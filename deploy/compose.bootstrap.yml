@@ -1,0 +1,109 @@
+name: zhixu
+
+services:
+  model-settings-key-init:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    entrypoint: ["/app/model-secrets-init.sh"]
+    user: "0:0"
+    network_mode: none
+    environment:
+      ZHIXU_MODEL_SETTINGS_KEY_DIR: /var/lib/zhixu/model-secrets
+    volumes:
+      - zhixu-model-secrets:/var/lib/zhixu/model-secrets
+
+  migrate:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    entrypoint: ["/app/zhixu-migrate"]
+    user: "10001:10001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      model-settings-key-init:
+        condition: service_completed_successfully
+    environment:
+      ZHIXU_DATABASE_HOST: postgres
+      ZHIXU_DATABASE_PORT: 5432
+      ZHIXU_DATABASE_NAME: ${ZHIXU_POSTGRES_DB:-zhixu}
+      ZHIXU_DATABASE_USER: ${ZHIXU_POSTGRES_USER:-zhixu}
+      ZHIXU_DATABASE_PASSWORD: ${ZHIXU_POSTGRES_PASSWORD:?set ZHIXU_POSTGRES_PASSWORD}
+
+  local-model-volume-init:
+    profiles: ["workspace-runtime"]
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.local-model-runtime
+    entrypoint: ["/usr/local/bin/local-model-volume-init"]
+    user: "0:0"
+    restart: "no"
+    network_mode: none
+    read_only: true
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN", "DAC_OVERRIDE"]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - type: volume
+        source: zhixu-local-models
+        target: /var/lib/zhixu/ollama/.ollama
+
+  local-model-runtime-credential-init:
+    profiles: ["workspace-runtime"]
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.local-model-runtime
+    entrypoint: ["/usr/local/bin/local-model-runtime-credential-init"]
+    user: "0:0"
+    restart: "no"
+    read_only: true
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN", "DAC_OVERRIDE"]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      ZHIXU_DATABASE_HOST: postgres
+      ZHIXU_DATABASE_PORT: 5432
+      ZHIXU_DATABASE_NAME: ${ZHIXU_POSTGRES_DB:-zhixu}
+      ZHIXU_DATABASE_USER: ${ZHIXU_POSTGRES_USER:-zhixu}
+      ZHIXU_DATABASE_PASSWORD: ${ZHIXU_POSTGRES_PASSWORD:?set ZHIXU_POSTGRES_PASSWORD}
+      ZHIXU_LOCAL_MODEL_RUNTIME_CREDENTIAL_DIR: /run/zhixu-local-model-runtime
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - type: volume
+        source: zhixu-local-model-runtime-credentials
+        target: /run/zhixu-local-model-runtime
+
+  modelctl:
+    profiles: ["modelctl"]
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    entrypoint: ["/app/zhixu-modelctl"]
+    user: "10001:10001"
+    environment:
+      ZHIXU_ENVIRONMENT: ${ZHIXU_ENVIRONMENT:-development}
+      ZHIXU_MODEL_SETTINGS_MODE: ${ZHIXU_MODEL_SETTINGS_MODE:-managed}
+      ZHIXU_MODEL_SETTINGS_KEY_FILE: /run/zhixu-model-secrets/model-settings.key
+      ZHIXU_DATABASE_HOST: postgres
+      ZHIXU_DATABASE_PORT: 5432
+      ZHIXU_DATABASE_NAME: ${ZHIXU_POSTGRES_DB:-zhixu}
+      ZHIXU_DATABASE_USER: ${ZHIXU_POSTGRES_USER:-zhixu}
+      ZHIXU_DATABASE_PASSWORD: ${ZHIXU_POSTGRES_PASSWORD:?set ZHIXU_POSTGRES_PASSWORD}
+      ZHIXU_WORKER_QUEUE: ${ZHIXU_WORKER_QUEUE:-workflow}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      model-settings-key-init:
+        condition: service_completed_successfully
+    volumes:
+      - type: volume
+        source: zhixu-model-secrets
+        target: /run/zhixu-model-secrets
+        read_only: true

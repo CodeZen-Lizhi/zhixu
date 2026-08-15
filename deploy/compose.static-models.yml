@@ -27,23 +27,8 @@ x-static-chat-environment: &static-chat-environment
   ZHIXU_CHAT_MAX_RESPONSE_BYTES: ${ZHIXU_CHAT_MAX_RESPONSE_BYTES:-4194304}
 
 services:
-  local-model-runtime-credential-init:
-    entrypoint: ["/bin/true"]
-    depends_on: !reset {}
-    volumes: !reset []
-    cap_add: !reset []
-    environment:
-      ZHIXU_DATABASE_HOST: ""
-      ZHIXU_DATABASE_PORT: ""
-      ZHIXU_DATABASE_NAME: ""
-      ZHIXU_DATABASE_USER: ""
-      ZHIXU_DATABASE_PASSWORD: ""
-      ZHIXU_LOCAL_MODEL_RUNTIME_CREDENTIAL_DIR: ""
-
   local-model-runtime:
-    depends_on: !override
-      local-model-volume-init:
-        condition: service_completed_successfully
+    depends_on: !reset {}
     volumes: !override
       - type: volume
         source: zhixu-local-models

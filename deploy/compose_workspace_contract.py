@@ -16,6 +16,7 @@ from typing import Any, Callable
 ROOT = Path(__file__).resolve().parent.parent
 CHECKER = ROOT / "deploy" / "compose_workspace_check.py"
 COMPOSE = ROOT / "deploy" / "compose.yml"
+BOOTSTRAP = ROOT / "deploy" / "compose.bootstrap.yml"
 ENV_FILE = ROOT / ".env.example"
 PATH_FIXTURE = ROOT / "deploy" / "workspace_path_contract.json"
 GRANT_KEYS = (
@@ -63,11 +64,17 @@ def expect_valid(model: dict[str, Any], mode: str) -> None:
         fail(f"valid {mode} model was rejected: {completed.stderr.strip()}")
 
 
-def expect_invalid(name: str, model: dict[str, Any], mutate: Callable[[dict[str, Any]], None]) -> None:
+def expect_invalid(
+    name: str,
+    model: dict[str, Any],
+    mutate: Callable[[dict[str, Any]], None],
+    *,
+    mode: str = "grant",
+) -> None:
     candidate = copy.deepcopy(model)
     mutate(candidate)
-    if check(candidate, "grant").returncode == 0:
-        fail(f"invalid grant model was accepted: {name}")
+    if check(candidate, mode).returncode == 0:
+        fail(f"invalid {mode} model was accepted: {name}")
 
 
 def set_grant_root(model: dict[str, Any], root: str) -> None:
@@ -81,7 +88,9 @@ def set_grant_root(model: dict[str, Any], root: str) -> None:
 
 def main() -> None:
     base = render(COMPOSE)
+    bootstrap = render(COMPOSE, BOOTSTRAP)
     expect_valid(base, "base")
+    expect_valid(bootstrap, "base")
 
     with tempfile.TemporaryDirectory(prefix="zhixu-compose-workspace-") as temporary:
         root = "/tmp/zhixu-workspace-contract"
@@ -121,15 +130,31 @@ def main() -> None:
     )
     expect_invalid(
         "Docker socket", granted,
-        lambda model: model["services"]["modelctl"]["volumes"].append(
+        lambda model: model["services"]["worker"]["volumes"].append(
             {"type": "bind", "source": "/var/run/docker.sock", "target": "/var/run/docker.sock"}
         ),
     )
     expect_invalid(
         "Docker socket descendant", granted,
-        lambda model: model["services"]["modelctl"]["volumes"].append(
+        lambda model: model["services"]["worker"]["volumes"].append(
             {"type": "volume", "source": "/var/run/docker.sock/child", "target": "/run/socket"}
         ),
+    )
+    expect_invalid(
+        "bootstrap Docker socket",
+        bootstrap,
+        lambda model: model["services"]["modelctl"]["volumes"].append(
+            {"type": "bind", "source": "/var/run/docker.sock", "target": "/var/run/docker.sock"}
+        ),
+        mode="base",
+    )
+    expect_invalid(
+        "bootstrap Workspace grant",
+        bootstrap,
+        lambda model: model["services"]["migrate"].setdefault("environment", {}).update(
+            ZHIXU_WORKSPACE_GRANTED_ROOT="/tmp/workspace"
+        ),
+        mode="base",
     )
     expect_invalid(
         "sidecar grant environment", granted,

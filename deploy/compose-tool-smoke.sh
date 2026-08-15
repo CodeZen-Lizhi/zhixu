@@ -5,6 +5,7 @@ set -Eeuo pipefail
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPOSITORY_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 readonly COMPOSE_FILE="${SCRIPT_DIR}/compose.yml"
+readonly BOOTSTRAP_COMPOSE_FILE="${SCRIPT_DIR}/compose.bootstrap.yml"
 readonly NETNS_COMPOSE_FILE="${SCRIPT_DIR}/compose.netns.yml"
 readonly STATIC_MODELS_COMPOSE_FILE="${SCRIPT_DIR}/compose.static-models.yml"
 readonly ENV_FILE="${REPOSITORY_ROOT}/.env.example"
@@ -55,6 +56,10 @@ PY
 
 compose() {
   docker compose --project-name "${PROJECT_NAME}" -f "${COMPOSE_FILE}" -f "${STATIC_MODELS_COMPOSE_FILE}" -f "${MAIN_NETNS_OVERRIDE_FILE}" --env-file "${ENV_FILE}" "$@"
+}
+
+bootstrap_compose() {
+  docker compose --project-name "${PROJECT_NAME}" -f "${COMPOSE_FILE}" -f "${BOOTSTRAP_COMPOSE_FILE}" -f "${MAIN_NETNS_OVERRIDE_FILE}" --env-file "${ENV_FILE}" "$@"
 }
 
 netns_compose() {
@@ -120,6 +125,8 @@ main() {
   log "validating and building the disposable Compose stack"
   compose config --quiet
   compose build
+  bootstrap_compose config --quiet
+  bootstrap_compose build model-settings-key-init migrate
   netns_compose config --quiet
   netns_compose build
   log "starting isolated namespace anchors"
@@ -130,8 +137,8 @@ main() {
     'git -C /workspace/project init --initial-branch=main >/dev/null && git -C /workspace/project config user.name "ZHIXU Tool Smoke" && git -C /workspace/project config user.email "tool-smoke@example.invalid" && git -C /workspace/project add -- docs/tool-smoke.md && git -C /workspace/project commit -m "base" >/dev/null'
   log "starting PostgreSQL, one-shot initialization, and API/Worker ingress with Tool Runtime enabled"
   compose up --detach --wait postgres
-  compose run --rm --no-deps -T model-settings-key-init
-  compose run --rm --no-deps -T migrate
+  bootstrap_compose run --rm --no-deps -T model-settings-key-init
+  bootstrap_compose run --rm --no-deps -T migrate
   compose up --detach --no-deps --wait app worker
   compose up --detach --no-deps --wait app-model-relay worker-model-relay
   compose exec -T app wget -q -O /dev/null http://127.0.0.1:8080/readyz

@@ -43,7 +43,7 @@
   switch 返回同一新 binding 后才能更新 selection。未确认、并发占用、错误旧 fingerprint、readiness 失败或旧 runtime 写入均不得产生隐式授权、重复历史或选择状态假成功。
 - `down` 保留选择、数据库、模型密钥和宿主机文件；显式 `reset` 可删除项目卷与选择，但不得删除用户文件或 Git 历史。
 - 路径穿越、Root 外写入、端口占用、Git 缺失、数据库不可用和挂载权限错误必须 fail closed。
-- Docker 固定入口由独立稳定 namespace anchor 发布；主项目 app/worker/relay 只消费对应 anchor，且只有 app/worker 获得 exact Root bind。Docker UI 仅支持主项目 Restart project；helper 或 daemon 恢复失败必须显示 degraded，并可由 launcher 受控恢复。
+- Docker 固定入口由独立稳定 namespace anchor 发布；主项目只持久声明 PostgreSQL、managed local-model runtime、app/worker 与两个 relay，且只有 app/worker 获得 exact Root bind。一次性初始化/migration/model control 必须由 launcher 从独立 bootstrap Compose 以 removable container 执行，不能出现在稳态项目或接收 Root grant。Docker UI 仅支持观察和 Restart 已准备的主项目；helper 或 daemon 恢复失败必须显示 degraded，并可由 launcher 受控恢复。
 
 ### 10.2 Inbox 与资料导入
 
@@ -301,7 +301,7 @@
 | AC-29 | Evaluation | 每类 AI 功能有固定数据集、指标和回归对比 |
 | AC-30 | Security | 路径穿越、Prompt Injection、SSRF 和 Secret 泄漏测试通过 |
 | AC-31 | Capacity | 在容量基线下检索和局部图谱达到性能目标 |
-| AC-32 | Deployment | Docker Compose 可启动 API、Worker、PostgreSQL、稳定 namespace anchor 与依赖服务；主 `zhixu` 项目 Restart project 后在 60 秒内收敛，`status` 显示两个项目的关键容器并明确 ready/degraded；daemon/helper 恢复失败必须安全降级并由 launcher 恢复 |
+| AC-32 | Deployment | launcher 通过独立 bootstrap Compose 完成初始化/migration 后启动 API、Worker、PostgreSQL、managed local-model runtime、两个 relay 与稳定 namespace anchor；主 `zhixu` 稳态项目不得显示 one-shot 服务，Restart project 后在 60 秒内收敛，`status` 显示两个项目的关键容器并明确 ready/degraded；daemon/helper 恢复失败必须安全降级并由 launcher 恢复 |
 | AC-33 | Export | Smart Collection Markdown、领域 Metadata JSON 与 Workspace 附件 ZIP 均通过真实运行链路验收 |
 | AC-34 | Recovery | 数据库、Git 和文件状态不一致时进入只读恢复状态 |
 | AC-35 | Lifecycle | Document 和 Topic 的重命名、移动、拆分、合并、归档和删除均通过 Proposal |

@@ -43,11 +43,13 @@ main() {
   local netns_id="sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
   local invalid_main_pair_id="sha256:1111111111111111111111111111111111111111111111111111111111111111"
   local invalid_helper_pair_id="sha256:2222222222222222222222222222222222222222222222222222222222222222"
+  local bootstrap_id="sha256:3333333333333333333333333333333333333333333333333333333333333333"
   export ZHIXU_FAKE_REFERENCED_IMAGE_ID="${referenced_id}"
   printf '%b\n' \
     "zhixu-auth-smoke-a1b2c3d4e5f6-app\tlatest\t${auth_id}\tzhixu-auth-smoke-a1b2c3d4e5f6\tapp" \
     "zhixu-auth-smoke-a1b2c3d4e5f6-app\tarchive\t${auth_id}\tzhixu-auth-smoke-a1b2c3d4e5f6\tapp" \
     "zhixu-rag-smoke-d4e5f6071829-worker\tlatest\t${rag_id}\tzhixu-rag-smoke-d4e5f6071829\tworker" \
+    "zhixu-rag-smoke-d4e5f6071829-local-model-runtime-credential-init\tlatest\t${bootstrap_id}\tzhixu-rag-smoke-d4e5f6071829\tlocal-model-runtime-credential-init" \
     "zhixu-rag-smoke-d4e5f6071829-netns-app-netns\tlatest\t${netns_id}\tzhixu-rag-smoke-d4e5f6071829-netns\tapp-netns" \
     "zhixu-tool-smoke-deadbeefcafe-app-netns\tlatest\t${invalid_main_pair_id}\tzhixu-tool-smoke-deadbeefcafe\tapp-netns" \
     "zhixu-auth-smoke-feedfacecafe-netns-app\tlatest\t${invalid_helper_pair_id}\tzhixu-auth-smoke-feedfacecafe-netns\tapp" \
@@ -79,6 +81,8 @@ main() {
     || fail "guarded apply did not remove the second exact target tag"
   grep -Fqx -- "zhixu-rag-smoke-d4e5f6071829-worker:latest" "${ZHIXU_FAKE_REMOVED_REFS}" \
     || fail "guarded apply did not remove the rag target"
+  grep -Fqx -- "zhixu-rag-smoke-d4e5f6071829-local-model-runtime-credential-init:latest" "${ZHIXU_FAKE_REMOVED_REFS}" \
+    || fail "guarded apply did not remove the bootstrap initializer target"
   grep -Fqx -- "zhixu-rag-smoke-d4e5f6071829-netns-app-netns:latest" "${ZHIXU_FAKE_REMOVED_REFS}" \
     || fail "guarded apply did not remove the helper target"
   if grep -Fq -- "zhixu-search-smoke-112233445566-app:latest" "${ZHIXU_FAKE_REMOVED_REFS}"; then

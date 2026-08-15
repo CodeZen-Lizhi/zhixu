@@ -6,9 +6,12 @@
 
 ```text
 host ./zhixu
-  -> one-shot Workspace Control validates exact root/grant
   -> Docker helper `zhixu-netns`: app/worker network namespace anchors
-  -> Docker main `zhixu`: app + worker + relays + postgres + one-shot migrate/modelctl
+  -> Docker main `zhixu`: postgres
+  -> temporary bootstrap Compose: key init + migrate + model credential/volume init
+  -> Docker main `zhixu`: local-model-runtime
+  -> temporary bootstrap Compose: modelctl stale recovery
+  -> one-shot Workspace Control validates exact root/grant and activates app + worker + relays
   -> browser: http://127.0.0.1:${ZHIXU_HTTP_PORT:-8080}
 ```
 
@@ -87,7 +90,16 @@ http://127.0.0.1:8080/
 
 Docker Desktop 中唯一受支持的 UI 操作是主项目 `zhixu` 的 **Restart project**。它不会
 重启 `zhixu-netns` anchor，主项目的 app、worker 与两个 relay 会重新加入既有 anchor；
-完成后用 `./zhixu status` 和固定 URL 确认 ready。
+完成后用 `./zhixu status` 和固定 URL 确认 ready。该操作只适用于已经由 launcher 完整准备
+并处于稳态的项目：主项目只保留 PostgreSQL、managed local-model runtime、app、worker 和
+两个 relay。主密钥初始化、migration、模型卷/credential 初始化与 `modelctl` 位于独立
+`deploy/compose.bootstrap.yml`，Docker Desktop Restart 不会重新执行它们。
+
+首次启动、软件升级、migration 或故障恢复必须使用 `./zhixu up` / `./zhixu restart`。
+launcher 用临时 `run --rm --no-deps` 容器按固定顺序完成 bootstrap；任一步失败都会阻止后续
+服务启动。布局升级后的第一次 `up` 或 `restart` 会精确清理旧版本遗留的 exited one-shot
+容器，但保留 PostgreSQL、模型密钥、本地模型等 named volume。不要在 Docker Desktop 中为
+这些旧容器执行带卷删除的清理。
 
 不要在 UI 中单独 Restart/Down/Delete `zhixu-netns`，也不要对主项目执行 Down/Delete。
 Docker daemon 或 helper 的恢复不存在跨项目启动顺序保证；系统会保持入口安全并显示
@@ -276,15 +288,16 @@ manager process RSS 峰值 9.69 MiB，相对 700 MiB 基线下降 99.1%。
 
 ## 5. 启动顺序与健康
 
-Compose 服务顺序：
+Launcher 启动顺序：
 
-1. PostgreSQL ready。
-2. `/app/zhixu-migrate` 固定执行项目 Goose Up → River Up → River Validate；非零退出阻止 API/Worker。
-3. Model key init/migrate one-shot 退出。
-4. 一次性 Workspace Control 重建 exact grant。
-5. API/Worker 的 PID 1 使用各自配置等待 PostgreSQL 可 ping；等待期间容器保持 running，并与对应 model relay 使用 `zhixu-netns` 的稳定 network namespace。参数、配置或数据库 URL 无效时以稳定、无 Secret 的错误失败，不无限重试。
-6. 数据库 ready 后等待入口 `exec` API/Worker；Worker 再次 Validate River Schema、冻结稳定 Definition/Executor Registry、启动 health 与 River；模型相关 wrapper 在每个 Attempt 执行边界按持久 binding Acquire generation，而不是冻结启动时模型。
-7. API `/readyz`、Worker 容器内 `:8081/readyz`、两个 anchor、两个 relay 与 Web 分别就绪后接流量。app anchor 每次启动均先安装 peer firewall 再监听入口。
+1. `zhixu-netns` app/worker anchor ready。
+2. 主项目 PostgreSQL ready；稳态 `up --remove-orphans` 同时清理旧布局遗留的 one-shot 容器。
+3. Bootstrap Compose 依次执行 model key init、`/app/zhixu-migrate`、local-model credential init 和 volume init；migration 固定执行项目 Goose Up → River Up → River Validate，任一步非零都阻止后续服务。
+4. Managed local-model runtime ready 后，bootstrap `modelctl recover --stale` 成功退出。
+5. 一次性 Workspace Control 重建 exact grant。
+6. API/Worker 的 PID 1 使用各自配置等待 PostgreSQL 可 ping；等待期间容器保持 running，并与对应 model relay 使用 `zhixu-netns` 的稳定 network namespace。参数、配置或数据库 URL 无效时以稳定、无 Secret 的错误失败，不无限重试。
+7. 数据库 ready 后等待入口 `exec` API/Worker；Worker 再次 Validate River Schema、冻结稳定 Definition/Executor Registry、启动 health 与 River；模型相关 wrapper 在每个 Attempt 执行边界按持久 binding Acquire generation，而不是冻结启动时模型。
+8. API `/readyz`、Worker 容器内 `:8081/readyz`、两个 anchor、两个 relay 与 Web 分别就绪后接流量。app anchor 每次启动均先安装 peer firewall 再监听入口。
 
 Liveness 只证明进程存活。Worker readiness 还要求 DB、River schema/client、Definition、Executor、启用依赖和非 shutdown。健康响应只暴露稳定 `status/code/version`，不返回底层 cause、DSN 或配置。
 
@@ -309,8 +322,8 @@ Liveness 只证明进程存活。Worker readiness 还要求 DB、River schema/cl
 1. 创建 Backup Marker，记录 Git HEAD、DB Schema、Active Index 和应用版本。
 2. 备份 Workspace/Git 与 PostgreSQL。
 3. 停止 Worker 领取新任务，摘 readiness，等待 graceful Stop 到安全 checkpoint。
-4. 执行前向 Migration；失败保持旧应用停止，不启动不兼容 Worker。
-5. 启动新 API/Worker，执行 consistency、readiness 和业务 Smoke，再恢复任务。
+4. 使用新版本 `./zhixu restart` 执行受控 bootstrap 与前向 Migration；失败保持旧应用停止，不启动不兼容 Worker。
+5. launcher 启动新 API/Worker 后，执行 consistency、readiness 和业务 Smoke，再恢复任务。
 
 回滚：
 
@@ -471,8 +484,11 @@ Git 校验失败时确认 Root 已是仓库，或首次显式 `--initialize-git`
 ### Compose 基线
 
 ```bash
-docker compose --project-name zhixu --profile workspace-runtime --profile modelctl \
+docker compose --project-name zhixu --profile workspace-runtime \
   -f deploy/compose.yml --env-file .env.example config --quiet
+docker compose --project-name zhixu --profile workspace-runtime --profile modelctl \
+  -f deploy/compose.yml -f deploy/compose.bootstrap.yml \
+  --env-file .env.example config --quiet
 docker compose --project-name zhixu-netns \
   -f deploy/compose.netns.yml --env-file .env.example config --quiet
 docker build -f deploy/Dockerfile -t zhixu:local .

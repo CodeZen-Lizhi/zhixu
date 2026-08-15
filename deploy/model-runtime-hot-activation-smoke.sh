@@ -6,6 +6,7 @@ umask 077
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPOSITORY_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 readonly COMPOSE_FILE="${SCRIPT_DIR}/compose.yml"
+readonly BOOTSTRAP_COMPOSE_FILE="${SCRIPT_DIR}/compose.bootstrap.yml"
 readonly NETNS_COMPOSE_FILE="${SCRIPT_DIR}/compose.netns.yml"
 readonly ENV_FILE="${REPOSITORY_ROOT}/.env.example"
 readonly TIMEOUT_SECONDS="${ZHIXU_MODEL_SETTINGS_SMOKE_TIMEOUT_SECONDS:-180}"
@@ -46,6 +47,11 @@ log() { printf '[model-runtime-hot-activation-smoke] %s\n' "$1"; }
 
 compose() {
   docker compose --project-name "${PROJECT_NAME}" -f "${COMPOSE_FILE}" -f "${RUNTIME_OVERRIDE_FILE}" \
+    -f "${MAIN_NETNS_OVERRIDE_FILE}" --env-file "${ENV_FILE}" "$@"
+}
+
+bootstrap_compose() {
+  docker compose --project-name "${PROJECT_NAME}" -f "${COMPOSE_FILE}" -f "${BOOTSTRAP_COMPOSE_FILE}" \
     -f "${MAIN_NETNS_OVERRIDE_FILE}" --env-file "${ENV_FILE}" "$@"
 }
 
@@ -447,6 +453,8 @@ YAML
   log 'building and starting an isolated managed API/Worker stack'
   compose config --quiet
   compose build --quiet
+  bootstrap_compose config --quiet
+  bootstrap_compose build --quiet model-settings-key-init migrate
   netns_compose config --quiet
   netns_compose build --quiet
   netns_compose up --detach --wait >/dev/null
@@ -455,8 +463,8 @@ YAML
 	compose run --rm --no-deps --entrypoint sh app -c \
 		'git -C /workspace/project init --initial-branch=main >/dev/null && git -C /workspace/project config user.name "ZHIXU Model Runtime Smoke" && git -C /workspace/project config user.email "model-runtime-smoke@example.invalid" && git -C /workspace/project add -- docs/model-runtime-smoke.md && git -C /workspace/project commit -m base >/dev/null' >/dev/null
   compose up --detach --wait postgres >/dev/null
-  compose run --rm --no-deps -T model-settings-key-init >/dev/null
-  compose run --rm --no-deps -T migrate >/dev/null
+  bootstrap_compose run --rm --no-deps -T model-settings-key-init >/dev/null
+  bootstrap_compose run --rm --no-deps -T migrate >/dev/null
   compose up --detach --no-deps --wait app worker >/dev/null
   compose up --detach --no-deps --wait app-model-relay worker-model-relay >/dev/null
 	authenticate

@@ -37,6 +37,8 @@
 - Helper identity：固定 Compose project `zhixu-netns`、由 helper 创建而被主项目声明为 external 的
   `zhixu-runtime` network、app anchor `zhixu-app-netns` 和 worker anchor `zhixu-worker-netns`。它们是 launcher
   基础设施而不是 Workspace runtime service，不能接收 grant 环境或 Workspace bind。
+- 稳态主项目只使用 `deploy/compose.yml`；launcher bootstrap 临时合并
+  `deploy/compose.yml` 与 `deploy/compose.bootstrap.yml`，但不得合并 `.zhixu/workspace-grant.yml`。
 
 ### 3. Contracts
 
@@ -93,9 +95,12 @@
   任一 anchor/关键 consumer 非 running、health 非 healthy 或 host `/readyz` 失败时输出 `Runtime: degraded`，且不得启动、停止或修复容器。
 - helper 配置、固定 name、image、project/service label、network、port、启动权限与运行时权限必须完整匹配才可复用。端口漂移先移除
   全部 namespace consumer 再重建唯一 anchor；同名外来 container/network、部分 helper 或错绑一律 fail closed，不自动删除。
-- `up`/`restart` 的受控顺序为 helper anchor -> 主 base services -> exact grant consumers；`down`/`reset` 为 consumers -> 主项目 -> helper。
+- `up`/`restart` 的受控顺序为 helper anchor -> PostgreSQL -> 无 grant bootstrap ->
+  `local-model-runtime`/modelctl -> exact grant consumers；`down`/`reset` 为 consumers -> 主项目 -> helper。
   普通 `down` 不删除 named volume、selection、grant 或宿主机 Workspace。helper/daemon 重启不承诺跨项目自动排序：入口必须 fail closed，
   status 显示 degraded，随后 `./zhixu restart` 重建全部 namespace consumer。
+- Docker Desktop Restart project 只重启已准备的六个稳态服务，不运行 bootstrap。首次启动、升级、迁移、
+  未准备状态恢复及 Workspace grant 变更必须通过 `./zhixu up`/`restart`。
 - `GET /api/v1/workspaces/active` 必须只接受唯一 `status='active'` Workspace，并在 managed runtime 中经 RootGrantResolver
   验证 ID、Root 和 grant 一致。零个、多个或不匹配均 fail closed，不得任选、回退 localStorage 或返回旧 Workspace。
 - `docs/operations.md` 是面向使用者的运行操作入口，但命令和状态语义仍以 `zhixu`、
@@ -131,6 +136,8 @@
 | runtime wait 参数、profile、配置或数据库 URL 无效 | `RUNTIME_WAIT_*_INVALID`，有限步骤内失败且日志无 Secret |
 | app/worker anchor 缺失、停止、错绑、权限不匹配或 namespace consumer 未对齐 | `status` 保留现状并输出 `Runtime: degraded`；零状态修改；`./zhixu restart` 按 helper -> consumers 恢复 |
 | 主项目 restart 后 relay/app/worker 的 namespace 或 anchor health 不匹配 | `Runtime: degraded`，不得以 container running 假报 ready |
+| bootstrap 模型获得 Workspace grant 或 host bind | Compose contract 失败；不执行 initializer/migration/modelctl |
+| 未准备项目从 Docker Desktop 直接 Start | 不受支持；转用 launcher 执行 bootstrap 并建立 exact grant |
 | 端口漂移或外来同名 helper resource | 启动 fail closed；仅完全匹配的 launcher-owned helper 可在 consumers 已移除后重建 |
 | relay exited 或关键 health 非 healthy | `status` 保留退出容器并输出 `Runtime: degraded`；零状态修改 |
 | 运行手册、PRD、部署文档或 OpenAPI 与当前命令/API 不一致 | 文档一致性检查失败；不得以历史说明覆盖当前实现契约 |
@@ -161,7 +168,8 @@
 - Launcher contract：首次必填、selection 权限/原子提交、同根幂等 switch、A/B 切换、失败不覆盖、restart/down/reset、
   rebind 必须显式确认、响应丢失精确重放、readiness 前不提交 selection、rebind/switch binding generation 一致，
   Secret 不进入 argv/log，且不存在 Controller PID/log/token/bundle 生命周期。
-- Compose contract：主/helper 双 model；base zero bind；grant 模型只有 API/Worker exact bind；固定 IPv4 loopback 端口；API 内部 loopback；
+- Compose contract：主/helper/bootstrap 三 model；base zero bind；grant 模型只有 API/Worker exact bind；bootstrap 合并模型 zero Workspace bind/grant；
+  固定 IPv4 loopback 端口；API 内部 loopback；
   app/worker 使用 profile-aware runtime wait；consumer 通过固定 anchor 共享 namespace；helper 无 Docker socket、Workspace/secret/grant mount/env；无随机 host port、父目录或 legacy `/workspace`。
 - Runtime wait 单测：首次 ping 失败后重试、取消退出、成功后 exec、API/Worker profile 路由、无效配置/URL fail fast 且无 Secret。
 - Launcher contract：首次 helper、幂等复用、旧拓扑迁移、端口 A -> B -> A、主项目 half-down、helper 故障恢复、`down`/`reset` 顺序与 Secret 不进 argv/log；`status` 必须调用两份 `ps --all`，健康模型输出 ready，anchor/consumer 异常输出 degraded 且保留退出行。
@@ -184,4 +192,7 @@ Correct: 同一改动同步运行手册、PRD、部署/追踪文档、OpenAPI �
 
 Wrong: 让会被主项目 restart 的 app/worker 持有 namespace，再只用 `depends_on` 保证 sidecar 顺序。
 Correct: 主项目 consumer 统一加入主项目外的稳定 anchor；主项目 restart 自动收敛，helper/daemon 故障则 fail closed、status degraded 并由 launcher 恢复。
+
+Wrong: 为了方便复用 Compose wrapper，让 initializer、migration 或 modelctl 同时获得 Workspace grant。
+Correct: bootstrap wrapper 只合并 steady + bootstrap 文件；Workspace grant 只在启动 API/Worker consumer 时加入。
 ```

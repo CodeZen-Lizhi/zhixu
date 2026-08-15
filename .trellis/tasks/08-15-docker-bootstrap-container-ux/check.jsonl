@@ -1,0 +1,2 @@
+{"file":".trellis/spec/backend/workspace-root-grant.md","reason":"审查 bootstrap 不获得 Workspace grant、稳态服务与 Docker UI Restart 契约未回归。"}
+{"file":".trellis/spec/backend/model-settings-runtime.md","reason":"审查 one-shot 失败阻断、Secret/volume 权限和模型运行时启动顺序未被弱化。"}

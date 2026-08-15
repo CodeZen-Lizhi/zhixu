@@ -63,6 +63,9 @@ Docker Volume 不运行进程，只保存模型 manifest、blob 和 Ollama 自�
   `openai-compatible + exact Relay` revision 只兼容读取，不允许作为新草稿保存。
 - static Compose overlay 继续访问宿主 `host.docker.internal:11434`；其 manager 保持健康 idle，不连接 lifecycle DB，
   不启动 child也不拉取模型。
+- `local-model-runtime-credential-init` 和 `local-model-volume-init` 属于 launcher-only
+  `deploy/compose.bootstrap.yml`；它们以 `run --rm --no-deps` 完成后即删除，不是主项目的长期容器。
+  主 `deploy/compose.yml` 只保留已准备的 `local-model-runtime` manager。
 - legacy standalone 模型只通过 launcher 的显式、只读源复制流程迁移。迁移失败保留 source；成功后也保留旧卷作为
   独立回滚源，普通 down/reset 不得误删它。
 
@@ -86,9 +89,10 @@ Docker Volume 不运行进程，只保存模型 manifest、blob 和 Ollama 自�
 - 发布前必须以真实 Compose 证明：全线上时无 serve/runner PID，管理器 idle RSS/anon满足批准预算；本地时只有一个
   serve，Chat/Embedding可用；down保留模型卷，reset只删除精确受管理卷。
 
-## 2026-08-14 Implementation Status And Release Gate
+## 2026-08-15 Implementation Status And Release Gate
 
-本 ADR 的 topology 已部分落地：主 Compose 已包含 managed service、project-owned model/credential volumes、
+本 ADR 的 topology 已部分落地：主 Compose 已包含 managed service 和 project-owned model/credential volumes；
+launcher-only bootstrap Compose 包含 credential/volume initializer。两个模型共同落地了
 non-root supervisor、固定 child runner、受限 inference proxy、static overlay，以及 PostgreSQL runtime/hold/operation
 基础表。显式 Chat/Embedding `ollama` provider、generation/test/activation preparation hold、持久 operation 与
 Snapshot/OpenAPI/Web 的 local runtime 投影也已接入。

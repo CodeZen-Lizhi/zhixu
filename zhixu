@@ -4,6 +4,7 @@ set -Eeuo pipefail
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly COMPOSE_FILE="${SCRIPT_DIR}/deploy/compose.yml"
+readonly BOOTSTRAP_COMPOSE_FILE="${SCRIPT_DIR}/deploy/compose.bootstrap.yml"
 readonly NETNS_COMPOSE_FILE="${SCRIPT_DIR}/deploy/compose.netns.yml"
 readonly DOCKERFILE="${SCRIPT_DIR}/deploy/Dockerfile"
 readonly ENV_TEMPLATE="${SCRIPT_DIR}/.env.example"
@@ -709,6 +710,19 @@ compose_without_grant() {
   fi
 }
 
+bootstrap_compose() {
+  local prefix=(docker compose --project-name "${PROJECT_NAME}" -f "${COMPOSE_FILE}" -f "${BOOTSTRAP_COMPOSE_FILE}" --env-file "${ENV_FILE}")
+  if [[ "${MUTATION_LOCK_HELD}" -eq 1 ]]; then
+    ZHIXU_MODEL_SETTINGS_ROLLOUT_ID= ZHIXU_MODEL_SETTINGS_PREPARED=false \
+      ZHIXU_APP_RESTART_POLICY=on-failure ZHIXU_WORKER_RESTART_POLICY=on-failure \
+      run_mutation_command "${prefix[@]}" "$@"
+  else
+    ZHIXU_MODEL_SETTINGS_ROLLOUT_ID= ZHIXU_MODEL_SETTINGS_PREPARED=false \
+      ZHIXU_APP_RESTART_POLICY=on-failure ZHIXU_WORKER_RESTART_POLICY=on-failure \
+      "${prefix[@]}" "$@"
+  fi
+}
+
 netns_compose() {
   local prefix=(docker compose --project-name "${NETNS_PROJECT_NAME}" -f "${NETNS_COMPOSE_FILE}" --env-file "${ENV_FILE}")
   if [[ "${MUTATION_LOCK_HELD}" -eq 1 ]]; then
@@ -1072,7 +1086,7 @@ teardown_main_project() {
   local ids
   ids="$(main_project_container_ids)"
   validate_main_project_containers "${ids}"
-  compose_without_grant --profile workspace-runtime --profile modelctl down --remove-orphans >/dev/null 2>&1 || true
+  compose_without_grant --profile workspace-runtime down --remove-orphans >/dev/null 2>&1 || true
   remove_project_containers "${PROJECT_NAME}"
   remove_project_networks "${PROJECT_NAME}"
 }
@@ -1122,11 +1136,16 @@ contain_uncommitted_runtime() {
 }
 
 validate_compose() {
-  compose config --quiet
-  local model=(docker compose --profile workspace-runtime --profile modelctl --project-name "${PROJECT_NAME}" -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" config --format json)
-  python3 "${SCRIPT_DIR}/deploy/compose_auth_check.py" -- "${model[@]}"
-  python3 "${SCRIPT_DIR}/deploy/compose_runtime_check.py" -- "${model[@]}"
-  python3 "${SCRIPT_DIR}/deploy/compose_workspace_check.py" --base -- "${model[@]}"
+  compose_without_grant --profile workspace-runtime config --quiet
+  local steady_model=(docker compose --profile workspace-runtime --project-name "${PROJECT_NAME}" -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" config --format json)
+  python3 "${SCRIPT_DIR}/deploy/compose_auth_check.py" -- "${steady_model[@]}"
+  python3 "${SCRIPT_DIR}/deploy/compose_runtime_check.py" -- "${steady_model[@]}"
+  python3 "${SCRIPT_DIR}/deploy/compose_workspace_check.py" --base -- "${steady_model[@]}"
+  bootstrap_compose --profile workspace-runtime --profile modelctl config --quiet
+  local bootstrap_model=(docker compose --profile workspace-runtime --profile modelctl --project-name "${PROJECT_NAME}" -f "${COMPOSE_FILE}" -f "${BOOTSTRAP_COMPOSE_FILE}" --env-file "${ENV_FILE}" config --format json)
+  python3 "${SCRIPT_DIR}/deploy/compose_auth_check.py" --bootstrap -- "${bootstrap_model[@]}"
+  python3 "${SCRIPT_DIR}/deploy/compose_runtime_check.py" --bootstrap -- "${bootstrap_model[@]}"
+  python3 "${SCRIPT_DIR}/deploy/compose_workspace_check.py" --base -- "${bootstrap_model[@]}"
   local static_model=(docker compose --profile workspace-runtime --project-name "${PROJECT_NAME}" -f "${COMPOSE_FILE}" -f "${SCRIPT_DIR}/deploy/compose.static-models.yml" --env-file "${ENV_FILE}" config --format json)
   python3 "${SCRIPT_DIR}/deploy/compose_runtime_check.py" --legacy-model-env -- "${static_model[@]}"
   netns_compose config --quiet
@@ -1136,16 +1155,18 @@ validate_compose() {
 
 start_base_stack() {
   log "building base and Workspace runtime images"
-  compose --profile workspace-runtime --profile modelctl build \
-    model-settings-key-init migrate modelctl local-model-runtime-credential-init local-model-runtime app worker app-model-relay worker-model-relay
+  bootstrap_compose --profile workspace-runtime --profile modelctl build \
+    model-settings-key-init migrate local-model-runtime-credential-init local-model-volume-init modelctl
+  compose_without_grant --profile workspace-runtime build \
+    local-model-runtime app worker app-model-relay worker-model-relay
   log "starting PostgreSQL, secret initialization, and migrations"
-  compose up --detach --wait postgres
-  compose run --rm --no-deps -T model-settings-key-init
-  compose run --rm --no-deps -T migrate
-  compose --profile workspace-runtime run --rm --no-deps -T local-model-runtime-credential-init
-  compose --profile workspace-runtime run --rm --no-deps -T local-model-volume-init
-  compose --profile workspace-runtime up --detach --wait local-model-runtime
-  compose --profile modelctl run --rm --no-deps -T modelctl recover --stale
+  compose_without_grant --profile workspace-runtime up --detach --wait --remove-orphans postgres
+  bootstrap_compose run --rm --no-deps -T model-settings-key-init
+  bootstrap_compose run --rm --no-deps -T migrate
+  bootstrap_compose --profile workspace-runtime run --rm --no-deps -T local-model-runtime-credential-init
+  bootstrap_compose --profile workspace-runtime run --rm --no-deps -T local-model-volume-init
+  compose_without_grant --profile workspace-runtime up --detach --wait local-model-runtime
+  bootstrap_compose --profile modelctl run --rm --no-deps -T modelctl recover --stale
 }
 
 host_platform() {
@@ -2251,12 +2272,12 @@ run_status() {
   validate_optional_state_directory
   select_existing_env
   printf 'Project: %s\n' "${PROJECT_NAME}"
-  compose_without_grant --profile workspace-runtime --profile modelctl ps --all || true
+  compose_without_grant --profile workspace-runtime ps --all || true
   printf 'Project: %s\n' "${NETNS_PROJECT_NAME}"
   netns_compose ps --all || true
   local main_status helper_status port
   port="$(validated_port ZHIXU_HTTP_PORT 8080)"
-  main_status="$(compose_without_grant --profile workspace-runtime --profile modelctl \
+  main_status="$(compose_without_grant --profile workspace-runtime \
     ps --all --format json postgres local-model-runtime app worker app-model-relay worker-model-relay 2>/dev/null || true)"
   helper_status="$(netns_compose ps --all --format json app-netns worker-netns 2>/dev/null || true)"
   if printf '%s' "${main_status}" | runtime_status_is_ready postgres=healthy local-model-runtime=healthy app=healthy worker=healthy \
@@ -2296,10 +2317,10 @@ run_logs() {
       netns_compose logs --follow --tail 200 "${service}"
       return
       ;;
-    postgres|model-settings-key-init|migrate|local-model-volume-init|local-model-runtime-credential-init|local-model-runtime|app|worker|app-model-relay|worker-model-relay|modelctl) ;;
+    postgres|local-model-runtime|app|worker|app-model-relay|worker-model-relay) ;;
     *) fail "unknown service: ${service}" ;;
   esac
-  compose_without_grant --profile workspace-runtime --profile modelctl logs --follow --tail 200 "${service}"
+  compose_without_grant --profile workspace-runtime logs --follow --tail 200 "${service}"
 }
 
 remove_active_grant() {
@@ -2322,11 +2343,11 @@ run_down() {
   validate_optional_state_directory
   select_existing_env
   validate_netns_resource_ownership
-  compose_without_grant --profile workspace-runtime --profile modelctl stop \
+  compose_without_grant --profile workspace-runtime stop \
     app-model-relay worker-model-relay app worker local-model-runtime >/dev/null 2>&1 || true
-  compose_without_grant --profile workspace-runtime --profile modelctl rm --force --stop \
+  compose_without_grant --profile workspace-runtime rm --force --stop \
     app-model-relay worker-model-relay app worker local-model-runtime >/dev/null 2>&1 || true
-  compose_without_grant --profile workspace-runtime --profile modelctl down --remove-orphans || true
+  compose_without_grant --profile workspace-runtime down --remove-orphans || true
   remove_project_containers "${PROJECT_NAME}"
   remove_project_networks "${PROJECT_NAME}"
   teardown_netns_project
@@ -2357,11 +2378,11 @@ run_reset() {
   fi
   validate_netns_resource_ownership
   validate_main_project_volumes
-  compose_without_grant --profile workspace-runtime --profile modelctl stop \
+  compose_without_grant --profile workspace-runtime stop \
     app-model-relay worker-model-relay app worker local-model-runtime >/dev/null 2>&1 || true
-  compose_without_grant --profile workspace-runtime --profile modelctl rm --force --stop \
+  compose_without_grant --profile workspace-runtime rm --force --stop \
     app-model-relay worker-model-relay app worker local-model-runtime >/dev/null 2>&1 || true
-  compose_without_grant --profile workspace-runtime --profile modelctl down --volumes --remove-orphans || \
+  compose_without_grant --profile workspace-runtime down --volumes --remove-orphans || \
     log "Compose volume teardown was incomplete; applying validated fallback cleanup"
   remove_project_containers "${PROJECT_NAME}"
   remove_project_networks "${PROJECT_NAME}"

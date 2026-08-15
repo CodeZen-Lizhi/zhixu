@@ -1,0 +1,2 @@
+{"file":".trellis/spec/backend/workspace-root-grant.md","reason":"约束 launcher、Compose、zero-bind、固定项目范围、启动/恢复顺序与 Docker UI Restart 边界。"}
+{"file":".trellis/spec/backend/model-settings-runtime.md","reason":"约束 key/migration one-shot 的 run --rm 顺序、本地模型凭据/卷和 modelctl 恢复边界。"}

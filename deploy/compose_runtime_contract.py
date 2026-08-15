@@ -15,6 +15,7 @@ from typing import Any, Callable
 ROOT = Path(__file__).resolve().parent.parent
 CHECKER = ROOT / "deploy" / "compose_runtime_check.py"
 COMPOSE = ROOT / "deploy" / "compose.yml"
+BOOTSTRAP = ROOT / "deploy" / "compose.bootstrap.yml"
 STATIC_MODELS = ROOT / "deploy" / "compose.static-models.yml"
 ENV_FILE = ROOT / ".env.example"
 
@@ -61,6 +62,8 @@ def check(model: dict[str, Any], *, mode: str = "managed") -> subprocess.Complet
     command = [sys.executable, str(CHECKER)]
     if mode == "static":
         command.append("--static-models")
+    elif mode == "bootstrap":
+        command.append("--bootstrap")
     elif mode == "legacy":
         command.append("--legacy-model-env")
     elif mode == "prepared":
@@ -99,11 +102,14 @@ def secret_mount(model: dict[str, Any], service_name: str) -> dict[str, Any]:
 
 
 def main() -> None:
-    managed = render(COMPOSE, profiles=("workspace-runtime", "modelctl"))
+    managed = render(COMPOSE, profiles=("workspace-runtime",))
+    bootstrap = render(
+        COMPOSE, BOOTSTRAP, profiles=("workspace-runtime", "modelctl")
+    )
     static = render(COMPOSE, STATIC_MODELS, profiles=("workspace-runtime",))
     prepared = render(
         COMPOSE,
-        profiles=("workspace-runtime", "modelctl"),
+        profiles=("workspace-runtime",),
         environment={
             "ZHIXU_MODEL_SETTINGS_ROLLOUT_ID": "compose-contract-rollout",
             "ZHIXU_MODEL_SETTINGS_PREPARED": "true",
@@ -112,11 +118,21 @@ def main() -> None:
         },
     )
     expect_valid(managed)
+    expect_valid(bootstrap, mode="bootstrap")
     expect_valid(static, mode="static")
     expect_valid(static, mode="legacy")
     expect_valid(prepared, mode="prepared")
     if managed["services"]["postgres"]["ports"][0].get("published") not in (None, 0, "0"):
         fail("Workspace-control PostgreSQL ingress must use a random loopback port")
+    if set(managed["services"]) != {
+        "postgres",
+        "local-model-runtime",
+        "app",
+        "worker",
+        "app-model-relay",
+        "worker-model-relay",
+    }:
+        fail("steady Compose exposed a bootstrap or unknown service")
 
     for service_name in ("app", "worker"):
         expect_invalid(
@@ -182,15 +198,33 @@ def main() -> None:
     expect_invalid("writable app key", managed, lambda model: secret_mount(model, "app").update(read_only=False))
     expect_invalid(
         "initializer extra mount",
-        managed,
+        bootstrap,
         lambda model: model["services"]["model-settings-key-init"]["volumes"].append(
             {"type": "bind", "source": "/tmp", "target": "/host"}
         ),
+        mode="bootstrap",
+    )
+    expect_invalid(
+        "key initializer gains network access",
+        bootstrap,
+        lambda model: model["services"]["model-settings-key-init"].update(
+            network_mode="default"
+        ),
+        mode="bootstrap",
+    )
+    expect_invalid(
+        "model volume initializer gains network access",
+        bootstrap,
+        lambda model: model["services"]["local-model-volume-init"].update(
+            network_mode="default"
+        ),
+        mode="bootstrap",
     )
     expect_invalid(
         "modelctl skips key initialization",
-        managed,
+        bootstrap,
         lambda model: model["services"]["modelctl"]["depends_on"].pop("model-settings-key-init"),
+        mode="bootstrap",
     )
     expect_invalid(
         "managed static secret",
@@ -200,7 +234,6 @@ def main() -> None:
     for service_name, selector in (
         ("app", "ZHIXU_CHAT_IMPLEMENTATION"),
         ("worker", "ZHIXU_EMBEDDING_IMPLEMENTATION"),
-        ("modelctl", "ZHIXU_STRUCTURED_SCHEDULER_RAG"),
     ):
         expect_invalid(
             f"retired AI runtime selector in {service_name}",
@@ -209,6 +242,14 @@ def main() -> None:
                 {key: "eino"}
             ),
         )
+    expect_invalid(
+        "retired AI runtime selector in modelctl",
+        bootstrap,
+        lambda model: model["services"]["modelctl"]["environment"].update(
+            ZHIXU_STRUCTURED_SCHEDULER_RAG="eino"
+        ),
+        mode="bootstrap",
+    )
     expect_invalid(
         "Eino chat without Tool runtime",
         managed,
@@ -225,10 +266,11 @@ def main() -> None:
     )
     expect_invalid(
         "Docker socket",
-        managed,
+        bootstrap,
         lambda model: model["services"]["modelctl"]["volumes"].append(
             {"type": "bind", "source": "/var/run/docker.sock", "target": "/var/run/docker.sock"}
         ),
+        mode="bootstrap",
     )
     expect_invalid(
         "relay private bind",
@@ -271,10 +313,11 @@ def main() -> None:
     )
     expect_invalid(
         "credential initializer loses ownership capability",
-        managed,
+        bootstrap,
         lambda model: model["services"]["local-model-runtime-credential-init"].update(
             cap_add=[]
         ),
+        mode="bootstrap",
     )
     expect_invalid(
         "runtime volume loses ownership labels",
@@ -319,6 +362,24 @@ def main() -> None:
         "legacy proxy remains in main project",
         managed,
         lambda model: model["services"].update(proxy={}),
+    )
+    expect_invalid(
+        "bootstrap service leaks into steady model",
+        managed,
+        lambda model: model["services"].update(migrate=bootstrap["services"]["migrate"]),
+    )
+    expect_invalid(
+        "steady service waits for bootstrap completion",
+        managed,
+        lambda model: model["services"]["app"]["depends_on"].update(
+            migrate={"condition": "service_completed_successfully"}
+        ),
+    )
+    expect_invalid(
+        "bootstrap model omits modelctl",
+        bootstrap,
+        lambda model: model["services"].pop("modelctl"),
+        mode="bootstrap",
     )
     expect_invalid(
         "static mode missing identity field",

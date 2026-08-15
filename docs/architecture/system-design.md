@@ -191,17 +191,22 @@ browser -> 127.0.0.1:${ZHIXU_HTTP_PORT:-8080} -> app anchor -> app loopback
 worker anchor -> worker loopback + worker model relay
 
 Compose project: zhixu
-postgres + one-shot migration/model control -> zhixu-runtime external network
+steady: postgres + local-model-runtime -> zhixu-runtime external network
 app/app relay -> container:zhixu-app-netns
 worker/worker relay -> container:zhixu-worker-netns
 host Workspace <== exact bind ==> app + worker only
+
+temporary bootstrap model
+key init -> migration -> credential/volume init -> modelctl recovery
+all steps use run --rm --no-deps; no Workspace grant
 ```
 
 - Web/API 只发布宿主机 IPv4 loopback；Worker 不发布宿主机端口；PostgreSQL 不暴露公网。
 - `zhixu-netns` 的 app anchor 只负责容器 loopback ingress 转发和 peer firewall；静态 Web/API 仍由 app 提供。anchor 没有 Workspace、认证状态、模型 secret、数据库 credential 或 Docker socket。启动时以 `NET_ADMIN` 安装 firewall，仅以 `SETUID`/`SETGID` 切换到非 root，长期进程 capability 全零。
 - app/worker 与两个 relay 是固定 anchor 的 namespace consumer；其 PID 1 在 PostgreSQL 暂不可用时保持 running，数据库可 ping 后再 `exec` 业务进程。主项目 Restart project 不会替换 anchor，避免 consumer 因短暂 owner 消失而永久漏启动。
 - API/Worker 共享同一 canonical Root Grant；Migrate、anchor、数据库和模型密钥卷不能读取 Workspace。
-- Docker UI 只支持主 `zhixu` Restart project。helper 或 daemon restart 不保证跨项目顺序，health/status 必须显示 degraded；launcher 使用 anchor-first 受控重建恢复。
+- 主 `deploy/compose.yml` 恰好声明 PostgreSQL、managed local-model runtime、app、worker 与两个 relay；不声明 one-shot 服务，也不使用 `service_completed_successfully` 稳态依赖。`deploy/compose.bootstrap.yml` 只由 launcher/隔离 smoke 临时合并，不接收 Workspace grant。
+- Docker UI 只支持观察和 Restart 已由 launcher 准备完成的主 `zhixu` 项目；Restart 不执行 bootstrap。首次启动、升级、migration、旧 one-shot orphan 清理与故障恢复必须使用 launcher。helper 或 daemon restart 不保证跨项目顺序，health/status 必须显示 degraded；launcher 使用 anchor-first 受控重建恢复。
 
 ### 自托管模式
 
@@ -211,7 +216,8 @@ host Workspace <== exact bind ==> app + worker only
 
 ### 启动与健康
 
-- 启动依赖为 helper anchor firewall/health → PostgreSQL ready → migration success → API/Worker composition ready → managed RuntimeHost ownership active → relay/Web ready。
+- launcher 启动依赖为 helper anchor firewall/health → PostgreSQL ready → key initialization → migration success → local-model credential/volume initialization → managed runtime ready → modelctl stale recovery → API/Worker composition ready → relay/Web ready。
+- bootstrap 步骤由 launcher 逐个执行 `run --rm --no-deps`；任一步非零即阻止下一步和所有后续稳态服务。稳态 Compose 只保留 PostgreSQL health gate，以支持已准备项目的 Docker Desktop Restart。
 - Compose 声明式依赖不单独承担 daemon restart 的收敛保证；API/Worker 启动入口按 profile 加载配置并等待 PostgreSQL，配置类错误 fail fast，瞬时连接失败可取消重试。主项目 restart 依赖持续运行的 helper anchor；helper/daemon 恢复失败只可降级，随后由 launcher 收敛。
 - Migration 固定执行应用迁移、River migration 和 Validate；失败阻止 API/Worker 就绪。
 - Liveness 只说明进程存在；Readiness 验证 DB、Definition/Executor、必要 Provider、Root Grant 和版本兼容。API health 不能替代 Worker `/readyz`。

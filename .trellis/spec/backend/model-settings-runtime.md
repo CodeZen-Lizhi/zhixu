@@ -7,7 +7,8 @@
 ### 1. Scope / Trigger
 
 - 修改 `internal/modelsettings`、`internal/platform/secretstore`、模型 Factory/Transport、API/Worker Composition Root、
-  Workflow Claim/Attempt、Retrieval Search/Reindex、`cmd/modelctl`、`deploy/compose.yml` 或根目录 `zhixu` 时，必须应用本规范。
+  Workflow Claim/Attempt、Retrieval Search/Reindex、`cmd/modelctl`、`deploy/compose.yml`、
+  `deploy/compose.bootstrap.yml` 或根目录 `zhixu` 时，必须应用本规范。
 - 本规范只覆盖开发 Compose 的 managed 模式；普通二进制 static Env/YAML 模式继续兼容，revision 固定为 `0`。
 
 ### 2. Signatures
@@ -23,6 +24,8 @@
   caller 不提交 revision。Retrieval 以持久 Index/Embedding provenance 获取兼容 generation。
 - Revision、Activation Store、Runtime Store、participant 与 generation lifecycle 是模块内部 seam；正常 Apply 由
   Activation Coordinator 驱动。`zhixu-modelctl` 不再写旧 validating/draining 状态，仅保留兼容的检查/恢复边界。
+- 稳态 Compose 固定为 `docker compose --profile workspace-runtime -f deploy/compose.yml ...`；bootstrap
+  仅由 launcher 以 `-f deploy/compose.yml -f deploy/compose.bootstrap.yml` 合并渲染和执行。
 
 ### 3. Contracts
 
@@ -67,10 +70,18 @@
 - 当前 Eino-only 制品只允许新建、测试和激活 `chat_completions`。`responses` 仍是持久读模型的合法历史值，
   但生产 Validator/Build 必须 fail closed，设置页只允许查看并迁移到 Chat Completions；不得修改历史 revision，
   也不得把其请求改发 Chat Completions。发布前必须确认 active/target 和非终态 Attempt 未绑定 Responses revision。
-- launcher 必须先等待 PostgreSQL healthy，再用 `compose run --rm --no-deps -T` 顺序执行 Key 初始化和迁移；任一步
-  非零退出都原样终止。完成即退出的 one-shot 不得交给 `compose up --wait` 或与 `compose wait` 竞态。
-- API 与 Worker 即使依赖 migration 完成，也必须直接声明 `postgres: service_healthy`；Compose 可能复用已完成的
-  migration one-shot，不能把 migration 完成当作当前 PostgreSQL 健康状态。
+- 主 `compose.yml` 的服务集合必须精确为 `postgres`、`local-model-runtime`、`app`、`worker`、
+  `app-model-relay`、`worker-model-relay`，不得声明 bootstrap service 或 `service_completed_successfully`
+  依赖。Docker Desktop 只能观察或 Restart 已完成准备的这个稳态项目；首次启动、升级、迁移和恢复必须走 launcher。
+- `compose.bootstrap.yml` 只声明 `model-settings-key-init`、`migrate`、`local-model-runtime-credential-init`、
+  `local-model-volume-init` 和 `modelctl`。launcher 必须先等待 PostgreSQL healthy，再用
+  `compose run --rm --no-deps -T` 顺序执行前四个 initializer，启动本地模型 manager 后再执行 modelctl；
+  任一步非零退出都原样终止，并阻止后续 bootstrap 和 API/Worker 启动。
+- Bootstrap wrapper 不得合并 Workspace grant/runtime override，不得获得 Workspace bind；完成即退出的
+  one-shot 不得交给 `compose up --wait` 或与 `compose wait` 竞态。后续稳态 `up --remove-orphans`
+  必须清理旧版遗留的 exited one-shot；`down`/`reset` 清理 allowlist 仍保留这些历史服务名。
+- API、Worker 和 `local-model-runtime` 即使依赖 bootstrap 完成，也必须直接声明
+  `postgres: service_healthy`；这是稳态容错门，不能当作 bootstrap 已执行的证据。
 - 普通模型 Apply 不得替换或重启 API/Worker 容器；`restart_required` 在所有合法响应中恒为 `false`。
   `./zhixu restart` 只保留为升级、迁移或进程故障恢复等运维命令，不是模型配置生效协议的一部分。
 - relay 使用 `network_mode: container:zhixu-app-netns|zhixu-worker-netns` 时不拥有独立网络配置；host-gateway 等映射只配置在
@@ -96,7 +107,10 @@
 | 历史 Export 表数据量较大 | repair 前评估全表回填与 `ACCESS EXCLUSIVE` 锁窗口，并安排维护窗口；不得宣称在线零停机 |
 | 存在 `responses` revision 时降级移除 `chat_api_style` | PostgreSQL `55000`，迁移版本和列保持不变；先创建显式 `chat_completions` revision 并完成业务迁移 |
 | 新保存、测试或激活 `responses` | 非重试配置错误；不发 Provider 请求、不追加可激活 revision、不回退到 Chat Completions |
-| Key 初始化或 migration one-shot 失败 | launcher 保留退出码并停止，不运行 modelctl、API 或 Worker |
+| 任一 initializer 或 modelctl 失败 | launcher 保留退出码并停止，不运行后续 bootstrap、API 或 Worker |
+| 稳态模型出现 bootstrap service 或 completed-service 依赖 | Compose contract 失败；不允许继续启动 |
+| bootstrap wrapper 包含 Workspace grant/bind | Workspace contract 失败；initializer 不得读取宿主 Workspace |
+| 未准备项目从 Docker Desktop 直接 Start | 不受支持；使用 `./zhixu up` 完成准备 |
 
 ### 5. Good / Base / Bad Cases
 
@@ -104,7 +118,8 @@
   两个 role 的 applied 与 active 收敛，容器 id、StartedAt 与 RestartCount 保持不变。错误 target 不影响 previous serving generation。
 - Base：全部模型 disabled 时仍完成 Compose、迁移、readiness、Keyword Search 和 Settings 浏览器闭环。
 - Bad：保存时直接替换共享 Adapter、等待所有任务排空、只更新数据库 active、不冻结 Attempt/Embedding provenance、
-  历史 embedding 静默使用 current、把 restart 当正常 Apply、Handler 持有明文 Key，或 `down` 隐式删除 volume。
+  历史 embedding 静默使用 current、把 restart 当正常 Apply、Handler 持有明文 Key、让 Docker Desktop
+  Start 代替 launcher bootstrap，或 `down` 隐式删除 volume。
 
 ### 6. Tests Required
 
@@ -119,8 +134,10 @@
   仅默认值可 Down；插入 `responses` 后 Down 必须返回 `55000` 且 Goose 版本保持不变。
 - HTTP/OpenAPI/Auth：activation exact body、202/409/503、Session-only、Origin/CSRF、`ManageSystemSettings` 路由映射、
   WriteKnowledge 拒绝、Snapshot strict projection 与 Secret 不回显。
-- Composition/CLI/Compose：API/Worker disabled/configured/unavailable 启动、HotRuntimeController readiness、旧 modelctl mutation
-  fail closed、launcher migration fail-fast、精确 smoke cleanup，以及隔离真实 Compose 中成功/失败/修正 Apply 后容器 identity 不变。
+- Composition/CLI/Compose：稳态六服务精确集合、bootstrap 五服务精确集合、零 completed dependency、
+  bootstrap 无 Workspace grant、`run --rm --no-deps` 顺序与失败阻断、旧 orphan 清理、API/Worker
+  disabled/configured/unavailable 启动、HotRuntimeController readiness、旧 modelctl mutation fail closed、精确 smoke cleanup，
+  以及隔离真实 Compose 中成功/失败/修正 Apply 后容器 identity 不变。
 - Composition：单一 Eino Runtime 必须注入 API/Worker；已退休 implementation selector 不得进入 API、Worker、modelctl、
   revision DTO、Config Hash 或 Compose。
 - Canonical Go/contract 门禁至少包含受影响 `go test`、`go test -race`、`go vet`、`go mod tidy -diff`、
@@ -144,8 +161,8 @@ Correct: DB 是单一 publish 点；RuntimeHost 用 generation lease/refcount �
 Wrong: docker compose down -v、image prune 或宽泛名称匹配被包装进日常 down。
 Correct: down 保留数据；reset 单独确认；历史 smoke 只按精确 namespace 且确认无容器引用后删除。
 
-Wrong: 用 compose up --wait 启动 migrate，或在共享 app 网络命名空间的 relay 上重复 extra_hosts。
-Correct: postgres healthy 后 compose run --rm 顺序执行 one-shot；网络映射由稳定 app/worker anchor 持有，relay 只消费对应 namespace。
+Wrong: 把 bootstrap service 留在主 Compose 并用 compose up --wait 启动，或给 bootstrap 合并 Workspace grant。
+Correct: 主 Compose 只包含六个稳态服务；postgres healthy 后 launcher 通过无 grant 的合并模型依次 run --rm one-shot。
 
 Wrong: 已存在 Responses revision 时直接 Drop `chat_api_style`，依赖再升级的默认值恢复。
 Correct: Down 持有排他锁并 fail closed；先显式迁移业务 revision，再执行降级。
@@ -227,7 +244,8 @@ Correct: 保留历史协议身份和 Down guard；当前制品在构造前拒绝
 ### 1. Scope / Trigger
 
 - 修改 `internal/localmodelruntime`、`cmd/local-model-runtime`、`cmd/local-model-runtime-credential-init`、
-  `migrations/00080_managed_ollama_runtime.sql`、`deploy/compose.yml`、`deploy/compose.static-models.yml`、launcher，
+  `migrations/00080_managed_ollama_runtime.sql`、`deploy/compose.yml`、`deploy/compose.bootstrap.yml`、
+  `deploy/compose.static-models.yml`、launcher，
   或 `internal/modelsettings/runtime` 的 local demand/generation lifecycle 时，必须应用本场景。
 - 本场景区分 `managed` 与 `external-static`：前者由项目内 manager 通过 PostgreSQL 协调唯一 child，后者只代理宿主
   Ollama，必须保持 healthy idle，不连接 lifecycle DB、不创建 hold/operation、不启动 child。
@@ -256,6 +274,9 @@ Correct: 保留历史协议身份和 Down guard；当前制品在构造前拒绝
 
 - 主拓扑只有一个长期新增 service：`local-model-runtime`；管理器是常驻控制面，`ollama serve` 是同容器内按需 child，
   `/var/lib/zhixu/ollama/.ollama` 是独立 project-owned Docker Volume。停止 child 释放内存但不得删除卷或自动 prune。
+- `local-model-runtime-credential-init` 和 `local-model-volume-init` 只存在于 `compose.bootstrap.yml`，
+  由 launcher 以无 Workspace grant 的 `run --rm --no-deps` 在启动稳态 manager 前顺序执行；
+  不得因初始化需求将它们恢复为长期项目容器。
 - API/Worker `RuntimeHost` 构造本地 generation 时 Acquire generation hold；heartbeat 期间 Renew；generation 真正 Close 时
   Release。Renew 失败必须阻止继续宣称本地 generation fresh；Release 失败不得伪造成功，依赖 lease expiry 做 crash recovery。
 - managed manager 只向 child loopback 发送固定 allowlist 环境变量（包括 `HOME`、`OLLAMA_HOST`、`OLLAMA_NO_CLOUD=true`、
@@ -316,7 +337,8 @@ Correct: 保留历史协议身份和 Down guard；当前制品在构造前拒绝
   `RuntimeHost` hold acquire/renew/release 与 Close 幂等。
 - Migration/integration：runtime/hold/operation CAS、owner epoch takeover、settings-state fence、nullable/JSONB scan、专用 role
   无法直接 DML lifecycle 表、无法读取 Endpoint/Secret/无关表，只能执行固定函数；existing role 高权限与 membership 必须拒绝。
-- Compose/launcher：managed/static rendered positive/negative contract、one-shot 顺序、down 保留卷、reset 精确清理。当前
+- Compose/launcher：managed/static 稳态模型、merged bootstrap positive/negative contract、无 Workspace grant 的
+  initializer 顺序与失败阻断、down 保留卷、reset 精确清理。当前
   Docker Desktop 的 `./deploy/managed-ollama-compose-smoke.sh` 已通过受控 HTTPS fixture 证明五种线上/本地模式、线上 child absence、单 serve、
   cached model 零 repull、manager container restart 恢复、`child_epoch` 单调递增及 60 秒 idle anonymous RSS 6.39 MiB /
   manager RSS 9.69 MiB；仍须在原生 Linux 验证网络，并补真实公网 Provider 出口、Docker daemon restart、显式 child

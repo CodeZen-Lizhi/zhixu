@@ -6,6 +6,7 @@ umask 077
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPOSITORY_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 readonly COMPOSE_FILE="${SCRIPT_DIR}/compose.yml"
+readonly BOOTSTRAP_COMPOSE_FILE="${SCRIPT_DIR}/compose.bootstrap.yml"
 readonly NETNS_COMPOSE_FILE="${SCRIPT_DIR}/compose.netns.yml"
 readonly ENV_FILE="${REPOSITORY_ROOT}/.env.example"
 readonly TIMEOUT_SECONDS="${ZHIXU_MANAGED_OLLAMA_SMOKE_TIMEOUT_SECONDS:-900}"
@@ -45,6 +46,11 @@ log() { printf '[managed-ollama-compose-smoke] %s\n' "$1"; }
 
 compose() {
   docker compose --project-name "${PROJECT_NAME}" -f "${COMPOSE_FILE}" -f "${RUNTIME_OVERRIDE_FILE}" \
+    -f "${MAIN_NETNS_OVERRIDE_FILE}" --env-file "${ENV_FILE}" "$@"
+}
+
+bootstrap_compose() {
+  docker compose --project-name "${PROJECT_NAME}" -f "${COMPOSE_FILE}" -f "${BOOTSTRAP_COMPOSE_FILE}" \
     -f "${MAIN_NETNS_OVERRIDE_FILE}" --env-file "${ENV_FILE}" "$@"
 }
 
@@ -526,9 +532,11 @@ YAML
 
   log 'building an isolated real Compose stack'
   compose config --quiet
+  bootstrap_compose --profile workspace-runtime config --quiet
   netns_compose config --quiet
-  compose build --quiet app worker app-model-relay worker-model-relay model-settings-key-init migrate \
-    local-model-volume-init local-model-runtime-credential-init local-model-runtime
+  compose build --quiet app worker app-model-relay worker-model-relay local-model-runtime
+  bootstrap_compose --profile workspace-runtime build --quiet model-settings-key-init migrate \
+    local-model-volume-init local-model-runtime-credential-init
   netns_compose build --quiet
   netns_compose up --detach --wait >/dev/null
   compose run --rm --no-deps --user root --entrypoint sh app -c \
@@ -536,10 +544,10 @@ YAML
   compose run --rm --no-deps --entrypoint sh app -c \
     'git -C /workspace/project init --initial-branch=main >/dev/null && git -C /workspace/project config user.name smoke && git -C /workspace/project config user.email smoke@example.invalid && git -C /workspace/project add -- docs/smoke.md && git -C /workspace/project commit -m base >/dev/null' >/dev/null
   compose up --detach --wait postgres >/dev/null
-  compose run --rm --no-deps -T model-settings-key-init >/dev/null
-  compose run --rm --no-deps -T migrate >/dev/null
-  compose run --rm --no-deps -T local-model-volume-init >/dev/null
-  compose run --rm --no-deps -T local-model-runtime-credential-init >/dev/null
+  bootstrap_compose run --rm --no-deps -T model-settings-key-init >/dev/null
+  bootstrap_compose run --rm --no-deps -T migrate >/dev/null
+  bootstrap_compose --profile workspace-runtime run --rm --no-deps -T local-model-runtime-credential-init >/dev/null
+  bootstrap_compose --profile workspace-runtime run --rm --no-deps -T local-model-volume-init >/dev/null
   compose up --detach --no-deps --wait local-model-runtime >/dev/null
   compose up --detach --no-deps --wait app worker >/dev/null || fail 'API or Worker startup failed'
   compose up --detach --no-deps --wait app-model-relay worker-model-relay >/dev/null || fail 'model relay startup failed'

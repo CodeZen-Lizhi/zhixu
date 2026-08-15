@@ -37,6 +37,10 @@ policy 和 healthcheck 都无法修复发生在 entrypoint 之前的 Engine join
   重启的跨项目恢复顺序不受承诺：入口必须保持 fail closed，`status` 报告 degraded，
   `./zhixu restart` 按 anchor 后 consumers 的顺序恢复。`down`/`reset` 按 consumers ->
   main project -> helper 清理，普通 `down` 保留数据卷、selection 与宿主机 Workspace。
+- 主项目的持久 Compose 模型只包含 PostgreSQL、managed local-model runtime、app、worker 与
+  两个 relay。密钥初始化、migration、模型卷/credential 初始化和 `modelctl` 放在独立
+  bootstrap Compose 中，由 launcher 以 `run --rm --no-deps` 顺序执行且不接收 Workspace
+  grant。Docker UI Restart 只重启已准备的稳态容器；首次启动、升级和恢复仍必须走 launcher。
 
 ## Considered Options
 
@@ -56,6 +60,8 @@ policy 和 healthcheck 都无法修复发生在 entrypoint 之前的 Engine join
   重新加入持续运行的 anchor。
 - Docker UI 会显示额外的 `zhixu-netns` 项目；这是一项显式运维成本，不能把 helper 当作
   用户可独立管理的应用项目。
+- 主 `zhixu` 项目不再显示 exited one-shot 容器。首次 `./zhixu up` / `restart` 通过稳态
+  `up --remove-orphans` 清理旧布局遗留容器，不删除 project-owned named volume。
 - 首次升级会无卷迁移旧 runtime consumer，重建 helper 和 grant runtime；不得使用
   `down -v`，也不得删除 PostgreSQL/model-secret volume、selection、grant 或 Workspace。
 - 端口变更必须先移除全部 anchor consumer，再重建唯一 app anchor，防止旧/新 namespace

@@ -71,6 +71,21 @@ RETIRED_AI_RUNTIME_SELECTOR_KEYS = {
     "ZHIXU_STRUCTURED_SCHEDULER_CAPTURE",
     "ZHIXU_STRUCTURED_SCHEDULER_ORGANIZING",
 }
+STEADY_SERVICES = {
+    "postgres",
+    "local-model-runtime",
+    "app",
+    "worker",
+    "app-model-relay",
+    "worker-model-relay",
+}
+BOOTSTRAP_SERVICES = {
+    "model-settings-key-init",
+    "migrate",
+    "local-model-volume-init",
+    "local-model-runtime-credential-init",
+    "modelctl",
+}
 
 
 def fail(message: str) -> None:
@@ -178,9 +193,32 @@ def validate_no_runtime_privilege(definition: dict[str, Any], service_name: str)
             fail(f"{service_name} must not receive {forbidden}")
 
 
-def validate_local_model_runtime(model: dict[str, Any], *, external_static: bool) -> None:
-    validate_local_model_volume(model, require_credentials=not external_static)
+def validate_service_set(model: dict[str, Any], *, bootstrap: bool) -> None:
+    services = model.get("services")
+    if not isinstance(services, dict):
+        fail("services are missing")
+    expected = STEADY_SERVICES | (BOOTSTRAP_SERVICES if bootstrap else set())
+    actual = set(services)
+    if actual != expected:
+        fail(
+            "resolved Compose services must be exactly "
+            + ", ".join(sorted(expected))
+        )
+    if bootstrap:
+        return
+    for service_name, definition in services.items():
+        dependencies = definition.get("depends_on", {})
+        if not isinstance(dependencies, dict):
+            fail(f"{service_name} dependencies must be an object")
+        if any(
+            isinstance(dependency, dict)
+            and dependency.get("condition") == "service_completed_successfully"
+            for dependency in dependencies.values()
+        ):
+            fail(f"steady {service_name} must not depend on a completed bootstrap service")
 
+
+def validate_bootstrap_initializers(model: dict[str, Any]) -> None:
     volume_init = service(model, "local-model-volume-init")
     validate_local_runtime_build(volume_init, "local-model-volume-init")
     if (
@@ -193,6 +231,7 @@ def validate_local_model_runtime(model: dict[str, Any], *, external_static: bool
         or volume_init.get("cap_drop") != ["ALL"]
         or set(volume_init.get("cap_add", [])) != {"CHOWN", "DAC_OVERRIDE"}
         or volume_init.get("security_opt") != ["no-new-privileges:true"]
+        or volume_init.get("depends_on")
     ):
         fail("local-model-volume-init security or lifecycle shape is invalid")
     validate_no_runtime_privilege(volume_init, "local-model-volume-init")
@@ -205,37 +244,47 @@ def validate_local_model_runtime(model: dict[str, Any], *, external_static: bool
     credential_environment = environment(credential_init, "local-model-runtime-credential-init")
     if (
         credential_init.get("profiles") != ["workspace-runtime"]
-        or credential_init.get("entrypoint") != (["/bin/true"] if external_static else ["/usr/local/bin/local-model-runtime-credential-init"])
+        or credential_init.get("entrypoint") != ["/usr/local/bin/local-model-runtime-credential-init"]
         or credential_init.get("user") != "0:0"
         or credential_init.get("restart") != "no"
         or credential_init.get("read_only") is not True
         or credential_init.get("cap_drop") != ["ALL"]
-        or set(credential_init.get("cap_add", [])) != (set() if external_static else {"CHOWN", "DAC_OVERRIDE"})
+        or set(credential_init.get("cap_add", [])) != {"CHOWN", "DAC_OVERRIDE"}
         or credential_init.get("security_opt") != ["no-new-privileges:true"]
-        or (not external_static and not has_dependency(credential_init, "postgres", "service_healthy"))
-        or (not external_static and not has_dependency(credential_init, "migrate", "service_completed_successfully"))
+        or not has_dependency(credential_init, "postgres", "service_healthy")
+        or not has_dependency(credential_init, "migrate", "service_completed_successfully")
     ):
         fail("local-model-runtime credential initializer shape is invalid")
     credential_mounts = volume_mounts(credential_init, "local-model-runtime-credential-init")
-    if external_static:
-        if credential_mounts:
-            fail("external-static credential initializer must not mount its credential volume")
-        if credential_init.get("depends_on"):
-            fail("external-static credential initializer must not depend on the database")
-    elif (
+    if (
         len(credential_mounts) != 1
+        or credential_mounts[0].get("type") != "volume"
         or credential_mounts[0].get("source") != LOCAL_RUNTIME_CREDENTIAL_VOLUME
         or credential_mounts[0].get("target") != LOCAL_RUNTIME_CREDENTIAL_TARGET
+        or credential_mounts[0].get("read_only") is True
     ):
         fail("managed credential initializer must mount its credential volume exactly once")
     validate_no_runtime_privilege(credential_init, "local-model-runtime-credential-init")
-    if external_static:
-        if any(credential_environment.get(key) for key in ("ZHIXU_DATABASE_HOST", "ZHIXU_DATABASE_PORT", "ZHIXU_DATABASE_NAME", "ZHIXU_DATABASE_USER", "ZHIXU_DATABASE_PASSWORD")):
-            fail("external-static credential initializer must not receive database credentials")
-    else:
-        for key in ("ZHIXU_DATABASE_HOST", "ZHIXU_DATABASE_PORT", "ZHIXU_DATABASE_NAME", "ZHIXU_DATABASE_USER", "ZHIXU_DATABASE_PASSWORD"):
-            if not credential_environment.get(key):
-                fail(f"credential initializer must receive {key}")
+    required_environment = {
+        "ZHIXU_DATABASE_HOST",
+        "ZHIXU_DATABASE_PORT",
+        "ZHIXU_DATABASE_NAME",
+        "ZHIXU_DATABASE_USER",
+        "ZHIXU_DATABASE_PASSWORD",
+        "ZHIXU_LOCAL_MODEL_RUNTIME_CREDENTIAL_DIR",
+    }
+    if set(credential_environment) != required_environment:
+        fail("credential initializer environment is not minimal")
+    if any(not credential_environment.get(key) for key in required_environment):
+        fail("credential initializer environment is incomplete")
+    if credential_environment["ZHIXU_LOCAL_MODEL_RUNTIME_CREDENTIAL_DIR"] != LOCAL_RUNTIME_CREDENTIAL_TARGET:
+        fail("credential initializer target is invalid")
+
+
+def validate_local_model_runtime(
+    model: dict[str, Any], *, external_static: bool, bootstrap: bool
+) -> None:
+    validate_local_model_volume(model, require_credentials=not external_static)
 
     runtime = service(model, "local-model-runtime")
     validate_local_runtime_build(runtime, "local-model-runtime")
@@ -294,25 +343,15 @@ def validate_local_model_runtime(model: dict[str, Any], *, external_static: bool
         "/run:rw,noexec,nosuid,nodev,size=16m,mode=0755",
     }:
         fail("local-model-runtime writable scratch space is invalid")
-    if not has_dependency(runtime, "local-model-volume-init", "service_completed_successfully"):
-        fail("local-model-runtime must wait for its volume initializer")
     if external_static:
-        if any(
-            has_dependency(runtime, dependency, condition)
-            for dependency, condition in (
-                ("postgres", "service_healthy"),
-                ("migrate", "service_completed_successfully"),
-                ("local-model-runtime-credential-init", "service_completed_successfully"),
-            )
-        ):
-            fail("external-static local-model-runtime must not depend on the database")
+        if runtime.get("depends_on"):
+            fail("external-static local-model-runtime must not have steady dependencies")
     else:
+        dependencies = runtime.get("depends_on")
+        if not isinstance(dependencies, dict) or set(dependencies) != {"postgres"}:
+            fail("managed local-model-runtime must have only its PostgreSQL health gate")
         if not has_dependency(runtime, "postgres", "service_healthy"):
             fail("managed local-model-runtime must wait for PostgreSQL health")
-        if not has_dependency(runtime, "migrate", "service_completed_successfully"):
-            fail("managed local-model-runtime must wait for migration")
-        if not has_dependency(runtime, "local-model-runtime-credential-init", "service_completed_successfully"):
-            fail("managed local-model-runtime must wait for credential initialization")
     healthcheck = runtime.get("healthcheck")
     if (
         not isinstance(healthcheck, dict)
@@ -326,7 +365,10 @@ def validate_local_model_runtime(model: dict[str, Any], *, external_static: bool
     services = model.get("services")
     assert isinstance(services, dict)
     for service_name, raw_definition in services.items():
-        if service_name in {"local-model-runtime", "local-model-volume-init", "local-model-runtime-credential-init"}:
+        allowed = {"local-model-runtime"}
+        if bootstrap:
+            allowed.add("local-model-volume-init")
+        if service_name in allowed:
             continue
         if not isinstance(raw_definition, dict):
             fail(f"{service_name} service definition must be an object")
@@ -337,7 +379,11 @@ def validate_local_model_runtime(model: dict[str, Any], *, external_static: bool
 
 def validate_runtime_dependencies(model: dict[str, Any]) -> None:
     for service_name in ("app", "worker"):
-        if not has_dependency(service(model, service_name), "postgres", "service_healthy"):
+        definition = service(model, service_name)
+        dependencies = definition.get("depends_on")
+        if not isinstance(dependencies, dict) or set(dependencies) != {"postgres"}:
+            fail(f"{service_name} must have only its PostgreSQL health gate")
+        if not has_dependency(definition, "postgres", "service_healthy"):
             fail(f"{service_name} must wait for PostgreSQL health")
 
 
@@ -380,7 +426,9 @@ def validate_eino_primary_runtime(model: dict[str, Any]) -> None:
         fail("Eino chat requires the Worker Tool runtime")
 
 
-def validate_secret_boundary(model: dict[str, Any], prepared_candidate: bool = False) -> None:
+def validate_secret_boundary(
+    model: dict[str, Any], *, prepared_candidate: bool = False, bootstrap: bool = False
+) -> None:
     volumes = model.get("volumes")
     if not isinstance(volumes, dict) or SECRET_VOLUME not in volumes:
         fail("the dedicated model settings secret volume is missing")
@@ -388,27 +436,38 @@ def validate_secret_boundary(model: dict[str, Any], prepared_candidate: bool = F
     if not isinstance(secret_volume, dict) or secret_volume.get("external") is True:
         fail("the model settings secret volume must be project-owned")
 
-    key_init = service(model, "model-settings-key-init")
-    if key_init.get("entrypoint") != ["/app/model-secrets-init.sh"] or key_init.get("user") != "0:0":
-        fail("model-settings-key-init must run the trusted initializer as root")
-    if key_init.get("privileged") is True or "cap_add" in key_init or "ports" in key_init:
-        fail("model-settings-key-init must not receive runtime privileges or ingress")
-    key_init_environment = environment(key_init, "model-settings-key-init")
-    if key_init_environment != {"ZHIXU_MODEL_SETTINGS_KEY_DIR": "/var/lib/zhixu/model-secrets"}:
-        fail("model-settings-key-init must receive only its fixed key directory")
+    if bootstrap:
+        key_init = service(model, "model-settings-key-init")
+        build = key_init.get("build")
+        if (
+            not isinstance(build, dict)
+            or build.get("dockerfile") != "deploy/Dockerfile"
+            or key_init.get("entrypoint") != ["/app/model-secrets-init.sh"]
+            or key_init.get("user") != "0:0"
+            or key_init.get("network_mode") != "none"
+            or key_init.get("depends_on")
+        ):
+            fail("model-settings-key-init image or lifecycle shape is invalid")
+        if key_init.get("privileged") is True or "cap_add" in key_init or "ports" in key_init:
+            fail("model-settings-key-init must not receive runtime privileges or ingress")
+        key_init_environment = environment(key_init, "model-settings-key-init")
+        if key_init_environment != {"ZHIXU_MODEL_SETTINGS_KEY_DIR": "/var/lib/zhixu/model-secrets"}:
+            fail("model-settings-key-init must receive only its fixed key directory")
 
-    key_init_mounts = volume_mounts(key_init, "model-settings-key-init")
-    writable_mounts = [
-        mount
-        for mount in key_init_mounts
-        if mount.get("source") == SECRET_VOLUME
-        and mount.get("target") == "/var/lib/zhixu/model-secrets"
-        and mount.get("read_only") is not True
-    ]
-    if len(key_init_mounts) != 1 or len(writable_mounts) != 1:
-        fail("model-settings-key-init needs exactly one writable dedicated secret volume")
+        key_init_mounts = volume_mounts(key_init, "model-settings-key-init")
+        writable_mounts = [
+            mount
+            for mount in key_init_mounts
+            if mount.get("source") == SECRET_VOLUME
+            and mount.get("target") == "/var/lib/zhixu/model-secrets"
+            and mount.get("read_only") is not True
+        ]
+        if len(key_init_mounts) != 1 or len(writable_mounts) != 1:
+            fail("model-settings-key-init needs exactly one writable dedicated secret volume")
 
-    readers = {"app", "worker", "modelctl"}
+    readers = {"app", "worker"}
+    if bootstrap:
+        readers.add("modelctl")
     services = model.get("services")
     assert isinstance(services, dict)
     for service_name, raw_definition in services.items():
@@ -428,9 +487,12 @@ def validate_secret_boundary(model: dict[str, Any], prepared_candidate: bool = F
                 fail(f"{service_name} must use managed model settings")
             if service_environment.get("ZHIXU_MODEL_SETTINGS_KEY_FILE") != KEY_FILE:
                 fail(f"{service_name} must use the fixed model settings key file")
-            if not has_dependency(definition, "model-settings-key-init", "service_completed_successfully"):
-                fail(f"{service_name} must wait for model-settings-key-init")
-        elif service_name == "model-settings-key-init":
+            if service_name == "modelctl":
+                if not has_dependency(definition, "model-settings-key-init", "service_completed_successfully"):
+                    fail("modelctl must retain the bootstrap key dependency")
+            elif has_dependency(definition, "model-settings-key-init", "service_completed_successfully"):
+                fail(f"steady {service_name} must not depend on model-settings-key-init")
+        elif bootstrap and service_name == "model-settings-key-init":
             pass
         elif secret_mounts:
             fail(f"{service_name} must not mount the model settings secret volume")
@@ -464,11 +526,67 @@ def validate_secret_boundary(model: dict[str, Any], prepared_candidate: bool = F
     if prepared_candidate and len(set(rollout_ids)) != 1:
         fail("prepared API and Worker candidates must use the same rollout id")
     validate_restart_policy(model, prepared_candidate)
+    if bootstrap:
+        validate_bootstrap_commands(model)
+
+
+def validate_bootstrap_commands(model: dict[str, Any]) -> None:
+    migrate = service(model, "migrate")
+    migrate_build = migrate.get("build")
+    migrate_environment = environment(migrate, "migrate")
+    required_database_environment = {
+        "ZHIXU_DATABASE_HOST",
+        "ZHIXU_DATABASE_PORT",
+        "ZHIXU_DATABASE_NAME",
+        "ZHIXU_DATABASE_USER",
+        "ZHIXU_DATABASE_PASSWORD",
+    }
+    if (
+        not isinstance(migrate_build, dict)
+        or migrate_build.get("dockerfile") != "deploy/Dockerfile"
+        or migrate.get("entrypoint") != ["/app/zhixu-migrate"]
+        or migrate.get("user") != "10001:10001"
+        or set(migrate_environment) != required_database_environment
+        or any(not migrate_environment.get(key) for key in required_database_environment)
+        or set(migrate.get("depends_on", {})) != {"postgres", "model-settings-key-init"}
+        or not has_dependency(migrate, "postgres", "service_healthy")
+        or not has_dependency(migrate, "model-settings-key-init", "service_completed_successfully")
+        or volume_mounts(migrate, "migrate")
+    ):
+        fail("migrate bootstrap service shape is invalid")
+    validate_no_runtime_privilege(migrate, "migrate")
+    if migrate.get("privileged") is True or "cap_add" in migrate:
+        fail("migrate bootstrap service privileges are invalid")
+
     modelctl = service(model, "modelctl")
-    if modelctl.get("entrypoint") != ["/app/zhixu-modelctl"]:
-        fail("modelctl entrypoint is invalid")
-    if modelctl.get("profiles") != ["modelctl"] or "ports" in modelctl:
-        fail("modelctl must be profile-scoped and have no published ports")
+    modelctl_build = modelctl.get("build")
+    modelctl_environment = environment(modelctl, "modelctl")
+    required_modelctl_environment = required_database_environment | {
+        "ZHIXU_ENVIRONMENT",
+        "ZHIXU_MODEL_SETTINGS_MODE",
+        "ZHIXU_MODEL_SETTINGS_KEY_FILE",
+        "ZHIXU_WORKER_QUEUE",
+    }
+    if (
+        not isinstance(modelctl_build, dict)
+        or modelctl_build.get("dockerfile") != "deploy/Dockerfile"
+        or modelctl.get("entrypoint") != ["/app/zhixu-modelctl"]
+        or modelctl.get("user") != "10001:10001"
+        or modelctl.get("profiles") != ["modelctl"]
+        or "ports" in modelctl
+        or set(modelctl_environment) != required_modelctl_environment
+        or modelctl_environment.get("ZHIXU_MODEL_SETTINGS_MODE") != "managed"
+        or modelctl_environment.get("ZHIXU_MODEL_SETTINGS_KEY_FILE") != KEY_FILE
+        or set(modelctl.get("depends_on", {}))
+        != {"postgres", "migrate", "model-settings-key-init"}
+        or not has_dependency(modelctl, "postgres", "service_healthy")
+        or not has_dependency(modelctl, "migrate", "service_completed_successfully")
+        or not has_dependency(modelctl, "model-settings-key-init", "service_completed_successfully")
+    ):
+        fail("modelctl bootstrap service shape is invalid")
+    validate_no_runtime_privilege(modelctl, "modelctl")
+    if modelctl.get("privileged") is True or "cap_add" in modelctl:
+        fail("modelctl bootstrap service privileges are invalid")
 
 
 def validate_zero_base_grant(model: dict[str, Any]) -> None:
@@ -649,6 +767,7 @@ def resolved_compose_model() -> tuple[dict[str, Any], str]:
     arguments = sys.argv[1:]
     mode = "managed"
     modes = {
+        "--bootstrap": "bootstrap",
         "--static-models": "static",
         "--legacy-model-env": "legacy",
         "--prepared-candidate": "prepared",
@@ -680,10 +799,16 @@ def resolved_compose_model() -> tuple[dict[str, Any], str]:
 
 def main() -> None:
     model, mode = resolved_compose_model()
+    bootstrap = mode == "bootstrap"
     external_static = mode in {"static", "legacy"}
+    validate_service_set(model, bootstrap=bootstrap)
     validate_runtime_dependencies(model)
     validate_runtime_entrypoints(model)
-    validate_local_model_runtime(model, external_static=external_static)
+    validate_local_model_runtime(
+        model, external_static=external_static, bootstrap=bootstrap
+    )
+    if bootstrap:
+        validate_bootstrap_initializers(model)
     if mode == "static":
         validate_static_models(model)
     elif mode == "legacy":
@@ -691,7 +816,7 @@ def main() -> None:
     elif mode == "prepared":
         validate_secret_boundary(model, prepared_candidate=True)
     else:
-        validate_secret_boundary(model)
+        validate_secret_boundary(model, bootstrap=bootstrap)
     validate_eino_primary_runtime(model)
     validate_relays(model, external_static=external_static)
     validate_ingress(model)

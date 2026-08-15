@@ -5,6 +5,7 @@ set -Eeuo pipefail
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPOSITORY_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 readonly COMPOSE_FILE="${SCRIPT_DIR}/compose.yml"
+readonly BOOTSTRAP_COMPOSE_FILE="${SCRIPT_DIR}/compose.bootstrap.yml"
 readonly NETNS_COMPOSE_FILE="${SCRIPT_DIR}/compose.netns.yml"
 readonly STATIC_MODELS_COMPOSE_FILE="${SCRIPT_DIR}/compose.static-models.yml"
 readonly DEFAULT_ENV_FILE="${REPOSITORY_ROOT}/.env.example"
@@ -86,6 +87,10 @@ compose() {
   docker compose --project-name "${PROJECT_NAME}" -f "${COMPOSE_FILE}" -f "${STATIC_MODELS_COMPOSE_FILE}" -f "${MAIN_NETNS_OVERRIDE_FILE}" --env-file "${DEFAULT_ENV_FILE}" "$@"
 }
 
+bootstrap_compose() {
+  docker compose --project-name "${PROJECT_NAME}" -f "${COMPOSE_FILE}" -f "${BOOTSTRAP_COMPOSE_FILE}" -f "${MAIN_NETNS_OVERRIDE_FILE}" --env-file "${DEFAULT_ENV_FILE}" "$@"
+}
+
 netns_compose() {
   docker compose --project-name "${NETNS_PROJECT_NAME}" -f "${NETNS_COMPOSE_FILE}" -f "${NETNS_OVERRIDE_FILE}" --env-file "${DEFAULT_ENV_FILE}" "$@"
 }
@@ -95,6 +100,15 @@ run_compose_step() {
   shift
   local output_file="${STATE_DIR}/compose-step.log"
   if ! compose "$@" >"${output_file}" 2>&1; then
+    fail "${label} failed; disposable resources will be removed"
+  fi
+}
+
+run_bootstrap_step() {
+  local label=$1
+  shift
+  local output_file="${STATE_DIR}/compose-step.log"
+  if ! bootstrap_compose "$@" >"${output_file}" 2>&1; then
     fail "${label} failed; disposable resources will be removed"
   fi
 }
@@ -264,6 +278,8 @@ main() {
   log "building disposable Compose stack"
   run_compose_step "Compose configuration validation" config --quiet
   run_compose_step "Compose image build" build
+  run_bootstrap_step "Bootstrap Compose validation" config --quiet
+  run_bootstrap_step "Bootstrap image build" build model-settings-key-init migrate
   netns_compose config --quiet
   netns_compose build
   log "starting isolated namespace anchors"
@@ -276,8 +292,8 @@ main() {
 
   log "starting PostgreSQL, one-shot initialization, and API/Worker ingress"
   run_compose_step "PostgreSQL startup" up --detach --wait postgres
-  run_compose_step "Model settings key initialization" run --rm --no-deps -T model-settings-key-init
-  run_compose_step "Database migration" run --rm --no-deps -T migrate
+  run_bootstrap_step "Model settings key initialization" run --rm --no-deps -T model-settings-key-init
+  run_bootstrap_step "Database migration" run --rm --no-deps -T migrate
   run_compose_step "API and Worker startup" up --detach --no-deps --wait app worker
   run_compose_step "Model relay startup" up --detach --no-deps --wait app-model-relay worker-model-relay
   authenticate

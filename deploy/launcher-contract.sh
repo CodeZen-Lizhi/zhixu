@@ -95,6 +95,12 @@ assert_log_not_contains() {
   fi
 }
 
+assert_bootstrap_log_has_no_grant() {
+  if grep -F -- "compose.bootstrap.yml" "${ZHIXU_FAKE_DOCKER_LOG}" | grep -F -- "workspace-grant" >/dev/null; then
+    fail "bootstrap Compose invocation received the Workspace grant override"
+  fi
+}
+
 assert_log_order() {
   local first second third
   first="$(grep -n -F -- "$1" "${ZHIXU_FAKE_DOCKER_LOG}" | head -n 1 | cut -d: -f1)"
@@ -222,6 +228,7 @@ run_legacy_migration_contract() {
   cp "${REPOSITORY_ROOT}/zhixu" "${STATE_DIR}/fixture/zhixu"
   cp "${REPOSITORY_ROOT}/.env.example" "${STATE_DIR}/fixture/.env.example"
   cp "${REPOSITORY_ROOT}/deploy/compose.yml" "${STATE_DIR}/fixture/deploy/compose.yml"
+  cp "${REPOSITORY_ROOT}/deploy/compose.bootstrap.yml" "${STATE_DIR}/fixture/deploy/compose.bootstrap.yml"
   cp "${SCRIPT_DIR}/testdata/launcher-fake-docker.sh" "${STATE_DIR}/bin/docker"
   chmod 0755 "${STATE_DIR}/fixture/zhixu" "${STATE_DIR}/bin/docker"
   export PATH="${STATE_DIR}/bin:${PATH}"
@@ -371,6 +378,7 @@ main() {
   cp "${REPOSITORY_ROOT}/zhixu" "${STATE_DIR}/fixture/zhixu"
   cp "${REPOSITORY_ROOT}/.env.example" "${STATE_DIR}/fixture/.env.example"
   cp "${REPOSITORY_ROOT}/deploy/compose.yml" "${STATE_DIR}/fixture/deploy/compose.yml"
+  cp "${REPOSITORY_ROOT}/deploy/compose.bootstrap.yml" "${STATE_DIR}/fixture/deploy/compose.bootstrap.yml"
   cp "${REPOSITORY_ROOT}/deploy/compose.netns.yml" "${STATE_DIR}/fixture/deploy/compose.netns.yml"
   cp "${REPOSITORY_ROOT}/deploy/compose.static-models.yml" "${STATE_DIR}/fixture/deploy/compose.static-models.yml"
   cp "${REPOSITORY_ROOT}/deploy/Dockerfile" "${STATE_DIR}/fixture/deploy/Dockerfile"
@@ -383,9 +391,12 @@ main() {
   cp "${REPOSITORY_ROOT}/deploy/local-model-legacy-migrate.sh" "${STATE_DIR}/fixture/deploy/local-model-legacy-migrate.sh"
   cp "${REPOSITORY_ROOT}/deploy/anchor-health/index.html" "${STATE_DIR}/fixture/deploy/anchor-health/index.html"
 
-  docker compose --profile workspace-runtime --profile modelctl --project-name zhixu \
+  docker compose --profile workspace-runtime --project-name zhixu \
     -f "${REPOSITORY_ROOT}/deploy/compose.yml" --env-file "${REPOSITORY_ROOT}/.env.example" \
     config --format json >"${STATE_DIR}/compose-managed.json"
+  docker compose --profile workspace-runtime --profile modelctl --project-name zhixu \
+    -f "${REPOSITORY_ROOT}/deploy/compose.yml" -f "${REPOSITORY_ROOT}/deploy/compose.bootstrap.yml" \
+    --env-file "${REPOSITORY_ROOT}/.env.example" config --format json >"${STATE_DIR}/compose-bootstrap.json"
   docker compose --profile workspace-runtime --project-name zhixu \
     -f "${REPOSITORY_ROOT}/deploy/compose.yml" -f "${REPOSITORY_ROOT}/deploy/compose.static-models.yml" \
     --env-file "${REPOSITORY_ROOT}/.env.example" config --format json >"${STATE_DIR}/compose-static.json"
@@ -398,6 +409,7 @@ main() {
   chmod 0755 "${STATE_DIR}/bin/sleep"
   export PATH="${STATE_DIR}/bin:${PATH}"
   export ZHIXU_FAKE_MANAGED_COMPOSE_MODEL="${STATE_DIR}/compose-managed.json"
+  export ZHIXU_FAKE_BOOTSTRAP_COMPOSE_MODEL="${STATE_DIR}/compose-bootstrap.json"
   export ZHIXU_FAKE_STATIC_COMPOSE_MODEL="${STATE_DIR}/compose-static.json"
   export ZHIXU_FAKE_NETNS_COMPOSE_MODEL="${STATE_DIR}/compose-netns.json"
   export ZHIXU_FAKE_DOCKER_LOG="${STATE_DIR}/docker.log"
@@ -448,11 +460,16 @@ main() {
   assert_log_contains "buildx build --target workspace-control-bundle"
   assert_log_contains "--project-name zhixu-netns"
   assert_log_contains "build app-netns worker-netns"
-  assert_log_contains "build model-settings-key-init migrate modelctl local-model-runtime-credential-init local-model-runtime app worker app-model-relay worker-model-relay"
-  assert_log_contains "up --detach --wait postgres"
-  assert_log_contains "run --rm --no-deps -T model-settings-key-init"
-  assert_log_contains "run --rm --no-deps -T migrate"
-  assert_log_contains "run --rm --no-deps -T local-model-runtime-credential-init"
+  assert_log_contains "-f ${STATE_DIR}/fixture/deploy/compose.yml -f ${STATE_DIR}/fixture/deploy/compose.bootstrap.yml"
+  assert_log_contains "build model-settings-key-init migrate local-model-runtime-credential-init local-model-volume-init modelctl"
+  assert_log_contains "build local-model-runtime app worker app-model-relay worker-model-relay"
+  assert_log_contains "up --detach --wait --remove-orphans postgres"
+  assert_log_contains "compose.bootstrap.yml --env-file ${STATE_DIR}/fixture/.env run --rm --no-deps -T model-settings-key-init"
+  assert_log_contains "compose.bootstrap.yml --env-file ${STATE_DIR}/fixture/.env run --rm --no-deps -T migrate"
+  assert_log_contains "compose.bootstrap.yml --env-file ${STATE_DIR}/fixture/.env --profile workspace-runtime run --rm --no-deps -T local-model-runtime-credential-init"
+  assert_log_contains "compose.bootstrap.yml --env-file ${STATE_DIR}/fixture/.env --profile workspace-runtime run --rm --no-deps -T local-model-volume-init"
+  assert_log_contains "compose.bootstrap.yml --env-file ${STATE_DIR}/fixture/.env --profile modelctl run --rm --no-deps -T modelctl recover --stale"
+  assert_bootstrap_log_has_no_grant
   assert_log_contains "up --detach --wait local-model-runtime"
   assert_log_order "run --rm --no-deps -T migrate" \
     "run --rm --no-deps -T local-model-runtime-credential-init" \
@@ -512,7 +529,7 @@ main() {
   up_output="$(cd "${STATE_DIR}/fixture" && ./zhixu up)"
   grep -F -- "ready: http://127.0.0.1:${port_b}/" <<<"${up_output}" >/dev/null || fail "A to B did not publish B"
   [[ "$(cat "${ZHIXU_FAKE_STATE_DIR}/netns-port")" == "${port_b}" ]] || fail "A to B retained the old anchor port"
-  assert_log_order "--profile workspace-runtime --profile modelctl down --remove-orphans" \
+  assert_log_order "--profile workspace-runtime down --remove-orphans" \
     "--project-name zhixu-netns -f ${STATE_DIR}/fixture/deploy/compose.netns.yml --env-file ${STATE_DIR}/fixture/.env down --remove-orphans" \
     "up --detach --wait app-netns worker-netns"
 
@@ -554,6 +571,8 @@ main() {
 
   reset_logs
   (cd "${STATE_DIR}/fixture" && ./zhixu restart >/dev/null)
+  assert_log_contains "up --detach --wait --remove-orphans postgres"
+  assert_bootstrap_log_has_no_grant
   assert_control_log_contains "switch --workspace-root ${workspace_a} --idempotency-key present"
   assert_control_log_not_contains "--initialize-git"
 
@@ -646,6 +665,34 @@ main() {
   expect_failure 42 bash -c "cd '${STATE_DIR}/fixture' && ./zhixu up"
   unset ZHIXU_FAKE_KEY_INIT_EXIT
   [[ ! -s "${ZHIXU_FAKE_WORKSPACECTL_LOG}" ]] || fail "base failure still invoked workspacectl"
+  assert_log_not_contains "run --rm --no-deps -T migrate"
+
+  reset_logs
+  export ZHIXU_FAKE_MIGRATE_EXIT=43
+  expect_failure 43 bash -c "cd '${STATE_DIR}/fixture' && ./zhixu up"
+  unset ZHIXU_FAKE_MIGRATE_EXIT
+  [[ ! -s "${ZHIXU_FAKE_WORKSPACECTL_LOG}" ]] || fail "migration failure still invoked workspacectl"
+  assert_log_not_contains "run --rm --no-deps -T local-model-runtime-credential-init"
+
+  reset_logs
+  export ZHIXU_FAKE_LOCAL_MODEL_RUNTIME_CREDENTIAL_INIT_EXIT=44
+  expect_failure 44 bash -c "cd '${STATE_DIR}/fixture' && ./zhixu up"
+  unset ZHIXU_FAKE_LOCAL_MODEL_RUNTIME_CREDENTIAL_INIT_EXIT
+  [[ ! -s "${ZHIXU_FAKE_WORKSPACECTL_LOG}" ]] || fail "credential initialization failure still invoked workspacectl"
+  assert_log_not_contains "run --rm --no-deps -T local-model-volume-init"
+
+  reset_logs
+  export ZHIXU_FAKE_LOCAL_MODEL_VOLUME_INIT_EXIT=45
+  expect_failure 45 bash -c "cd '${STATE_DIR}/fixture' && ./zhixu up"
+  unset ZHIXU_FAKE_LOCAL_MODEL_VOLUME_INIT_EXIT
+  [[ ! -s "${ZHIXU_FAKE_WORKSPACECTL_LOG}" ]] || fail "volume initialization failure still invoked workspacectl"
+  assert_log_not_contains "up --detach --wait local-model-runtime"
+
+  reset_logs
+  export ZHIXU_FAKE_MODELCTL_EXIT=46
+  expect_failure 46 bash -c "cd '${STATE_DIR}/fixture' && ./zhixu up"
+  unset ZHIXU_FAKE_MODELCTL_EXIT
+  [[ ! -s "${ZHIXU_FAKE_WORKSPACECTL_LOG}" ]] || fail "modelctl failure still invoked workspacectl"
 
   reset_logs
   local status_output
@@ -754,7 +801,7 @@ main() {
   (cd "${STATE_DIR}/fixture" && ./zhixu down >/dev/null)
   [[ -f "${selection}" ]] || fail "down forgot the saved Workspace"
   [[ ! -e "${grant}" ]] || fail "down retained a corrupt derived grant"
-  assert_log_contains "--profile workspace-runtime --profile modelctl down --remove-orphans"
+  assert_log_contains "--profile workspace-runtime down --remove-orphans"
   if grep -F -- "--volumes" "${ZHIXU_FAKE_DOCKER_LOG}" >/dev/null; then
     fail "normal down requested volume deletion"
   fi

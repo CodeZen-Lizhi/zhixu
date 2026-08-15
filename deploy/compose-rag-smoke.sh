@@ -5,6 +5,7 @@ set -Eeuo pipefail
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPOSITORY_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 readonly COMPOSE_FILE="${SCRIPT_DIR}/compose.yml"
+readonly BOOTSTRAP_COMPOSE_FILE="${SCRIPT_DIR}/compose.bootstrap.yml"
 readonly NETNS_COMPOSE_FILE="${SCRIPT_DIR}/compose.netns.yml"
 readonly STATIC_MODELS_COMPOSE_FILE="${SCRIPT_DIR}/compose.static-models.yml"
 readonly RAG_COMPOSE_FILE="${SCRIPT_DIR}/compose.rag-smoke.yml"
@@ -64,6 +65,12 @@ compose() {
   [[ -z "${GRANT_COMPOSE_FILE}" || ! -f "${GRANT_COMPOSE_FILE}" ]] || compose_files+=(-f "${GRANT_COMPOSE_FILE}")
   [[ -z "${MAIN_NETNS_OVERRIDE_FILE}" || ! -f "${MAIN_NETNS_OVERRIDE_FILE}" ]] || compose_files+=(-f "${MAIN_NETNS_OVERRIDE_FILE}")
   [[ -z "${RAG_NETNS_OVERRIDE_FILE}" || ! -f "${RAG_NETNS_OVERRIDE_FILE}" ]] || compose_files+=(-f "${RAG_NETNS_OVERRIDE_FILE}")
+  docker compose --project-name "${PROJECT_NAME}" "${compose_files[@]}" --env-file "${ENV_FILE}" "$@"
+}
+
+bootstrap_compose() {
+  local -a compose_files=(-f "${COMPOSE_FILE}" -f "${BOOTSTRAP_COMPOSE_FILE}")
+  [[ -z "${MAIN_NETNS_OVERRIDE_FILE}" || ! -f "${MAIN_NETNS_OVERRIDE_FILE}" ]] || compose_files+=(-f "${MAIN_NETNS_OVERRIDE_FILE}")
   docker compose --project-name "${PROJECT_NAME}" "${compose_files[@]}" --env-file "${ENV_FILE}" "$@"
 }
 
@@ -795,14 +802,16 @@ YAML
 
   compose --profile workspace-runtime config >"${RUNTIME_COMPOSE_FILE}"
   chmod 600 "${RUNTIME_COMPOSE_FILE}"
+  bootstrap_compose config --quiet
   netns_compose config --quiet
   compose --profile workspace-runtime build --quiet
+  bootstrap_compose build --quiet model-settings-key-init migrate
   netns_compose build --quiet
   log 'starting isolated namespace anchors'
   netns_compose up --detach --wait >/dev/null
   compose up --detach --wait postgres >/dev/null
-  compose run --rm --no-deps -T model-settings-key-init >/dev/null
-  compose run --rm --no-deps -T migrate >/dev/null
+  bootstrap_compose run --rm --no-deps -T model-settings-key-init >/dev/null
+  bootstrap_compose run --rm --no-deps -T migrate >/dev/null
   if [[ "${REAL_PROVIDER_MODE}" != 1 ]]; then
     compose up --detach --no-deps --wait rag-model-fixture >/dev/null
   fi

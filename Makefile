@@ -1,7 +1,7 @@
 SHELL := /bin/sh
 DOCKER_COMPOSE ?= docker compose
 
-.PHONY: test migrate go-test go-vet web-install web-lint web-typecheck web-test web-build eino-test eino-vet eino-live-smoke eino-live-smoke-env eino-live-smoke-contract eino-live-chat-smoke eino-live-query-plan-smoke eino-live-rag-metadata-smoke eino-live-faithfulness-smoke eino-live-openai-embedding-smoke eino-live-ollama-embedding-smoke eino-stable-observation-test eino-stable-observation-preflight eino-stable-observation-start eino-stable-observation-day eino-stable-observation-attest eino-stable-observation-verify agent-eval semantic-link-eval openapi-check trellis-script-test task-context-check auth-integration tool-integration rag-integration graph-integration graph-smoke graph-benchmark benchmark-capacity semantic-link-integration semantic-link-fault-smoke semantic-link-browser-smoke semantic-link-smoke collection-health-integration collection-health-fault-smoke collection-health-benchmark collection-health-browser-smoke collection-health-secret-scan collection-health-smoke artifact-browser-smoke m8-learning-browser-smoke export-browser-smoke timeline-impact-integration timeline-impact-fault-smoke timeline-impact-worker-smoke compose-auth-check compose-runtime-check compose-runtime-contract compose-netns-check compose-netns-contract compose-workspace-check compose-workspace-contract compose-static-models-check compose-smoke-cleanup-contract smoke-image-cleanup-contract compose-rag-real-provider-contract compose-auth-smoke compose-check launcher-contract model-secrets-init-contract architecture-quality-baseline docker-build compose-up compose-down compose-reset compose-search-smoke compose-tool-smoke compose-rag-smoke compose-rag-real-provider-preflight compose-rag-real-provider-smoke compose-model-runtime-hot-activation-smoke
+.PHONY: test migrate go-test go-vet web-install web-lint web-typecheck web-test web-build eino-test eino-vet eino-live-smoke eino-live-smoke-env eino-live-smoke-contract eino-live-chat-smoke eino-live-query-plan-smoke eino-live-rag-metadata-smoke eino-live-faithfulness-smoke eino-live-openai-embedding-smoke eino-live-ollama-embedding-smoke eino-stable-observation-test eino-stable-observation-preflight eino-stable-observation-start eino-stable-observation-day eino-stable-observation-attest eino-stable-observation-verify agent-eval semantic-link-eval openapi-check trellis-script-test task-context-check auth-integration tool-integration rag-integration graph-integration graph-smoke graph-benchmark benchmark-capacity semantic-link-integration semantic-link-fault-smoke semantic-link-browser-smoke semantic-link-smoke collection-health-integration collection-health-fault-smoke collection-health-benchmark collection-health-browser-smoke collection-health-secret-scan collection-health-smoke artifact-browser-smoke m8-learning-browser-smoke export-browser-smoke timeline-impact-integration timeline-impact-fault-smoke timeline-impact-worker-smoke compose-auth-check compose-runtime-check compose-bootstrap-check compose-runtime-contract compose-netns-check compose-netns-contract compose-workspace-check compose-workspace-contract compose-static-models-check compose-smoke-cleanup-contract smoke-image-cleanup-contract compose-rag-real-provider-contract compose-auth-smoke compose-check launcher-contract model-secrets-init-contract architecture-quality-baseline docker-build compose-up compose-down compose-reset compose-search-smoke compose-tool-smoke compose-rag-smoke compose-rag-real-provider-preflight compose-rag-real-provider-smoke compose-model-runtime-hot-activation-smoke
 
 test: trellis-script-test task-context-check go-test go-vet web-lint web-typecheck web-test web-build eino-test eino-vet eino-live-smoke-contract eino-stable-observation-test agent-eval openapi-check compose-check
 
@@ -312,7 +312,15 @@ compose-auth-smoke:
 
 compose-runtime-check:
 	@python3 deploy/compose_runtime_check.py -- \
-		$(DOCKER_COMPOSE) --profile workspace-runtime --profile modelctl -f deploy/compose.yml --env-file .env.example config --format json
+		$(DOCKER_COMPOSE) --profile workspace-runtime -f deploy/compose.yml --env-file .env.example config --format json
+
+compose-bootstrap-check:
+	@python3 deploy/compose_auth_check.py --bootstrap -- \
+		$(DOCKER_COMPOSE) --profile workspace-runtime --profile modelctl -f deploy/compose.yml -f deploy/compose.bootstrap.yml --env-file .env.example config --format json
+	@python3 deploy/compose_runtime_check.py --bootstrap -- \
+		$(DOCKER_COMPOSE) --profile workspace-runtime --profile modelctl -f deploy/compose.yml -f deploy/compose.bootstrap.yml --env-file .env.example config --format json
+	@python3 deploy/compose_workspace_check.py --base -- \
+		$(DOCKER_COMPOSE) --profile workspace-runtime --profile modelctl -f deploy/compose.yml -f deploy/compose.bootstrap.yml --env-file .env.example config --format json
 
 compose-static-models-check:
 	@python3 deploy/compose_runtime_check.py --static-models -- \
@@ -335,8 +343,9 @@ compose-workspace-check:
 compose-workspace-contract:
 	python3 deploy/compose_workspace_contract.py
 
-compose-check: compose-auth-check compose-runtime-check compose-static-models-check compose-runtime-contract compose-netns-check compose-netns-contract compose-workspace-check compose-workspace-contract compose-smoke-cleanup-contract smoke-image-cleanup-contract compose-rag-real-provider-contract launcher-contract model-secrets-init-contract
+compose-check: compose-auth-check compose-runtime-check compose-bootstrap-check compose-static-models-check compose-runtime-contract compose-netns-check compose-netns-contract compose-workspace-check compose-workspace-contract compose-smoke-cleanup-contract smoke-image-cleanup-contract compose-rag-real-provider-contract launcher-contract model-secrets-init-contract
 	$(DOCKER_COMPOSE) -f deploy/compose.yml --env-file .env.example config --quiet
+	$(DOCKER_COMPOSE) --profile workspace-runtime --profile modelctl -f deploy/compose.yml -f deploy/compose.bootstrap.yml --env-file .env.example config --quiet
 	$(DOCKER_COMPOSE) --project-name zhixu-netns -f deploy/compose.netns.yml --env-file .env.example config --quiet
 
 compose-smoke-cleanup-contract:
@@ -360,13 +369,11 @@ architecture-quality-baseline:
 docker-build:
 	docker build -f deploy/Dockerfile -t zhixu:local .
 
-compose-up: compose-auth-check compose-netns-check
-	$(DOCKER_COMPOSE) --project-name zhixu-netns -f deploy/compose.netns.yml --env-file .env.example up -d --build --wait
-	$(DOCKER_COMPOSE) --project-name zhixu -f deploy/compose.yml --env-file .env.example up -d --build --wait
+compose-up:
+	./zhixu up
 
 compose-down:
-	$(DOCKER_COMPOSE) --project-name zhixu -f deploy/compose.yml --env-file .env.example down --remove-orphans
-	$(DOCKER_COMPOSE) --project-name zhixu-netns -f deploy/compose.netns.yml --env-file .env.example down --remove-orphans
+	./zhixu down
 
 compose-reset:
 	./zhixu reset

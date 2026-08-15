@@ -87,6 +87,16 @@ remembered, so later starts need no path:
 ./zhixu restart
 ```
 
+The persisted `zhixu` Compose project contains only PostgreSQL, the managed
+local-model runtime, API, Worker, and the two model relays. Key initialization,
+migration, volume/credential preparation, and `modelctl` live in
+`deploy/compose.bootstrap.yml`; the launcher runs them as removable one-shot
+containers before starting the steady services. Docker Desktop may observe and
+restart an already prepared main project, but its Restart action does not rerun
+bootstrap. Use `./zhixu up` or `./zhixu restart` for first start, upgrades, or
+recovery. The first launcher start after this layout change also removes legacy
+exited one-shot containers without deleting named volumes.
+
 `ZHIXU_WORKSPACE_ROOT` remains obsolete and is never a second source of truth.
 
 On Docker Desktop, make sure the selected directory is shared with Docker. The

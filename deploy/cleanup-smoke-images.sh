@@ -8,6 +8,9 @@ readonly IMAGE_ID_RE='^sha256:[0-9a-f]{64}$'
 readonly IMAGE_INSPECT_FORMAT='{{.Id}}|{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}'
 readonly -a BUILD_SERVICES=(
   model-settings-key-init
+  local-model-runtime-credential-init
+  local-model-volume-init
+  local-model-runtime
   app-model-relay
   worker-model-relay
   migrate

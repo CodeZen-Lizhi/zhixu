@@ -106,7 +106,7 @@ assert_runtime_startup_contract() {
   local smoke_script=$1
   local script_path="${SCRIPT_DIR}/${smoke_script}"
   local previous_line=0
-  local startup_step line
+  local startup_step line startup_source bootstrap_wrapper
   local -a startup_steps=()
   if [[ "${smoke_script}" == compose-rag-smoke.sh ]]; then
     startup_steps=(
@@ -116,6 +116,18 @@ assert_runtime_startup_contract() {
       'run --rm --no-deps -T migrate'
       'up --detach --no-deps --wait rag-model-fixture'
       '  activate_workspace_grant'
+    )
+  elif [[ "${smoke_script}" == managed-ollama-compose-smoke.sh ]]; then
+    startup_steps=(
+      'netns_compose up --detach --wait'
+      'up --detach --wait postgres'
+      'run --rm --no-deps -T model-settings-key-init'
+      'run --rm --no-deps -T migrate'
+      'run --rm --no-deps -T local-model-runtime-credential-init'
+      'run --rm --no-deps -T local-model-volume-init'
+      'up --detach --no-deps --wait local-model-runtime'
+      'up --detach --no-deps --wait app worker'
+      'up --detach --no-deps --wait app-model-relay worker-model-relay'
     )
   else
     startup_steps=(
@@ -135,13 +147,33 @@ assert_runtime_startup_contract() {
   if grep -Eq 'up[[:space:]].*(model-settings-key-init|migrate|firewall)' "${script_path}"; then
     fail "${smoke_script} starts a one-shot service through Compose up"
   fi
-  if [[ "${smoke_script}" != compose-rag-smoke.sh ]] && grep -Eq '(firewall|proxy)' "${script_path}"; then
+  if [[ "${smoke_script}" != compose-rag-smoke.sh ]] \
+    && grep -Eq '(^|[[:space:]])(firewall|proxy)([[:space:]]|$)' "${script_path}"; then
     fail "${smoke_script} still depends on the removed firewall/proxy services"
   fi
+  grep -F -- 'BOOTSTRAP_COMPOSE_FILE=' "${script_path}" >/dev/null \
+    || fail "${smoke_script} does not declare the bootstrap Compose file"
+  grep -F -- 'bootstrap_compose()' "${script_path}" >/dev/null \
+    || fail "${smoke_script} does not isolate bootstrap Compose calls"
+  bootstrap_wrapper="$(sed -n '/^bootstrap_compose() {/,/^}/p' "${script_path}")"
+  [[ "${bootstrap_wrapper}" == *BOOTSTRAP_COMPOSE_FILE* ]] \
+    || fail "${smoke_script} bootstrap wrapper omits the bootstrap Compose file"
+  [[ "${bootstrap_wrapper}" != *GRANT_COMPOSE_FILE* ]] \
+    || fail "${smoke_script} bootstrap wrapper includes the Workspace grant"
+  [[ "${bootstrap_wrapper}" != *RUNTIME_OVERRIDE_FILE* && "${bootstrap_wrapper}" != *RUNTIME_COMPOSE_FILE* ]] \
+    || fail "${smoke_script} bootstrap wrapper includes a Workspace-bearing runtime override"
   for startup_step in "${startup_steps[@]}"; do
     line="$(grep -n -m 1 -F -- "${startup_step}" "${script_path}" | cut -d: -f1)"
     [[ -n "${line}" ]] || fail "${smoke_script} does not run startup step: ${startup_step}"
     (( line > previous_line )) || fail "${smoke_script} startup step is out of order: ${startup_step}"
+    if [[ "${startup_step}" == *model-settings-key-init* \
+      || "${startup_step}" == *migrate* \
+      || "${startup_step}" == *local-model-volume-init* \
+      || "${startup_step}" == *local-model-runtime-credential-init* ]]; then
+      startup_source="$(sed -n "${line}p" "${script_path}")"
+      [[ "${startup_source}" == *bootstrap* ]] \
+        || fail "${smoke_script} does not route ${startup_step} through bootstrap Compose"
+    fi
     previous_line=${line}
   done
 }
@@ -222,7 +254,7 @@ main() {
   [[ "${CASE_EXIT}" -eq 143 ]] || fail "cleanup failure replaced TERM status"
 
   local smoke_script
-  for smoke_script in compose-auth-smoke.sh compose-search-smoke.sh compose-tool-smoke.sh compose-rag-smoke.sh model-runtime-hot-activation-smoke.sh; do
+  for smoke_script in compose-auth-smoke.sh compose-search-smoke.sh compose-tool-smoke.sh compose-rag-smoke.sh managed-ollama-compose-smoke.sh model-runtime-hot-activation-smoke.sh; do
     grep -F -- 'source "${SCRIPT_DIR}/compose-smoke-cleanup.sh"' "${SCRIPT_DIR}/${smoke_script}" >/dev/null \
       || fail "${smoke_script} does not use the shared cleanup contract"
     grep -F -- "cleanup_compose_smoke_project_images" "${SCRIPT_DIR}/${smoke_script}" >/dev/null \

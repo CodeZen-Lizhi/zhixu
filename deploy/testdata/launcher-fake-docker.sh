@@ -867,6 +867,9 @@ EOF
   *"compose.static-models.yml"*" config --format json "*)
     cat "${ZHIXU_FAKE_STATIC_COMPOSE_MODEL}"
     ;;
+  *"compose.bootstrap.yml"*" config --format json "*)
+    cat "${ZHIXU_FAKE_BOOTSTRAP_COMPOSE_MODEL}"
+    ;;
   *" config --format json "*)
     cat "${ZHIXU_FAKE_MANAGED_COMPOSE_MODEL}"
     ;;
@@ -905,6 +908,9 @@ EOF
     ;;
   *" run --rm --no-deps -T local-model-volume-init "*)
     [[ "${ZHIXU_FAKE_LOCAL_MODEL_VOLUME_INIT_EXIT:-0}" == "0" ]] || exit "${ZHIXU_FAKE_LOCAL_MODEL_VOLUME_INIT_EXIT}"
+    ;;
+  *" run --rm --no-deps -T modelctl recover --stale "*)
+    [[ "${ZHIXU_FAKE_MODELCTL_EXIT:-0}" == "0" ]] || exit "${ZHIXU_FAKE_MODELCTL_EXIT}"
     ;;
   *" up --detach --wait local-model-runtime "*)
     [[ "${ZHIXU_FAKE_LOCAL_MODEL_RUNTIME_START_EXIT:-0}" == "0" ]] || exit "${ZHIXU_FAKE_LOCAL_MODEL_RUNTIME_START_EXIT}"

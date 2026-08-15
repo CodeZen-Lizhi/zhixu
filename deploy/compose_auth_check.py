@@ -107,8 +107,11 @@ def validate_local_auth_ingress(model: dict[str, Any], app_environment: dict[str
         fail("the API must not publish an independent port outside the ingress anchor")
 
 
-def resolved_compose_model() -> dict[str, Any]:
+def resolved_compose_model() -> tuple[dict[str, Any], bool]:
     arguments = sys.argv[1:]
+    bootstrap = arguments[:1] == ["--bootstrap"]
+    if bootstrap:
+        arguments = arguments[1:]
     try:
         if arguments:
             if arguments[0] != "--" or len(arguments) == 1:
@@ -128,11 +131,11 @@ def resolved_compose_model() -> dict[str, Any]:
         fail("resolved Compose model could not be read")
     if not isinstance(model, dict):
         fail("resolved Compose model must be an object")
-    return model
+    return model, bootstrap
 
 
 def main() -> None:
-    model = resolved_compose_model()
+    model, bootstrap = resolved_compose_model()
 
     app_environment = service_environment(model, "app")
     mode = app_environment.get("ZHIXU_AUTH_MODE")
@@ -159,7 +162,10 @@ def main() -> None:
 
     validate_local_auth_ingress(model, app_environment, mode)
 
-    for service_name in ("migrate", "worker"):
+    non_api_services = ["worker"]
+    if bootstrap:
+        non_api_services.extend(("migrate", "modelctl"))
+    for service_name in non_api_services:
         environment = service_environment(model, service_name)
         for secret_name in ("ZHIXU_AUTH_BOOTSTRAP_TOKEN", "ZHIXU_REVIEW_QUESTION_REF_KEY"):
             if secret_name in environment:
