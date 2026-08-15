@@ -37,8 +37,10 @@ import (
 	captureapplication "github.com/CodeZen-Lizhi/zhixu/internal/capture/application"
 	capturehttp "github.com/CodeZen-Lizhi/zhixu/internal/capture/http"
 	approvaldispatchpostgres "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/approvaldispatchpostgres"
+	changecontrolgitmerge "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/gitmerge"
 	changecontrollocalfs "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/localfs"
 	changecontrolpostgres "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/postgres"
+	changecontrolworkflowcancel "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/workflowcancel"
 	changecontrolapplication "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/application"
 	changecontrolhttp "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/http"
 	collectionpostgres "github.com/CodeZen-Lizhi/zhixu/internal/collection/adapter/postgres"
@@ -139,9 +141,10 @@ import (
 )
 
 const (
-	apiReadTimeout       = 30 * time.Second
-	apiReadHeaderTimeout = 5 * time.Second
-	apiIdleTimeout       = 60 * time.Second
+	apiReadTimeout            = 30 * time.Second
+	apiReadHeaderTimeout      = 5 * time.Second
+	apiIdleTimeout            = 60 * time.Second
+	proposalMergeProbeTimeout = 6 * time.Second
 )
 
 func main() {
@@ -439,6 +442,7 @@ func runAPI() int {
 		healthEvents, healthEventsErr := eventspostgres.NewStore(database.DB())
 		changeControlRepository, changeControlRepositoryErr := changecontrolpostgres.NewRepository(database.DB(), healthEvents)
 		var workflowService *workflowapplication.Service
+		var workflowControlService *workflowapplication.Service
 		var workflowRuntime *workflowpostgres.RuntimeRepository
 		if changeControlRepositoryErr != nil {
 			logger.Error("change control repository is unavailable", "error_code", "CHANGE_CONTROL_DATABASE_UNAVAILABLE")
@@ -474,6 +478,7 @@ func runAPI() int {
 				ragInitErr = firstError(ragInitErr, workflowServiceErr)
 			} else {
 				workflowRuntime = runtime
+				workflowControlService = workflowService
 				humanReviewProjector, humanReviewErr := newOrganizingHumanTaskReviewProjector(database.DB(), workflowRuntime)
 				if humanReviewErr != nil {
 					logger.Error("workflow human review projector is unavailable", "error_code", "ORGANIZING_HUMAN_REVIEW_UNAVAILABLE")
@@ -578,6 +583,23 @@ func runAPI() int {
 					if changeControlServiceErr != nil {
 						logger.Error("change control service is unavailable", "error_code", "CHANGE_CONTROL_SERVICE_UNAVAILABLE")
 					} else {
+						workflowCanceller, workflowCancellerErr := changecontrolworkflowcancel.New(workflowControlService)
+						if workflowCancellerErr != nil {
+							logger.Error("proposal revision workflow cancellation is unavailable", "error_code", "PROPOSAL_REVISION_WORKFLOW_CANCEL_UNAVAILABLE")
+						} else {
+							configuredChangeControlService.SetRevisionWorkflowCanceller(workflowCanceller)
+						}
+						mergeEngine, mergeEngineErr := changecontrolgitmerge.New(gitcli.New(""))
+						if mergeEngineErr == nil {
+							probeContext, cancelProbe := context.WithTimeout(context.Background(), proposalMergeProbeTimeout)
+							mergeEngineErr = mergeEngine.Probe(probeContext)
+							cancelProbe()
+						}
+						if mergeEngineErr != nil {
+							logger.Error("proposal revision merge engine is unavailable", "error_code", "PROPOSAL_MERGE_ENGINE_UNAVAILABLE")
+						} else {
+							configuredChangeControlService.SetRevisionMergeEngine(mergeEngine)
+						}
 						changeControlService = configuredChangeControlService
 						changeControlHandler = changecontrolhttp.NewHandlerWithTimeout(changeControlService, cfg.GraphQueryTimeout)
 					}

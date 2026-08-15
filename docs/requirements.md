@@ -83,7 +83,9 @@
 
 - 所有正式内容、关系、生命周期和写回变更都有 typed Proposal、Revision、Evidence、Diff、风险、影响和回滚计划。
 - Proposal 列表按 Workspace、类型、风险、状态、创建者和时间筛选；详情可以从 owner、Workflow、Approval 和 Commit 反查。
-- 修改 Proposal 创建新 Revision，旧 Revision 保留；审批期间目标变化进入 `NEEDS_REVISION`。
+- 修改 Proposal 创建新的不可变 Revision，旧 Revision、Approval、Workflow 和 Write Authorization 历史保持可读；Proposal 详情提供当前 Revision 能力和有界历史。
+- 审批期间目标变化进入 `NEEDS_REVISION`；普通 `file_patch/REPLACE` 可以在服务端三方合并工作台中核对基线、当前 Workspace 和原提案，显式解决冲突后追加 Revision，并重新进入审批，而不是覆盖当前文件。
+- 三方合并的候选只在服务端生成，追加命令使用 Proposal version、当前 Revision、当前文件 Hash 和幂等键做并发校验；409 失败不得丢弃用户草稿或静默重绑到新基线。
 - 同质低风险 Proposal 的批量处理为 Should，仍需逐项校验授权、版本和结果。
 
 ### 10.8 人工审批

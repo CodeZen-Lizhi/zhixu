@@ -297,6 +297,8 @@ describe("EventStoreProvider", () => {
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ["business", workspaceA, "proposals"] }, { throwOnError: true });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ["business", workspaceA, "proposal"] }, { throwOnError: true });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ["business", workspaceA, "proposal-current-content"] }, { throwOnError: true });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["business", workspaceA, "proposal-revisions"] }, { throwOnError: true });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["business", workspaceA, "proposal-revision"] }, { throwOnError: true });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ["captures", workspaceA] }, { throwOnError: true });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ["organizing", workspaceA] }, { throwOnError: true });
     expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["rag", workspaceA] });
@@ -332,7 +334,7 @@ describe("EventStoreProvider", () => {
     unsubscribe();
   });
 
-  it("Proposal 事件同时失效详情与 Revision 绑定的 current-content", async () => {
+  it("Proposal revised 事件同时失效详情、current-content 与 Revision 历史", async () => {
     setActiveWorkspaceId(workspaceA);
     const queryClient = renderStore();
     const invalidate = vi.spyOn(queryClient, "invalidateQueries").mockResolvedValue(undefined);
@@ -341,7 +343,7 @@ describe("EventStoreProvider", () => {
     await act(async () => connectionMock.options[0]?.onEvent?.({
       schemaVersion: 1,
       id: "46",
-      type: "proposal.updated",
+      type: "proposal.revised",
       occurredAt: "2026-07-22T00:00:03Z",
       workspaceId: workspaceA,
       resourceRef: `proposal:${proposalId}`,
@@ -353,6 +355,8 @@ describe("EventStoreProvider", () => {
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ["business", workspaceA, "proposals"] }, { throwOnError: true });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ["business", workspaceA, "proposal", proposalId] }, { throwOnError: true });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ["business", workspaceA, "proposal-current-content", proposalId] }, { throwOnError: true });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["business", workspaceA, "proposal-revisions", proposalId] }, { throwOnError: true });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["business", workspaceA, "proposal-revision", proposalId] }, { throwOnError: true });
     expect(window.sessionStorage.getItem(`zhixu.event-cursor.${workspaceA}`)).toBe("46");
   });
 

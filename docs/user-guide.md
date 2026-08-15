@@ -102,8 +102,10 @@
 - **用途**：集中审查任何可能改变正式知识、关系、文件或 Git 的建议。
 - **入口**：审批中心、工作流 Human Task、文档/图谱/健康/冲突详情。
 - **主要操作**：按类型、风险和状态筛选；检查目标、证据、引用、Diff、影响和回滚计划；批准、驳回、暂缓或创建修订。批量审批为 Should，且只能用于同质低风险项。
-- **结果**：Approval 固定绑定 Proposal Revision、Change Hash、目标版本和批准时 Git 基线；驳回原因成为反馈。
+- **结果**：Approval 固定绑定 Proposal Revision、Change Hash、目标版本和批准时 Git 基线；驳回原因成为反馈。对普通 `file_patch/REPLACE` Proposal，修订工作台会并列展示基线、当前 Workspace 和原提案，用户确认候选后追加新的不可变 Revision。
 - **限制**：登录或高权限 Token 不等于写授权。审批后目标或 Git HEAD 变化会进入 NEEDS_REVISION；模型不能生成或扩大写授权。
+- **修订工作台**：无冲突也必须由用户显式提交并重新审批；有冲突时逐项确认 Current、Proposed 或自定义结果。旧 Revision、Approval 和 Workflow 在历史中只读保留，新 Revision 不复用旧授权。
+- **发生漂移时**：服务端返回稳定 409，页面保留当前内存草稿并冻结旧绑定；刷新权威内容后，用户显式重新合并，系统不会把旧草稿静默绑定到新文件。
 
 ### 5.5 安全写回、Git 与回滚（需求 10.9）
 

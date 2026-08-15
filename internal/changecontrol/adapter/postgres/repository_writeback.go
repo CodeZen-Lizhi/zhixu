@@ -96,18 +96,20 @@ func (r *Repository) BeginWriteback(ctx context.Context, command domain.BeginWri
 
 	// Proposal、Revision、Approval 以固定顺序锁定，正文/目标/Hash 全部从此处派生。
 	var proposalWorkspace, proposalStatus, targetPath, targetMode, baseHash, content, revisionChangeHash string
-	var proposalWorkflowRunID *string
+	var proposalWorkflowRunID string
 	var revisionProposal, approvalProposal, approvalRevision string
 	var approvalChangeHash, approvalDecision string
 	var approvalGitHead *string
 	var revisionID, approvalID string
 	err = tx.QueryRow(ctx, `
-			SELECT p.workspace_id::text,p.status,p.workflow_run_id::text,r.id::text,r.proposal_id::text,r.target_path,r.target_mode,r.base_hash,r.content,r.change_hash,
+			SELECT p.workspace_id::text,p.status,d.workflow_run_id::text,r.id::text,r.proposal_id::text,r.target_path,r.target_mode,r.base_hash,r.content,r.change_hash,
 			       a.id::text,a.proposal_id::text,a.revision_id::text,a.change_hash,a.decision,a.approved_git_head
 		FROM change_control.proposal p
 		JOIN change_control.proposal_revision r ON r.id=$2 AND r.proposal_id=p.id
 		JOIN change_control.approval a ON a.id=$3 AND a.proposal_id=p.id AND a.revision_id=r.id
-		WHERE p.id=$1
+		JOIN change_control.proposal_revision_dispatch d
+		  ON d.proposal_id=p.id AND d.revision_id=r.id AND d.approval_id=a.id
+		WHERE p.id=$1 AND p.current_revision_id=r.id
 		FOR UPDATE OF p,r,a`, string(command.ProposalID), string(writeAuth.RevisionID), string(writeAuth.ApprovalID)).Scan(
 		&proposalWorkspace, &proposalStatus, &proposalWorkflowRunID, &revisionID, &revisionProposal, &targetPath, &targetMode, &baseHash, &content, &revisionChangeHash,
 		&approvalID, &approvalProposal, &approvalRevision, &approvalChangeHash, &approvalDecision, &approvalGitHead)
@@ -118,7 +120,7 @@ func (r *Repository) BeginWriteback(ctx context.Context, command domain.BeginWri
 		return domain.WritebackExecution{}, classifyWriteback(err, "WRITEBACK_BEGIN_APPROVAL_QUERY_FAILED")
 	}
 	normalizedTargetMode, modeErr := domain.ValidateTargetMode(domain.TargetMode(targetMode))
-	if modeErr != nil || proposalWorkspace != string(command.WorkspaceID) || proposalWorkflowRunID == nil || *proposalWorkflowRunID != string(command.WorkflowRunID) || revisionProposal != string(command.ProposalID) || approvalProposal != string(command.ProposalID) || approvalRevision != revisionID || foundation.ID(revisionID) != writeAuth.RevisionID || foundation.ID(approvalID) != writeAuth.ApprovalID || approvalDecision != string(domain.DecisionApproved) || approvalGitHead == nil || !strings.EqualFold(revisionChangeHash, writeAuth.ApprovedChangeHash) || !strings.EqualFold(approvalChangeHash, writeAuth.ApprovedChangeHash) || !strings.EqualFold(baseHash, writeAuth.TargetVersion) || domain.NormalizeTargetMode(writeAuth.TargetMode) != normalizedTargetMode || domain.NormalizeTargetMode(gitAuth.TargetMode) != normalizedTargetMode || writeAuth.Scope != domain.ExpectedAuthorizationScopeForTarget(targetPath, normalizedTargetMode) || gitAuth.Scope != domain.ExpectedAuthorizationScopeForTarget(targetPath, normalizedTargetMode) {
+	if modeErr != nil || proposalWorkspace != string(command.WorkspaceID) || proposalWorkflowRunID != string(command.WorkflowRunID) || revisionProposal != string(command.ProposalID) || approvalProposal != string(command.ProposalID) || approvalRevision != revisionID || foundation.ID(revisionID) != writeAuth.RevisionID || foundation.ID(approvalID) != writeAuth.ApprovalID || approvalDecision != string(domain.DecisionApproved) || approvalGitHead == nil || !strings.EqualFold(revisionChangeHash, writeAuth.ApprovedChangeHash) || !strings.EqualFold(approvalChangeHash, writeAuth.ApprovedChangeHash) || !strings.EqualFold(baseHash, writeAuth.TargetVersion) || domain.NormalizeTargetMode(writeAuth.TargetMode) != normalizedTargetMode || domain.NormalizeTargetMode(gitAuth.TargetMode) != normalizedTargetMode || writeAuth.Scope != domain.ExpectedAuthorizationScopeForTarget(targetPath, normalizedTargetMode) || gitAuth.Scope != domain.ExpectedAuthorizationScopeForTarget(targetPath, normalizedTargetMode) {
 		return domain.WritebackExecution{}, writebackDomainError(domain.ErrWritebackIdentityConflict)
 	}
 
@@ -185,7 +187,7 @@ func (r *Repository) BeginWriteback(ctx context.Context, command domain.BeginWri
 	if err != nil {
 		return domain.WritebackExecution{}, classifyWriteback(err, "WRITEBACK_BEGIN_CREATE_FAILED")
 	}
-	proposalTag, err := tx.Exec(ctx, `UPDATE change_control.proposal SET status=$2,updated_at=$3,version=version+1 WHERE id=$1 AND workspace_id=$4 AND status=$5`, string(command.ProposalID), string(domain.StatusApplying), now, string(command.WorkspaceID), string(domain.StatusApproved))
+	proposalTag, err := tx.Exec(ctx, `UPDATE change_control.proposal SET status=$2,updated_at=$3,version=version+1 WHERE id=$1 AND workspace_id=$4 AND status=$5 AND current_revision_id=$6`, string(command.ProposalID), string(domain.StatusApplying), now, string(command.WorkspaceID), string(domain.StatusApproved), revisionID)
 	if err != nil {
 		return domain.WritebackExecution{}, classifyWriteback(err, "WRITEBACK_BEGIN_PROPOSAL_FAILED")
 	}

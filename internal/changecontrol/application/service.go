@@ -67,9 +67,24 @@ type Service struct {
 	targets    TargetReader
 	git        ApprovalGitInspector
 	dispatcher ApprovalDispatcher
+	// mergeEngine is optional during the expand window; revision endpoints fail
+	// closed until Composition Root injects the fixed platform adapter.
+	mergeEngine RevisionMergeEngine
+	// revisionWorkflowCanceller asks the Workflow owner to converge an old
+	// Revision run before the append transaction attempts to supersede it.
+	revisionWorkflowCanceller RevisionWorkflowCanceller
 	// knowledgeApprovalApplier 是 typed knowledge_change 的原子 Approval→Relation seam。
 	// 为空时 file_patch 仍可用，但批准 knowledge_change 必须 fail closed。
 	knowledgeApprovalApplier knowledgeapplication.ApprovedRelationApprovalPort
+}
+
+func (s *Service) markNeedsRevision(ctx context.Context, proposal domain.Proposal) error {
+	if err := s.repo.MarkNeedsRevision(ctx, proposal.ID, proposal.Revision.ID, proposal.Version, s.clock.Now()); err != nil {
+		return err
+	}
+	proposal.Status = domain.StatusNeedsRevision
+	_, err := s.ensureRevisionWorkflowCancellation(ctx, proposal)
+	return err
 }
 
 // NewServiceWithDispatch 创建启用 Approval→Workflow/River 原子投递的 Change Control 应用服务。
@@ -178,7 +193,7 @@ type DownstreamUpdateFactory interface {
 	BuildDownstreamUpdate(context.Context, foundation.ID, foundation.ID, knowledge.ImpactObjectType, foundation.ID, knowledge.ImpactAction) (domain.DownstreamUpdate, error)
 }
 
-// ProposalCreateLookup 为 owner 事实变化后的精确幂等重放提供持久绑定查询。
+// ProposalCreateLookup 为外部目标事实变化后的精确幂等重放提供持久绑定查询。
 type ProposalCreateLookup interface {
 	FindProposalByIdempotencyKey(context.Context, foundation.ID, string) (domain.Proposal, bool, error)
 }
@@ -349,21 +364,45 @@ func (s *Service) createFileProposal(ctx context.Context, command createFileProp
 	if err != nil {
 		return CreateResult{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, err)
 	}
-	if targetMode == domain.TargetModeCreateOnly {
-		lookup, ok := s.repo.(ProposalCreateLookup)
-		if !ok {
-			return CreateResult{}, foundation.NewError(foundation.ErrorDependencyUnavailable, "CREATE_ONLY_IDEMPOTENCY_LOOKUP_UNAVAILABLE", false, errors.New("create-only proposal lookup is unavailable"))
+	lookup, ok := s.repo.(ProposalCreateLookup)
+	if !ok {
+		return CreateResult{}, foundation.NewError(foundation.ErrorDependencyUnavailable, "PROPOSAL_CREATE_LOOKUP_UNAVAILABLE", false, errors.New("proposal create lookup is unavailable"))
+	}
+	existing, found, lookupErr := lookup.FindProposalByIdempotencyKey(ctx, command.WorkspaceID, idempotencyKey)
+	if lookupErr != nil {
+		return CreateResult{}, lookupErr
+	}
+	if found {
+		if !fileProposalCreateRequestMatches(existing, command.WorkspaceID, targetPath, targetMode, baseHash, command.Content, evidenceSummary, riskLevel, risk, rollbackPlan, changeHash, requestHash, idempotencyKey) {
+			return CreateResult{}, foundation.NewError(foundation.ErrorVersionConflict, "IDEMPOTENCY_KEY_REUSED", false, errors.New("idempotency key is bound to another proposal request"))
 		}
-		existing, found, lookupErr := lookup.FindProposalByIdempotencyKey(ctx, command.WorkspaceID, idempotencyKey)
-		if lookupErr != nil {
-			return CreateResult{}, lookupErr
+		return CreateResult{Proposal: existing, Replayed: true}, nil
+	}
+	var baseSnapshotContent *string
+	if targetMode == domain.TargetModeReplace && len([]byte(command.Content)) <= domain.ProposalRevisionMaxBytes {
+		reader, readerOK := s.targets.(CurrentContentReader)
+		if !readerOK {
+			return CreateResult{}, foundation.NewError(foundation.ErrorDependencyUnavailable, "PROPOSAL_CURRENT_CONTENT_UNAVAILABLE", true, errors.New("current content reader is unavailable"))
 		}
-		if found {
-			if !fileProposalCreateRequestMatches(existing, command.WorkspaceID, targetPath, targetMode, baseHash, command.Content, evidenceSummary, riskLevel, risk, rollbackPlan, changeHash, requestHash, idempotencyKey) {
-				return CreateResult{}, foundation.NewError(foundation.ErrorVersionConflict, "IDEMPOTENCY_KEY_REUSED", false, errors.New("idempotency key is bound to another proposal request"))
+		content, currentHash, readErr := reader.CurrentContent(ctx, command.WorkspaceID, targetPath, MaxProposalCurrentContentBytes)
+		if readErr != nil {
+			var classified *foundation.Error
+			if !errors.As(readErr, &classified) || classified.Code != "PROPOSAL_CURRENT_CONTENT_TOO_LARGE" {
+				return CreateResult{}, readErr
 			}
-			return CreateResult{Proposal: existing, Replayed: true}, nil
+		} else {
+			currentHash = strings.ToLower(currentHash)
+			if len(content) > int(domain.ProposalRevisionMaxBytes) || !domain.ValidHash(currentHash) || domain.RawContentHash(string(content)) != currentHash {
+				return CreateResult{}, foundation.NewError(foundation.ErrorConsistencyViolation, "PROPOSAL_CURRENT_CONTENT_HASH_INVALID", false, errors.New("current content hash is inconsistent"))
+			}
+			if currentHash != baseHash {
+				return CreateResult{}, foundation.NewError(foundation.ErrorVersionConflict, "TARGET_BASE_HASH_CONFLICT", false, &HashConflict{Expected: baseHash, Current: currentHash})
+			}
+			snapshot := string(content)
+			baseSnapshotContent = &snapshot
 		}
+	}
+	if targetMode == domain.TargetModeCreateOnly {
 		reader, ok := s.targets.(CreateOnlyTargetReader)
 		if !ok {
 			return CreateResult{}, foundation.NewError(foundation.ErrorDependencyUnavailable, "CREATE_ONLY_TARGET_READER_UNAVAILABLE", false, errors.New("create-only target reader is unavailable"))
@@ -387,6 +426,12 @@ func (s *Service) createFileProposal(ctx context.Context, command createFileProp
 		BaseHash:   baseHash, Content: command.Content, EvidenceSummary: evidenceSummary,
 		Risk: risk, RollbackPlan: rollbackPlan,
 		ChangeHash: changeHash, CreatedAt: now,
+	}
+	if baseSnapshotContent != nil {
+		revision.BaseSnapshot = &domain.RevisionBaseSnapshot{
+			ProposalID: proposalID, RevisionID: revisionID, BaseHash: baseHash, Content: *baseSnapshotContent,
+			ByteSize: len([]byte(*baseSnapshotContent)), SchemaVersion: domain.ProposalRevisionBaseSnapshotSchemaVersion, CreatedAt: now,
+		}
 	}
 	if err := domain.ValidateProposalRevisionForType(domain.ProposalTypeFilePatch, revision); err != nil {
 		return CreateResult{}, foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_INVALID", false, err)
@@ -673,7 +718,14 @@ func (s *Service) ListProposals(ctx context.Context, query domain.ProposalListQu
 	if !ok {
 		return nil, false, foundation.NewError(foundation.ErrorDependencyUnavailable, "PROPOSAL_LIST_UNAVAILABLE", true, errors.New("proposal list repository is unavailable"))
 	}
-	return repository.ListProposals(ctx, query)
+	items, hasMore, err := repository.ListProposals(ctx, query)
+	if err != nil {
+		return nil, false, err
+	}
+	for index := range items {
+		items[index].RevisionCapability = domain.GateProposalRevisionMergeEngine(items[index].RevisionCapability, s.RevisionMergeAvailable())
+	}
+	return items, hasMore, nil
 }
 
 // DecideProposal 由服务端生成 Approval ID，并绑定 Revision 与 Change Hash。
@@ -713,10 +765,10 @@ func (s *Service) decideProposalLegacy(ctx context.Context, proposalID, revision
 	if proposal.Status == domain.StatusReady && decision == domain.DecisionApproved && domain.ProposalSupportsFileWriteback(proposal.Type) {
 		currentHash, readErr := s.verifyProposalTarget(ctx, proposal)
 		if readErr != nil {
-			return s.rejectUnavailableTarget(ctx, proposal.ID, readErr)
+			return s.rejectUnavailableTarget(ctx, proposal, readErr)
 		}
 		if domain.NormalizeTargetMode(proposal.Revision.TargetMode) == domain.TargetModeReplace && strings.ToLower(currentHash) != proposal.Revision.BaseHash {
-			if markErr := s.repo.MarkNeedsRevision(ctx, proposal.ID, s.clock.Now()); markErr != nil {
+			if markErr := s.markNeedsRevision(ctx, proposal); markErr != nil {
 				return domain.Approval{}, markErr
 			}
 			return domain.Approval{}, foundation.NewError(foundation.ErrorVersionConflict, "TARGET_BASE_HASH_CONFLICT", false, &HashConflict{Expected: proposal.Revision.BaseHash, Current: strings.ToLower(currentHash)})
@@ -818,12 +870,12 @@ func (s *Service) DecideProposalWithDispatch(ctx context.Context, proposalID, re
 	if decision == domain.DecisionApproved {
 		currentHash, readErr := s.verifyProposalTarget(ctx, proposal)
 		if readErr != nil {
-			_, rejectionErr := s.rejectUnavailableTarget(ctx, proposal.ID, readErr)
+			_, rejectionErr := s.rejectUnavailableTarget(ctx, proposal, readErr)
 			return ApprovalDecisionResult{}, rejectionErr
 		}
 		currentHash = strings.ToLower(currentHash)
 		if domain.NormalizeTargetMode(proposal.Revision.TargetMode) == domain.TargetModeReplace && currentHash != proposal.Revision.BaseHash {
-			if markErr := s.repo.MarkNeedsRevision(ctx, proposal.ID, s.clock.Now()); markErr != nil {
+			if markErr := s.markNeedsRevision(ctx, proposal); markErr != nil {
 				return ApprovalDecisionResult{}, markErr
 			}
 			return ApprovalDecisionResult{}, foundation.NewError(foundation.ErrorVersionConflict, "TARGET_BASE_HASH_CONFLICT", false, &HashConflict{Expected: proposal.Revision.BaseHash, Current: currentHash})
@@ -894,12 +946,12 @@ func (s *Service) dispatchApproval(ctx context.Context, command ApprovalDispatch
 	return decisionResultFromDispatch(result), nil
 }
 
-func (s *Service) rejectUnavailableTarget(ctx context.Context, proposalID foundation.ID, readErr error) (domain.Approval, error) {
+func (s *Service) rejectUnavailableTarget(ctx context.Context, proposal domain.Proposal, readErr error) (domain.Approval, error) {
 	var unavailable *domain.TargetUnavailableError
 	if !errors.As(readErr, &unavailable) {
 		return domain.Approval{}, readErr
 	}
-	if markErr := s.repo.MarkNeedsRevision(ctx, proposalID, s.clock.Now()); markErr != nil {
+	if markErr := s.markNeedsRevision(ctx, proposal); markErr != nil {
 		return domain.Approval{}, markErr
 	}
 	return domain.Approval{}, foundation.NewError(foundation.ErrorVersionConflict, "TARGET_BASE_UNAVAILABLE", false, unavailable)
@@ -953,7 +1005,7 @@ func (s *Service) CheckApplyPreflight(ctx context.Context, proposalID, revisionI
 	if err != nil {
 		var unavailable *domain.TargetUnavailableError
 		if errors.As(err, &unavailable) {
-			if markErr := s.repo.MarkNeedsRevision(ctx, proposal.ID, s.clock.Now()); markErr != nil {
+			if markErr := s.markNeedsRevision(ctx, proposal); markErr != nil {
 				return ApplyPreflightResult{}, markErr
 			}
 			return ApplyPreflightResult{}, foundation.NewError(foundation.ErrorVersionConflict, "TARGET_BASE_UNAVAILABLE", false, unavailable)
@@ -962,7 +1014,7 @@ func (s *Service) CheckApplyPreflight(ctx context.Context, proposalID, revisionI
 	}
 	currentBaseHash = strings.ToLower(currentBaseHash)
 	if domain.NormalizeTargetMode(proposal.Revision.TargetMode) == domain.TargetModeReplace && proposal.Revision.BaseHash != currentBaseHash {
-		if markErr := s.repo.MarkNeedsRevision(ctx, proposal.ID, s.clock.Now()); markErr != nil {
+		if markErr := s.markNeedsRevision(ctx, proposal); markErr != nil {
 			return ApplyPreflightResult{}, markErr
 		}
 		return ApplyPreflightResult{}, foundation.NewError(foundation.ErrorVersionConflict, "TARGET_BASE_HASH_CONFLICT", false, &HashConflict{Expected: proposal.Revision.BaseHash, Current: currentBaseHash})
@@ -1008,7 +1060,7 @@ func (s *Service) IssueWriteAuthorization(ctx context.Context, command domain.Au
 		return domain.AuthorizationIssueResult{}, err
 	}
 	if domain.NormalizeTargetMode(proposal.Revision.TargetMode) == domain.TargetModeReplace && strings.ToLower(currentHash) != proposal.Revision.BaseHash {
-		if markErr := s.repo.MarkNeedsRevision(ctx, proposal.ID, s.clock.Now()); markErr != nil {
+		if markErr := s.markNeedsRevision(ctx, proposal); markErr != nil {
 			return domain.AuthorizationIssueResult{}, markErr
 		}
 		return domain.AuthorizationIssueResult{}, foundation.NewError(foundation.ErrorVersionConflict, "TARGET_BASE_HASH_CONFLICT", false, &HashConflict{Expected: proposal.Revision.BaseHash, Current: strings.ToLower(currentHash)})

@@ -18,6 +18,23 @@ for (const marker of [
   }
 }
 for (const marker of [
+  '    "/api/v1/proposals/{proposal_id}/revision-merge-previews": {',
+  '    "/api/v1/proposals/{proposal_id}/revisions": {',
+  '    "/api/v1/proposals/{proposal_id}/revisions/{revision_id}": {',
+  '      "ProposalRevisionCapability": {',
+  '      "ProposalRevisionMergePreviewRequest": {',
+  '      "AppendProposalRevisionRequest": {',
+  '      "ProposalRevisionMergePreview": {',
+  '      "ProposalRevisionHistoryApproval": {',
+  '      "ProposalRevisionHistoryPage": {',
+  '      "ProposalRevisionHistoryDetail": {',
+  '      "ProposalRevisionAppendResponse": {',
+]) {
+  if (openAPISource.split(marker).length !== 2) {
+    throw new Error(`Proposal Revision OpenAPI key must occur exactly once: ${marker.trim()}`);
+  }
+}
+for (const marker of [
   '    "/api/v1/health/issues/{issue_id}/observations": {',
   '    "/api/v1/health/issues/{issue_id}/decisions": {',
   '      "HealthIssueObservationPage": {',
@@ -213,6 +230,10 @@ const requiredOperations = [
   ["/api/v1/workspaces/{workspace_id}/proposals", "get", "200"],
   ["/api/v1/proposals/{proposal_id}", "get", "200"],
   ["/api/v1/proposals/{proposal_id}/current-content", "get", "200"],
+  ["/api/v1/proposals/{proposal_id}/revision-merge-previews", "post", "200"],
+  ["/api/v1/proposals/{proposal_id}/revisions", "get", "200"],
+  ["/api/v1/proposals/{proposal_id}/revisions", "post", "201"],
+  ["/api/v1/proposals/{proposal_id}/revisions/{revision_id}", "get", "200"],
   ["/api/v1/proposals/{proposal_id}/approvals", "post", "201"],
   ["/api/v1/proposals/{proposal_id}/apply-preflight", "post", "200"],
   ["/api/v1/search", "post", "200"],
@@ -689,6 +710,21 @@ for (const schema of [
   "ProposalPage",
   "ProposalSummary",
   "ProposalCurrentContent",
+  "ProposalRevisionCapability",
+  "ProposalRevisionMergePreviewRequest",
+  "AppendProposalRevisionRequest",
+  "ProposalRevisionTextSnapshot",
+  "ProposalRevisionMergeConflict",
+  "ProposalRevisionMergePreview",
+  "ProposalRevisionHistoryApproval",
+  "ProposalRevisionWorkflow",
+  "ProposalRevisionHistoryItem",
+  "ProposalRevisionHistoryPage",
+  "ProposalRevisionBaseSnapshot",
+  "ProposalRevisionLineage",
+  "HistoricalProposalRevision",
+  "ProposalRevisionHistoryDetail",
+  "ProposalRevisionAppendResponse",
   "FilePatchProposal",
   "KnowledgeChangeTargetRef",
   "KnowledgeChangeBaseVersion",
@@ -863,7 +899,7 @@ for (const status of ["200", "201"]) {
 
 for (const [path, method, statuses] of [
   ["/api/v1/workspaces/{workspace_id}/source-versions", "get", ["400", "503", "405"]],
-  ["/api/v1/workspaces/{workspace_id}/proposals", "get", ["400", "503", "405"]],
+  ["/api/v1/workspaces/{workspace_id}/proposals", "get", ["400", "500", "503", "405"]],
   ["/api/v1/workspaces/{workspace_id}/workflows", "get", ["400", "503", "405"]],
   ["/api/v1/proposals/{proposal_id}/current-content", "get", ["400", "404", "503", "405"]],
 ]) {
@@ -898,6 +934,317 @@ for (const [path, schema] of [
 }
 
 const schemas = document.components.schemas;
+const revisionPreviewPath = "/api/v1/proposals/{proposal_id}/revision-merge-previews";
+const revisionCollectionPath = "/api/v1/proposals/{proposal_id}/revisions";
+const revisionDetailPath = "/api/v1/proposals/{proposal_id}/revisions/{revision_id}";
+const revisionPreviewOperation = document.paths[revisionPreviewPath]?.post;
+const revisionHistoryOperation = document.paths[revisionCollectionPath]?.get;
+const revisionAppendOperation = document.paths[revisionCollectionPath]?.post;
+const revisionDetailOperation = document.paths[revisionDetailPath]?.get;
+const revisionHashPattern = "^[0-9a-f]{64}$";
+
+function requireExactRevisionObject(schemaName, required, optional = []) {
+  const schema = schemas[schemaName];
+  const properties = [...required, ...optional];
+  if (schema?.type !== "object" || schema.additionalProperties !== false ||
+      schema.required?.join(",") !== required.join(",") ||
+      Object.keys(schema.properties ?? {}).join(",") !== properties.join(",")) {
+    throw new Error(`${schemaName} must remain an exact strict Proposal Revision object`);
+  }
+}
+
+for (const [operation, capability] of [
+  [revisionPreviewOperation, "READ_LOCAL"],
+  [revisionHistoryOperation, "READ_LOCAL"],
+  [revisionAppendOperation, "WRITE_PROPOSAL"],
+  [revisionDetailOperation, "READ_LOCAL"],
+]) {
+  if (!operation || operation.security !== undefined || operation["x-required-capability"] !== capability) {
+    throw new Error(`Proposal Revision operation must inherit authentication and require ${capability}`);
+  }
+}
+if (revisionPreviewOperation.requestBody?.required !== true ||
+    revisionPreviewOperation.requestBody?.["x-max-body-bytes"] !== 4096 ||
+    revisionPreviewOperation.requestBody?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/ProposalRevisionMergePreviewRequest" ||
+    revisionPreviewOperation.responses?.["200"]?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/ProposalRevisionMergePreview") {
+  throw new Error("Proposal Revision preview must use its bounded strict request and response schemas");
+}
+if (!revisionAppendOperation.parameters?.some((parameter) => parameter.$ref === "#/components/parameters/IdempotencyKey") ||
+    revisionAppendOperation.requestBody?.required !== true ||
+    revisionAppendOperation.requestBody?.["x-max-body-bytes"] !== 8388608 ||
+    revisionAppendOperation.requestBody?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/AppendProposalRevisionRequest") {
+  throw new Error("Proposal Revision append must require Idempotency-Key and its bounded strict request schema");
+}
+for (const [status, replayed] of [["200", true], ["201", false]]) {
+  const response = revisionAppendOperation.responses?.[status];
+  const schema = response?.content?.["application/json"]?.schema;
+  if (schema?.allOf?.[0]?.$ref !== "#/components/schemas/ProposalRevisionAppendResponse" ||
+      schema?.allOf?.[1]?.properties?.replayed?.const !== replayed ||
+      response?.["x-max-response-bytes"] !== 16777216 ||
+      response?.headers?.["Cache-Control"]?.schema?.const !== "private, no-store") {
+    throw new Error(`Proposal Revision append ${status} must expose a bounded replayed=${String(replayed)} no-store response`);
+  }
+}
+const historyParameters = revisionHistoryOperation.parameters ?? [];
+const historyLimit = historyParameters.find((parameter) => parameter.name === "limit");
+const historyCursor = historyParameters.find((parameter) => parameter.name === "before_revision_no");
+if (historyParameters.length !== 2 || historyLimit?.in !== "query" ||
+    historyLimit.schema?.minimum !== 1 || historyLimit.schema?.maximum !== 100 || historyLimit.schema?.default !== 30 ||
+    historyCursor?.in !== "query" || historyCursor.schema?.minimum !== 2 ||
+    revisionHistoryOperation.requestBody !== undefined ||
+    revisionHistoryOperation.responses?.["200"]?.["x-max-response-bytes"] !== 1048576 ||
+    revisionHistoryOperation.responses?.["200"]?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/ProposalRevisionHistoryPage") {
+  throw new Error("Proposal Revision history must retain its strict bounded descending cursor contract");
+}
+if (revisionDetailOperation.requestBody !== undefined ||
+    revisionDetailOperation.responses?.["200"]?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/ProposalRevisionHistoryDetail") {
+  throw new Error("Proposal Revision detail must return the exact historical detail schema");
+}
+for (const [operation, successStatuses] of [
+  [revisionPreviewOperation, ["200"]],
+  [revisionHistoryOperation, ["200"]],
+  [revisionDetailOperation, ["200"]],
+]) {
+  for (const status of successStatuses) {
+    const response = operation.responses?.[status];
+    if (response?.headers?.["Cache-Control"]?.schema?.const !== "private, no-store") {
+      throw new Error(`Proposal Revision ${operation.operationId} ${status} must remain private, no-store`);
+    }
+  }
+}
+if (revisionPreviewOperation.responses?.["200"]?.["x-max-response-bytes"] !== 16777216 ||
+    revisionDetailOperation.responses?.["200"]?.["x-max-response-bytes"] !== 16777216) {
+  throw new Error("Proposal Revision body-bearing reads must retain the 16 MiB response limit");
+}
+for (const [operation, statuses] of [
+  [revisionPreviewOperation, ["400", "401", "403", "404", "405", "409", "413", "415", "422", "500", "503"]],
+  [revisionAppendOperation, ["400", "401", "403", "404", "405", "409", "413", "415", "422", "500", "503"]],
+  [revisionHistoryOperation, ["400", "401", "403", "404", "405", "500", "503"]],
+  [revisionDetailOperation, ["400", "401", "403", "404", "405", "413", "500", "503"]],
+]) {
+  for (const status of statuses) {
+    const response = resolveRef(operation.responses?.[status]);
+    if (!response || response.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/Problem") {
+      throw new Error(`Proposal Revision ${operation.operationId} ${status} must return Problem`);
+    }
+  }
+}
+for (const [operation, errorCodes] of [
+  [revisionPreviewOperation, [
+    "PROPOSAL_MERGE_CONTENT_INVALID", "PROPOSAL_REVISION_INPUT_TOO_LARGE", "PROPOSAL_REVISION_NOT_EDITABLE",
+    "PROPOSAL_BASE_SNAPSHOT_UNAVAILABLE", "PROPOSAL_REVISION_STALE", "PROPOSAL_REVISION_WORKFLOW_ACTIVE",
+    "PROPOSAL_MERGE_RESULT_TOO_LARGE", "PROPOSAL_MERGE_BUSY", "PROPOSAL_MERGE_TIMEOUT",
+    "PROPOSAL_MERGE_TEMPORARY_STORAGE_UNAVAILABLE", "PROPOSAL_MERGE_ENGINE_UNAVAILABLE",
+    "PROPOSAL_MERGE_ENGINE_UNSUPPORTED", "PROPOSAL_MERGE_ENGINE_OUTPUT_INVALID",
+    "PROPOSAL_REVISION_REPOSITORY_UNAVAILABLE", "PROPOSAL_CURRENT_CONTENT_UNAVAILABLE",
+    "PROPOSAL_REVISION_SOURCE_INVALID", "PROPOSAL_CURRENT_CONTENT_HASH_INVALID", "PROPOSAL_BASE_SNAPSHOT_INVALID",
+  ]],
+  [revisionAppendOperation, [
+    "IDEMPOTENCY_KEY_REQUIRED", "IDEMPOTENCY_KEY_REUSED", "PROPOSAL_REVISION_INPUT_TOO_LARGE",
+    "PROPOSAL_REVISION_STALE", "PROPOSAL_REVISION_SIDE_EFFECT_STARTED", "PROPOSAL_REVISION_WORKFLOW_ACTIVE",
+    "PROPOSAL_REVISION_WORKFLOW_CANCEL_UNAVAILABLE",
+    "PROPOSAL_REVISION_AUTHORIZATION_CONFLICT", "PROPOSAL_REVISION_CONFLICTS_UNRESOLVED",
+    "PROPOSAL_MERGE_RESULT_TOO_LARGE", "PROPOSAL_MERGE_ENGINE_UNAVAILABLE",
+    "PROPOSAL_REVISION_REPOSITORY_UNAVAILABLE", "PROPOSAL_CURRENT_CONTENT_UNAVAILABLE",
+    "PROPOSAL_REVISION_SOURCE_INVALID", "PROPOSAL_CURRENT_CONTENT_HASH_INVALID", "PROPOSAL_BASE_SNAPSHOT_INVALID",
+    "PROPOSAL_REVISION_RESULT_INVALID",
+  ]],
+  [revisionHistoryOperation, [
+    "PROPOSAL_REVISION_HISTORY_QUERY_INVALID", "PROPOSAL_REVISION_HISTORY_BINDING_INVALID",
+    "PROPOSAL_REVISION_REPOSITORY_UNAVAILABLE",
+  ]],
+  [revisionDetailOperation, [
+    "PROPOSAL_REVISION_HISTORY_QUERY_INVALID", "PROPOSAL_REVISION_NOT_FOUND",
+    "PROPOSAL_REVISION_INPUT_TOO_LARGE",
+    "PROPOSAL_REVISION_HISTORY_BINDING_INVALID", "PROPOSAL_REVISION_REPOSITORY_UNAVAILABLE",
+  ]],
+]) {
+  for (const errorCode of errorCodes) {
+    if (!operation["x-error-codes"]?.includes(errorCode)) {
+      throw new Error(`Proposal Revision ${operation.operationId} error matrix is missing ${errorCode}`);
+    }
+  }
+}
+
+requireExactRevisionObject("ProposalRevisionCapability", ["editable", "reason"]);
+if (schemas.ProposalRevisionCapability.properties?.editable?.type !== "boolean" ||
+    schemas.ProposalRevisionCapability.properties?.reason?.enum?.join(",") !==
+      "AVAILABLE,PROPOSAL_REVISION_UNSUPPORTED_TYPE,PROPOSAL_REVISION_UNSUPPORTED_MODE,PROPOSAL_REVISION_STATUS_NOT_EDITABLE,PROPOSAL_REVISION_STALE,PROPOSAL_REVISION_WORKFLOW_ACTIVE,PROPOSAL_REVISION_SIDE_EFFECT_STARTED,PROPOSAL_REVISION_INPUT_TOO_LARGE,PROPOSAL_MERGE_ENGINE_UNAVAILABLE") {
+  throw new Error("ProposalRevisionCapability reason set drifted");
+}
+requireExactRevisionObject("ProposalRevisionMergePreviewRequest", [
+  "source_revision_id", "source_change_hash", "expected_proposal_version",
+]);
+if (schemas.ProposalRevisionMergePreviewRequest.properties?.source_revision_id?.format !== "uuid" ||
+    schemas.ProposalRevisionMergePreviewRequest.properties?.source_change_hash?.pattern !== revisionHashPattern ||
+    schemas.ProposalRevisionMergePreviewRequest.properties?.expected_proposal_version?.minimum !== 1) {
+  throw new Error("ProposalRevisionMergePreviewRequest source binding drifted");
+}
+const appendRevisionRequired = [
+  "expected_proposal_version", "source_revision_id", "source_change_hash", "expected_current_hash", "merge_fingerprint",
+  "merge_algorithm", "merge_algorithm_version", "content", "evidence_summary", "risk", "rollback_plan", "resolved_conflict_ids",
+];
+requireExactRevisionObject("AppendProposalRevisionRequest", appendRevisionRequired);
+const appendRevisionRequest = schemas.AppendProposalRevisionRequest;
+if (appendRevisionRequest.properties?.expected_proposal_version?.minimum !== 1 ||
+    appendRevisionRequest.properties?.source_revision_id?.format !== "uuid" ||
+    ["source_change_hash", "expected_current_hash", "merge_fingerprint"].some((field) => appendRevisionRequest.properties?.[field]?.pattern !== revisionHashPattern) ||
+    appendRevisionRequest.properties?.merge_algorithm?.const !== "git-merge-file" ||
+    appendRevisionRequest.properties?.merge_algorithm_version?.const !== "diff3/myers/marker32/v1" ||
+    appendRevisionRequest.properties?.content?.["x-max-utf8-bytes"] !== 1048576 ||
+    ["evidence_summary", "risk", "rollback_plan"].some((field) => appendRevisionRequest.properties?.[field]?.["x-max-utf8-bytes"] !== 65536) ||
+    appendRevisionRequest.properties?.resolved_conflict_ids?.maxItems !== 1024 ||
+    appendRevisionRequest.properties?.resolved_conflict_ids?.uniqueItems !== true ||
+    appendRevisionRequest.properties?.resolved_conflict_ids?.items?.pattern !== revisionHashPattern) {
+  throw new Error("AppendProposalRevisionRequest merge binding or public bounds drifted");
+}
+requireExactRevisionObject("ProposalRevisionTextSnapshot", ["content", "hash", "byte_size"]);
+if (schemas.ProposalRevisionTextSnapshot.properties?.content?.["x-max-utf8-bytes"] !== 1048576 ||
+    schemas.ProposalRevisionTextSnapshot.properties?.hash?.pattern !== revisionHashPattern ||
+    schemas.ProposalRevisionTextSnapshot.properties?.byte_size?.maximum !== 1048576) {
+  throw new Error("ProposalRevisionTextSnapshot byte and hash contract drifted");
+}
+requireExactRevisionObject("ProposalRevisionMergeConflict", ["id", "ordinal", "base", "current", "proposed"]);
+if (schemas.ProposalRevisionMergeConflict.properties?.id?.pattern !== revisionHashPattern ||
+    schemas.ProposalRevisionMergeConflict.properties?.ordinal?.minimum !== 1 ||
+    schemas.ProposalRevisionMergeConflict.properties?.ordinal?.maximum !== 1024 ||
+    ["base", "current", "proposed"].some((field) => schemas.ProposalRevisionMergeConflict.properties?.[field]?.["x-max-utf8-bytes"] !== 1048576)) {
+  throw new Error("ProposalRevisionMergeConflict exact fragment contract drifted");
+}
+const previewRequired = [
+  "schema_version", "merge_algorithm", "merge_algorithm_version", "merge_fingerprint", "proposal_id", "workspace_id",
+  "proposal_version", "source_revision_id", "source_revision_no", "source_change_hash", "target_path", "target_mode",
+  "base", "current", "proposed", "candidate", "conflict_count", "conflicts",
+];
+requireExactRevisionObject("ProposalRevisionMergePreview", previewRequired);
+const revisionPreview = schemas.ProposalRevisionMergePreview;
+if (revisionPreview.properties?.schema_version?.const !== "proposal-text-merge-preview/v1" ||
+    revisionPreview.properties?.merge_algorithm?.const !== "git-merge-file" ||
+    revisionPreview.properties?.merge_algorithm_version?.const !== "diff3/myers/marker32/v1" ||
+    revisionPreview.properties?.target_mode?.const !== "REPLACE" ||
+    ["base", "current", "proposed", "candidate"].some((field) => revisionPreview.properties?.[field]?.$ref !== "#/components/schemas/ProposalRevisionTextSnapshot") ||
+    revisionPreview.properties?.conflict_count?.maximum !== 1024 ||
+    revisionPreview.properties?.conflicts?.maxItems !== 1024 ||
+    revisionPreview.properties?.conflicts?.items?.$ref !== "#/components/schemas/ProposalRevisionMergeConflict") {
+  throw new Error("ProposalRevisionMergePreview immutable merge contract drifted");
+}
+requireExactRevisionObject("ProposalRevisionHistoryApproval", [
+  "id", "proposal_id", "revision_id", "change_hash", "decision", "decided_at",
+], ["approved_git_head"]);
+const revisionHistoryApproval = schemas.ProposalRevisionHistoryApproval;
+if (revisionHistoryApproval.properties?.id?.format !== "uuid" ||
+    revisionHistoryApproval.properties?.proposal_id?.format !== "uuid" ||
+    revisionHistoryApproval.properties?.revision_id?.format !== "uuid" ||
+    revisionHistoryApproval.properties?.change_hash?.pattern !== revisionHashPattern ||
+    revisionHistoryApproval.properties?.decision?.enum?.join(",") !== "approved,rejected" ||
+    revisionHistoryApproval.properties?.approved_git_head?.pattern !== "^([0-9a-f]{40}|[0-9a-f]{64})$" ||
+    revisionHistoryApproval.properties?.decided_at?.format !== "date-time") {
+  throw new Error("ProposalRevisionHistoryApproval immutable decision contract drifted");
+}
+requireExactRevisionObject("ProposalRevisionWorkflow", ["id", "status_url"]);
+requireExactRevisionObject("ProposalRevisionHistoryItem", [
+  "proposal_id", "revision_id", "revision_no", "target_path", "target_mode", "base_hash", "change_hash",
+  "base_available", "current", "approval", "workflow", "created_at",
+]);
+const revisionHistoryItem = schemas.ProposalRevisionHistoryItem;
+if (revisionHistoryItem.properties?.target_mode?.const !== "REPLACE" ||
+    revisionHistoryItem.properties?.base_hash?.pattern !== revisionHashPattern ||
+    revisionHistoryItem.properties?.change_hash?.pattern !== revisionHashPattern ||
+    revisionHistoryItem.properties?.approval?.oneOf?.[0]?.$ref !== "#/components/schemas/ProposalRevisionHistoryApproval" ||
+    revisionHistoryItem.properties?.approval?.oneOf?.[1]?.type !== "null" ||
+    revisionHistoryItem.properties?.workflow?.oneOf?.[0]?.$ref !== "#/components/schemas/ProposalRevisionWorkflow" ||
+    revisionHistoryItem.properties?.workflow?.oneOf?.[1]?.type !== "null") {
+  throw new Error("ProposalRevisionHistoryItem historical binding drifted");
+}
+requireExactRevisionObject("ProposalRevisionHistoryPage", ["items"], ["next_before_revision_no"]);
+if (schemas.ProposalRevisionHistoryPage.properties?.items?.maxItems !== 100 ||
+    schemas.ProposalRevisionHistoryPage.properties?.items?.items?.$ref !== "#/components/schemas/ProposalRevisionHistoryItem" ||
+    schemas.ProposalRevisionHistoryPage.properties?.next_before_revision_no?.minimum !== 2) {
+  throw new Error("ProposalRevisionHistoryPage pagination contract drifted");
+}
+requireExactRevisionObject("ProposalRevisionBaseSnapshot", ["hash", "content", "byte_size", "schema_version", "created_at"]);
+if (schemas.ProposalRevisionBaseSnapshot.properties?.hash?.pattern !== revisionHashPattern ||
+    schemas.ProposalRevisionBaseSnapshot.properties?.content?.["x-max-utf8-bytes"] !== 1048576 ||
+    schemas.ProposalRevisionBaseSnapshot.properties?.byte_size?.maximum !== 1048576 ||
+    schemas.ProposalRevisionBaseSnapshot.properties?.schema_version?.const !== "proposal-base-snapshot/v1") {
+  throw new Error("ProposalRevisionBaseSnapshot exact-body contract drifted");
+}
+requireExactRevisionObject("ProposalRevisionLineage", [
+  "source_revision_id", "source_change_hash", "kind", "merge_algorithm", "merge_algorithm_version", "merge_fingerprint", "created_at",
+]);
+if (schemas.ProposalRevisionLineage.properties?.source_revision_id?.format !== "uuid" ||
+    schemas.ProposalRevisionLineage.properties?.source_change_hash?.pattern !== revisionHashPattern ||
+    schemas.ProposalRevisionLineage.properties?.kind?.enum?.join(",") !== "DIRECT_EDIT,THREE_WAY_MERGE" ||
+    schemas.ProposalRevisionLineage.properties?.merge_algorithm?.const !== "git-merge-file" ||
+    schemas.ProposalRevisionLineage.properties?.merge_algorithm_version?.const !== "diff3/myers/marker32/v1" ||
+    schemas.ProposalRevisionLineage.properties?.merge_fingerprint?.pattern !== revisionHashPattern) {
+  throw new Error("ProposalRevisionLineage source binding drifted");
+}
+const historicalRevision = schemas.HistoricalProposalRevision;
+if (historicalRevision.allOf?.[0]?.$ref !== "#/components/schemas/ProposalRevision" ||
+    historicalRevision.allOf?.[1]?.properties?.target_mode?.const !== "REPLACE" ||
+    historicalRevision.allOf?.[1]?.properties?.base_hash?.pattern !== revisionHashPattern ||
+    historicalRevision.allOf?.[1]?.properties?.content?.["x-max-utf8-bytes"] !== 1048576 ||
+    ["evidence_summary", "risk", "rollback_plan"].some((field) => historicalRevision.allOf?.[1]?.properties?.[field]?.["x-max-utf8-bytes"] !== 65536)) {
+  throw new Error("HistoricalProposalRevision bounded file-patch contract drifted");
+}
+requireExactRevisionObject("ProposalRevisionHistoryDetail", [
+  "workspace_id", "proposal_id", "current_revision_id", "current", "revision", "base_available",
+  "base_snapshot", "lineage", "approval", "workflow",
+]);
+const revisionHistoryDetail = schemas.ProposalRevisionHistoryDetail;
+if (revisionHistoryDetail.properties?.revision?.$ref !== "#/components/schemas/HistoricalProposalRevision" ||
+    revisionHistoryDetail.properties?.base_snapshot?.oneOf?.[0]?.$ref !== "#/components/schemas/ProposalRevisionBaseSnapshot" ||
+    revisionHistoryDetail.properties?.base_snapshot?.oneOf?.[1]?.type !== "null" ||
+    revisionHistoryDetail.properties?.lineage?.oneOf?.[0]?.$ref !== "#/components/schemas/ProposalRevisionLineage" ||
+    revisionHistoryDetail.properties?.lineage?.oneOf?.[1]?.type !== "null" ||
+    revisionHistoryDetail.properties?.approval?.oneOf?.[0]?.$ref !== "#/components/schemas/ProposalRevisionHistoryApproval" ||
+    revisionHistoryDetail.properties?.approval?.oneOf?.[1]?.type !== "null" ||
+    revisionHistoryDetail.properties?.workflow?.oneOf?.[0]?.$ref !== "#/components/schemas/ProposalRevisionWorkflow" ||
+    revisionHistoryDetail.properties?.workflow?.oneOf?.[1]?.type !== "null") {
+  throw new Error("ProposalRevisionHistoryDetail nullable historical projections drifted");
+}
+requireExactRevisionObject("ProposalRevisionAppendResponse", [
+  "proposal_type", "id", "workspace_id", "target_path", "status", "risk_level", "version", "revision_capability",
+  "revision", "approval", "created_at", "updated_at", "replayed",
+]);
+const revisionAppendResponse = schemas.ProposalRevisionAppendResponse;
+if (revisionAppendResponse.properties?.proposal_type?.const !== "file_patch" ||
+    revisionAppendResponse.properties?.status?.const !== "ready_for_review" ||
+    revisionAppendResponse.properties?.version?.minimum !== 1 ||
+    revisionAppendResponse.properties?.revision_capability?.$ref !== "#/components/schemas/ProposalRevisionCapability" ||
+    revisionAppendResponse.properties?.revision?.$ref !== "#/components/schemas/ProposalRevision" ||
+    revisionAppendResponse.properties?.approval?.type !== "null" ||
+    revisionAppendResponse.properties?.replayed?.type !== "boolean") {
+  throw new Error("ProposalRevisionAppendResponse ready-for-review receipt drifted");
+}
+for (const schemaName of [
+  "FilePatchProposal", "RestoreDocumentProposal", "KnowledgeChangeProposal", "PublishArtifactProposal", "DownstreamUpdateProposal",
+]) {
+  if (!schemas[schemaName].required?.includes("version") || schemas[schemaName].properties?.version?.minimum !== 1 ||
+      !schemas[schemaName].required?.includes("revision_capability") ||
+      schemas[schemaName].properties?.revision_capability?.$ref !== "#/components/schemas/ProposalRevisionCapability") {
+    throw new Error(`${schemaName} must expose version and revision_capability`);
+  }
+}
+if (!schemas.ProposalSummary.required?.includes("version") || schemas.ProposalSummary.properties?.version?.minimum !== 1 ||
+    !schemas.ProposalSummary.required?.includes("revision_capability") ||
+    schemas.ProposalSummary.properties?.revision_capability?.$ref !== "#/components/schemas/ProposalRevisionCapability" ||
+    !document.paths["/api/v1/workspaces/{workspace_id}/proposals"]?.get?.["x-error-codes"]?.includes("PROPOSAL_REVISION_CAPABILITY_INVALID")) {
+  throw new Error("ProposalSummary must expose version and revision_capability with fail-closed output validation");
+}
+for (const [operation, statuses] of [
+  [document.paths["/api/v1/workspaces/{workspace_id}/proposals"]?.post, ["200", "201"]],
+  [document.paths["/api/v1/proposals/{proposal_id}"]?.get, ["200"]],
+  [document.paths["/api/v1/workspaces/{workspace_id}/impact-reports/{report_id}/proposals"]?.post, ["200", "201"]],
+]) {
+  for (const status of statuses) {
+    if (operation?.responses?.[status]?.headers?.["Cache-Control"]?.schema?.const !== "private, no-store") {
+      throw new Error(`Proposal response ${operation?.operationId ?? "unknown"} ${status} must remain private, no-store`);
+    }
+  }
+}
+
 const workflowRunHumanTask = schemas.WorkflowRun?.properties?.human_task?.oneOf ?? [];
 if (!schemas.WorkflowRun?.required?.includes("human_task") ||
     workflowRunHumanTask[0]?.$ref !== "#/components/schemas/PendingWorkflowHumanTask" ||
@@ -1612,7 +1959,7 @@ if (currentContent.additionalProperties !== false || currentContent.properties.c
     currentContent.properties.current_hash.not?.const !== zeroAbsenceToken || currentContent.properties.base_hash.not?.const !== zeroAbsenceToken ||
     currentContent.properties.base_hash_match.type !== "boolean" ||
     currentContent["x-invariant"] !== "base_hash_match == (current_hash == base_hash); CREATE_ONLY requires empty content and matching non-zero workspace-target-absent/v1 tokens." ||
-    document.paths["/api/v1/proposals/{proposal_id}/current-content"].get.responses["200"].headers?.["Cache-Control"]?.schema?.const !== "no-store") {
+    document.paths["/api/v1/proposals/{proposal_id}/current-content"].get.responses["200"].headers?.["Cache-Control"]?.schema?.const !== "private, no-store") {
   throw new Error("Proposal current-content body or no-store contract drifted");
 }
 for (const schemaName of ["ProposalRevision", "ApplyPreflightResult"]) {
@@ -3150,9 +3497,10 @@ const downstreamForbiddenFields = [
 ];
 const downstreamCreateResponse = schemas.DownstreamUpdateProposalCreateResponse;
 const downstreamCreateResponseRequired = [
-  "proposal_type", "id", "workspace_id", "status", "risk_level", "revision", "approval", "replayed", "created_at", "updated_at",
+  "proposal_type", "id", "workspace_id", "status", "risk_level", "version", "revision_capability", "revision", "approval", "replayed", "created_at", "updated_at",
 ];
 const applyPreflightOperation = document.paths["/api/v1/proposals/{proposal_id}/apply-preflight"]?.post;
+const decideProposalOperation = document.paths["/api/v1/proposals/{proposal_id}/approvals"]?.post;
 if (downstreamForbiddenFields.some((field) => downstreamProposal.properties[field] !== undefined) ||
     schemas.ProposalSummary.properties.replayed !== undefined ||
     downstreamCreateResponse.type !== "object" ||
@@ -3169,6 +3517,12 @@ if (downstreamForbiddenFields.some((field) => downstreamProposal.properties[fiel
     !applyPreflightOperation?.["x-error-codes"]?.includes("DOWNSTREAM_UPDATE_APPLY_UNAVAILABLE") ||
     !applyPreflightOperation?.responses?.["409"]?.description?.includes("DOWNSTREAM_UPDATE_APPLY_UNAVAILABLE")) {
   throw new Error("replayed must remain endpoint-only and approved downstream Proposals must forbid apply/writeback fields");
+}
+if (!decideProposalOperation?.["x-error-codes"]?.includes("PROPOSAL_REVISION_WORKFLOW_CANCEL_UNAVAILABLE") ||
+    !decideProposalOperation?.responses?.["503"] ||
+    !applyPreflightOperation?.["x-error-codes"]?.includes("PROPOSAL_REVISION_WORKFLOW_CANCEL_UNAVAILABLE") ||
+    !applyPreflightOperation?.responses?.["503"]) {
+  throw new Error("Proposal approval and preflight must expose retryable Revision Workflow cancellation dependency failures");
 }
 const publishArtifactCoverage = schemas.PublishArtifactCoverage;
 const publishArtifactBinding = schemas.PublishArtifactBinding;

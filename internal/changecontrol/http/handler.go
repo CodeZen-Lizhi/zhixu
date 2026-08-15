@@ -70,6 +70,10 @@ func (h *Handler) Routes(router gin.IRouter) {
 	router.POST("/workspaces/:workspace_id/impact-reports/:report_id/proposals", httpapi.GinHandler(h.createDownstreamUpdateProposal))
 	router.GET("/proposals/:proposal_id", httpapi.GinHandler(h.getProposal))
 	router.GET("/proposals/:proposal_id/current-content", httpapi.GinHandler(h.getProposalCurrentContent))
+	router.POST("/proposals/:proposal_id/revision-merge-previews", httpapi.GinHandler(h.previewProposalRevision))
+	router.GET("/proposals/:proposal_id/revisions", httpapi.GinHandler(h.listProposalRevisions))
+	router.POST("/proposals/:proposal_id/revisions", httpapi.GinHandler(h.appendProposalRevision))
+	router.GET("/proposals/:proposal_id/revisions/:revision_id", httpapi.GinHandler(h.getProposalRevision))
 	router.POST("/proposals/:proposal_id/approvals", httpapi.GinHandler(h.decideProposal))
 	router.POST("/proposals/:proposal_id/apply-preflight", httpapi.GinHandler(h.applyPreflight))
 }
@@ -86,7 +90,7 @@ type proposalCurrentContentResponse struct {
 }
 
 func (h *Handler) getProposalCurrentContent(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Cache-Control", "private, no-store")
 	proposalID, err := foundation.ParseID(r.PathValue("proposal_id"))
 	if err != nil {
 		writeError(w, err)
@@ -128,18 +132,20 @@ type proposalListCursor struct {
 }
 
 type proposalListResponse struct {
-	ID           string                    `json:"id"`
-	WorkspaceID  string                    `json:"workspace_id"`
-	ProposalType string                    `json:"proposal_type"`
-	Status       string                    `json:"status"`
-	Target       string                    `json:"target"`
-	RiskLevel    string                    `json:"risk_level"`
-	Risk         string                    `json:"risk"`
-	RevisionID   string                    `json:"revision_id"`
-	ChangeHash   string                    `json:"change_hash"`
-	Approval     *approvalSnapshotResponse `json:"approval,omitempty"`
-	CreatedAt    string                    `json:"created_at"`
-	UpdatedAt    string                    `json:"updated_at"`
+	ID                 string                     `json:"id"`
+	WorkspaceID        string                     `json:"workspace_id"`
+	ProposalType       string                     `json:"proposal_type"`
+	Status             string                     `json:"status"`
+	Target             string                     `json:"target"`
+	RiskLevel          string                     `json:"risk_level"`
+	Risk               string                     `json:"risk"`
+	RevisionID         string                     `json:"revision_id"`
+	ChangeHash         string                     `json:"change_hash"`
+	Version            int64                      `json:"version"`
+	RevisionCapability revisionCapabilityResponse `json:"revision_capability"`
+	Approval           *approvalSnapshotResponse  `json:"approval,omitempty"`
+	CreatedAt          string                     `json:"created_at"`
+	UpdatedAt          string                     `json:"updated_at"`
 }
 
 func (h *Handler) listProposals(w http.ResponseWriter, r *http.Request) {
@@ -247,7 +253,7 @@ func (h *Handler) listProposals(w http.ResponseWriter, r *http.Request) {
 	}
 	response := proposalPageResponse{Items: make([]proposalListResponse, len(items))}
 	for index, item := range items {
-		mapped, mapErr := toProposalListResponse(item)
+		mapped, mapErr := toProposalListResponse(item, h.revisionMergeAvailable())
 		if mapErr != nil {
 			writeError(w, mapErr)
 			return
@@ -304,16 +310,18 @@ type applyPreflightRequest struct {
 }
 
 type proposalResponse struct {
-	ProposalType string                    `json:"proposal_type"`
-	ID           string                    `json:"id"`
-	WorkspaceID  string                    `json:"workspace_id"`
-	TargetPath   string                    `json:"target_path,omitempty"`
-	Status       string                    `json:"status"`
-	RiskLevel    string                    `json:"risk_level"`
-	Revision     any                       `json:"revision"`
-	Approval     *approvalSnapshotResponse `json:"approval"`
-	CreatedAt    string                    `json:"created_at"`
-	UpdatedAt    string                    `json:"updated_at"`
+	ProposalType       string                     `json:"proposal_type"`
+	ID                 string                     `json:"id"`
+	WorkspaceID        string                     `json:"workspace_id"`
+	TargetPath         string                     `json:"target_path,omitempty"`
+	Status             string                     `json:"status"`
+	RiskLevel          string                     `json:"risk_level"`
+	Version            int64                      `json:"version"`
+	RevisionCapability revisionCapabilityResponse `json:"revision_capability"`
+	Revision           any                        `json:"revision"`
+	Approval           *approvalSnapshotResponse  `json:"approval"`
+	CreatedAt          string                     `json:"created_at"`
+	UpdatedAt          string                     `json:"updated_at"`
 }
 
 type downstreamUpdateProposalCreateResponse struct {
@@ -504,6 +512,7 @@ type applyPreflightResponse struct {
 }
 
 func (h *Handler) createProposal(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "private, no-store")
 	workspaceID, err := foundation.ParseID(r.PathValue("workspace_id"))
 	if err != nil {
 		writeError(w, err)
@@ -541,7 +550,7 @@ func (h *Handler) createProposal(w http.ResponseWriter, r *http.Request) {
 	if result.Replayed {
 		status = http.StatusOK
 	}
-	response, mapErr := toProposalResponse(result.Proposal)
+	response, mapErr := toProposalResponse(result.Proposal, h.revisionMergeAvailable())
 	if mapErr != nil {
 		writeError(w, mapErr)
 		return
@@ -550,6 +559,7 @@ func (h *Handler) createProposal(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) createDownstreamUpdateProposal(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "private, no-store")
 	if r.URL.RawQuery != "" {
 		writeError(w, downstreamUpdateProposalInvalid("query parameters are not supported"))
 		return
@@ -602,7 +612,7 @@ func (h *Handler) createDownstreamUpdateProposal(w http.ResponseWriter, r *http.
 		writeError(w, err)
 		return
 	}
-	response, err := toProposalResponse(result.Proposal)
+	response, err := toProposalResponse(result.Proposal, h.revisionMergeAvailable())
 	if err != nil {
 		writeError(w, err)
 		return
@@ -668,6 +678,7 @@ func downstreamUpdateProposalInvalid(message string) error {
 }
 
 func (h *Handler) getProposal(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "private, no-store")
 	proposalID, err := foundation.ParseID(r.PathValue("proposal_id"))
 	if err != nil {
 		writeError(w, err)
@@ -682,7 +693,7 @@ func (h *Handler) getProposal(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	response, mapErr := toProposalResponse(proposal)
+	response, mapErr := toProposalResponse(proposal, h.revisionMergeAvailable())
 	if mapErr != nil {
 		writeError(w, mapErr)
 		return
@@ -760,7 +771,7 @@ func (h *Handler) applyPreflight(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func toProposalResponse(proposal domain.Proposal) (proposalResponse, error) {
+func toProposalResponse(proposal domain.Proposal, mergeAvailable bool) (proposalResponse, error) {
 	proposalType := domain.NormalizeProposalType(proposal.Type)
 	riskLevel, err := responseRiskLevel(proposalType, proposal.RiskLevel)
 	if err != nil {
@@ -768,7 +779,8 @@ func toProposalResponse(proposal domain.Proposal) (proposalResponse, error) {
 	}
 	response := proposalResponse{
 		ProposalType: string(proposalType), ID: string(proposal.ID), WorkspaceID: string(proposal.WorkspaceID), TargetPath: proposal.TargetPath,
-		Status: string(proposal.Status), RiskLevel: string(riskLevel), CreatedAt: proposal.CreatedAt.UTC().Format(time.RFC3339Nano),
+		Status: string(proposal.Status), RiskLevel: string(riskLevel), Version: proposal.Version, RevisionCapability: revisionCapability(proposal, mergeAvailable),
+		CreatedAt: proposal.CreatedAt.UTC().Format(time.RFC3339Nano),
 		UpdatedAt: proposal.UpdatedAt.UTC().Format(time.RFC3339Nano),
 	}
 	switch proposalType {
@@ -929,7 +941,7 @@ func toKnowledgeRevisionResponse(revision domain.Revision) knowledgeRevisionResp
 	return response
 }
 
-func toProposalListResponse(item domain.ProposalListItem) (proposalListResponse, error) {
+func toProposalListResponse(item domain.ProposalListItem, mergeAvailable bool) (proposalListResponse, error) {
 	proposalType := domain.NormalizeProposalType(item.Type)
 	riskLevel, err := responseRiskLevel(proposalType, item.RiskLevel)
 	if err != nil {
@@ -939,10 +951,14 @@ func toProposalListResponse(item domain.ProposalListItem) (proposalListResponse,
 	if proposalType == domain.ProposalTypePublishArtifact {
 		target = "Artifact 发布"
 	}
+	capability, err := toRevisionCapabilityResponse(domain.GateProposalRevisionMergeEngine(item.RevisionCapability, mergeAvailable))
+	if err != nil || item.Version <= 0 {
+		return proposalListResponse{}, foundation.NewError(foundation.ErrorConsistencyViolation, "PROPOSAL_REVISION_CAPABILITY_INVALID", false, errors.New("proposal list revision capability is invalid"))
+	}
 	response := proposalListResponse{
 		ID: string(item.ProposalID), WorkspaceID: string(item.WorkspaceID), ProposalType: string(proposalType),
 		Status: string(item.Status), Target: target, RiskLevel: string(riskLevel), Risk: item.Risk, RevisionID: string(item.RevisionID),
-		ChangeHash: item.ChangeHash, CreatedAt: item.CreatedAt.UTC().Format(time.RFC3339Nano),
+		ChangeHash: item.ChangeHash, Version: item.Version, RevisionCapability: capability, CreatedAt: item.CreatedAt.UTC().Format(time.RFC3339Nano),
 		UpdatedAt: item.UpdatedAt.UTC().Format(time.RFC3339Nano),
 	}
 	if item.Approval != nil {
@@ -1016,18 +1032,83 @@ func writeError(w http.ResponseWriter, err error) {
 	if classified.Code == "UNSUPPORTED_MEDIA_TYPE" {
 		status = http.StatusUnsupportedMediaType
 	}
+	switch classified.Code {
+	case "PROPOSAL_REVISION_INPUT_TOO_LARGE":
+		status = http.StatusRequestEntityTooLarge
+	case "PROPOSAL_REVISION_CONFLICTS_UNRESOLVED", "PROPOSAL_MERGE_RESULT_TOO_LARGE":
+		status = http.StatusUnprocessableEntity
+	case "PROPOSAL_MERGE_BUSY", "PROPOSAL_MERGE_TIMEOUT", "PROPOSAL_MERGE_TEMPORARY_STORAGE_UNAVAILABLE",
+		"PROPOSAL_MERGE_ENGINE_UNAVAILABLE", "PROPOSAL_MERGE_ENGINE_UNSUPPORTED", "PROPOSAL_MERGE_ENGINE_OUTPUT_INVALID":
+		status = http.StatusServiceUnavailable
+	case "PROPOSAL_REVISION_RESULT_INVALID", "PROPOSAL_REVISION_HISTORY_BINDING_INVALID", "PROPOSAL_REVISION_SOURCE_INVALID",
+		"PROPOSAL_BASE_SNAPSHOT_INVALID", "PROPOSAL_CURRENT_CONTENT_HASH_INVALID", "PROPOSAL_REVISION_CAPABILITY_INVALID":
+		status = http.StatusInternalServerError
+	}
 	details := map[string]any(nil)
 	var conflict *application.HashConflict
 	if errors.As(err, &conflict) {
+		if classified.Code == "PROPOSAL_REVISION_STALE" {
+			details = map[string]any{
+				"expected_current_hash": conflict.Expected,
+				"current_hash":          conflict.Current,
+				"conflict_type":         "current_content_changed",
+				"resolution_actions":    []string{"refresh_proposal", "restart_merge"},
+			}
+		} else {
+			details = map[string]any{
+				"expected_version":   conflict.Expected,
+				"current_version":    conflict.Current,
+				"conflict_type":      "target_base_hash_changed",
+				"resolution_actions": []string{"create_new_proposal_revision"},
+			}
+		}
+	}
+	switch classified.Code {
+	case "PROPOSAL_REVISION_INPUT_TOO_LARGE":
 		details = map[string]any{
-			"expected_version":   conflict.Expected,
-			"current_version":    conflict.Current,
-			"conflict_type":      "target_base_hash_changed",
-			"resolution_actions": []string{"create_new_proposal_revision"},
+			"max_preview_request_bytes": revisionPreviewRequestMaxBytes, "max_append_request_bytes": revisionAppendRequestMaxBytes,
+			"max_content_bytes":  int(domain.ProposalRevisionMaxBytes),
+			"max_metadata_bytes": revisionMetadataMaxBytes, "max_conflict_ids": revisionConflictIDMaxItems,
+		}
+	case "PROPOSAL_MERGE_RESULT_TOO_LARGE":
+		details = map[string]any{
+			"max_candidate_bytes": int(domain.ProposalRevisionMaxBytes), "max_response_bytes": revisionPreviewResponseMaxBytes,
+			"max_conflicts": revisionConflictIDMaxItems,
+		}
+	case "PROPOSAL_REVISION_CONFLICTS_UNRESOLVED":
+		details = map[string]any{"max_conflicts": revisionConflictIDMaxItems, "resolution_actions": []string{"resolve_all_conflicts", "recalculate_preview"}}
+		if conflictIDs := unresolvedRevisionConflictIDs(err); len(conflictIDs) > 0 {
+			details["conflict_ids"] = conflictIDs
+		}
+	case "PROPOSAL_REVISION_NOT_EDITABLE":
+		details = map[string]any{"resolution_actions": []string{"refresh_proposal"}}
+	case "PROPOSAL_REVISION_STALE":
+		if details == nil {
+			details = map[string]any{"resolution_actions": []string{"refresh_proposal", "restart_merge"}}
 		}
 	}
 	message := publicMessage(classified.Code)
 	httpapi.WriteProblem(w, status, classified.Code, message, classified.Retryable, details)
+}
+
+func unresolvedRevisionConflictIDs(err error) []string {
+	var unresolved *application.UnresolvedRevisionConflicts
+	if !errors.As(err, &unresolved) || unresolved == nil || len(unresolved.ConflictIDs) == 0 || len(unresolved.ConflictIDs) > revisionConflictIDMaxItems {
+		return nil
+	}
+	result := make([]string, len(unresolved.ConflictIDs))
+	seen := make(map[string]struct{}, len(unresolved.ConflictIDs))
+	for index, conflictID := range unresolved.ConflictIDs {
+		if !validLowerHash(conflictID) {
+			return nil
+		}
+		if _, duplicate := seen[conflictID]; duplicate {
+			return nil
+		}
+		seen[conflictID] = struct{}{}
+		result[index] = conflictID
+	}
+	return result
 }
 
 func publicMessage(code string) string {
@@ -1041,7 +1122,7 @@ func publicMessage(code string) string {
 	case "TARGET_BASE_UNAVAILABLE":
 		return "Proposal 目标文件已不存在或不再安全可读"
 	case "IDEMPOTENCY_KEY_REQUIRED":
-		return "创建 Proposal 必须提供 Idempotency-Key"
+		return "写入请求必须提供且仅提供一个 Idempotency-Key"
 	case "IDEMPOTENCY_KEY_REUSED":
 		return "Idempotency-Key 已绑定到不同的 Proposal 请求"
 	case "DOWNSTREAM_UPDATE_PROPOSAL_INVALID":
@@ -1060,6 +1141,38 @@ func publicMessage(code string) string {
 		return "审批未绑定到请求的 Proposal Revision"
 	case "PROPOSAL_NOT_FOUND", "PROPOSAL_REVISION_NOT_FOUND":
 		return "请求的 Proposal 或 Revision 不存在"
+	case "PROPOSAL_REVISION_NOT_EDITABLE":
+		return "当前 Proposal 状态或类型不允许创建新 Revision"
+	case "PROPOSAL_BASE_SNAPSHOT_UNAVAILABLE":
+		return "当前 Revision 没有可信的基线快照"
+	case "PROPOSAL_REVISION_STALE":
+		return "Proposal 或 Workspace 内容已变化，请重新合并"
+	case "PROPOSAL_REVISION_SIDE_EFFECT_STARTED":
+		return "当前 Revision 已进入不可安全替换的执行阶段"
+	case "PROPOSAL_REVISION_WORKFLOW_ACTIVE":
+		return "当前 Revision 的 Workflow 尚未结束"
+	case "PROPOSAL_REVISION_WORKFLOW_CANCEL_UNAVAILABLE":
+		return "当前 Revision 的 Workflow 取消服务暂不可用"
+	case "PROPOSAL_REVISION_AUTHORIZATION_CONFLICT":
+		return "当前 Revision 的写入授权无法安全撤销"
+	case "PROPOSAL_REVISION_CONFLICTS_UNRESOLVED":
+		return "仍有合并冲突尚未确认"
+	case "PROPOSAL_REVISION_INPUT_TOO_LARGE":
+		return "Revision 请求或正文超过固定大小限制"
+	case "PROPOSAL_MERGE_CONTENT_INVALID":
+		return "Revision 合并请求内容无效"
+	case "PROPOSAL_MERGE_RESULT_TOO_LARGE":
+		return "合并结果超过固定大小限制"
+	case "PROPOSAL_MERGE_BUSY":
+		return "合并服务繁忙，请稍后重试"
+	case "PROPOSAL_MERGE_TIMEOUT":
+		return "合并计算超时，请稍后重试"
+	case "PROPOSAL_MERGE_TEMPORARY_STORAGE_UNAVAILABLE":
+		return "合并临时存储暂不可用"
+	case "PROPOSAL_MERGE_ENGINE_UNAVAILABLE", "PROPOSAL_MERGE_ENGINE_UNSUPPORTED", "PROPOSAL_MERGE_ENGINE_OUTPUT_INVALID":
+		return "三方合并能力暂不可用"
+	case "PROPOSAL_REVISION_HISTORY_QUERY_INVALID":
+		return "Revision 历史查询参数无效"
 	default:
 		return "请求未完成：" + code
 	}

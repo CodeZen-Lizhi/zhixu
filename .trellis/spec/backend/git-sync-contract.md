@@ -12,6 +12,7 @@
 - `internal/platform/secretstore` 是 Model Settings 与 Git Sync 共用的 AES-256-GCM key/nonce/envelope 原语；
   它不拥有任一业务的 AAD、持久化 shape 或错误语义。
 - `internal/platform/gitcli` 只暴露固定领域动作。调用方不能提交原始 Git 参数、任意 refspec 或环境变量。
+- `git merge-file` 只允许作为 `ThreeWayMerger` 的无仓库文本计算 plumbing：固定 diff3/myers/marker32 参数、私有临时目录、受限输入输出、deadline 和并发闸门；它不是 Git branch merge，不能读取或修改 Workspace、ref、index 或 object database。
 - `internal/platform/gitoperation` 是 Git Remote Sync、Safe Writeback 和文件历史共享的 Workspace 级 Git 操作互斥边界。
 - Fast-forward 后的资料更新通过 `internal/gitsync/adapter/sourcecapture` 调用既有 external-change capture 契约；Git 成功与索引结果必须分列。
 

@@ -2398,6 +2398,9 @@
         "responses": {
           "200": {
             "description": "The same idempotent request was replayed; the existing Proposal is returned.",
+            "headers": {
+              "Cache-Control": { "schema": { "type": "string", "const": "private, no-store" } }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2408,6 +2411,9 @@
           },
           "201": {
             "description": "Proposal and first Revision created.",
+            "headers": {
+              "Cache-Control": { "schema": { "type": "string", "const": "private, no-store" } }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2472,6 +2478,9 @@
       },
       "get": {
         "operationId": "listProposals",
+        "x-error-codes": [
+          "PROPOSAL_REVISION_CAPABILITY_INVALID"
+        ],
         "parameters": [
           {
             "name": "cursor",
@@ -2562,6 +2571,9 @@
           "405": {
             "$ref": "#/components/responses/MethodNotAllowed"
           },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
@@ -2585,6 +2597,9 @@
         "responses": {
           "200": {
             "description": "Current consistent Proposal and Revision with an explicit nullable Approval snapshot.",
+            "headers": {
+              "Cache-Control": { "schema": { "type": "string", "const": "private, no-store" } }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2650,6 +2665,9 @@
       ],
       "post": {
         "operationId": "decideProposal",
+        "x-error-codes": [
+          "PROPOSAL_REVISION_WORKFLOW_CANCEL_UNAVAILABLE"
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -2750,7 +2768,8 @@
         "operationId": "checkProposalApplyPreflight",
         "description": "Reads the real target file hash inside the persisted Workspace and verifies Approval, Revision, Change Hash and base hash. It performs no write and issues no write authorization. downstream_update is approval-only and always fails closed with 409 DOWNSTREAM_UPDATE_APPLY_UNAVAILABLE.",
         "x-error-codes": [
-          "DOWNSTREAM_UPDATE_APPLY_UNAVAILABLE"
+          "DOWNSTREAM_UPDATE_APPLY_UNAVAILABLE",
+          "PROPOSAL_REVISION_WORKFLOW_CANCEL_UNAVAILABLE"
         ],
         "requestBody": {
           "required": true,
@@ -5649,7 +5668,7 @@
               "Cache-Control": {
                 "schema": {
                   "type": "string",
-                  "const": "no-store"
+                  "const": "private, no-store"
                 }
               }
             },
@@ -5673,6 +5692,233 @@
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
+        }
+      }
+    },
+    "/api/v1/proposals/{proposal_id}/revision-merge-previews": {
+      "parameters": [
+        {
+          "name": "proposal_id",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string", "format": "uuid" }
+        }
+      ],
+      "post": {
+        "operationId": "previewProposalRevisionMerge",
+        "description": "Reads the authoritative base, current Workspace and proposed Revision text, then computes a side-effect-free marker-free three-way merge preview.",
+        "x-required-capability": "READ_LOCAL",
+        "x-error-codes": [
+          "PROPOSAL_MERGE_CONTENT_INVALID", "PROPOSAL_REVISION_INPUT_TOO_LARGE", "PROPOSAL_REVISION_NOT_EDITABLE",
+          "PROPOSAL_BASE_SNAPSHOT_UNAVAILABLE", "PROPOSAL_REVISION_STALE", "PROPOSAL_REVISION_WORKFLOW_ACTIVE",
+          "PROPOSAL_MERGE_RESULT_TOO_LARGE", "PROPOSAL_MERGE_BUSY", "PROPOSAL_MERGE_TIMEOUT",
+          "PROPOSAL_MERGE_TEMPORARY_STORAGE_UNAVAILABLE", "PROPOSAL_MERGE_ENGINE_UNAVAILABLE",
+          "PROPOSAL_MERGE_ENGINE_UNSUPPORTED", "PROPOSAL_MERGE_ENGINE_OUTPUT_INVALID", "UNSUPPORTED_MEDIA_TYPE",
+          "PROPOSAL_REVISION_REPOSITORY_UNAVAILABLE", "PROPOSAL_CURRENT_CONTENT_UNAVAILABLE",
+          "PROPOSAL_REVISION_SOURCE_INVALID", "PROPOSAL_CURRENT_CONTENT_HASH_INVALID", "PROPOSAL_BASE_SNAPSHOT_INVALID",
+          "PROPOSAL_NOT_FOUND", "CHANGE_CONTROL_SERVICE_UNAVAILABLE", "INTERNAL_ERROR"
+        ],
+        "requestBody": {
+          "required": true,
+          "x-max-body-bytes": 4096,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/ProposalRevisionMergePreviewRequest" } }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The exact bounded merge preview. No Proposal, Revision or Workspace file was changed.",
+            "x-max-response-bytes": 16777216,
+            "headers": {
+              "Cache-Control": { "schema": { "type": "string", "const": "private, no-store" } }
+            },
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ProposalRevisionMergePreview" } }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "413": { "$ref": "#/components/responses/PayloadTooLarge" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" },
+          "422": { "$ref": "#/components/responses/UnprocessableEntity" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/proposals/{proposal_id}/revisions": {
+      "parameters": [
+        {
+          "name": "proposal_id",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string", "format": "uuid" }
+        }
+      ],
+      "get": {
+        "operationId": "listProposalRevisions",
+        "description": "Returns a bounded newest-first immutable Revision history without revision or base snapshot bodies.",
+        "x-required-capability": "READ_LOCAL",
+        "x-error-codes": [
+          "PROPOSAL_REVISION_HISTORY_QUERY_INVALID", "PROPOSAL_REVISION_HISTORY_BINDING_INVALID",
+          "PROPOSAL_REVISION_REPOSITORY_UNAVAILABLE", "CHANGE_CONTROL_SERVICE_UNAVAILABLE", "INTERNAL_ERROR"
+        ],
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 30 }
+          },
+          {
+            "name": "before_revision_no",
+            "in": "query",
+            "description": "Exclusive descending Revision number cursor.",
+            "schema": { "type": "integer", "minimum": 2 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Newest-first Revision summaries and an optional exclusive next cursor.",
+            "x-max-response-bytes": 1048576,
+            "headers": {
+              "Cache-Control": { "schema": { "type": "string", "const": "private, no-store" } }
+            },
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ProposalRevisionHistoryPage" } }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      },
+      "post": {
+        "operationId": "appendProposalRevision",
+        "description": "Recomputes the authoritative merge, verifies every conflict acknowledgement, then atomically appends one immutable Revision. It never approves or writes the Workspace file.",
+        "x-required-capability": "WRITE_PROPOSAL",
+        "x-error-codes": [
+          "IDEMPOTENCY_KEY_REQUIRED", "IDEMPOTENCY_KEY_REUSED", "PROPOSAL_MERGE_CONTENT_INVALID",
+          "PROPOSAL_REVISION_INPUT_TOO_LARGE", "PROPOSAL_REVISION_NOT_EDITABLE", "PROPOSAL_BASE_SNAPSHOT_UNAVAILABLE",
+          "PROPOSAL_REVISION_STALE", "PROPOSAL_REVISION_SIDE_EFFECT_STARTED", "PROPOSAL_REVISION_WORKFLOW_ACTIVE",
+          "PROPOSAL_REVISION_WORKFLOW_CANCEL_UNAVAILABLE",
+          "PROPOSAL_REVISION_AUTHORIZATION_CONFLICT", "PROPOSAL_REVISION_CONFLICTS_UNRESOLVED",
+          "PROPOSAL_MERGE_RESULT_TOO_LARGE", "PROPOSAL_MERGE_BUSY", "PROPOSAL_MERGE_TIMEOUT",
+          "PROPOSAL_MERGE_TEMPORARY_STORAGE_UNAVAILABLE", "PROPOSAL_MERGE_ENGINE_UNAVAILABLE",
+          "PROPOSAL_MERGE_ENGINE_UNSUPPORTED", "PROPOSAL_MERGE_ENGINE_OUTPUT_INVALID", "UNSUPPORTED_MEDIA_TYPE",
+          "PROPOSAL_REVISION_REPOSITORY_UNAVAILABLE", "PROPOSAL_CURRENT_CONTENT_UNAVAILABLE",
+          "PROPOSAL_REVISION_SOURCE_INVALID", "PROPOSAL_CURRENT_CONTENT_HASH_INVALID", "PROPOSAL_BASE_SNAPSHOT_INVALID",
+          "PROPOSAL_REVISION_RESULT_INVALID",
+          "PROPOSAL_NOT_FOUND", "CHANGE_CONTROL_SERVICE_UNAVAILABLE", "INTERNAL_ERROR"
+        ],
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": {
+          "required": true,
+          "x-max-body-bytes": 8388608,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/AppendProposalRevisionRequest" } }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Exact Idempotency-Key replay of the same append command.",
+            "x-max-response-bytes": 16777216,
+            "headers": {
+              "Cache-Control": { "schema": { "type": "string", "const": "private, no-store" } }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/ProposalRevisionAppendResponse" },
+                    { "properties": { "replayed": { "const": true } } }
+                  ]
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "A new immutable Revision was appended and became the Proposal current Revision.",
+            "x-max-response-bytes": 16777216,
+            "headers": {
+              "Cache-Control": { "schema": { "type": "string", "const": "private, no-store" } }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/ProposalRevisionAppendResponse" },
+                    { "properties": { "replayed": { "const": false } } }
+                  ]
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "413": { "$ref": "#/components/responses/PayloadTooLarge" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" },
+          "422": { "$ref": "#/components/responses/UnprocessableEntity" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/proposals/{proposal_id}/revisions/{revision_id}": {
+      "parameters": [
+        {
+          "name": "proposal_id",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string", "format": "uuid" }
+        },
+        {
+          "name": "revision_id",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string", "format": "uuid" }
+        }
+      ],
+      "get": {
+        "operationId": "getProposalRevision",
+        "description": "Returns one exact immutable historical Revision with its optional base snapshot, lineage, Approval and Workflow binding.",
+        "x-required-capability": "READ_LOCAL",
+        "x-error-codes": [
+          "PROPOSAL_REVISION_HISTORY_QUERY_INVALID", "PROPOSAL_REVISION_NOT_FOUND",
+          "PROPOSAL_REVISION_INPUT_TOO_LARGE",
+          "PROPOSAL_REVISION_HISTORY_BINDING_INVALID", "PROPOSAL_REVISION_REPOSITORY_UNAVAILABLE",
+          "CHANGE_CONTROL_SERVICE_UNAVAILABLE", "INTERNAL_ERROR"
+        ],
+        "responses": {
+          "200": {
+            "description": "Exact historical Revision detail. Legacy missing base snapshots remain explicit null.",
+            "x-max-response-bytes": 16777216,
+            "headers": {
+              "Cache-Control": { "schema": { "type": "string", "const": "private, no-store" } }
+            },
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ProposalRevisionHistoryDetail" } }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "413": { "$ref": "#/components/responses/PayloadTooLarge" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
         }
       }
     },
@@ -10881,6 +11127,9 @@
         "responses": {
           "200": {
             "description": "Exact Idempotency-Key replay of the same complete report, target, action and owner binding.",
+            "headers": {
+              "Cache-Control": { "schema": { "type": "string", "const": "private, no-store" } }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -10902,6 +11151,9 @@
           },
           "201": {
             "description": "A new approval-only downstream_update Proposal was created; no target write or execution capability was granted.",
+            "headers": {
+              "Cache-Control": { "schema": { "type": "string", "const": "private, no-store" } }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -11805,7 +12057,7 @@
         }
       },
       "PayloadTooLarge": {
-        "description": "The complete bounded history, blob or diff exceeds the public response limit.",
+        "description": "The bounded request or complete history, blob, diff or merge result exceeds its public byte or item limit.",
         "content": {
           "application/json": {
             "schema": {
@@ -15856,6 +16108,264 @@
         },
         "additionalProperties": false
       },
+      "ProposalRevisionCapability": {
+        "type": "object",
+        "required": ["editable", "reason"],
+        "properties": {
+          "editable": { "type": "boolean" },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "AVAILABLE",
+              "PROPOSAL_REVISION_UNSUPPORTED_TYPE",
+              "PROPOSAL_REVISION_UNSUPPORTED_MODE",
+              "PROPOSAL_REVISION_STATUS_NOT_EDITABLE",
+              "PROPOSAL_REVISION_STALE",
+              "PROPOSAL_REVISION_WORKFLOW_ACTIVE",
+              "PROPOSAL_REVISION_SIDE_EFFECT_STARTED",
+			  "PROPOSAL_REVISION_INPUT_TOO_LARGE",
+			  "PROPOSAL_MERGE_ENGINE_UNAVAILABLE"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "ProposalRevisionMergePreviewRequest": {
+        "type": "object",
+        "required": ["source_revision_id", "source_change_hash", "expected_proposal_version"],
+        "properties": {
+          "source_revision_id": { "type": "string", "format": "uuid" },
+          "source_change_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "expected_proposal_version": { "type": "integer", "minimum": 1 }
+        },
+        "additionalProperties": false
+      },
+      "AppendProposalRevisionRequest": {
+        "type": "object",
+        "required": [
+          "expected_proposal_version", "source_revision_id", "source_change_hash", "expected_current_hash",
+          "merge_fingerprint", "merge_algorithm", "merge_algorithm_version", "content", "evidence_summary",
+          "risk", "rollback_plan", "resolved_conflict_ids"
+        ],
+        "properties": {
+          "expected_proposal_version": { "type": "integer", "minimum": 1 },
+          "source_revision_id": { "type": "string", "format": "uuid" },
+          "source_change_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "expected_current_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "merge_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "merge_algorithm": { "const": "git-merge-file" },
+          "merge_algorithm_version": { "const": "diff3/myers/marker32/v1" },
+          "content": { "type": "string", "minLength": 1, "maxLength": 1048576, "x-max-utf8-bytes": 1048576 },
+          "evidence_summary": { "type": "string", "minLength": 1, "maxLength": 65536, "x-max-utf8-bytes": 65536 },
+          "risk": { "type": "string", "minLength": 1, "maxLength": 65536, "x-max-utf8-bytes": 65536 },
+          "rollback_plan": { "type": "string", "minLength": 1, "maxLength": 65536, "x-max-utf8-bytes": 65536 },
+          "resolved_conflict_ids": {
+            "type": "array",
+            "maxItems": 1024,
+            "uniqueItems": true,
+            "items": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+          }
+        },
+        "additionalProperties": false
+      },
+      "ProposalRevisionTextSnapshot": {
+        "type": "object",
+        "required": ["content", "hash", "byte_size"],
+        "properties": {
+          "content": { "type": "string", "maxLength": 1048576, "x-max-utf8-bytes": 1048576 },
+          "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "byte_size": { "type": "integer", "minimum": 0, "maximum": 1048576 }
+        },
+        "additionalProperties": false
+      },
+      "ProposalRevisionMergeConflict": {
+        "type": "object",
+        "required": ["id", "ordinal", "base", "current", "proposed"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "ordinal": { "type": "integer", "minimum": 1, "maximum": 1024 },
+          "base": { "type": "string", "maxLength": 1048576, "x-max-utf8-bytes": 1048576 },
+          "current": { "type": "string", "maxLength": 1048576, "x-max-utf8-bytes": 1048576 },
+          "proposed": { "type": "string", "maxLength": 1048576, "x-max-utf8-bytes": 1048576 }
+        },
+        "additionalProperties": false
+      },
+      "ProposalRevisionMergePreview": {
+        "type": "object",
+        "required": [
+          "schema_version", "merge_algorithm", "merge_algorithm_version", "merge_fingerprint", "proposal_id",
+          "workspace_id", "proposal_version", "source_revision_id", "source_revision_no", "source_change_hash",
+          "target_path", "target_mode", "base", "current", "proposed", "candidate", "conflict_count", "conflicts"
+        ],
+        "properties": {
+          "schema_version": { "const": "proposal-text-merge-preview/v1" },
+          "merge_algorithm": { "const": "git-merge-file" },
+          "merge_algorithm_version": { "const": "diff3/myers/marker32/v1" },
+          "merge_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "proposal_id": { "type": "string", "format": "uuid" },
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "proposal_version": { "type": "integer", "minimum": 1 },
+          "source_revision_id": { "type": "string", "format": "uuid" },
+          "source_revision_no": { "type": "integer", "minimum": 1 },
+          "source_change_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "target_path": { "type": "string", "minLength": 1 },
+          "target_mode": { "const": "REPLACE" },
+          "base": { "$ref": "#/components/schemas/ProposalRevisionTextSnapshot" },
+          "current": { "$ref": "#/components/schemas/ProposalRevisionTextSnapshot" },
+          "proposed": { "$ref": "#/components/schemas/ProposalRevisionTextSnapshot" },
+          "candidate": { "$ref": "#/components/schemas/ProposalRevisionTextSnapshot" },
+          "conflict_count": { "type": "integer", "minimum": 0, "maximum": 1024 },
+          "conflicts": {
+            "type": "array",
+            "maxItems": 1024,
+            "items": { "$ref": "#/components/schemas/ProposalRevisionMergeConflict" }
+          }
+        },
+        "additionalProperties": false,
+        "x-invariant": "conflict_count equals conflicts.length; conflict ordinals are contiguous from 1; all hashes bind the exact UTF-8 response bytes."
+      },
+      "ProposalRevisionHistoryApproval": {
+        "type": "object",
+        "required": ["id", "proposal_id", "revision_id", "change_hash", "decision", "decided_at"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "proposal_id": { "type": "string", "format": "uuid" },
+          "revision_id": { "type": "string", "format": "uuid" },
+          "change_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "decision": { "type": "string", "enum": ["approved", "rejected"] },
+          "decided_at": { "type": "string", "format": "date-time" },
+          "approved_git_head": { "type": "string", "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$" }
+        },
+        "additionalProperties": false
+      },
+      "ProposalRevisionWorkflow": {
+        "type": "object",
+        "required": ["id", "status_url"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "status_url": { "type": "string", "pattern": "^/api/v1/workflows/[0-9a-f-]{36}$" }
+        },
+        "additionalProperties": false
+      },
+      "ProposalRevisionHistoryItem": {
+        "type": "object",
+        "required": [
+          "proposal_id", "revision_id", "revision_no", "target_path", "target_mode", "base_hash", "change_hash",
+          "base_available", "current", "approval", "workflow", "created_at"
+        ],
+        "properties": {
+          "proposal_id": { "type": "string", "format": "uuid" },
+          "revision_id": { "type": "string", "format": "uuid" },
+          "revision_no": { "type": "integer", "minimum": 1 },
+          "target_path": { "type": "string", "minLength": 1 },
+          "target_mode": { "const": "REPLACE" },
+          "base_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "change_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "base_available": { "type": "boolean" },
+          "current": { "type": "boolean" },
+          "approval": { "oneOf": [{ "$ref": "#/components/schemas/ProposalRevisionHistoryApproval" }, { "type": "null" }] },
+          "workflow": { "oneOf": [{ "$ref": "#/components/schemas/ProposalRevisionWorkflow" }, { "type": "null" }] },
+          "created_at": { "type": "string", "format": "date-time" }
+        },
+        "additionalProperties": false
+      },
+      "ProposalRevisionHistoryPage": {
+        "type": "object",
+        "required": ["items"],
+        "properties": {
+          "items": { "type": "array", "maxItems": 100, "items": { "$ref": "#/components/schemas/ProposalRevisionHistoryItem" } },
+          "next_before_revision_no": { "type": "integer", "minimum": 2 }
+        },
+        "additionalProperties": false
+      },
+      "ProposalRevisionBaseSnapshot": {
+        "type": "object",
+        "required": ["hash", "content", "byte_size", "schema_version", "created_at"],
+        "properties": {
+          "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "content": { "type": "string", "maxLength": 1048576, "x-max-utf8-bytes": 1048576 },
+          "byte_size": { "type": "integer", "minimum": 0, "maximum": 1048576 },
+          "schema_version": { "const": "proposal-base-snapshot/v1" },
+          "created_at": { "type": "string", "format": "date-time" }
+        },
+        "additionalProperties": false
+      },
+      "ProposalRevisionLineage": {
+        "type": "object",
+        "required": [
+          "source_revision_id", "source_change_hash", "kind", "merge_algorithm", "merge_algorithm_version",
+          "merge_fingerprint", "created_at"
+        ],
+        "properties": {
+          "source_revision_id": { "type": "string", "format": "uuid" },
+          "source_change_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "kind": { "type": "string", "enum": ["DIRECT_EDIT", "THREE_WAY_MERGE"] },
+          "merge_algorithm": { "const": "git-merge-file" },
+          "merge_algorithm_version": { "const": "diff3/myers/marker32/v1" },
+          "merge_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "created_at": { "type": "string", "format": "date-time" }
+        },
+        "additionalProperties": false
+      },
+      "HistoricalProposalRevision": {
+        "allOf": [
+          { "$ref": "#/components/schemas/ProposalRevision" },
+          {
+            "properties": {
+              "target_mode": { "const": "REPLACE" },
+              "base_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+              "content": { "type": "string", "minLength": 1, "maxLength": 1048576, "x-max-utf8-bytes": 1048576 },
+              "evidence_summary": { "type": "string", "minLength": 1, "maxLength": 65536, "x-max-utf8-bytes": 65536 },
+              "risk": { "type": "string", "minLength": 1, "maxLength": 65536, "x-max-utf8-bytes": 65536 },
+              "rollback_plan": { "type": "string", "minLength": 1, "maxLength": 65536, "x-max-utf8-bytes": 65536 }
+            }
+          }
+        ]
+      },
+      "ProposalRevisionHistoryDetail": {
+        "type": "object",
+        "required": [
+          "workspace_id", "proposal_id", "current_revision_id", "current", "revision", "base_available",
+          "base_snapshot", "lineage", "approval", "workflow"
+        ],
+        "properties": {
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "proposal_id": { "type": "string", "format": "uuid" },
+          "current_revision_id": { "type": "string", "format": "uuid" },
+          "current": { "type": "boolean" },
+          "revision": { "$ref": "#/components/schemas/HistoricalProposalRevision" },
+          "base_available": { "type": "boolean" },
+          "base_snapshot": { "oneOf": [{ "$ref": "#/components/schemas/ProposalRevisionBaseSnapshot" }, { "type": "null" }] },
+          "lineage": { "oneOf": [{ "$ref": "#/components/schemas/ProposalRevisionLineage" }, { "type": "null" }] },
+          "approval": { "oneOf": [{ "$ref": "#/components/schemas/ProposalRevisionHistoryApproval" }, { "type": "null" }] },
+          "workflow": { "oneOf": [{ "$ref": "#/components/schemas/ProposalRevisionWorkflow" }, { "type": "null" }] }
+        },
+        "additionalProperties": false,
+        "x-invariant": "base_available equals (base_snapshot is non-null); current equals (revision.id == current_revision_id)."
+      },
+      "ProposalRevisionAppendResponse": {
+        "type": "object",
+        "required": [
+          "proposal_type", "id", "workspace_id", "target_path", "status", "risk_level", "version",
+          "revision_capability", "revision", "approval", "created_at", "updated_at", "replayed"
+        ],
+        "properties": {
+          "proposal_type": { "const": "file_patch" },
+          "id": { "type": "string", "format": "uuid" },
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "target_path": { "type": "string", "minLength": 1 },
+          "status": { "const": "ready_for_review" },
+          "risk_level": { "$ref": "#/components/schemas/ProposalRiskLevel" },
+          "version": { "type": "integer", "minimum": 1 },
+          "revision_capability": { "$ref": "#/components/schemas/ProposalRevisionCapability" },
+          "revision": { "$ref": "#/components/schemas/ProposalRevision" },
+          "approval": { "type": "null" },
+          "created_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" },
+          "replayed": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      },
       "ProposalRevision": {
         "type": "object",
         "x-invariant": "target_mode REPLACE requires a sha256 base_hash; target_mode CREATE_ONLY requires a non-zero workspace-target-absent/v1 token.",
@@ -16104,6 +16614,8 @@
           "target_path",
           "status",
           "risk_level",
+          "version",
+          "revision_capability",
           "revision",
           "approval",
           "created_at",
@@ -16147,6 +16659,13 @@
           },
           "risk_level": {
             "$ref": "#/components/schemas/ProposalRiskLevel"
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "revision_capability": {
+            "$ref": "#/components/schemas/ProposalRevisionCapability"
           },
           "revision": {
             "$ref": "#/components/schemas/ProposalRevision"
@@ -16239,6 +16758,8 @@
           "target_path",
           "status",
           "risk_level",
+          "version",
+          "revision_capability",
           "revision",
           "approval",
           "created_at",
@@ -16254,6 +16775,8 @@
             "enum": ["draft", "validating", "ready_for_review", "approved", "applying", "applied", "verifying", "completed", "rejected", "needs_revision", "deferred", "apply_failed", "verify_failed", "rolled_back", "cancelled"]
           },
           "risk_level": { "const": "HIGH" },
+          "version": { "type": "integer", "minimum": 1 },
+          "revision_capability": { "$ref": "#/components/schemas/ProposalRevisionCapability" },
           "revision": { "$ref": "#/components/schemas/RestoreDocumentRevision" },
           "approval": {
             "oneOf": [
@@ -16458,6 +16981,8 @@
           "workspace_id",
           "status",
           "risk_level",
+          "version",
+          "revision_capability",
           "revision",
           "approval",
           "created_at",
@@ -16497,6 +17022,13 @@
           },
           "risk_level": {
             "const": "HIGH"
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "revision_capability": {
+            "$ref": "#/components/schemas/ProposalRevisionCapability"
           },
           "revision": {
             "$ref": "#/components/schemas/KnowledgeChangeRevision"
@@ -16695,6 +17227,8 @@
           "workspace_id",
           "status",
           "risk_level",
+          "version",
+          "revision_capability",
           "revision",
           "approval",
           "created_at",
@@ -16734,6 +17268,13 @@
           },
           "risk_level": {
             "const": "HIGH"
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "revision_capability": {
+            "$ref": "#/components/schemas/ProposalRevisionCapability"
           },
           "revision": {
             "$ref": "#/components/schemas/PublishArtifactRevision"
@@ -17007,6 +17548,8 @@
           "workspace_id",
           "status",
           "risk_level",
+          "version",
+          "revision_capability",
           "revision",
           "approval",
           "created_at",
@@ -17034,6 +17577,13 @@
           },
           "risk_level": {
             "const": "HIGH"
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "revision_capability": {
+            "$ref": "#/components/schemas/ProposalRevisionCapability"
           },
           "revision": {
             "$ref": "#/components/schemas/DownstreamUpdateRevision"
@@ -17068,6 +17618,8 @@
           "workspace_id",
           "status",
           "risk_level",
+          "version",
+          "revision_capability",
           "revision",
           "approval",
           "replayed",
@@ -17096,6 +17648,13 @@
           },
           "risk_level": {
             "const": "HIGH"
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "revision_capability": {
+            "$ref": "#/components/schemas/ProposalRevisionCapability"
           },
           "revision": {
             "$ref": "#/components/schemas/DownstreamUpdateRevision"
@@ -24435,6 +24994,8 @@
           "risk",
           "revision_id",
           "change_hash",
+          "version",
+          "revision_capability",
           "created_at",
           "updated_at"
         ],
@@ -24493,6 +25054,13 @@
           "change_hash": {
             "type": "string",
             "pattern": "^[0-9a-f]{64}$"
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "revision_capability": {
+            "$ref": "#/components/schemas/ProposalRevisionCapability"
           },
           "approval": {
             "$ref": "#/components/schemas/Approval"

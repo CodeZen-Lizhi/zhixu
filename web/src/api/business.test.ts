@@ -31,6 +31,9 @@ const restoreTargetContentHash = "ae7ce8d5ba997e154949caeda929cef4f828e90ccc2942
 const reviewTaskId = "10000000-0000-4000-8000-000000000009";
 const reviewNodeRunId = "10000000-0000-4000-8000-000000000010";
 const reviewSnapshotId = "10000000-0000-4000-8000-000000000011";
+const editableRevisionCapability = { editable: true, reason: "AVAILABLE" };
+const unsupportedRevisionCapability = { editable: false, reason: "PROPOSAL_REVISION_UNSUPPORTED_TYPE" };
+const lockedRevisionCapability = { editable: false, reason: "PROPOSAL_REVISION_STATUS_NOT_EDITABLE" };
 const reviewEvidenceResponse = {
   kind: "SOURCE_VERSION",
   source_version_id: "10000000-0000-4000-8000-000000000012",
@@ -129,6 +132,8 @@ const fileProposalResponse = (
   target_path: "docs/a.md",
   status: "approved",
   risk_level: "LOW",
+  version: 1,
+  revision_capability: lockedRevisionCapability,
   revision: {
     id: revisionId,
     revision_no: 1,
@@ -165,6 +170,8 @@ const restoreProposalResponse = (
   target_path: "docs/a.md",
   status: "ready_for_review",
   risk_level: "HIGH",
+  version: 1,
+  revision_capability: unsupportedRevisionCapability,
   revision: {
     id: revisionId,
     revision_no: 1,
@@ -204,6 +211,8 @@ const knowledgeProposalResponse = (
   proposal_type: "knowledge_change",
   status: "ready_for_review",
   risk_level: "HIGH",
+  version: 1,
+  revision_capability: unsupportedRevisionCapability,
   revision: {
     id: revisionId,
     revision_no: 1,
@@ -240,6 +249,8 @@ const publishArtifactProposalResponse = (
   proposal_type: "publish_artifact",
   status: "ready_for_review",
   risk_level: "HIGH",
+  version: 1,
+  revision_capability: unsupportedRevisionCapability,
   revision: {
     id: revisionId,
     revision_no: 1,
@@ -278,6 +289,8 @@ const downstreamArtifactProposalResponse = (
   proposal_type: "downstream_update",
   status: "ready_for_review",
   risk_level: "HIGH",
+  version: 1,
+  revision_capability: unsupportedRevisionCapability,
   revision: {
     id: revisionId,
     revision_no: 1,
@@ -340,6 +353,8 @@ const proposalSummaryResponse = (overrides: Record<string, unknown> = {}) => ({
   risk: "风险说明",
   revision_id: revisionId,
   change_hash: "b".repeat(64),
+  version: 1,
+  revision_capability: editableRevisionCapability,
   created_at: "2026-07-22T00:00:00Z",
   updated_at: "2026-07-22T00:01:00Z",
   ...overrides,
@@ -378,6 +393,8 @@ describe("business API boundary", () => {
       risk: "低风险说明",
       revision_id: revisionId,
       change_hash: "a".repeat(64),
+      version: 1,
+      revision_capability: lockedRevisionCapability,
       approval: {
         id: "10000000-0000-4000-8000-000000000004",
         proposal_id: proposalId,
@@ -407,6 +424,17 @@ describe("business API boundary", () => {
     const page = await listProposals(workspaceId);
     expect(page.items).toHaveLength(1);
     expect(page.items[0]).not.toHaveProperty("approval");
+  });
+
+  it("rejects a Proposal summary without version and revision capability", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      items: [proposalSummaryResponse({ version: undefined, revision_capability: undefined })],
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })));
+
+    await expect(listProposals(workspaceId)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
   });
 
   it.each([
@@ -1001,12 +1029,13 @@ describe("business API boundary", () => {
       workspace_id: "10000000-0000-4000-8000-000000000002",
       status: "ready_for_review",
       risk_level: "LOW",
+      version: 1,
       created_at: "2026-07-22T00:00:00Z",
       updated_at: "2026-07-22T00:01:00Z",
     };
     const responses = [
-      { ...common, proposal_type: "file_patch", target_path: "docs/a.md", revision: { id: "10000000-0000-4000-8000-000000000003", revision_no: 1, target_mode: "REPLACE", base_hash: "a".repeat(64), content: "next", evidence_summary: "evidence", risk: "low", rollback_plan: "revert", change_hash: "b".repeat(64), created_at: "2026-07-22T00:00:00Z" }, approval: null },
-      { ...common, proposal_type: "knowledge_change", risk_level: "HIGH", revision: { id: "10000000-0000-4000-8000-000000000004", revision_no: 2, schema_version: "knowledge-relation-change/v1", target_refs: [{ type: "RELATION_CANDIDATE", id: "10000000-0000-4000-8000-000000000005", fingerprint: "e".repeat(64) }], base_versions: [{ node_type: "CLAIM", node_id: "10000000-0000-4000-8000-000000000005", version: 3 }, { node_type: "TOPIC", node_id: "10000000-0000-4000-8000-000000000006", version: 2 }], change_set: { operation: "CREATE_RELATION", source: { type: "CLAIM", id: "10000000-0000-4000-8000-000000000005", version: 3 }, target: { type: "TOPIC", id: "10000000-0000-4000-8000-000000000006", version: 2 }, relation_type: "BELONGS_TO" }, evidence_refs: [{ candidate_evidence_id: "10000000-0000-4000-8000-000000000007", semantic_hash: "c".repeat(64) }], risk: "medium", rollback_plan: "remove relation", change_hash: "d".repeat(64), created_at: "2026-07-22T00:00:00Z" }, approval: null },
+      { ...common, proposal_type: "file_patch", target_path: "docs/a.md", revision_capability: editableRevisionCapability, revision: { id: "10000000-0000-4000-8000-000000000003", revision_no: 1, target_mode: "REPLACE", base_hash: "a".repeat(64), content: "next", evidence_summary: "evidence", risk: "low", rollback_plan: "revert", change_hash: "b".repeat(64), created_at: "2026-07-22T00:00:00Z" }, approval: null },
+      { ...common, proposal_type: "knowledge_change", risk_level: "HIGH", revision_capability: unsupportedRevisionCapability, revision: { id: "10000000-0000-4000-8000-000000000004", revision_no: 2, schema_version: "knowledge-relation-change/v1", target_refs: [{ type: "RELATION_CANDIDATE", id: "10000000-0000-4000-8000-000000000005", fingerprint: "e".repeat(64) }], base_versions: [{ node_type: "CLAIM", node_id: "10000000-0000-4000-8000-000000000005", version: 3 }, { node_type: "TOPIC", node_id: "10000000-0000-4000-8000-000000000006", version: 2 }], change_set: { operation: "CREATE_RELATION", source: { type: "CLAIM", id: "10000000-0000-4000-8000-000000000005", version: 3 }, target: { type: "TOPIC", id: "10000000-0000-4000-8000-000000000006", version: 2 }, relation_type: "BELONGS_TO" }, evidence_refs: [{ candidate_evidence_id: "10000000-0000-4000-8000-000000000007", semantic_hash: "c".repeat(64) }], risk: "medium", rollback_plan: "remove relation", change_hash: "d".repeat(64), created_at: "2026-07-22T00:00:00Z" }, approval: null },
     ];
     vi.stubGlobal("fetch", vi.fn().mockImplementation(() => Promise.resolve(new Response(JSON.stringify(responses.shift()), { status: 200, headers: { "Content-Type": "application/json" } }))));
 
@@ -1354,6 +1383,8 @@ describe("business API boundary", () => {
       target_path: "docs/a.md",
       status: "approved",
       risk_level: "LOW",
+      version: 1,
+      revision_capability: lockedRevisionCapability,
       revision: {
         id: revisionId,
         revision_no: 1,
@@ -1395,6 +1426,8 @@ describe("business API boundary", () => {
       target_path: "docs/a.md",
       status: "approved",
       risk_level: "LOW",
+      version: 1,
+      revision_capability: lockedRevisionCapability,
       revision: { id: revisionId, revision_no: 1, target_mode: "REPLACE", base_hash: "a".repeat(64), content: "next", evidence_summary: "evidence", risk: "low", rollback_plan: "revert", change_hash: "b".repeat(64), created_at: "2026-07-22T00:00:00Z" },
       approval: { id: "10000000-0000-4000-8000-000000000004", proposal_id: proposalId, revision_id: revisionId, change_hash: "b".repeat(64), decision: "approved", approved_git_head: "c".repeat(40), workflow_run_id: workflowRunId, workflow_status_url: `/api/v1/workflows/${workflowRunId}`, decided_at: "2026-07-22T00:02:00Z" },
       created_at: "2026-07-22T00:00:00Z",

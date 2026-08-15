@@ -1,6 +1,4 @@
-import { Editor, type OnMount } from "@monaco-editor/react";
-
-import { configureLocalMonaco, releaseDetachedEditorModel } from "../../shared/monaco-runtime";
+import { MonacoTextEditor } from "../../shared/MonacoTextEditor";
 
 export interface MonacoMarkdownEditorProps {
   value: string;
@@ -19,38 +17,16 @@ export const MonacoMarkdownEditor = ({
   onReady,
   onError,
 }: MonacoMarkdownEditorProps) => {
-  configureLocalMonaco();
-
-  const handleMount: OnMount = (editor, monacoInstance) => {
-    try {
-      releaseDetachedEditorModel(editor, monacoInstance);
-      onReady?.();
-    } catch (error: unknown) {
-      onError?.(error instanceof Error ? error : new Error("Markdown 编辑器加载失败"));
-    }
-  };
-
-  return <Editor
-    key={modelPath}
+  return <MonacoTextEditor
+    ariaLabel="Markdown 正文"
+    disabled={disabled}
     height="100%"
     language="markdown"
-    loading={<p className="authoring-editor__loading">正在加载编辑器…</p>}
-    onChange={(nextValue) => onChange(nextValue ?? "")}
-    onMount={handleMount}
-    options={{
-      ariaLabel: "Markdown 正文",
-      automaticLayout: true,
-      minimap: { enabled: false },
-      padding: { top: 18, bottom: 18 },
-      readOnly: disabled,
-      renderLineHighlight: "line",
-      scrollBeyondLastLine: false,
-      tabSize: 2,
-      wordWrap: "on",
-    }}
-    path={modelPath}
-    keepCurrentModel
-    theme="vs-light"
+    loadingLabel="正在加载编辑器..."
+    modelPath={modelPath}
+    onChange={onChange}
     value={value}
+    {...(onError === undefined ? {} : { onError })}
+    {...(onReady === undefined ? {} : { onReady })}
   />;
 };

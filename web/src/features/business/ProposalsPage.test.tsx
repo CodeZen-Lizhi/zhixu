@@ -15,6 +15,16 @@ const api = vi.hoisted(() => ({
   listProposals: vi.fn(),
   preflightProposal: vi.fn(),
 }));
+const revisionApi = vi.hoisted(() => ({
+  listProposalRevisions: vi.fn(),
+  getProposalRevision: vi.fn(),
+  workbenchProps: undefined as {
+    authorityEditable: boolean;
+    onClose: () => void;
+    onRevisionCreated: (result: unknown) => Promise<void> | void;
+    onAuthorityStale: () => Promise<void> | void;
+  } | undefined,
+}));
 type MonacoMode = "ready" | "loading" | "error";
 interface MonacoDiffViewerMockProps {
   onReady: () => void;
@@ -35,6 +45,12 @@ vi.mock("../../api/business", async (importOriginal) => ({
   listProposals: api.listProposals,
   preflightProposal: api.preflightProposal,
 }));
+vi.mock("../../api/business-revisions", async (importOriginal) => ({
+  // eslint-disable-next-line @typescript-eslint/consistent-type-imports
+  ...(await importOriginal<typeof import("../../api/business-revisions")>()),
+  listProposalRevisions: revisionApi.listProposalRevisions,
+  getProposalRevision: revisionApi.getProposalRevision,
+}));
 vi.mock("../../app/active-workspace", async (importOriginal) => ({
   // eslint-disable-next-line @typescript-eslint/consistent-type-imports
   ...(await importOriginal<typeof import("../../app/active-workspace")>()),
@@ -47,6 +63,28 @@ vi.mock("./MonacoDiffViewer", () => ({
     if (monaco.mode === "ready") queueMicrotask(() => props.onReady());
     if (monaco.mode === "error") queueMicrotask(() => props.onError(new Error("本地 Monaco worker 加载失败")));
     return <div>Diff Viewer</div>;
+  },
+}));
+vi.mock("../../shared/MonacoDiffViewer", () => ({
+  MonacoDiffViewer: (props: MonacoDiffViewerMockProps & { original: string; modified: string }) => {
+    monaco.diffViewer(props);
+    queueMicrotask(() => props.onReady());
+    return <div>Historical Diff Viewer</div>;
+  },
+}));
+vi.mock("./ProposalRevisionWorkbench", () => ({
+  ProposalRevisionWorkbench: (props: {
+    authorityEditable: boolean;
+    onClose: () => void;
+    onRevisionCreated: (result: unknown) => Promise<void> | void;
+    onAuthorityStale: () => Promise<void> | void;
+  }) => {
+    revisionApi.workbenchProps = props;
+    return <section aria-label="Revision 工作台">
+      <h2>Revision Workbench</h2>
+      <p>{props.authorityEditable ? "权威可编辑" : "权威不可编辑，草稿已保留"}</p>
+      <button type="button" onClick={props.onClose}>返回审阅</button>
+    </section>;
   },
 }));
 
@@ -65,6 +103,8 @@ const fileProposal = (overrides: Record<string, unknown> = {}) => ({
   targetPath: "docs/a.md",
   status: "ready_for_review" as const,
   riskLevel: "LOW" as const,
+  version: 1,
+  revisionCapability: { editable: true, reason: "AVAILABLE" as const },
   revision: {
     id: revisionId,
     revisionNo: 1,
@@ -233,6 +273,20 @@ const currentContent = (baseHashMatch = true, baseHash = "a".repeat(64)) => ({
   baseHashMatch,
 });
 
+const oldRevisionId = "10000000-0000-4000-8000-000000000009";
+const historyItem = (id: string, revisionNo: number, current: boolean) => ({
+  proposalId,
+  revisionId: id,
+  revisionNo,
+  targetPath: "docs/a.md",
+  targetMode: "REPLACE" as const,
+  baseHash: "a".repeat(64),
+  changeHash: current ? changeHash : "d".repeat(64),
+  baseAvailable: true,
+  current,
+  createdAt: current ? "2026-07-22T00:00:00Z" : "2026-07-21T00:00:00Z",
+});
+
 const renderDetail = () => {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   const rendered = render(
@@ -262,6 +316,9 @@ beforeEach(() => {
   api.getProposalCurrentContent.mockResolvedValue(currentContent());
   api.listProposals.mockResolvedValue({ items: [] });
   api.preflightProposal.mockResolvedValue({ proposalId, revisionId, changeHash, targetMode: "REPLACE", baseHash: "a".repeat(64), preflightPassed: true, mode: "preflight_only", writePerformed: false });
+  revisionApi.listProposalRevisions.mockResolvedValue({ items: [historyItem(revisionId, 1, true)] });
+  revisionApi.getProposalRevision.mockResolvedValue({});
+  revisionApi.workbenchProps = undefined;
 });
 
 afterEach(() => {
@@ -271,6 +328,9 @@ afterEach(() => {
   api.getProposalCurrentContent.mockReset();
   api.listProposals.mockReset();
   api.preflightProposal.mockReset();
+  revisionApi.listProposalRevisions.mockReset();
+  revisionApi.getProposalRevision.mockReset();
+  revisionApi.workbenchProps = undefined;
   monaco.diffViewer.mockReset();
 });
 
@@ -1105,6 +1165,85 @@ describe("ProposalDetailPage", () => {
     expect(screen.getByRole("link", { name: "连接或切换 Workspace" })).toHaveAttribute("href", "/workspace");
     expect(api.getProposal).not.toHaveBeenCalled();
     expect(api.getProposalCurrentContent).not.toHaveBeenCalled();
+  });
+
+  it("按服务端 capability 进入全宽 Revision 工作台并隐藏普通决策", async () => {
+    renderDetail();
+
+    const entry = await screen.findByRole("button", { name: "编辑修订版本" });
+    fireEvent.click(entry);
+
+    expect(await screen.findByRole("heading", { name: "Revision Workbench" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "批准" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "修订历史" })).not.toBeInTheDocument();
+
+    api.getProposal.mockResolvedValue(fileProposal({
+      revisionCapability: { editable: false, reason: "PROPOSAL_REVISION_STATUS_NOT_EDITABLE" },
+    }));
+    await act(async () => { await revisionApi.workbenchProps?.onAuthorityStale(); });
+    expect(screen.getByRole("heading", { name: "Revision Workbench" })).toBeInTheDocument();
+    expect(await screen.findByText("权威不可编辑，草稿已保留")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "返回审阅" }));
+    expect(screen.queryByRole("button", { name: "编辑修订版本" })).not.toBeInTheDocument();
+
+    cleanup();
+    api.getProposal.mockResolvedValue(fileProposal({
+      revisionCapability: { editable: false, reason: "PROPOSAL_REVISION_STATUS_NOT_EDITABLE" },
+    }));
+    const { queryClient } = renderDetail();
+    await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+    expect(screen.queryByRole("button", { name: "编辑修订版本" })).not.toBeInTheDocument();
+  });
+
+  it("选择旧 Revision 后只读展示冻结 base 到 proposed，并隐藏审批与编辑", async () => {
+    api.getProposal.mockResolvedValue(fileProposal({
+      revision: { ...fileProposal().revision, revisionNo: 2 },
+    }));
+    revisionApi.listProposalRevisions.mockResolvedValue({
+      items: [historyItem(revisionId, 2, true), historyItem(oldRevisionId, 1, false)],
+    });
+    revisionApi.getProposalRevision.mockResolvedValue({
+      workspaceId,
+      proposalId,
+      currentRevisionId: revisionId,
+      current: false,
+      revision: {
+        ...fileProposal().revision,
+        id: oldRevisionId,
+        revisionNo: 1,
+        content: "historic proposed",
+        changeHash: "d".repeat(64),
+      },
+      baseAvailable: true,
+      baseSnapshot: {
+        hash: "a".repeat(64),
+        content: "historic base",
+        byteSize: 13,
+        schemaVersion: "proposal-base-snapshot/v1",
+        createdAt: "2026-07-21T00:00:00Z",
+      },
+    });
+    renderDetail();
+
+    const revision = await screen.findByRole("button", { name: "Revision #1，历史，未审批" });
+    fireEvent.click(revision);
+
+    await waitFor(() => expect(revision).toHaveAttribute("aria-current", "true"));
+    expect(await screen.findByRole("heading", { name: "历史 Revision #1" })).toBeInTheDocument();
+    expect(await screen.findByText("Historical Diff Viewer")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "批准" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "编辑修订版本" })).not.toBeInTheDocument();
+    expect(revisionApi.getProposalRevision).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId,
+      proposalId,
+      revisionId: oldRevisionId,
+      revisionNo: 1,
+    }), expect.any(AbortSignal));
+    expect(monaco.diffViewer).toHaveBeenLastCalledWith(expect.objectContaining({
+      original: "historic base",
+      modified: "historic proposed",
+    }));
   });
 
   it.each(["HIGH", "CRITICAL"] as const)("%s 风险等级触发高风险确认并在取消后恢复焦点", async (riskLevel) => {

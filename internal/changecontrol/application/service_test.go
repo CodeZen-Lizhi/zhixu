@@ -24,6 +24,9 @@ type fakeRepo struct {
 	err                error
 	createCalls        int
 	markedNeedsReview  bool
+	markedProposalID   foundation.ID
+	markedRevisionID   foundation.ID
+	markedVersion      int64
 	authorization      domain.ToolAuthorization
 	authorizationReads int
 	authReplayed       bool
@@ -168,8 +171,11 @@ func (f *fakeRepo) Approve(_ context.Context, approval domain.Approval) (domain.
 func (f *fakeRepo) GetProposal(_ context.Context, _ foundation.ID) (domain.Proposal, error) {
 	return f.proposal, f.err
 }
-func (f *fakeRepo) MarkNeedsRevision(_ context.Context, _ foundation.ID, _ time.Time) error {
+func (f *fakeRepo) MarkNeedsRevision(_ context.Context, proposalID, revisionID foundation.ID, expectedVersion int64, _ time.Time) error {
 	f.markedNeedsReview = true
+	f.markedProposalID = proposalID
+	f.markedRevisionID = revisionID
+	f.markedVersion = expectedVersion
 	return f.err
 }
 func (f *fakeRepo) ValidateWorkflowContext(context.Context, foundation.ID, foundation.ID, foundation.ID) error {
@@ -203,6 +209,8 @@ func (f *fakeRepo) RevokeAuthorization(_ context.Context, _ foundation.ID, _ tim
 type fakeTargets struct {
 	hash             string
 	content          []byte
+	contentSequence  [][]byte
+	hashSequence     []string
 	err              error
 	calls            int
 	absenceErr       error
@@ -218,8 +226,16 @@ func (f *fakeTargets) CurrentHash(context.Context, foundation.ID, string) (strin
 }
 
 func (f *fakeTargets) CurrentContent(context.Context, foundation.ID, string, int64) ([]byte, string, error) {
+	call := f.calls
 	f.calls++
-	return append([]byte(nil), f.content...), f.hash, f.err
+	content, hash := f.content, f.hash
+	if call < len(f.contentSequence) {
+		content = f.contentSequence[call]
+	}
+	if call < len(f.hashSequence) {
+		hash = f.hashSequence[call]
+	}
+	return append([]byte(nil), content...), hash, f.err
 }
 
 func (f *fakeTargets) EnsureTargetAbsent(_ context.Context, workspaceID foundation.ID, targetPath, absenceToken string) error {
@@ -309,9 +325,11 @@ func newTestDispatchServiceWithKnowledgeApply(repository *fakeRepo, targets *fak
 
 func TestCreateProposalBindsTargetBaseAndContent(t *testing.T) {
 	repository := &fakeRepo{}
-	service := newTestService(repository, &fakeTargets{})
+	baseContent := "base\n"
+	baseHash := domain.RawContentHash(baseContent)
+	service := newTestService(repository, &fakeTargets{hash: baseHash, content: []byte(baseContent)})
 	result, err := service.CreateProposal(context.Background(), CreateCommand{
-		WorkspaceID: "workspace", TargetPath: "notes/../notes/a.md", BaseHash: testHash,
+		WorkspaceID: "workspace", TargetPath: "notes/../notes/a.md", BaseHash: baseHash,
 		IdempotencyKey: "create-1", RiskLevel: domain.ProposalRiskLevelLow,
 		Content: "  code\r\n", EvidenceSummary: "evidence", Risk: "may change editorial structure", RollbackPlan: "revert commit",
 	})
@@ -322,16 +340,19 @@ func TestCreateProposalBindsTargetBaseAndContent(t *testing.T) {
 	if proposal.Type != domain.ProposalTypeFilePatch || proposal.RiskLevel != domain.ProposalRiskLevelLow || proposal.TargetPath != "notes/a.md" || proposal.Revision.TargetPath != "notes/a.md" || proposal.Status != domain.StatusReady || proposal.IdempotencyKey != "create-1" || proposal.RequestHash == "" {
 		t.Fatalf("proposal = %#v", proposal)
 	}
-	expectedRequestHash, err := domain.ComputeRequestHashWithRiskLevel("workspace", "notes/a.md", testHash, "  code\r\n", "evidence", domain.ProposalRiskLevelLow, "may change editorial structure", "revert commit")
+	expectedRequestHash, err := domain.ComputeRequestHashWithRiskLevel("workspace", "notes/a.md", baseHash, "  code\r\n", "evidence", domain.ProposalRiskLevelLow, "may change editorial structure", "revert commit")
 	if err != nil || proposal.RequestHash != expectedRequestHash {
 		t.Fatalf("request hash = %s, want %s, err=%v", proposal.RequestHash, expectedRequestHash, err)
 	}
-	wantHash := domain.ComputeChangeHash("notes/a.md", testHash, "  code\r\n")
+	wantHash := domain.ComputeChangeHash("notes/a.md", baseHash, "  code\r\n")
 	if proposal.Revision.ChangeHash != wantHash {
 		t.Fatalf("change hash = %s, want %s", proposal.Revision.ChangeHash, wantHash)
 	}
-	if wantHash == domain.ComputeChangeHash("notes/a.md", testHash, "code\r\n") || wantHash == domain.ComputeChangeHash("other.md", testHash, "  code\r\n") {
+	if wantHash == domain.ComputeChangeHash("notes/a.md", baseHash, "code\r\n") || wantHash == domain.ComputeChangeHash("other.md", baseHash, "  code\r\n") {
 		t.Fatal("change hash did not bind semantic content and target")
+	}
+	if proposal.Revision.BaseSnapshot == nil || proposal.Revision.BaseSnapshot.Content != baseContent || proposal.Revision.BaseSnapshot.BaseHash != baseHash {
+		t.Fatalf("base snapshot = %#v", proposal.Revision.BaseSnapshot)
 	}
 }
 
@@ -986,8 +1007,9 @@ func TestDecideProposalMarksNeedsRevisionWhenTargetUnavailable(t *testing.T) {
 	repository := &fakeRepo{proposal: proposal}
 	service := newTestService(repository, &fakeTargets{err: &domain.TargetUnavailableError{Cause: errors.New("missing")}})
 	_, err := service.DecideProposal(context.Background(), proposal.ID, proposal.Revision.ID, proposal.Revision.ChangeHash, domain.DecisionApproved)
-	if err == nil || !repository.markedNeedsReview {
-		t.Fatalf("err=%v marked=%v", err, repository.markedNeedsReview)
+	if err == nil || !repository.markedNeedsReview || repository.markedProposalID != proposal.ID ||
+		repository.markedRevisionID != proposal.Revision.ID || repository.markedVersion != proposal.Version {
+		t.Fatalf("err=%v marked=%v proposal=%s revision=%s version=%d", err, repository.markedNeedsReview, repository.markedProposalID, repository.markedRevisionID, repository.markedVersion)
 	}
 }
 
@@ -1047,6 +1069,35 @@ func TestApplyPreflightMarksNeedsRevisionOnRealBaselineConflict(t *testing.T) {
 	var conflict *HashConflict
 	if !errors.As(err, &conflict) || !repository.markedNeedsReview {
 		t.Fatalf("err = %v, marked = %v", err, repository.markedNeedsReview)
+	}
+}
+
+func TestApplyPreflightRequestsWorkflowCancellationAfterNeedsRevisionFence(t *testing.T) {
+	proposal := approvedProposal(testHash)
+	proposal.Version = 4
+	runID := foundation.ID("workflow-run")
+	proposal.WorkflowRunID = &runID
+	proposal.WorkflowRunStatus = "running"
+	repository := &fakeRepo{proposal: proposal}
+	service := newTestService(repository, &fakeTargets{hash: strings.Repeat("a", 64)})
+	var cancellation RevisionWorkflowCancellation
+	service.SetRevisionWorkflowCanceller(RevisionWorkflowCancellerFunc(func(_ context.Context, command RevisionWorkflowCancellation) (RevisionWorkflowCancellationResult, error) {
+		if !repository.markedNeedsReview {
+			t.Fatal("workflow cancellation requested before needs_revision committed")
+		}
+		cancellation = command
+		return RevisionWorkflowCancellationResult{}, nil
+	}))
+
+	_, err := service.CheckApplyPreflight(context.Background(), proposal.ID, proposal.Revision.ID, proposal.Revision.ChangeHash)
+	var conflict *HashConflict
+	if !errors.As(err, &conflict) {
+		t.Fatalf("error = %v", err)
+	}
+	if cancellation.WorkspaceID != proposal.WorkspaceID || cancellation.ProposalID != proposal.ID ||
+		cancellation.RevisionID != proposal.Revision.ID || cancellation.WorkflowRunID != runID ||
+		!strings.HasPrefix(cancellation.IdempotencyKey, "proposal-revision-cancel:") {
+		t.Fatalf("cancellation = %#v", cancellation)
 	}
 }
 

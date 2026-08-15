@@ -23,10 +23,25 @@ export type SourceVersionItem = {
   ingestionStatus?: SourceIngestionStatus; workflowStatus?: WorkflowStatus; indexStatus?: SourceIndexStatus;
 };
 export type ProposalStatus = "draft" | "validating" | "ready_for_review" | "approved" | "applying" | "applied" | "verifying" | "completed" | "rejected" | "needs_revision" | "deferred" | "apply_failed" | "verify_failed" | "rolled_back" | "cancelled";
+export type ProposalRevisionCapabilityReason =
+  | "AVAILABLE"
+  | "PROPOSAL_REVISION_UNSUPPORTED_TYPE"
+  | "PROPOSAL_REVISION_UNSUPPORTED_MODE"
+  | "PROPOSAL_REVISION_STATUS_NOT_EDITABLE"
+  | "PROPOSAL_REVISION_STALE"
+  | "PROPOSAL_REVISION_WORKFLOW_ACTIVE"
+  | "PROPOSAL_REVISION_SIDE_EFFECT_STARTED"
+	| "PROPOSAL_REVISION_INPUT_TOO_LARGE"
+	| "PROPOSAL_MERGE_ENGINE_UNAVAILABLE";
+export type ProposalRevisionCapability = {
+  editable: boolean;
+  reason: ProposalRevisionCapabilityReason;
+};
 export type ProposalSummary = {
   id: string; workspaceId: string; type: ProposalType;
   status: ProposalStatus; target: string; riskLevel: ProposalRiskLevel; risk: string; revisionId: string;
-  changeHash: string; approval?: ApprovalSnapshot; createdAt: string; updatedAt: string;
+  changeHash: string; version: number; revisionCapability: ProposalRevisionCapability;
+  approval?: ApprovalSnapshot; createdAt: string; updatedAt: string;
 };
 export type WorkflowStatus = "pending" | "running" | "waiting_for_human" | "retry_wait" | "paused" | "succeeded" | "failed" | "cancelled";
 export type WorkflowSummary = {
@@ -119,6 +134,8 @@ export interface DownstreamUpdateRevision extends ProposalRevisionBase {
 interface ProposalDetailBase {
   id: string;
   workspaceId: string;
+  version: number;
+  revisionCapability: ProposalRevisionCapability;
   status: ProposalStatus;
   riskLevel: ProposalRiskLevel;
   approval?: ApprovalSnapshot;
@@ -242,12 +259,27 @@ export type WorkflowListParams = {
   status?: WorkflowStatus;
 };
 
+export type BusinessProblemDetailValue = string | number | boolean | readonly string[];
+export type BusinessProblemDetails = Readonly<Record<string, BusinessProblemDetailValue>>;
+
 export class BusinessApiError extends ApiBoundaryError {
   readonly status: number | undefined;
-  constructor(code: "HTTP_ERROR" | "INVALID_RESPONSE" | "NETWORK_ERROR", message: string, retryable: boolean, status?: number, options?: ErrorOptions) {
+  readonly errorCode: string | undefined;
+  readonly details: BusinessProblemDetails | undefined;
+
+  constructor(
+    code: "HTTP_ERROR" | "INVALID_RESPONSE" | "NETWORK_ERROR",
+    message: string,
+    retryable: boolean,
+    status?: number,
+    options?: ErrorOptions,
+    problem?: { errorCode: string; details?: BusinessProblemDetails },
+  ) {
     super(code, message, retryable, options);
     this.name = "BusinessApiError";
     this.status = status;
+    this.errorCode = problem?.errorCode;
+    this.details = problem?.details;
   }
 }
 
@@ -385,6 +417,26 @@ const boolValue = (r: Record<string, unknown>, field: string): boolean => {
   const value = r[field];
   if (typeof value !== "boolean") throw new BusinessApiError("INVALID_RESPONSE", `响应字段无效：${field}`, false);
   return value;
+};
+const decodeProposalRevisionCapability = (value: unknown): ProposalRevisionCapability => {
+  const capability = record(value, "proposal.revision_capability");
+  exact(capability, ["editable", "reason"], "proposal.revision_capability");
+  const editable = boolValue(capability, "editable");
+  const reason = literalValue(capability, "reason", [
+    "AVAILABLE",
+    "PROPOSAL_REVISION_UNSUPPORTED_TYPE",
+    "PROPOSAL_REVISION_UNSUPPORTED_MODE",
+    "PROPOSAL_REVISION_STATUS_NOT_EDITABLE",
+    "PROPOSAL_REVISION_STALE",
+    "PROPOSAL_REVISION_WORKFLOW_ACTIVE",
+    "PROPOSAL_REVISION_SIDE_EFFECT_STARTED",
+    "PROPOSAL_REVISION_INPUT_TOO_LARGE",
+		"PROPOSAL_MERGE_ENGINE_UNAVAILABLE",
+  ] as const);
+  if (editable !== (reason === "AVAILABLE")) {
+    throw new BusinessApiError("INVALID_RESPONSE", "Proposal Revision capability 语义无效", false);
+  }
+  return { editable, reason };
 };
 const recordArray = (value: unknown, field: string, minimum = 0, maximum = 100): Record<string, unknown>[] => {
   if (!Array.isArray(value)) throw new BusinessApiError("INVALID_RESPONSE", `响应字段无效：${field}`, false);
@@ -615,6 +667,73 @@ const page = <T>(value: unknown, decode: (item: unknown) => T): Page<T> => {
   if (nextCursor !== undefined && (nextCursor.length < 1 || nextCursor.length > 2048)) throw new BusinessApiError("INVALID_RESPONSE", "列表响应 cursor 无效", false);
   return { items: r.items.map(decode), ...(nextCursor === undefined || nextCursor === "" ? {} : { nextCursor }) };
 };
+const problemKeys = ["error_code", "message", "retryable", "workflow_run_id", "details"] as const;
+const problemTokenPattern = /^[A-Z][A-Z0-9_]{0,127}$/;
+const problemDetailKeyPattern = /^[a-z][a-z0-9_]{0,63}$/;
+const decodeProblemDetails = (value: unknown): BusinessProblemDetails | undefined => {
+  if (value === undefined) return undefined;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length > 16) return undefined;
+  const details: Record<string, BusinessProblemDetailValue> = {};
+  for (const [key, item] of entries) {
+    if (!problemDetailKeyPattern.test(key)) return undefined;
+    if (typeof item === "string") {
+      if (utf8Encoder.encode(item).byteLength > 512) return undefined;
+      details[key] = item;
+      continue;
+    }
+    if (typeof item === "number") {
+      if (!Number.isSafeInteger(item)) return undefined;
+      details[key] = item;
+      continue;
+    }
+    if (typeof item === "boolean") {
+      details[key] = item;
+      continue;
+    }
+    if (Array.isArray(item) && item.length <= 1024 && item.every((entry) => typeof entry === "string" && utf8Encoder.encode(entry).byteLength <= 128)) {
+      details[key] = item;
+      continue;
+    }
+    return undefined;
+  }
+  return details;
+};
+const decodeBusinessProblem = (value: unknown, response: Response): BusinessApiError => {
+  const fallback = (): BusinessApiError => new BusinessApiError(
+    "HTTP_ERROR",
+    `业务 API 请求失败（HTTP ${String(response.status)}）。`,
+    response.status >= 500,
+    response.status,
+  );
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return fallback();
+  const problem = value as Record<string, unknown>;
+  if (!hasOnlyKeys(problem, problemKeys)) return fallback();
+  const errorCode = problem.error_code;
+  const message = problem.message;
+  const retryable = problem.retryable;
+  const workflowRunId = problem.workflow_run_id;
+  if (
+    typeof errorCode !== "string"
+    || !problemTokenPattern.test(errorCode)
+    || typeof message !== "string"
+    || message.trim() === ""
+    || utf8Encoder.encode(message).byteLength > 4096
+    || typeof retryable !== "boolean"
+    || workflowRunId !== undefined && (typeof workflowRunId !== "string" || !uuidPattern.test(workflowRunId))
+  ) return fallback();
+  const details = decodeProblemDetails(problem.details);
+  if (problem.details !== undefined && details === undefined) return fallback();
+  return new BusinessApiError(
+    "HTTP_ERROR",
+    message,
+    retryable,
+    response.status,
+    undefined,
+    { errorCode, ...(details === undefined ? {} : { details }) },
+  );
+};
 const request = async (path: string, init?: RequestInit): Promise<unknown> => {
   let response: Response;
   const headers = new Headers(init?.headers); headers.set("Accept", "application/json"); if (init?.body !== undefined) headers.set("Content-Type", "application/json");
@@ -630,12 +749,12 @@ const request = async (path: string, init?: RequestInit): Promise<unknown> => {
     throw new BusinessApiError("INVALID_RESPONSE", "业务 API 返回了无效 JSON。", false, response.status, { cause: error });
   }
   if (!response.ok) {
-    const p = typeof payload === "object" && payload !== null ? payload as Record<string, unknown> : {};
-    const message = typeof p.message === "string" ? p.message : `业务 API 请求失败（HTTP ${String(response.status)}）。`;
-    throw new BusinessApiError("HTTP_ERROR", message, response.status >= 500, response.status);
+    throw decodeBusinessProblem(payload, response);
   }
   return payload;
 };
+
+export const requestBusinessJSON = request;
 
 const decodeSource = (value: unknown, expectedWorkspaceId: string): SourceVersionItem => {
   const r = record(value, "source_version");
@@ -648,7 +767,7 @@ const decodeSource = (value: unknown, expectedWorkspaceId: string): SourceVersio
 };
 const decodeProposal = (value: unknown, expectedWorkspaceId: string): ProposalSummary => {
   const r = record(value, "proposal");
-  exact(r, ["id", "workspace_id", "proposal_type", "status", "target", "risk_level", "risk", "revision_id", "change_hash", "approval", "created_at", "updated_at"], "proposal");
+  exact(r, ["id", "workspace_id", "proposal_type", "status", "target", "risk_level", "risk", "revision_id", "change_hash", "version", "revision_capability", "approval", "created_at", "updated_at"], "proposal");
   const workspaceId = boundValue(uuidValue(r, "workspace_id"), expectedWorkspaceId, "proposal.workspace_id");
   const id = uuidValue(r, "id");
   const type = literalValue(r, "proposal_type", ["file_patch", "restore_document", "knowledge_change", "publish_artifact", "downstream_update"]);
@@ -663,7 +782,13 @@ const decodeProposal = (value: unknown, expectedWorkspaceId: string): ProposalSu
     throw new BusinessApiError("INVALID_RESPONSE", "Typed Proposal 摘要必须使用 HIGH 风险等级", false);
   }
   const approval = decodeProposalApproval(r.approval, id, revisionId, changeHash, type);
-  return { id, workspaceId, type, status: proposalStatus(r, "status"), target, riskLevel, risk: stringValue(r, "risk")!, revisionId, changeHash, ...(approval === undefined ? {} : { approval }), createdAt: dateTimeValue(r, "created_at"), updatedAt: dateTimeValue(r, "updated_at") };
+  const version = integerValue(r, "version", 1);
+  const revisionCapability = decodeProposalRevisionCapability(requiredFieldValue(r, "revision_capability"));
+  return {
+    id, workspaceId, type, status: proposalStatus(r, "status"), target, riskLevel, risk: stringValue(r, "risk")!, revisionId, changeHash,
+    version, revisionCapability,
+    ...(approval === undefined ? {} : { approval }), createdAt: dateTimeValue(r, "created_at"), updatedAt: dateTimeValue(r, "updated_at"),
+  };
 };
 const decodeWorkflow = (value: unknown, expectedWorkspaceId: string): WorkflowSummary => {
   const r = record(value, "workflow");
@@ -846,17 +971,19 @@ export const listWorkflows = (workspaceId: string, params: WorkflowListParams = 
   return request(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/workflows${query.size ? `?${query}` : ""}`, signal === undefined ? undefined : { signal }).then((v) => page(v, (item) => decodeWorkflow(item, workspaceId)));
 };
 
-export const getProposal = (workspaceId: string, id: string, signal?: AbortSignal): Promise<ProposalDetail> => request(`/api/v1/proposals/${encodeURIComponent(id)}`, signal === undefined ? undefined : { signal }).then(async (v) => {
+export const decodeProposalDetail = async (v: unknown, workspaceId: string, id: string): Promise<ProposalDetail> => {
   const r = record(v, "proposal");
   const type = literalValue(r, "proposal_type", ["file_patch", "restore_document", "knowledge_change", "publish_artifact", "downstream_update"]);
   exact(r, fileWritebackProposalType(type)
-    ? ["proposal_type", "id", "workspace_id", "target_path", "status", "risk_level", "revision", "approval", "created_at", "updated_at"]
-    : ["proposal_type", "id", "workspace_id", "status", "risk_level", "revision", "approval", "created_at", "updated_at"], "proposal");
+    ? ["proposal_type", "id", "workspace_id", "target_path", "status", "risk_level", "version", "revision_capability", "revision", "approval", "created_at", "updated_at"]
+    : ["proposal_type", "id", "workspace_id", "status", "risk_level", "version", "revision_capability", "revision", "approval", "created_at", "updated_at"], "proposal");
   const approvalValue = requiredFieldValue(r, "approval");
   const revision = record(r.revision, "proposal.revision");
   const base = {
     id: boundValue(uuidValue(r, "id"), id, "proposal.id"),
     workspaceId: boundValue(uuidValue(r, "workspace_id"), workspaceId, "proposal.workspace_id"),
+    version: integerValue(r, "version", 1),
+    revisionCapability: decodeProposalRevisionCapability(r.revision_capability),
     status: proposalStatus(r, "status"),
     riskLevel: proposalRiskLevel(r, "risk_level"),
     createdAt: dateTimeValue(r, "created_at"),
@@ -1076,7 +1203,10 @@ export const getProposal = (workspaceId: string, id: string, signal?: AbortSigna
     revision: decodedRevision,
     ...(approval === undefined ? {} : { approval }),
   };
-});
+};
+export const getProposal = (workspaceId: string, id: string, signal?: AbortSignal): Promise<ProposalDetail> =>
+  request(`/api/v1/proposals/${encodeURIComponent(id)}`, signal === undefined ? undefined : { signal })
+    .then((value) => decodeProposalDetail(value, workspaceId, id));
 export const getProposalCurrentContent = (workspaceId: string, id: string, binding: { targetPath: string; targetMode: ProposalTargetMode; baseHash: string }, signal?: AbortSignal): Promise<ProposalCurrentContent> => request(`/api/v1/proposals/${encodeURIComponent(id)}/current-content`, signal === undefined ? undefined : { signal }).then((v) => {
   const r = record(v, "proposal_current_content");
   exact(r, ["proposal_id", "workspace_id", "target_path", "target_mode", "content", "current_hash", "base_hash", "base_hash_match"], "proposal_current_content");

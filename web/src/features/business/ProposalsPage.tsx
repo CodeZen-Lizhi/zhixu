@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, BookUp, CalendarDays, Check, Clock3, FileDiff, GitMerge, History, RotateCcw, X } from "lucide-react";
 import { Component, lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
@@ -15,6 +15,11 @@ import {
   type ProposalDetail,
   type ProposalRiskLevel,
 } from "../../api/business";
+import {
+  listProposalRevisions,
+  type AppendProposalRevisionResult,
+  type ProposalRevisionHistoryBinding,
+} from "../../api/business-revisions";
 import { useActiveWorkspaceId } from "../../app/active-workspace";
 import {
   Badge,
@@ -29,9 +34,11 @@ import {
 import { canonicalLocalDate, formatElapsedDuration, localDateStartRfc3339 } from "../../shared/time";
 import { BusinessWorkspaceGate } from "./BusinessWorkspaceGate";
 import { useScopedCursor } from "./pagination";
+import { ProposalRevisionHistorySelector, ProposalRevisionHistoryView } from "./ProposalRevisionHistory";
 import { parseProposalUrlState, proposalStatusOptions, writeProposalUrlState, type ProposalUrlState } from "./url-state";
 
 const MonacoDiffViewer = lazy(() => import("./MonacoDiffViewer").then((module) => ({ default: module.MonacoDiffViewer })));
+const ProposalRevisionWorkbench = lazy(() => import("./ProposalRevisionWorkbench").then((module) => ({ default: module.ProposalRevisionWorkbench })));
 type ProposalDecisionAction = "approved" | "rejected" | "redispatch";
 type DiffLoadStatus = "idle" | "loading" | "ready" | "error";
 interface ProposalDecisionSnapshot {
@@ -226,6 +233,8 @@ export const ProposalDetailPage = () => {
   const workspaceId = useActiveWorkspaceId();
   const queryClient = useQueryClient();
   const [confirm, setConfirm] = useState<ProposalDecisionSnapshot>();
+  const [revisionWorkbenchOpen, setRevisionWorkbenchOpen] = useState(false);
+  const [revisionSelection, setRevisionSelection] = useState<{ currentRevisionId: string; selectedRevisionId: string }>();
   const [diffLoadState, setDiffLoadState] = useState<DiffLoadState>({ identity: "", status: "idle", message: "" });
   const [diffRetryNonce, setDiffRetryNonce] = useState(0);
   const decisionTriggerRef = useRef<HTMLButtonElement>(null);
@@ -238,6 +247,38 @@ export const ProposalDetailPage = () => {
     gcTime: 0,
   });
   const proposal = proposalQuery.data;
+  const revisionHistoryBinding: ProposalRevisionHistoryBinding | undefined = proposal?.type === "file_patch" && proposal.revision.targetMode === "REPLACE"
+    ? { workspaceId, proposalId, targetPath: proposal.targetPath }
+    : undefined;
+  const revisionHistoryQuery = useInfiniteQuery({
+    queryKey: ["business", workspaceId, "proposal-revisions", proposalId],
+    queryFn: ({ pageParam, signal }) => {
+      if (revisionHistoryBinding === undefined) throw new Error("Revision history 绑定不完整");
+      return listProposalRevisions(revisionHistoryBinding, {
+        limit: 30,
+        ...(pageParam === undefined ? {} : { beforeRevisionNo: pageParam }),
+      }, signal);
+    },
+    initialPageParam: undefined as number | undefined,
+    getNextPageParam: (lastPage) => lastPage.nextBeforeRevisionNo,
+    enabled: revisionHistoryBinding !== undefined,
+    retry: false,
+    gcTime: 0,
+  });
+  const revisionHistoryItems = revisionHistoryQuery.data?.pages.flatMap((page) => page.items) ?? [];
+  const selectedRevisionId = revisionSelection === undefined
+    ? proposal?.revision.id ?? ""
+    : revisionSelection.selectedRevisionId === revisionSelection.currentRevisionId
+      && revisionSelection.currentRevisionId !== proposal?.revision.id
+      ? proposal?.revision.id ?? ""
+      : revisionSelection.selectedRevisionId;
+  const selectRevision = (revisionId: string): void => {
+    if (proposal === undefined) return;
+    setRevisionSelection({ currentRevisionId: proposal.revision.id, selectedRevisionId: revisionId });
+  };
+  const selectedHistoricalRevision = revisionHistoryItems.find((item) =>
+    item.revisionId === selectedRevisionId && item.revisionId !== proposal?.revision.id);
+  const viewingHistoricalRevision = selectedHistoricalRevision !== undefined;
   const confirmMatchesProposal = confirm !== undefined
     && confirm.proposalType === proposal?.type
     && confirm.revisionId === proposal.revision.id
@@ -257,7 +298,7 @@ export const ProposalDetailPage = () => {
       if (fileWritebackProposal === undefined) throw new Error("文件型提案绑定不完整");
       return readCurrentContent(workspaceId, proposalId, fileWritebackProposal, signal);
     },
-    enabled: Boolean(workspaceId && proposalId && fileWritebackProposal),
+    enabled: Boolean(workspaceId && proposalId && fileWritebackProposal && !revisionWorkbenchOpen && !viewingHistoricalRevision),
     retry: false,
     gcTime: 0,
   });
@@ -271,22 +312,39 @@ export const ProposalDetailPage = () => {
       return { identity: diffIdentity, status: "loading", message: "" };
     });
   }, [diffIdentity]);
-  const refetchProposalFacts = async () => {
+  const refetchProposalFacts = async (): Promise<boolean> => {
     const previousCurrentContentKey = proposalCurrentContentKey;
     const result = await proposalQuery.refetch();
     const freshProposal = result.data;
-    if (result.isError || !isFileWritebackProposal(freshProposal)) return;
+    if (result.isError) return false;
+    if (!isFileWritebackProposal(freshProposal)) return true;
     const freshCurrentContentKey = currentContentKey(workspaceId, proposalId, freshProposal);
     if (JSON.stringify(previousCurrentContentKey) !== JSON.stringify(freshCurrentContentKey)) {
       await queryClient.cancelQueries({ queryKey: previousCurrentContentKey, exact: true });
       queryClient.removeQueries({ queryKey: previousCurrentContentKey, exact: true });
     }
-    await queryClient.fetchQuery({
-      queryKey: freshCurrentContentKey,
-      queryFn: ({ signal }) => readCurrentContent(workspaceId, proposalId, freshProposal, signal),
-      staleTime: 0,
-      gcTime: 0,
-    });
+    try {
+      await queryClient.fetchQuery({
+        queryKey: freshCurrentContentKey,
+        queryFn: ({ signal }) => readCurrentContent(workspaceId, proposalId, freshProposal, signal),
+        staleTime: 0,
+        gcTime: 0,
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const handleRevisionCreated = async (result: AppendProposalRevisionResult): Promise<void> => {
+    queryClient.setQueryData(proposalQueryKey, result.proposal);
+    const refreshed = await refetchProposalFacts();
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["business", workspaceId, "proposals"] }),
+      queryClient.invalidateQueries({ queryKey: ["business", workspaceId, "workflows"] }),
+      queryClient.invalidateQueries({ queryKey: ["business", workspaceId, "proposal-revisions", proposalId] }),
+      queryClient.invalidateQueries({ queryKey: ["business", workspaceId, "proposal-revision", proposalId] }),
+    ]);
+    if (!refreshed) throw new Error("最新 Proposal 或当前 Workspace 正文读取失败");
   };
   const mutation = useMutation({
     mutationFn: async (snapshot: ProposalDecisionSnapshot) => {
@@ -343,7 +401,7 @@ export const ProposalDetailPage = () => {
   });
 
   if (!workspaceId) return <BusinessWorkspaceGate description="提案详情必须绑定已连接 Workspace；未连接时不会读取版本、正文或审批结果。" />;
-  if (proposalQuery.isError) {
+  if (proposalQuery.isError && proposal === undefined) {
     return <div className="page-stack"><ErrorState title="提案读取失败" description={proposalQuery.error.message} onRetry={() => void proposalQuery.refetch()} /></div>;
   }
   if (proposalQuery.isPending || !proposal) {
@@ -356,6 +414,12 @@ export const ProposalDetailPage = () => {
   const knowledgeRevision = proposal.type === "knowledge_change" ? proposal.revision : undefined;
   const publishRevision = proposal.type === "publish_artifact" ? proposal.revision : undefined;
   const downstreamRevision = proposal.type === "downstream_update" ? proposal.revision : undefined;
+  const revisionEditable = proposal.type === "file_patch"
+    && proposal.revision.targetMode === "REPLACE"
+    && proposal.revisionCapability.editable;
+  const revisionEntryLabel = proposal.status === "needs_revision" || currentContentQuery.data?.baseHashMatch === false
+    ? "进入三方合并"
+    : "编辑修订版本";
   const versionBindingLabel = restoreRevision ? "恢复预览哈希" : fileRevision?.targetMode === "CREATE_ONLY" ? "缺失证明" : fileRevision ? "基线哈希" : publishRevision ? "产物内容哈希" : downstreamRevision ? "目标基线版本" : "版本来源";
   const versionBindingValue = restoreRevision?.restore.previewHash ?? fileRevision?.baseHash ?? publishRevision?.publication.contentHash ?? (downstreamRevision ? `v${String(downstreamRevision.update.baseVersion)}` : "结构化节点版本");
   const proposedContent = fileRevision?.content ?? "";
@@ -449,6 +513,49 @@ export const ProposalDetailPage = () => {
       <div className="hash-card"><span>变更哈希</span><code>{changeHash.slice(0, 16)}…</code></div>
     </div>
 
+    {revisionHistoryBinding !== undefined && !revisionWorkbenchOpen ? <ProposalRevisionHistorySelector
+      items={revisionHistoryItems}
+      selectedRevisionId={selectedRevisionId}
+      loading={revisionHistoryQuery.isPending}
+      loadingMore={revisionHistoryQuery.isFetchingNextPage}
+      hasMore={revisionHistoryQuery.hasNextPage}
+      {...(revisionHistoryQuery.isError ? { errorMessage: revisionHistoryQuery.error.message } : {})}
+      onSelect={selectRevision}
+      onRetry={() => void revisionHistoryQuery.refetch()}
+      onLoadMore={() => void revisionHistoryQuery.fetchNextPage()}
+    /> : null}
+
+    {selectedHistoricalRevision !== undefined && revisionHistoryBinding !== undefined
+      ? <ProposalRevisionHistoryView
+        binding={revisionHistoryBinding}
+        item={selectedHistoricalRevision}
+        onReturnToLatest={() => selectRevision(proposal.revision.id)}
+      />
+      : revisionWorkbenchOpen && proposal.type === "file_patch" && proposal.revision.targetMode === "REPLACE"
+        ? <Suspense fallback={<Card><p>正在加载 Revision 工作台...</p></Card>}>
+          <ProposalRevisionWorkbench
+            binding={{
+              workspaceId,
+              proposalId,
+              expectedProposalVersion: proposal.version,
+              sourceRevisionId: proposal.revision.id,
+              sourceRevisionNo: proposal.revision.revisionNo,
+              sourceChangeHash: proposal.revision.changeHash,
+              targetPath: proposal.targetPath,
+            }}
+            authorityEditable={revisionEditable}
+            evidenceSummary={proposal.revision.evidenceSummary}
+            risk={proposal.revision.risk}
+            rollbackPlan={proposal.revision.rollbackPlan}
+            riskLevel={proposal.riskLevel}
+            onClose={() => setRevisionWorkbenchOpen(false)}
+            onRevisionCreated={handleRevisionCreated}
+            onAuthorityStale={async () => {
+              if (!await refetchProposalFacts()) throw new Error("最新 Proposal 或当前 Workspace 正文读取失败");
+            }}
+          />
+        </Suspense>
+        : <>
     <div className="review-layout">
       <main>
         <Card>
@@ -549,6 +656,7 @@ export const ProposalDetailPage = () => {
       <aside className="review-sidebar">
         <Card>
           <CardHeader eyebrow="变更控制" title="决策" />
+          {revisionEditable ? <Button className="full-button" variant="secondary" onClick={() => setRevisionWorkbenchOpen(true)}><GitMerge size={16} />{revisionEntryLabel}</Button> : null}
           {proposal.status === "needs_revision" || (fileWriteback && currentContentQuery.data?.baseHashMatch === false)
             ? <UnavailableState title="基线已漂移" description="批准已被阻止；请重新生成提案修订版本。" />
             : ready ? <>
@@ -566,7 +674,7 @@ export const ProposalDetailPage = () => {
             </> : writebackState === "legacy_unrecoverable" ? <UnavailableState title="历史审批缺少 Git 基线" description="该记录可只读查看，但服务端禁止自动补建写回 Workflow；请按恢复手册人工处理或重新生成提案。" />
               : <UnavailableState title="当前状态不可决策" description="该提案已有决定或已进入后续状态；页面不会重复显示批准/驳回操作。" />}
           {mutation.isError ? <p className="form-error" role="alert">{mutation.error.message}</p> : null}
-          <p className="sidebar-note">暂缓、编辑后批准、批量审批与完整三方合并尚未交付。</p>
+          {revisionEditable ? <p className="sidebar-note">创建新 Revision 后，当前审批事实会重置并要求重新审阅。</p> : null}
         </Card>
         {fileWriteback && proposal.status === "approved" ? <Card>
           <CardHeader eyebrow="安全写回" title="写回前检查" />
@@ -615,5 +723,6 @@ export const ProposalDetailPage = () => {
         <Button variant={activeConfirm?.action === "rejected" ? "danger" : "primary"} onClick={() => { if (activeConfirm !== undefined) mutation.mutate(activeConfirm); }} disabled={mutation.isPending || activeConfirm === undefined}>{mutation.isPending ? "提交中…" : "确认提交"}</Button>
       </div>
     </Dialog>
+    </>}
   </div>;
 };

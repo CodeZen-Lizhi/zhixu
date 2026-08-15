@@ -226,6 +226,12 @@ export const EventStoreProvider = ({ children }: { children: ReactNode }) => {
         await invalidate(proposalId === undefined
           ? ["business", workspaceId, "proposal-current-content"]
           : ["business", workspaceId, "proposal-current-content", proposalId]);
+        await invalidate(proposalId === undefined
+          ? ["business", workspaceId, "proposal-revisions"]
+          : ["business", workspaceId, "proposal-revisions", proposalId]);
+        await invalidate(proposalId === undefined
+          ? ["business", workspaceId, "proposal-revision"]
+          : ["business", workspaceId, "proposal-revision", proposalId]);
         if (event.type.startsWith("approval.")) await invalidate(["business", workspaceId, "workflows"]);
       }
       if (workflowEvent) {
@@ -236,6 +242,8 @@ export const EventStoreProvider = ({ children }: { children: ReactNode }) => {
         await invalidate(["business", workspaceId, "proposals"]);
         await invalidate(["business", workspaceId, "proposal"]);
         await invalidate(["business", workspaceId, "proposal-current-content"]);
+        await invalidate(["business", workspaceId, "proposal-revisions"]);
+        await invalidate(["business", workspaceId, "proposal-revision"]);
       }
       if (workflowEvent || sourceEvent) await invalidate(["business", workspaceId, "sources"]);
 			if (captureEvent || sourceEvent || workflowEvent) await invalidate(["captures", workspaceId]);

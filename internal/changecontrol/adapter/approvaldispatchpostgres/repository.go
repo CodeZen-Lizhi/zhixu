@@ -73,17 +73,20 @@ func (r *ApprovalDispatchRepository) DecideAndDispatch(ctx context.Context, comm
 
 	var workspaceID, proposalType, status, revisionHash, targetPath, targetMode, baseHash string
 	var proposalVersion int64
-	var workflowRunID *string
+	var legacyWorkflowRunID, revisionWorkflowRunID *string
 	var restoreDocumentID, restoreExpectedHead, restoreCurrentContentHash *string
 	var restoreExpectedDocumentVersion *int64
 	err = tx.QueryRow(ctx, `
-			SELECT p.workspace_id::text,p.proposal_type,p.status,p.version,p.workflow_run_id::text,r.change_hash,r.target_path,r.target_mode,r.base_hash,
+			SELECT p.workspace_id::text,p.proposal_type,p.status,p.version,p.workflow_run_id::text,d.workflow_run_id::text,
+			       r.change_hash,r.target_path,r.target_mode,r.base_hash,
 			       r.restore_document_id::text,r.restore_expected_head,r.restore_expected_document_version,r.restore_current_content_hash
 		FROM change_control.proposal p
 		JOIN change_control.proposal_revision r ON r.proposal_id=p.id AND r.id=$2
-		WHERE p.id=$1
+		LEFT JOIN change_control.proposal_revision_dispatch d
+		  ON d.proposal_id=p.id AND d.revision_id=r.id
+		WHERE p.id=$1 AND (p.current_revision_id=r.id OR p.current_revision_id IS NULL)
 		FOR UPDATE OF p,r`, string(command.Approval.ProposalID), string(command.Approval.RevisionID)).Scan(
-		&workspaceID, &proposalType, &status, &proposalVersion, &workflowRunID, &revisionHash, &targetPath, &targetMode, &baseHash,
+		&workspaceID, &proposalType, &status, &proposalVersion, &legacyWorkflowRunID, &revisionWorkflowRunID, &revisionHash, &targetPath, &targetMode, &baseHash,
 		&restoreDocumentID, &restoreExpectedHead, &restoreExpectedDocumentVersion, &restoreCurrentContentHash,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -123,10 +126,10 @@ func (r *ApprovalDispatchRepository) DecideAndDispatch(ctx context.Context, comm
 	}
 
 	if command.Approval.Decision == domain.DecisionRejected {
-		return r.persistRejected(ctx, tx, command, foundation.ID(workspaceID), proposalVersion, status, workflowRunID, existingErr == nil)
+		return r.persistRejected(ctx, tx, command, foundation.ID(workspaceID), proposalVersion, status, revisionWorkflowRunID, existingErr == nil)
 	}
-	if workflowRunID != nil {
-		return r.replayApproved(ctx, tx, command, foundation.ID(*workflowRunID))
+	if revisionWorkflowRunID != nil {
+		return r.replayApproved(ctx, tx, command, foundation.ID(*revisionWorkflowRunID))
 	}
 	if normalizedProposalType == domain.ProposalTypeRestoreDocument {
 		var documentPath, lifecycle, currentRevisionID string
@@ -172,20 +175,28 @@ func (r *ApprovalDispatchRepository) DecideAndDispatch(ctx context.Context, comm
 	if runtimeResult.Replayed && existingErr != nil {
 		return changedispatch.Result{}, foundation.NewError(foundation.ErrorConsistencyViolation, "APPROVAL_DISPATCH_RUNTIME_ORPHANED", false, errors.New("workflow exists without its approval"))
 	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO change_control.proposal_revision_dispatch(
+			workspace_id,proposal_id,revision_id,approval_id,workflow_run_id,created_at
+		) VALUES($1,$2,$3,$4,$5,$6)`, workspaceID, string(command.Approval.ProposalID), string(command.Approval.RevisionID), string(command.Approval.ID), string(runtimeResult.Run.ID), command.Approval.DecidedAt.UTC()); err != nil {
+		return changedispatch.Result{}, classifyDispatch(err, "APPROVAL_DISPATCH_BINDING_CREATE_FAILED")
+	}
 	if existingErr != nil {
 		tag, updateErr := tx.Exec(ctx, `UPDATE change_control.proposal
-			SET status=$2,workflow_run_id=$3,updated_at=$4,version=version+1
-			WHERE id=$1 AND status=$5 AND workflow_run_id IS NULL`, string(command.Approval.ProposalID), string(domain.StatusApproved), string(runtimeResult.Run.ID), command.Approval.DecidedAt.UTC(), string(domain.StatusReady))
+			SET status=$2,workflow_run_id=COALESCE(workflow_run_id,$3),updated_at=$4,version=version+1
+			WHERE id=$1 AND status=$5 AND version=$6
+			  AND (current_revision_id=$7 OR current_revision_id IS NULL)`, string(command.Approval.ProposalID), string(domain.StatusApproved), string(runtimeResult.Run.ID), command.Approval.DecidedAt.UTC(), string(domain.StatusReady), proposalVersion, string(command.Approval.RevisionID))
 		if updateErr != nil {
 			return changedispatch.Result{}, classifyDispatch(updateErr, "APPROVAL_DISPATCH_PROPOSAL_UPDATE_FAILED")
 		}
 		if tag.RowsAffected() != 1 {
 			return changedispatch.Result{}, foundation.NewError(foundation.ErrorVersionConflict, "PROPOSAL_NOT_READY_FOR_REVIEW", false, errors.New("proposal state changed"))
 		}
-	} else {
+	} else if legacyWorkflowRunID == nil {
 		tag, updateErr := tx.Exec(ctx, `UPDATE change_control.proposal
-			SET workflow_run_id=$2,updated_at=CURRENT_TIMESTAMP,version=version+1
-			WHERE id=$1 AND status=$3 AND workflow_run_id IS NULL`, string(command.Approval.ProposalID), string(runtimeResult.Run.ID), string(domain.StatusApproved))
+			SET workflow_run_id=COALESCE(workflow_run_id,$2),updated_at=CURRENT_TIMESTAMP,version=version+1
+			WHERE id=$1 AND status=$3 AND version=$4
+			  AND (current_revision_id=$5 OR current_revision_id IS NULL)`, string(command.Approval.ProposalID), string(runtimeResult.Run.ID), string(domain.StatusApproved), proposalVersion, string(command.Approval.RevisionID))
 		if updateErr != nil {
 			return changedispatch.Result{}, classifyDispatch(updateErr, "APPROVAL_DISPATCH_PROPOSAL_BIND_FAILED")
 		}
@@ -199,8 +210,8 @@ func (r *ApprovalDispatchRepository) DecideAndDispatch(ctx context.Context, comm
 	return dispatchResult(command.Approval, runtimeResult, changedispatch.StatusQueued, false), nil
 }
 
-func (r *ApprovalDispatchRepository) persistRejected(ctx context.Context, tx pgx.Tx, command changedispatch.Command, workspaceID foundation.ID, proposalVersion int64, status string, workflowRunID *string, replayed bool) (changedispatch.Result, error) {
-	if workflowRunID != nil {
+func (r *ApprovalDispatchRepository) persistRejected(ctx context.Context, tx pgx.Tx, command changedispatch.Command, workspaceID foundation.ID, proposalVersion int64, status string, revisionWorkflowRunID *string, replayed bool) (changedispatch.Result, error) {
+	if revisionWorkflowRunID != nil {
 		return changedispatch.Result{}, foundation.NewError(foundation.ErrorConsistencyViolation, "APPROVAL_DISPATCH_BINDING_CONFLICT", false, errors.New("rejected proposal is bound to a workflow"))
 	}
 	if replayed {
@@ -225,7 +236,7 @@ func (r *ApprovalDispatchRepository) persistRejected(ctx context.Context, tx pgx
 		VALUES($1,$2,$3,$4,$5,NULL,$6)`, string(command.Approval.ID), string(command.Approval.ProposalID), string(command.Approval.RevisionID), command.Approval.ChangeHash, string(command.Approval.Decision), command.Approval.DecidedAt.UTC()); err != nil {
 		return changedispatch.Result{}, classifyDispatch(err, "APPROVAL_CREATE_FAILED")
 	}
-	tag, err := tx.Exec(ctx, `UPDATE change_control.proposal SET status=$2,updated_at=$3,version=version+1 WHERE id=$1 AND status=$4 AND workflow_run_id IS NULL`, string(command.Approval.ProposalID), string(domain.StatusRejected), command.Approval.DecidedAt.UTC(), string(domain.StatusReady))
+	tag, err := tx.Exec(ctx, `UPDATE change_control.proposal SET status=$2,updated_at=$3,version=version+1 WHERE id=$1 AND status=$4 AND version=$5 AND (current_revision_id=$6 OR current_revision_id IS NULL)`, string(command.Approval.ProposalID), string(domain.StatusRejected), command.Approval.DecidedAt.UTC(), string(domain.StatusReady), proposalVersion, string(command.Approval.RevisionID))
 	if err != nil {
 		return changedispatch.Result{}, classifyDispatch(err, "PROPOSAL_DECISION_UPDATE_FAILED")
 	}

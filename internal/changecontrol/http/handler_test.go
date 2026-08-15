@@ -112,7 +112,7 @@ func TestCreateDownstreamUpdateProposalContract(t *testing.T) {
 	}
 	var response map[string]any
 	decode(t, recorder, &response)
-	assertJSONFields(t, "create response", response, "proposal_type", "id", "workspace_id", "status", "risk_level", "revision", "approval", "created_at", "updated_at", "replayed")
+	assertJSONFields(t, "create response", response, "proposal_type", "id", "workspace_id", "status", "risk_level", "version", "revision_capability", "revision", "approval", "created_at", "updated_at", "replayed")
 	if response["proposal_type"] != string(domain.ProposalTypeDownstreamUpdate) || response["risk_level"] != string(domain.ProposalRiskLevelHigh) || response["replayed"] != false {
 		t.Fatalf("proposal=%#v", response)
 	}
@@ -290,6 +290,28 @@ func TestApprovalAndPreflightContracts(t *testing.T) {
 	}
 }
 
+func TestApprovalAndPreflightExposeRetryableWorkflowCancellationFailure(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		body string
+	}{
+		{name: "approval", path: "/api/v1/proposals/" + string(testProposalID) + "/approvals", body: `{"revision_id":"` + string(testRevisionID) + `","change_hash":"` + testChangeHash + `","decision":"approved"}`},
+		{name: "preflight", path: "/api/v1/proposals/" + string(testProposalID) + "/apply-preflight", body: `{"revision_id":"` + string(testRevisionID) + `","approved_change_hash":"` + testChangeHash + `"}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service := &fakeService{err: foundation.NewError(foundation.ErrorDependencyUnavailable, "PROPOSAL_REVISION_WORKFLOW_CANCEL_UNAVAILABLE", true, errors.New("secret workflow dependency"))}
+			recorder := serve(t, service, http.MethodPost, test.path, test.body)
+			if recorder.Code != http.StatusServiceUnavailable ||
+				!strings.Contains(recorder.Body.String(), `"error_code":"PROPOSAL_REVISION_WORKFLOW_CANCEL_UNAVAILABLE"`) ||
+				!strings.Contains(recorder.Body.String(), `"retryable":true`) || strings.Contains(recorder.Body.String(), "secret") {
+				t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+}
+
 func TestProposalCurrentContentContract(t *testing.T) {
 	service := &fakeService{currentContent: application.ProposalCurrentContent{
 		ProposalID: testProposalID, WorkspaceID: testWorkspaceID, TargetPath: "notes/a.md", Content: "current",
@@ -299,7 +321,7 @@ func TestProposalCurrentContentContract(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
-	if recorder.Header().Get("Cache-Control") != "no-store" {
+	if recorder.Header().Get("Cache-Control") != "private, no-store" {
 		t.Fatalf("Cache-Control=%q", recorder.Header().Get("Cache-Control"))
 	}
 	var response proposalCurrentContentResponse
@@ -311,13 +333,16 @@ func TestProposalCurrentContentContract(t *testing.T) {
 
 func TestProposalListBindsFiltersToCursor(t *testing.T) {
 	now := time.Date(2026, 7, 22, 1, 0, 0, 0, time.UTC)
-	service := &fakeService{listItems: []domain.ProposalListItem{{ProposalID: testProposalID, WorkspaceID: testWorkspaceID, Type: domain.ProposalTypeFilePatch, Status: domain.StatusReady, RiskLevel: domain.ProposalRiskLevelLow, RevisionID: testRevisionID, CreatedAt: now, UpdatedAt: now}}, listHasMore: true}
+	service := &fakeService{listItems: []domain.ProposalListItem{{ProposalID: testProposalID, WorkspaceID: testWorkspaceID, Type: domain.ProposalTypeFilePatch, Status: domain.StatusReady, RiskLevel: domain.ProposalRiskLevelLow, RevisionID: testRevisionID, Version: 1, RevisionCapability: listCapability(domain.ProposalTypeFilePatch, domain.StatusReady), CreatedAt: now, UpdatedAt: now}}, listHasMore: true}
 	first := serve(t, service, http.MethodGet, "/api/v1/workspaces/"+string(testWorkspaceID)+"/proposals?status=ready_for_review&proposal_type=file_patch&limit=1", "")
 	if first.Code != http.StatusOK || service.listQuery.Status != domain.StatusReady || service.listQuery.Type != domain.ProposalTypeFilePatch {
 		t.Fatalf("status=%d query=%+v body=%s", first.Code, service.listQuery, first.Body.String())
 	}
 	var page proposalPageResponse
 	decode(t, first, &page)
+	if len(page.Items) != 1 || page.Items[0].Version != 1 || !page.Items[0].RevisionCapability.Editable || page.Items[0].RevisionCapability.Reason != string(domain.ProposalRevisionAvailable) {
+		t.Fatalf("page=%#v", page)
+	}
 	legacyCursor := cursorWithoutProposalKind(t, page.NextCursor)
 	legacy := serve(t, service, http.MethodGet, "/api/v1/workspaces/"+string(testWorkspaceID)+"/proposals?status=ready_for_review&proposal_type=file_patch&limit=1&cursor="+legacyCursor, "")
 	if legacy.Code != http.StatusBadRequest || service.listCalls != 1 {
@@ -329,8 +354,33 @@ func TestProposalListBindsFiltersToCursor(t *testing.T) {
 	}
 }
 
+func TestProposalListRejectsInvalidRevisionCapabilityProjection(t *testing.T) {
+	tests := []struct {
+		name       string
+		version    int64
+		capability domain.ProposalRevisionCapability
+	}{
+		{name: "missing version", capability: listCapability(domain.ProposalTypeFilePatch, domain.StatusReady)},
+		{name: "missing capability", version: 1},
+		{name: "inconsistent capability", version: 1, capability: domain.ProposalRevisionCapability{Editable: true, Reason: domain.ProposalRevisionStatusNotEditable}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service := &fakeService{listItems: []domain.ProposalListItem{{
+				ProposalID: testProposalID, WorkspaceID: testWorkspaceID, Type: domain.ProposalTypeFilePatch,
+				Status: domain.StatusReady, RiskLevel: domain.ProposalRiskLevelLow, RevisionID: testRevisionID,
+				Version: test.version, RevisionCapability: test.capability,
+			}}}
+			recorder := serve(t, service, http.MethodGet, "/api/v1/workspaces/"+string(testWorkspaceID)+"/proposals", "")
+			if recorder.Code != http.StatusInternalServerError || !strings.Contains(recorder.Body.String(), "PROPOSAL_REVISION_CAPABILITY_INVALID") {
+				t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+}
+
 func TestProposalListRejectsLowercaseRiskFilter(t *testing.T) {
-	service := &fakeService{listItems: []domain.ProposalListItem{{ProposalID: testProposalID, WorkspaceID: testWorkspaceID, Type: domain.ProposalTypeFilePatch, Status: domain.StatusReady, RiskLevel: domain.ProposalRiskLevelHigh, RevisionID: testRevisionID}}}
+	service := &fakeService{listItems: []domain.ProposalListItem{{ProposalID: testProposalID, WorkspaceID: testWorkspaceID, Type: domain.ProposalTypeFilePatch, Status: domain.StatusReady, RiskLevel: domain.ProposalRiskLevelHigh, RevisionID: testRevisionID, Version: 1, RevisionCapability: listCapability(domain.ProposalTypeFilePatch, domain.StatusReady)}}}
 	recorder := serve(t, service, http.MethodGet, "/api/v1/workspaces/"+string(testWorkspaceID)+"/proposals?risk=high", "")
 	if recorder.Code != http.StatusBadRequest || service.listCalls != 0 {
 		t.Fatalf("status=%d risk=%q body=%s", recorder.Code, service.listQuery.RiskLevel, recorder.Body.String())
@@ -346,7 +396,7 @@ func TestProposalListRejectsPaddedRiskFilter(t *testing.T) {
 }
 
 func TestProposalListAcceptsUppercaseRiskFilter(t *testing.T) {
-	service := &fakeService{listItems: []domain.ProposalListItem{{ProposalID: testProposalID, WorkspaceID: testWorkspaceID, Type: domain.ProposalTypeFilePatch, Status: domain.StatusReady, RiskLevel: domain.ProposalRiskLevelHigh, RevisionID: testRevisionID}}}
+	service := &fakeService{listItems: []domain.ProposalListItem{{ProposalID: testProposalID, WorkspaceID: testWorkspaceID, Type: domain.ProposalTypeFilePatch, Status: domain.StatusReady, RiskLevel: domain.ProposalRiskLevelHigh, RevisionID: testRevisionID, Version: 1, RevisionCapability: listCapability(domain.ProposalTypeFilePatch, domain.StatusReady)}}}
 	recorder := serve(t, service, http.MethodGet, "/api/v1/workspaces/"+string(testWorkspaceID)+"/proposals?risk=HIGH", "")
 	if recorder.Code != http.StatusOK || service.listQuery.RiskLevel != domain.ProposalRiskLevelHigh {
 		t.Fatalf("status=%d risk=%q body=%s", recorder.Code, service.listQuery.RiskLevel, recorder.Body.String())
@@ -358,7 +408,7 @@ func TestProposalListAcceptsPublishArtifactFilter(t *testing.T) {
 	service := &fakeService{listItems: []domain.ProposalListItem{{
 		ProposalID: testProposalID, WorkspaceID: testWorkspaceID, Type: domain.ProposalTypePublishArtifact,
 		Status: domain.StatusReady, Target: "知识关系", RiskLevel: domain.ProposalRiskLevelHigh, Risk: "publish approved artifact",
-		RevisionID: testRevisionID, ChangeHash: testChangeHash, CreatedAt: now, UpdatedAt: now,
+		RevisionID: testRevisionID, ChangeHash: testChangeHash, Version: 1, RevisionCapability: listCapability(domain.ProposalTypePublishArtifact, domain.StatusReady), CreatedAt: now, UpdatedAt: now,
 	}}}
 	recorder := serve(t, service, http.MethodGet, "/api/v1/workspaces/"+string(testWorkspaceID)+"/proposals?proposal_type=publish_artifact", "")
 	if recorder.Code != http.StatusOK || service.listQuery.Type != domain.ProposalTypePublishArtifact {
@@ -377,7 +427,7 @@ func TestProposalListAcceptsDownstreamUpdateFilter(t *testing.T) {
 	service := &fakeService{listItems: []domain.ProposalListItem{{
 		ProposalID: testProposalID, WorkspaceID: testWorkspaceID, Type: domain.ProposalTypeDownstreamUpdate,
 		Status: domain.StatusReady, Target: "ARTIFACT:" + string(targetID), RiskLevel: domain.ProposalRiskLevelHigh,
-		Risk: "owner-backed downstream update", RevisionID: testRevisionID, ChangeHash: testChangeHash, CreatedAt: now, UpdatedAt: now,
+		Risk: "owner-backed downstream update", RevisionID: testRevisionID, ChangeHash: testChangeHash, Version: 1, RevisionCapability: listCapability(domain.ProposalTypeDownstreamUpdate, domain.StatusReady), CreatedAt: now, UpdatedAt: now,
 	}}}
 	recorder := serve(t, service, http.MethodGet, "/api/v1/workspaces/"+string(testWorkspaceID)+"/proposals?proposal_type=downstream_update", "")
 	if recorder.Code != http.StatusOK || service.listQuery.Type != domain.ProposalTypeDownstreamUpdate {
@@ -394,10 +444,10 @@ func TestProposalListIncludesLegalDurableApprovalBindings(t *testing.T) {
 	now := time.Date(2026, 7, 22, 1, 0, 0, 0, time.UTC)
 	approvedGitHead := testApprovedGitHead
 	service := &fakeService{listItems: []domain.ProposalListItem{
-		{ProposalID: testProposalID, WorkspaceID: testWorkspaceID, Type: domain.ProposalTypeFilePatch, Status: domain.StatusReady, RiskLevel: domain.ProposalRiskLevelLow, RevisionID: testRevisionID, ChangeHash: testChangeHash, CreatedAt: now, UpdatedAt: now},
-		{ProposalID: testProposalID, WorkspaceID: testWorkspaceID, Type: domain.ProposalTypeFilePatch, Status: domain.StatusRejected, RiskLevel: domain.ProposalRiskLevelLow, RevisionID: testRevisionID, ChangeHash: testChangeHash, Approval: &domain.Approval{ID: testApprovalID, ProposalID: testProposalID, RevisionID: testRevisionID, ChangeHash: testChangeHash, Decision: domain.DecisionRejected, DecidedAt: now}, CreatedAt: now, UpdatedAt: now},
-		{ProposalID: testProposalID, WorkspaceID: testWorkspaceID, Type: domain.ProposalTypeFilePatch, Status: domain.StatusApproved, RiskLevel: domain.ProposalRiskLevelHigh, RevisionID: testRevisionID, ChangeHash: testChangeHash, Approval: &domain.Approval{ID: testApprovalID, ProposalID: testProposalID, RevisionID: testRevisionID, ChangeHash: testChangeHash, Decision: domain.DecisionApproved, ApprovedGitHead: &approvedGitHead, DecidedAt: now}, WorkflowRunID: proposalWorkflowRunID(testWorkflowRunID), CreatedAt: now, UpdatedAt: now},
-		{ProposalID: testProposalID, WorkspaceID: testWorkspaceID, Type: domain.ProposalTypeKnowledgeChange, Status: domain.StatusApproved, RiskLevel: domain.ProposalRiskLevelHigh, RevisionID: testRevisionID, ChangeHash: testChangeHash, Approval: &domain.Approval{ID: testApprovalID, ProposalID: testProposalID, RevisionID: testRevisionID, ChangeHash: testChangeHash, Decision: domain.DecisionApproved, DecidedAt: now}, CreatedAt: now, UpdatedAt: now},
+		{ProposalID: testProposalID, WorkspaceID: testWorkspaceID, Type: domain.ProposalTypeFilePatch, Status: domain.StatusReady, RiskLevel: domain.ProposalRiskLevelLow, RevisionID: testRevisionID, ChangeHash: testChangeHash, Version: 1, RevisionCapability: listCapability(domain.ProposalTypeFilePatch, domain.StatusReady), CreatedAt: now, UpdatedAt: now},
+		{ProposalID: testProposalID, WorkspaceID: testWorkspaceID, Type: domain.ProposalTypeFilePatch, Status: domain.StatusRejected, RiskLevel: domain.ProposalRiskLevelLow, RevisionID: testRevisionID, ChangeHash: testChangeHash, Version: 1, RevisionCapability: listCapability(domain.ProposalTypeFilePatch, domain.StatusRejected), Approval: &domain.Approval{ID: testApprovalID, ProposalID: testProposalID, RevisionID: testRevisionID, ChangeHash: testChangeHash, Decision: domain.DecisionRejected, DecidedAt: now}, CreatedAt: now, UpdatedAt: now},
+		{ProposalID: testProposalID, WorkspaceID: testWorkspaceID, Type: domain.ProposalTypeFilePatch, Status: domain.StatusApproved, RiskLevel: domain.ProposalRiskLevelHigh, RevisionID: testRevisionID, ChangeHash: testChangeHash, Version: 1, RevisionCapability: listCapability(domain.ProposalTypeFilePatch, domain.StatusApproved), Approval: &domain.Approval{ID: testApprovalID, ProposalID: testProposalID, RevisionID: testRevisionID, ChangeHash: testChangeHash, Decision: domain.DecisionApproved, ApprovedGitHead: &approvedGitHead, DecidedAt: now}, WorkflowRunID: proposalWorkflowRunID(testWorkflowRunID), CreatedAt: now, UpdatedAt: now},
+		{ProposalID: testProposalID, WorkspaceID: testWorkspaceID, Type: domain.ProposalTypeKnowledgeChange, Status: domain.StatusApproved, RiskLevel: domain.ProposalRiskLevelHigh, RevisionID: testRevisionID, ChangeHash: testChangeHash, Version: 1, RevisionCapability: listCapability(domain.ProposalTypeKnowledgeChange, domain.StatusApproved), Approval: &domain.Approval{ID: testApprovalID, ProposalID: testProposalID, RevisionID: testRevisionID, ChangeHash: testChangeHash, Decision: domain.DecisionApproved, DecidedAt: now}, CreatedAt: now, UpdatedAt: now},
 	}}
 	recorder := serve(t, service, http.MethodGet, "/api/v1/workspaces/"+string(testWorkspaceID)+"/proposals", "")
 	if recorder.Code != http.StatusOK {
@@ -685,7 +735,7 @@ func TestPublishArtifactProposalReadsOmitFileWritebackBindings(t *testing.T) {
 		ProposalID: proposal.ID, WorkspaceID: proposal.WorkspaceID, Type: proposal.Type, Status: proposal.Status,
 		RiskLevel: proposal.RiskLevel, Risk: proposal.Revision.Risk, RevisionID: proposal.Revision.ID,
 		ChangeHash: proposal.Revision.ChangeHash, Approval: proposal.Approval, WorkflowRunID: proposal.WorkflowRunID,
-		CreatedAt: proposal.CreatedAt, UpdatedAt: proposal.UpdatedAt,
+		Version: proposal.Version, RevisionCapability: listCapability(proposal.Type, proposal.Status), CreatedAt: proposal.CreatedAt, UpdatedAt: proposal.UpdatedAt,
 	}
 	listRecorder := serve(t, &fakeService{listItems: []domain.ProposalListItem{listItem}}, http.MethodGet, "/api/v1/workspaces/"+string(testWorkspaceID)+"/proposals", "")
 	if listRecorder.Code != http.StatusOK {
@@ -790,12 +840,19 @@ func publishArtifactProposalFixture(t *testing.T, now time.Time) domain.Proposal
 	}
 	return domain.Proposal{
 		ID: testProposalID, WorkspaceID: testWorkspaceID, Type: domain.ProposalTypePublishArtifact, RiskLevel: domain.ProposalRiskLevelHigh,
-		Status: domain.StatusReady, CreatedAt: now, UpdatedAt: now,
+		Status: domain.StatusReady, Version: 1, CreatedAt: now, UpdatedAt: now,
 		Revision: domain.Revision{
 			ID: testRevisionID, ProposalID: testProposalID, RevisionNo: 1, Risk: "publish approved artifact",
 			RollbackPlan: "keep artifact isolated", ChangeHash: changeHash, PublishArtifact: &publication, CreatedAt: now,
 		},
 	}
+}
+
+func listCapability(proposalType domain.ProposalType, status domain.ProposalStatus) domain.ProposalRevisionCapability {
+	return domain.EvaluateProposalRevisionCapability(domain.ProposalRevisionCapabilityFacts{
+		ProposalType: proposalType, ProposalStatus: status, TargetMode: domain.TargetModeReplace,
+		CurrentRevisionID: testRevisionID, RevisionID: testRevisionID,
+	})
 }
 
 func downstreamUpdateProposalFixture(t *testing.T, now time.Time, targetType knowledge.ImpactObjectType) domain.Proposal {
@@ -894,6 +951,339 @@ func TestHandlerRejectsInvalidJSONAndInternalErrorsAreRedacted(t *testing.T) {
 	}
 }
 
+func TestProposalRevisionMergePreviewContract(t *testing.T) {
+	service, request := revisionHTTPFixture(t)
+	recorder := serve(t, service, http.MethodPost, "/api/v1/proposals/"+string(testProposalID)+"/revision-merge-previews", request)
+	if recorder.Code != http.StatusOK || recorder.Header().Get("Cache-Control") != "private, no-store" {
+		t.Fatalf("status=%d cache=%q body=%s", recorder.Code, recorder.Header().Get("Cache-Control"), recorder.Body.String())
+	}
+	if service.previewCalls != 1 || service.previewInput.WorkspaceID != testWorkspaceID || service.previewInput.ProposalID != testProposalID || service.previewInput.ExpectedCurrentHash != "" {
+		t.Fatalf("input=%#v calls=%d", service.previewInput, service.previewCalls)
+	}
+	var response map[string]any
+	decode(t, recorder, &response)
+	assertJSONFields(t, "preview", response,
+		"schema_version", "merge_algorithm", "merge_algorithm_version", "merge_fingerprint", "proposal_id", "workspace_id",
+		"proposal_version", "source_revision_id", "source_revision_no", "source_change_hash", "target_path", "target_mode",
+		"base", "current", "proposed", "candidate", "conflict_count", "conflicts")
+	if response["schema_version"] != revisionPreviewSchemaVersion || response["proposal_version"] != float64(7) || response["target_mode"] != string(domain.TargetModeReplace) || response["conflict_count"] != float64(1) {
+		t.Fatalf("response=%#v", response)
+	}
+	base := response["base"].(map[string]any)
+	current := response["current"].(map[string]any)
+	proposed := response["proposed"].(map[string]any)
+	if base["content"] != "base\n" || current["content"] != "current\n" || proposed["content"] != "proposed\n" || current["byte_size"] != float64(len("current\n")) {
+		t.Fatalf("snapshots=%#v %#v %#v", base, current, proposed)
+	}
+	conflicts := response["conflicts"].([]any)
+	conflict := conflicts[0].(map[string]any)
+	assertJSONFields(t, "conflict", conflict, "id", "ordinal", "base", "current", "proposed")
+	if conflict["ordinal"] != float64(1) || conflict["current"] != "current\n" {
+		t.Fatalf("conflict=%#v", conflict)
+	}
+}
+
+func TestRevisionCapabilityUsesWorkflowTerminalStatus(t *testing.T) {
+	tests := []struct {
+		status   string
+		editable bool
+		reason   string
+	}{
+		{status: "failed", editable: true, reason: "AVAILABLE"},
+		{status: "running", reason: "PROPOSAL_REVISION_WORKFLOW_ACTIVE"},
+		{status: "succeeded", reason: "PROPOSAL_REVISION_SIDE_EFFECT_STARTED"},
+	}
+	for _, test := range tests {
+		t.Run(test.status, func(t *testing.T) {
+			service, _ := revisionHTTPFixture(t)
+			workflowID := testWorkflowRunID
+			service.proposal.Status = domain.StatusNeedsRevision
+			service.proposal.WorkflowRunID = &workflowID
+			service.proposal.WorkflowRunStatus = test.status
+			capability := revisionCapability(service.proposal, true)
+			if capability.Editable != test.editable || capability.Reason != test.reason {
+				t.Fatalf("capability=%#v", capability)
+			}
+		})
+	}
+}
+
+func TestRevisionCapabilityFailsClosedWhenMergeEngineIsUnavailable(t *testing.T) {
+	service, _ := revisionHTTPFixture(t)
+	capability := revisionCapability(service.proposal, false)
+	if capability.Editable || capability.Reason != string(domain.ProposalRevisionEngineUnavailable) {
+		t.Fatalf("capability=%#v", capability)
+	}
+}
+
+func TestAppendProposalRevisionContractAndReplay(t *testing.T) {
+	service, _ := revisionHTTPFixture(t)
+	newRevisionID := foundation.ID("30000000-0000-4000-8000-000000000002")
+	now := time.Date(2026, 8, 14, 10, 0, 0, 0, time.UTC)
+	currentHash := domain.RawContentHash("current\n")
+	newRevision := domain.Revision{
+		ID: newRevisionID, ProposalID: testProposalID, RevisionNo: 2, TargetPath: "notes/a.md", TargetMode: domain.TargetModeReplace,
+		BaseHash: currentHash, Content: "resolved\n", EvidenceSummary: "evidence", Risk: "risk",
+		RollbackPlan: "rollback", ChangeHash: domain.ComputeChangeHash("notes/a.md", currentHash, "resolved\n"), CreatedAt: now,
+	}
+	service.appendResult = application.AppendRevisionResult{Proposal: domain.Proposal{
+		ID: testProposalID, WorkspaceID: testWorkspaceID, Type: domain.ProposalTypeFilePatch, RiskLevel: domain.ProposalRiskLevelLow,
+		TargetPath: "notes/a.md", Status: domain.StatusReady, Version: 8, CurrentRevisionID: newRevisionID,
+		Revision: newRevision, CreatedAt: now.Add(-time.Hour), UpdatedAt: now,
+	}, Revision: newRevision}
+	conflictID := strings.Repeat("c", 64)
+	body := marshalJSON(t, appendRevisionRequest{
+		ExpectedProposalVersion: 7, SourceRevisionID: string(testRevisionID), SourceChangeHash: testChangeHash,
+		ExpectedCurrentHash: currentHash, MergeFingerprint: strings.Repeat("f", 64),
+		MergeAlgorithm: domain.ProposalRevisionMergeAlgorithm, MergeAlgorithmVersion: domain.ProposalRevisionMergeAlgorithmVersion,
+		Content: "resolved\n", EvidenceSummary: "evidence", Risk: "risk", RollbackPlan: "rollback",
+		ResolvedConflictIDs: &[]string{conflictID},
+	})
+	path := "/api/v1/proposals/" + string(testProposalID) + "/revisions"
+	recorder := serveRequest(t, service, http.MethodPost, path, body, "application/json", []string{"revision-command"})
+	if recorder.Code != http.StatusCreated || recorder.Header().Get("Cache-Control") != "private, no-store" || service.appendCalls != 1 {
+		t.Fatalf("status=%d calls=%d body=%s", recorder.Code, service.appendCalls, recorder.Body.String())
+	}
+	if service.appendCommand.IdempotencyKey != "revision-command" || service.appendCommand.ExpectedProposalVersion != 7 || service.appendCommand.SourceRevisionID != testRevisionID || len(service.appendCommand.ResolvedConflictIDs) != 1 || service.appendCommand.ResolvedConflictIDs[0] != conflictID {
+		t.Fatalf("command=%#v", service.appendCommand)
+	}
+	var response map[string]any
+	decode(t, recorder, &response)
+	if response["replayed"] != false || response["version"] != float64(8) || response["approval"] != nil {
+		t.Fatalf("response=%#v", response)
+	}
+	capability := response["revision_capability"].(map[string]any)
+	if capability["editable"] != true || capability["reason"] != "AVAILABLE" {
+		t.Fatalf("capability=%#v", capability)
+	}
+
+	service.appendResult.Replayed = true
+	replay := serveRequest(t, service, http.MethodPost, path, body, "application/json", []string{"revision-command"})
+	if replay.Code != http.StatusOK {
+		t.Fatalf("replay status=%d body=%s", replay.Code, replay.Body.String())
+	}
+	decode(t, replay, &response)
+	if response["replayed"] != true {
+		t.Fatalf("replay=%#v", response)
+	}
+
+	service.appendResult.Proposal.Revision.EvidenceSummary = "different evidence"
+	service.appendResult.Revision.EvidenceSummary = "different evidence"
+	invalidBinding := serveRequest(t, service, http.MethodPost, path, body, "application/json", []string{"revision-command"})
+	if invalidBinding.Code != http.StatusInternalServerError || !strings.Contains(invalidBinding.Body.String(), "PROPOSAL_REVISION_RESULT_INVALID") {
+		t.Fatalf("invalid binding status=%d body=%s", invalidBinding.Code, invalidBinding.Body.String())
+	}
+	service.appendResult.Proposal.Revision.EvidenceSummary = "evidence"
+	service.appendResult.Revision.EvidenceSummary = "evidence"
+
+	service.appendResult.Proposal.Version = 9
+	invalidReceipt := serveRequest(t, service, http.MethodPost, path, body, "application/json", []string{"revision-command"})
+	if invalidReceipt.Code != http.StatusInternalServerError || !strings.Contains(invalidReceipt.Body.String(), "PROPOSAL_REVISION_RESULT_INVALID") {
+		t.Fatalf("invalid receipt status=%d body=%s", invalidReceipt.Code, invalidReceipt.Body.String())
+	}
+}
+
+func TestProposalRevisionCommandsRejectInvalidWireBeforeApplication(t *testing.T) {
+	service, previewBody := revisionHTTPFixture(t)
+	appendBody := marshalJSON(t, appendRevisionRequest{
+		ExpectedProposalVersion: 7, SourceRevisionID: string(testRevisionID), SourceChangeHash: testChangeHash,
+		ExpectedCurrentHash: domain.RawContentHash("current\n"), MergeFingerprint: strings.Repeat("f", 64),
+		MergeAlgorithm: domain.ProposalRevisionMergeAlgorithm, MergeAlgorithmVersion: domain.ProposalRevisionMergeAlgorithmVersion,
+		Content: "resolved\n", EvidenceSummary: "evidence", Risk: "risk", RollbackPlan: "rollback", ResolvedConflictIDs: &[]string{},
+	})
+	previewPath := "/api/v1/proposals/" + string(testProposalID) + "/revision-merge-previews"
+	appendPath := "/api/v1/proposals/" + string(testProposalID) + "/revisions"
+	tests := []struct {
+		name, path, body, contentType string
+		keys                          []string
+		status                        int
+		code                          string
+	}{
+		{name: "preview empty", path: previewPath, contentType: "application/json", status: 400, code: "PROPOSAL_MERGE_CONTENT_INVALID"},
+		{name: "preview unknown", path: previewPath, body: strings.TrimSuffix(previewBody, "}") + `,"extra":true}`, contentType: "application/json", status: 400, code: "PROPOSAL_MERGE_CONTENT_INVALID"},
+		{name: "preview duplicate", path: previewPath, body: strings.TrimSuffix(previewBody, "}") + `,"source_change_hash":"` + testChangeHash + `"}`, contentType: "application/json", status: 400, code: "PROPOSAL_MERGE_CONTENT_INVALID"},
+		{name: "preview oversized", path: previewPath, body: strings.Repeat(" ", revisionPreviewRequestMaxBytes+1), contentType: "application/json", status: 413, code: "PROPOSAL_REVISION_INPUT_TOO_LARGE"},
+		{name: "append content type", path: appendPath, body: appendBody, contentType: "text/plain", keys: []string{"key"}, status: 415, code: "UNSUPPORTED_MEDIA_TYPE"},
+		{name: "append missing key", path: appendPath, body: appendBody, contentType: "application/json", status: 400, code: "IDEMPOTENCY_KEY_REQUIRED"},
+		{name: "append duplicate key", path: appendPath, body: appendBody, contentType: "application/json", keys: []string{"a", "b"}, status: 400, code: "IDEMPOTENCY_KEY_REQUIRED"},
+		{name: "append missing conflicts", path: appendPath, body: strings.Replace(appendBody, `,"resolved_conflict_ids":[]`, "", 1), contentType: "application/json", keys: []string{"key"}, status: 400, code: "PROPOSAL_MERGE_CONTENT_INVALID"},
+		{name: "append oversized metadata", path: appendPath, body: strings.Replace(appendBody, `"evidence_summary":"evidence"`, `"evidence_summary":"`+strings.Repeat("e", revisionMetadataMaxBytes+1)+`"`, 1), contentType: "application/json", keys: []string{"key"}, status: 413, code: "PROPOSAL_REVISION_INPUT_TOO_LARGE"},
+		{name: "append query", path: appendPath + "?unsafe=1", body: appendBody, contentType: "application/json", keys: []string{"key"}, status: 400, code: "PROPOSAL_MERGE_CONTENT_INVALID"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			beforePreview, beforeAppend := service.previewCalls, service.appendCalls
+			recorder := serveRequest(t, service, http.MethodPost, test.path, test.body, test.contentType, test.keys)
+			if recorder.Code != test.status || !strings.Contains(recorder.Body.String(), test.code) || service.previewCalls != beforePreview || service.appendCalls != beforeAppend {
+				t.Fatalf("status=%d preview=%d append=%d body=%s", recorder.Code, service.previewCalls, service.appendCalls, recorder.Body.String())
+			}
+		})
+	}
+}
+
+func TestProposalRevisionProblemsUseStableStatusesAndSafeDetails(t *testing.T) {
+	path := "/api/v1/proposals/" + string(testProposalID) + "/revision-merge-previews"
+	tests := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{name: "input", err: foundation.NewError(foundation.ErrorInvalidInput, "PROPOSAL_REVISION_INPUT_TOO_LARGE", false, errors.New("secret content")), want: http.StatusRequestEntityTooLarge},
+		{name: "result", err: foundation.NewError(foundation.ErrorNonRetryableFailure, "PROPOSAL_MERGE_RESULT_TOO_LARGE", false, errors.New("secret output")), want: http.StatusUnprocessableEntity},
+		{name: "conflicts", err: foundation.NewError(foundation.ErrorVersionConflict, "PROPOSAL_REVISION_CONFLICTS_UNRESOLVED", false, &application.UnresolvedRevisionConflicts{ConflictIDs: []string{strings.Repeat("a", 64), strings.Repeat("b", 64)}}), want: http.StatusUnprocessableEntity},
+		{name: "invalid conflict details", err: foundation.NewError(foundation.ErrorVersionConflict, "PROPOSAL_REVISION_CONFLICTS_UNRESOLVED", false, &application.UnresolvedRevisionConflicts{ConflictIDs: []string{"unsafe fragment"}}), want: http.StatusUnprocessableEntity},
+		{name: "engine", err: foundation.NewError(foundation.ErrorNonRetryableFailure, "PROPOSAL_MERGE_ENGINE_OUTPUT_INVALID", false, errors.New("secret stderr")), want: http.StatusServiceUnavailable},
+		{name: "workflow cancellation", err: foundation.NewError(foundation.ErrorDependencyUnavailable, "PROPOSAL_REVISION_WORKFLOW_CANCEL_UNAVAILABLE", true, errors.New("secret workflow error")), want: http.StatusServiceUnavailable},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service, body := revisionHTTPFixture(t)
+			service.revisionErr = test.err
+			recorder := serve(t, service, http.MethodPost, path, body)
+			if recorder.Code != test.want || strings.Contains(recorder.Body.String(), "secret") || recorder.Header().Get("Cache-Control") != "private, no-store" {
+				t.Fatalf("status=%d cache=%q body=%s", recorder.Code, recorder.Header().Get("Cache-Control"), recorder.Body.String())
+			}
+			if test.name == "conflicts" && (!strings.Contains(recorder.Body.String(), `"conflict_ids":["`+strings.Repeat("a", 64)+`","`+strings.Repeat("b", 64)+`"]`) || strings.Contains(recorder.Body.String(), "proposal revision has unresolved conflicts")) {
+				t.Fatalf("unsafe or incomplete conflict details: %s", recorder.Body.String())
+			}
+			if test.name == "invalid conflict details" && strings.Contains(recorder.Body.String(), "conflict_ids") {
+				t.Fatalf("invalid conflict details leaked: %s", recorder.Body.String())
+			}
+			if test.name == "workflow cancellation" && !strings.Contains(recorder.Body.String(), `"retryable":true`) {
+				t.Fatalf("workflow cancellation dependency was not retryable: %s", recorder.Body.String())
+			}
+		})
+	}
+}
+
+func TestProposalRevisionPreviewRejectsInvalidApplicationText(t *testing.T) {
+	service, body := revisionHTTPFixture(t)
+	service.previewResult.CurrentContent = string([]byte{0xff})
+	service.previewResult.Preview.CurrentHash = domain.RawContentHash(service.previewResult.CurrentContent)
+	recorder := serve(t, service, http.MethodPost, "/api/v1/proposals/"+string(testProposalID)+"/revision-merge-previews", body)
+	if recorder.Code != http.StatusServiceUnavailable || !strings.Contains(recorder.Body.String(), "PROPOSAL_MERGE_ENGINE_OUTPUT_INVALID") {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestProposalRevisionHistoryAndDetailContracts(t *testing.T) {
+	now := time.Date(2026, 8, 14, 9, 0, 0, 0, time.UTC)
+	revisionTwoID := foundation.ID("30000000-0000-4000-8000-000000000002")
+	revisionThreeID := foundation.ID("30000000-0000-4000-8000-000000000003")
+	approvedGitHead := strings.Repeat("a", 40)
+	workflowID := testWorkflowRunID
+	approval := &domain.Approval{
+		ID: testApprovalID, ProposalID: testProposalID, RevisionID: revisionTwoID, ChangeHash: testChangeHash,
+		Decision: domain.DecisionApproved, ApprovedGitHead: &approvedGitHead, DecidedAt: now,
+	}
+	service := &fakeService{
+		revisionItems: []domain.ProposalRevisionHistoryItem{
+			{ProposalID: testProposalID, RevisionID: revisionThreeID, RevisionNo: 3, TargetPath: "notes/a.md", TargetMode: domain.TargetModeReplace, BaseHash: testChangeHash, ChangeHash: strings.Repeat("b", 64), BaseAvailable: true, Current: true, CreatedAt: now.Add(time.Hour)},
+			{ProposalID: testProposalID, RevisionID: revisionTwoID, RevisionNo: 2, TargetPath: "notes/a.md", TargetMode: domain.TargetModeReplace, BaseHash: testChangeHash, ChangeHash: testChangeHash, BaseAvailable: true, Approval: approval, WorkflowRunID: &workflowID, CreatedAt: now},
+		},
+		revisionHasMore: true,
+	}
+	list := serve(t, service, http.MethodGet, "/api/v1/proposals/"+string(testProposalID)+"/revisions?limit=2", "")
+	if list.Code != http.StatusOK || list.Header().Get("Cache-Control") != "private, no-store" || service.historyQuery.Limit != 2 {
+		t.Fatalf("status=%d query=%#v body=%s", list.Code, service.historyQuery, list.Body.String())
+	}
+	var page map[string]any
+	decode(t, list, &page)
+	if page["next_before_revision_no"] != float64(2) || len(page["items"].([]any)) != 2 {
+		t.Fatalf("page=%#v", page)
+	}
+	historyApproval := page["items"].([]any)[1].(map[string]any)["approval"].(map[string]any)
+	historyWorkflow := page["items"].([]any)[1].(map[string]any)["workflow"].(map[string]any)
+	if historyApproval["revision_id"] != string(revisionTwoID) || historyWorkflow["status_url"] != "/api/v1/workflows/"+string(workflowID) {
+		t.Fatalf("approval=%#v workflow=%#v", historyApproval, historyWorkflow)
+	}
+
+	baseContent := "base\n"
+	baseHash := domain.RawContentHash(baseContent)
+	detailChangeHash := domain.ComputeChangeHash("notes/a.md", baseHash, "proposed\n")
+	detailApproval := *approval
+	detailApproval.ChangeHash = detailChangeHash
+	service.revisionDetail = domain.ProposalRevisionHistoryDetail{
+		WorkspaceID: testWorkspaceID, ProposalID: testProposalID, CurrentRevisionID: revisionThreeID,
+		Revision: domain.Revision{
+			ID: revisionTwoID, ProposalID: testProposalID, RevisionNo: 2, TargetPath: "notes/a.md", TargetMode: domain.TargetModeReplace,
+			BaseHash: baseHash, Content: "proposed\n", EvidenceSummary: "evidence", Risk: "risk", RollbackPlan: "rollback",
+			ChangeHash: detailChangeHash, CreatedAt: now,
+			BaseSnapshot: &domain.RevisionBaseSnapshot{ProposalID: testProposalID, RevisionID: revisionTwoID, BaseHash: baseHash, Content: baseContent, ByteSize: len(baseContent), SchemaVersion: domain.ProposalRevisionBaseSnapshotSchemaVersion, CreatedAt: now},
+			Lineage:      &domain.RevisionLineage{ProposalID: testProposalID, RevisionID: revisionTwoID, SourceRevisionID: testRevisionID, SourceChangeHash: testChangeHash, Kind: domain.RevisionLineageThreeWayMerge, MergeAlgorithm: domain.ProposalRevisionMergeAlgorithm, MergeVersion: domain.ProposalRevisionMergeAlgorithmVersion, MergeFingerprint: strings.Repeat("f", 64), CreatedAt: now},
+		},
+		Approval: &detailApproval, WorkflowRunID: &workflowID,
+	}
+	detail := serve(t, service, http.MethodGet, "/api/v1/proposals/"+string(testProposalID)+"/revisions/"+string(revisionTwoID), "")
+	if detail.Code != http.StatusOK || detail.Header().Get("Cache-Control") != "private, no-store" {
+		t.Fatalf("status=%d body=%s", detail.Code, detail.Body.String())
+	}
+	var response map[string]any
+	decode(t, detail, &response)
+	assertJSONFields(t, "revision detail", response, "workspace_id", "proposal_id", "current_revision_id", "current", "revision", "base_available", "base_snapshot", "lineage", "approval", "workflow")
+	if response["current"] != false || response["base_available"] != true || response["base_snapshot"].(map[string]any)["content"] != baseContent || response["lineage"].(map[string]any)["source_revision_id"] != string(testRevisionID) {
+		t.Fatalf("detail=%#v", response)
+	}
+	service.revisionDetail.Revision.Lineage = nil
+	missingLineage := serve(t, service, http.MethodGet, "/api/v1/proposals/"+string(testProposalID)+"/revisions/"+string(revisionTwoID), "")
+	if missingLineage.Code != http.StatusInternalServerError || !strings.Contains(missingLineage.Body.String(), "PROPOSAL_REVISION_HISTORY_BINDING_INVALID") {
+		t.Fatalf("missing lineage status=%d body=%s", missingLineage.Code, missingLineage.Body.String())
+	}
+	service.revisionDetail.Revision.Lineage = &domain.RevisionLineage{ProposalID: testProposalID, RevisionID: revisionTwoID, SourceRevisionID: testRevisionID, SourceChangeHash: testChangeHash, Kind: domain.RevisionLineageThreeWayMerge, MergeAlgorithm: domain.ProposalRevisionMergeAlgorithm, MergeVersion: domain.ProposalRevisionMergeAlgorithmVersion, MergeFingerprint: strings.Repeat("f", 64), CreatedAt: now}
+
+	for _, suffix := range []string{"?before_revision_no=1", "?limit=", "?before_revision_no="} {
+		invalid := serve(t, service, http.MethodGet, "/api/v1/proposals/"+string(testProposalID)+"/revisions"+suffix, "")
+		if invalid.Code != http.StatusBadRequest || service.historyCalls != 1 || !strings.Contains(invalid.Body.String(), "PROPOSAL_REVISION_HISTORY_QUERY_INVALID") {
+			t.Fatalf("suffix=%q status=%d calls=%d body=%s", suffix, invalid.Code, service.historyCalls, invalid.Body.String())
+		}
+	}
+	invalidID := serve(t, service, http.MethodGet, "/api/v1/proposals/not-a-uuid/revisions", "")
+	if invalidID.Code != http.StatusBadRequest || service.historyCalls != 1 || !strings.Contains(invalidID.Body.String(), "PROPOSAL_REVISION_HISTORY_QUERY_INVALID") {
+		t.Fatalf("invalid id status=%d calls=%d body=%s", invalidID.Code, service.historyCalls, invalidID.Body.String())
+	}
+
+	service.revisionItems = append(service.revisionItems, domain.ProposalRevisionHistoryItem{
+		ProposalID: testProposalID, RevisionID: testRevisionID, RevisionNo: 1, TargetPath: "notes/a.md",
+		TargetMode: domain.TargetModeReplace, BaseHash: testChangeHash, ChangeHash: strings.Repeat("d", 64), CreatedAt: now.Add(-time.Hour),
+	})
+	overLimit := serve(t, service, http.MethodGet, "/api/v1/proposals/"+string(testProposalID)+"/revisions?limit=2", "")
+	if overLimit.Code != http.StatusInternalServerError || !strings.Contains(overLimit.Body.String(), "PROPOSAL_REVISION_HISTORY_BINDING_INVALID") {
+		t.Fatalf("status=%d body=%s", overLimit.Code, overLimit.Body.String())
+	}
+}
+
+func revisionHTTPFixture(t *testing.T) (*fakeService, string) {
+	t.Helper()
+	base, current, proposed := "base\n", "current\n", "proposed\n"
+	conflictID := strings.Repeat("c", 64)
+	proposal := domain.Proposal{
+		ID: testProposalID, WorkspaceID: testWorkspaceID, Type: domain.ProposalTypeFilePatch, RiskLevel: domain.ProposalRiskLevelLow,
+		TargetPath: "notes/a.md", Status: domain.StatusReady, Version: 7, CurrentRevisionID: testRevisionID,
+		Revision: domain.Revision{ID: testRevisionID, ProposalID: testProposalID, RevisionNo: 1, TargetPath: "notes/a.md", TargetMode: domain.TargetModeReplace, BaseHash: domain.RawContentHash(base), Content: proposed, EvidenceSummary: "evidence", Risk: "risk", RollbackPlan: "rollback", ChangeHash: testChangeHash},
+	}
+	service := &fakeService{proposal: proposal, previewResult: application.RevisionPreviewResult{
+		WorkspaceID: testWorkspaceID, SourceRevisionNo: 1, SourceChangeHash: testChangeHash, TargetPath: "notes/a.md", TargetMode: domain.TargetModeReplace,
+		BaseContent: base, CurrentContent: current, ProposedContent: proposed,
+		Preview: domain.RevisionMergePreview{
+			ProposalID: testProposalID, SourceRevisionID: testRevisionID, ProposalVersion: 7,
+			BaseHash: domain.RawContentHash(base), CurrentHash: domain.RawContentHash(current), ProposedHash: domain.RawContentHash(proposed),
+			Candidate: current, Conflicts: []domain.RevisionConflict{{ID: conflictID, Ordinal: 1, Base: base, Current: current, Proposed: proposed}},
+			Algorithm: domain.ProposalRevisionMergeAlgorithm, AlgorithmVersion: domain.ProposalRevisionMergeAlgorithmVersion, Fingerprint: strings.Repeat("f", 64),
+		},
+	}}
+	request := marshalJSON(t, revisionMergePreviewRequest{SourceRevisionID: string(testRevisionID), SourceChangeHash: testChangeHash, ExpectedProposalVersion: 7})
+	return service, request
+}
+
+func marshalJSON(t *testing.T, value any) string {
+	t.Helper()
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
 type fakeService struct {
 	proposal                 domain.Proposal
 	decisionResult           application.ApprovalDecisionResult
@@ -912,7 +1302,24 @@ type fakeService struct {
 	downstreamCreateCalls    int
 	downstreamWaitForContext bool
 	downstreamContextErr     error
+	previewResult            application.RevisionPreviewResult
+	appendResult             application.AppendRevisionResult
+	revisionItems            []domain.ProposalRevisionHistoryItem
+	revisionHasMore          bool
+	revisionDetail           domain.ProposalRevisionHistoryDetail
+	revisionErr              error
+	historyErr               error
+	previewInput             domain.RevisionMergeInput
+	appendCommand            application.AppendRevisionCommand
+	historyQuery             domain.ProposalRevisionHistoryQuery
+	previewCalls             int
+	appendCalls              int
+	historyCalls             int
+	detailCalls              int
+	mergeUnavailable         bool
 }
+
+func (f *fakeService) RevisionMergeAvailable() bool { return !f.mergeUnavailable }
 
 func (f *fakeService) ListProposals(_ context.Context, query domain.ProposalListQuery) ([]domain.ProposalListItem, bool, error) {
 	f.listCalls++
@@ -948,6 +1355,29 @@ func (f *fakeService) DecideProposalWithDispatch(_ context.Context, _, _ foundat
 }
 func (f *fakeService) CheckApplyPreflight(context.Context, foundation.ID, foundation.ID, string) (application.ApplyPreflightResult, error) {
 	return f.preflight, f.err
+}
+
+func (f *fakeService) PreviewProposalRevision(_ context.Context, input domain.RevisionMergeInput) (application.RevisionPreviewResult, error) {
+	f.previewCalls++
+	f.previewInput = input
+	return f.previewResult, f.revisionErr
+}
+
+func (f *fakeService) AppendProposalRevision(_ context.Context, command application.AppendRevisionCommand) (application.AppendRevisionResult, error) {
+	f.appendCalls++
+	f.appendCommand = command
+	return f.appendResult, f.revisionErr
+}
+
+func (f *fakeService) ListProposalRevisions(_ context.Context, query domain.ProposalRevisionHistoryQuery) ([]domain.ProposalRevisionHistoryItem, bool, error) {
+	f.historyCalls++
+	f.historyQuery = query
+	return append([]domain.ProposalRevisionHistoryItem(nil), f.revisionItems...), f.revisionHasMore, f.historyErr
+}
+
+func (f *fakeService) GetProposalRevision(context.Context, foundation.ID, foundation.ID) (domain.ProposalRevisionHistoryDetail, error) {
+	f.detailCalls++
+	return f.revisionDetail, f.historyErr
 }
 
 func serve(t *testing.T, service Service, method, path, body string) *httptest.ResponseRecorder {

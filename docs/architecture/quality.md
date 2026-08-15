@@ -47,7 +47,8 @@
 - temp/backup 在目标同目录随机 `O_EXCL|0600` 创建，只有当前 Execution 生成且 Hash/identity 未篡改的 locator 可以恢复或清理。
 - 文件锁不能阻止恶意本地进程；rehash→rename 和断电不确定性通过最终复核、backup 与 Manual Recovery 处理，不宣称不存在。
 - Git Runner 使用固定 executable、参数数组、固定 cwd、输出/timeout 上限、禁 Hook/GPG/editor/pager/external diff/textconv，清理继承 `GIT_*`。
-- 允许受控 inspect/diff/raw object/tree/`commit-tree`/expected-old `update-ref`/exact trailer/revert；禁止 shell、任意 `git add/commit`、reset、checkout、switch、merge、rebase、cherry-pick、任意 push、submodule/LFS 和 history rewrite。
+- 允许受控 inspect/diff/raw object/tree/`commit-tree`/expected-old `update-ref`/exact trailer/revert，以及仅由 `ThreeWayMerger` 执行的 `merge-file -p -q --diff3 --diff-algorithm=myers --marker-size=32` 文本计算。后者必须使用私有 `0700` 临时目录和 `0600` 输入文件、固定 `CURRENT|BASE|PROPOSED` 标签、5 秒 deadline、并发上限 2、独立 stdout/stderr 上限和必然清理；不得接收路径、原始 argv 或环境，且不接触 Workspace、Git ref/index/object database。
+- 禁止 shell、任意 `git add/commit`、reset、checkout、switch、branch merge、rebase、cherry-pick、任意 push、submodule/LFS 和 history rewrite。
 
 ### 1.5 Prompt Injection、SSRF 与 Web
 

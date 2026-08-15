@@ -1,1 +1,16 @@
-{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python3 .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "复核 Schema、锁序、幂等、回填、租户与事务不变量"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "复核稳定错误、unknown result 与敏感 details"}
+{"file": ".trellis/spec/backend/http-boundary.md", "reason": "复核 OpenAPI/runtime 对等与 HTTP 安全边界"}
+{"file": ".trellis/spec/backend/auth-security.md", "reason": "复核认证、CSRF、Capability 与 Write Authorization 分界"}
+{"file": ".trellis/spec/backend/git-sync-contract.md", "reason": "复核 merge-file 未扩大为 branch/raw Git 能力"}
+{"file": ".trellis/spec/backend/document-history-contract.md", "reason": "复核 restore_document 与历史读取无回归"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "复核 Go composition、并发、资源与故障路径"}
+{"file": ".trellis/spec/frontend/directory-structure.md", "reason": "复核 shared/feature 导入边界"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "复核权威状态、409 草稿保留与 SSE 失效"}
+{"file": ".trellis/spec/frontend/component-guidelines.md", "reason": "复核 Monaco、键盘、focus、移动布局"}
+{"file": ".trellis/spec/frontend/type-safety.md", "reason": "复核严格 wire decoder 与语义绑定"}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "复核 UI 状态、浏览器和可访问性证据"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "复核跨层 round-trip 与唯一事实源"}
+{"file": ".trellis/tasks/08-14-proposal-revision-three-way-merge/research/backend-revision-contract.md", "reason": "逐项复核 current Revision 与旧能力不复活"}
+{"file": ".trellis/tasks/08-14-proposal-revision-three-way-merge/research/merge-engine.md", "reason": "逐项复核 engine contract、资源和差分 fixture"}
+{"file": ".trellis/tasks/08-14-proposal-revision-three-way-merge/research/frontend-merge-ux.md", "reason": "逐项复核工作台恢复、历史与 desktop/mobile 链路"}

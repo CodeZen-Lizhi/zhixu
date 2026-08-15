@@ -26,3 +26,17 @@ func TestProposalStatusRequestUsesStableResourceAndSourceBinding(t *testing.T) {
 		t.Fatalf("event type/schema=%s/%d", request.Type, request.SchemaVersion)
 	}
 }
+
+func TestProposalRevisedRequestContainsOnlyStableSummary(t *testing.T) {
+	workspaceID := foundation.ID("10000000-0000-4000-8000-000000000001")
+	proposalID := foundation.ID("10000000-0000-4000-8000-000000000002")
+	revisionID := foundation.ID("10000000-0000-4000-8000-000000000004")
+	at := time.Date(2026, 8, 14, 1, 2, 3, 0, time.UTC)
+	request := ProposalStatusRequest(workspaceID, proposalID, revisionID, ProposalRevisedEventType, "ready_for_review", 2, at)
+	if err := request.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if request.Type != ProposalRevisedEventType || request.SourceEventRef != ProposalRevisedEventType+":"+string(revisionID)+":v1" || request.PayloadSummary.Status != "ready_for_review" {
+		t.Fatalf("request=%#v", request)
+	}
+}

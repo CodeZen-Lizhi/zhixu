@@ -79,13 +79,19 @@ type Proposal struct {
 	RequestHash    string
 	// WorkflowRunID 是 Approved Proposal 原子派发后绑定的唯一 Workflow Run；未派发记录为 nil，绑定后不随后续状态变化清除。
 	WorkflowRunID *foundation.ID
-	Status        ProposalStatus
+	// WorkflowRunStatus 是当前 Revision dispatch 绑定 Run 的只读状态；没有 dispatch 时为空。
+	WorkflowRunStatus string
+	Status            ProposalStatus
 	// Version 用于 Proposal 的乐观锁；每次受控状态变更必须递增一。
-	Version   int64
-	CreatedAt time.Time
-	UpdatedAt time.Time
-	Revision  Revision
-	Approval  *Approval
+	Version int64
+	// CurrentRevisionID is the explicit execution/review pointer. Empty values
+	// remain valid for legacy in-memory proposals created before the pointer was
+	// introduced; PostgreSQL migrations backfill it for persisted rows.
+	CurrentRevisionID foundation.ID
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+	Revision          Revision
+	Approval          *Approval
 }
 
 // RestoreBindingMatches compares the complete typed restore intent without dereferencing nil.
@@ -118,7 +124,12 @@ type Revision struct {
 	RestoreDocument *RestoreDocument
 	// DownstreamUpdate 仅在 downstream_update Revision 中存在，记录审批意图而非写回命令。
 	DownstreamUpdate *DownstreamUpdate
-	CreatedAt        time.Time
+	// BaseSnapshot is populated for REPLACE revisions that support server-side
+	// three-way merge. Legacy revisions may leave it nil.
+	BaseSnapshot *RevisionBaseSnapshot
+	// Lineage records the immutable predecessor of an appended revision.
+	Lineage   *RevisionLineage
+	CreatedAt time.Time
 }
 
 // Approval 将用户决定绑定到唯一 Revision 和 Change Hash。

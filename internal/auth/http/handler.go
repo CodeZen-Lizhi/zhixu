@@ -271,6 +271,8 @@ var capabilityRoutes = []capabilityRoute{
 	oneCapability(http.MethodPost, "/api/v1/workflows/{run_id}/cancel", capability.WriteProposal),
 	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspace_id}/proposals", capability.WriteProposal),
 	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspace_id}/impact-reports/{report_id}/proposals", capability.WriteProposal),
+	oneCapability(http.MethodPost, "/api/v1/proposals/{proposal_id}/revision-merge-previews", capability.ReadLocal),
+	oneCapability(http.MethodPost, "/api/v1/proposals/{proposal_id}/revisions", capability.WriteProposal),
 	oneCapability(http.MethodPost, "/api/v1/collections", capability.WriteProposal),
 	oneCapability(http.MethodPut, "/api/v1/collections/{collection_id}", capability.WriteProposal),
 	oneCapability(http.MethodPost, "/api/v1/collections/{collection_id}/archive", capability.WriteProposal),

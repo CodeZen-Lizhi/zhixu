@@ -137,9 +137,16 @@ func TestWritebackSagaRealFaultSmoke(t *testing.T) {
 	if err != nil || approval.ApprovedGitHead == nil || *approval.ApprovedGitHead != baseGitHead {
 		t.Fatalf("approval=%#v err=%v", approval, err)
 	}
-	// Direct-node smoke bypasses ApprovalDispatch, so bind the approved Proposal
-	// to the already-created Workflow Run exactly as the production UoW does.
+	// Direct-node smoke bypasses ApprovalDispatch, so retain the legacy Proposal
+	// projection and create the exact current-revision dispatch binding.
 	if _, err := tx.Exec(ctx, `UPDATE change_control.proposal SET workflow_run_id=$2,version=version+1,updated_at=CURRENT_TIMESTAMP WHERE id=$1 AND workflow_run_id IS NULL`, string(created.Proposal.ID), string(runID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO change_control.proposal_revision_dispatch(
+			workspace_id,proposal_id,revision_id,approval_id,workflow_run_id,created_at
+		) VALUES($1,$2,$3,$4,$5,CURRENT_TIMESTAMP)`,
+		string(workspaceID), string(created.Proposal.ID), string(created.Proposal.Revision.ID), string(approval.ID), string(runID)); err != nil {
 		t.Fatal(err)
 	}
 	issue := func(tool string, capability domain.Capability, key string) domain.AuthorizationIssueResult {

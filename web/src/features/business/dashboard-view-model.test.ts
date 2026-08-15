@@ -35,6 +35,8 @@ const proposal = (overrides: Partial<ProposalSummary> = {}): ProposalSummary => 
   risk: "小范围文案变更",
   revisionId: "40000000-0000-4000-8000-000000000001",
   changeHash: "a".repeat(64),
+  version: 1,
+  revisionCapability: { editable: true, reason: "AVAILABLE" },
   createdAt: "2026-07-30T08:00:00Z",
   updatedAt: "2026-07-31T08:00:00Z",
   ...overrides,

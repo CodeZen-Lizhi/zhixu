@@ -239,6 +239,10 @@ func (failingApprovalRuntime) StartTx(context.Context, pgx.Tx, workflowapplicati
 
 type dispatchCommitResponseLossDB struct{ pool *pgxpool.Pool }
 
+func (d dispatchCommitResponseLossDB) Query(ctx context.Context, sql string, arguments ...any) (pgx.Rows, error) {
+	return d.pool.Query(ctx, sql, arguments...)
+}
+
 func (d dispatchCommitResponseLossDB) QueryRow(ctx context.Context, sql string, arguments ...any) pgx.Row {
 	return d.pool.QueryRow(ctx, sql, arguments...)
 }

@@ -12,7 +12,7 @@ type Repository interface {
 	CreateProposal(context.Context, Proposal) (Proposal, error)
 	GetProposal(context.Context, foundation.ID) (Proposal, error)
 	Approve(context.Context, Approval) (Approval, error)
-	MarkNeedsRevision(context.Context, foundation.ID, time.Time) error
+	MarkNeedsRevision(context.Context, foundation.ID, foundation.ID, int64, time.Time) error
 }
 
 // ProposalListItem 是 Proposal 列表的有界只读摘要，不携带正文内容。
@@ -26,6 +26,10 @@ type ProposalListItem struct {
 	Risk        string
 	RevisionID  foundation.ID
 	ChangeHash  string
+	Version     int64
+	// RevisionCapability is computed from the same current Revision projection
+	// returned by this bounded query.
+	RevisionCapability ProposalRevisionCapability
 	// Approval 是最新 Revision 的持久审批决定；未审批时为 nil。
 	Approval *Approval
 	// WorkflowRunID 是 file_patch 批准后持久绑定的写回 Workflow；未派发时为 nil。

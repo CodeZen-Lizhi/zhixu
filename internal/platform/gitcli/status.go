@@ -20,6 +20,7 @@ const defaultExecutable = "git"
 // Client executes project-owned Git operations through the restricted CLI runner.
 type Client struct {
 	executable string
+	mergeGate  *mergeSemaphore
 }
 
 // New creates a Git CLI client. An empty executable uses git from PATH.
@@ -27,7 +28,7 @@ func New(executable string) Client {
 	if strings.TrimSpace(executable) == "" {
 		executable = defaultExecutable
 	}
-	return Client{executable: executable}
+	return Client{executable: executable, mergeGate: newMergeSemaphore()}
 }
 
 // Status returns the branch, HEAD and dirty state for the repository containing

@@ -24,20 +24,22 @@
 
 ### R1. 适用范围与不可变版本
 
-- 三方合并仅用于正文会写入 Workspace 文件、且目标模式为 `REPLACE` 的 Proposal；结构化 `knowledge_change`、`publish_artifact`、`downstream_update` 不进入文本三方合并。
+- 首期三方合并仅用于普通 `file_patch/REPLACE` Proposal；`restore_document` 与结构化 `knowledge_change`、`publish_artifact`、`downstream_update` 不进入文本三方合并。
+- 首期只从最新 `ready_for_review` Revision 编辑，或从已经完成旧 Workflow/Authorization 安全围栏的 `needs_revision` 恢复；不直接编辑 `approved/applying` 或其它终态 Proposal。
 - 每次编辑或冲突解决都追加新的不可变 Proposal Revision，递增 `revision_no`；旧 Revision、旧 Diff、旧 Approval 和既有审计事实保持可读且不可改写。
 - 新 Revision 必须重新计算并绑定 Target、Base Hash、Content、Evidence、Risk、Rollback Plan 和 Change Hash；任何旧 Approval、Write Authorization、Apply Preflight 或 Workflow 绑定不得复用。
 
 ### R2. 三方输入与服务端合并
 
 - 合并输入固定为 `base`（旧 Revision 创建时的精确基线内容）、`current`（服务端当前读取的 Workspace 内容）和 `proposed`（旧 Revision 的建议内容），并绑定 Workspace、Proposal、Revision、Target Path、Target Mode 和当前内容 Hash。
-- 服务端使用确定、受版本约束的三方合并实现生成合并候选和冲突区间；前端只展示服务端结果并提交用户处理后的完整候选及其版本绑定。
+- 首期 `base`、`current`、`proposed` 和最终正文各自最多 1 MiB；超过上限时稳定拒绝合并，但不收窄既有较大 Proposal 的创建、审批和只读合同，也不得降级到另一套合并算法。
+- 服务端使用确定、受版本约束的三方合并实现生成合并候选和结构化冲突上下文（稳定 ID/ordinal 与受限的 base/current/proposed 片段）；前端只展示服务端结果并提交用户处理后的完整候选及其版本绑定，不伪造原文绝对行区间。
 - 无冲突时仍由用户核对并显式创建新 Revision，不自动审批或自动写回。
 - 有冲突时必须显示 base/current/proposed 三方上下文并要求用户解决全部冲突；未解决冲突标记、输入超限或非法编码不得创建 Revision。
 
 ### R3. 编辑与重新审批
 
-- 用户可在三方合并结果基础上编辑最终正文；允许同步修订 Evidence Summary、风险说明和回滚计划，风险等级继续遵循 Proposal Type 约束。
+- 用户可在三方合并结果基础上编辑最终正文；允许同步修订 Evidence Summary、风险说明和回滚计划，Proposal 聚合级风险等级保持不变并继续遵循 Proposal Type 约束。
 - 创建新 Revision 后 Proposal 回到 `ready_for_review`，页面刷新后可恢复并显示最新 Revision；用户必须重新审批，新 Approval 只绑定该 Revision。
 - 当前文件再次漂移时，新 Revision 创建命令返回稳定冲突并附当前版本摘要；页面重新读取权威事实，不覆盖用户编辑内容，并允许用户以最新 current 重新发起合并。
 
@@ -62,19 +64,17 @@
 - [ ] AC4：创建新 Revision 后 Proposal 回到 `ready_for_review`；审批、preflight、Safe Writeback 和 Git Commit 全链路绑定新 Revision，最终内容同时保留 current 与 proposed 的已确认修改。
 - [ ] AC5：合并过程中 current 再次漂移、Proposal version 变化或并发创建 Revision时返回稳定 409；不会覆盖文件、丢失旧 Revision或产生两个最新 Revision。
 - [ ] AC6：相同 Idempotency Key 与相同绑定可安全重放；不同载荷复用同键被拒绝；响应丢失后恢复同一 Revision。
-- [ ] AC7：空文件、文件末尾、CRLF/LF、相邻修改、删除/新增同一区域、较大但受限 Markdown 和非法/超限输入有确定测试；合并输出不会残留未解析冲突标记。
+- [ ] AC7：空 base/current、文件末尾、CRLF/LF、相邻修改、删除/新增同一区域、较大但受限 Markdown 和非法/超限输入有确定测试；最终空白正文继续按现有契约拒绝，合并输出不会残留未解析冲突标记。
 - [ ] AC8：OpenAPI、后端领域/Application/PostgreSQL/HTTP、生产 Composition、前端严格 Decoder/UI 与事件失效均完成；不存在仅前端实现的合并规则或第二写入路径。
-- [ ] AC9：桌面和 `390x844` 移动端真实浏览器链路覆盖无冲突与冲突解决、刷新恢复、再次漂移和重新审批；无横向溢出、控制台错误或失败假成功。
+- [ ] AC9：桌面和 `390x844` 移动端真实浏览器链路覆盖无冲突与冲突解决、成功创建后的刷新恢复、再次漂移和重新审批；未提交正文不进入 Browser Storage，且无横向溢出、控制台错误或失败假成功。
 - [ ] AC10：现有 Proposal 类型、Approval、current-content、preflight、Safe Writeback、Document Restore 和 typed Proposal 测试无回归，`docs/requirements.md` AC-13 与产品交付父任务状态同步。
 
 ## Out Of Scope
 
 - 结构化 `knowledge_change`、`publish_artifact`、`downstream_update` 的通用对象合并器。
+- `restore_document` 的三方合并或可编辑恢复结果；其基线漂移时继续重新生成严格恢复预览。
 - Git branch merge/rebase、远端冲突解决、force push、reset、checkout 或历史重写。
 - 自动审批、自动写回、多人实时协同编辑、评论系统和批量 Proposal 合并。
+- 将文件截断为空白正文；首期保持现有非空 Markdown Revision/Writeback 契约。
 - 将完整正文或三方内容写入日志、Audit payload、URL 或浏览器持久存储。
 - 修改已发布迁移；数据库演进只使用新的前向 migration。
-
-## Open Question
-
-- `restore_document` 是否在首期与普通 `file_patch/REPLACE` 一起支持三方合并，还是首期仅支持普通文件修改 Proposal？

@@ -1,1 +1,17 @@
-{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python3 .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/spec/backend/index.md", "reason": "Change Control 后端分层、生产装配与质量入口"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "current Revision、append-only、CAS、幂等回执与固定锁序"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "稳定 409/413/503 Problem 与敏感信息边界"}
+{"file": ".trellis/spec/backend/http-boundary.md", "reason": "Gin/OpenAPI 路由对等、严格 JSON 与 no-store"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Go Adapter、故障恢复、资源清理与测试分层"}
+{"file": ".trellis/spec/backend/git-sync-contract.md", "reason": "固定 Git 领域动作、进程取消与禁止 raw argv"}
+{"file": ".trellis/spec/frontend/index.md", "reason": "前端工作台整体规范入口"}
+{"file": ".trellis/spec/frontend/directory-structure.md", "reason": "Business 与 shared Monaco 的依赖边界"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "Query/local draft/SSE 事实归属与正文不持久化"}
+{"file": ".trellis/spec/frontend/component-guidelines.md", "reason": "Monaco 生命周期、响应式与可访问性"}
+{"file": ".trellis/spec/frontend/type-safety.md", "reason": "Proposal 严格 decoder 与漂移冲突契约"}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "前端状态、浏览器与质量门禁"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "迁移到 OpenAPI、应用、Web、事件的完整数据流"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "成熟方案门禁与共享 Monaco 复用"}
+{"file": ".trellis/tasks/08-14-proposal-revision-three-way-merge/research/backend-revision-contract.md", "reason": "后端 current pointer、Workflow/Authorization 围栏与 API 研究"}
+{"file": ".trellis/tasks/08-14-proposal-revision-three-way-merge/research/merge-engine.md", "reason": "Git merge-file 选型、固定契约、安全边界与测试向量"}
+{"file": ".trellis/tasks/08-14-proposal-revision-three-way-merge/research/frontend-merge-ux.md", "reason": "Revision workbench、严格 decoder、状态机与浏览器 UX 研究"}

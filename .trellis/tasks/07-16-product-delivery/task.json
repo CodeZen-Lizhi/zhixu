@@ -51,7 +51,8 @@
     "07-28-m7-timeline-impact-residuals",
     "07-28-m8-learning-residuals",
     "07-28-m9-export-residuals",
-    "08-08-otel-prometheus-observability"
+    "08-08-otel-prometheus-observability",
+    "08-14-proposal-revision-three-way-merge"
   ],
   "parent": null,
   "relatedFiles": [],

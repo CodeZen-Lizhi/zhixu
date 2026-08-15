@@ -137,7 +137,7 @@ func insertProposalListFixture(t *testing.T, ctx context.Context, tx pgx.Tx, fix
 	revisionID := proposalListRelatedID(fixture.ID, "92000000")
 	requestHash := strings.Repeat(string(fixture.ID)[0:1], 64)
 	changeHash := strings.Repeat(string(fixture.ID)[1:2], 64)
-	if _, err := tx.Exec(ctx, `INSERT INTO change_control.proposal(id,workspace_id,proposal_type,risk_level,idempotency_key,request_hash,status,version,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,1,$8,$9)`, string(fixture.ID), string(fixture.WorkspaceID), string(fixture.Type), string(fixture.RiskLevel), "list-"+string(fixture.ID), requestHash, string(fixture.Status), fixture.CreatedAt, fixture.UpdatedAt); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO change_control.proposal(id,workspace_id,proposal_type,risk_level,idempotency_key,request_hash,status,version,created_at,updated_at,current_revision_id) VALUES($1,$2,$3,$4,$5,$6,$7,1,$8,$9,$10)`, string(fixture.ID), string(fixture.WorkspaceID), string(fixture.Type), string(fixture.RiskLevel), "list-"+string(fixture.ID), requestHash, string(fixture.Status), fixture.CreatedAt, fixture.UpdatedAt, string(revisionID)); err != nil {
 		t.Fatal(err)
 	}
 	if fixture.Type == domain.ProposalTypeKnowledgeChange {
@@ -165,6 +165,14 @@ func insertProposalListFixture(t *testing.T, ctx context.Context, tx pgx.Tx, fix
 			t.Fatal(err)
 		}
 		if _, err := tx.Exec(ctx, `UPDATE change_control.proposal SET workflow_run_id=$1,version=version+1 WHERE id=$2`, string(fixture.WorkflowRunID), string(fixture.ID)); err != nil {
+			t.Fatal(err)
+		}
+		approvalID := proposalListRelatedID(fixture.ID, "93000000")
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO change_control.proposal_revision_dispatch(
+				workspace_id,proposal_id,revision_id,approval_id,workflow_run_id,created_at
+			) VALUES($1,$2,$3,$4,$5,$6)`,
+			string(fixture.WorkspaceID), string(fixture.ID), string(revisionID), string(approvalID), string(fixture.WorkflowRunID), fixture.UpdatedAt); err != nil {
 			t.Fatal(err)
 		}
 	}
