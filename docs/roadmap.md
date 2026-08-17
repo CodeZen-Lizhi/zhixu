@@ -39,9 +39,11 @@ flowchart LR
 
 - **优先级/初估**：P1，20–30 人天。
 - **目标**：让用户在 Workspace 内提出分析目标，由系统执行多步、可审计的只读工具循环，并把需要写入的结果收敛为 Proposal。
+- **当前实现状态**：`/chat` 已具备独立的 `workspace_analysis` 模式、六阶段持久流程、受限时间线和恢复合同；默认 `rag` 路径、历史哈希和既有 RAG Definition 保持不变。真实旧/新 API/Worker 四组合、含新事实后的 current-API/legacy-Worker 回滚、固定 RAG 浏览器和 Worker 恢复演练已通过。该能力仍默认关闭，只有 API、Worker、Definition 与精确 Tool Registry 同时 ready 时才能接受新请求；在完成目标环境灰度和 OTLP 观察前，本条目仍不标记为路线图已交付。
 - **首期范围**：只开放 `ReadGitStatus`、受证据约束的 RAG、`ReadSource` 和 `ValidateCitation`；其他自由查询或正文工具先完成 Receipt、输入上限、敏感信息处理和循环契约。
 - **边界**：工具仅服务端授权；步骤数、单工具超时、总时限、并发、Token 和费用预算有硬限制；最终事实必须经过 Evidence/Citation 校验。模型不得直接写文件、提交 Git 或扩大 Capability。
 - **验收门禁**：一次对话至少完成两次有依赖的只读调用；时间线区分 Token、工具请求/结果、等待和最终回答，刷新或 Worker 重投递能从持久事实恢复；各种上限以稳定错误终止。
+- **关闭与回退**：先停止新提交，再让存量 Run 在安全检查点完成或稳定终止；保留 additive schema、receipt、candidate 与历史 Answer，确认没有可运行的新 Definition 节点后只回退 Worker，current API 继续承担兼容读取。不得把工作区分析请求改投固定 RAG。执行步骤见 [发布 Runbook](architecture/runbooks/workspace-analysis-rollout.md)。
 - **依赖**：Eino AI Runtime 基线已交付；固定 RAG 与受限 Workspace Agent 模式仍需拥有独立产品入口、能力门禁和 Git 发布恢复路径，Eino 类型不得进入外部 API、领域对象或前端业务类型。
 
 ### 3.2 TODO 4：自动合成可持续演进的知识笔记

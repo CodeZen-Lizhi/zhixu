@@ -96,6 +96,7 @@ Go race/vet/tidy、OpenAPI 与 Web lint/typecheck/test/build 门禁通过。
 | [Eino Embedding Adapter 契约](./eino-embedding-adapter.md) | Eino OpenAI-Compatible/Ollama、wire 向量交叉校验、安全传输、错误矩阵与升级门禁 | 生产固定 Eino，真实 Provider/发布验收独立记录 |
 | [Eino Structured Scheduler 契约](./eino-structured-scheduler.md) | Application phase-scheduler Port、固定短 Graph、五消费者编排、错误/预算/审计门禁 | 生产固定 Eino；构建失败 fail closed |
 | [Eino 生产 AI Runtime 契约](./eino-runtime-adoption-gates.md) | RAG v2 Agent/短引用只读工具/final Stream、draft SSE、Finalizer 与稳定性门禁 | Eino 是唯一部署路径；Checkpoint 仍仅 PoC，真实 Provider 与稳定性证据独立记录 |
+| [Workspace Analysis 合同](./workspace-analysis-contract.md) | 显式模式、六阶段 Definition、精确只读 Tool、Operation/receipt/预算恢复、终态发布与时间线 | 本地实现、真实 PostgreSQL/River、旧/新四组合、post-fact Worker-only 回滚、进程 kill/reclaim、固定 RAG、Worker OTLP 演练与桌面/移动浏览器链路已验证；目标环境 Migration、Canary、OTLP 观察窗口与扩量仍需发布授权 |
 | [Timeline 与 Impact 契约](./timeline-impact.md) | append-only Event/Report、Outbox 状态机、Impact/Audit 原子事务、API/Worker/Web 门禁 | M7-04 与遗留收口已验证；下游 owner executor、Document/Eval impact 与全局 Audit 保持 deferred |
 | [Artifact 产物闭环契约](./artifact-contract.md) | Revision、Citation、generation、receipt/reservation、导出与 Publish Proposal 边界 | M8-01 后端、迁移、API/Worker 和真实浏览器闭环已验证；Proposal 批准后的正式写回保持 Change Control owner |
 | [快速记录与画像契约](./capture-profile-contract.md) | Capture、Source/Version、Outbox、独立阶段、Profile Revision/Evidence 与降级恢复 | TEXT/URL/FILE/IMAGE、Profile v1、真实 PostgreSQL 与桌面/移动 Capture 链已验证 |
@@ -106,7 +107,7 @@ Go race/vet/tidy、OpenAPI 与 Web lint/typecheck/test/build 门禁通过。
 | [可恢复异步 Export 契约](./export-contract.md) | Tagged Job、Collection scan、附件 ZIP、prepared result、流式下载、Audit 与清理 | Collection Markdown/Metadata JSON 和 Workspace Attachments ZIP 已交付并关闭 AC-33；Evaluation/Audit 内容导出保持 deferred |
 | [数据库开发规范](./database-guidelines.md) | pgx/Goose/River、参数化查询、事务、迁移和约束 | 已记录 M7-03 Collection/Health、M8 Review/Interview/Shared Path/Memory、M9 Workspace 列表的持久化、receipt、可见性与 PG/EXPLAIN 门禁 |
 | [错误处理规范](./error-handling.md) | 领域错误、Retry 分类、Problem Details、SSE 错误 | 已记录 Tool 稳定错误、M9 Proposal detail/summary Approval 空值契约与 M10 Auth 的稳定 Problem Details 边界 |
-| [日志与审计规范](./logging-guidelines.md) | slog JSON、OTel/OTLP Trace、Prometheus、脱敏和 Audit | 显式 Provider、真实启动探针、API/Worker `/metrics`、River consumer span 与环境隔离合同已验证；外部后端部署保持可选 |
+| [日志与审计规范](./logging-guidelines.md) | slog JSON、OTel/OTLP Trace/Metrics、Prometheus、脱敏和 Audit | 显式 Provider、双 signal 启动探针、API 本地 `/metrics`、API/Worker OTLP Metrics、River consumer span 与环境隔离合同已验证；目标环境后端观察仍需发布授权 |
 | [质量与交付规范](./quality-guidelines.md) | 禁止模式、测试金字塔、安全、Review 和门禁 | 已记录 M7 Graph/Collection/Health、M8 Review/Interview/Shared Path/Memory 和 M9 Export 的跨层、fault、浏览器与独立审查门禁 |
 
 ## 开发前检查清单

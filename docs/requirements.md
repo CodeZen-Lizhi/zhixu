@@ -176,7 +176,9 @@
 - 未审批任务不能调用写工具；所有 Tool Call 有最小、脱敏、不可伪造的审计。写能力只存在于 Safe Writeback。
 - 除固定 retrieval-first RAG 外，产品提供边界独立的受限 Workspace Agent 模式：用户提交一次复合分析目标后，Agent 能在白名单和硬预算内完成至少两次有依赖的只读工具调用，并用前一步结果决定后一步；首期能力限定为 Git 状态、受证据约束的检索、Source 读取和 Citation 校验。
 - Agent 时间线区分 Token 增量、工具请求、工具结果、等待和最终回答；刷新、中断或 Worker 重投递后从持久事实恢复。步骤数、单工具超时、总时限、并发、Token 与费用达到上限时以稳定原因终止，不能降级为无证据回答。
-- 受限 Agent 与固定 RAG 模式可独立启用和回滚。涉及正式知识或 Git 变更时，Agent 最多生成 typed Proposal；模型不能直接修改文件、创建 Commit 或调用可信写工具。
+- `workspace_analysis` 必须由用户显式选择；省略 mode 等同 `rag`，并保持既有请求哈希与固定 RAG 行为。该模式只允许本地批准知识范围，`allow_web=true` 和不支持的 Scope 组合在启动前拒绝。
+- 受限 Agent 与固定 RAG 模式可独立启用和回滚。新模式默认关闭，API、Worker、Definition 和精确 Tool Registry 必须共同 readiness；任一缺失时只对新模式返回 capability unavailable，不能静默回退到 RAG。启用前旧/新实例可混部；某 Workspace 一旦写入新模式事实，其读流量必须保留在兼容 API 上，旧 API 只能服务经证明没有这些事实的 Workspace。
+- 涉及正式知识或 Git 变更时，Agent 只返回带已验证 Citation 的建议和固定 `/proposals` 入口；不得创建或预填 Proposal，也不能直接修改文件、创建 Commit 或调用可信写工具。
 
 ### 10.21 可观测性、审计与成本
 
@@ -242,6 +244,7 @@
 ### 可用性与恢复
 
 - API、Worker、数据库、模型、索引和 Web 有独立 readiness；依赖降级不应扩大权限或产生假成功。
+- Workspace Analysis 额外要求 API/Worker 合同、冻结 Definition 和精确 Tool Registry 同时就绪；关闭该能力时先拒绝新 Run，再排空或在安全检查点终止存量 Run，历史 receipt、candidate 和 Answer 保持可读。
 - 从 ready 状态执行主 Docker Compose 项目 restart 必须在 60 秒内重新收敛为 ready；app/worker 与各自 relay 必须共享对应稳定 anchor 的 network namespace，host loopback 入口与 bridge peer 隔离保持有效。
 - helper/daemon 重启不承诺跨项目自动排序；anchor 缺失、停止或 namespace 分叉必须 fail closed 并显示 degraded，`./zhixu restart` 必须能在不删除数据卷、selection、grant 或宿主机 Workspace 的前提下恢复。
 - 支持 Worker crash、响应丢失、lease 过期、Provider 限流、索引失败和写回未知结果的恢复。

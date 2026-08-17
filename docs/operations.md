@@ -443,9 +443,12 @@ Embedding rate limit 进入 Retry Wait；Worker crash 从 checkpoint 恢复；�
 
 ### Telemetry 故障
 
-- `disabled`：无 OTLP exporter 属预期，API/Worker `/metrics` 与 context propagation 仍可用。
-- `optional`：记录稳定 degraded，ready 保持；说明 Trace 缺口。
-- `required`：startup export/flush 失败时 API/Worker 不启动；恢复 endpoint 后重启，不伪造 success。
+- `disabled`：无 OTLP exporter 属预期；API 本地 `/metrics` 与两个进程的 context propagation 仍可用。
+  Worker 健康端口只有 `/livez`、`/readyz`，不能假设存在 Worker `/metrics`。
+- `optional`：Trace 或 Metrics 任一 startup probe 失败时，两种 OTLP signal 原子降级，记录稳定 degraded，
+  ready 保持；API 本地 Prometheus 继续可用，Worker 外部指标存在明确缺口。
+- `required`：Trace 或 Metrics 任一 startup export/flush 失败时 API/Worker 不启动；恢复 endpoint 后重启，
+  不伪造 success。
 - 日志/健康不输出 endpoint、DSN 或 raw exporter error。
 
 ## 11. 常见页面与启动故障
@@ -508,6 +511,11 @@ make openapi-check
 make compose-check
 make compose-up
 make compose-rag-smoke
+make compose-workspace-analysis-compat-smoke
+make compose-workspace-analysis-smoke
+make compose-workspace-analysis-worker-restart-smoke
+make compose-workspace-analysis-otlp-smoke
+make compose-rag-browser-smoke
 make compose-tool-smoke
 make compose-model-runtime-hot-activation-smoke
 make eino-live-smoke
@@ -518,6 +526,10 @@ make benchmark-capacity
 ```
 
 `compose-model-runtime-hot-activation-smoke` 精确调用隔离的 `deploy/model-runtime-hot-activation-smoke.sh`，使用 disposable Compose 项目、Workspace、数据库和受控 loopback fake model 验证 Apply 前后容器身份不变；它不属于普通 `make test` 或快速检查。集成 target 使用 disposable database/Workspace，缺少 `ZHIXU_TEST_DATABASE_URL` 时必须失败或明确 skip，不能把未运行报为通过。Compose smoke、PostgreSQL integration、River fault、认证负测、容量、备份恢复、浏览器和真实模型评测证明不同边界，不能相互替代。
+
+Workspace Analysis 的本地兼容/回滚演练不能替代生产 canary 与 OTLP 观察。正式顺序、停止条件、
+Worker-only 回滚和含新事实 Workspace 的兼容 API 约束见
+[Workspace Analysis 发布与回滚 Runbook](architecture/runbooks/workspace-analysis-rollout.md)。
 
 `make eino-live-smoke` 覆盖受控真实 Provider 的即时门禁，不能替代稳定观察。六项 live gate 与 host-relay 外部
 Chat/本地 Ollama Embedding 的浏览器终态已通过；容器直连外部 HTTPS 路径以及连续 7 天、100 个非 replay RAG v2

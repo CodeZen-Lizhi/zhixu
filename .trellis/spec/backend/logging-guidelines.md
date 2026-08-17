@@ -78,19 +78,78 @@ git diff --check
 - queue/active/node result/retry/manual/lease/heartbeat/duplicate/shutdown 指标已接到真实
   Worker/PostgreSQL 事实点；持久 transition replay 不重复发射，metric 失败不改变业务结果。
 - 项目自有 River metadata 只写 `traceparent`；River 保留的 `river:*` recovery 字段可共存但不进入 Application 或可观测载荷。
-- `disabled` 零 OTLP 网络但保留 context 和 `/metrics`；optional/required 只有在
-  `telemetry.startup` 真实 export+ForceFlush 成功后才标记 exporting。optional 失败清理后
-  使用无 exporter Provider，required 在 listener/ready 前 fail-fast。
-- OTLP base URL 保留 base path 后追加 `/v1/traces`；endpoint/header/compression/TLS/
+- `disabled` 零 OTLP 网络但保留 context 和进程内 Metrics；只有 API 暴露本地 `/metrics`，
+  Worker health server 只暴露 `/livez|/readyz`。optional/required 只有在 Trace 与 Metrics
+  两个 startup probe 都真实 export+ForceFlush 成功后才标记 exporting；任一失败时 optional
+  原子清理两种 exporter 并降级，required 在 listener/ready 前 fail-fast。
+- OTLP base URL 保留 base path 后分别追加 `/v1/traces` 和 `/v1/metrics`；endpoint/header/compression/TLS/
   timeout/retry、sampler、span limits 和 BSP 参数必须由项目显式覆盖环境默认。实际 payload
   Resource 只能含 service name/version/deployment environment。
-- API 顶层 `/metrics` 与 Worker `:8081/metrics` 暴露固定二十四个项目 collector 及 Go/process
-  collector；`/metrics|/livez|/readyz` 不创建 request span。Metrics 只表示当前进程快照和
-  本次启动累计值，历史由外部 Prometheus Server 拥有。
+- API 顶层 `/metrics` 暴露项目 collector 及 Go/process collector；`/metrics|/livez|/readyz`
+  不创建 request span。Worker 没有本地 Metrics HTTP route；optional/required 模式通过 OTLP
+  导出同一项目 Measurement。Metrics 只表示当前进程快照和本次启动累计值，历史由外部后端拥有。
 - API/Worker 的进程作用域 Provider 分别使用 `zhixu-api`/`zhixu-worker` service name，并在 Shutdown 刷新
-  Metrics/Trace。`TELEMETRY_EXPORTING` 只证明 exporter 已构造；Collector 可达性必须由真实 `/v1/metrics`、
-  `/v1/traces` 导出证据证明。
+  Metrics/Trace。`TELEMETRY_EXPORTING` 只证明两个 exporter 的 startup probe 已成功；持续可达性必须由
+  真实 `/v1/metrics`、`/v1/traces` 导出证据证明。
 - Worker `/livez|readyz` 只返回稳定 `status/code/version`；真实容器日志和 health response 已执行 Secret canary 扫描。
+
+### Scenario: Prometheus 与 OTLP Metrics 双写
+
+#### 1. Scope / Trigger
+
+- `cmd/api`、`cmd/worker` 初始化 `internal/platform/observability.Telemetry` 时，必须按配置同时建立
+  进程内 Prometheus 与可选 OTLP Metrics/Trace 生命周期；业务包只能通过项目 `Metrics` 接口记录。
+
+#### 2. Signatures
+
+- 初始化入口固定为 `InitializeTelemetry(ctx, TelemetryOptions)`；Metrics 入口固定为
+  `Telemetry.Metrics()`，只有 API composition 使用 `Telemetry.MetricsHandler()` 挂载 `/metrics`。
+- OTLP base endpoint 分别追加 `/v1/traces` 与 `/v1/metrics`；Resource 必须且只能包含
+  `service.name`、`service.version`、`deployment.environment`。
+- 项目 Metrics 使用 canonical dotted 名称，例如 `workspace_analysis.outcome_total`；Prometheus
+  exposition 再映射为 `zhixu_workspace_analysis_outcome_total`，不得反向污染 OTLP 名称。
+
+#### 3. Contracts
+
+- `disabled` 不发 OTLP 网络请求；API 本地 `/metrics` 继续可用，Worker 只提供健康路由。
+- `optional|required` 的业务 Metrics 必须同时写入本地 Prometheus Registry 与 OTLP MeterProvider；
+  Trace 或 Metrics 任一 startup probe 失败时，不得留下半导出状态。
+- shutdown 必须各自恰好一次关闭 Trace 与 Metrics Provider；PeriodicReader shutdown 自带最终 collect/export，
+  不得在前面额外 ForceFlush 造成 cumulative sample 重复。
+- OTLP label 继续服从项目低基数和脱敏合同，不能加入 Workspace、Run、Answer、Tool、Receipt 或路径正文。
+- Collector 的 Prometheus projection 可按标准语义从 `service.name` 增加固定 `job` 标签；演练必须将它
+  与三项 Resource、业务标签一起做完整键值集合校验，不能把任意额外标签当成安全元数据。
+
+#### 4. Validation & Error Matrix
+
+- `disabled` 且 endpoint 非空 -> `ErrTelemetryEndpointForbidden`，零 exporter 请求。
+- `optional` 且任一 signal 构造或 startup probe 失败 -> 稳定 degraded，本地 Metrics 与 non-exporting Trace 可用。
+- `required` 且任一 signal 失败 -> `ErrTelemetryExporterRequired`，进程在 listener/ready 前失败。
+- 重定向、环境变量偷渡、非法 TLS/endpoint、超时或未知 Metric/label -> fail closed，不记录 raw endpoint/error。
+- exporting fanout 在 shutdown 后继续记录 -> `ErrObservabilityClosed`，不得静默接受或重新创建 Provider；
+  `disabled`/degraded 的本地 Prometheus Registry 保持既有进程内生命周期，不据此宣称存在外部 Provider。
+
+#### 5. Good/Base/Bad Cases
+
+- Good: Worker required 模式向隔离 Collector 导出一个带精确四个业务标签、三项 Resource 和固定 `job`
+  投影的 `workspace_analysis.outcome_total` cumulative monotonic Sum，exact replay 不增量。
+- Base: disabled 模式 API 仍可读取本地 `/metrics`，Worker `/livez|/readyz` 正常且无 OTLP 请求。
+- Bad: 宣称 Worker 存在 `:8081/metrics`，或 Trace exporter 成功后 Metrics exporter 失败却仍报告 exporting。
+
+#### 6. Tests Required
+
+- 单元与 race 测试覆盖 `/v1/metrics` 路径、exact Resource、canonical instrument、label 集、环境隔离、
+  optional/required 原子语义、并发 shutdown 和关闭后拒绝。
+- Compose contract 必须锁定 Collector digest、loopback 网络、named config、只读/最小权限和无 host bind mount。
+- 真实 Compose rehearsal 必须跑完整 Worker/PostgreSQL/River Workspace Analysis，执行 exact replay、
+  graceful shutdown，并在 Collector 投影验证单一样本和零身份标签。
+
+#### 7. Wrong vs Correct
+
+```text
+Wrong: 给 Worker 虚构 /metrics 路由，或用 host bind mount 注入 Collector 配置后绕过 Workspace grant。
+Correct: API 保留本地 /metrics；API/Worker 经官方 OTLP Metrics SDK 双写，Collector 用 pinned image、named config 和隔离 loopback 真实验收。
+```
 
 ## M10-01 Audit 与安全脱敏边界
 
@@ -160,6 +219,52 @@ Correct: 用 canonical UUID + ':' + 已验证幂等键构造可打印锁键，�
   调用点对 Audit Recorder 的接入覆盖。
 - 灰度环境的外部 OTel/Prometheus 查询、告警和稳定发布观察证据的受控归档方式。
 - Audit 访问权限、长期归档策略与真实自托管数据库演练。
+
+## Scenario: Workspace Analysis 终态指标
+
+### 1. Scope / Trigger
+
+- `workspace-analysis@1` 的 Answer/Analysis Run 终态成功提交后，记录一个低基数结果计数；
+  临时节点状态、重放和提交前状态不得产生指标。
+
+### 2. Signatures
+
+- 业务指标名固定为 `workspace_analysis.outcome_total`，Prometheus 名固定为
+  `zhixu_workspace_analysis_outcome_total`。
+- 构造入口固定为 `NewWorkspaceAnalysisOutcomeMeasurement(status, terminationReason)`。
+
+### 3. Contracts
+
+- 标签必须且只能包含 `mode=workspace_analysis`、`definition=workspace-analysis-v1`、
+  `outcome` 和 `termination_reason`。
+- `outcome` 只允许 `completed|refused|clarification_required|failure|cancelled`；
+  `termination_reason` 只允许领域冻结的 13 个终态原因。
+- Workspace、Workflow、Answer、Tool、Operation、Receipt 等身份不得成为标签。
+
+### 4. Validation & Error Matrix
+
+- active 状态、未知状态或 status/reason 组合不匹配 -> `ErrInvalidMetric`。
+- 缺少固定标签、未知 label/value、UUID/长哈希/长数字身份 -> fail closed。
+- Metrics exporter 失败 -> 不回滚已提交业务事务，但必须保留稳定诊断错误码。
+
+### 5. Good/Base/Bad Cases
+
+- Good: `succeeded + COMPLETED` 映射为 `completed`，在首次终态提交后计数一次。
+- Base: Worker 重放已存在 publication，只读验证而不重复计数。
+- Bad: 把 `workspace_id` 或 `result_hash` 放入标签，或在 transaction commit 前记录。
+
+### 6. Tests Required
+
+- 单元测试覆盖全部合法 status/reason 矩阵和非法组合。
+- Memory/Prometheus 测试断言 exact label set、exposition 名称和 UUID/hash 泄漏拒绝。
+- Finalizer 测试断言首次提交计数、持久重放不重复，以及 exporter 错误不改变终态结果。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: 在节点完成或 publication replay 时，用 workspace_id/result_hash 作为 label 记录结果。
+Correct: 只在首次持久终态提交成功后，使用固定 definition/mode 和枚举 outcome/reason 计数。
+```
 
 ## M6-03 Tool Redaction Boundary
 

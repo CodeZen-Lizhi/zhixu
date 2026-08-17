@@ -1,0 +1,14 @@
+{"file":".trellis/spec/backend/auth-security.md","reason":"复核模型不能扩大 Workspace、Capability、Tool 或写权限"}
+{"file":".trellis/spec/backend/http-boundary.md","reason":"复核 HTTP/OpenAPI/SSE/cache/strict JSON 对等"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"复核日志、Metric、Trace、Audit 和事件无 Prompt/正文/路径泄漏"}
+{"file":".trellis/spec/backend/git-sync-contract.md","reason":"复核 dirty 状态读取没有扩大为 raw Git 或写能力"}
+{"file":".trellis/spec/backend/eino-runtime-adoption-gates.md","reason":"复核 Eino 类型隔离、Provider 错误、fallback 和恢复门禁"}
+{"file":".trellis/spec/frontend/state-management.md","reason":"复核 Query/SSE/Draft/local 状态、刷新与 authoritative terminal"}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"复核严格 union decoder、短引用和跨层语义绑定"}
+{"file":".trellis/spec/frontend/component-guidelines.md","reason":"复核时间线、Stop、键盘/focus、移动布局与无重叠"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"复核 mode -> Definition -> Tool -> Answer -> SSE -> UI round trip"}
+{"file":".trellis/tasks/08-15-workspace-agent-user-flow/research/runtime-persistence.md","reason":"逐项复核持久恢复、预算与 canonical receipt 不变量"}
+{"file":".trellis/tasks/08-15-workspace-agent-user-flow/research/tool-security-user-flow.md","reason":"逐项复核工具版本、短引用、Git 聚合和 Proposal 边界"}
+{"file": ".trellis/tasks/08-15-workspace-agent-user-flow/research/stop-double-409.md", "reason": "复核 Stop 只恢复精确版本冲突且不扩大控制权限"}
+{"file": ".trellis/tasks/08-15-workspace-agent-user-flow/research/terminal-fault-matrix.md", "reason": "复核 River 终态矩阵不伪造预算耗尽或终止事实"}
+{"file": ".trellis/tasks/08-15-workspace-agent-user-flow/research/post-fact-rollback-routing.md", "reason": "验证 post-fact rollback 仅证明仓库内单 API 拓扑，不替代外部生产路由证据"}

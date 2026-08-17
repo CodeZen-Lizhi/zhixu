@@ -269,6 +269,16 @@ Proposal Revision → Evidence/Diff validation → ReadyForReview → Approval �
 
 Question/scope → Clarification（必要时）→ query plan → hybrid retrieval → eligibility → conflict check → structured answer → citation/faithfulness review → Answer/Refusal。Conversation 只提供短期上下文；网页补充需要独立授权，不能把网页内容当 System 指令。
 
+### 7.4.1 受限 Workspace Analysis
+
+`workspace_analysis` 是与固定 RAG 独立的显式 Question mode。它使用冻结的 `workspace-analysis@1` 六阶段 Workflow：Git 聚合 → 受证据约束的检索 → 固定 Source 读取 → 合成 → Citation 校验 → Faithfulness Review/发布。服务端为每个阶段选择唯一的精确 Tool；模型只能使用本 Run 的短引用，不能选择 Tool、版本、Workspace、路径或任何授权事实。
+
+Git、检索和读取等可随时间变化的操作在成功时与 Call 终结、预算结算和跨 Attempt logical operation 一起写入 canonical receipt。租约回收、重复 River 投递或响应丢失只能复用或归约同一 receipt；无法证明的调用进入 Unknown，不能重新观察 Git/检索或把结果交给后继。最终发布要求不可变 candidate、已验证 Citation receipt 和独立成功的 Review Model Run；取消、拒答、失败和 Unknown 都必须关闭 pending Answer，且不得伪造 Model Run。
+
+时间线 snapshot 是权威读模型，SSE 只传递可幂等失效通知，Answer Draft SSE 只传递合成中的临时 Token。对外投影只含稳定阶段、受限工具名/版本、安全 Git 聚合、预算与脱敏错误，不含 Prompt、原始参数/结果、私有 receipt binding、路径或 Provider tool-call ID。
+
+该能力默认关闭。API 和 Worker 仅在同一合同版本的 Definition、Tool Registry 与运行时参数均 readiness 时接收新 Run；失败只对该模式 fail closed，固定 RAG 继续可用。启用前可以混部旧/新实例；一旦某 Workspace 写入工作区分析 Question/Answer，该 Workspace 的读流量必须持续路由到能识别新联合类型的 API。当前单 ingress 拓扑不提供 legacy/current API 的 Workspace 分流，因此回滚固定为“停止新提交 → 排空或安全终止存量 Run → 确认无可运行新节点 → 保留 current API version/兼容读取能力与 ingress → 只回退 Worker artifact”。API 可为应用 feature-off 配置而从同一 current image 重建，因此本地兼容门禁不证明连接无中断。additive schema、receipt、candidate 与历史 Answer 全部保留，且绝不改投固定 RAG。旧 API 只能服务经证明没有工作区分析事实的 Workspace；完整操作见 [Workspace Analysis 发布 Runbook](runbooks/workspace-analysis-rollout.md)。
+
 ### 7.5 Artifact 生成
 
 目标/材料 → frozen Input Snapshot → coverage/gap analysis → versioned outline → Human Task → per-section retrieval/generation → Citation/Conflict/Coverage gate → Artifact Revision → export 或 publish Proposal。证据不足的章节保留 GAP；生成结果默认不入正式知识。

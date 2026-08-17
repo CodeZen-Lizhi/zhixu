@@ -254,17 +254,21 @@ database lease/heartbeat are configured through the `ZHIXU_REINDEX_*` variables;
 the Reindex heartbeat must be shorter than its lease.
 
 Telemetry defaults to `disabled`: API and Worker keep propagatable trace context
-and expose independent Prometheus registries at `/metrics`, but make no OTLP
-network requests and require no observability backend. `optional|required`
-require `OTEL_EXPORTER_OTLP_ENDPOINT`; startup exports and flushes a real
-`telemetry.startup` span before reporting success. Optional mode falls back to a
-non-exporting SDK provider with a stable degraded status, while required mode
-fails before listening. API `http.request` and claimed River
+and make no OTLP network requests. The API exposes its process-local Prometheus
+registry at `/metrics`; the Worker health server exposes only `/livez` and
+`/readyz`. `optional|required` require `OTEL_EXPORTER_OTLP_ENDPOINT`; startup
+exports and flushes both a real `telemetry.startup` span and the runtime presence
+metric before reporting success. Optional mode atomically falls back to local
+Prometheus plus a non-exporting trace provider with a stable degraded status if
+either OTLP signal is unavailable, while required mode fails before listening.
+API `http.request` and claimed River
 `workflow.node.consume` spans use the project-owned validation/redaction and
 only persist `traceparent` across the job boundary.
-API and Worker use scoped external Providers with distinct service names, append
+In optional or required mode, API and Worker dual-write project metrics to their
+local registries and scoped OTLP Providers with distinct service names, append
 `/v1/metrics` and `/v1/traces`, and flush on shutdown. `TELEMETRY_EXPORTING`
-means the exporter is configured, not that a remote Collector has acknowledged data.
+means both exporters passed their startup probes, not that a remote Collector
+will remain reachable.
 
 SIGINT/SIGTERM first remove Worker readiness and choose the graceful River
 `Stop` path. A fatal runtime invariant may instead choose `StopAndCancel`; the

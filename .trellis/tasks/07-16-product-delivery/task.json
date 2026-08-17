@@ -52,7 +52,8 @@
     "07-28-m8-learning-residuals",
     "07-28-m9-export-residuals",
     "08-08-otel-prometheus-observability",
-    "08-14-proposal-revision-three-way-merge"
+    "08-14-proposal-revision-three-way-merge",
+    "08-15-workspace-agent-user-flow"
   ],
   "parent": null,
   "relatedFiles": [],
