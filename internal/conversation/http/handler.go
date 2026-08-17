@@ -40,6 +40,8 @@ type Service interface {
 	ListTurns(context.Context, application.ListTurnsQuery) (application.TurnPage, error)
 	// GetAnswer 返回 Answer 与 Workflow 权威状态投影。
 	GetAnswer(context.Context, foundation.ID, foundation.ID) (application.AnswerView, error)
+	// GetWorkspaceAnalysisTimeline 返回 Answer-scoped Workspace Analysis 权威时间线。
+	GetWorkspaceAnalysisTimeline(context.Context, application.WorkspaceAnalysisTimelineQuery) (conversationdomain.WorkspaceAnalysisTimeline, error)
 }
 
 // Handler 将 Conversation Application 映射到稳定 REST 契约。
@@ -61,6 +63,7 @@ func (handler *Handler) Routes(router gin.IRouter) {
 	router.POST("/conversations/:conversation_id/questions", httpapi.GinHandler(handler.submitQuestion))
 	router.GET("/conversations/:conversation_id/turns", httpapi.GinHandler(handler.listTurns))
 	router.GET("/answers/:answer_id", httpapi.GinHandler(handler.getAnswer))
+	router.GET("/answers/:answer_id/analysis-timeline", httpapi.GinHandler(handler.getWorkspaceAnalysisTimeline))
 	router.POST("/answers/:answer_id/feedback", httpapi.GinHandler(handler.submitFeedback))
 }
 
@@ -71,6 +74,7 @@ type createConversationRequest struct {
 
 type questionRequest struct {
 	WorkspaceID  string               `json:"workspace_id"`
+	Mode         string               `json:"mode,omitempty"`
 	Question     string               `json:"question"`
 	Scope        questionScopeRequest `json:"scope,omitempty"`
 	AnswerDepth  string               `json:"answer_depth,omitempty"`
@@ -116,6 +120,7 @@ type questionResponse struct {
 	ID                    string        `json:"id"`
 	WorkspaceID           string        `json:"workspace_id"`
 	ConversationID        string        `json:"conversation_id"`
+	Mode                  string        `json:"mode"`
 	Question              string        `json:"question"`
 	Ordinal               int64         `json:"ordinal"`
 	ContextThroughOrdinal int64         `json:"context_through_ordinal"`
@@ -378,6 +383,23 @@ func (handler *Handler) getAnswer(w http.ResponseWriter, r *http.Request) {
 	httpapi.WriteJSON(w, http.StatusOK, toAnswerResponse(view))
 }
 
+func (handler *Handler) getWorkspaceAnalysisTimeline(w http.ResponseWriter, r *http.Request) {
+	if !handler.available(w) {
+		return
+	}
+	workspaceID, answerID, err := parseScopedIDs(r.URL.Query().Get("workspace_id"), r.PathValue("answer_id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	timeline, err := handler.service.GetWorkspaceAnalysisTimeline(r.Context(), application.WorkspaceAnalysisTimelineQuery{WorkspaceID: workspaceID, AnswerID: answerID})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	httpapi.WriteJSON(w, http.StatusOK, timeline)
+}
+
 func (handler *Handler) submitFeedback(w http.ResponseWriter, r *http.Request) {
 	if !handler.available(w) {
 		return
@@ -445,7 +467,7 @@ func toQuestionRequest(wire questionRequest, workspaceID, conversationID foundat
 	if err != nil {
 		return conversationdomain.QuestionRequest{}, err
 	}
-	return conversationdomain.QuestionRequest{WorkspaceID: workspaceID, ConversationID: conversationID, QuestionText: wire.Question, Scope: conversationdomain.QuestionScope{RetrievalMode: retrievaldomain.SearchMode(wire.Scope.RetrievalMode), Filter: retrievaldomain.SearchFilter{SourceIDs: sourceIDs, SourceVersionIDs: versionIDs, PathPrefixes: wire.Scope.PathPrefixes, CapturedAtFrom: from, CapturedAtBefore: before}, AllowOriginalSources: wire.Scope.AllowOriginalSources, AllowWeb: wire.Scope.AllowWeb}, AnswerDepth: conversationdomain.AnswerDepth(wire.AnswerDepth), OutputFormat: conversationdomain.OutputFormat(wire.OutputFormat)}, nil
+	return conversationdomain.QuestionRequest{WorkspaceID: workspaceID, ConversationID: conversationID, Mode: conversationdomain.QuestionMode(wire.Mode), QuestionText: wire.Question, Scope: conversationdomain.QuestionScope{RetrievalMode: retrievaldomain.SearchMode(wire.Scope.RetrievalMode), Filter: retrievaldomain.SearchFilter{SourceIDs: sourceIDs, SourceVersionIDs: versionIDs, PathPrefixes: wire.Scope.PathPrefixes, CapturedAtFrom: from, CapturedAtBefore: before}, AllowOriginalSources: wire.Scope.AllowOriginalSources, AllowWeb: wire.Scope.AllowWeb}, AnswerDepth: conversationdomain.AnswerDepth(wire.AnswerDepth), OutputFormat: conversationdomain.OutputFormat(wire.OutputFormat)}, nil
 }
 
 func toConversationResponse(value conversationdomain.Conversation) conversationResponse {
@@ -454,7 +476,7 @@ func toConversationResponse(value conversationdomain.Conversation) conversationR
 
 func toQuestionResponse(value conversationdomain.Question) questionResponse {
 	filter := value.Request.Scope.Filter
-	return questionResponse{ID: string(value.ID), WorkspaceID: string(value.Request.WorkspaceID), ConversationID: string(value.Request.ConversationID), Question: value.Request.QuestionText, Ordinal: value.Ordinal, ContextThroughOrdinal: value.ContextThroughOrdinal, Scope: scopeResponse{RetrievalMode: string(value.Request.Scope.RetrievalMode), SourceIDs: idsToStrings(filter.SourceIDs), SourceVersionIDs: idsToStrings(filter.SourceVersionIDs), PathPrefixes: append([]string{}, filter.PathPrefixes...), CapturedAtFrom: formatOptionalTime(filter.CapturedAtFrom), CapturedAtBefore: formatOptionalTime(filter.CapturedAtBefore), AllowOriginalSources: value.Request.Scope.AllowOriginalSources, AllowWeb: value.Request.Scope.AllowWeb}, AnswerDepth: string(value.Request.AnswerDepth), OutputFormat: string(value.Request.OutputFormat), CreatedAt: formatTime(value.CreatedAt)}
+	return questionResponse{ID: string(value.ID), WorkspaceID: string(value.Request.WorkspaceID), ConversationID: string(value.Request.ConversationID), Mode: string(value.Request.Mode), Question: value.Request.QuestionText, Ordinal: value.Ordinal, ContextThroughOrdinal: value.ContextThroughOrdinal, Scope: scopeResponse{RetrievalMode: string(value.Request.Scope.RetrievalMode), SourceIDs: idsToStrings(filter.SourceIDs), SourceVersionIDs: idsToStrings(filter.SourceVersionIDs), PathPrefixes: append([]string{}, filter.PathPrefixes...), CapturedAtFrom: formatOptionalTime(filter.CapturedAtFrom), CapturedAtBefore: formatOptionalTime(filter.CapturedAtBefore), AllowOriginalSources: value.Request.Scope.AllowOriginalSources, AllowWeb: value.Request.Scope.AllowWeb}, AnswerDepth: string(value.Request.AnswerDepth), OutputFormat: string(value.Request.OutputFormat), CreatedAt: formatTime(value.CreatedAt)}
 }
 
 func toAnswerResponse(view application.AnswerView) answerResponse {

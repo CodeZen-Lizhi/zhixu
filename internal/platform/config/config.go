@@ -23,23 +23,24 @@ import (
 )
 
 const (
-	defaultHTTPAddr                   = "127.0.0.1:8080"
-	defaultVersion                    = "dev"
-	defaultPingTimeout                = 2 * time.Second
-	defaultGraphQueryTimeout          = 2 * time.Second
-	defaultHealthInterval             = 15 * time.Second
-	defaultShutdownTimeout            = 10 * time.Second
-	defaultMaxConns                   = int32(10)
-	defaultMinConns                   = int32(1)
-	defaultWorkerQueue                = "workflow"
-	defaultWorkerMaxWorkers           = 4
-	defaultWorkerJobTimeout           = 15 * time.Minute
-	defaultWorkerRescueStuckJobsAfter = 30 * time.Minute
-	defaultWorkflowLeaseDuration      = 2 * time.Minute
-	defaultWorkflowHeartbeatInterval  = 30 * time.Second
-	defaultWorkerSoftStopTimeout      = 30 * time.Second
-	defaultWorkerHardStopTimeout      = 60 * time.Second
-	defaultWorkerHealthAddr           = "0.0.0.0:8081"
+	defaultHTTPAddr                        = "127.0.0.1:8080"
+	defaultVersion                         = "dev"
+	defaultPingTimeout                     = 2 * time.Second
+	defaultGraphQueryTimeout               = 2 * time.Second
+	defaultHealthInterval                  = 15 * time.Second
+	defaultShutdownTimeout                 = 10 * time.Second
+	defaultMaxConns                        = int32(10)
+	defaultMinConns                        = int32(1)
+	defaultWorkerQueue                     = "workflow"
+	defaultWorkerMaxWorkers                = 4
+	defaultWorkerJobTimeout                = 15 * time.Minute
+	defaultWorkerRescueStuckJobsAfter      = 30 * time.Minute
+	defaultWorkflowLeaseDuration           = 2 * time.Minute
+	defaultWorkflowHeartbeatInterval       = 30 * time.Second
+	defaultWorkspaceAnalysisConfigRevision = int64(1)
+	defaultWorkerSoftStopTimeout           = 30 * time.Second
+	defaultWorkerHardStopTimeout           = 60 * time.Second
+	defaultWorkerHealthAddr                = "0.0.0.0:8081"
 )
 
 // AuthMode 控制 API 是否要求单用户身份认证。
@@ -182,29 +183,32 @@ const (
 // Config contains process settings, including connection secrets. Callers must
 // use String or GoString rather than serializing the struct for diagnostics.
 type Config struct {
-	AppName                    string        `yaml:"app_name" validate:"notblank"`
-	Version                    string        `yaml:"version" validate:"notblank"`
-	Environment                string        `yaml:"environment"`
-	HTTPAddr                   string        `yaml:"http_addr" validate:"notblank"`
-	DatabaseURL                string        `yaml:"database_url"`
-	DatabaseHost               string        `yaml:"database_host"`
-	DatabasePort               string        `yaml:"database_port"`
-	DatabaseName               string        `yaml:"database_name"`
-	DatabaseUser               string        `yaml:"database_user"`
-	DatabasePassword           string        `yaml:"database_password"`
-	DatabaseMaxConns           int32         `yaml:"database_max_conns" validate:"gte=0"`
-	DatabaseMinConns           int32         `yaml:"database_min_conns" validate:"gte=0"`
-	DatabasePingTimeout        time.Duration `yaml:"database_ping_timeout" validate:"gt=0"`
-	GraphQueryTimeout          time.Duration `yaml:"graph_query_timeout" validate:"gt=0"`
-	HealthInterval             time.Duration `yaml:"health_interval" validate:"gt=0"`
-	ShutdownTimeout            time.Duration `yaml:"shutdown_timeout" validate:"gt=0"`
-	WebAssetsDir               string        `yaml:"web_assets_dir"`
-	WorkerQueue                string        `yaml:"worker_queue"`
-	WorkerMaxWorkers           int           `yaml:"worker_max_workers"`
-	WorkerJobTimeout           time.Duration `yaml:"worker_job_timeout"`
-	WorkerRescueStuckJobsAfter time.Duration `yaml:"worker_rescue_stuck_jobs_after"`
-	WorkflowLeaseDuration      time.Duration `yaml:"workflow_lease"`
-	WorkflowHeartbeatInterval  time.Duration `yaml:"workflow_heartbeat"`
+	AppName                         string        `yaml:"app_name" validate:"notblank"`
+	Version                         string        `yaml:"version" validate:"notblank"`
+	Environment                     string        `yaml:"environment"`
+	HTTPAddr                        string        `yaml:"http_addr" validate:"notblank"`
+	DatabaseURL                     string        `yaml:"database_url"`
+	DatabaseHost                    string        `yaml:"database_host"`
+	DatabasePort                    string        `yaml:"database_port"`
+	DatabaseName                    string        `yaml:"database_name"`
+	DatabaseUser                    string        `yaml:"database_user"`
+	DatabasePassword                string        `yaml:"database_password"`
+	DatabaseMaxConns                int32         `yaml:"database_max_conns" validate:"gte=0"`
+	DatabaseMinConns                int32         `yaml:"database_min_conns" validate:"gte=0"`
+	DatabasePingTimeout             time.Duration `yaml:"database_ping_timeout" validate:"gt=0"`
+	GraphQueryTimeout               time.Duration `yaml:"graph_query_timeout" validate:"gt=0"`
+	HealthInterval                  time.Duration `yaml:"health_interval" validate:"gt=0"`
+	ShutdownTimeout                 time.Duration `yaml:"shutdown_timeout" validate:"gt=0"`
+	WebAssetsDir                    string        `yaml:"web_assets_dir"`
+	WorkerQueue                     string        `yaml:"worker_queue"`
+	WorkerMaxWorkers                int           `yaml:"worker_max_workers"`
+	WorkerJobTimeout                time.Duration `yaml:"worker_job_timeout"`
+	WorkerRescueStuckJobsAfter      time.Duration `yaml:"worker_rescue_stuck_jobs_after"`
+	WorkflowLeaseDuration           time.Duration `yaml:"workflow_lease"`
+	WorkflowHeartbeatInterval       time.Duration `yaml:"workflow_heartbeat"`
+	WorkspaceAnalysisAPIEnabled     bool          `yaml:"workspace_analysis_api_enabled"`
+	WorkspaceAnalysisWorkerEnabled  bool          `yaml:"workspace_analysis_worker_enabled"`
+	WorkspaceAnalysisConfigRevision int64         `yaml:"workspace_analysis_config_revision"`
 
 	ReindexDispatchPollInterval time.Duration `yaml:"reindex_dispatch_poll_interval"`
 	ReindexDispatchBatchSize    int           `yaml:"reindex_dispatch_batch_size"`
@@ -289,22 +293,23 @@ type Config struct {
 // database URL empty so a process cannot silently connect to an unknown DB.
 func Defaults() Config {
 	return Config{
-		AppName:                    "zhixu",
-		Version:                    defaultVersion,
-		Environment:                "development",
-		HTTPAddr:                   defaultHTTPAddr,
-		DatabaseMaxConns:           defaultMaxConns,
-		DatabaseMinConns:           defaultMinConns,
-		DatabasePingTimeout:        defaultPingTimeout,
-		GraphQueryTimeout:          defaultGraphQueryTimeout,
-		HealthInterval:             defaultHealthInterval,
-		ShutdownTimeout:            defaultShutdownTimeout,
-		WorkerQueue:                defaultWorkerQueue,
-		WorkerMaxWorkers:           defaultWorkerMaxWorkers,
-		WorkerJobTimeout:           defaultWorkerJobTimeout,
-		WorkerRescueStuckJobsAfter: defaultWorkerRescueStuckJobsAfter,
-		WorkflowLeaseDuration:      defaultWorkflowLeaseDuration,
-		WorkflowHeartbeatInterval:  defaultWorkflowHeartbeatInterval,
+		AppName:                         "zhixu",
+		Version:                         defaultVersion,
+		Environment:                     "development",
+		HTTPAddr:                        defaultHTTPAddr,
+		DatabaseMaxConns:                defaultMaxConns,
+		DatabaseMinConns:                defaultMinConns,
+		DatabasePingTimeout:             defaultPingTimeout,
+		GraphQueryTimeout:               defaultGraphQueryTimeout,
+		HealthInterval:                  defaultHealthInterval,
+		ShutdownTimeout:                 defaultShutdownTimeout,
+		WorkerQueue:                     defaultWorkerQueue,
+		WorkerMaxWorkers:                defaultWorkerMaxWorkers,
+		WorkerJobTimeout:                defaultWorkerJobTimeout,
+		WorkerRescueStuckJobsAfter:      defaultWorkerRescueStuckJobsAfter,
+		WorkflowLeaseDuration:           defaultWorkflowLeaseDuration,
+		WorkflowHeartbeatInterval:       defaultWorkflowHeartbeatInterval,
+		WorkspaceAnalysisConfigRevision: defaultWorkspaceAnalysisConfigRevision,
 
 		ReindexDispatchPollInterval: defaultReindexDispatchPollInterval,
 		ReindexDispatchBatchSize:    defaultReindexDispatchBatchSize,
@@ -461,6 +466,9 @@ func (c Config) validateWith(configValidation *configValidator, validateAuth boo
 	}
 	if c.WorkflowHeartbeatInterval > (c.WorkflowLeaseDuration-time.Nanosecond)/3 {
 		return errors.New("workflow_heartbeat must be less than one third of workflow_lease")
+	}
+	if c.WorkspaceAnalysisConfigRevision <= 0 {
+		return errors.New("workspace_analysis_config_revision must be positive")
 	}
 	if c.ReindexDispatchPollInterval <= 0 || c.ReindexDispatchPollInterval > maxReindexDispatchPollInterval {
 		return errors.New("reindex_dispatch_poll_interval must be positive and at most 1m")
@@ -1046,7 +1054,7 @@ func (c Config) DatabaseConnectionString() (string, error) {
 // credentials and exporter endpoints are intentionally omitted.
 func (c Config) String() string {
 	return fmt.Sprintf(
-		"Config{AppName:%q Version:%q Environment:%q HTTPAddr:%q DatabaseConfigured:%t DatabaseMaxConns:%d DatabaseMinConns:%d DatabasePingTimeout:%s GraphQueryTimeout:%s HealthInterval:%s ShutdownTimeout:%s WebAssetsDir:%q WorkerQueue:%q WorkerMaxWorkers:%d WorkerJobTimeout:%s WorkerRescueStuckJobsAfter:%s WorkflowLeaseDuration:%s WorkflowHeartbeatInterval:%s ReindexDispatchPollInterval:%s ReindexDispatchBatchSize:%d ReindexDispatchErrorBackoff:%s ReindexLeaseDuration:%s ReindexHeartbeatInterval:%s ModelSettingsMode:%q ModelSettingsKeyConfigured:%t GitSyncKeyConfigured:%t ModelSettingsRolloutConfigured:%t ModelSettingsPrepared:%t EmbeddingProvider:%q EmbeddingConfigured:%t EmbeddingModel:%q EmbeddingDimensions:%d EmbeddingNormalization:%q EmbeddingDistanceMetric:%q EmbeddingMaxBatchSize:%d EmbeddingMaxInputBytes:%d EmbeddingMaxBatchInputBytes:%d EmbeddingTimeout:%s EmbeddingMaxResponseBytes:%d ChatProvider:%q ChatConfigured:%t ChatAPIStyle:%q ChatModel:%q ChatModelVersion:%q ChatAdapterVersion:%q ChatTimeout:%s ChatMaxRequestBytes:%d ChatMaxResponseBytes:%d ToolRuntimeMode:%q WebFetchMode:%q WebFetchTimeout:%s WebFetchResponseHeaderTimeout:%s WebFetchTLSHandshakeTimeout:%s WebFetchMaxRedirects:%d WebFetchMaxURLBytes:%d WebFetchMaxResponseHeaderBytes:%d WebFetchMaxBodyBytes:%d WebFetchMaxTextBytes:%d WebFetchMaxResolvedIPs:%d WebFetchAllowedContentTypeCount:%d RetrievalRRFK:%d RetrievalRRFLexicalCandidateLimit:%d RetrievalRRFVectorCandidateLimit:%d RetrievalRRFFusedCandidateLimit:%d RetrievalRRFRerankCandidateLimit:%d WorkerSoftStopTimeout:%s WorkerHardStopTimeout:%s WorkerHealthAddr:%q TelemetryMode:%q TelemetryConfigured:%t AuthMode:%q AuthConfigured:%t AuthSessionTTL:%s AuthAPITokenTTL:%s AuthSecureCookie:%t AuthAllowedOriginCount:%d ReviewQuestionRefConfigured:%t}",
+		"Config{AppName:%q Version:%q Environment:%q HTTPAddr:%q DatabaseConfigured:%t DatabaseMaxConns:%d DatabaseMinConns:%d DatabasePingTimeout:%s GraphQueryTimeout:%s HealthInterval:%s ShutdownTimeout:%s WebAssetsDir:%q WorkerQueue:%q WorkerMaxWorkers:%d WorkerJobTimeout:%s WorkerRescueStuckJobsAfter:%s WorkflowLeaseDuration:%s WorkflowHeartbeatInterval:%s WorkspaceAnalysisAPIEnabled:%t WorkspaceAnalysisWorkerEnabled:%t WorkspaceAnalysisConfigRevision:%d ReindexDispatchPollInterval:%s ReindexDispatchBatchSize:%d ReindexDispatchErrorBackoff:%s ReindexLeaseDuration:%s ReindexHeartbeatInterval:%s ModelSettingsMode:%q ModelSettingsKeyConfigured:%t GitSyncKeyConfigured:%t ModelSettingsRolloutConfigured:%t ModelSettingsPrepared:%t EmbeddingProvider:%q EmbeddingConfigured:%t EmbeddingModel:%q EmbeddingDimensions:%d EmbeddingNormalization:%q EmbeddingDistanceMetric:%q EmbeddingMaxBatchSize:%d EmbeddingMaxInputBytes:%d EmbeddingMaxBatchInputBytes:%d EmbeddingTimeout:%s EmbeddingMaxResponseBytes:%d ChatProvider:%q ChatConfigured:%t ChatAPIStyle:%q ChatModel:%q ChatModelVersion:%q ChatAdapterVersion:%q ChatTimeout:%s ChatMaxRequestBytes:%d ChatMaxResponseBytes:%d ToolRuntimeMode:%q WebFetchMode:%q WebFetchTimeout:%s WebFetchResponseHeaderTimeout:%s WebFetchTLSHandshakeTimeout:%s WebFetchMaxRedirects:%d WebFetchMaxURLBytes:%d WebFetchMaxResponseHeaderBytes:%d WebFetchMaxBodyBytes:%d WebFetchMaxTextBytes:%d WebFetchMaxResolvedIPs:%d WebFetchAllowedContentTypeCount:%d RetrievalRRFK:%d RetrievalRRFLexicalCandidateLimit:%d RetrievalRRFVectorCandidateLimit:%d RetrievalRRFFusedCandidateLimit:%d RetrievalRRFRerankCandidateLimit:%d WorkerSoftStopTimeout:%s WorkerHardStopTimeout:%s WorkerHealthAddr:%q TelemetryMode:%q TelemetryConfigured:%t AuthMode:%q AuthConfigured:%t AuthSessionTTL:%s AuthAPITokenTTL:%s AuthSecureCookie:%t AuthAllowedOriginCount:%d ReviewQuestionRefConfigured:%t}",
 		c.AppName,
 		c.Version,
 		c.Environment,
@@ -1065,6 +1073,9 @@ func (c Config) String() string {
 		c.WorkerRescueStuckJobsAfter,
 		c.WorkflowLeaseDuration,
 		c.WorkflowHeartbeatInterval,
+		c.WorkspaceAnalysisAPIEnabled,
+		c.WorkspaceAnalysisWorkerEnabled,
+		c.WorkspaceAnalysisConfigRevision,
 		c.ReindexDispatchPollInterval,
 		c.ReindexDispatchBatchSize,
 		c.ReindexDispatchErrorBackoff,

@@ -75,6 +75,8 @@ const (
 	MetricAgentResultTotal = platform.MetricAgentResultTotal
 	// MetricRAGOutcomeTotal 是 RAG 终态与运行失败计数。
 	MetricRAGOutcomeTotal = platform.MetricRAGOutcomeTotal
+	// MetricWorkspaceAnalysisOutcomeTotal 是 Workspace Analysis 终态计数。
+	MetricWorkspaceAnalysisOutcomeTotal = platform.MetricWorkspaceAnalysisOutcomeTotal
 	// MetricRAGGraphNodeResultTotal 是 Eino RAG Graph 节点结果计数。
 	MetricRAGGraphNodeResultTotal = platform.MetricRAGGraphNodeResultTotal
 )
@@ -170,6 +172,11 @@ func NewLabels(values map[string]string) (Labels, error) { return platform.NewLa
 // NewMeasurement 创建并校验单次指标记录。
 func NewMeasurement(name MetricName, kind MetricKind, value float64, labels Labels) (Measurement, error) {
 	return platform.NewMeasurement(name, kind, value, labels)
+}
+
+// NewWorkspaceAnalysisOutcomeMeasurement 从持久终态构造低基数 Workspace Analysis 指标。
+func NewWorkspaceAnalysisOutcomeMeasurement(status, terminationReason string) (Measurement, error) {
+	return platform.NewWorkspaceAnalysisOutcomeMeasurement(status, terminationReason)
 }
 
 // MetricNames 返回稳定指标注册表。

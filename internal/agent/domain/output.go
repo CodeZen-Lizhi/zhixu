@@ -34,6 +34,12 @@ const (
 	FaithfulnessReviewSchemaID = "agent.faithfulness-review"
 	// ToolRequestSchemaID 是项目自有单次 Tool Request 的稳定 Schema ID。
 	ToolRequestSchemaID = "agent.tool-request"
+	// WorkspaceAnalysisPlanSchemaID 是受限工作区检索计划的稳定 Schema ID。
+	WorkspaceAnalysisPlanSchemaID = "agent.workspace-analysis-plan"
+	// WorkspaceAnalysisCandidateSchemaID 是发布前不可变候选答案的稳定 Schema ID。
+	WorkspaceAnalysisCandidateSchemaID = "agent.workspace-analysis-candidate"
+	// WorkspaceAnalysisCandidateSchemaVersion 是候选持久表使用的数字 Schema 版本。
+	WorkspaceAnalysisCandidateSchemaVersion int64 = 1
 	// OutputSchemaVersionV1 是项目自有 Agent 结构化输出的首个版本。
 	OutputSchemaVersionV1 = "v1"
 	// OutputSchemaVersionV2 是 RAG Answer 增量字段使用的第二个版本。
@@ -56,6 +62,10 @@ const (
 	ResultTypeOrganizingOutline = "organizing_outline"
 	// ResultTypeOrganizingDocument 是基于冻结整理材料生成的文档结果类型。
 	ResultTypeOrganizingDocument = "organizing_document"
+	// ResultTypeWorkspaceAnalysisPlan 是工作区分析 Query Planner 的稳定终态类型。
+	ResultTypeWorkspaceAnalysisPlan = "workspace_analysis_plan"
+	// ResultTypeWorkspaceAnalysisAnswer 是工作区分析 Synthesis Candidate 的稳定终态类型。
+	ResultTypeWorkspaceAnalysisAnswer = "workspace_analysis_answer"
 
 	maxOutputTextBytes = 16 * 1024
 	maxSummaryBytes    = 4 * 1024

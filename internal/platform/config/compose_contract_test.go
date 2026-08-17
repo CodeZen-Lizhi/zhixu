@@ -131,6 +131,41 @@ func TestComposeAuthEnvironmentAndMakefileContract(t *testing.T) {
 	}, false, "must be empty")
 }
 
+func TestComposeWorkspaceAnalysisFeatureGateContract(t *testing.T) {
+	repositoryRoot := composeContractRepositoryRoot(t)
+	requireDockerCompose(t, repositoryRoot)
+
+	defaults := resolvedComposeModel(t, repositoryRoot, nil)
+	defaultApp := composeServiceEnvironment(t, defaults, "app")
+	defaultWorker := composeServiceEnvironment(t, defaults, "worker")
+	if defaultApp["ZHIXU_WORKSPACE_ANALYSIS_API_ENABLED"] != "false" ||
+		defaultWorker["ZHIXU_WORKSPACE_ANALYSIS_WORKER_ENABLED"] != "false" ||
+		defaultApp["ZHIXU_WORKSPACE_ANALYSIS_CONFIG_REVISION"] != "1" ||
+		defaultWorker["ZHIXU_WORKSPACE_ANALYSIS_CONFIG_REVISION"] != "1" {
+		t.Fatalf("default Workspace Analysis Compose gates drifted: app=%v worker=%v", defaultApp, defaultWorker)
+	}
+
+	enabled := resolvedComposeModel(t, repositoryRoot, map[string]string{
+		"ZHIXU_WORKSPACE_ANALYSIS_API_ENABLED":     "true",
+		"ZHIXU_WORKSPACE_ANALYSIS_WORKER_ENABLED":  "true",
+		"ZHIXU_WORKSPACE_ANALYSIS_CONFIG_REVISION": "9",
+	})
+	appEnvironment := composeServiceEnvironment(t, enabled, "app")
+	workerEnvironment := composeServiceEnvironment(t, enabled, "worker")
+	appConfig, err := LoadWithLookup("", composeEnvironmentLookup(t, appEnvironment))
+	if err != nil {
+		t.Fatalf("load enabled Workspace Analysis API configuration: %v", err)
+	}
+	workerConfig, err := loadWorkerWithLookup("", composeEnvironmentLookup(t, workerEnvironment))
+	if err != nil {
+		t.Fatalf("load enabled Workspace Analysis Worker configuration: %v", err)
+	}
+	if !appConfig.WorkspaceAnalysisAPIEnabled || appConfig.WorkspaceAnalysisConfigRevision != 9 ||
+		!workerConfig.WorkspaceAnalysisWorkerEnabled || workerConfig.WorkspaceAnalysisConfigRevision != 9 {
+		t.Fatalf("enabled Workspace Analysis Compose gates were not preserved: app=%s worker=%s", appConfig.String(), workerConfig.String())
+	}
+}
+
 func TestComposeMakefileDelegatesMutationsToLauncher(t *testing.T) {
 	repositoryRoot := composeContractRepositoryRoot(t)
 	contents, err := os.ReadFile(filepath.Join(repositoryRoot, "Makefile"))

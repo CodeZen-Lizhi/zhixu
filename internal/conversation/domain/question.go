@@ -18,6 +18,10 @@ const (
 	MaxQuestionBytes = retrievaldomain.MaxSearchQueryBytes
 	// MaxQuestionScopeBytes 是持久化 canonical Scope JSON 的最大字节数。
 	MaxQuestionScopeBytes = 16 * 1024
+	// QuestionRequestHashSchemaVersionV1 是保留历史 RAG 字节布局的请求哈希版本。
+	QuestionRequestHashSchemaVersionV1 = 1
+	// QuestionRequestHashSchemaVersionV2 是绑定 Workspace Analysis mode 的请求哈希版本。
+	QuestionRequestHashSchemaVersionV2 = 2
 )
 
 type questionScopeDocument struct {
@@ -40,6 +44,29 @@ type questionScopePersistenceDocument struct {
 	CapturedAtBefore     json.RawMessage             `json:"captured_at_before"`
 	AllowOriginalSources *bool                       `json:"allow_original_sources"`
 	AllowWeb             *bool                       `json:"allow_web"`
+}
+
+// QuestionMode 区分固定证据问答与受限工作区分析。
+type QuestionMode string
+
+const (
+	// QuestionModeRAG 表示现有固定 RAG 问答，也是省略 mode 时的兼容默认值。
+	QuestionModeRAG QuestionMode = "rag"
+	// QuestionModeWorkspaceAnalysis 表示受限、持久且只读的工作区分析。
+	QuestionModeWorkspaceAnalysis QuestionMode = "workspace_analysis"
+)
+
+// CanonicalizeQuestionMode 将空值归一为历史 RAG，并拒绝未知执行模式。
+func CanonicalizeQuestionMode(mode QuestionMode) (QuestionMode, error) {
+	if mode == "" {
+		return QuestionModeRAG, nil
+	}
+	switch mode {
+	case QuestionModeRAG, QuestionModeWorkspaceAnalysis:
+		return mode, nil
+	default:
+		return "", invalid(WorkspaceAnalysisModeInvalidCode, "question mode is invalid", nil)
+	}
 }
 
 // AnswerDepth 是用户选择的回答详细程度。
@@ -76,6 +103,7 @@ type QuestionScope struct {
 type QuestionRequest struct {
 	WorkspaceID    foundation.ID
 	ConversationID foundation.ID
+	Mode           QuestionMode
 	QuestionText   string
 	Scope          QuestionScope
 	AnswerDepth    AnswerDepth
@@ -128,6 +156,13 @@ func CanonicalizeQuestionRequest(request QuestionRequest) (QuestionRequest, erro
 	if err != nil || workspaceID == conversationID {
 		return QuestionRequest{}, invalid(ErrorCodeQuestionInvalid, "question conversation is invalid", err)
 	}
+	questionMode, err := CanonicalizeQuestionMode(request.Mode)
+	if err != nil {
+		return QuestionRequest{}, err
+	}
+	if questionMode == QuestionModeWorkspaceAnalysis && !workspaceAnalysisQuestionScopeSupported(request.Scope) {
+		return QuestionRequest{}, invalid(WorkspaceAnalysisScopeUnsupportedCode, "workspace analysis scope is unsupported", nil)
+	}
 	mode := request.Scope.RetrievalMode
 	if mode == "" {
 		mode = retrievaldomain.SearchModeHybrid
@@ -157,7 +192,7 @@ func CanonicalizeQuestionRequest(request QuestionRequest) (QuestionRequest, erro
 		return QuestionRequest{}, invalid(ErrorCodeQuestionInvalid, "output format is invalid", nil)
 	}
 	canonical := QuestionRequest{
-		WorkspaceID: workspaceID, ConversationID: conversationID, QuestionText: search.Query,
+		WorkspaceID: workspaceID, ConversationID: conversationID, Mode: questionMode, QuestionText: search.Query,
 		Scope: QuestionScope{
 			RetrievalMode: search.Mode, Filter: search.Filter,
 			AllowOriginalSources: request.Scope.AllowOriginalSources, AllowWeb: request.Scope.AllowWeb,
@@ -168,6 +203,12 @@ func CanonicalizeQuestionRequest(request QuestionRequest) (QuestionRequest, erro
 		return QuestionRequest{}, invalid(ErrorCodeQuestionInvalid, "question retrieval scope is oversized or cannot be encoded", encodeErr)
 	}
 	return canonical, nil
+}
+
+func workspaceAnalysisQuestionScopeSupported(scope QuestionScope) bool {
+	return !scope.AllowOriginalSources && !scope.AllowWeb &&
+		len(scope.Filter.SourceIDs) == 0 && len(scope.Filter.SourceVersionIDs) == 0 &&
+		len(scope.Filter.PathPrefixes) == 0 && scope.Filter.CapturedAtFrom == nil && scope.Filter.CapturedAtBefore == nil
 }
 
 // EncodeQuestionScope 返回与请求哈希共享字段定义的 canonical 持久化 JSON。
@@ -250,13 +291,14 @@ func DecodeQuestionScope(workspaceID foundation.ID, raw json.RawMessage) (Questi
 	return scope, nil
 }
 
-// ComputeQuestionRequestHash 计算绑定正文、Scope 和回答选项的稳定幂等哈希。
+// ComputeQuestionRequestHash 计算绑定正文、Scope、执行模式和回答选项的稳定幂等哈希。
+// RAG 保留历史 v1 字节布局；只有 Workspace Analysis 使用包含 mode 的 v2 布局。
 func ComputeQuestionRequestHash(request QuestionRequest) (string, error) {
 	canonical, err := CanonicalizeQuestionRequest(request)
 	if err != nil {
 		return "", err
 	}
-	payload := struct {
+	legacyPayload := struct {
 		SchemaVersion  int                   `json:"schema_version"`
 		WorkspaceID    foundation.ID         `json:"workspace_id"`
 		ConversationID foundation.ID         `json:"conversation_id"`
@@ -265,12 +307,31 @@ func ComputeQuestionRequestHash(request QuestionRequest) (string, error) {
 		AnswerDepth    AnswerDepth           `json:"answer_depth"`
 		OutputFormat   OutputFormat          `json:"output_format"`
 	}{
-		SchemaVersion: 1, WorkspaceID: canonical.WorkspaceID, ConversationID: canonical.ConversationID,
+		SchemaVersion: QuestionRequestHashSchemaVersionV1, WorkspaceID: canonical.WorkspaceID, ConversationID: canonical.ConversationID,
 		QuestionText: canonical.QuestionText,
 		Scope:        canonicalQuestionScopeDocument(canonical.Scope),
 		AnswerDepth:  canonical.AnswerDepth, OutputFormat: canonical.OutputFormat,
 	}
-	encoded, err := json.Marshal(payload)
+	var encoded []byte
+	if canonical.Mode == QuestionModeRAG {
+		encoded, err = json.Marshal(legacyPayload)
+	} else {
+		workspacePayload := struct {
+			SchemaVersion  int                   `json:"schema_version"`
+			WorkspaceID    foundation.ID         `json:"workspace_id"`
+			ConversationID foundation.ID         `json:"conversation_id"`
+			Mode           QuestionMode          `json:"mode"`
+			QuestionText   string                `json:"question_text"`
+			Scope          questionScopeDocument `json:"scope"`
+			AnswerDepth    AnswerDepth           `json:"answer_depth"`
+			OutputFormat   OutputFormat          `json:"output_format"`
+		}{
+			SchemaVersion: QuestionRequestHashSchemaVersionV2, WorkspaceID: canonical.WorkspaceID, ConversationID: canonical.ConversationID,
+			Mode: canonical.Mode, QuestionText: canonical.QuestionText, Scope: canonicalQuestionScopeDocument(canonical.Scope),
+			AnswerDepth: canonical.AnswerDepth, OutputFormat: canonical.OutputFormat,
+		}
+		encoded, err = json.Marshal(workspacePayload)
+	}
 	if err != nil {
 		return "", inconsistent(ErrorCodeQuestionInvalid, "question request hash payload is invalid")
 	}

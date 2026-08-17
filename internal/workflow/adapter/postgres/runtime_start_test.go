@@ -36,6 +36,14 @@ func (h *workflowTerminalHookStub) OnWorkflowNodeTerminal(context.Context, any, 
 	return h.err
 }
 
+type workflowControlHookStub struct {
+	err error
+}
+
+func (h *workflowControlHookStub) OnWorkflowControl(context.Context, any, application.WorkflowControlEvent) error {
+	return h.err
+}
+
 func TestNewRuntimeRepositoryRejectsTypedNilJobInserter(t *testing.T) {
 	var inserter *typedNilJobInserter
 	if _, err := NewRuntimeRepository(fakeDB{}, inserter); err == nil {
@@ -83,17 +91,23 @@ func TestNewRuntimeRepositoryWithHooksValidatesAndInjectsLifecycleHooks(t *testi
 	if _, err := NewRuntimeRepositoryWithHooks(fakeDB{}, &typedNilJobInserter{}, RuntimeRepositoryHooks{Terminal: terminal}); err == nil {
 		t.Fatal("typed nil terminal hook was accepted")
 	}
+	var control *workflowControlHookStub
+	if _, err := NewRuntimeRepositoryWithHooks(fakeDB{}, &typedNilJobInserter{}, RuntimeRepositoryHooks{Control: control}); err == nil {
+		t.Fatal("typed nil control hook was accepted")
+	}
 	cancellation := &cancellationSafetyGuardStub{safe: true}
 	terminal = &workflowTerminalHookStub{}
+	control = &workflowControlHookStub{}
 	repository, err := NewRuntimeRepositoryWithHooks(fakeDB{}, &typedNilJobInserter{}, RuntimeRepositoryHooks{
 		CancellationSafety: cancellation,
 		Terminal:           terminal,
+		Control:            control,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if repository.cancellation != cancellation || repository.terminal != terminal {
-		t.Fatalf("hooks were not injected: cancellation=%T terminal=%T", repository.cancellation, repository.terminal)
+	if repository.cancellation != cancellation || repository.terminal != terminal || repository.control != control {
+		t.Fatalf("hooks were not injected: cancellation=%T terminal=%T control=%T", repository.cancellation, repository.terminal, repository.control)
 	}
 	if repository.modelRuntimeFreshWithin != modelsettingsapplication.DefaultRuntimeFreshWithin {
 		t.Fatalf("default model runtime freshness=%s want=%s", repository.modelRuntimeFreshWithin, modelsettingsapplication.DefaultRuntimeFreshWithin)

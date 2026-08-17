@@ -82,6 +82,60 @@ func TestEinoCallbackTelemetryPreservesCorrelationWithoutSensitivePayloads(t *te
 	)
 }
 
+func TestEinoCallbackTelemetryWorkspaceAnalysisTraceProjectionOmitsPrivatePayloads(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(writer, validChatResponse("chat-v1", `{"result":"workspace-analysis-provider-output-canary"}`))
+	}))
+	defer server.Close()
+
+	tracer := observability.NewMemoryTracer()
+	metrics := observability.NewMemoryMetrics()
+	options := chatOptions(server.URL+"/workspace-analysis-private-endpoint", server.Client())
+	options.APIKey = "workspace-analysis-api-secret-canary"
+	model, err := models.NewEinoOpenAIChatModel(options, models.NewModelTelemetry(tracer, metrics))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := observability.WithCorrelation(context.Background(), observability.Correlation{
+		RequestID: "workspace-analysis-request", WorkspaceID: "10000000-0000-4000-8000-000000000001",
+		WorkflowRunID: "10000000-0000-4000-8000-000000000002", NodeRunID: "10000000-0000-4000-8000-000000000003",
+		AttemptNo: 2, DispatchNo: 3, RetryNo: 1, RiverJobID: 42,
+	})
+	request := validChatRequest(model.Contract().Model)
+	request.Phase = agentdomain.ModelCallAnswer
+	request.Messages[0].Content = "workspace-analysis-prompt-body-canary Authorization: Bearer workspace-analysis-auth-secret-canary"
+	request.Messages[1].Content = `{"private_binding":"workspace-analysis-private-binding-canary","source_tuple":{"chunk_id":"10000000-0000-4000-8000-000000000011","source_version_id":"10000000-0000-4000-8000-000000000012","source_span_id":"10000000-0000-4000-8000-000000000013"},"path":"/Users/example/private-workspace/source.md","answer":"workspace-analysis-answer-body-canary"}`
+	if _, err := model.Chat(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+
+	spans := tracer.Snapshot()
+	if len(spans) != 1 {
+		t.Fatalf("spans=%#v", spans)
+	}
+	span := spans[0]
+	if span.Operation != "model.chat.generate" || span.ErrorCode != "" {
+		t.Fatalf("span=%#v", span)
+	}
+	assertExactTraceAttributes(t, span.Attributes, map[string]string{
+		"component": "eino_chat", "phase": "ANSWER", "status": "success",
+		"request_id": "workspace-analysis-request", "workspace_id": "10000000-0000-4000-8000-000000000001",
+		"workflow_run_id": "10000000-0000-4000-8000-000000000002", "node_run_id": "10000000-0000-4000-8000-000000000003",
+		"attempt_no": "2", "dispatch_no": "3", "retry_no": "1", "river_job_id": "42",
+	})
+	measurements := metrics.Snapshot()
+	assertModelCallbackMeasurements(t, measurements, "ANSWER", "success", "")
+	assertTelemetryOmits(t, spans, measurements,
+		options.APIKey, options.BaseURL, server.URL, "workspace-analysis-private-endpoint",
+		"workspace-analysis-prompt-body-canary", "Authorization", "workspace-analysis-auth-secret-canary",
+		"workspace-analysis-private-binding-canary", "chunk_id", "source_version_id", "source_span_id",
+		"10000000-0000-4000-8000-000000000011", "10000000-0000-4000-8000-000000000012", "10000000-0000-4000-8000-000000000013",
+		"/Users/example/private-workspace/source.md", "workspace-analysis-answer-body-canary", "workspace-analysis-provider-output-canary",
+	)
+}
+
 func TestEinoCallbackTelemetryUsesStableFailureAndCancellationCodes(t *testing.T) {
 	t.Parallel()
 	t.Run("provider failure", func(t *testing.T) {
@@ -290,6 +344,18 @@ func assertModelCallbackMeasurements(t *testing.T, measurements []observability.
 	seen := make(map[observability.MetricName]bool, 2)
 	for _, measurement := range measurements {
 		labels := measurement.Labels.Map()
+		labelCount := 3
+		if errorCode != "" {
+			labelCount++
+		}
+		if len(labels) != labelCount {
+			t.Fatalf("measurement labels=%#v", labels)
+		}
+		if errorCode == "" {
+			if _, found := labels["error_code"]; found {
+				t.Fatalf("successful measurement unexpectedly has error_code=%#v", labels)
+			}
+		}
 		if labels["component"] != "eino_chat" || labels["phase"] != phase || labels["result"] != result || labels["error_code"] != errorCode {
 			t.Fatalf("measurement=%#v labels=%#v", measurement, labels)
 		}
@@ -303,6 +369,18 @@ func assertModelCallbackMeasurements(t *testing.T, measurements []observability.
 	}
 	if !seen[observability.MetricModelCallDuration] || !seen[observability.MetricModelCallTotal] {
 		t.Fatalf("metric names=%#v", seen)
+	}
+}
+
+func assertExactTraceAttributes(t *testing.T, got, want map[string]string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("trace attribute count=%d want=%d got=%#v", len(got), len(want), got)
+	}
+	for key, value := range want {
+		if got[key] != value {
+			t.Fatalf("trace attribute %s=%q want=%q; got=%#v", key, got[key], value, got)
+		}
 	}
 }
 

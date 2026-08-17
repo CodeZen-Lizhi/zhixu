@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -33,10 +34,43 @@ import (
 
 const fixtureAPIKey = "fixture-secret-canary"
 
+func TestParseFixtureAnswerStreamFrameDelay(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want time.Duration
+		ok   bool
+	}{
+		{name: "disabled", raw: "", ok: true},
+		{name: "bounded", raw: "750", want: 750 * time.Millisecond, ok: true},
+		{name: "maximum", raw: "5000", want: 5 * time.Second, ok: true},
+		{name: "zero", raw: "0"},
+		{name: "negative", raw: "-1"},
+		{name: "leading zero", raw: "0750"},
+		{name: "whitespace", raw: " 750"},
+		{name: "over maximum", raw: "5001"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := parseFixtureAnswerStreamFrameDelay(test.raw)
+			if (err == nil) != test.ok || got != test.want {
+				t.Fatalf("parseFixtureAnswerStreamFrameDelay(%q)=(%s,%v), want (%s, ok=%t)", test.raw, got, err, test.want, test.ok)
+			}
+		})
+	}
+}
+
 func TestFixtureBarrierRequiresExplicitRelease(t *testing.T) {
-	releasePath := t.TempDir() + "/release"
+	barrierDir := t.TempDir()
+	releasePath := barrierDir + "/release"
+	enteredPath := barrierDir + "/entered"
+	settledPath := barrierDir + "/settled"
+	armedPath := barrierDir + "/armed"
+	token := "0123456789abcdef0123456789abcdef"
+	writeFixtureBarrierToken(t, armedPath, token)
 	handler := newHandlerWithBarrier("fixture-model-v2", fixtureAPIKey, fixtureBarrier{
-		stage: "structured_plan", releasePath: releasePath, maxWait: 2 * time.Second, poll: 5 * time.Millisecond,
+		stage: "structured_plan", releasePath: releasePath, enteredPath: enteredPath, settledPath: settledPath, armedPath: armedPath, lockPath: barrierDir + "/claim",
+		maxWait: 2 * time.Second, poll: 5 * time.Millisecond,
 	})
 	body := fixtureRequest(t, "rag_query_plan", "agent.rag-query-plan", map[string]any{"model_run_ref": "10000000-0000-4000-8000-000000000123"})
 	type barrierResponse struct {
@@ -52,14 +86,13 @@ func TestFixtureBarrierRequiresExplicitRelease(t *testing.T) {
 		handler.ServeHTTP(response, request)
 		result <- barrierResponse{status: response.Code, body: response.Body.String()}
 	}()
+	waitForFixtureBarrierFile(t, enteredPath)
 	select {
 	case response := <-result:
 		t.Fatalf("barrier returned before release: %#v", response)
-	case <-time.After(50 * time.Millisecond):
+	default:
 	}
-	if err := os.WriteFile(releasePath, []byte("release"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeFixtureBarrierToken(t, releasePath, token)
 	select {
 	case response := <-result:
 		if response.status != http.StatusOK || !strings.Contains(response.body, "rag_query_plan") {
@@ -68,6 +101,312 @@ func TestFixtureBarrierRequiresExplicitRelease(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("barrier did not release")
 	}
+	waitForFixtureBarrierFile(t, settledPath)
+	if settled := readFixtureBarrierTokenForTest(t, settledPath); settled != token {
+		t.Fatalf("settled token=%q, want current generation", settled)
+	}
+}
+
+func TestFixtureBarrierAcknowledgesExactWorkspaceAnalysisCandidateStream(t *testing.T) {
+	barrierDir := t.TempDir()
+	releasePath := barrierDir + "/release"
+	enteredPath := barrierDir + "/entered"
+	settledPath := barrierDir + "/settled"
+	armedPath := barrierDir + "/armed"
+	token := "fedcba9876543210fedcba9876543210"
+	writeFixtureBarrierToken(t, armedPath, token)
+	fixtureServer, _ := newProductionFixtureServer(t)
+	_, catalog := newProductionStructuredRuntime(t, fixtureServer)
+	snapshot, err := catalog.Snapshot(
+		agentworkflow.WorkspaceAnalysisSynthesisPromptRef(),
+		agentdomain.SchemaRef{ID: agentdomain.WorkspaceAnalysisCandidateSchemaID, Version: "1"},
+		agentdomain.SchemaRef{ID: agentdomain.WorkspaceAnalysisCandidateSchemaID, Version: "1"},
+		agentworkflow.DefaultProfileRef(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := newHandlerWithBarrier("fixture-model-v2", fixtureAPIKey, fixtureBarrier{
+		stage: "workspace_analysis_candidate_stream", releasePath: releasePath, enteredPath: enteredPath, settledPath: settledPath, armedPath: armedPath, lockPath: barrierDir + "/claim",
+		maxWait: 2 * time.Second, poll: 5 * time.Millisecond,
+	})
+	body := fixtureWorkspaceAnalysisCandidateStreamRequest(t, snapshot.Schema.JSONSchema, fixtureWorkspaceAnalysisSynthesisInput())
+	type barrierResponse struct {
+		status int
+		body   string
+	}
+	result := make(chan barrierResponse, 1)
+	go func() {
+		request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+		request.Header.Set("Authorization", "Bearer "+fixtureAPIKey)
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		result <- barrierResponse{status: response.Code, body: response.Body.String()}
+	}()
+	waitForFixtureBarrierFile(t, enteredPath)
+	select {
+	case response := <-result:
+		t.Fatalf("candidate barrier returned before release: %#v", response)
+	default:
+	}
+	writeFixtureBarrierToken(t, releasePath, token)
+	select {
+	case response := <-result:
+		if response.status != http.StatusOK || !strings.Contains(response.body, "stream-workspace-analysis") {
+			t.Fatalf("released candidate barrier response=%#v", response)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("candidate barrier did not release")
+	}
+	waitForFixtureBarrierFile(t, settledPath)
+	if settled := readFixtureBarrierTokenForTest(t, settledPath); settled != token {
+		t.Fatalf("candidate settled token=%q, want current generation", settled)
+	}
+}
+
+func TestFixtureBarrierRejectsStaleReleaseToken(t *testing.T) {
+	barrierDir := t.TempDir()
+	releasePath := barrierDir + "/release"
+	enteredPath := barrierDir + "/entered"
+	settledPath := barrierDir + "/settled"
+	armedPath := barrierDir + "/armed"
+	currentToken := "00112233445566778899aabbccddeeff"
+	writeFixtureBarrierToken(t, armedPath, currentToken)
+	writeFixtureBarrierToken(t, releasePath, "ffeeddccbbaa99887766554433221100")
+	handler := newHandlerWithBarrier("fixture-model-v2", fixtureAPIKey, fixtureBarrier{
+		stage: "structured_plan", releasePath: releasePath, enteredPath: enteredPath, settledPath: settledPath, armedPath: armedPath, lockPath: barrierDir + "/claim",
+		maxWait: 2 * time.Second, poll: 5 * time.Millisecond,
+	})
+	result := make(chan int, 1)
+	go func() {
+		request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(fixtureRequest(t, "rag_query_plan", "agent.rag-query-plan", map[string]any{"model_run_ref": "10000000-0000-4000-8000-000000000124"})))
+		request.Header.Set("Authorization", "Bearer "+fixtureAPIKey)
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		result <- response.Code
+	}()
+	waitForFixtureBarrierFile(t, enteredPath)
+	if entered := readFixtureBarrierTokenForTest(t, enteredPath); entered != currentToken {
+		t.Fatalf("entered token=%q, want current generation", entered)
+	}
+	select {
+	case status := <-result:
+		t.Fatalf("stale release token unexpectedly passed status=%d", status)
+	default:
+	}
+	writeFixtureBarrierToken(t, releasePath, currentToken)
+	select {
+	case status := <-result:
+		if status != http.StatusOK {
+			t.Fatalf("current release token status=%d", status)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("current release token did not unblock fixture")
+	}
+	waitForFixtureBarrierFile(t, settledPath)
+	if settled := readFixtureBarrierTokenForTest(t, settledPath); settled != currentToken {
+		t.Fatalf("settled token=%q, want current generation", settled)
+	}
+}
+
+func TestFixtureBarrierAcknowledgesSettlementAfterRequestCancellation(t *testing.T) {
+	barrierDir := t.TempDir()
+	releasePath := barrierDir + "/release"
+	enteredPath := barrierDir + "/entered"
+	settledPath := barrierDir + "/settled"
+	armedPath := barrierDir + "/armed"
+	token := "89abcdef0123456789abcdef01234567"
+	writeFixtureBarrierToken(t, armedPath, token)
+	handler := newHandlerWithBarrier("fixture-model-v2", fixtureAPIKey, fixtureBarrier{
+		stage: "structured_plan", releasePath: releasePath, enteredPath: enteredPath, settledPath: settledPath, armedPath: armedPath, lockPath: barrierDir + "/claim",
+		maxWait: 2 * time.Second, poll: 5 * time.Millisecond,
+	})
+	body := fixtureRequest(t, "rag_query_plan", "agent.rag-query-plan", map[string]any{"model_run_ref": "10000000-0000-4000-8000-000000000125"})
+	result := make(chan int, 1)
+	requestContext, cancelRequest := context.WithCancel(context.Background())
+	go func() {
+		request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body)).WithContext(requestContext)
+		request.Header.Set("Authorization", "Bearer "+fixtureAPIKey)
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		result <- response.Code
+	}()
+	waitForFixtureBarrierFile(t, enteredPath)
+	cancelRequest()
+	waitForFixtureBarrierFile(t, settledPath)
+	if settled := readFixtureBarrierTokenForTest(t, settledPath); settled != token {
+		t.Fatalf("cancelled settled token=%q, want current generation", settled)
+	}
+	select {
+	case status := <-result:
+		if status != http.StatusGatewayTimeout {
+			t.Fatalf("cancelled barrier status=%d", status)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled barrier handler did not settle")
+	}
+}
+
+func TestFixtureBarrierClaimPreventsRearmTOCTOU(t *testing.T) {
+	barrierDir := t.TempDir()
+	releasePath := barrierDir + "/release"
+	enteredPath := barrierDir + "/entered"
+	settledPath := barrierDir + "/settled"
+	armedPath := barrierDir + "/armed"
+	lockPath := barrierDir + "/claim"
+	oldToken := "89abcdef0123456789abcdef01234567"
+	newToken := "76543210fedcba9876543210fedcba98"
+	writeFixtureBarrierToken(t, armedPath, oldToken)
+
+	claimObserved := make(chan struct{})
+	allowClaim := make(chan struct{})
+	var allowClaimOnce sync.Once
+	releaseClaim := func() { allowClaimOnce.Do(func() { close(allowClaim) }) }
+	defer releaseClaim()
+	barrier := fixtureBarrier{
+		stage: "structured_plan", releasePath: releasePath, enteredPath: enteredPath, settledPath: settledPath,
+		armedPath: armedPath, lockPath: lockPath, maxWait: 2 * time.Second, poll: 5 * time.Millisecond,
+		afterClaimForTest: func() {
+			close(claimObserved)
+			<-allowClaim
+		},
+	}
+	handler := newHandlerWithBarrier("fixture-model-v2", fixtureAPIKey, barrier)
+	body := fixtureRequest(t, "rag_query_plan", "agent.rag-query-plan", map[string]any{"model_run_ref": "10000000-0000-4000-8000-000000000126"})
+	requestContext, cancelRequest := context.WithCancel(context.Background())
+	defer cancelRequest()
+	result := make(chan int, 1)
+	go func() {
+		request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body)).WithContext(requestContext)
+		request.Header.Set("Authorization", "Bearer "+fixtureAPIKey)
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		result <- response.Code
+	}()
+	select {
+	case <-claimObserved:
+	case <-time.After(time.Second):
+		t.Fatal("fixture did not claim the barrier generation")
+	}
+
+	rearmAttempted := make(chan struct{})
+	rearmResult := make(chan error, 1)
+	go func() {
+		close(rearmAttempted)
+		rearmResult <- tryRearmFixtureBarrierGeneration(lockPath, armedPath, enteredPath, settledPath, newToken)
+	}()
+	<-rearmAttempted
+	select {
+	case err := <-rearmResult:
+		t.Fatalf("re-arm crossed the claimed generation before settlement: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	releaseClaim()
+	waitForFixtureBarrierFile(t, enteredPath)
+	if entered := readFixtureBarrierTokenForTest(t, enteredPath); entered != oldToken {
+		t.Fatalf("entered token=%q, want old generation", entered)
+	}
+	cancelRequest()
+	select {
+	case status := <-result:
+		if status != http.StatusGatewayTimeout {
+			t.Fatalf("cancelled barrier status=%d", status)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("claimed barrier request did not settle")
+	}
+	select {
+	case err := <-rearmResult:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("re-arm did not acquire the claim after settlement")
+	}
+	if armed := readFixtureBarrierTokenForTest(t, armedPath); armed != newToken {
+		t.Fatalf("armed token=%q, want new generation", armed)
+	}
+	if _, err := os.Stat(enteredPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("old entered acknowledgement remains after re-arm: %v", err)
+	}
+}
+
+func waitForFixtureBarrierFile(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("fixture barrier did not acknowledge %q", path)
+}
+
+func writeFixtureBarrierToken(t *testing.T, path, token string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(token+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func readFixtureBarrierTokenForTest(t *testing.T, path string) string {
+	t.Helper()
+	encoded, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSuffix(string(encoded), "\n")
+}
+
+func tryRearmFixtureBarrierGeneration(lockPath, armedPath, enteredPath, settledPath, token string) error {
+	deadline := time.Now().Add(time.Second)
+	for {
+		err := os.Mkdir(lockPath, 0o700)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return err
+		}
+		if time.Now().After(deadline) {
+			return errors.New("claim lock acquisition timed out")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	defer os.Remove(lockPath)
+	oldToken, err := os.ReadFile(armedPath)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(enteredPath); err == nil {
+		settled, readErr := os.ReadFile(settledPath)
+		if readErr != nil {
+			return readErr
+		}
+		if string(settled) != string(oldToken) {
+			return errors.New("old barrier generation did not settle before re-arm")
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.Remove(enteredPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.Remove(settledPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	temporary := armedPath + ".tmp"
+	if err := os.WriteFile(temporary, []byte(token+"\n"), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(temporary, armedPath)
 }
 
 func TestFixtureBuildsStructuredPlanAndMetadataFromBoundInput(t *testing.T) {
@@ -696,12 +1035,213 @@ func TestFixtureStreamsMultipleFramesWithUsage(t *testing.T) {
 	}
 }
 
+func TestFixtureServesWorkspaceAnalysisPlannerWithoutServerIdentity(t *testing.T) {
+	server, _ := newProductionFixtureServer(t)
+	_, catalog := newProductionStructuredRuntime(t, server)
+	// The catalog owns the frozen provider schema; this request must use it unchanged.
+	snapshot, err := catalog.Snapshot(
+		agentworkflow.WorkspaceAnalysisPlanPromptRef(),
+		agentdomain.SchemaRef{ID: agentdomain.WorkspaceAnalysisPlanSchemaID, Version: agentdomain.OutputSchemaVersionV1},
+		agentdomain.SchemaRef{ID: agentdomain.WorkspaceAnalysisPlanSchemaID, Version: agentdomain.OutputSchemaVersionV1},
+		agentworkflow.DefaultProfileRef(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := fixtureWorkspaceAnalysisPlannerInput()
+	response := callFixture(t, newHandler("fixture-model-v1", fixtureAPIKey), fixtureStructuredRequest(t, snapshot.Schema.JSONSchema, input))
+	if response != `{"i":"answer from approved recovery evidence","r":["approved recovery"],"d":"","q":"","s":[]}` ||
+		strings.Contains(response, "model_run_ref") || strings.Contains(response, "workspace_id") {
+		t.Fatalf("workspace planner provider response=%s", response)
+	}
+
+	const evidenceToken = "durable-rag-0123abcdef89"
+	input["question"] = "Analyze the approved evidence token " + evidenceToken + " with citations."
+	response = callFixture(t, newHandler("fixture-model-v1", fixtureAPIKey), fixtureStructuredRequest(t, snapshot.Schema.JSONSchema, input))
+	if response != `{"i":"answer from approved recovery evidence","r":["`+evidenceToken+`"],"d":"","q":"","s":[]}` {
+		t.Fatalf("workspace planner did not bind the smoke evidence token: %s", response)
+	}
+
+	input["workflow_run_id"] = "10000000-0000-4000-8000-000000000001"
+	status := fixtureStatus(t, newHandler("fixture-model-v1", fixtureAPIKey), fixtureStructuredRequest(t, snapshot.Schema.JSONSchema, input))
+	if status != http.StatusUnprocessableEntity {
+		t.Fatalf("planner identity leak status=%d", status)
+	}
+}
+
+func TestFixtureKeepsHistoricalRAGV2PlannerSeparateFromWorkspaceAnalysis(t *testing.T) {
+	server, _ := newProductionFixtureServer(t)
+	_, catalog := newProductionStructuredRuntime(t, server)
+	snapshot, err := catalog.Snapshot(
+		agentworkflow.QueryPlanProviderPromptRef(),
+		agentdomain.SchemaRef{ID: agentdomain.RAGQueryPlanSchemaID, Version: agentdomain.OutputSchemaVersionV2},
+		agentdomain.SchemaRef{ID: agentdomain.RAGQueryPlanSchemaID, Version: agentdomain.OutputSchemaVersionV2},
+		agentworkflow.DefaultProfileRef(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := map[string]any{
+		"schema_version": 2, "untrusted_data": true, "question": "Summarize approved recovery evidence.", "history": []any{},
+		"scope": map[string]any{
+			"retrieval_mode": "keyword", "source_ids": []any{}, "source_version_ids": []any{}, "path_prefixes": []any{},
+			"captured_at_from": nil, "captured_at_before": nil, "allow_original_sources": false, "allow_web": false,
+		},
+		"non_evidence_context": map[string]any{"untrusted_data": true, "user_preferences": []any{}, "task_context": []any{}},
+		"answer_depth":         "standard",
+		"output_format":        "markdown",
+	}
+	response := callFixture(t, newHandler("fixture-model-v1", fixtureAPIKey), fixtureStructuredRequest(t, snapshot.Schema.JSONSchema, input))
+	if response != `{"i":"answer from approved recovery evidence","r":["approved recovery"],"d":"","q":"","s":[]}` {
+		t.Fatalf("historical RAG v2 planner response drifted: %s", response)
+	}
+}
+
+func TestFixtureStreamsWorkspaceAnalysisCandidateWithStrictWireContract(t *testing.T) {
+	server, bodies := newRecordingFixtureServer(t)
+	runtimeModel, err := platformmodels.NewEinoRuntimeChatModel(platformmodels.OpenAIChatOptions{
+		Client: server.Client(), BaseURL: server.URL, APIKey: fixtureAPIKey,
+		Model: "rag-smoke", ModelVersion: "rag-smoke-v1", AdapterVersion: "fixture-v1",
+		Timeout: 5 * time.Second, MaxRequestBytes: maxRequestBytes, MaxResponseBytes: maxRequestBytes,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := agentworkflow.NewRuntimeCatalog(agentworkflow.CatalogOptions{
+		Model:   agentdomain.ModelRef{AdapterName: "openai-compatible", AdapterVersion: "fixture-v1", ModelID: "rag-smoke", ModelVersion: "rag-smoke-v1"},
+		Timeout: 5 * time.Second, MaxOutputTokens: 1024,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := catalog.Snapshot(
+		agentworkflow.WorkspaceAnalysisSynthesisPromptRef(),
+		agentdomain.SchemaRef{ID: agentdomain.WorkspaceAnalysisCandidateSchemaID, Version: "1"},
+		agentdomain.SchemaRef{ID: agentdomain.WorkspaceAnalysisCandidateSchemaID, Version: "1"},
+		agentworkflow.DefaultProfileRef(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := agenteino.NewWorkspaceAnalysisCandidateStreamRuntime(runtimeModel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, err := json.Marshal(fixtureWorkspaceAnalysisSynthesisInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := &fixtureCandidateSink{}
+	response, err := runtime.Stream(context.Background(), agentapplication.ChatRequest{
+		Phase: agentdomain.ModelCallAnswer, ProfileRef: snapshot.Profile.Ref, PromptRef: snapshot.Prompt.Ref,
+		SchemaRef: snapshot.Schema.Ref, Model: snapshot.Profile.Model,
+		Messages:     []agentapplication.ChatMessage{{Role: agentapplication.MessageRoleSystem, Content: snapshot.Prompt.InitialInstruction}, {Role: agentapplication.MessageRoleUser, Content: string(input)}},
+		OutputSchema: snapshot.Schema.JSONSchema, MaxOutputTokens: 1024,
+	}, sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate, err := agentdomain.DecodeWorkspaceAnalysisCandidateProvider(response.Content, agentdomain.DefaultDecodeLimits())
+	if err != nil || candidate.Payload.AnswerMarkdown != fixtureWorkspaceAnalysisCandidate ||
+		!reflect.DeepEqual(candidate.Payload.CitationRefs, []string{"E1"}) || candidate.Payload.ProposalSuggestion == nil ||
+		candidate.Payload.ProposalSuggestion.Summary != "Review this evidence-backed change in the proposal workspace." ||
+		!reflect.DeepEqual(candidate.Payload.ProposalSuggestion.CitationRefs, []string{"E1"}) ||
+		response.Usage.TotalTokens != 6 || sink.String() != string(response.Content) {
+		t.Fatalf("candidate=%#v usage=%#v sink=%q err=%v", candidate, response.Usage, sink.String(), err)
+	}
+	requests := bodies()
+	if len(requests) != 1 {
+		t.Fatalf("candidate provider calls=%d", len(requests))
+	}
+	var wire struct {
+		Stream        bool            `json:"stream"`
+		ToolChoice    string          `json:"tool_choice"`
+		Tools         json.RawMessage `json:"tools"`
+		StreamOptions struct {
+			IncludeUsage bool `json:"include_usage"`
+		} `json:"stream_options"`
+		ResponseFormat struct {
+			Type       string `json:"type"`
+			JSONSchema struct {
+				Name   string          `json:"name"`
+				Strict bool            `json:"strict"`
+				Schema json.RawMessage `json:"schema"`
+			} `json:"json_schema"`
+		} `json:"response_format"`
+	}
+	if err := json.Unmarshal(requests[0], &wire); err != nil || !wire.Stream || wire.ToolChoice != "none" || len(wire.Tools) != 0 ||
+		!wire.StreamOptions.IncludeUsage || wire.ResponseFormat.Type != "json_schema" ||
+		wire.ResponseFormat.JSONSchema.Name != workspaceAnalysisCandidateResponseSchemaName || !wire.ResponseFormat.JSONSchema.Strict ||
+		!bytes.Equal(wire.ResponseFormat.JSONSchema.Schema, snapshot.Schema.JSONSchema) {
+		t.Fatalf("candidate provider wire=%s err=%v", requests[0], err)
+	}
+}
+
+func TestFixtureServesWorkspaceAnalysisFaithfulnessReviewSubject(t *testing.T) {
+	server, _ := newProductionFixtureServer(t)
+	_, catalog := newProductionStructuredRuntime(t, server)
+	snapshot, err := catalog.Snapshot(
+		agentworkflow.FaithfulnessReviewPromptRef(),
+		agentdomain.SchemaRef{ID: agentdomain.FaithfulnessReviewSchemaID, Version: agentdomain.OutputSchemaVersionV1},
+		agentdomain.SchemaRef{ID: agentdomain.FaithfulnessReviewSchemaID, Version: agentdomain.OutputSchemaVersionV1},
+		agentworkflow.DefaultProfileRef(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := callFixture(t, newHandler("fixture-model-v1", fixtureAPIKey), fixtureStructuredRequest(t, snapshot.Schema.JSONSchema, fixtureWorkspaceAnalysisReviewInput()))
+	review, err := agentdomain.DecodeFaithfulnessReview([]byte(response), agentdomain.DefaultDecodeLimits())
+	if err != nil || review.ModelRunRef != "40000000-0000-4000-8000-000000000001" || !review.Payload.Passed ||
+		len(review.Payload.Items) != 1 || review.Payload.Items[0].AssertionID != "@answer/conclusion" ||
+		!reflect.DeepEqual(review.Payload.Items[0].CitationIDs, []string{"E1"}) {
+		t.Fatalf("workspace analysis review=%#v err=%v", review, err)
+	}
+}
+
+func TestFixtureRejectsWorkspaceAnalysisCandidateAndReviewContractDrift(t *testing.T) {
+	server, _ := newProductionFixtureServer(t)
+	_, catalog := newProductionStructuredRuntime(t, server)
+	candidateSnapshot, err := catalog.Snapshot(
+		agentworkflow.WorkspaceAnalysisSynthesisPromptRef(),
+		agentdomain.SchemaRef{ID: agentdomain.WorkspaceAnalysisCandidateSchemaID, Version: "1"},
+		agentdomain.SchemaRef{ID: agentdomain.WorkspaceAnalysisCandidateSchemaID, Version: "1"},
+		agentworkflow.DefaultProfileRef(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidCandidate := fixtureWorkspaceAnalysisCandidateStreamRequest(t, candidateSnapshot.Schema.JSONSchema, fixtureWorkspaceAnalysisSynthesisInput())
+	var candidateRequest map[string]any
+	if err := json.Unmarshal(invalidCandidate, &candidateRequest); err != nil {
+		t.Fatal(err)
+	}
+	candidateRequest["response_format"].(map[string]any)["json_schema"].(map[string]any)["name"] = "wrong_name"
+	invalidCandidate, err = json.Marshal(candidateRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status := fixtureStatus(t, newHandler("fixture-model-v1", fixtureAPIKey), invalidCandidate); status != http.StatusUnprocessableEntity {
+		t.Fatalf("candidate response format drift status=%d", status)
+	}
+	identityInput := fixtureWorkspaceAnalysisSynthesisInput()
+	identityInput["workspace_id"] = "10000000-0000-4000-8000-000000000001"
+	if status := fixtureStatus(t, newHandler("fixture-model-v1", fixtureAPIKey), fixtureWorkspaceAnalysisCandidateStreamRequest(t, candidateSnapshot.Schema.JSONSchema, identityInput)); status != http.StatusUnprocessableEntity {
+		t.Fatalf("candidate identity leak status=%d", status)
+	}
+
+	reviewInput := fixtureWorkspaceAnalysisReviewInput()
+	reviewInput["review_targets"].([]any)[0].(map[string]any)["citation_ids"] = []string{"E2"}
+	if status := fixtureStatus(t, newHandler("fixture-model-v1", fixtureAPIKey), fixtureRequest(t, "faithfulness_review", "agent.faithfulness-review", reviewInput)); status != http.StatusUnprocessableEntity {
+		t.Fatalf("review binding drift status=%d", status)
+	}
+}
+
 func TestFixtureBuildsFaithfulnessItemsFromReviewTargets(t *testing.T) {
 	input := map[string]any{"model_run_ref": "20000000-0000-4000-8000-000000000001", "review_targets": []any{
 		map[string]any{"id": "fact", "kind": "FACTUAL", "citation_ids": []string{"cite-1"}},
 		map[string]any{"id": "inference", "kind": "MODEL_INFERENCE", "citation_ids": []string{}},
 	}}
-	response := callFixture(t, newHandler("fixture-model-v1", fixtureAPIKey), fixtureRequest(t, "faithfulness_review", "agent.faithfulness-review", input))
+	response := callFixture(t, newHandler("fixture-model-v1", fixtureAPIKey), fixtureStructuredRequest(t, fixtureFaithfulnessReviewSchema(t), input))
 	if !bytes.Contains([]byte(response), []byte(`"verdict":"SUPPORTED"`)) || !bytes.Contains([]byte(response), []byte(`"verdict":"INFERENCE_DISCLOSED"`)) {
 		t.Fatalf("faithfulness response=%s", response)
 	}
@@ -964,4 +1504,104 @@ func fixtureRuntimeRequest(t *testing.T, messages []any, stream bool, toolChoice
 		t.Fatal(err)
 	}
 	return encoded
+}
+
+type fixtureCandidateSink struct{ strings.Builder }
+
+func (sink *fixtureCandidateSink) Append(_ context.Context, chunk agentapplication.WorkspaceAnalysisCandidateStreamChunk) error {
+	_, err := sink.WriteString(chunk.Content)
+	return err
+}
+
+func fixtureWorkspaceAnalysisPlannerInput() map[string]any {
+	return map[string]any{
+		"schema_version": 1, "untrusted_data": true, "question": "Summarize the approved workspace evidence.", "history": []any{},
+		"scope":        map[string]any{"retrieval_mode": "workspace", "allow_original_sources": false, "allow_web": false},
+		"answer_depth": "STANDARD", "output_format": "MARKDOWN", "git_status": map[string]any{"is_clean": true},
+	}
+}
+
+func fixtureWorkspaceAnalysisSynthesisInput() map[string]any {
+	return map[string]any{
+		"schema_version": 1, "untrusted_data": true, "question": "Summarize the approved workspace evidence.", "history": []any{},
+		"answer_depth": "STANDARD", "output_format": "MARKDOWN", "git_status": map[string]any{"is_clean": true},
+		"search":   map[string]any{"effective_mode": "KEYWORD", "hit_count": 1, "degradation_codes": []any{}},
+		"evidence": []any{map[string]any{"evidence_ref": "E1", "excerpt": "Approved workspace evidence.\n", "truncated": false}},
+	}
+}
+
+func fixtureWorkspaceAnalysisReviewInput() map[string]any {
+	const modelRunRef = "40000000-0000-4000-8000-000000000001"
+	const answer = "The supplied workspace evidence supports this bounded fixture result [E1]."
+	return map[string]any{
+		"schema_version": "agent-workspace-analysis-review-input/v1", "model_run_ref": modelRunRef,
+		"candidate":      map[string]any{"answer_markdown": answer, "citation_refs": []string{"E1"}},
+		"review_targets": []any{map[string]any{"id": "@answer/conclusion", "text": answer, "kind": "FACTUAL", "citation_ids": []string{"E1"}}},
+		"evidence":       []any{map[string]any{"evidence_ref": "E1", "excerpt": "Approved workspace evidence.\n"}},
+	}
+}
+
+func fixtureFaithfulnessReviewSchema(t *testing.T) []byte {
+	t.Helper()
+	server, _ := newProductionFixtureServer(t)
+	_, catalog := newProductionStructuredRuntime(t, server)
+	snapshot, err := catalog.Snapshot(
+		agentworkflow.FaithfulnessReviewPromptRef(),
+		agentdomain.SchemaRef{ID: agentdomain.FaithfulnessReviewSchemaID, Version: agentdomain.OutputSchemaVersionV1},
+		agentdomain.SchemaRef{ID: agentdomain.FaithfulnessReviewSchemaID, Version: agentdomain.OutputSchemaVersionV1},
+		agentworkflow.DefaultProfileRef(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return append([]byte(nil), snapshot.Schema.JSONSchema...)
+}
+
+func fixtureStructuredRequest(t *testing.T, responseSchema []byte, input map[string]any) []byte {
+	t.Helper()
+	inputJSON, err := json.Marshal(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := map[string]any{
+		"model": "fixture-model", "max_tokens": 1024,
+		"messages":        []any{map[string]any{"role": "system", "content": "policy"}, map[string]any{"role": "user", "content": "UNTRUSTED TASK INPUT\n" + string(inputJSON)}},
+		"response_format": map[string]any{"type": "json_schema", "json_schema": map[string]any{"name": "fixture", "strict": true, "schema": json.RawMessage(responseSchema)}},
+	}
+	encoded, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
+}
+
+func fixtureWorkspaceAnalysisCandidateStreamRequest(t *testing.T, responseSchema []byte, input map[string]any) []byte {
+	t.Helper()
+	inputJSON, err := json.Marshal(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := map[string]any{
+		"model": "fixture-model", "max_tokens": 1024, "stream": true, "tool_choice": "none",
+		"stream_options": map[string]any{"include_usage": true},
+		"messages":       []any{map[string]any{"role": "system", "content": "policy"}, map[string]any{"role": "user", "content": string(inputJSON)}},
+		"response_format": map[string]any{"type": "json_schema", "json_schema": map[string]any{
+			"name": workspaceAnalysisCandidateResponseSchemaName, "strict": true, "schema": json.RawMessage(responseSchema),
+		}},
+	}
+	encoded, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
+}
+
+func fixtureStatus(t *testing.T, handler http.Handler, body []byte) int {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+fixtureAPIKey)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	return response.Code
 }

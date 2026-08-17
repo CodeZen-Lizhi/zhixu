@@ -508,7 +508,7 @@ func newArtifactHTTPIntegrationServer(t *testing.T, pool *pgxpool.Pool) *httptes
 	cfg.ChatBaseURL = "http://127.0.0.1:11434/v1"
 	cfg.ChatModel = "artifact-http-integration"
 	cfg.ChatModelVersion = "artifact-http-integration-v1"
-	workflowService, _, generation, err := newAPIArtifactWorkflowComponents(pool, cfg, workspaces, files, nil, ids, clock)
+	workflowService, _, generation, err := newAPIArtifactWorkflowComponents(pool, cfg, workspaces, files, nil, ids, clock, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

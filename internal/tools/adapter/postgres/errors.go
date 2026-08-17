@@ -32,6 +32,12 @@ const (
 	ErrorCodePermissionDenied = "TOOL_PERMISSION_DENIED"
 	// ErrorCodePersistenceConsistency 表示数据库事实违反 Tool 持久化不变量。
 	ErrorCodePersistenceConsistency = "TOOL_PERSISTENCE_CONSISTENCY"
+	// ErrorCodeResultReceiptNotFound 表示成功 Call 没有精确绑定的 canonical receipt closure。
+	ErrorCodeResultReceiptNotFound = "TOOL_RESULT_RECEIPT_NOT_FOUND"
+	// ErrorCodeResultReceiptConflict 表示既有 receipt closure 与本次完成身份或文档不同。
+	ErrorCodeResultReceiptConflict = "TOOL_RESULT_RECEIPT_CONFLICT"
+	// ErrorCodeResultReceiptFinalizationUnknown 表示提交响应丢失且无法按精确身份证明事务结果。
+	ErrorCodeResultReceiptFinalizationUnknown = "TOOL_RESULT_RECEIPT_FINALIZATION_UNKNOWN"
 )
 
 func classify(cause error) error {
@@ -84,4 +90,24 @@ func denied(code string, cause error) error {
 
 func consistency(cause error) error {
 	return foundation.NewError(foundation.ErrorConsistencyViolation, ErrorCodePersistenceConsistency, false, cause)
+}
+
+func receiptNotFound(cause error) error {
+	return foundation.NewError(foundation.ErrorNotFound, ErrorCodeResultReceiptNotFound, false, cause)
+}
+
+func receiptConflict(cause error) error {
+	return foundation.NewError(foundation.ErrorVersionConflict, ErrorCodeResultReceiptConflict, false, cause)
+}
+
+func receiptFinalizationUnknown(cause error) error {
+	return foundation.NewError(foundation.ErrorManualRecoveryRequired, ErrorCodeResultReceiptFinalizationUnknown, false, cause)
+}
+
+func classifyReceiptWrite(cause error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(cause, &pgErr) && pgErr.Code == "23505" {
+		return receiptConflict(cause)
+	}
+	return classify(cause)
 }

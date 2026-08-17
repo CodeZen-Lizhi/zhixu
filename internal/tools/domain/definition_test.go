@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -62,6 +63,9 @@ func TestCanonicalizeDefinitionRejectsUnsafeContracts(t *testing.T) {
 			value.AllowedWorkflows = append(value.AllowedWorkflows, value.AllowedWorkflows[0])
 		}},
 		{name: "duplicate sensitive field", mutate: func(value *Definition) { value.SensitiveFields = []string{"/token", "/token"} }},
+		{name: "unknown result persistence policy", mutate: func(value *Definition) {
+			value.ResultPersistencePolicy = "STORE_EVERYTHING"
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -71,6 +75,37 @@ func TestCanonicalizeDefinitionRejectsUnsafeContracts(t *testing.T) {
 				t.Fatal("expected definition rejection")
 			}
 		})
+	}
+}
+
+func TestCanonicalizeDefinitionOmitsDisabledResultPersistenceAndHashesOptIn(t *testing.T) {
+	legacy, err := CanonicalizeDefinition(validDefinition())
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte("result_persistence_policy")) {
+		t.Fatalf("disabled result persistence leaked into canonical definition: %s", encoded)
+	}
+
+	optedIn := validDefinition()
+	optedIn.ResultPersistencePolicy = ResultPersistenceCanonical
+	canonical, err := CanonicalizeDefinition(optedIn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if canonical.DefinitionHash == legacy.DefinitionHash {
+		t.Fatal("opt-in result persistence did not change definition hash")
+	}
+	encoded, err = json.Marshal(canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(encoded, []byte(`"result_persistence_policy":"PERSIST_CANONICAL"`)) {
+		t.Fatalf("canonical result persistence is absent: %s", encoded)
 	}
 }
 

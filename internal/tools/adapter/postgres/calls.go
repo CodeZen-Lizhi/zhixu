@@ -147,6 +147,17 @@ func (repository *Repository) finalize(ctx context.Context, expectedVersion int6
 		return application.ToolCallMutationResult{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	result, err := finalizeCallTx(ctx, tx, expectedVersion, call)
+	if err != nil {
+		return application.ToolCallMutationResult{}, err
+	}
+	if commitErr := tx.Commit(ctx); commitErr != nil {
+		return repository.recoverTerminalAfterCommitError(ctx, call, commitErr)
+	}
+	return result, nil
+}
+
+func finalizeCallTx(ctx context.Context, tx pgx.Tx, expectedVersion int64, call domain.ToolCall) (application.ToolCallMutationResult, error) {
 	updated, err := scanToolCall(tx.QueryRow(ctx, `
 		UPDATE workflow.tool_call SET
 			response_hash=$1,response_bytes=$2,response_summary=$3,result_ref=$4,
@@ -177,9 +188,6 @@ func (repository *Repository) finalize(ctx context.Context, expectedVersion int6
 		call.RequestHash, call.RequestBytes, call.RequestSummary,
 	))
 	if err == nil {
-		if commitErr := tx.Commit(ctx); commitErr != nil {
-			return repository.recoverTerminalAfterCommitError(ctx, call, commitErr)
-		}
 		return application.ToolCallMutationResult{Call: updated}, nil
 	}
 	if !noRows(err) {
@@ -194,9 +202,6 @@ func (repository *Repository) finalize(ctx context.Context, expectedVersion int6
 	}
 	if !sameTerminalResult(existing, call) {
 		return application.ToolCallMutationResult{}, versionConflict(errors.New("tool call terminal result differs"))
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return application.ToolCallMutationResult{}, classify(err)
 	}
 	return application.ToolCallMutationResult{Call: existing, Replayed: true}, nil
 }

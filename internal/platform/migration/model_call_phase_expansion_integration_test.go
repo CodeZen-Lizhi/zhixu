@@ -27,17 +27,17 @@ func TestModelCallAgentAnswerPhaseMigration(t *testing.T) {
 	legacyRAGRun := fixture.newModelRun(t, ctx, pool)
 	fixture.insertSequence(t, ctx, pool, legacyRAGRun, []string{"PLAN", "INITIAL", "REVIEW"})
 
-	if _, err := provider.UpTo(ctx, 78); err != nil {
-		t.Fatalf("00078 up with legacy phase histories: %v", err)
+	if _, err := provider.ApplyVersion(ctx, 83, true); err != nil {
+		t.Fatalf("00083 up with legacy phase histories: %v", err)
 	}
 	assertModelCallPhaseMigrationShape(t, ctx, pool, true)
-	if _, err := provider.DownTo(ctx, 77); err != nil {
-		t.Fatalf("00078 down with only legacy phase histories: %v", err)
+	if _, err := provider.ApplyVersion(ctx, 83, false); err != nil {
+		t.Fatalf("00083 down with only legacy phase histories: %v", err)
 	}
 	assertMigrationVersion(t, ctx, pool, 77)
 	assertModelCallPhaseMigrationShape(t, ctx, pool, false)
-	if _, err := provider.UpTo(ctx, 78); err != nil {
-		t.Fatalf("00078 up after clean down: %v", err)
+	if _, err := provider.ApplyVersion(ctx, 83, true); err != nil {
+		t.Fatalf("00083 up after clean down: %v", err)
 	}
 
 	fullAgentRun := fixture.newModelRun(t, ctx, pool)
@@ -112,12 +112,12 @@ func TestModelCallAgentAnswerPhaseMigration(t *testing.T) {
 		assertPostgresCode(t, err, "23514")
 	})
 
-	if _, err := provider.DownTo(ctx, 77); err == nil {
-		t.Fatal("00078 down accepted retained AGENT/ANSWER facts")
+	if _, err := provider.ApplyVersion(ctx, 83, false); err == nil {
+		t.Fatal("00083 down accepted retained AGENT/ANSWER facts")
 	} else {
 		assertPostgresCode(t, err, "55000")
 	}
-	assertMigrationVersion(t, ctx, pool, 78)
+	assertMigrationVersion(t, ctx, pool, 83)
 }
 
 type modelCallPhaseFixture struct {

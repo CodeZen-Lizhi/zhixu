@@ -167,15 +167,15 @@ func TestTelemetryShutdownIsConcurrentAndSecretSafe(t *testing.T) {
 	wait.Wait()
 	mutex.Lock()
 	defer mutex.Unlock()
-	if requests != 2 {
-		t.Fatalf("export requests=%d want startup plus one flush", requests)
+	if requests != 4 {
+		t.Fatalf("export requests=%d want one startup and shutdown export for each signal", requests)
 	}
 }
 
 func TestTelemetryShutdownReturnsStableSecretSafeError(t *testing.T) {
 	var requests atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
-		if requests.Add(1) == 1 {
+		if requests.Add(1) <= 2 {
 			response.WriteHeader(http.StatusOK)
 			return
 		}

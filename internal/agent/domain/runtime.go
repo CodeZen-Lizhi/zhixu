@@ -269,7 +269,8 @@ func validSuccessfulResultType(value string) bool {
 	return value == ResultTypeRelationAssessment || value == ResultTypeRAGAnswer || value == ResultTypeFaithfulnessReview ||
 		value == ResultTypeArtifactSection || value == ResultTypeToolRequest || value == ResultTypeClarification ||
 		value == ResultTypeDocumentKnowledgeProfile || value == ResultTypeOrganizingOutline ||
-		value == ResultTypeOrganizingDocument
+		value == ResultTypeOrganizingDocument || value == ResultTypeWorkspaceAnalysisPlan ||
+		value == ResultTypeWorkspaceAnalysisAnswer
 }
 
 func canonicalErrorCode(value string) bool {

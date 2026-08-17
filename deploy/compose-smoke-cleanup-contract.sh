@@ -282,6 +282,34 @@ main() {
         || fail "${smoke_script} does not stop the real Provider Vite process"
       grep -F -- 'stop_provider_host_relay' "${SCRIPT_DIR}/${smoke_script}" >/dev/null \
         || fail "${smoke_script} does not stop the real Provider host relay"
+      grep -F -- 'RAG_BROWSER_MODE="${ZHIXU_COMPOSE_RAG_BROWSER:-0}"' "${SCRIPT_DIR}/${smoke_script}" >/dev/null \
+        || fail "${smoke_script} does not keep the fixed RAG browser gate opt-in"
+      grep -F -- 'rag-fixture.smoke.spec.ts' "${SCRIPT_DIR}/${smoke_script}" >/dev/null \
+        || fail "${smoke_script} does not run the independent fixed RAG browser smoke"
+      grep -F -- 'ZHIXU_RAG_FIXTURE_SMOKE_ARTIFACT_DIR' "${SCRIPT_DIR}/${smoke_script}" >/dev/null \
+        || fail "${smoke_script} does not expose bounded fixed RAG browser artifacts"
+      grep -F -- "fixture_answer_stream_frame_delay_ms='750'" "${SCRIPT_DIR}/${smoke_script}" >/dev/null \
+        || fail "${smoke_script} does not make the fixed RAG fixture stream observable with a bounded delay"
+      grep -F -- 'fixed RAG browser smoke cannot be combined with real Provider or Workspace Analysis mode' "${SCRIPT_DIR}/${smoke_script}" >/dev/null \
+        || fail "${smoke_script} does not isolate fixed RAG browser mode from other RAG smoke modes"
+      grep -F -- 'ZHIXU_COMPOSE_RAG_BROWSER=1 bash deploy/compose-rag-smoke.sh' "${SCRIPT_DIR}/../Makefile" >/dev/null \
+        || fail 'Makefile does not expose the fixed RAG browser smoke target'
+      grep -F -- 'ZHIXU_RAG_FIXTURE_BARRIER_ENTERED_FILE' "${SCRIPT_DIR}/${smoke_script}" >/dev/null \
+        || fail "${smoke_script} does not pass the Workspace Analysis fixture entered acknowledgement"
+      grep -F -- 'ZHIXU_RAG_FIXTURE_BARRIER_ARMED_FILE' "${SCRIPT_DIR}/${smoke_script}" >/dev/null \
+        || fail "${smoke_script} does not pass the Workspace Analysis fixture generation binding"
+      grep -F -- '</proc/1/environ' "${SCRIPT_DIR}/${smoke_script}" >/dev/null \
+        || fail "${smoke_script} does not verify the Workspace Analysis fixture PID 1 barrier binding"
+      grep -F -- 'rm -f -- "$3" "$4" "$5"' "${SCRIPT_DIR}/${smoke_script}" >/dev/null \
+        || fail "${smoke_script} does not clear the Workspace Analysis barrier generation and latches together"
+      grep -F -- 'workspace_analysis_fixture_barrier_entered' "${SCRIPT_DIR}/${smoke_script}" >/dev/null \
+        || fail "${smoke_script} does not wait for the Workspace Analysis fixture acknowledgement"
+      grep -F -- '[[ "${expected_terminal}" == completed ]] || fixture_entry_required=0' "${SCRIPT_DIR}/${smoke_script}" >/dev/null \
+        || fail "${smoke_script} does not preserve immediate cancellation and early-refusal semantics"
+      grep -F -- '"${fixture_entry_required}" == 0 || "${fixture_entered}" == 1' "${SCRIPT_DIR}/${smoke_script}" >/dev/null \
+        || fail "${smoke_script} does not preserve the completed-run fixture acknowledgement gate"
+      grep -F -- 'mv -f -- "${temporary}" "$2"' "${SCRIPT_DIR}/${smoke_script}" >/dev/null \
+        || fail "${smoke_script} does not atomically publish the Workspace Analysis barrier release token"
     fi
     assert_runtime_startup_contract "${smoke_script}"
   done

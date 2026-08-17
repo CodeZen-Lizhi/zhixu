@@ -1,9 +1,79 @@
 package domain
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
 )
+
+func TestWorkspaceAnalysisPlanResultStrictCanonicalDecode(t *testing.T) {
+	plan := WorkspaceAnalysisPlanResult{
+		ResultType:    ResultTypeWorkspaceAnalysisPlan,
+		SchemaID:      WorkspaceAnalysisPlanSchemaID,
+		SchemaVersion: OutputSchemaVersionV1,
+		ModelRunRef:   testModelRunID,
+		Payload: RAGQueryPlanPayload{
+			Intent:                "find workspace policy",
+			RequiresClarification: false,
+			Rewrites:              []string{"workspace policy"},
+			ClarificationReason:   "",
+			ClarificationQuestion: "",
+			SuggestedScopes:       []string{},
+		},
+	}
+	canonical, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := DecodeWorkspaceAnalysisPlan(canonical, DefaultDecodeLimits())
+	if err != nil {
+		t.Fatalf("canonical workspace analysis plan rejected: %v", err)
+	}
+	roundTrip, err := json.Marshal(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(roundTrip, canonical) {
+		t.Fatalf("workspace analysis plan canonical bytes drifted: got=%s want=%s", roundTrip, canonical)
+	}
+
+	duplicateField := bytes.Replace(canonical,
+		[]byte(`"result_type":"workspace_analysis_plan"`),
+		[]byte(`"result_type":"workspace_analysis_plan","result_type":"workspace_analysis_plan"`), 1)
+	unknownField := append(append([]byte(nil), canonical[:len(canonical)-1]...), []byte(`,"extra":true}`)...)
+	nullRequiredList := bytes.Replace(canonical, []byte(`"rewrites":["workspace policy"]`), []byte(`"rewrites":null`), 1)
+	for name, raw := range map[string][]byte{
+		"duplicate field": duplicateField,
+		"unknown field":   unknownField,
+		"null rewrites":   nullRequiredList,
+		"trailing value":  append(append([]byte(nil), canonical...), []byte(`{}`)...),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := DecodeWorkspaceAnalysisPlan(raw, DefaultDecodeLimits()); err == nil {
+				t.Fatalf("strict decoder accepted %s: %s", name, raw)
+			}
+		})
+	}
+
+	for name, mutate := range map[string]func(*WorkspaceAnalysisPlanResult){
+		"result type":    func(value *WorkspaceAnalysisPlanResult) { value.ResultType = ResultTypeRAGQueryPlan },
+		"schema id":      func(value *WorkspaceAnalysisPlanResult) { value.SchemaID = RAGQueryPlanSchemaID },
+		"schema version": func(value *WorkspaceAnalysisPlanResult) { value.SchemaVersion = OutputSchemaVersionV2 },
+		"model run ref":  func(value *WorkspaceAnalysisPlanResult) { value.ModelRunRef = "invalid" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := plan
+			mutate(&candidate)
+			raw, marshalErr := json.Marshal(candidate)
+			if marshalErr != nil {
+				t.Fatal(marshalErr)
+			}
+			if _, err := DecodeWorkspaceAnalysisPlan(raw, DefaultDecodeLimits()); err == nil {
+				t.Fatalf("decoder accepted mismatched %s", name)
+			}
+		})
+	}
+}
 
 func TestRAGQueryPlanSeparatesRetrievalFromClarification(t *testing.T) {
 	plan := RAGQueryPlanResult{
@@ -82,6 +152,23 @@ func TestRAGQueryPlanProviderV2ComposesIdentitylessWire(t *testing.T) {
 	if composed.ModelRunRef != testModelRunID || composed.SchemaVersion != OutputSchemaVersionV1 || composed.Payload.RequiresClarification ||
 		len(composed.Payload.Rewrites) != 2 || composed.Payload.Rewrites[0] != "where is the policy?" || composed.Payload.Rewrites[1] != "policy location" {
 		t.Fatalf("composed = %+v", composed)
+	}
+}
+
+func TestRAGQueryPlanProviderV2ComposesWorkspaceAnalysisEnvelope(t *testing.T) {
+	provider := RAGQueryPlanProviderResultV2{
+		Intent: "inspect workspace", Rewrites: []string{"workspace overview"}, SuggestedScopes: []string{},
+	}
+	modelRunID := testModelRunID
+	result, err := provider.ComposeWorkspaceAnalysis(modelRunID, "current workspace state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ResultType != ResultTypeWorkspaceAnalysisPlan || result.SchemaID != WorkspaceAnalysisPlanSchemaID ||
+		result.SchemaVersion != OutputSchemaVersionV1 || result.ModelRunRef != modelRunID ||
+		len(result.Payload.Rewrites) != 2 || result.Payload.Rewrites[0] != "current workspace state" ||
+		result.Payload.Rewrites[1] != "workspace overview" {
+		t.Fatalf("workspace analysis plan = %+v", result)
 	}
 }
 

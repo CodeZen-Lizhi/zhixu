@@ -36,9 +36,11 @@ const (
 	// canonical Answer remains subject to its own domain limit and publication
 	// gates; draft bytes are never an Answer fact.
 	MaxDraftStreamSessionBytes = 4 * 1024 * 1024
-	// MaxDraftStreamTTL bounds replayable draft retention. A current worker
-	// lease, not this TTL, remains the authority for writes.
-	MaxDraftStreamTTL = 30 * time.Minute
+	// MaxDraftStreamTTL bounds replayable draft retention. Workspace Analysis
+	// needs the full one-hour run window; the fixed RAG path keeps its shorter
+	// ten-minute TTL at its own workflow adapter boundary.
+	// A current worker lease, not this TTL, remains the authority for writes.
+	MaxDraftStreamTTL = time.Hour
 	// MaxDraftStreamReplayChunks bounds one SSE recovery query.
 	MaxDraftStreamReplayChunks = 128
 )

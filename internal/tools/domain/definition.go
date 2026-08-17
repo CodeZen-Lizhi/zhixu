@@ -70,6 +70,16 @@ const (
 	InvocationSourceTrustedWorkflow InvocationSource = "TRUSTED_WORKFLOW"
 )
 
+// ResultPersistencePolicy 声明成功 Tool 输出是否需要保存受限 canonical receipt。
+type ResultPersistencePolicy string
+
+const (
+	// ResultPersistenceDisabled 保持历史 Tool 只保存摘要或既有 result ref 的行为。
+	ResultPersistenceDisabled ResultPersistencePolicy = ""
+	// ResultPersistenceCanonical 要求成功终结时原子保存受 Schema 和字节上限约束的 canonical receipt。
+	ResultPersistenceCanonical ResultPersistencePolicy = "PERSIST_CANONICAL"
+)
+
 // IdempotencyMode 描述 Tool 对幂等键的要求。
 type IdempotencyMode string
 
@@ -131,14 +141,16 @@ type Definition struct {
 	RequiredCapability   capability.Capability `json:"required_capability,omitempty"`
 	SideEffectLevel      SideEffectLevel       `json:"side_effect_level"`
 	InvocationPolicy     InvocationPolicy      `json:"invocation_policy"`
-	Timeout              time.Duration         `json:"timeout"`
-	RetryPolicy          RetryPolicy           `json:"retry_policy"`
-	IdempotencyMode      IdempotencyMode       `json:"idempotency_mode"`
-	SensitiveFields      []string              `json:"sensitive_fields,omitempty"`
-	AllowedWorkflows     []WorkflowBinding     `json:"allowed_workflows"`
-	MaxInputBytes        int64                 `json:"max_input_bytes"`
-	MaxOutputBytes       int64                 `json:"max_output_bytes"`
-	DefinitionHash       string                `json:"definition_hash"`
+	// ResultPersistencePolicy 控制新 Tool 版本是否持久化受限 canonical 输出；零值保持历史 hash 兼容。
+	ResultPersistencePolicy ResultPersistencePolicy `json:"result_persistence_policy,omitempty"`
+	Timeout                 time.Duration           `json:"timeout"`
+	RetryPolicy             RetryPolicy             `json:"retry_policy"`
+	IdempotencyMode         IdempotencyMode         `json:"idempotency_mode"`
+	SensitiveFields         []string                `json:"sensitive_fields,omitempty"`
+	AllowedWorkflows        []WorkflowBinding       `json:"allowed_workflows"`
+	MaxInputBytes           int64                   `json:"max_input_bytes"`
+	MaxOutputBytes          int64                   `json:"max_output_bytes"`
+	DefinitionHash          string                  `json:"definition_hash"`
 }
 
 // AllowsInvocation 判断调用来源是否满足 Definition 的暴露策略。
@@ -204,7 +216,8 @@ func validateDefinitionScalars(definition Definition) error {
 	if definition.RequiredCapability != "" && !capability.IsKnown(definition.RequiredCapability) {
 		return invalid(ErrorCodeDefinitionInvalid, "tool required capability is unknown")
 	}
-	if !validSideEffect(definition.SideEffectLevel) || !validInvocationPolicy(definition.InvocationPolicy) || !validIdempotencyMode(definition.IdempotencyMode) {
+	if !validSideEffect(definition.SideEffectLevel) || !validInvocationPolicy(definition.InvocationPolicy) ||
+		!validResultPersistencePolicy(definition.ResultPersistencePolicy) || !validIdempotencyMode(definition.IdempotencyMode) {
 		return invalid(ErrorCodeDefinitionInvalid, "tool execution policy is invalid")
 	}
 	if definition.RequiredCapability == "" && definition.SideEffectLevel != SideEffectNone {
@@ -223,6 +236,10 @@ func validateDefinitionScalars(definition Definition) error {
 		return invalid(ErrorCodeDefinitionInvalid, "tool document byte limit is invalid")
 	}
 	return nil
+}
+
+func validResultPersistencePolicy(policy ResultPersistencePolicy) bool {
+	return policy == ResultPersistenceDisabled || policy == ResultPersistenceCanonical
 }
 
 func validRetryPolicy(policy RetryPolicy) bool {

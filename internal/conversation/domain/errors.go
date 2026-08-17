@@ -26,6 +26,10 @@ const (
 	ErrorCodeCursorInvalid = "CONVERSATION_CURSOR_INVALID"
 	// ErrorCodeRetrievalSummaryInvalid 表示 Answer 的可恢复检索摘要不合法。
 	ErrorCodeRetrievalSummaryInvalid = "CONVERSATION_RETRIEVAL_SUMMARY_INVALID"
+	// ErrorCodeWorkspaceAnalysisResultInvalid 表示工作区分析公开结果、终态或安全摘要不合法。
+	ErrorCodeWorkspaceAnalysisResultInvalid = "CONVERSATION_WORKSPACE_ANALYSIS_RESULT_INVALID"
+	// ErrorCodeWorkspaceAnalysisTimelineInvalid 表示工作区分析时间线快照或安全投影不合法。
+	ErrorCodeWorkspaceAnalysisTimelineInvalid = "CONVERSATION_WORKSPACE_ANALYSIS_TIMELINE_INVALID"
 	// ErrorCodeFeedbackInvalid 表示 Answer Feedback 类型、引用绑定或幂等哈希不合法。
 	ErrorCodeFeedbackInvalid = "CONVERSATION_FEEDBACK_INVALID"
 )

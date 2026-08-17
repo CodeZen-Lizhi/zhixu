@@ -35,8 +35,13 @@ func TestFacadeAliasesTelemetryAndTraceContracts(t *testing.T) {
 		MetricAgentToolCalls != "agent.runtime.tool_calls" ||
 		MetricAgentResultTotal != "agent.runtime.result_total" ||
 		MetricRAGOutcomeTotal != "rag.outcome_total" ||
+		MetricWorkspaceAnalysisOutcomeTotal != "workspace_analysis.outcome_total" ||
 		MetricRAGGraphNodeResultTotal != "agent.rag.graph_node.result_total" {
 		t.Fatal("facade omitted Eino runtime metric aliases")
+	}
+	measurement, err := NewWorkspaceAnalysisOutcomeMeasurement("succeeded", "COMPLETED")
+	if err != nil || measurement.Name != MetricWorkspaceAnalysisOutcomeTotal {
+		t.Fatalf("workspace analysis measurement=%#v err=%v", measurement, err)
 	}
 	telemetry, err := InitializeTelemetry(context.Background(), TelemetryOptions{Mode: TelemetryModeDisabled})
 	if err != nil {

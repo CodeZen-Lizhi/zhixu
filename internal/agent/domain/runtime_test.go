@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"context"
 	"errors"
 	"math"
 	"strings"
@@ -35,6 +36,17 @@ func TestValidationExhaustedErrorIsStableAndPreservesCause(t *testing.T) {
 	err := NewValidationExhaustedError(cause)
 	if errorCode(err) != ErrorCodeValidationExhausted || !errors.Is(err, cause) {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestWorkspaceAnalysisPreAuthorizationDeadlineErrorIsStableAndNonRetryable(t *testing.T) {
+	err := NewWorkspaceAnalysisPreAuthorizationDeadlineError()
+	var classified *foundation.Error
+	if !errors.As(err, &classified) ||
+		classified.Kind != foundation.ErrorNonRetryableFailure ||
+		classified.Code != ErrorCodeWorkspaceAnalysisPreAuthorizationDeadline ||
+		classified.Retryable || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("pre-authorization deadline error=%#v", err)
 	}
 }
 
@@ -121,6 +133,40 @@ func TestSuccessfulModelRunAcceptsArtifactSectionResultType(t *testing.T) {
 	run.CompletedAt = &now
 	if err := ValidateModelRun(run); err != nil {
 		t.Fatalf("ValidateModelRun(artifact section) error = %v", err)
+	}
+}
+
+func TestSuccessfulModelRunAcceptsWorkspaceAnalysisResultTypes(t *testing.T) {
+	tests := []struct {
+		name       string
+		schemaID   string
+		resultType string
+	}{
+		{name: "plan", schemaID: WorkspaceAnalysisPlanSchemaID, resultType: ResultTypeWorkspaceAnalysisPlan},
+		{name: "candidate", schemaID: WorkspaceAnalysisCandidateSchemaID, resultType: ResultTypeWorkspaceAnalysisAnswer},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			run := validModelRun()
+			completed := run.UpdatedAt.Add(time.Second)
+			schemaVersion := OutputSchemaVersionV1
+			if test.schemaID == WorkspaceAnalysisCandidateSchemaID {
+				schemaVersion = "1"
+			}
+			run.Schema = SchemaRef{ID: test.schemaID, Version: schemaVersion}
+			run.ReducedSchema = run.Schema
+			run.Status = ModelRunSucceeded
+			run.FinalResultType = test.resultType
+			run.CompletedAt = &completed
+			run.UpdatedAt = completed
+			if err := ValidateModelRun(run); err != nil {
+				t.Fatalf("workspace analysis model run rejected: %v", err)
+			}
+			run.Retrieval = RetrievalRef{}
+			if err := ValidateModelRun(run); errorCode(err) != ErrorCodeModelRunInvalid {
+				t.Fatalf("workspace analysis model run without retrieval err=%v", err)
+			}
+		})
 	}
 }
 

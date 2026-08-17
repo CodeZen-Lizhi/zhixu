@@ -16,6 +16,7 @@ import (
 	agentapplication "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
 	artifactworkflow "github.com/CodeZen-Lizhi/zhixu/internal/artifact/workflow"
 	changecontrolworkflow "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/workflow"
+	conversationworkflow "github.com/CodeZen-Lizhi/zhixu/internal/conversation/workflow"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	memorypostgres "github.com/CodeZen-Lizhi/zhixu/internal/memory/adapter/postgres"
 	memoryapplication "github.com/CodeZen-Lizhi/zhixu/internal/memory/application"
@@ -62,7 +63,7 @@ func TestWorkerToolCompositionSeparatesContractsExecutorsAndTrustedAudit(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if enabled.contracts == nil || enabled.executions == nil || enabled.execution == nil || enabled.repository == nil || enabled.writebackAudit == nil || enabled.workflow == nil || enabled.definition == nil || !enabled.runtimeEnabled || len(enabled.enabledRefs) != 7 {
+	if enabled.contracts == nil || enabled.executions == nil || enabled.execution == nil || enabled.repository == nil || enabled.writebackAudit == nil || enabled.workflow == nil || enabled.definition == nil || !enabled.runtimeEnabled || len(enabled.enabledRefs) != 11 {
 		t.Fatalf("enabled components=%+v", enabled)
 	}
 	for _, ref := range enabled.enabledRefs {
@@ -70,8 +71,25 @@ func TestWorkerToolCompositionSeparatesContractsExecutorsAndTrustedAudit(t *test
 		if err != nil {
 			t.Fatalf("resolve executor %s: %v", ref.Name, err)
 		}
-		if _, ok := executor.(toolsapplication.ResultReceiptLoader); !ok {
+		contract, err := enabled.contracts.ResolveContract(ref)
+		if err != nil {
+			t.Fatalf("resolve contract %s: %v", ref.Name, err)
+		}
+		if contract.Definition.ResultPersistencePolicy != toolsdomain.ResultPersistenceCanonical {
+			if _, ok := executor.(toolsapplication.ResultReceiptLoader); ok {
+				continue
+			}
 			t.Fatalf("executor %s lacks canonical replay loader", ref.Name)
+		}
+	}
+	for _, ref := range []toolsdomain.ToolRef{
+		{Name: "ReadGitStatus", Version: 2},
+		{Name: "SearchKnowledge", Version: 2},
+		{Name: "ReadSource", Version: 3},
+		{Name: "ValidateCitation", Version: 3},
+	} {
+		if _, err := enabled.executions.ResolveExecutor(ref); err != nil {
+			t.Fatalf("workspace analysis executor %s@%d is unreachable: %v", ref.Name, ref.Version, err)
 		}
 	}
 	for _, unavailable := range []toolsdomain.ToolRef{
@@ -248,6 +266,10 @@ func TestWorkerChatCompositionUsesEinoSchedulersAndRegistersRelationAndRAGTogeth
 	if agent.relation == nil || agent.rag == nil || !agent.capability.available || agent.capability.code != "" {
 		t.Fatalf("agent components=%+v", agent)
 	}
+	if agent.workspaceInspect != nil || agent.workspaceRetrieve != nil || agent.workspaceRead != nil ||
+		agent.workspaceSynthesize != nil || agent.workspaceValidate != nil || agent.workspaceReview != nil {
+		t.Fatalf("test-only RAG constructor returned a partial Workspace Analysis composition: %+v", agent)
+	}
 	if agent.relationScheduler == nil || agent.ragScheduler == nil || agent.ragRuntimeScheduler == nil || agent.artifactScheduler == nil ||
 		agent.captureScheduler == nil || agent.organizingScheduler == nil {
 		t.Fatalf("Eino schedulers were not wired through Worker composition: %+v", agent)
@@ -262,6 +284,22 @@ func TestWorkerChatCompositionUsesEinoSchedulersAndRegistersRelationAndRAGTogeth
 	}
 	if _, err := worker.executors.Resolve(agentworkflow.RAGWorkflowNodeKind, agentworkflow.RAGWorkflowInputSchemaVersion); err != nil {
 		t.Fatalf("RAG executor is unreachable: %v", err)
+	}
+	for _, key := range []string{
+		conversationworkflow.WorkspaceAnalysisNodeInspectWorkspace,
+		conversationworkflow.WorkspaceAnalysisNodeRetrieveEvidence,
+		conversationworkflow.WorkspaceAnalysisNodeReadEvidence,
+		conversationworkflow.WorkspaceAnalysisNodeSynthesizeAnswer,
+		conversationworkflow.WorkspaceAnalysisNodeValidateCitations,
+		conversationworkflow.WorkspaceAnalysisNodeReviewPublish,
+	} {
+		node, found := workerWorkspaceAnalysisNode(key)
+		if !found {
+			t.Fatalf("workspace analysis node %s is missing", key)
+		}
+		if _, err := worker.executors.Resolve(node.Kind, node.InputSchemaVersion); err != nil {
+			t.Fatalf("workspace analysis executor %s is unreachable: %v", key, err)
+		}
 	}
 	if worker.artifact.generation == nil || worker.artifact.terminal == nil || worker.artifact.executor == nil || worker.artifact.catalog == nil || !worker.artifact.capability.available || worker.artifact.capability.code != "" {
 		t.Fatalf("enabled artifact components=%+v", worker.artifact)
@@ -288,6 +326,11 @@ func TestWorkerChatCompositionUsesEinoSchedulersAndRegistersRelationAndRAGTogeth
 	}
 	if _, err := worker.definitions.Resolve(agentworkflow.RAGWorkflowDefinitionKey, agentworkflow.RegisteredRAGDefinitionV1().Version); err != nil {
 		t.Fatalf("historical RAG v1 definition is unreachable: %v", err)
+	}
+	workspaceAnalysisDefinition := conversationworkflow.RegisteredWorkspaceAnalysisDefinition()
+	registeredWorkspaceAnalysis, err := worker.definitions.Resolve(workspaceAnalysisDefinition.Key, workspaceAnalysisDefinition.Version)
+	if err != nil || registeredWorkspaceAnalysis.GraphHash != workspaceAnalysisDefinition.GraphHash {
+		t.Fatalf("workspace analysis definition is unreachable or drifted: definition=%+v err=%v", registeredWorkspaceAnalysis, err)
 	}
 	if _, err := worker.definitions.Resolve(artifactworkflow.DefinitionKey, artifactworkflow.DefinitionVersion); err != nil {
 		t.Fatalf("Artifact definition is unreachable: %v", err)

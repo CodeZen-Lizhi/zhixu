@@ -21,6 +21,7 @@ import (
 type RuntimeRepositoryHooks struct {
 	CancellationSafety application.CancellationSafetyGuard
 	Terminal           application.WorkflowTerminalHook
+	Control            application.WorkflowControlHook
 	// ModelRuntimeFreshWithin is the Worker-owned admission policy for a
 	// managed runtime owner. Zero uses the shared server default.
 	ModelRuntimeFreshWithin time.Duration
@@ -32,6 +33,7 @@ type RuntimeRepository struct {
 	jobs                    riveradapter.JobInserter
 	cancellation            application.CancellationSafetyGuard
 	terminal                application.WorkflowTerminalHook
+	control                 application.WorkflowControlHook
 	modelRuntimeFreshWithin time.Duration
 }
 
@@ -61,6 +63,9 @@ func NewRuntimeRepositoryWithHooks(db DB, jobs riveradapter.JobInserter, hooks R
 	if hooks.Terminal != nil && isNilWorkflowTerminalHook(hooks.Terminal) {
 		return nil, foundation.NewError(foundation.ErrorInvalidInput, "WORKFLOW_TERMINAL_HOOK_INVALID", false, errors.New("runtime terminal hook is nil"))
 	}
+	if hooks.Control != nil && isNilWorkflowControlHook(hooks.Control) {
+		return nil, foundation.NewError(foundation.ErrorInvalidInput, "WORKFLOW_CONTROL_HOOK_INVALID", false, errors.New("runtime control hook is nil"))
+	}
 	if hooks.ModelRuntimeFreshWithin == 0 {
 		hooks.ModelRuntimeFreshWithin = modelsettingsapplication.DefaultRuntimeFreshWithin
 	}
@@ -68,7 +73,7 @@ func NewRuntimeRepositoryWithHooks(db DB, jobs riveradapter.JobInserter, hooks R
 		return nil, foundation.NewError(foundation.ErrorInvalidInput, "WORKFLOW_MODEL_RUNTIME_FRESHNESS_INVALID", false, errors.New("workflow model runtime freshness policy is invalid"))
 	}
 	return &RuntimeRepository{
-		db: db, jobs: jobs, cancellation: hooks.CancellationSafety, terminal: hooks.Terminal,
+		db: db, jobs: jobs, cancellation: hooks.CancellationSafety, terminal: hooks.Terminal, control: hooks.Control,
 		modelRuntimeFreshWithin: hooks.ModelRuntimeFreshWithin,
 	}, nil
 }
@@ -95,6 +100,19 @@ func isNilCancellationSafetyGuard(guard application.CancellationSafetyGuard) boo
 }
 
 func isNilWorkflowTerminalHook(hook application.WorkflowTerminalHook) bool {
+	if hook == nil {
+		return true
+	}
+	value := reflect.ValueOf(hook)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
+}
+
+func isNilWorkflowControlHook(hook application.WorkflowControlHook) bool {
 	if hook == nil {
 		return true
 	}

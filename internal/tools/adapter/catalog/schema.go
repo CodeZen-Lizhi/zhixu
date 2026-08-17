@@ -1,9 +1,10 @@
 package catalog
 
 const (
-	uuidPattern   = `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`
-	hash64Pattern = `^[0-9a-f]{64}$`
-	gitOIDPattern = `^(?:[0-9a-f]{40}|[0-9a-f]{64})$`
+	uuidPattern        = `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`
+	hash64Pattern      = `^[0-9a-f]{64}$`
+	gitOIDPattern      = `^(?:[0-9a-f]{40}|[0-9a-f]{64})$`
+	evidenceRefPattern = `^E[1-5]$`
 )
 
 const searchKnowledgeInputSchema = `{
@@ -41,6 +42,34 @@ const searchKnowledgeOutputSchema = `{
   }
 }`
 
+const searchKnowledgeV2InputSchema = `{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "type":"object","additionalProperties":false,
+  "required":["query","mode","limit"],
+  "properties":{
+    "query":{"type":"string","minLength":1,"maxLength":8192},
+    "mode":{"type":"string","enum":["keyword","semantic","hybrid"]},
+    "limit":{"type":"integer","minimum":1,"maximum":5}
+  }
+}`
+
+const searchKnowledgeV2OutputSchema = `{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "type":"object","additionalProperties":false,
+  "required":["effective_mode","items","degradations"],
+  "properties":{
+    "effective_mode":{"type":"string","enum":["keyword","semantic","hybrid"]},
+    "items":{"type":"array","maxItems":5,"items":{"type":"object","additionalProperties":false,
+      "required":["evidence_ref","rank","snippet"],
+      "properties":{
+        "evidence_ref":{"type":"string","pattern":"` + evidenceRefPattern + `"},
+        "rank":{"type":"integer","minimum":1,"maximum":5},
+        "snippet":{"type":"string","minLength":1,"maxLength":4096}
+      }}},
+    "degradations":{"type":"array","maxItems":16,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":64}}
+  }
+}`
+
 const readSourceInputSchema = `{
   "$schema":"https://json-schema.org/draft/2020-12/schema",
   "type":"object","additionalProperties":false,
@@ -60,6 +89,25 @@ const readSourceOutputSchema = `{
     "source_span_id":{"type":"string","pattern":"` + uuidPattern + `"},
     "content_hash":{"type":"string","pattern":"` + hash64Pattern + `"},
     "excerpt":{"type":"string","minLength":1,"maxLength":262144}
+  }
+}`
+
+const readSourceV3InputSchema = `{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "type":"object","additionalProperties":false,
+  "required":["evidence_ref"],
+  "properties":{"evidence_ref":{"type":"string","pattern":"^E[1-3]$"}}
+}`
+
+const readSourceV3OutputSchema = `{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "type":"object","additionalProperties":false,
+  "required":["evidence_ref","content_hash","truncated","excerpt"],
+  "properties":{
+    "evidence_ref":{"type":"string","pattern":"^E[1-3]$"},
+    "content_hash":{"type":"string","pattern":"` + hash64Pattern + `"},
+    "truncated":{"type":"boolean"},
+    "excerpt":{"type":"string","minLength":1,"maxLength":4096}
   }
 }`
 
@@ -133,6 +181,30 @@ const validateCitationOutputSchema = `{
       "chunk_id":{"type":"string","pattern":"` + uuidPattern + `"},
       "source_version_id":{"type":"string","pattern":"` + uuidPattern + `"},
       "source_span_id":{"type":"string","pattern":"` + uuidPattern + `"},
+      "valid":{"type":"boolean"},
+      "reason_code":{"type":"string","enum":["OK","CITATION_UNRESOLVABLE","EVIDENCE_INELIGIBLE","BINDING_MISMATCH"]}
+    }}}}
+}`
+
+const validateCitationV3InputSchema = `{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "type":"object","additionalProperties":false,
+  "required":["candidate_id","candidate_hash","evidence_refs"],
+  "properties":{
+    "candidate_id":{"type":"string","pattern":"` + uuidPattern + `"},
+    "candidate_hash":{"type":"string","pattern":"` + hash64Pattern + `"},
+    "evidence_refs":{"type":"array","minItems":1,"maxItems":3,"uniqueItems":true,"items":{"type":"string","pattern":"^E[1-3]$"}}
+  }
+}`
+
+const validateCitationV3OutputSchema = `{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "type":"object","additionalProperties":false,
+  "required":["results"],
+  "properties":{"results":{"type":"array","minItems":1,"maxItems":3,"items":{"type":"object","additionalProperties":false,
+    "required":["evidence_ref","valid","reason_code"],
+    "properties":{
+      "evidence_ref":{"type":"string","pattern":"^E[1-3]$"},
       "valid":{"type":"boolean"},
       "reason_code":{"type":"string","enum":["OK","CITATION_UNRESOLVABLE","EVIDENCE_INELIGIBLE","BINDING_MISMATCH"]}
     }}}}

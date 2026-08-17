@@ -131,6 +131,54 @@ func TestRuntimeCatalogPublishesAdditiveConversationRAGSchemas(t *testing.T) {
 	}
 }
 
+func TestRuntimeCatalogPublishesIdentitylessWorkspaceAnalysisPlanSchema(t *testing.T) {
+	catalog, err := NewRuntimeCatalog(CatalogOptions{Model: testModelRef(), Timeout: time.Second, MaxOutputTokens: 512})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := agentdomain.SchemaRef{ID: agentdomain.WorkspaceAnalysisPlanSchemaID, Version: agentdomain.OutputSchemaVersionV1}
+	snapshot, err := catalog.Snapshot(WorkspaceAnalysisPlanPromptRef(), ref, ref, DefaultProfileRef())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Prompt.Ref != WorkspaceAnalysisPlanPromptRef() || snapshot.Schema.Ref != ref || snapshot.ReducedSchema.Ref != ref ||
+		bytes.Contains(snapshot.Schema.JSONSchema, []byte("model_run_ref")) || bytes.Contains(snapshot.Schema.JSONSchema, []byte("workspace_id")) {
+		t.Fatalf("workspace analysis plan snapshot exposes identity: prompt=%+v schema=%s", snapshot.Prompt.Ref, snapshot.Schema.JSONSchema)
+	}
+	providerDocument := json.RawMessage(`{"i":"inspect workspace","r":["workspace policy"],"d":"","q":"","s":[]}`)
+	decoded, err := snapshot.Schema.Decode(providerDocument)
+	if err != nil || !bytes.Equal(decoded, providerDocument) {
+		t.Fatalf("provider decode=%s err=%v", decoded, err)
+	}
+	if _, err := snapshot.Schema.Decode(json.RawMessage(`{"model_run_ref":"83000000-0000-4000-8000-000000000001"}`)); err == nil {
+		t.Fatal("workspace analysis plan schema accepted a server-owned identity")
+	}
+}
+
+func TestRuntimeCatalogPublishesIdentitylessWorkspaceAnalysisCandidateSchema(t *testing.T) {
+	catalog, err := NewRuntimeCatalog(CatalogOptions{Model: testModelRef(), Timeout: time.Second, MaxOutputTokens: 4096})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := agentdomain.SchemaRef{ID: agentdomain.WorkspaceAnalysisCandidateSchemaID, Version: "1"}
+	snapshot, err := catalog.Snapshot(WorkspaceAnalysisSynthesisPromptRef(), ref, ref, DefaultProfileRef())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Prompt.Ref != WorkspaceAnalysisSynthesisPromptRef() || snapshot.Schema.Ref != ref || snapshot.ReducedSchema.Ref != ref ||
+		bytes.Contains(snapshot.Schema.JSONSchema, []byte("model_run_ref")) || bytes.Contains(snapshot.Schema.JSONSchema, []byte("workspace_id")) {
+		t.Fatalf("workspace analysis candidate snapshot exposes identity: prompt=%+v schema=%s", snapshot.Prompt.Ref, snapshot.Schema.JSONSchema)
+	}
+	providerDocument := json.RawMessage(`{"result_type":"workspace_analysis_candidate","schema_id":"agent.workspace-analysis-candidate","schema_version":"1","payload":{"answer_markdown":"Grounded answer [E1].","citation_refs":["E1"],"proposal_suggestion":null}}`)
+	decoded, err := snapshot.Schema.Decode(providerDocument)
+	if err != nil || !bytes.Equal(decoded, providerDocument) {
+		t.Fatalf("provider decode=%s err=%v", decoded, err)
+	}
+	if _, err := snapshot.Schema.Decode(json.RawMessage(`{"model_run_ref":"83000000-0000-4000-8000-000000000001"}`)); err == nil {
+		t.Fatal("workspace analysis candidate schema accepted a server-owned identity")
+	}
+}
+
 func TestRuntimeCatalogDoesNotExposeLegacyRAGMetadataOrMixedVersions(t *testing.T) {
 	catalog, err := NewRuntimeCatalog(CatalogOptions{Model: testModelRef(), Timeout: time.Second, MaxOutputTokens: 128})
 	if err != nil {

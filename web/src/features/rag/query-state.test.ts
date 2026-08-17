@@ -5,7 +5,7 @@ import type { Answer } from "../../api/conversation";
 import type { ServerEventEnvelope } from "../../events";
 import { invalidateRagEvent, recoverRagWorkspace } from "./event-recovery";
 import { ragQueryKeys } from "./query-keys";
-import { maximumPendingAnswerPolls, pendingAnswerPollInterval, pendingAnswerPollMilliseconds } from "./queries";
+import { maximumPendingAnswerPolls, maximumWorkspaceAnalysisPendingAnswerPolls, pendingAnswerPollInterval, pendingAnswerPollMilliseconds } from "./queries";
 
 const workspaceId = "92000000-0000-4000-8000-000000000001";
 const otherWorkspaceId = "92000000-0000-4000-8000-000000000002";
@@ -17,6 +17,7 @@ describe("RAG query state", () => {
   it("所有 key 都以 Workspace 分区", () => {
     expect(ragQueryKeys.answer(workspaceId, answerId)).not.toEqual(ragQueryKeys.answer(otherWorkspaceId, answerId));
     expect(ragQueryKeys.turns(workspaceId, conversationId)).not.toEqual(ragQueryKeys.turns(otherWorkspaceId, conversationId));
+    expect(ragQueryKeys.analysisTimeline(workspaceId, answerId)).not.toEqual(ragQueryKeys.analysisTimeline(otherWorkspaceId, answerId));
   });
 
   it("pending 只在有界次数内轮询", () => {
@@ -24,6 +25,9 @@ describe("RAG query state", () => {
     expect(maximumPendingAnswerPolls * pendingAnswerPollMilliseconds).toBe(12 * 60_000);
     expect(pendingAnswerPollInterval(pending, maximumPendingAnswerPolls - 1)).toBe(pendingAnswerPollMilliseconds);
     expect(pendingAnswerPollInterval(pending, maximumPendingAnswerPolls)).toBe(false);
+    expect(maximumWorkspaceAnalysisPendingAnswerPolls * pendingAnswerPollMilliseconds).toBeGreaterThan(60 * 60_000);
+    expect(pendingAnswerPollInterval(pending, maximumPendingAnswerPolls, maximumWorkspaceAnalysisPendingAnswerPolls)).toBe(pendingAnswerPollMilliseconds);
+    expect(pendingAnswerPollInterval(pending, maximumWorkspaceAnalysisPendingAnswerPolls, maximumWorkspaceAnalysisPendingAnswerPolls)).toBe(false);
     expect(pendingAnswerPollInterval({ publicationStatus: "completed" } as Answer, 1)).toBe(false);
   });
 
@@ -32,6 +36,7 @@ describe("RAG query state", () => {
     const reset = vi.spyOn(queryClient, "resetQueries").mockResolvedValue(undefined);
     const invalidate = vi.spyOn(queryClient, "invalidateQueries").mockResolvedValue(undefined);
     const event = {
+      type: "conversation.updated",
       workspaceId,
       payloadSummary: { conversationId, answerId },
       invalidations: [
@@ -65,6 +70,27 @@ describe("RAG query state", () => {
     invalidate.mockClear();
     await invalidateRagEvent(queryClient, otherWorkspaceId, event);
     expect(reset).not.toHaveBeenCalled();
+    expect(invalidate).not.toHaveBeenCalled();
+  });
+
+  it("工作区分析 SSE 只精确失效对应 Answer 的时间线快照", async () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries").mockResolvedValue(undefined);
+    const event = {
+      type: "workspace_analysis.tool.completed",
+      workspaceId,
+      payloadSummary: { answerId },
+      invalidations: [{ resource: "workflow", id: "92000000-0000-4000-8000-000000000005" }],
+    } as ServerEventEnvelope;
+
+    await invalidateRagEvent(queryClient, workspaceId, event);
+
+    expect(invalidate).toHaveBeenCalledWith(
+      { queryKey: ragQueryKeys.analysisTimeline(workspaceId, answerId), exact: true },
+      { throwOnError: true },
+    );
+    invalidate.mockClear();
+    await invalidateRagEvent(queryClient, otherWorkspaceId, event);
     expect(invalidate).not.toHaveBeenCalled();
   });
 
@@ -162,6 +188,7 @@ describe("RAG query state", () => {
     ];
     const unsubscribes = observers.map((observer) => observer.subscribe(() => undefined));
     const event = {
+      type: "conversation.updated",
       workspaceId,
       payloadSummary: { conversationId, answerId },
       invalidations: [

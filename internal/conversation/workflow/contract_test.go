@@ -183,6 +183,9 @@ func TestRAGWorkflowDefinitionV2OwnsExactReadOnlyTools(t *testing.T) {
 	if err != nil || definition.GraphHash != wantHash {
 		t.Fatalf("graph hash = %q, want %q, error=%v", definition.GraphHash, wantHash, err)
 	}
+	if definition.GraphHash != "359a4f9851f07268f50b2d597c697d74ed0f67b7439c2747efbf2ed85f98b490" {
+		t.Fatalf("v2 graph hash = %q", definition.GraphHash)
+	}
 	if !reflect.DeepEqual(definition, conversationworkflow.RegisteredDefinitionV2()) {
 		t.Fatalf("current registered definition drifted from v2: %#v", definition)
 	}

@@ -1,7 +1,7 @@
 SHELL := /bin/sh
 DOCKER_COMPOSE ?= docker compose
 
-.PHONY: test migrate go-test go-vet web-install web-lint web-typecheck web-test web-build eino-test eino-vet eino-live-smoke eino-live-smoke-env eino-live-smoke-contract eino-live-chat-smoke eino-live-query-plan-smoke eino-live-rag-metadata-smoke eino-live-faithfulness-smoke eino-live-openai-embedding-smoke eino-live-ollama-embedding-smoke eino-stable-observation-test eino-stable-observation-preflight eino-stable-observation-start eino-stable-observation-day eino-stable-observation-attest eino-stable-observation-verify agent-eval semantic-link-eval openapi-check trellis-script-test task-context-check auth-integration tool-integration rag-integration graph-integration graph-smoke graph-benchmark benchmark-capacity semantic-link-integration semantic-link-fault-smoke semantic-link-browser-smoke semantic-link-smoke collection-health-integration collection-health-fault-smoke collection-health-benchmark collection-health-browser-smoke collection-health-secret-scan collection-health-smoke artifact-browser-smoke m8-learning-browser-smoke export-browser-smoke timeline-impact-integration timeline-impact-fault-smoke timeline-impact-worker-smoke compose-auth-check compose-runtime-check compose-bootstrap-check compose-runtime-contract compose-netns-check compose-netns-contract compose-workspace-check compose-workspace-contract compose-static-models-check compose-smoke-cleanup-contract smoke-image-cleanup-contract compose-rag-real-provider-contract compose-auth-smoke compose-check launcher-contract model-secrets-init-contract architecture-quality-baseline docker-build compose-up compose-down compose-reset compose-search-smoke compose-tool-smoke compose-rag-smoke compose-rag-real-provider-preflight compose-rag-real-provider-smoke compose-model-runtime-hot-activation-smoke
+.PHONY: test migrate go-test go-vet web-install web-lint web-typecheck web-test web-build eino-test eino-vet eino-live-smoke eino-live-smoke-env eino-live-smoke-contract eino-live-chat-smoke eino-live-query-plan-smoke eino-live-rag-metadata-smoke eino-live-openai-embedding-smoke eino-live-ollama-embedding-smoke eino-stable-observation-test eino-stable-observation-preflight eino-stable-observation-start eino-stable-observation-day eino-stable-observation-attest eino-stable-observation-verify agent-eval semantic-link-eval openapi-check trellis-script-test task-context-check auth-integration tool-integration rag-integration workspace-analysis-integration workspace-analysis-terminal-matrix workspace-analysis-fault-smoke graph-integration graph-smoke graph-benchmark benchmark-capacity semantic-link-integration semantic-link-fault-smoke semantic-link-browser-smoke semantic-link-smoke collection-health-integration collection-health-fault-smoke collection-health-benchmark collection-health-browser-smoke collection-health-secret-scan collection-health-smoke artifact-browser-smoke m8-learning-browser-smoke export-browser-smoke timeline-impact-integration timeline-impact-fault-smoke timeline-impact-worker-smoke compose-auth-check compose-runtime-check compose-bootstrap-check compose-runtime-contract compose-netns-check compose-netns-contract compose-workspace-check compose-workspace-contract compose-static-models-check compose-smoke-cleanup-contract smoke-image-cleanup-contract compose-rag-real-provider-contract compose-workspace-analysis-compat-contract compose-workspace-analysis-worker-restart-contract compose-workspace-analysis-otlp-contract compose-auth-smoke compose-check launcher-contract model-secrets-init-contract architecture-quality-baseline docker-build compose-up compose-down compose-reset compose-search-smoke compose-tool-smoke compose-rag-smoke compose-rag-browser-smoke compose-workspace-analysis-smoke compose-workspace-analysis-otlp-smoke compose-workspace-analysis-compat-smoke compose-workspace-analysis-worker-restart-smoke compose-rag-real-provider-preflight compose-rag-real-provider-smoke compose-model-runtime-hot-activation-smoke
 
 test: trellis-script-test task-context-check go-test go-vet web-lint web-typecheck web-test web-build eino-test eino-vet eino-live-smoke-contract eino-stable-observation-test agent-eval openapi-check compose-check
 
@@ -225,6 +225,18 @@ rag-integration:
 	@test -n "$$ZHIXU_TEST_DATABASE_URL" || (echo "ZHIXU_TEST_DATABASE_URL is required" >&2; exit 1)
 	go test -race -tags=integration -count=1 -p 1 -run '^TestPublicConversationRunsThroughRiverRAGAndFeedback$$' ./cmd/worker
 
+workspace-analysis-integration:
+	@test -n "$$ZHIXU_TEST_DATABASE_URL" || (echo "ZHIXU_TEST_DATABASE_URL is required" >&2; exit 1)
+	go test -race -tags=integration -count=1 -p 1 -timeout 5m -run '^TestWorkspaceAnalysis' ./internal/platform/migration
+	go test -race -tags=integration -count=1 -p 1 -timeout 5m -run '^TestWorkspaceAnalysis' ./internal/conversation/adapter/postgres ./internal/agent/adapter/postgres ./internal/tools/adapter/postgres
+	go test -race -tags=integration -count=1 -p 1 -timeout 5m -run '^TestWorkspaceAnalysis' ./cmd/worker
+
+workspace-analysis-terminal-matrix:
+	bash deploy/workspace-analysis-terminal-matrix-go-gate.sh
+
+workspace-analysis-fault-smoke: workspace-analysis-terminal-matrix
+	bash deploy/compose-workspace-analysis-worker-restart-smoke.sh
+
 graph-integration:
 	@test -n "$$ZHIXU_TEST_DATABASE_URL" || (echo "ZHIXU_TEST_DATABASE_URL is required" >&2; exit 1)
 	go test -race -tags=integration -count=1 -p 1 -run '^TestGraphPublicHTTPIntegration$$' ./cmd/api
@@ -343,7 +355,7 @@ compose-workspace-check:
 compose-workspace-contract:
 	python3 deploy/compose_workspace_contract.py
 
-compose-check: compose-auth-check compose-runtime-check compose-bootstrap-check compose-static-models-check compose-runtime-contract compose-netns-check compose-netns-contract compose-workspace-check compose-workspace-contract compose-smoke-cleanup-contract smoke-image-cleanup-contract compose-rag-real-provider-contract launcher-contract model-secrets-init-contract
+compose-check: compose-auth-check compose-runtime-check compose-bootstrap-check compose-static-models-check compose-runtime-contract compose-netns-check compose-netns-contract compose-workspace-check compose-workspace-contract compose-smoke-cleanup-contract smoke-image-cleanup-contract compose-rag-real-provider-contract compose-workspace-analysis-compat-contract compose-workspace-analysis-worker-restart-contract compose-workspace-analysis-otlp-contract launcher-contract model-secrets-init-contract
 	$(DOCKER_COMPOSE) -f deploy/compose.yml --env-file .env.example config --quiet
 	$(DOCKER_COMPOSE) --profile workspace-runtime --profile modelctl -f deploy/compose.yml -f deploy/compose.bootstrap.yml --env-file .env.example config --quiet
 	$(DOCKER_COMPOSE) --project-name zhixu-netns -f deploy/compose.netns.yml --env-file .env.example config --quiet
@@ -356,6 +368,15 @@ smoke-image-cleanup-contract:
 
 compose-rag-real-provider-contract:
 	bash deploy/compose-rag-real-provider-contract.sh
+
+compose-workspace-analysis-compat-contract:
+	bash deploy/compose-workspace-analysis-compat-smoke-contract.sh
+
+compose-workspace-analysis-worker-restart-contract:
+	bash deploy/compose-workspace-analysis-worker-restart-smoke-contract.sh
+
+compose-workspace-analysis-otlp-contract:
+	bash deploy/compose-workspace-analysis-otlp-smoke-contract.sh
 
 launcher-contract:
 	bash deploy/launcher-contract.sh
@@ -386,6 +407,21 @@ compose-tool-smoke:
 
 compose-rag-smoke:
 	bash deploy/compose-rag-smoke.sh
+
+compose-rag-browser-smoke:
+	ZHIXU_COMPOSE_RAG_BROWSER=1 bash deploy/compose-rag-smoke.sh
+
+compose-workspace-analysis-smoke:
+	bash deploy/compose-workspace-analysis-smoke.sh
+
+compose-workspace-analysis-otlp-smoke:
+	bash deploy/compose-workspace-analysis-otlp-smoke.sh
+
+compose-workspace-analysis-compat-smoke:
+	bash deploy/compose-workspace-analysis-compat-smoke.sh
+
+compose-workspace-analysis-worker-restart-smoke:
+	bash deploy/compose-workspace-analysis-worker-restart-smoke.sh
 
 compose-model-runtime-hot-activation-smoke:
 	bash deploy/model-runtime-hot-activation-smoke.sh

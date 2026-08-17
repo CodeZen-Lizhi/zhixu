@@ -4,6 +4,7 @@ package migration
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -68,30 +69,37 @@ func TestRunnerRealPostgreSQLUpRepeatDownAndGuard(t *testing.T) {
 	if _, err := provider.Up(ctx); err != nil {
 		t.Fatal(err)
 	}
-	insertRuntimeIdentityFixture(t, ctx, pool)
-	downEmptyKnowledgeMigration(t, ctx, provider)
+
+	guardPool, guardCleanup := newMigrationTestDatabase(t, ctx)
+	defer guardCleanup()
+	guardProvider := migrationProvider(t, guardPool)
+	if _, err := guardProvider.UpTo(ctx, 17); err != nil {
+		t.Fatal(err)
+	}
+	insertRuntimeIdentityFixture(t, ctx, guardPool)
+	downEmptyKnowledgeMigration(t, ctx, guardProvider)
 	// 00016 has no cache, V2 Delivery, or Hybrid Index data in this fixture.
-	if _, err := provider.Down(ctx); err != nil {
+	if _, err := guardProvider.Down(ctx); err != nil {
 		t.Fatalf("00016 Down rejected an empty Embedding Hybrid Search schema: %v", err)
 	}
 	// 00015 has no Source Manifest or Delivery data in this fixture.
-	if _, err := provider.Down(ctx); err != nil {
+	if _, err := guardProvider.Down(ctx); err != nil {
 		t.Fatalf("00015 Down rejected an empty Reindex Consumer schema: %v", err)
 	}
 	// 00014 has no Retrieval data yet, so remove it before exercising the
 	// earlier M4-A runtime-identity downgrade guard.
-	if _, err := provider.Down(ctx); err != nil {
+	if _, err := guardProvider.Down(ctx); err != nil {
 		t.Fatalf("00014 Down rejected an empty Retrieval schema: %v", err)
 	}
 	// 00013 has no Proposal→Run bindings yet, so it can be removed before
 	// removing 00012 and testing the M4-A runtime-identity guard.
-	if _, err := provider.Down(ctx); err != nil {
+	if _, err := guardProvider.Down(ctx); err != nil {
 		t.Fatalf("00013 Down rejected an unbound Proposal schema: %v", err)
 	}
-	if _, err := provider.Down(ctx); err != nil {
+	if _, err := guardProvider.Down(ctx); err != nil {
 		t.Fatalf("00012 Down rejected legacy-only runtime identity: %v", err)
 	}
-	if _, err := provider.Down(ctx); err == nil {
+	if _, err := guardProvider.Down(ctx); err == nil {
 		t.Fatal("00011 Down accepted Runtime identity data")
 	} else {
 		var pgErr *pgconn.PgError
@@ -653,6 +661,247 @@ func TestRunnerAdoptsLegacyShellHistory(t *testing.T) {
 	}
 }
 
+func TestRunnerBridgesDeployedEinoMigrationVersionCollision(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newMigrationTestDatabase(t, ctx)
+	defer cleanup()
+
+	db := stdlib.OpenDBFromPool(pool)
+	defer db.Close()
+	annotated := prepareDeployedEinoMigrationVersionCollision(t, ctx, pool, db)
+
+	runner, err := NewRunner(pool, projectmigrations.FS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.Up(ctx); err != nil {
+		t.Fatalf("bridge deployed Eino collision: %v", err)
+	}
+	if err := runner.Up(ctx); err != nil {
+		t.Fatalf("repeat bridged migration Up: %v", err)
+	}
+
+	var canonicalSchema, legacySchema, adoptedHistory int
+	if err := pool.QueryRow(ctx, `
+SELECT
+    (SELECT count(*) FROM information_schema.columns
+     WHERE table_schema='ops' AND table_name='model_settings_revisions' AND column_name='chat_api_style')
+  + (SELECT count(*) FROM pg_tables
+     WHERE schemaname='ops' AND tablename='model_settings_rollout_participant'),
+    (SELECT count(*) FROM pg_tables
+     WHERE schemaname='agent' AND tablename IN ('answer_draft_session','answer_draft_chunk')),
+    (SELECT count(*) FROM public.goose_db_version
+     WHERE is_applied AND version_id IN (83,84))`).Scan(&canonicalSchema, &legacySchema, &adoptedHistory); err != nil {
+		t.Fatal(err)
+	}
+	if canonicalSchema != 2 || legacySchema != 2 || adoptedHistory != 2 {
+		t.Fatalf("bridge schema/history canonical=%d legacy=%d adopted=%d", canonicalSchema, legacySchema, adoptedHistory)
+	}
+	version, err := migrationProvider(t, pool).GetDBVersion(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version != 91 {
+		t.Fatalf("bridged migration version=%d want=91", version)
+	}
+	needsOutOfOrder, err := bridgeMigrationVersionCollision(ctx, db, annotated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if needsOutOfOrder {
+		t.Fatal("completed collision bridge still enables out-of-order migrations")
+	}
+}
+
+func TestRunnerResumesInterruptedEinoMigrationVersionCollisionBridge(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newMigrationTestDatabase(t, ctx)
+	defer cleanup()
+
+	db := stdlib.OpenDBFromPool(pool)
+	defer db.Close()
+	annotated := prepareDeployedEinoMigrationVersionCollision(t, ctx, pool, db)
+	if err := applyUnversionedMigrationSubset(ctx, db, annotated, legacyCollisionFirstVersion); err != nil {
+		t.Fatalf("apply first canonical collision migration: %v", err)
+	}
+
+	runner, err := NewRunner(pool, projectmigrations.FS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.Up(ctx); err != nil {
+		t.Fatalf("resume interrupted collision bridge: %v", err)
+	}
+	firstState, err := inspectSchemaFingerprint(ctx, db, canonicalModelSettings78Fingerprint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondState, err := inspectSchemaFingerprint(ctx, db, canonicalModelSettings79Fingerprint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var adoptedHistory int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM public.goose_db_version
+		WHERE is_applied AND version_id IN (83,84)`).Scan(&adoptedHistory); err != nil {
+		t.Fatal(err)
+	}
+	if firstState != fingerprintPresent || secondState != fingerprintPresent || adoptedHistory != 2 {
+		t.Fatalf("resumed bridge states canonical78=%s canonical79=%s adopted=%d", firstState, secondState, adoptedHistory)
+	}
+}
+
+func TestRunnerBridgesInterruptedDeployedEinoMigrationVersionCollision(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newMigrationTestDatabase(t, ctx)
+	defer cleanup()
+
+	db := stdlib.OpenDBFromPool(pool)
+	defer db.Close()
+	annotated := preparePreCollisionMigrationHistory(t, ctx, db)
+	content, err := fs.ReadFile(projectmigrations.FS, "00083_model_call_agent_answer_phases.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, legacyUpSection(string(content))); err != nil {
+		t.Fatalf("apply interrupted historical Eino migration: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+INSERT INTO public.goose_db_version(version_id,is_applied,tstamp)
+VALUES (78,true,now())`); err != nil {
+		t.Fatalf("record interrupted historical Eino version: %v", err)
+	}
+
+	runner, err := NewRunner(pool, projectmigrations.FS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.Up(ctx); err != nil {
+		t.Fatalf("bridge interrupted deployed Eino collision: %v", err)
+	}
+	version, err := migrationProvider(t, pool).GetDBVersion(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version != 91 {
+		t.Fatalf("interrupted deployed Eino migration version=%d want=91", version)
+	}
+	needsOutOfOrder, err := bridgeMigrationVersionCollision(ctx, db, annotated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if needsOutOfOrder {
+		t.Fatal("repaired interrupted collision still enables out-of-order migrations")
+	}
+}
+
+func TestRunnerResumesCanonicalHistoryBetweenModelSettingsMigrations(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newMigrationTestDatabase(t, ctx)
+	defer cleanup()
+
+	provider := migrationProvider(t, pool)
+	if _, err := provider.UpTo(ctx, legacyCollisionFirstVersion); err != nil {
+		t.Fatalf("apply canonical migrations through 78: %v", err)
+	}
+	runner, err := NewRunner(pool, projectmigrations.FS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.Up(ctx); err != nil {
+		t.Fatalf("resume canonical history after 78: %v", err)
+	}
+	version, err := migrationProvider(t, pool).GetDBVersion(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version != 91 {
+		t.Fatalf("resumed canonical migration version=%d want=91", version)
+	}
+}
+
+func TestRunnerResumesCanonicalHistoryBetweenEinoMigrations(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newMigrationTestDatabase(t, ctx)
+	defer cleanup()
+
+	db := stdlib.OpenDBFromPool(pool)
+	defer db.Close()
+	annotated, err := NewLegacyAnnotationFS(projectmigrations.FS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider, err := goose.NewProvider(goose.DialectPostgres, db, annotated, goose.WithTableName(projectMigrationTable))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.UpTo(ctx, adoptedEinoFirstVersion); err != nil {
+		t.Fatalf("apply canonical migrations through 83: %v", err)
+	}
+
+	runner, err := NewRunner(pool, projectmigrations.FS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.Up(ctx); err != nil {
+		t.Fatalf("resume canonical history after 83: %v", err)
+	}
+	version, err := migrationProvider(t, pool).GetDBVersion(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version != 91 {
+		t.Fatalf("resumed canonical migration version=%d want=91", version)
+	}
+}
+
+func prepareDeployedEinoMigrationVersionCollision(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	db *sql.DB,
+) fs.FS {
+	t.Helper()
+	annotated := preparePreCollisionMigrationHistory(t, ctx, db)
+	for _, name := range []string{
+		"00083_model_call_agent_answer_phases.sql",
+		"00084_answer_draft_stream.sql",
+	} {
+		content, err := fs.ReadFile(projectmigrations.FS, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, legacyUpSection(string(content))); err != nil {
+			t.Fatalf("apply historical Eino migration %s: %v", name, err)
+		}
+	}
+	if _, err := pool.Exec(ctx, `
+INSERT INTO public.goose_db_version(version_id,is_applied,tstamp)
+VALUES (78,true,now()),(79,true,now())`); err != nil {
+		t.Fatalf("record historical Eino versions: %v", err)
+	}
+	return annotated
+}
+
+func preparePreCollisionMigrationHistory(t *testing.T, ctx context.Context, db *sql.DB) fs.FS {
+	t.Helper()
+	annotated, err := NewLegacyAnnotationFS(projectmigrations.FS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider, err := goose.NewProvider(goose.DialectPostgres, db, annotated, goose.WithTableName(projectMigrationTable))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.UpTo(ctx, 77); err != nil {
+		t.Fatalf("apply pre-collision migrations: %v", err)
+	}
+	return annotated
+}
+
+func TestProjectMigrationVersionsAreUnique(t *testing.T) {
+	latestProjectMigration(t)
+}
+
 func latestProjectMigration(t *testing.T) (int, int) {
 	t.Helper()
 	entries, err := fs.ReadDir(projectmigrations.FS, ".")
@@ -661,6 +910,7 @@ func latestProjectMigration(t *testing.T) (int, int) {
 	}
 	maxVersion := 0
 	count := 0
+	versions := make(map[int]string)
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
 			continue
@@ -673,6 +923,10 @@ func latestProjectMigration(t *testing.T) (int, int) {
 		if err != nil || version <= 0 {
 			t.Fatalf("migration filename %q has invalid version", entry.Name())
 		}
+		if previous, exists := versions[version]; exists {
+			t.Fatalf("migration version %d is duplicated by %q and %q", version, previous, entry.Name())
+		}
+		versions[version] = entry.Name()
 		count++
 		if version > maxVersion {
 			maxVersion = version

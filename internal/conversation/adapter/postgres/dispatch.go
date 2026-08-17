@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"time"
 
+	agentapplication "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
+	agentdomain "github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
 	conversationapplication "github.com/CodeZen-Lizhi/zhixu/internal/conversation/application"
 	conversationdomain "github.com/CodeZen-Lizhi/zhixu/internal/conversation/domain"
 	conversationworkflow "github.com/CodeZen-Lizhi/zhixu/internal/conversation/workflow"
@@ -31,11 +34,13 @@ type questionRuntimeStarter interface {
 
 // QuestionDispatcher 跨 Conversation、Workflow、River 与 Server Event 维护 Question 原子派发。
 type QuestionDispatcher struct {
-	db      DB
-	runtime questionRuntimeStarter
-	events  eventsapplication.Appender
-	ids     foundation.IDGenerator
-	clock   foundation.Clock
+	db       DB
+	runtime  questionRuntimeStarter
+	events   eventsapplication.Appender
+	ids      foundation.IDGenerator
+	clock    foundation.Clock
+	analysis agentapplication.WorkspaceAnalysisRunStarter
+	audit    WorkspaceAnalysisAuditRecorder
 }
 
 var _ conversationapplication.QuestionDispatcher = (*QuestionDispatcher)(nil)
@@ -48,10 +53,53 @@ func NewQuestionDispatcher(
 	ids foundation.IDGenerator,
 	clock foundation.Clock,
 ) (*QuestionDispatcher, error) {
+	return newQuestionDispatcher(db, runtime, events, ids, clock, nil, nil)
+}
+
+// NewQuestionDispatcherWithWorkspaceAnalysis 显式注入已通过 readiness 的 Analysis Run 原子创建能力。
+func NewQuestionDispatcherWithWorkspaceAnalysis(
+	db DB,
+	runtime questionRuntimeStarter,
+	events eventsapplication.Appender,
+	ids foundation.IDGenerator,
+	clock foundation.Clock,
+	analysis agentapplication.WorkspaceAnalysisRunStarter,
+) (*QuestionDispatcher, error) {
+	if isNilInterface(analysis) {
+		return nil, dependency(ErrorCodeQuestionDispatchUnavailable, errors.New("workspace analysis run starter is nil"))
+	}
+	return newQuestionDispatcher(db, runtime, events, ids, clock, analysis, nil)
+}
+
+// NewQuestionDispatcherWithWorkspaceAnalysisAndAudit 显式启用 Analysis Run 创建事务内审计。
+func NewQuestionDispatcherWithWorkspaceAnalysisAndAudit(
+	db DB,
+	runtime questionRuntimeStarter,
+	events eventsapplication.Appender,
+	ids foundation.IDGenerator,
+	clock foundation.Clock,
+	analysis agentapplication.WorkspaceAnalysisRunStarter,
+	audit WorkspaceAnalysisAuditRecorder,
+) (*QuestionDispatcher, error) {
+	if isNilInterface(analysis) || isNilInterface(audit) {
+		return nil, dependency(ErrorCodeQuestionDispatchUnavailable, errors.New("workspace analysis dispatch dependencies are incomplete"))
+	}
+	return newQuestionDispatcher(db, runtime, events, ids, clock, analysis, audit)
+}
+
+func newQuestionDispatcher(
+	db DB,
+	runtime questionRuntimeStarter,
+	events eventsapplication.Appender,
+	ids foundation.IDGenerator,
+	clock foundation.Clock,
+	analysis agentapplication.WorkspaceAnalysisRunStarter,
+	audit WorkspaceAnalysisAuditRecorder,
+) (*QuestionDispatcher, error) {
 	if isNilInterface(db) || isNilInterface(runtime) || isNilInterface(events) || isNilInterface(ids) || isNilInterface(clock) {
 		return nil, dependency(ErrorCodeQuestionDispatchUnavailable, errors.New("question dispatch dependency is nil"))
 	}
-	return &QuestionDispatcher{db: db, runtime: runtime, events: events, ids: ids, clock: clock}, nil
+	return &QuestionDispatcher{db: db, runtime: runtime, events: events, ids: ids, clock: clock, analysis: analysis, audit: audit}, nil
 }
 
 // SubmitQuestion 原子创建或精确重放 Question、Answer、Workflow、River Job 与安全摘要事件。
@@ -66,6 +114,9 @@ func (dispatcher *QuestionDispatcher) SubmitQuestion(ctx context.Context, record
 	request, err := validateQuestionDispatchRecord(record)
 	if err != nil {
 		return conversationapplication.SubmitQuestionResult{}, err
+	}
+	if request.Mode == conversationdomain.QuestionModeWorkspaceAnalysis && isNilInterface(dispatcher.analysis) {
+		return conversationapplication.SubmitQuestionResult{}, workspaceAnalysisCapabilityUnavailable()
 	}
 
 	tx, err := dispatcher.db.Begin(ctx)
@@ -143,12 +194,12 @@ func (dispatcher *QuestionDispatcher) SubmitQuestion(ctx context.Context, record
 		return conversationapplication.SubmitQuestionResult{}, err
 	}
 	persistedQuestion, err := scanQuestion(tx.QueryRow(ctx, `INSERT INTO agent.question(
-		id,workspace_id,conversation_id,ordinal,question_text,scope,answer_depth,output_format,
+		id,workspace_id,conversation_id,ordinal,mode,question_text,scope,answer_depth,output_format,
 		context_through_ordinal,context_hash,idempotency_key,request_hash,created_at
-	) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10,$11,$12,$13)
+	) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12,$13,$14)
 	RETURNING `+questionColumns,
 		string(question.ID), string(request.WorkspaceID), string(request.ConversationID), question.Ordinal,
-		request.QuestionText, scope, string(request.AnswerDepth), string(request.OutputFormat),
+		string(request.Mode), request.QuestionText, scope, string(request.AnswerDepth), string(request.OutputFormat),
 		question.ContextThroughOrdinal, question.ContextHash, record.IdempotencyKey, question.RequestHash, question.CreatedAt.UTC()))
 	if err != nil {
 		return conversationapplication.SubmitQuestionResult{}, err
@@ -190,6 +241,9 @@ func (dispatcher *QuestionDispatcher) SubmitQuestion(ctx context.Context, record
 	}
 	if !samePendingAnswerDispatchBinding(answerView.Answer, answer) {
 		return conversationapplication.SubmitQuestionResult{}, consistency(ErrorCodeQuestionDispatchCorrupt, errors.New("answer readback differs from dispatched slot"))
+	}
+	if err := dispatcher.startWorkspaceAnalysisRun(ctx, tx, persistedQuestion, answerView.Answer, runtimeResult, false); err != nil {
+		return conversationapplication.SubmitQuestionResult{}, err
 	}
 
 	updatedConversation, err := scanConversationRecord(tx.QueryRow(ctx, `UPDATE agent.conversation
@@ -268,6 +322,9 @@ func (dispatcher *QuestionDispatcher) replayQuestion(ctx context.Context, tx pgx
 		answerView.Workflow.Version != runtimeResult.Run.Version || !answerView.Workflow.UpdatedAt.Equal(runtimeResult.Run.UpdatedAt) {
 		return conversationapplication.SubmitQuestionResult{}, consistency(ErrorCodeQuestionDispatchCorrupt, errors.New("replayed answer workflow projection differs"))
 	}
+	if err := dispatcher.startWorkspaceAnalysisRun(ctx, tx, question, answerView.Answer, runtimeResult, true); err != nil {
+		return conversationapplication.SubmitQuestionResult{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return conversationapplication.SubmitQuestionResult{}, classify(err, ErrorCodeQuestionDispatchUnavailable)
 	}
@@ -275,15 +332,12 @@ func (dispatcher *QuestionDispatcher) replayQuestion(ctx context.Context, tx pgx
 }
 
 func (dispatcher *QuestionDispatcher) startQuestionWorkflow(ctx context.Context, tx pgx.Tx, question conversationdomain.Question, answerID foundation.ID) (workflowapplication.RuntimeStartResult, error) {
-	input, err := conversationworkflow.EncodeInput(conversationworkflow.Input{
-		SchemaVersion: conversationworkflow.InputSchemaVersion, ConversationID: question.Request.ConversationID,
-		QuestionID: question.ID, AnswerID: answerID, QuestionOrdinal: question.Ordinal, ContextHash: question.ContextHash,
-	})
+	plan, err := buildQuestionWorkflowDispatchPlan(question, answerID)
 	if err != nil {
 		return workflowapplication.RuntimeStartResult{}, err
 	}
 	request, err := workflowapplication.BuildRuntimeStartRequest(
-		dispatcher.ids, dispatcher.clock, question.Request.WorkspaceID, questionWorkflowIdempotencyKey(question.ID), input, conversationworkflow.RegisteredDefinitionV2(),
+		dispatcher.ids, dispatcher.clock, question.Request.WorkspaceID, plan.idempotencyKey, plan.input, plan.definition,
 	)
 	if err != nil {
 		return workflowapplication.RuntimeStartResult{}, classify(err, ErrorCodeQuestionDispatchUnavailable)
@@ -292,19 +346,82 @@ func (dispatcher *QuestionDispatcher) startQuestionWorkflow(ctx context.Context,
 	if err != nil {
 		return workflowapplication.RuntimeStartResult{}, err
 	}
-	if err := validateQuestionRuntime(result, request, input, question); err != nil {
+	if err := validateQuestionRuntime(result, request, plan, question); err != nil {
 		return workflowapplication.RuntimeStartResult{}, err
 	}
 	return result, nil
 }
 
-func validateQuestionRuntime(result workflowapplication.RuntimeStartResult, request workflowapplication.RuntimeStartRequest, input json.RawMessage, question conversationdomain.Question) error {
+type questionWorkflowDispatchPlan struct {
+	definition     workflowdomain.RegisteredDefinition
+	input          json.RawMessage
+	idempotencyKey string
+	root           workflowdomain.NodeDefinition
+}
+
+type questionWorkflowInputBinding struct {
+	ConversationID  foundation.ID
+	QuestionID      foundation.ID
+	AnswerID        foundation.ID
+	QuestionOrdinal int64
+	ContextHash     string
+}
+
+func buildQuestionWorkflowDispatchPlan(question conversationdomain.Question, answerID foundation.ID) (questionWorkflowDispatchPlan, error) {
+	var definition workflowdomain.RegisteredDefinition
+	var input json.RawMessage
+	var err error
+	switch question.Request.Mode {
+	case conversationdomain.QuestionModeRAG:
+		definition = conversationworkflow.RegisteredDefinitionV2()
+		input, err = conversationworkflow.EncodeInput(conversationworkflow.Input{
+			SchemaVersion: conversationworkflow.InputSchemaVersion, ConversationID: question.Request.ConversationID,
+			QuestionID: question.ID, AnswerID: answerID, QuestionOrdinal: question.Ordinal, ContextHash: question.ContextHash,
+		})
+	case conversationdomain.QuestionModeWorkspaceAnalysis:
+		definition = conversationworkflow.RegisteredWorkspaceAnalysisDefinition()
+		input, err = conversationworkflow.EncodeWorkspaceAnalysisInput(conversationworkflow.WorkspaceAnalysisInput{
+			SchemaVersion: conversationworkflow.WorkspaceAnalysisInputSchemaVersion, ConversationID: question.Request.ConversationID,
+			QuestionID: question.ID, AnswerID: answerID, QuestionOrdinal: question.Ordinal, ContextHash: question.ContextHash,
+		})
+	default:
+		return questionWorkflowDispatchPlan{}, invalid(ErrorCodeQuestionDispatchInvalid, errors.New("question workflow mode is unsupported"))
+	}
+	if err != nil {
+		return questionWorkflowDispatchPlan{}, err
+	}
+	root, err := uniqueQuestionWorkflowRoot(definition)
+	if err != nil {
+		return questionWorkflowDispatchPlan{}, err
+	}
+	return questionWorkflowDispatchPlan{
+		definition: definition, input: input,
+		idempotencyKey: questionWorkflowIdempotencyKeyForMode(question.Request.Mode, question.ID), root: root,
+	}, nil
+}
+
+func uniqueQuestionWorkflowRoot(definition workflowdomain.RegisteredDefinition) (workflowdomain.NodeDefinition, error) {
+	var root workflowdomain.NodeDefinition
+	count := 0
+	for _, node := range definition.Graph.Nodes {
+		if len(node.Dependencies) == 0 {
+			root = node
+			count++
+		}
+	}
+	if count != 1 {
+		return workflowdomain.NodeDefinition{}, consistency(ErrorCodeQuestionDispatchCorrupt, errors.New("question workflow definition does not have exactly one root"))
+	}
+	return root, nil
+}
+
+func validateQuestionRuntime(result workflowapplication.RuntimeStartResult, request workflowapplication.RuntimeStartRequest, plan questionWorkflowDispatchPlan, question conversationdomain.Question) error {
 	if result.Run.WorkspaceID != question.Request.WorkspaceID || result.Run.ID == "" || result.Run.DefinitionID == "" ||
 		result.Run.IdempotencyKey != request.Run.IdempotencyKey || result.Run.RequestHash != request.RequestHash ||
 		result.FirstNode.ID == "" || result.Job.JobID < 1 || result.Replayed != result.Job.Duplicate ||
-		result.FirstNode.RunID != result.Run.ID || result.FirstNode.NodeKey != conversationworkflow.NodeKey ||
-		result.FirstNode.NodeType != conversationworkflow.NodeKind || result.FirstNode.InputSchemaVersion != conversationworkflow.InputSchemaVersion ||
-		result.FirstNode.OutputSchemaVersion != conversationworkflow.OutputSchemaVersion || result.FirstNode.DispatchNo != questionDispatchNo ||
+		result.FirstNode.RunID != result.Run.ID || result.FirstNode.NodeKey != plan.root.Key ||
+		result.FirstNode.NodeType != plan.root.Kind || result.FirstNode.InputSchemaVersion != plan.root.InputSchemaVersion ||
+		result.FirstNode.OutputSchemaVersion != plan.root.OutputSchemaVersion || result.FirstNode.DispatchNo != questionDispatchNo ||
 		result.FirstNode.IdempotencyKey != request.FirstNode.IdempotencyKey || !validWorkflowRunStatus(result.Run.Status) ||
 		!validQuestionNodeStatus(result.FirstNode.Status) || result.Run.Version < 1 || result.FirstNode.Version < 1 ||
 		result.Run.CreatedAt.IsZero() || result.Run.UpdatedAt.Before(result.Run.CreatedAt) || result.FirstNode.CreatedAt.IsZero() ||
@@ -312,15 +429,15 @@ func validateQuestionRuntime(result workflowapplication.RuntimeStartResult, requ
 		(!result.Replayed && (result.Run.Status != workflowdomain.RunStatusPending || result.FirstNode.Status != workflowdomain.NodeStatusPending)) {
 		return consistency(ErrorCodeQuestionDispatchCorrupt, errors.New("RAG workflow start result binding is invalid"))
 	}
-	runInput, err := conversationworkflow.DecodeInput(result.Run.Input)
+	runInput, err := decodeQuestionWorkflowInput(question.Request.Mode, result.Run.Input)
 	if err != nil {
 		return consistency(ErrorCodeQuestionDispatchCorrupt, err)
 	}
-	nodeInput, err := conversationworkflow.DecodeInput(result.FirstNode.Input)
+	nodeInput, err := decodeQuestionWorkflowInput(question.Request.Mode, result.FirstNode.Input)
 	if err != nil || runInput != nodeInput {
 		return consistency(ErrorCodeQuestionDispatchCorrupt, err)
 	}
-	expected, err := conversationworkflow.DecodeInput(input)
+	expected, err := decodeQuestionWorkflowInput(question.Request.Mode, plan.input)
 	if err != nil || expected != runInput {
 		return consistency(ErrorCodeQuestionDispatchCorrupt, err)
 	}
@@ -340,6 +457,31 @@ func validateQuestionRuntime(result workflowapplication.RuntimeStartResult, requ
 		seen[identity] = struct{}{}
 	}
 	return nil
+}
+
+func decodeQuestionWorkflowInput(mode conversationdomain.QuestionMode, raw json.RawMessage) (questionWorkflowInputBinding, error) {
+	switch mode {
+	case conversationdomain.QuestionModeRAG:
+		input, err := conversationworkflow.DecodeInput(raw)
+		if err != nil {
+			return questionWorkflowInputBinding{}, err
+		}
+		return questionWorkflowInputBinding{
+			ConversationID: input.ConversationID, QuestionID: input.QuestionID, AnswerID: input.AnswerID,
+			QuestionOrdinal: input.QuestionOrdinal, ContextHash: input.ContextHash,
+		}, nil
+	case conversationdomain.QuestionModeWorkspaceAnalysis:
+		input, err := conversationworkflow.DecodeWorkspaceAnalysisInput(raw)
+		if err != nil {
+			return questionWorkflowInputBinding{}, err
+		}
+		return questionWorkflowInputBinding{
+			ConversationID: input.ConversationID, QuestionID: input.QuestionID, AnswerID: input.AnswerID,
+			QuestionOrdinal: input.QuestionOrdinal, ContextHash: input.ContextHash,
+		}, nil
+	default:
+		return questionWorkflowInputBinding{}, invalid(ErrorCodeQuestionDispatchInvalid, errors.New("question workflow mode is unsupported"))
+	}
 }
 
 func validQuestionNodeStatus(status workflowdomain.NodeStatus) bool {
@@ -396,7 +538,7 @@ func nextQuestionOrdinal(ctx context.Context, tx pgx.Tx, workspaceID, conversati
 
 func questionDispatchTime(ctx context.Context, tx pgx.Tx, minimum time.Time) (time.Time, error) {
 	var now time.Time
-	if err := tx.QueryRow(ctx, `SELECT CURRENT_TIMESTAMP`).Scan(&now); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&now); err != nil {
 		return time.Time{}, classify(err, ErrorCodeQuestionDispatchUnavailable)
 	}
 	now = now.UTC()
@@ -426,6 +568,85 @@ func (dispatcher *QuestionDispatcher) appendAnswerPending(ctx context.Context, t
 	return nil
 }
 
+func (dispatcher *QuestionDispatcher) startWorkspaceAnalysisRun(
+	ctx context.Context,
+	tx pgx.Tx,
+	question conversationdomain.Question,
+	answer conversationdomain.Answer,
+	runtime workflowapplication.RuntimeStartResult,
+	replayed bool,
+) error {
+	if question.Request.Mode != conversationdomain.QuestionModeWorkspaceAnalysis {
+		return nil
+	}
+	if isNilInterface(dispatcher.analysis) {
+		return workspaceAnalysisCapabilityUnavailable()
+	}
+	run, err := dispatcher.analysis.StartWorkspaceAnalysisRunTx(ctx, tx, agentapplication.WorkspaceAnalysisRunStartCommand{
+		WorkspaceID: question.Request.WorkspaceID, ConversationID: question.Request.ConversationID,
+		QuestionID: question.ID, AnswerID: answer.ID, WorkflowRunID: runtime.Run.ID,
+		CreatedAt: question.CreatedAt, Replayed: replayed,
+	})
+	if err != nil {
+		var classified *foundation.Error
+		if errors.As(err, &classified) && classified.Code == agentapplication.ErrorCodeWorkspaceAnalysisCapabilityUnavailable {
+			return workspaceAnalysisCapabilityUnavailable()
+		}
+		return err
+	}
+	if run.WorkspaceID != question.Request.WorkspaceID || run.ConversationID != question.Request.ConversationID ||
+		run.QuestionID != question.ID || run.AnswerID != answer.ID || run.WorkflowRunID != runtime.Run.ID {
+		return consistency(ErrorCodeQuestionDispatchCorrupt, errors.New("workspace analysis run binding differs from the dispatched question"))
+	}
+	if err := dispatcher.appendWorkspaceAnalysisStartedEvent(ctx, tx, run, replayed); err != nil {
+		return err
+	}
+	if !replayed {
+		if err := appendWorkspaceAnalysisRunStartedAudit(ctx, tx, dispatcher.audit, run); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// appendWorkspaceAnalysisStartedEvent 在 Analysis Run 创建事务中写入唯一的安全失效通知。
+// 重放只接受已提交且完整相同的事件，避免手工补写掩盖拆分状态。
+func (dispatcher *QuestionDispatcher) appendWorkspaceAnalysisStartedEvent(
+	ctx context.Context,
+	tx pgx.Tx,
+	run agentdomain.WorkspaceAnalysisRun,
+	wantReplay bool,
+) error {
+	// The source ref identifies the immutable creation transition, not the
+	// current mutable Run projection returned during an idempotency replay.
+	// Preserve the exact queued/v1 binding so AppendTx can reject any real
+	// source-event drift.
+	const initialVersion int64 = 1
+	const initialStatus = agentdomain.WorkspaceAnalysisRunQueued
+	conversationID, workflowRunID, questionID, answerID := run.ConversationID, run.WorkflowRunID, run.QuestionID, run.AnswerID
+	_, replayed, err := dispatcher.events.AppendTx(ctx, tx, eventsdomain.AppendRequest{
+		WorkspaceID: run.WorkspaceID, ConversationID: &conversationID, WorkflowRunID: &workflowRunID,
+		Type: "workspace_analysis.started", ResourceRef: "workspace_analysis:" + string(run.ID), ResourceVersion: initialVersion,
+		PayloadSummary: eventsdomain.PayloadSummary{
+			ConversationID: &conversationID, WorkflowRunID: &workflowRunID, QuestionID: &questionID, AnswerID: &answerID,
+			Status: string(initialStatus),
+		},
+		SchemaVersion:  1,
+		SourceEventRef: "workspace_analysis.started:" + string(run.ID) + ":v1",
+		OccurredAt:     run.CreatedAt,
+	})
+	if err != nil {
+		return err
+	}
+	if replayed != wantReplay {
+		return consistency(
+			ErrorCodeQuestionDispatchCorrupt,
+			fmt.Errorf("workspace analysis started event replay=%t, want %t", replayed, wantReplay),
+		)
+	}
+	return nil
+}
+
 func submitQuestionResult(question conversationdomain.Question, answerView conversationapplication.AnswerView, runtime workflowapplication.RuntimeStartResult, replayed bool) conversationapplication.SubmitQuestionResult {
 	return conversationapplication.SubmitQuestionResult{
 		Question: question, Answer: answerView.Answer,
@@ -438,6 +659,22 @@ func submitQuestionResult(question conversationdomain.Question, answerView conve
 
 func questionWorkflowIdempotencyKey(questionID foundation.ID) string {
 	return "rag-question:" + string(questionID)
+}
+
+func questionWorkflowIdempotencyKeyForMode(mode conversationdomain.QuestionMode, questionID foundation.ID) string {
+	if mode == conversationdomain.QuestionModeWorkspaceAnalysis {
+		return "workspace-analysis-question:" + string(questionID)
+	}
+	return questionWorkflowIdempotencyKey(questionID)
+}
+
+func workspaceAnalysisCapabilityUnavailable() error {
+	return foundation.NewError(
+		foundation.ErrorDependencyUnavailable,
+		conversationdomain.WorkspaceAnalysisCapabilityUnavailableCode,
+		false,
+		errors.New("workspace analysis dispatch capability is unavailable"),
+	)
 }
 
 func sameQuestionDispatchBinding(left, right conversationdomain.Question) bool {

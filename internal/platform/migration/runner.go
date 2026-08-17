@@ -72,7 +72,16 @@ func (r *Runner) Up(ctx context.Context) (retErr error) {
 	if err := adoptLegacyProjectHistory(ctx, sqlDB); err != nil {
 		return err
 	}
-	provider, err := goose.NewProvider(goose.DialectPostgres, sqlDB, r.projectFS, goose.WithTableName(projectMigrationTable))
+	collisionBridgeApplied, err := bridgeMigrationVersionCollision(ctx, sqlDB, r.projectFS)
+	if err != nil {
+		return err
+	}
+	providerOptions := []goose.ProviderOption{goose.WithTableName(projectMigrationTable)}
+	if collisionBridgeApplied {
+		// The bridge adopts 83/84 before normal migration resumes at 80.
+		providerOptions = append(providerOptions, goose.WithAllowOutofOrder(true))
+	}
+	provider, err := goose.NewProvider(goose.DialectPostgres, sqlDB, r.projectFS, providerOptions...)
 	if err != nil {
 		return fmt.Errorf("create project migration provider: %w", err)
 	}

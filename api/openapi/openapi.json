@@ -3018,6 +3018,23 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/SubmitQuestionRequest"
+              },
+              "examples": {
+                "rag": {
+                  "summary": "默认证据问答",
+                  "value": {
+                    "workspace_id": "11111111-1111-4111-8111-111111111111",
+                    "question": "如何验证当前结论？"
+                  }
+                },
+                "workspace_analysis": {
+                  "summary": "受限工作区分析",
+                  "value": {
+                    "workspace_id": "11111111-1111-4111-8111-111111111111",
+                    "mode": "workspace_analysis",
+                    "question": "分析当前工作区并给出有证据的改进建议"
+                  }
+                }
               }
             }
           }
@@ -3146,6 +3163,46 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Answer"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/answers/{answer_id}/analysis-timeline": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/AnswerID"
+        },
+        {
+          "$ref": "#/components/parameters/WorkspaceIDQuery"
+        }
+      ],
+      "get": {
+        "operationId": "getWorkspaceAnalysisTimeline",
+        "responses": {
+          "200": {
+            "description": "Authoritative, bounded Workspace Analysis timeline snapshot.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceAnalysisTimeline"
                 }
               }
             }
@@ -20421,6 +20478,16 @@
             "type": "string",
             "format": "uuid"
           },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "rag",
+              "workspace_analysis"
+            ],
+            "default": "rag",
+            "example": "rag",
+            "description": "Execution mode. Omission preserves the historical fixed RAG behavior."
+          },
           "question": {
             "type": "string",
             "minLength": 1,
@@ -20458,6 +20525,7 @@
           "id",
           "workspace_id",
           "conversation_id",
+          "mode",
           "ordinal",
           "context_through_ordinal",
           "question",
@@ -20478,6 +20546,13 @@
           "conversation_id": {
             "type": "string",
             "format": "uuid"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "rag",
+              "workspace_analysis"
+            ]
           },
           "ordinal": {
             "type": "integer",
@@ -20990,6 +21065,836 @@
         },
         "additionalProperties": false
       },
+      "WorkspaceAnalysisGitStatus": {
+        "type": "object",
+        "required": [
+          "branch",
+          "head",
+          "clean",
+          "staged_count",
+          "unstaged_count",
+          "untracked_count",
+          "conflict_count"
+        ],
+        "properties": {
+          "branch": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255
+          },
+          "head": {
+            "type": "string",
+            "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+          },
+          "clean": {
+            "type": "boolean"
+          },
+          "staged_count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000000
+          },
+          "unstaged_count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000000
+          },
+          "untracked_count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000000
+          },
+          "conflict_count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000000
+          }
+        },
+        "additionalProperties": false
+      },
+      "WorkspaceAnalysisBudgetSummary": {
+        "type": "object",
+        "required": [
+          "model_calls",
+          "tool_calls",
+          "input_tokens",
+          "output_tokens",
+          "estimated_cost_microunits"
+        ],
+        "properties": {
+          "model_calls": {
+            "type": "integer",
+            "const": 3
+          },
+          "tool_calls": {
+            "type": "integer",
+            "minimum": 4,
+            "maximum": 6
+          },
+          "input_tokens": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 196608
+          },
+          "output_tokens": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 5376
+          },
+          "estimated_cost_microunits": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "WorkspaceAnalysisProposalSuggestion": {
+        "type": "object",
+        "required": [
+          "summary",
+          "citation_ids",
+          "href"
+        ],
+        "properties": {
+          "summary": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "x-max-utf8-bytes": 4096
+          },
+          "citation_ids": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 500,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          "href": {
+            "type": "string",
+            "const": "/proposals"
+          }
+        },
+        "additionalProperties": false
+      },
+      "WorkspaceAnalysisAnswerResult": {
+        "type": "object",
+        "required": [
+          "result_type",
+          "schema_id",
+          "schema_version",
+          "model_run_ref",
+          "payload"
+        ],
+        "properties": {
+          "result_type": {
+            "const": "workspace_analysis"
+          },
+          "schema_id": {
+            "const": "conversation.workspace_analysis_answer"
+          },
+          "schema_version": {
+            "const": "v1"
+          },
+          "model_run_ref": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "payload": {
+            "type": "object",
+            "required": [
+              "answer_markdown",
+              "citations",
+              "git_status",
+              "budget",
+              "proposal_suggestion",
+              "termination_reason"
+            ],
+            "properties": {
+              "answer_markdown": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 65536,
+                "x-max-utf8-bytes": 65536
+              },
+              "citations": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 500,
+                "items": {
+                  "$ref": "#/components/schemas/RAGResultCitation"
+                }
+              },
+              "git_status": {
+                "$ref": "#/components/schemas/WorkspaceAnalysisGitStatus"
+              },
+              "budget": {
+                "$ref": "#/components/schemas/WorkspaceAnalysisBudgetSummary"
+              },
+              "proposal_suggestion": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/WorkspaceAnalysisProposalSuggestion"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "termination_reason": {
+                "const": "COMPLETED"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      },
+      "WorkspaceAnalysisRefusalResult": {
+        "type": "object",
+        "required": [
+          "result_type",
+          "schema_id",
+          "schema_version",
+          "model_run_ref",
+          "payload"
+        ],
+        "properties": {
+          "result_type": {
+            "const": "workspace_analysis_refusal"
+          },
+          "schema_id": {
+            "const": "conversation.workspace_analysis_refusal"
+          },
+          "schema_version": {
+            "const": "v1"
+          },
+          "model_run_ref": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "payload": {
+            "type": "object",
+            "required": [
+              "reason_code",
+              "summary"
+            ],
+            "properties": {
+              "reason_code": {
+                "type": "string",
+                "enum": [
+                  "WORKSPACE_ANALYSIS_EVIDENCE_INSUFFICIENT",
+                  "WORKSPACE_ANALYSIS_CITATION_INVALID",
+                  "WORKSPACE_ANALYSIS_FAITHFULNESS_REJECTED",
+                  "WORKSPACE_ANALYSIS_MODEL_REFUSED"
+                ]
+              },
+              "summary": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "x-max-utf8-bytes": 4096
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "reason_code": {
+                      "const": "WORKSPACE_ANALYSIS_MODEL_REFUSED"
+                    }
+                  },
+                  "required": [
+                    "reason_code"
+                  ]
+                }
+              },
+              "required": [
+                "payload"
+              ]
+            },
+            "then": {
+              "properties": {
+                "model_run_ref": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "model_run_ref": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        ],
+        "additionalProperties": false
+      },
+      "WorkspaceAnalysisTerminationResult": {
+        "type": "object",
+        "required": [
+          "result_type",
+          "schema_id",
+          "schema_version",
+          "model_run_ref",
+          "payload"
+        ],
+        "properties": {
+          "result_type": {
+            "const": "workspace_analysis_termination"
+          },
+          "schema_id": {
+            "const": "conversation.workspace_analysis_termination"
+          },
+          "schema_version": {
+            "const": "v1"
+          },
+          "model_run_ref": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "payload": {
+            "type": "object",
+            "required": [
+              "termination_reason",
+              "summary"
+            ],
+            "properties": {
+              "termination_reason": {
+                "type": "string",
+                "enum": [
+                  "WORKSPACE_ANALYSIS_BUDGET_EXHAUSTED",
+                  "WORKSPACE_ANALYSIS_RECEIPT_INVALID",
+                  "WORKSPACE_ANALYSIS_RESULT_UNKNOWN",
+                  "WORKSPACE_ANALYSIS_DEADLINE_EXCEEDED",
+                  "WORKSPACE_ANALYSIS_MODEL_FAILED",
+                  "WORKSPACE_ANALYSIS_TOOL_FAILED",
+                  "WORKSPACE_ANALYSIS_RUNTIME_FAILED",
+                  "WORKSPACE_ANALYSIS_CANCELLED"
+                ]
+              },
+              "summary": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "x-max-utf8-bytes": 4096
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      },
+      "WorkspaceAnalysisTimeline": {
+        "type": "object",
+        "required": [
+          "schema_id",
+          "schema_version",
+          "workspace_id",
+          "answer_id",
+          "analysis_run_id",
+          "run_status",
+          "termination_reason",
+          "items",
+          "budget",
+          "latest_server_event_sequence"
+        ],
+        "properties": {
+          "schema_id": {
+            "const": "conversation.workspace_analysis_timeline"
+          },
+          "schema_version": {
+            "const": "v1"
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "answer_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "analysis_run_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "run_status": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "running",
+              "succeeded",
+              "refused",
+              "clarification_required",
+              "failed",
+              "cancelled"
+            ]
+          },
+          "termination_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "COMPLETED",
+              "WORKSPACE_ANALYSIS_EVIDENCE_INSUFFICIENT",
+              "WORKSPACE_ANALYSIS_CITATION_INVALID",
+              "WORKSPACE_ANALYSIS_FAITHFULNESS_REJECTED",
+              "WORKSPACE_ANALYSIS_CLARIFICATION_REQUIRED",
+              "WORKSPACE_ANALYSIS_MODEL_REFUSED",
+              "WORKSPACE_ANALYSIS_BUDGET_EXHAUSTED",
+              "WORKSPACE_ANALYSIS_RECEIPT_INVALID",
+              "WORKSPACE_ANALYSIS_RESULT_UNKNOWN",
+              "WORKSPACE_ANALYSIS_DEADLINE_EXCEEDED",
+              "WORKSPACE_ANALYSIS_MODEL_FAILED",
+              "WORKSPACE_ANALYSIS_TOOL_FAILED",
+              "WORKSPACE_ANALYSIS_RUNTIME_FAILED",
+              "WORKSPACE_ANALYSIS_CANCELLED",
+              null
+            ]
+          },
+          "items": {
+            "type": "array",
+            "minItems": 0,
+            "maxItems": 32,
+            "items": {
+              "$ref": "#/components/schemas/WorkspaceAnalysisTimelineItem"
+            }
+          },
+          "budget": {
+            "$ref": "#/components/schemas/WorkspaceAnalysisTimelineBudget"
+          },
+          "latest_server_event_sequence": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "WorkspaceAnalysisTimelineItem": {
+        "type": "object",
+        "required": [
+          "sequence",
+          "kind",
+          "phase",
+          "status",
+          "tool_ref",
+          "duration_ms",
+          "error_code",
+          "summary"
+        ],
+        "properties": {
+          "sequence": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 32
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "node",
+              "model",
+              "tool"
+            ]
+          },
+          "phase": {
+            "type": "string",
+            "enum": [
+              "inspect_workspace",
+              "retrieve_evidence",
+              "read_evidence",
+              "synthesize_answer",
+              "validate_citations",
+              "review_publish"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "waiting",
+              "started",
+              "succeeded",
+              "failed",
+              "refused",
+              "unknown",
+              "cancelled"
+            ]
+          },
+          "tool_ref": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/WorkspaceAnalysisTimelineToolRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 3600000
+          },
+          "error_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "WORKSPACE_ANALYSIS_EVIDENCE_INSUFFICIENT",
+              "WORKSPACE_ANALYSIS_CITATION_INVALID",
+              "WORKSPACE_ANALYSIS_FAITHFULNESS_REJECTED",
+              "WORKSPACE_ANALYSIS_MODEL_REFUSED",
+              "WORKSPACE_ANALYSIS_BUDGET_EXHAUSTED",
+              "WORKSPACE_ANALYSIS_RECEIPT_INVALID",
+              "WORKSPACE_ANALYSIS_RESULT_UNKNOWN",
+              "WORKSPACE_ANALYSIS_DEADLINE_EXCEEDED",
+              "WORKSPACE_ANALYSIS_MODEL_FAILED",
+              "WORKSPACE_ANALYSIS_TOOL_FAILED",
+              "WORKSPACE_ANALYSIS_RUNTIME_FAILED",
+              "WORKSPACE_ANALYSIS_CANCELLED",
+              null
+            ]
+          },
+          "summary": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/WorkspaceAnalysisTimelineGitSummary"
+              },
+              {
+                "$ref": "#/components/schemas/WorkspaceAnalysisTimelineSearchSummary"
+              },
+              {
+                "$ref": "#/components/schemas/WorkspaceAnalysisTimelineSourceSummary"
+              },
+              {
+                "$ref": "#/components/schemas/WorkspaceAnalysisTimelineCitationSummary"
+              },
+              {
+                "$ref": "#/components/schemas/WorkspaceAnalysisTimelineModelSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "WorkspaceAnalysisTimelineToolRef": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "name",
+              "version"
+            ],
+            "properties": {
+              "name": {
+                "const": "ReadGitStatus"
+              },
+              "version": {
+                "const": 2
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": [
+              "name",
+              "version"
+            ],
+            "properties": {
+              "name": {
+                "const": "SearchKnowledge"
+              },
+              "version": {
+                "const": 2
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": [
+              "name",
+              "version"
+            ],
+            "properties": {
+              "name": {
+                "const": "ReadSource"
+              },
+              "version": {
+                "const": 3
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": [
+              "name",
+              "version"
+            ],
+            "properties": {
+              "name": {
+                "const": "ValidateCitation"
+              },
+              "version": {
+                "const": 3
+              }
+            },
+            "additionalProperties": false
+          }
+        ]
+      },
+      "WorkspaceAnalysisTimelineBudget": {
+        "type": "object",
+        "required": [
+          "model_calls",
+          "tool_calls",
+          "source_reads",
+          "input_tokens",
+          "output_tokens",
+          "estimated_cost_microunits"
+        ],
+        "properties": {
+          "model_calls": {
+            "$ref": "#/components/schemas/WorkspaceAnalysisTimelineCounter"
+          },
+          "tool_calls": {
+            "$ref": "#/components/schemas/WorkspaceAnalysisTimelineCounter"
+          },
+          "source_reads": {
+            "$ref": "#/components/schemas/WorkspaceAnalysisTimelineCounter"
+          },
+          "input_tokens": {
+            "$ref": "#/components/schemas/WorkspaceAnalysisTimelineCounter"
+          },
+          "output_tokens": {
+            "$ref": "#/components/schemas/WorkspaceAnalysisTimelineCounter"
+          },
+          "estimated_cost_microunits": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/WorkspaceAnalysisTimelineCounter"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "WorkspaceAnalysisTimelineCounter": {
+        "type": "object",
+        "required": [
+          "used",
+          "max"
+        ],
+        "properties": {
+          "used": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "max": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "WorkspaceAnalysisTimelineGitSummary": {
+        "type": "object",
+        "required": [
+          "kind",
+          "git"
+        ],
+        "properties": {
+          "kind": {
+            "const": "git"
+          },
+          "git": {
+            "$ref": "#/components/schemas/WorkspaceAnalysisGitStatus"
+          }
+        },
+        "additionalProperties": false
+      },
+      "WorkspaceAnalysisTimelineSearchSummary": {
+        "type": "object",
+        "required": [
+          "kind",
+          "search"
+        ],
+        "properties": {
+          "kind": {
+            "const": "search"
+          },
+          "search": {
+            "type": "object",
+            "required": [
+              "hit_count",
+              "degradation_codes"
+            ],
+            "properties": {
+              "hit_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 5
+              },
+              "degradation_codes": {
+                "type": "array",
+                "maxItems": 16,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                }
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      },
+      "WorkspaceAnalysisTimelineSourceSummary": {
+        "type": "object",
+        "required": [
+          "kind",
+          "source"
+        ],
+        "properties": {
+          "kind": {
+            "const": "source"
+          },
+          "source": {
+            "type": "object",
+            "required": [
+              "evidence_ref",
+              "content_hash",
+              "truncated"
+            ],
+            "properties": {
+              "evidence_ref": {
+                "type": "string",
+                "pattern": "^E[1-3]$"
+              },
+              "content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      },
+      "WorkspaceAnalysisTimelineCitationSummary": {
+        "type": "object",
+        "required": [
+          "kind",
+          "citation_validation"
+        ],
+        "properties": {
+          "kind": {
+            "const": "citation_validation"
+          },
+          "citation_validation": {
+            "type": "object",
+            "required": [
+              "valid_count",
+              "invalid_count",
+              "reason_codes"
+            ],
+            "properties": {
+              "valid_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 3
+              },
+              "invalid_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 3
+              },
+              "reason_codes": {
+                "type": "array",
+                "maxItems": 3,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                }
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      },
+      "WorkspaceAnalysisTimelineModelSummary": {
+        "type": "object",
+        "required": [
+          "kind",
+          "model_usage"
+        ],
+        "properties": {
+          "kind": {
+            "const": "model_usage"
+          },
+          "model_usage": {
+            "type": "object",
+            "required": [
+              "input_tokens",
+              "output_tokens"
+            ],
+            "properties": {
+              "input_tokens": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 65536
+              },
+              "output_tokens": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 5376
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      },
       "RetrievalDegradation": {
         "type": "object",
         "required": [
@@ -21194,7 +22099,9 @@
               "pending",
               "completed",
               "refused",
-              "clarification_required"
+              "clarification_required",
+              "failed",
+              "cancelled"
             ]
           },
           "workflow": {
@@ -21205,7 +22112,10 @@
             "enum": [
               "rag_answer",
               "refusal",
-              "clarification"
+              "clarification",
+              "workspace_analysis",
+              "workspace_analysis_refusal",
+              "workspace_analysis_termination"
             ]
           },
           "assistant_text": {
@@ -21228,6 +22138,15 @@
               },
               {
                 "$ref": "#/components/schemas/ClarificationResult"
+              },
+              {
+                "$ref": "#/components/schemas/WorkspaceAnalysisAnswerResult"
+              },
+              {
+                "$ref": "#/components/schemas/WorkspaceAnalysisRefusalResult"
+              },
+              {
+                "$ref": "#/components/schemas/WorkspaceAnalysisTerminationResult"
               }
             ]
           },

@@ -2,12 +2,24 @@ import { type KeyboardEvent, type SyntheticEvent, useEffect, useMemo, useRef, us
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import { useActiveWorkspaceId } from "../../app/active-workspace";
-import type { Answer, AnswerCitation, FeedbackType, SearchMode, Turn, WorkflowStatus } from "../../api/conversation";
+import type {
+  Answer,
+  AnswerCitation,
+  ClarificationAnswer,
+  CompletedAnswer,
+  FeedbackType,
+  QuestionMode,
+  RefusedAnswer,
+  SearchMode,
+  Turn,
+  WorkflowStatus,
+} from "../../api/conversation";
 import { ConversationApiError } from "../../api/conversation";
 import { createCommandId, useCreateConversationCommand, useSubmitFeedbackCommand, useSubmitQuestionCommand } from "./commands";
 import { SourceSpanViewer } from "../source-spans";
 import { type AnswerDraftState, usePendingAnswerDraft } from "./answer-draft";
 import { useAnswer, useConversation, useConversationList, useConversationTurns, useLatestTurn } from "./queries";
+import { WorkspaceAnalysisTimeline } from "./WorkspaceAnalysisTimeline";
 
 const stageLabels: Record<string, string> = {
   "plan.started": "正在理解问题", "plan.completed": "检索计划已冻结",
@@ -19,6 +31,11 @@ const retrievalModeLabels: Record<SearchMode, string> = {
   keyword: "关键词",
   semantic: "语义",
   hybrid: "混合",
+};
+
+const questionModeLabels: Record<QuestionMode, string> = {
+  rag: "证据问答",
+  workspace_analysis: "工作区分析",
 };
 
 const workflowStatusLabels: Record<WorkflowStatus, string> = {
@@ -107,7 +124,9 @@ const CitationList = ({ citations, onSelect }: { citations: AnswerCitation[]; on
   </ol>
 );
 
-const RetrievalSummary = ({ answer }: { answer: Exclude<Answer, { publicationStatus: "pending" }> }) => (
+type RAGPublishedAnswer = CompletedAnswer | RefusedAnswer | ClarificationAnswer;
+
+const RetrievalSummary = ({ answer }: { answer: RAGPublishedAnswer }) => (
   <details className="rag-details">
     <summary>为什么这样回答</summary>
     <dl className="rag-metrics">
@@ -155,15 +174,38 @@ const FeedbackForm = ({ answer }: { answer: Exclude<Answer, { publicationStatus:
 
 export const AnswerPublication = ({ answer, draft, onCitation, onPrompt = () => undefined }: { answer: Answer; draft?: AnswerDraftState | undefined; onCitation: (citation: AnswerCitation) => void; onPrompt?: (prompt: string) => void }) => {
   if (answer.publicationStatus === "pending") return <PendingAnswer answer={answer} draft={draft} />;
-  if (answer.publicationStatus === "refused") return <article className="rag-answer rag-answer--refused">
+  if (answer.resultType === "workspace_analysis_refusal") return <article className="rag-answer rag-answer--refused">
+    <p className="eyebrow">分析未发布</p><h3>现有证据不足以形成可靠结论</h3><p>{answer.result.payload.summary}</p>
+    <FeedbackForm answer={answer} />
+  </article>;
+  if (answer.resultType === "workspace_analysis_termination") return <article className="rag-answer rag-answer--refused">
+    <p className="eyebrow">{answer.publicationStatus === "cancelled" ? "分析已取消" : "分析未完成"}</p>
+    <h3>{answer.result.payload.summary}</h3><code>{answer.result.payload.terminationReason}</code>
+  </article>;
+  if (answer.resultType === "refusal") return <article className="rag-answer rag-answer--refused">
     <p className="eyebrow">明确拒答</p><h3>现有证据不足以安全回答</h3><p>{answer.result.payload.summary}</p>
     {answer.result.payload.missingRequirements.length > 0 ? <ul>{answer.result.payload.missingRequirements.map((item) => <li key={item}>{item}</li>)}</ul> : null}
     <RetrievalSummary answer={answer} /><FeedbackForm answer={answer} />
   </article>;
-  if (answer.publicationStatus === "clarification_required") return <article className="rag-answer rag-answer--clarification">
+  if (answer.resultType === "clarification") return <article className="rag-answer rag-answer--clarification">
     <p className="eyebrow">需要澄清</p><h3>{answer.result.payload.question}</h3><p>{answer.result.payload.reason}</p>
     {answer.result.payload.suggestedScopes.length > 0 ? <ul>{answer.result.payload.suggestedScopes.map((item) => <li key={item}><button type="button" className="rag-prompt-link" onClick={() => onPrompt(item)}>{item}</button></li>)}</ul> : null}
-    <RetrievalSummary answer={answer} />
+    {answer.retrievalSummary === null ? null : <RetrievalSummary answer={answer} />}
+  </article>;
+  if (answer.resultType === "workspace_analysis") return <article className="rag-answer">
+    <p className="eyebrow">已校验分析</p><div className="rag-answer__copy">{answer.assistantText}</div>
+    <dl className="rag-analysis-git">
+      <div><dt>分支</dt><dd>{answer.result.payload.gitStatus.branch === "" ? "detached" : answer.result.payload.gitStatus.branch}</dd></div>
+      <div><dt>提交</dt><dd>{answer.result.payload.gitStatus.head.slice(0, 10)}</dd></div>
+      <div><dt>工作树</dt><dd>{answer.result.payload.gitStatus.clean ? "干净" : "有变更"}</dd></div>
+      <div><dt>冲突</dt><dd>{answer.result.payload.gitStatus.conflictCount}</dd></div>
+    </dl>
+    <CitationList citations={answer.citations} onSelect={onCitation} />
+    {answer.result.payload.proposalSuggestion === null ? null : <div className="rag-proposal-suggestion">
+      <strong>{answer.result.payload.proposalSuggestion.summary}</strong>
+      <Link className="rag-text-link" to={answer.result.payload.proposalSuggestion.href}>查看提案</Link>
+    </div>}
+    <FeedbackForm answer={answer} />
   </article>;
   return <article className="rag-answer">
     <p className="eyebrow">已校验回答</p><div className="rag-answer__copy">{answer.assistantText}</div>
@@ -178,9 +220,10 @@ export const AnswerPublication = ({ answer, draft, onCitation, onPrompt = () => 
   </article>;
 };
 
-const TurnCard = ({ turn, answer, draft, onCitation, onPrompt }: { turn: Turn; answer: Answer; draft?: AnswerDraftState | undefined; onCitation: (citation: AnswerCitation) => void; onPrompt: (prompt: string) => void }) => (
+const TurnCard = ({ turn, answer, draft, autoRefreshAnalysis, onCitation, onPrompt }: { turn: Turn; answer: Answer; draft?: AnswerDraftState | undefined; autoRefreshAnalysis: boolean; onCitation: (citation: AnswerCitation) => void; onPrompt: (prompt: string) => void }) => (
   <section className="rag-turn" aria-labelledby={`question-${turn.question.id}`}>
-    <div className="rag-question"><span>问题 {turn.question.ordinal}</span><div><h2 id={`question-${turn.question.id}`}>{turn.question.question}</h2><small>{formatTime(turn.question.createdAt)}</small></div></div>
+    <div className="rag-question"><span>问题 {turn.question.ordinal}</span><div><h2 id={`question-${turn.question.id}`}>{turn.question.question}</h2><small>{formatTime(turn.question.createdAt)} · {questionModeLabels[turn.question.mode]}</small></div></div>
+    {turn.question.mode === "workspace_analysis" ? <WorkspaceAnalysisTimeline workspaceId={turn.question.workspaceId} conversationId={turn.question.conversationId} answer={answer} autoRefresh={autoRefreshAnalysis} /> : null}
     <AnswerPublication answer={answer} draft={draft} onCitation={onCitation} onPrompt={onPrompt} />
   </section>
 );
@@ -203,6 +246,7 @@ export const RagPage = () => {
   const [title, setTitle] = useState("");
   const [createCommandKey, setCreateCommandKey] = useState(() => createCommandId());
   const [question, setQuestion] = useState("");
+  const [questionMode, setQuestionMode] = useState<QuestionMode>("rag");
   const [retrievalMode, setRetrievalMode] = useState<"keyword" | "semantic" | "hybrid">("hybrid");
   const [sourceIds, setSourceIds] = useState("");
   const [sourceVersionIds, setSourceVersionIds] = useState("");
@@ -214,13 +258,27 @@ export const RagPage = () => {
   const [answerDepth, setAnswerDepth] = useState<"concise" | "standard" | "detailed">("standard");
   const [outputFormat, setOutputFormat] = useState<"markdown" | "outline">("markdown");
   const [questionCommandId, setQuestionCommandId] = useState(() => createCommandId());
+  const workspaceAnalysisScopeUnsupported = questionMode === "workspace_analysis" && (
+    sourceIds.trim() !== "" || sourceVersionIds.trim() !== "" || pathPrefixes.trim() !== "" ||
+    capturedAtFrom !== "" || capturedAtBefore !== "" || allowOriginalSources || allowWeb
+  );
+  const selectQuestionModeByKeyboard = (event: KeyboardEvent<HTMLDivElement>) => {
+    let mode: QuestionMode | undefined;
+    if (event.key === "ArrowLeft" || event.key === "ArrowUp" || event.key === "Home") mode = "rag";
+    if (event.key === "ArrowRight" || event.key === "ArrowDown" || event.key === "End") mode = "workspace_analysis";
+    if (mode === undefined) return;
+    event.preventDefault();
+    selectQuestionMode(mode);
+    event.currentTarget.querySelector<HTMLButtonElement>(`[data-question-mode="${mode}"]`)?.focus();
+  };
   const conversations = useMemo(() => listQuery.data?.pages.flatMap((page) => page.items) ?? [], [listQuery.data]);
   const turns = useMemo(() => {
     const items = turnsQuery.data?.pages.flatMap((page) => page.items) ?? [];
     return mergeLatestTurn(items, latestTurnQuery.data);
   }, [latestTurnQuery.data, turnsQuery.data]);
-  const lastPendingId = [...turns].reverse().find((turn) => turn.answer.publicationStatus === "pending")?.answer.id ?? "";
-  const recoveredAnswer = useAnswer(workspaceId, lastPendingId, true);
+  const lastPendingTurn = [...turns].reverse().find((turn) => turn.answer.publicationStatus === "pending");
+  const lastPendingId = lastPendingTurn?.answer.id ?? "";
+  const recoveredAnswer = useAnswer(workspaceId, lastPendingId, true, lastPendingTurn?.question.mode ?? "rag");
   const streamAnswerId = recoveredAnswer.data?.id === lastPendingId && recoveredAnswer.data.publicationStatus !== "pending"
     ? ""
     : lastPendingId;
@@ -248,9 +306,9 @@ export const RagPage = () => {
   };
   const submitQuestionForm = (event: SyntheticEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (question.trim() === "" || conversationId === "") return;
+    if (question.trim() === "" || conversationId === "" || workspaceAnalysisScopeUnsupported) return;
     const split = (value: string) => value.split(/[\n,]/).map((item) => item.trim()).filter((item) => item !== "");
-    questionMutation.mutate({ workspaceId, conversationId, idempotencyKey: questionCommandId, question: question.trim(), answerDepth, outputFormat,
+    questionMutation.mutate({ workspaceId, conversationId, idempotencyKey: questionCommandId, question: question.trim(), mode: questionMode, answerDepth, outputFormat,
       scope: { retrievalMode, sourceIds: split(sourceIds), sourceVersionIds: split(sourceVersionIds), pathPrefixes: split(pathPrefixes), capturedAtFrom: capturedAtFrom === "" ? null : new Date(capturedAtFrom).toISOString(), capturedAtBefore: capturedAtBefore === "" ? null : new Date(capturedAtBefore).toISOString(), allowOriginalSources, allowWeb },
     }, {
       onSuccess: () => { setQuestion(""); setQuestionCommandId(createCommandId()); },
@@ -258,6 +316,20 @@ export const RagPage = () => {
   };
   const keyboardSubmit = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); }
+  };
+  const selectQuestionMode = (mode: QuestionMode) => {
+    if (mode === questionMode) return;
+    setQuestionMode(mode);
+    setQuestionCommandId(createCommandId());
+  };
+  const clearWorkspaceAnalysisScope = () => {
+    setSourceIds("");
+    setSourceVersionIds("");
+    setPathPrefixes("");
+    setCapturedAtFrom("");
+    setCapturedAtBefore("");
+    setAllowOriginalSources(false);
+    setAllowWeb(false);
   };
   const selectCitation = (citation: AnswerCitation) => {
     citationTriggerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -285,11 +357,16 @@ export const RagPage = () => {
         <div className="rag-timeline">{turns.map((turn) => {
           const answer = recoveredAnswer.data?.id === turn.answer.id ? recoveredAnswer.data : turn.answer;
           const draft = answer.publicationStatus === "pending" && answer.id === answerDraft.answerId ? answerDraft : undefined;
-          return <TurnCard key={turn.question.id} turn={turn} answer={answer} draft={draft} onCitation={selectCitation} onPrompt={setQuestion} />;
+          return <TurnCard key={turn.question.id} turn={turn} answer={answer} draft={draft} autoRefreshAnalysis={turn.question.mode === "workspace_analysis" && answer.id === lastPendingId} onCitation={selectCitation} onPrompt={setQuestion} />;
         })}</div>
         {turnsQuery.hasNextPage ? <button type="button" className="secondary-button" disabled={turnsQuery.isFetchingNextPage} onClick={() => { void turnsQuery.fetchNextPage(); }}>{turnsQuery.isFetchingNextPage ? "正在恢复…" : "加载更多轮次"}</button> : null}
-        {conversationId !== "" ? <form className="rag-composer" onSubmit={submitQuestionForm}><label><span>问题</span><textarea maxLength={8192} rows={4} value={question} onKeyDown={keyboardSubmit} onChange={(event) => setQuestion(event.target.value)} placeholder="输入问题。Enter 提交，Shift + Enter 换行。" /></label>
-          <details className="rag-scope"><summary>检索范围与证据边界</summary><div className="rag-scope__grid">
+        {conversationId !== "" ? <form className="rag-composer" onSubmit={submitQuestionForm}>
+          <div className="rag-mode-switch" role="radiogroup" aria-label="回答模式" onKeyDown={selectQuestionModeByKeyboard}>
+            <button type="button" role="radio" data-question-mode="rag" tabIndex={questionMode === "rag" ? 0 : -1} aria-checked={questionMode === "rag"} onClick={() => selectQuestionMode("rag")}>证据问答</button>
+            <button type="button" role="radio" data-question-mode="workspace_analysis" tabIndex={questionMode === "workspace_analysis" ? 0 : -1} aria-checked={questionMode === "workspace_analysis"} onClick={() => selectQuestionMode("workspace_analysis")}>工作区分析</button>
+          </div>
+          <label><span>问题</span><textarea maxLength={8192} rows={4} value={question} onKeyDown={keyboardSubmit} onChange={(event) => setQuestion(event.target.value)} placeholder="输入问题。Enter 提交，Shift + Enter 换行。" /></label>
+          {questionMode === "rag" ? <details className="rag-scope"><summary>检索范围与证据边界</summary><div className="rag-scope__grid">
             <label><span>检索模式</span><select value={retrievalMode} onChange={(event) => setRetrievalMode(event.target.value as typeof retrievalMode)}><option value="hybrid">混合</option><option value="keyword">关键词</option><option value="semantic">语义</option></select></label>
             <label><span>来源 ID（逗号分隔）</span><input value={sourceIds} onChange={(event) => setSourceIds(event.target.value)} /></label>
             <label><span>资料版本 ID</span><input value={sourceVersionIds} onChange={(event) => setSourceVersionIds(event.target.value)} /></label>
@@ -298,8 +375,9 @@ export const RagPage = () => {
             <label><span>捕获时间前</span><input type="datetime-local" value={capturedAtBefore} onChange={(event) => setCapturedAtBefore(event.target.value)} /></label>
             <label className="rag-check"><input type="checkbox" checked={allowOriginalSources} onChange={(event) => setAllowOriginalSources(event.target.checked)} /><span>允许原始来源（能力不可用时明确拒绝）</span></label>
             <label className="rag-check"><input type="checkbox" checked={allowWeb} onChange={(event) => setAllowWeb(event.target.checked)} /><span>允许 Web（能力不可用时明确拒绝）</span></label>
-          </div></details>
-          <div className="rag-composer__options"><label><span>回答深度</span><select value={answerDepth} onChange={(event) => setAnswerDepth(event.target.value as typeof answerDepth)}><option value="concise">简洁</option><option value="standard">标准</option><option value="detailed">详细</option></select></label><label><span>输出格式</span><select value={outputFormat} onChange={(event) => setOutputFormat(event.target.value as typeof outputFormat)}><option value="markdown">Markdown</option><option value="outline">大纲</option></select></label><button disabled={questionMutation.isPending || question.trim() === "" || conversationQuery.data?.status === "archived"}>{questionMutation.isPending ? "已接收，正在启动…" : "提交问题"}</button></div>{conversationQuery.data?.status === "archived" ? <p className="rag-muted">此会话已归档，不能继续提问。</p> : null}{questionMutation.isError ? <ErrorNotice error={questionMutation.error} /> : null}</form> : null}
+          </div></details> : null}
+          {workspaceAnalysisScopeUnsupported ? <div className="rag-notice rag-notice--error" role="alert"><strong>当前范围不支持工作区分析</strong><span>请清除来源、路径、时间、原始来源与 Web 限制。</span><button type="button" className="secondary-button" onClick={clearWorkspaceAnalysisScope}>清除范围限制</button></div> : null}
+          <div className="rag-composer__options"><label><span>回答深度</span><select value={answerDepth} onChange={(event) => setAnswerDepth(event.target.value as typeof answerDepth)}><option value="concise">简洁</option><option value="standard">标准</option><option value="detailed">详细</option></select></label><label><span>输出格式</span><select value={outputFormat} onChange={(event) => setOutputFormat(event.target.value as typeof outputFormat)}><option value="markdown">Markdown</option><option value="outline">大纲</option></select></label><button disabled={questionMutation.isPending || question.trim() === "" || workspaceAnalysisScopeUnsupported || conversationQuery.data?.status === "archived"}>{questionMutation.isPending ? "已接收，正在启动…" : "提交问题"}</button></div>{conversationQuery.data?.status === "archived" ? <p className="rag-muted">此会话已归档，不能继续提问。</p> : null}{questionMutation.isError ? <ErrorNotice error={questionMutation.error} /> : null}</form> : null}
       </main>
       <aside ref={evidenceRef} tabIndex={selectedCitation === undefined ? undefined : -1} className={`rag-evidence${selectedCitation === undefined ? "" : " is-open"}`} aria-label="引用证据"><p className="eyebrow">证据</p><CitationInspector citation={selectedCitation} onClose={closeCitation} /></aside>
     </div>

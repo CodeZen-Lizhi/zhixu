@@ -15,6 +15,37 @@ import (
 // section. Keep the owner read bounded without rejecting that valid contract.
 const maxSucceededNodeOutputBytes = 512 * 1024
 
+// GetRunInput returns the immutable root input for one Workspace-bound Run.
+// Successor nodes use it to recover server-owned root identities without
+// copying those identities into every stage output.
+func (r *RuntimeRepository) GetRunInput(
+	ctx context.Context,
+	workspaceID, runID foundation.ID,
+) (json.RawMessage, error) {
+	parsedWorkspace, workspaceErr := foundation.ParseID(string(workspaceID))
+	parsedRun, runErr := foundation.ParseID(string(runID))
+	if r == nil || isNilDB(r.db) {
+		return nil, foundation.NewError(foundation.ErrorDependencyUnavailable, "WORKFLOW_RUN_INPUT_UNAVAILABLE", true, errors.New("workflow runtime repository is unavailable"))
+	}
+	if ctx == nil || workspaceErr != nil || parsedWorkspace != workspaceID || runErr != nil || parsedRun != runID {
+		return nil, foundation.NewError(foundation.ErrorInvalidInput, "WORKFLOW_RUN_INPUT_QUERY_INVALID", false, errors.New("workflow run input query is invalid"))
+	}
+	var input []byte
+	err := r.db.QueryRow(ctx, `SELECT input
+		FROM workflow.run
+		WHERE workspace_id=$1 AND id=$2`, string(workspaceID), string(runID)).Scan(&input)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, foundation.NewError(foundation.ErrorNotFound, "WORKFLOW_RUN_INPUT_NOT_FOUND", false, err)
+	}
+	if err != nil {
+		return nil, classify(err, "WORKFLOW_RUN_INPUT_QUERY_FAILED")
+	}
+	if len(input) == 0 || len(input) > maxSucceededNodeOutputBytes || !json.Valid(input) {
+		return nil, foundation.NewError(foundation.ErrorConsistencyViolation, "WORKFLOW_RUN_INPUT_INVALID", false, errors.New("workflow run input is invalid"))
+	}
+	return append(json.RawMessage(nil), input...), nil
+}
+
 // GetSucceededNodeOutput returns one redacted stage receipt through the
 // Workflow owner. It never exposes node inputs, attempts, or private tables to
 // another module's adapter.

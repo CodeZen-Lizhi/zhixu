@@ -161,6 +161,7 @@ func TestValidateAnswerRequiresOneCanonicalTerminalPublication(t *testing.T) {
 func TestAnswerPublicationTransitionIsSingleTerminalChoice(t *testing.T) {
 	for _, terminal := range []AnswerPublicationStatus{
 		AnswerPublicationCompleted, AnswerPublicationRefused, AnswerPublicationClarificationRequired,
+		WorkspaceAnalysisPublicationFailed, WorkspaceAnalysisPublicationCancelled,
 	} {
 		if err := ValidateAnswerPublicationTransition(AnswerPublicationPending, terminal); err != nil {
 			t.Fatalf("terminal=%s err=%v", terminal, err)
@@ -170,11 +171,97 @@ func TestAnswerPublicationTransitionIsSingleTerminalChoice(t *testing.T) {
 		{"", AnswerPublicationCompleted},
 		{AnswerPublicationCompleted, AnswerPublicationRefused},
 		{AnswerPublicationPending, AnswerPublicationPending},
-		{AnswerPublicationPending, "failed"},
+		{AnswerPublicationPending, "timed_out"},
 	} {
 		if err := ValidateAnswerPublicationTransition(invalid[0], invalid[1]); errorCode(err) != ErrorCodeAnswerTransitionInvalid {
 			t.Fatalf("transition=%q->%q err=%v", invalid[0], invalid[1], err)
 		}
+	}
+}
+
+func TestValidateAnswerAcceptsWorkspaceAnalysisModelRunMatrix(t *testing.T) {
+	now := time.Date(2026, 8, 15, 3, 0, 0, 0, time.UTC)
+	publishedAt := now.Add(time.Second)
+	base := Answer{
+		ID: "10000000-0000-4000-8000-000000000040", WorkspaceID: testWorkspaceID,
+		ConversationID: testConversationID, QuestionID: "10000000-0000-4000-8000-000000000041",
+		WorkflowRunID: "10000000-0000-4000-8000-000000000042", Version: 2,
+		CreatedAt: now, UpdatedAt: publishedAt, PublishedAt: &publishedAt,
+	}
+
+	completedDocument, err := json.Marshal(validWorkspaceAnalysisAnswerResult())
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed, err := CanonicalizeWorkspaceAnalysisPublishedResult(
+		AnswerPublicationCompleted, AnswerResultWorkspaceAnalysis, completedDocument,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completedAnswer := base
+	completedAnswer.PublicationStatus = AnswerPublicationCompleted
+	completedAnswer.ResultType = completed.Type
+	completedAnswer.Result = completed.Document
+	completedAnswer.ResultHash = completed.Hash
+	completedAnswer.ModelRunID = completed.ModelRunID
+	if err := ValidateAnswer(completedAnswer); err != nil {
+		t.Fatalf("completed workspace analysis answer: %v", err)
+	}
+
+	refusalDocument, err := json.Marshal(WorkspaceAnalysisRefusalResult{
+		ResultType: AnswerResultWorkspaceAnalysisRefusal, SchemaID: WorkspaceAnalysisRefusalSchemaID,
+		SchemaVersion: WorkspaceAnalysisResultSchemaVersionV1,
+		Payload: WorkspaceAnalysisRefusalPayload{
+			ReasonCode: WorkspaceAnalysisEvidenceInsufficient, Summary: "当前证据不足，无法安全回答。",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	refusal, err := CanonicalizeWorkspaceAnalysisPublishedResult(
+		AnswerPublicationRefused, AnswerResultWorkspaceAnalysisRefusal, refusalDocument,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refusalAnswer := base
+	refusalAnswer.PublicationStatus = AnswerPublicationRefused
+	refusalAnswer.ResultType = refusal.Type
+	refusalAnswer.Result = refusal.Document
+	refusalAnswer.ResultHash = refusal.Hash
+	if err := ValidateAnswer(refusalAnswer); err != nil {
+		t.Fatalf("deterministic workspace analysis refusal: %v", err)
+	}
+
+	terminationDocument, err := json.Marshal(WorkspaceAnalysisTerminationResult{
+		ResultType: AnswerResultWorkspaceAnalysisTermination, SchemaID: WorkspaceAnalysisTerminationSchemaID,
+		SchemaVersion: WorkspaceAnalysisResultSchemaVersionV1,
+		Payload: WorkspaceAnalysisTerminationPayload{
+			TerminationReason: WorkspaceAnalysisBudgetExhausted, Summary: "分析预算已耗尽。",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	termination, err := CanonicalizeWorkspaceAnalysisPublishedResult(
+		WorkspaceAnalysisPublicationFailed, AnswerResultWorkspaceAnalysisTermination, terminationDocument,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failedAnswer := base
+	failedAnswer.PublicationStatus = WorkspaceAnalysisPublicationFailed
+	failedAnswer.ResultType = termination.Type
+	failedAnswer.Result = termination.Document
+	failedAnswer.ResultHash = termination.Hash
+	if err := ValidateAnswer(failedAnswer); err != nil {
+		t.Fatalf("workspace analysis termination: %v", err)
+	}
+
+	failedAnswer.ModelRunID = completed.ModelRunID
+	if err := ValidateAnswer(failedAnswer); errorCode(err) != ErrorCodeAnswerInvalid {
+		t.Fatalf("termination model mismatch err=%v", err)
 	}
 }
 

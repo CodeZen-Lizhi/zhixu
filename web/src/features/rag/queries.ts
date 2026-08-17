@@ -1,16 +1,29 @@
 import { useEffect, useRef } from "react";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 
-import { getAnswer, getConversation, getLatestTurn, listConversations, listTurns, type Answer } from "../../api/conversation";
+import {
+  getAnswer,
+  getConversation,
+  getLatestTurn,
+  getWorkspaceAnalysisTimeline,
+  listConversations,
+  listTurns,
+  type Answer,
+  type QuestionMode,
+  type WorkspaceAnalysisTimeline,
+} from "../../api/conversation";
 import { ragQueryKeys } from "./query-keys";
 
 export const maximumPendingAnswerPolls = 144;
+export const maximumWorkspaceAnalysisPendingAnswerPolls = 732;
 export const pendingAnswerPollMilliseconds = 5_000;
+export const maximumAnalysisTimelinePolls = 732;
 
 export const pendingAnswerPollInterval = (
   answer: Answer | undefined,
   completedFetches: number,
-): number | false => answer?.publicationStatus === "pending" && completedFetches < maximumPendingAnswerPolls
+  maximumPolls = maximumPendingAnswerPolls,
+): number | false => answer?.publicationStatus === "pending" && completedFetches < maximumPolls
   ? pendingAnswerPollMilliseconds
   : false;
 
@@ -43,7 +56,7 @@ export const useLatestTurn = (workspaceId: string, conversationId: string) => us
   retry: false,
 });
 
-export const useAnswer = (workspaceId: string, answerId: string, polling = false) => {
+export const useAnswer = (workspaceId: string, answerId: string, polling = false, mode: QuestionMode = "rag") => {
   const attempts = useRef(0);
   useEffect(() => { attempts.current = 0; }, [answerId, workspaceId]);
   return useQuery({
@@ -55,7 +68,33 @@ export const useAnswer = (workspaceId: string, answerId: string, polling = false
     enabled: workspaceId !== "" && answerId !== "",
     retry: false,
     refetchInterval: (query) => polling
-      ? pendingAnswerPollInterval(query.state.data ?? undefined, attempts.current)
+      ? pendingAnswerPollInterval(
+        query.state.data ?? undefined,
+        attempts.current,
+        mode === "workspace_analysis" ? maximumWorkspaceAnalysisPendingAnswerPolls : maximumPendingAnswerPolls,
+      )
       : false,
+  });
+};
+
+const analysisTimelinePollInterval = (
+  timeline: WorkspaceAnalysisTimeline | undefined,
+  completedFetches: number,
+): number | false => (timeline?.runStatus === "queued" || timeline?.runStatus === "running") && completedFetches < maximumAnalysisTimelinePolls
+  ? pendingAnswerPollMilliseconds
+  : false;
+
+export const useWorkspaceAnalysisTimeline = (workspaceId: string, answerId: string, enabled = true, polling = true) => {
+  const attempts = useRef(0);
+  useEffect(() => { attempts.current = 0; }, [answerId, workspaceId]);
+  return useQuery({
+    queryKey: ragQueryKeys.analysisTimeline(workspaceId, answerId),
+    queryFn: async ({ signal }) => {
+      attempts.current += 1;
+      return getWorkspaceAnalysisTimeline({ workspaceId, answerId }, signal);
+    },
+    enabled: enabled && workspaceId !== "" && answerId !== "",
+    retry: false,
+    refetchInterval: (query) => polling ? analysisTimelinePollInterval(query.state.data, attempts.current) : false,
   });
 };

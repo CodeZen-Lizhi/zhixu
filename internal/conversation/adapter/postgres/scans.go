@@ -74,7 +74,7 @@ func parseCanonicalID(value string) (foundation.ID, error) {
 type questionScan struct {
 	id, workspaceID, conversationID string
 	ordinal                         int64
-	questionText, scope             string
+	mode, questionText, scope       string
 	answerDepth, outputFormat       string
 	contextThroughOrdinal           int64
 	contextHash, requestHash        string
@@ -83,7 +83,7 @@ type questionScan struct {
 
 func (scan *questionScan) destinations() []any {
 	return []any{
-		&scan.id, &scan.workspaceID, &scan.conversationID, &scan.ordinal, &scan.questionText, &scan.scope,
+		&scan.id, &scan.workspaceID, &scan.conversationID, &scan.ordinal, &scan.mode, &scan.questionText, &scan.scope,
 		&scan.answerDepth, &scan.outputFormat, &scan.contextThroughOrdinal, &scan.contextHash, &scan.requestHash, &scan.createdAt,
 	}
 }
@@ -108,7 +108,7 @@ func (scan *questionScan) build() (conversationdomain.Question, error) {
 	question := conversationdomain.Question{
 		ID: id,
 		Request: conversationdomain.QuestionRequest{
-			WorkspaceID: workspaceID, ConversationID: conversationID, QuestionText: scan.questionText,
+			WorkspaceID: workspaceID, ConversationID: conversationID, Mode: conversationdomain.QuestionMode(scan.mode), QuestionText: scan.questionText,
 			Scope: scope, AnswerDepth: conversationdomain.AnswerDepth(scan.answerDepth), OutputFormat: conversationdomain.OutputFormat(scan.outputFormat),
 		},
 		Ordinal: scan.ordinal, ContextThroughOrdinal: scan.contextThroughOrdinal, ContextHash: scan.contextHash,

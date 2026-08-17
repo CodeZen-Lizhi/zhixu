@@ -36,8 +36,8 @@ type contractFixture struct {
 
 func TestContractsContainExactUniqueCoreToolSet(t *testing.T) {
 	contracts := mustContracts(t)
-	if len(contracts) != 13 {
-		t.Fatalf("Contracts() count = %d, want 13", len(contracts))
+	if len(contracts) != 17 {
+		t.Fatalf("Contracts() count = %d, want 17", len(contracts))
 	}
 	got := make([]string, 0, len(contracts))
 	seen := make(map[domain.ToolRef]struct{}, len(contracts))
@@ -52,7 +52,8 @@ func TestContractsContainExactUniqueCoreToolSet(t *testing.T) {
 	sort.Strings(got)
 	want := []string{
 		"ApplyApprovedPatch@1", "CalculateDiff@1", "CreateGitCommit@1", "FetchWebPage@1", "ReadDocument@1", "ReadGitStatus@1",
-		"ReadSource@1", "ReadSource@2", "RebuildIndex@1", "RunRegressionEvaluation@1", "SearchKnowledge@1", "ValidateCitation@1", "ValidateCitation@2",
+		"ReadGitStatus@2", "ReadSource@1", "ReadSource@2", "ReadSource@3", "RebuildIndex@1", "RunRegressionEvaluation@1",
+		"SearchKnowledge@1", "SearchKnowledge@2", "ValidateCitation@1", "ValidateCitation@2", "ValidateCitation@3",
 	}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("tool names = %v, want %v", got, want)
@@ -62,18 +63,27 @@ func TestContractsContainExactUniqueCoreToolSet(t *testing.T) {
 func TestContractsHaveStableExactSchemaRefsAndHashes(t *testing.T) {
 	left := mustContracts(t)
 	right := mustContracts(t)
-	expectedV1Hashes := map[domain.ToolRef]string{
+	expectedHashes := map[domain.ToolRef]string{
 		{Name: "SearchKnowledge", Version: 1}:         "c89a7f23de7ac737aefbbd91a7d2231ce303713a0ee451a5aaa152ac0e8024be",
 		{Name: "ReadSource", Version: 1}:              "c1984a7c2ef56e5fb59ea0c2d38c418023e6e82a814f74143ca9b92d6a111361",
+		{Name: "ReadSource", Version: 2}:              "a6ba6638bbc44db91c5cbb228d220538a80e7a672a7f0f8d07231eef00dbadb5",
 		{Name: "ReadDocument", Version: 1}:            "af5c0e57ac8099f23909908c56e7dffe1479912b45492b40f4189ba65511488b",
 		{Name: "FetchWebPage", Version: 1}:            "d067073172c9934fdb8a363432127ec8f96dbe8f831c6e9b207912ce2abd7c63",
 		{Name: "ValidateCitation", Version: 1}:        "af9ae558607202a7b9ada28bef5c41859a556b23b9698f03602f5e672e357829",
+		{Name: "ValidateCitation", Version: 2}:        "a4312ed4eafd3cf7458da7c9240cf47000129c76e00a74854bd217c23a1eeb69",
 		{Name: "CalculateDiff", Version: 1}:           "e7693463f013f1f5f5d5286629907f2689f871c8d6573071aa090eaa0cddb081",
 		{Name: "ReadGitStatus", Version: 1}:           "fef29851ef283d17331787512e3982eeb32c111c6372dcdf1e333166a57f2bc8",
 		{Name: "ApplyApprovedPatch", Version: 1}:      "4a43c6efe8093fd3b25f34683a263fc0b8203fcff2ce24d9be77c92e7493baa5",
 		{Name: "CreateGitCommit", Version: 1}:         "7f31573506e734c450b8e7a8653716bd9840e3677f9bf831e36dafd2ff3eb45c",
 		{Name: "RebuildIndex", Version: 1}:            "4184b8712c0b95a55a6412f2bea6bb30f21762ce886fcf4a4afcbde21f7be142",
 		{Name: "RunRegressionEvaluation", Version: 1}: "4765b2a9a4acc38a8e5c69039d64b55300e7841f0b25082759a9e22fb31fef38",
+		{Name: "ReadGitStatus", Version: 2}:           "b5dd1fcca72d5bb41fd9ad3f74006d3706e4184ad39e2a3409b565d1ff896bbd",
+		{Name: "SearchKnowledge", Version: 2}:         "db7180086adb06a18a4be8d1eb80a208fa6385c70f1a71d6d67c4f263fbd1807",
+		{Name: "ReadSource", Version: 3}:              "d41dabac535261b885e453b64e11fe5bb779838e31a255aea4798e27ead54d32",
+		{Name: "ValidateCitation", Version: 3}:        "bf5e643c47d57478b46d258eca250dc30e810ee7a0693569f44edaab19037d54",
+	}
+	if len(expectedHashes) != len(left) {
+		t.Fatalf("hash fixture count = %d, want %d", len(expectedHashes), len(left))
 	}
 	expectedRefs := make(map[domain.ToolRef][2]string, len(contractFixtures()))
 	for _, fixture := range contractFixtures() {
@@ -85,8 +95,11 @@ func TestContractsHaveStableExactSchemaRefsAndHashes(t *testing.T) {
 		if leftDefinition.Ref != rightDefinition.Ref || leftDefinition.DefinitionHash != rightDefinition.DefinitionHash {
 			t.Fatalf("unstable definition hash for %s: got %q, replay %q", toolRefLabel(leftDefinition.Ref), leftDefinition.DefinitionHash, rightDefinition.DefinitionHash)
 		}
-		if expectedHash, isV1 := expectedV1Hashes[leftDefinition.Ref]; isV1 && leftDefinition.DefinitionHash != expectedHash {
-			t.Fatalf("v1 definition hash drift for %s: got %q, want %q", toolRefLabel(leftDefinition.Ref), leftDefinition.DefinitionHash, expectedHash)
+		expectedHash, ok := expectedHashes[leftDefinition.Ref]
+		if !ok {
+			t.Errorf("definition hash fixture missing for %s", toolRefLabel(leftDefinition.Ref))
+		} else if leftDefinition.DefinitionHash != expectedHash {
+			t.Errorf("definition hash drift for %s: got %q, want %q", toolRefLabel(leftDefinition.Ref), leftDefinition.DefinitionHash, expectedHash)
 		}
 		if refs, isV1 := expectedRefs[leftDefinition.Ref]; isV1 && (leftDefinition.InputSchema != (domain.SchemaRef{ID: refs[0], Version: 1}) ||
 			leftDefinition.OutputSchema != (domain.SchemaRef{ID: refs[1], Version: 1})) {
@@ -219,6 +232,91 @@ func TestRAGV2ContractsReuseV1SchemasAndBindOnlyCurrentRAGWorkflow(t *testing.T)
 	}
 }
 
+func TestWorkspaceAnalysisContractsAreExactTrustedPersistedVersions(t *testing.T) {
+	contracts := contractsByRef(t)
+	tests := []struct {
+		ref          domain.ToolRef
+		inputSchema  domain.SchemaRef
+		outputSchema domain.SchemaRef
+		maxInput     int64
+		maxOutput    int64
+		goodInput    string
+		badInput     string
+		goodOutput   string
+		badOutput    string
+	}{
+		{
+			ref:          domain.ToolRef{Name: "ReadGitStatus", Version: 2},
+			inputSchema:  domain.SchemaRef{ID: "tool.read_git_status.input", Version: 1},
+			outputSchema: domain.SchemaRef{ID: "tool.read_git_status.output", Version: 1},
+			maxInput:     4 * 1024, maxOutput: domain.ReadGitStatusV2ReceiptMaxOutputBytes,
+			goodInput: `{}`, badInput: `{"workspace_id":"` + testID1 + `"}`,
+			goodOutput: `{"branch":"main","clean":false,"conflict_count":0,"head":"` + testOID + `","object_format":"sha1","staged_count":1,"unstaged_count":0,"untracked_count":0}`,
+			badOutput:  `{"branch":"main","head":"` + testOID + `","object_format":"sha1","clean":true,"staged_count":1,"unstaged_count":0,"untracked_count":0,"conflict_count":0}`,
+		},
+		{
+			ref:          domain.ToolRef{Name: "SearchKnowledge", Version: 2},
+			inputSchema:  domain.SchemaRef{ID: "tool.search_knowledge.input", Version: 2},
+			outputSchema: domain.SchemaRef{ID: "tool.search_knowledge.output", Version: 2},
+			maxInput:     maxSmallDocumentBytes, maxOutput: domain.SearchKnowledgeV2ReceiptMaxOutputBytes,
+			goodInput:  `{"query":"bounded query","mode":"hybrid","limit":5}`,
+			badInput:   `{"query":"bounded query","mode":"hybrid","limit":6}`,
+			goodOutput: `{"degradations":[],"effective_mode":"hybrid","items":[{"evidence_ref":"E1","rank":1,"snippet":"evidence"}]}`,
+			badOutput:  `{"effective_mode":"hybrid","items":[{"evidence_ref":"E2","rank":1,"snippet":"evidence"}],"degradations":[]}`,
+		},
+		{
+			ref:          domain.ToolRef{Name: "ReadSource", Version: 3},
+			inputSchema:  domain.SchemaRef{ID: "tool.read_source.input", Version: 2},
+			outputSchema: domain.SchemaRef{ID: "tool.read_source.output", Version: 2},
+			maxInput:     4 * 1024, maxOutput: domain.ReadSourceV3ReceiptMaxOutputBytes,
+			goodInput: `{"evidence_ref":"E1"}`, badInput: `{"evidence_ref":"E4"}`,
+			goodOutput: `{"content_hash":"` + testHashA + `","evidence_ref":"E1","excerpt":"immutable excerpt","truncated":false}`,
+			badOutput:  `{"evidence_ref":"E1","content_hash":"` + testHashA + `","truncated":false,"excerpt":""}`,
+		},
+		{
+			ref:          domain.ToolRef{Name: "ValidateCitation", Version: 3},
+			inputSchema:  domain.SchemaRef{ID: "tool.validate_citation.input", Version: 2},
+			outputSchema: domain.SchemaRef{ID: "tool.validate_citation.output", Version: 2},
+			maxInput:     16 * 1024, maxOutput: domain.ValidateCitationV3ReceiptMaxOutputBytes,
+			goodInput:  `{"candidate_id":"` + testID1 + `","candidate_hash":"` + testHashA + `","evidence_refs":["E1"]}`,
+			badInput:   `{"candidate_id":"` + testID1 + `","candidate_hash":"` + testHashA + `","evidence_refs":["E1","E1"]}`,
+			goodOutput: `{"results":[{"evidence_ref":"E1","reason_code":"OK","valid":true}]}`,
+			badOutput:  `{"results":[{"evidence_ref":"E1","valid":false,"reason_code":"OK"}]}`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(toolRefLabel(test.ref), func(t *testing.T) {
+			contract, found := contracts[test.ref]
+			if !found {
+				t.Fatal("workspace analysis contract is missing")
+			}
+			definition := contract.Definition
+			if definition.InputSchema != test.inputSchema || definition.OutputSchema != test.outputSchema ||
+				definition.MaxInputBytes != test.maxInput || definition.MaxOutputBytes != test.maxOutput ||
+				definition.RequiredCapability != capability.ReadLocal || definition.SideEffectLevel != domain.SideEffectNone ||
+				definition.InvocationPolicy != domain.InvocationTrustedWorkflowOnly ||
+				definition.ResultPersistencePolicy != domain.ResultPersistenceCanonical ||
+				definition.IdempotencyMode != domain.IdempotencyNone || definition.RetryPolicy.MaxAttempts != 1 ||
+				len(definition.AllowedWorkflows) != 1 ||
+				definition.AllowedWorkflows[0] != (domain.WorkflowBinding{Key: workspaceAnalysisFlow, Version: 1}) {
+				t.Fatalf("workspace analysis definition = %#v", definition)
+			}
+			assertDecoderAcceptsExactCopy(t, contract.DecodeInput, []byte(test.goodInput))
+			assertDecoderAcceptsExactCopy(t, contract.DecodeOutput, []byte(test.goodOutput))
+			if _, err := contract.DecodeInput([]byte(test.badInput)); err == nil {
+				t.Fatal("input decoder accepted invalid workspace analysis document")
+			}
+			if _, err := contract.DecodeOutput([]byte(test.badOutput)); err == nil {
+				t.Fatal("output decoder accepted invalid workspace analysis document")
+			}
+			assertRequiredFieldsMatchDecoder(t, contract.DecodeInput, definition.InputSchemaDocument, []byte(test.goodInput))
+			assertRequiredFieldsMatchDecoder(t, contract.DecodeOutput, definition.OutputSchemaDocument, []byte(test.goodOutput))
+			assertSharedStrictFailures(t, contract.DecodeInput, []byte(test.goodInput))
+			assertSharedStrictFailures(t, contract.DecodeOutput, []byte(test.goodOutput))
+		})
+	}
+}
+
 func TestCatalogDoesNotProvideExecutorsOrAvailabilityFallback(t *testing.T) {
 	registry := application.NewExecutionRegistry()
 	for _, contract := range mustContracts(t) {
@@ -326,7 +424,7 @@ func mustContracts(t *testing.T) []application.Contract {
 
 func contractsByRef(t *testing.T) map[domain.ToolRef]application.Contract {
 	t.Helper()
-	result := make(map[domain.ToolRef]application.Contract, 13)
+	result := make(map[domain.ToolRef]application.Contract, 17)
 	for _, contract := range mustContracts(t) {
 		result[contract.Definition.Ref] = contract
 	}

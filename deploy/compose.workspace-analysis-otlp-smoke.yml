@@ -1,0 +1,34 @@
+configs:
+  workspace-analysis-otel-collector:
+    file: ./workspace-analysis-otel-collector.yaml
+
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.158.0@sha256:c5918f78992ee73b0d6f0e599423ac5ec52dd5d9726733114d6eca53d5a32ed5
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    configs:
+      - source: workspace-analysis-otel-collector
+        target: /etc/otelcol-contrib/config.yaml
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    restart: "no"
+    network_mode: service:rag-model-fixture
+    depends_on:
+      rag-model-fixture:
+        condition: service_healthy
+
+  app:
+    environment:
+      ZHIXU_TELEMETRY_MODE: disabled
+      OTEL_EXPORTER_OTLP_ENDPOINT: ""
+
+  worker:
+    environment:
+      ZHIXU_TELEMETRY_MODE: required
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://127.0.0.1:4318
+    depends_on:
+      otel-collector:
+        condition: service_started

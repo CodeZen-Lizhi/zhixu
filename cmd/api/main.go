@@ -14,6 +14,7 @@ import (
 
 	agentpostgres "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/postgres"
 	agentworkflow "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/workflow"
+	agentapplication "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/app"
 	artifactchangecontrol "github.com/CodeZen-Lizhi/zhixu/internal/artifact/adapter/changecontrol"
 	artifactlearningpath "github.com/CodeZen-Lizhi/zhixu/internal/artifact/adapter/learningpath"
@@ -444,11 +445,20 @@ func runAPI() int {
 		var workflowService *workflowapplication.Service
 		var workflowControlService *workflowapplication.Service
 		var workflowRuntime *workflowpostgres.RuntimeRepository
+		var workspaceAnalysisRuntimeHooks *apiWorkspaceAnalysisRuntimeHooks
 		if changeControlRepositoryErr != nil {
 			logger.Error("change control repository is unavailable", "error_code", "CHANGE_CONTROL_DATABASE_UNAVAILABLE")
 		} else if healthEventsErr != nil {
 			logger.Error("health event store is unavailable", "error_code", "HEALTH_EVENT_STORE_UNAVAILABLE")
 		} else {
+			if cfg.WorkspaceAnalysisAPIEnabled {
+				configuredHooks, hooksErr := newAPIWorkspaceAnalysisRuntimeHooks(database.DB(), healthEvents)
+				if hooksErr != nil {
+					logger.Warn("workspace analysis API runtime hooks are unavailable", "error_code", "WORKSPACE_ANALYSIS_CAPABILITY_UNAVAILABLE")
+				} else {
+					workspaceAnalysisRuntimeHooks = configuredHooks
+				}
+			}
 			healthCancellationGuard, healthCancellationGuardErr := healthpostgres.NewScanCancellationGuard(healthEvents)
 			cancellationGuard, cancellationGuardErr := workflowapplication.NewCompositeCancellationSafetyGuard(
 				changeControlRepository,
@@ -470,6 +480,7 @@ func runAPI() int {
 			} else {
 				workflowService, runtime, artifactGeneration, workflowServiceErr = newAPIArtifactWorkflowComponents(
 					database.DB(), cfg, workspaceRepository, fileScanner, cancellationGuard, artifactIDs, artifactClock,
+					workspaceAnalysisRuntimeHooks,
 					modelEnqueueFences...,
 				)
 			}
@@ -661,8 +672,18 @@ func runAPI() int {
 		} else {
 			candidateHandler = configuredCandidateHandler
 		}
+		dispatchReady := questionDispatchEnabled(true, ragInitErr)
+		var workspaceAnalysisStarters []agentapplication.WorkspaceAnalysisRunStarter
+		if cfg.WorkspaceAnalysisAPIEnabled && dispatchReady && workspaceAnalysisRuntimeHooks != nil {
+			starter, starterErr := newAPIWorkspaceAnalysisRunStarter(database.DB(), cfg, configuredModels)
+			if starterErr != nil {
+				logger.Warn("workspace analysis API capability is unavailable", "error_code", "WORKSPACE_ANALYSIS_CAPABILITY_UNAVAILABLE")
+			} else {
+				workspaceAnalysisStarters = append(workspaceAnalysisStarters, starter)
+			}
+		}
 		configuredConversation, configuredEvents, conversationErr := newConversationHandlers(
-			database.DB(), workflowRuntime, questionDispatchEnabled(true, ragInitErr),
+			database.DB(), workflowRuntime, dispatchReady, workspaceAnalysisStarters...,
 		)
 		if conversationErr != nil {
 			logger.Error("conversation service is unavailable", "error_code", "CONVERSATION_SERVICE_UNAVAILABLE")
@@ -1648,9 +1669,13 @@ func newConversationHandlers(
 	pool *pgxpool.Pool,
 	runtime *workflowpostgres.RuntimeRepository,
 	ragEnabled bool,
+	workspaceAnalysis ...agentapplication.WorkspaceAnalysisRunStarter,
 ) (*conversationhttp.Handler, *eventshttp.Handler, error) {
 	if pool == nil {
 		return nil, nil, errors.New("conversation database is unavailable")
+	}
+	if len(workspaceAnalysis) > 1 || (!ragEnabled && len(workspaceAnalysis) != 0) {
+		return nil, nil, errors.New("conversation workspace analysis capability is ambiguous or cannot run without dispatch")
 	}
 	eventStore, err := eventspostgres.NewStore(pool)
 	if err != nil {
@@ -1662,16 +1687,31 @@ func newConversationHandlers(
 	}
 	var dispatcher conversationapplication.QuestionDispatcher
 	if ragEnabled {
-		dispatcher, err = conversationpostgres.NewQuestionDispatcher(
-			pool, runtime, eventStore, foundation.NewUUIDGenerator(nil), foundation.SystemClock{},
-		)
+		if len(workspaceAnalysis) == 1 {
+			auditRepository, auditErr := auditpostgres.NewRepository(pool)
+			if auditErr != nil {
+				return nil, nil, auditErr
+			}
+			auditRecorder, auditErr := auditapplication.NewRecorder(auditRepository)
+			if auditErr != nil {
+				return nil, nil, auditErr
+			}
+			dispatcher, err = conversationpostgres.NewQuestionDispatcherWithWorkspaceAnalysisAndAudit(
+				pool, runtime, eventStore, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, workspaceAnalysis[0], auditRecorder,
+			)
+		} else {
+			dispatcher, err = conversationpostgres.NewQuestionDispatcher(
+				pool, runtime, eventStore, foundation.NewUUIDGenerator(nil), foundation.SystemClock{},
+			)
+		}
 		if err != nil {
 			return nil, nil, err
 		}
 	}
 	service, err := conversationapplication.NewService(conversationapplication.Dependencies{
 		Repository: repository, QuestionDispatcher: dispatcher, FeedbackRepository: repository,
-		IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{},
+		WorkspaceAnalysisTimelineReader: repository,
+		IDs:                             foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{},
 	})
 	if err != nil {
 		return nil, nil, err
@@ -1741,6 +1781,7 @@ func newAPIArtifactWorkflowComponents(
 	cancellation workflowapplication.CancellationSafetyGuard,
 	ids foundation.IDGenerator,
 	clock foundation.Clock,
+	workspaceAnalysis *apiWorkspaceAnalysisRuntimeHooks,
 	enqueueFences ...riveradapter.EnqueueFence,
 ) (*workflowapplication.Service, *workflowpostgres.RuntimeRepository, *artifactpostgres.SectionGenerationRepository, error) {
 	factory, err := newAPIRuntimeRepositoryFactory(pool, cfg, enqueueFences...)
@@ -1751,9 +1792,14 @@ func newAPIArtifactWorkflowComponents(
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	terminalHooks, controlHook, err := composeAPIWorkflowRuntimeHooks(terminal, workspaceAnalysis)
+	if err != nil {
+		return nil, nil, nil, err
+	}
 	runtime, err := factory.newRepository(workflowpostgres.RuntimeRepositoryHooks{
 		CancellationSafety: cancellation,
-		Terminal:           terminal,
+		Terminal:           terminalHooks,
+		Control:            controlHook,
 	})
 	if err != nil {
 		return nil, nil, nil, err

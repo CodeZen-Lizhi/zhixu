@@ -158,6 +158,10 @@ func newOTLPHTTPTransport() *http.Transport {
 }
 
 func buildOTLPTraceURL(endpoint string) (string, error) {
+	return buildOTLPSignalURL(endpoint, "traces")
+}
+
+func buildOTLPSignalURL(endpoint, signal string) (string, error) {
 	parsed, err := url.Parse(strings.TrimSpace(endpoint))
 	if err != nil || parsed == nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Opaque != "" {
 		return "", ErrTelemetryExporterRequired
@@ -165,7 +169,10 @@ func buildOTLPTraceURL(endpoint string) (string, error) {
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
 		return "", ErrTelemetryExporterRequired
 	}
-	parsed.Path = strings.TrimRight(parsed.Path, "/") + "/v1/traces"
+	if signal != "traces" && signal != "metrics" {
+		return "", ErrTelemetryExporterRequired
+	}
+	parsed.Path = strings.TrimRight(parsed.Path, "/") + "/v1/" + signal
 	parsed.RawPath = ""
 	return parsed.String(), nil
 }

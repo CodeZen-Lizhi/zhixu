@@ -58,7 +58,8 @@ type Telemetry struct {
 	metrics        Metrics
 	metricsHandler http.Handler
 	tracer         Tracer
-	provider       traceLifecycle
+	traceProvider  traceLifecycle
+	metricProvider metricLifecycle
 	status         TelemetryStatus
 	once           sync.Once
 	closeErr       error
@@ -98,7 +99,7 @@ func InitializeTelemetry(ctx context.Context, options TelemetryOptions) (*Teleme
 	if identityErr != nil {
 		return nil, identityErr
 	}
-	provider, err := newExportingTraceProvider(ctx, endpoint, identity)
+	traceProvider, err := newExportingTraceProvider(ctx, endpoint, identity)
 	if err != nil {
 		if options.Mode == TelemetryModeRequired {
 			return nil, ErrTelemetryExporterRequired
@@ -107,9 +108,21 @@ func InitializeTelemetry(ctx context.Context, options TelemetryOptions) (*Teleme
 			Mode: options.Mode, Degraded: true, Code: TelemetryStatusExporterUnavailable,
 		}), nil
 	}
+	metricProvider, err := newExportingMetricProvider(ctx, endpoint, identity)
+	if err != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), otlpExportTimeout)
+		_ = traceProvider.Shutdown(cleanupCtx)
+		cancel()
+		if options.Mode == TelemetryModeRequired {
+			return nil, ErrTelemetryExporterRequired
+		}
+		return newLocalTelemetry(metrics, metricsHandler, newNoExportTraceProvider(identity), TelemetryStatus{
+			Mode: options.Mode, Degraded: true, Code: TelemetryStatusExporterUnavailable,
+		}), nil
+	}
 	return &Telemetry{
-		metrics: metrics, metricsHandler: metricsHandler,
-		tracer: provider.Tracer(), provider: provider,
+		metrics: newFanoutMetrics(metrics, metricProvider.Metrics()), metricsHandler: metricsHandler,
+		tracer: traceProvider.Tracer(), traceProvider: traceProvider, metricProvider: metricProvider,
 		status: TelemetryStatus{
 			Mode: options.Mode, Exporting: true, Code: TelemetryStatusExporting,
 		},
@@ -117,7 +130,7 @@ func InitializeTelemetry(ctx context.Context, options TelemetryOptions) (*Teleme
 }
 
 func newLocalTelemetry(metrics Metrics, metricsHandler http.Handler, provider traceLifecycle, status TelemetryStatus) *Telemetry {
-	return &Telemetry{metrics: metrics, metricsHandler: metricsHandler, tracer: provider.Tracer(), provider: provider, status: status}
+	return &Telemetry{metrics: metrics, metricsHandler: metricsHandler, tracer: provider.Tracer(), traceProvider: provider, status: status}
 }
 
 // Metrics returns the initialized recorder.
@@ -147,10 +160,28 @@ func (telemetry *Telemetry) Shutdown(ctx context.Context) error {
 		return nil
 	}
 	telemetry.once.Do(func() {
-		if telemetry.provider != nil {
-			if err := telemetry.provider.Shutdown(ctx); err != nil {
-				telemetry.closeErr = ErrTelemetryShutdown
-			}
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		var traceErr, metricErr error
+		var wait sync.WaitGroup
+		if telemetry.traceProvider != nil {
+			wait.Add(1)
+			go func() {
+				defer wait.Done()
+				traceErr = telemetry.traceProvider.Shutdown(ctx)
+			}()
+		}
+		if telemetry.metricProvider != nil {
+			wait.Add(1)
+			go func() {
+				defer wait.Done()
+				metricErr = telemetry.metricProvider.Shutdown(ctx)
+			}()
+		}
+		wait.Wait()
+		if traceErr != nil || metricErr != nil {
+			telemetry.closeErr = ErrTelemetryShutdown
 		}
 	})
 	return telemetry.closeErr

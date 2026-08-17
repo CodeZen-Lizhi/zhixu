@@ -1,14 +1,18 @@
 package application
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	agentdomain "github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/capability"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/tools/domain"
@@ -38,19 +42,40 @@ func (reader *executionTestPolicy) ResolveToolPolicy(_ context.Context, _ domain
 }
 
 type executionTestRepository struct {
-	refused        []domain.ToolCall
-	started        []domain.ToolCall
-	finalized      []domain.ToolCall
-	unknown        []domain.ToolCall
-	startResult    *StartCallResult
-	startErr       error
-	finalizeErr    error
-	markUnknownErr error
-	markContextErr error
-	stale          []domain.ToolCall
-	trusted        *domain.ToolCall
-	trustedLoad    TrustedWriteLoadCommand
-	trustedLoadErr error
+	refused                   []domain.ToolCall
+	started                   []domain.ToolCall
+	finalized                 []domain.ToolCall
+	unknown                   []domain.ToolCall
+	startResult               *StartCallResult
+	startErr                  error
+	finalizeErr               error
+	receiptFinalizeErr        error
+	receiptLoadErr            error
+	markUnknownErr            error
+	markContextErr            error
+	stale                     []domain.ToolCall
+	trusted                   *domain.ToolCall
+	trustedLoad               TrustedWriteLoadCommand
+	trustedLoadErr            error
+	receiptFinalized          []FinalizeCallWithReceiptCommand
+	receiptFailures           []FinalizeCallWithReceiptFailureCommand
+	receipt                   domain.ResultReceipt
+	receiptFailure            domain.ResultReceiptFailure
+	receiptLoads              int
+	receiptCallMutator        func(*domain.ToolCall)
+	receiptOperationID        *foundation.ID
+	receiptFailureOperationID *foundation.ID
+	receiptFailureFinalizeErr error
+	receiptFailureMutator     func(*domain.ResultReceiptFailure)
+	workspaceAuthorized       []AuthorizeWorkspaceAnalysisToolCallCommand
+	workspaceFinalized        []FinalizeWorkspaceAnalysisToolCallCommand
+	workspaceRefusals         []RecordWorkspaceAnalysisToolRefusalCommand
+	workspaceAuthorize        *WorkspaceAnalysisToolAuthorizationResult
+	workspaceAuthErr          error
+	workspaceFinishErr        error
+	workspaceRefusalErr       error
+	workspaceRefusalReplay    bool
+	workspaceCallMutator      func(*domain.ToolCall)
 }
 
 func (repository *executionTestRepository) RecordRefused(_ context.Context, command RecordRefusedCommand) (ToolCallMutationResult, error) {
@@ -75,6 +100,116 @@ func (repository *executionTestRepository) FinalizeCall(_ context.Context, comma
 		return ToolCallMutationResult{}, repository.finalizeErr
 	}
 	return ToolCallMutationResult{Call: command.Call}, nil
+}
+
+func (repository *executionTestRepository) FinalizeCallWithReceipt(
+	_ context.Context,
+	command FinalizeCallWithReceiptCommand,
+) (ResultReceiptMutationResult, error) {
+	repository.receiptFinalized = append(repository.receiptFinalized, command)
+	if repository.receiptFinalizeErr != nil {
+		return ResultReceiptMutationResult{}, repository.receiptFinalizeErr
+	}
+	persistedCall := command.Call
+	if repository.receiptCallMutator != nil {
+		repository.receiptCallMutator(&persistedCall)
+	}
+	draft := domain.ResultReceiptDraft{ID: command.ReceiptID, Output: command.Output, CreatedAt: *persistedCall.CompletedAt}
+	if command.PrivateBinding != nil {
+		draft.PrivateBindingSchema = command.PrivateBinding.Schema
+		draft.PrivateBinding = command.PrivateBinding.Document
+	}
+	receipt, err := domain.NewResultReceipt(draft, persistedCall, command.Definition)
+	if err != nil {
+		return ResultReceiptMutationResult{}, err
+	}
+	repository.receipt = receipt
+	result := ResultReceiptMutationResult{Call: persistedCall, Receipt: receipt}
+	if len(repository.workspaceAuthorized) > 0 {
+		result.OperationID = repository.workspaceAuthorized[len(repository.workspaceAuthorized)-1].OperationID
+	}
+	if repository.receiptOperationID != nil {
+		result.OperationID = *repository.receiptOperationID
+	}
+	return result, nil
+}
+
+func (repository *executionTestRepository) LoadResultReceipt(_ context.Context, _ LoadResultReceiptCommand) (domain.ResultReceipt, error) {
+	repository.receiptLoads++
+	if repository.receiptLoadErr != nil {
+		return domain.ResultReceipt{}, repository.receiptLoadErr
+	}
+	return repository.receipt, nil
+}
+
+func (repository *executionTestRepository) FinalizeCallWithReceiptFailure(
+	_ context.Context,
+	command FinalizeCallWithReceiptFailureCommand,
+) (ResultReceiptFailureMutationResult, error) {
+	repository.receiptFailures = append(repository.receiptFailures, command)
+	if repository.receiptFailureFinalizeErr != nil {
+		return ResultReceiptFailureMutationResult{}, repository.receiptFailureFinalizeErr
+	}
+	failure, err := domain.NewResultReceiptFailure(command.Failure, command.Call, command.Definition)
+	if err != nil {
+		return ResultReceiptFailureMutationResult{}, err
+	}
+	if repository.receiptFailureMutator != nil {
+		repository.receiptFailureMutator(&failure)
+	}
+	repository.receiptFailure = failure
+	result := ResultReceiptFailureMutationResult{
+		Call: command.Call, Failure: failure, OperationID: command.Failure.OperationID,
+	}
+	if repository.receiptFailureOperationID != nil {
+		result.OperationID = *repository.receiptFailureOperationID
+	}
+	return result, nil
+}
+
+func (repository *executionTestRepository) AuthorizeWorkspaceAnalysisToolCall(
+	_ context.Context,
+	command AuthorizeWorkspaceAnalysisToolCallCommand,
+) (WorkspaceAnalysisToolAuthorizationResult, error) {
+	repository.workspaceAuthorized = append(repository.workspaceAuthorized, command)
+	if repository.workspaceAuthErr != nil {
+		return WorkspaceAnalysisToolAuthorizationResult{}, repository.workspaceAuthErr
+	}
+	if repository.workspaceAuthorize != nil {
+		return *repository.workspaceAuthorize, nil
+	}
+	return WorkspaceAnalysisToolAuthorizationResult{
+		Call: command.Call, OperationID: command.OperationID, ReservationID: command.ReservationID,
+		Disposition: WorkspaceAnalysisToolAuthorizationCreated,
+	}, nil
+}
+
+func (repository *executionTestRepository) FinalizeWorkspaceAnalysisToolCall(
+	_ context.Context,
+	command FinalizeWorkspaceAnalysisToolCallCommand,
+) (ToolCallMutationResult, error) {
+	repository.workspaceFinalized = append(repository.workspaceFinalized, command)
+	if repository.workspaceFinishErr != nil {
+		return ToolCallMutationResult{}, repository.workspaceFinishErr
+	}
+	call := command.Call
+	if repository.workspaceCallMutator != nil {
+		repository.workspaceCallMutator(&call)
+	}
+	return ToolCallMutationResult{Call: call}, nil
+}
+
+func (repository *executionTestRepository) RecordWorkspaceAnalysisToolRefusal(
+	_ context.Context,
+	command RecordWorkspaceAnalysisToolRefusalCommand,
+) (WorkspaceAnalysisToolRefusalResult, error) {
+	repository.workspaceRefusals = append(repository.workspaceRefusals, command)
+	if repository.workspaceRefusalErr != nil {
+		return WorkspaceAnalysisToolRefusalResult{}, repository.workspaceRefusalErr
+	}
+	return WorkspaceAnalysisToolRefusalResult{
+		RefusalID: command.RefusalID, ErrorCode: command.ErrorCode, Replayed: repository.workspaceRefusalReplay,
+	}, nil
 }
 
 func (repository *executionTestRepository) MarkUnknown(ctx context.Context, command MarkUnknownCommand) (ToolCallMutationResult, error) {
@@ -538,6 +673,490 @@ func TestExecutionServiceReplaysCanonicalResultReceiptWithoutSecondExecute(t *te
 	}
 }
 
+func TestExecutionServicePersistsAndReplaysOptInCanonicalReceiptFromRepository(t *testing.T) {
+	contract := workspaceAnalysisSearchExecutionContract()
+	executor := &executionTestExecutor{result: ExecutorResult{
+		Output: json.RawMessage(`{"degradations":[],"effective_mode":"hybrid","items":[]}`),
+		PrivateBinding: &ExecutorPrivateBinding{
+			Schema:   domain.SchemaRef{ID: "tool.search_knowledge.private_binding", Version: 1},
+			Document: json.RawMessage(`{"items":[],"selected_refs":[]}`),
+		},
+	}}
+	service, repository, _ := newExecutionTestService(t, contract, executor)
+	command := executionTestCommand(contract.Definition.Ref.Name, json.RawMessage(`{}`))
+	command.Invocation = domain.InvocationSourceTrustedWorkflow
+
+	first, err := service.Execute(context.Background(), command)
+	if err != nil {
+		t.Fatalf("first Execute: %v", err)
+	}
+	if first.Replayed || executor.calls != 1 || len(repository.finalized) != 0 || len(repository.receiptFinalized) != 1 ||
+		first.Call.Status != domain.CallSucceeded || first.ResultReceiptID != repository.receipt.ID ||
+		string(first.Output) != string(repository.receipt.Output) {
+		t.Fatalf("first=%+v execute=%d legacy=%d receipt=%d", first, executor.calls, len(repository.finalized), len(repository.receiptFinalized))
+	}
+	if repository.receipt.PrivateBinding == nil || repository.receipt.PrivateBinding.Schema != executor.result.PrivateBinding.Schema {
+		t.Fatalf("persisted receipt binding=%v", repository.receipt.PrivateBinding)
+	}
+
+	repository.startResult = &StartCallResult{Call: first.Call, Disposition: StartCallReplayed}
+	second, err := service.Execute(context.Background(), command)
+	if err != nil {
+		t.Fatalf("replay Execute: %v", err)
+	}
+	if !second.Replayed || executor.calls != 1 || repository.receiptLoads != 1 ||
+		second.ResultReceiptID != repository.receipt.ID || string(second.Output) != string(repository.receipt.Output) ||
+		len(repository.receiptFinalized) != 1 {
+		t.Fatalf("second=%+v execute=%d loads=%d finalizations=%d", second, executor.calls, repository.receiptLoads, len(repository.receiptFinalized))
+	}
+}
+
+func TestExecutionServiceReturnsNoCanonicalOutputWhenReceiptFinalizationIsUnknown(t *testing.T) {
+	contract := workspaceAnalysisSearchExecutionContract()
+	executor := &executionTestExecutor{result: ExecutorResult{
+		Output: json.RawMessage(`{"degradations":[],"effective_mode":"hybrid","items":[]}`),
+		PrivateBinding: &ExecutorPrivateBinding{
+			Schema:   domain.SchemaRef{ID: "tool.search_knowledge.private_binding", Version: 1},
+			Document: json.RawMessage(`{"items":[],"selected_refs":[]}`),
+		},
+	}}
+	service, repository, _ := newExecutionTestService(t, contract, executor)
+	repository.receiptFinalizeErr = foundation.NewError(
+		foundation.ErrorManualRecoveryRequired,
+		"TOOL_RESULT_RECEIPT_FINALIZATION_UNKNOWN",
+		false,
+		errors.New("commit response was lost"),
+	)
+	command := executionTestCommand(contract.Definition.Ref.Name, json.RawMessage(`{}`))
+	command.Invocation = domain.InvocationSourceTrustedWorkflow
+
+	result, err := service.Execute(context.Background(), command)
+	if errorCode(err) != "TOOL_RESULT_RECEIPT_FINALIZATION_UNKNOWN" || len(result.Output) != 0 ||
+		len(repository.unknown) != 0 || len(repository.finalized) != 0 || len(repository.receiptFinalized) != 1 {
+		t.Fatalf("result=%+v error=%v unknown=%d legacy=%d receipt=%d",
+			result, err, len(repository.unknown), len(repository.finalized), len(repository.receiptFinalized))
+	}
+}
+
+func TestExecutionServiceRejectsCanonicalReceiptFromDifferentCall(t *testing.T) {
+	contract := workspaceAnalysisSearchExecutionContract()
+	executor := &executionTestExecutor{result: ExecutorResult{
+		Output: json.RawMessage(`{"degradations":[],"effective_mode":"hybrid","items":[]}`),
+		PrivateBinding: &ExecutorPrivateBinding{
+			Schema:   domain.SchemaRef{ID: "tool.search_knowledge.private_binding", Version: 1},
+			Document: json.RawMessage(`{"items":[],"selected_refs":[]}`),
+		},
+	}}
+	service, repository, _ := newExecutionTestService(t, contract, executor)
+	repository.receiptCallMutator = func(call *domain.ToolCall) {
+		call.ID = "00000000-0000-4000-8000-000000000201"
+		call.WorkspaceID = "00000000-0000-4000-8000-000000000202"
+		call.WorkflowRunID = "00000000-0000-4000-8000-000000000203"
+		call.NodeRunID = "00000000-0000-4000-8000-000000000204"
+		call.NodeAttemptID = "00000000-0000-4000-8000-000000000205"
+	}
+	command := executionTestCommand(contract.Definition.Ref.Name, json.RawMessage(`{}`))
+	command.Invocation = domain.InvocationSourceTrustedWorkflow
+
+	result, err := service.Execute(context.Background(), command)
+	if errorCode(err) != errorCodeResultReplayUnavailable || len(result.Output) != 0 || executor.calls != 1 ||
+		len(repository.receiptFinalized) != 1 {
+		t.Fatalf("result=%+v error=%v execute=%d finalizations=%d",
+			result, err, executor.calls, len(repository.receiptFinalized))
+	}
+}
+
+func TestExecutionServiceWorkspaceAnalysisAuthorizesBeforeExecutorAndClosesCanonicalReceipt(t *testing.T) {
+	contract := workspaceAnalysisGitExecutionContract()
+	executor := &executionTestExecutor{result: ExecutorResult{Output: workspaceAnalysisGitExecutionOutput()}}
+	service, repository, policy := newExecutionTestService(t, contract, executor)
+	command := workspaceAnalysisGitExecutionCommand(policy)
+
+	result, err := service.ExecuteWorkspaceAnalysisTool(context.Background(), command)
+	if err != nil {
+		t.Fatalf("ExecuteWorkspaceAnalysisTool: %v", err)
+	}
+	if executor.calls != 1 || len(repository.workspaceAuthorized) != 1 || len(repository.started) != 0 ||
+		len(repository.receiptFinalized) != 1 || len(repository.workspaceFinalized) != 0 {
+		t.Fatalf("executor=%d authorized=%d generic_started=%d receipts=%d terminal=%d",
+			executor.calls, len(repository.workspaceAuthorized), len(repository.started),
+			len(repository.receiptFinalized), len(repository.workspaceFinalized))
+	}
+	authorized := repository.workspaceAuthorized[0]
+	if authorized.OperationKey != command.OperationKey || authorized.Call.Status != domain.CallStarted ||
+		authorized.Call.RequestHash == "" || authorized.Definition.Ref != contract.Definition.Ref ||
+		result.Call.Status != domain.CallSucceeded || result.OperationID != authorized.OperationID || result.Replayed ||
+		string(result.Output) != string(workspaceAnalysisGitExecutionOutput()) {
+		t.Fatalf("authorization=%+v result=%+v", authorized, result)
+	}
+	encoded, marshalErr := json.Marshal(result)
+	if marshalErr != nil || strings.Contains(string(encoded), string(authorized.OperationID)) {
+		t.Fatalf("result JSON leaked operation identity: %s err=%v", encoded, marshalErr)
+	}
+	var logs bytes.Buffer
+	slog.New(slog.NewJSONHandler(&logs, nil)).Info("tool result", "result", result)
+	if strings.Contains(logs.String(), string(authorized.OperationID)) {
+		t.Fatalf("result log leaked operation identity: %s", logs.String())
+	}
+}
+
+func TestExecutionServiceWorkspaceAnalysisFailureClosesOperationWithoutGenericFinalize(t *testing.T) {
+	contract := workspaceAnalysisGitExecutionContract()
+	executor := &executionTestExecutor{err: foundation.NewError(
+		foundation.ErrorRetryableFailure, "GIT_STATUS_TEMPORARY", true, errors.New("git unavailable"),
+	)}
+	service, repository, policy := newExecutionTestService(t, contract, executor)
+
+	command := workspaceAnalysisGitExecutionCommand(policy)
+	_, err := service.ExecuteWorkspaceAnalysisTool(context.Background(), command)
+	if errorCode(err) != "GIT_STATUS_TEMPORARY" || len(repository.workspaceFinalized) != 1 ||
+		repository.workspaceFinalized[0].Call.Status != domain.CallFailed ||
+		repository.workspaceFinalized[0].Call.ErrorCode != "GIT_STATUS_TEMPORARY" ||
+		len(repository.finalized) != 0 || len(repository.unknown) != 0 || len(repository.receiptFinalized) != 0 {
+		t.Fatalf("error=%v workspace_terminal=%+v generic_failed=%d generic_unknown=%d receipts=%d",
+			err, repository.workspaceFinalized, len(repository.finalized), len(repository.unknown), len(repository.receiptFinalized))
+	}
+	assertWorkspaceAnalysisTerminal(t, err, repository.workspaceAuthorized[0].OperationID, repository.workspaceFinalized[0].Call)
+
+	repository.workspaceAuthorize = &WorkspaceAnalysisToolAuthorizationResult{
+		Call:          repository.workspaceFinalized[0].Call,
+		OperationID:   repository.workspaceAuthorized[0].OperationID,
+		ReservationID: repository.workspaceAuthorized[0].ReservationID,
+		Disposition:   WorkspaceAnalysisToolAuthorizationReplayFailure,
+	}
+	_, replayErr := service.ExecuteWorkspaceAnalysisTool(context.Background(), command)
+	if errorCode(replayErr) != "GIT_STATUS_TEMPORARY" || executor.calls != 1 || len(repository.workspaceFinalized) != 1 {
+		t.Fatalf("replay error=%v executor=%d finalizations=%d", replayErr, executor.calls, len(repository.workspaceFinalized))
+	}
+	assertWorkspaceAnalysisTerminal(t, replayErr, repository.workspaceAuthorize.OperationID, repository.workspaceAuthorize.Call)
+}
+
+func TestExecutionServiceWorkspaceAnalysisRecordsDeterministicRefusalWithoutExecutorOrBudget(t *testing.T) {
+	tests := []struct {
+		name              string
+		configureContract func(*Contract)
+		mutate            func(*ExecuteWorkspaceAnalysisToolCommand)
+		configurePolicy   func(*executionTestPolicy)
+		wantCode          string
+	}{
+		{
+			name: "allowlist", wantCode: errorCodeToolNotAllowed,
+			mutate: func(command *ExecuteWorkspaceAnalysisToolCommand) { command.Tool.Request.ToolName = "UnregisteredTool" },
+		},
+		{
+			name: "invocation", wantCode: errorCodeInvocationDenied,
+			mutate: func(command *ExecuteWorkspaceAnalysisToolCommand) {
+				command.Tool.Invocation = domain.InvocationSourceModelRequest
+			},
+		},
+		{
+			name: "idempotency", wantCode: errorCodeIdempotencyUnexpected,
+			mutate: func(command *ExecuteWorkspaceAnalysisToolCommand) {
+				command.Tool.IdempotencyKey = "workspace-analysis:unexpected"
+			},
+		},
+		{
+			name: "capability", wantCode: errorCodePermissionDenied,
+			configurePolicy: func(policy *executionTestPolicy) {
+				policy.policy.Permissions = []capability.Capability{capability.ReadExternal}
+			},
+		},
+		{
+			name: "input", wantCode: errorCodeInputInvalid,
+			configureContract: func(contract *Contract) {
+				contract.DecodeInput = func([]byte) (json.RawMessage, error) {
+					return nil, errors.New("input contract rejected")
+				}
+			},
+			mutate: func(command *ExecuteWorkspaceAnalysisToolCommand) {
+				command.Tool.Request.Arguments = json.RawMessage(`{"unexpected":true}`)
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			contract := workspaceAnalysisGitExecutionContract()
+			if test.configureContract != nil {
+				test.configureContract(&contract)
+			}
+			executor := &executionTestExecutor{result: ExecutorResult{Output: workspaceAnalysisGitExecutionOutput()}}
+			service, repository, policy := newExecutionTestService(t, contract, executor)
+			command := workspaceAnalysisGitExecutionCommand(policy)
+			if test.configurePolicy != nil {
+				test.configurePolicy(policy)
+			}
+			if test.mutate != nil {
+				test.mutate(&command)
+			}
+
+			_, err := service.ExecuteWorkspaceAnalysisTool(context.Background(), command)
+			if errorCode(err) != test.wantCode || executor.calls != 0 || len(repository.workspaceRefusals) != 1 ||
+				len(repository.workspaceAuthorized) != 0 || len(repository.workspaceFinalized) != 0 || len(repository.receiptFinalized) != 0 {
+				t.Fatalf("error=%v executor=%d refusals=%d authorized=%d finalized=%d receipts=%d",
+					err, executor.calls, len(repository.workspaceRefusals), len(repository.workspaceAuthorized), len(repository.workspaceFinalized), len(repository.receiptFinalized))
+			}
+			refusal := repository.workspaceRefusals[0]
+			if refusal.ErrorCode != test.wantCode || refusal.OperationKey != command.OperationKey || refusal.Identity != command.Tool.Identity {
+				t.Fatalf("refusal=%+v", refusal)
+			}
+			if refusal.RefusalID == "" || strings.Contains(fmt.Sprintf("%+v", refusal), string(command.Tool.Request.Arguments)) ||
+				strings.Contains(fmt.Sprintf("%+v", refusal), command.Tool.Request.Reason) {
+				t.Fatalf("refusal leaked request material: %+v", refusal)
+			}
+
+			repository.workspaceRefusalReplay = true
+			_, replayErr := service.ExecuteWorkspaceAnalysisTool(context.Background(), command)
+			if errorCode(replayErr) != test.wantCode || executor.calls != 0 || len(repository.workspaceRefusals) != 2 ||
+				len(repository.workspaceAuthorized) != 0 || len(repository.workspaceFinalized) != 0 {
+				t.Fatalf("replay=%v executor=%d refusals=%d authorized=%d finalized=%d",
+					replayErr, executor.calls, len(repository.workspaceRefusals), len(repository.workspaceAuthorized), len(repository.workspaceFinalized))
+			}
+		})
+	}
+}
+
+func TestExecutionServiceWorkspaceAnalysisNeverAuditsStaleOrExecutorFailuresAsRefusal(t *testing.T) {
+	t.Run("stale", func(t *testing.T) {
+		service, repository, policy := newExecutionTestService(t, workspaceAnalysisGitExecutionContract(), &executionTestExecutor{})
+		policy.err = foundation.NewError(foundation.ErrorVersionConflict, "TOOL_CONTEXT_STALE", false, errors.New("lease expired"))
+		_, err := service.ExecuteWorkspaceAnalysisTool(context.Background(), workspaceAnalysisGitExecutionCommand(policy))
+		if errorCode(err) != "TOOL_CONTEXT_STALE" || len(repository.workspaceRefusals) != 0 || len(repository.workspaceAuthorized) != 0 {
+			t.Fatalf("error=%v refusals=%d authorized=%d", err, len(repository.workspaceRefusals), len(repository.workspaceAuthorized))
+		}
+	})
+	t.Run("executor", func(t *testing.T) {
+		executor := &executionTestExecutor{err: errors.New("git execution failed")}
+		service, repository, policy := newExecutionTestService(t, workspaceAnalysisGitExecutionContract(), executor)
+		_, err := service.ExecuteWorkspaceAnalysisTool(context.Background(), workspaceAnalysisGitExecutionCommand(policy))
+		if errorCode(err) != errorCodeExecutionFailed || executor.calls != 1 || len(repository.workspaceRefusals) != 0 ||
+			len(repository.workspaceAuthorized) != 1 || len(repository.workspaceFinalized) != 1 {
+			t.Fatalf("error=%v executor=%d refusals=%d authorized=%d finalized=%d", err, executor.calls, len(repository.workspaceRefusals), len(repository.workspaceAuthorized), len(repository.workspaceFinalized))
+		}
+	})
+}
+
+func TestExecutionServiceWorkspaceAnalysisReplaysPersistedReceiptWithoutSecondExecutor(t *testing.T) {
+	contract := workspaceAnalysisGitExecutionContract()
+	executor := &executionTestExecutor{result: ExecutorResult{Output: workspaceAnalysisGitExecutionOutput()}}
+	service, repository, policy := newExecutionTestService(t, contract, executor)
+	command := workspaceAnalysisGitExecutionCommand(policy)
+
+	first, err := service.ExecuteWorkspaceAnalysisTool(context.Background(), command)
+	if err != nil {
+		t.Fatalf("first ExecuteWorkspaceAnalysisTool: %v", err)
+	}
+	firstAuthorization := repository.workspaceAuthorized[0]
+	repository.workspaceAuthorize = &WorkspaceAnalysisToolAuthorizationResult{
+		Call: first.Call, OperationID: firstAuthorization.OperationID, ReservationID: firstAuthorization.ReservationID,
+		Disposition: WorkspaceAnalysisToolAuthorizationReuseResult,
+	}
+	second, err := service.ExecuteWorkspaceAnalysisTool(context.Background(), command)
+	if err != nil {
+		t.Fatalf("replay ExecuteWorkspaceAnalysisTool: %v", err)
+	}
+	if !second.Replayed || executor.calls != 1 || len(repository.workspaceAuthorized) != 2 ||
+		len(repository.receiptFinalized) != 1 || repository.receiptLoads != 1 ||
+		second.OperationID != firstAuthorization.OperationID || string(second.Output) != string(first.Output) {
+		t.Fatalf("second=%+v executor=%d authorized=%d finalizations=%d loads=%d",
+			second, executor.calls, len(repository.workspaceAuthorized), len(repository.receiptFinalized), repository.receiptLoads)
+	}
+}
+
+func TestExecutionServiceWorkspaceAnalysisUnknownAndReplayCarryTerminalEvidence(t *testing.T) {
+	contract := workspaceAnalysisGitExecutionContract()
+	executor := &executionTestExecutor{err: foundation.NewError(
+		foundation.ErrorManualRecoveryRequired, "GIT_STATUS_UNCERTAIN", false, errors.New("git outcome is unknown"),
+	)}
+	service, repository, policy := newExecutionTestService(t, contract, executor)
+	command := workspaceAnalysisGitExecutionCommand(policy)
+
+	_, err := service.ExecuteWorkspaceAnalysisTool(context.Background(), command)
+	if errorCode(err) != errorCodeOutcomeUnknown || len(repository.workspaceFinalized) != 1 ||
+		repository.workspaceFinalized[0].Call.Status != domain.CallUnknown {
+		t.Fatalf("error=%v finalizations=%+v", err, repository.workspaceFinalized)
+	}
+	assertWorkspaceAnalysisTerminal(t, err, repository.workspaceAuthorized[0].OperationID, repository.workspaceFinalized[0].Call)
+
+	repository.workspaceAuthorize = &WorkspaceAnalysisToolAuthorizationResult{
+		Call:          repository.workspaceFinalized[0].Call,
+		OperationID:   repository.workspaceAuthorized[0].OperationID,
+		ReservationID: repository.workspaceAuthorized[0].ReservationID,
+		Disposition:   WorkspaceAnalysisToolAuthorizationTerminateUnknown,
+	}
+	_, replayErr := service.ExecuteWorkspaceAnalysisTool(context.Background(), command)
+	if errorCode(replayErr) != errorCodeOutcomeUnknown || executor.calls != 1 || len(repository.workspaceFinalized) != 1 {
+		t.Fatalf("replay error=%v executor=%d finalizations=%d", replayErr, executor.calls, len(repository.workspaceFinalized))
+	}
+	assertWorkspaceAnalysisTerminal(t, replayErr, repository.workspaceAuthorize.OperationID, repository.workspaceAuthorize.Call)
+}
+
+func TestExecutionServiceWorkspaceAnalysisDoesNotForgeTerminalEvidence(t *testing.T) {
+	t.Run("authorization failure", func(t *testing.T) {
+		service, repository, policy := newExecutionTestService(t, workspaceAnalysisGitExecutionContract(), &executionTestExecutor{})
+		repository.workspaceAuthErr = errors.New("authorization unavailable")
+		_, err := service.ExecuteWorkspaceAnalysisTool(context.Background(), workspaceAnalysisGitExecutionCommand(policy))
+		if _, found := WorkspaceAnalysisToolTerminalFromError(err); found {
+			t.Fatalf("authorization error carries terminal evidence: %v", err)
+		}
+	})
+	t.Run("receipt finalization uncertain", func(t *testing.T) {
+		service, repository, policy := newExecutionTestService(t, workspaceAnalysisGitExecutionContract(), &executionTestExecutor{result: ExecutorResult{Output: workspaceAnalysisGitExecutionOutput()}})
+		repository.receiptFinalizeErr = errors.New("commit response lost")
+		_, err := service.ExecuteWorkspaceAnalysisTool(context.Background(), workspaceAnalysisGitExecutionCommand(policy))
+		if _, found := WorkspaceAnalysisToolTerminalFromError(err); found {
+			t.Fatalf("receipt finalization error carries terminal evidence: %v", err)
+		}
+	})
+	t.Run("terminal mutation drift", func(t *testing.T) {
+		service, repository, policy := newExecutionTestService(t, workspaceAnalysisGitExecutionContract(), &executionTestExecutor{err: errors.New("git failed")})
+		repository.workspaceCallMutator = func(call *domain.ToolCall) { call.ErrorCode = "DIFFERENT_TERMINAL" }
+		_, err := service.ExecuteWorkspaceAnalysisTool(context.Background(), workspaceAnalysisGitExecutionCommand(policy))
+		if errorCode(err) != errorCodeFinalizationUnknown {
+			t.Fatalf("error=%v", err)
+		}
+		if _, found := WorkspaceAnalysisToolTerminalFromError(err); found {
+			t.Fatalf("terminal drift carries terminal evidence: %v", err)
+		}
+	})
+	t.Run("canonical receipt operation drift", func(t *testing.T) {
+		service, repository, policy := newExecutionTestService(t, workspaceAnalysisGitExecutionContract(), &executionTestExecutor{result: ExecutorResult{Output: workspaceAnalysisGitExecutionOutput()}})
+		wrongOperationID := foundation.ID("00000000-0000-4000-8000-000000000399")
+		repository.receiptOperationID = &wrongOperationID
+		_, err := service.ExecuteWorkspaceAnalysisTool(context.Background(), workspaceAnalysisGitExecutionCommand(policy))
+		if errorCode(err) != errorCodeFinalizationUnknown {
+			t.Fatalf("error=%v", err)
+		}
+		if _, found := WorkspaceAnalysisToolTerminalFromError(err); found {
+			t.Fatalf("receipt operation drift carries terminal evidence: %v", err)
+		}
+	})
+}
+
+func TestWorkspaceAnalysisToolTerminalIsSafeAndPreservesFoundationError(t *testing.T) {
+	contract := workspaceAnalysisGitExecutionContract()
+	cause := foundation.NewError(foundation.ErrorRetryableFailure, "GIT_STATUS_TEMPORARY", true, errors.New("git unavailable"))
+	service, repository, policy := newExecutionTestService(t, contract, &executionTestExecutor{err: cause})
+	_, err := service.ExecuteWorkspaceAnalysisTool(context.Background(), workspaceAnalysisGitExecutionCommand(policy))
+	terminal, found := WorkspaceAnalysisToolTerminalFromError(err)
+	if !found {
+		t.Fatalf("missing terminal evidence: %v", err)
+	}
+	var classified *foundation.Error
+	if !errors.As(err, &classified) || classified.Kind != foundation.ErrorRetryableFailure || classified.Code != "GIT_STATUS_TEMPORARY" || !classified.Retryable {
+		t.Fatalf("classified error=%+v err=%v", classified, err)
+	}
+	encoded, marshalErr := json.Marshal(terminal)
+	if marshalErr != nil || string(encoded) != "{}" {
+		t.Fatalf("terminal JSON=%s err=%v", encoded, marshalErr)
+	}
+	formatted := fmt.Sprint(terminal) + fmt.Sprintf("%#v", terminal)
+	var logs bytes.Buffer
+	slog.New(slog.NewJSONHandler(&logs, nil)).Info("terminal", "terminal", terminal)
+	for _, secret := range []string{string(terminal.OperationID), string(terminal.CallID), repository.workspaceFinalized[0].Call.RequestHash} {
+		if strings.Contains(formatted, secret) || strings.Contains(logs.String(), secret) {
+			t.Fatalf("terminal evidence leaked %q through safe projection", secret)
+		}
+	}
+}
+
+func TestExecutionServiceLegacyResultKeepsWorkspaceOperationIDEmpty(t *testing.T) {
+	service, _, _ := newExecutionTestService(t, testContract("SearchKnowledge", 1), &executionTestExecutor{result: ExecutorResult{Output: json.RawMessage(`{}`)}})
+	result, err := service.Execute(context.Background(), executionTestCommand("SearchKnowledge", json.RawMessage(`{}`)))
+	if err != nil || result.OperationID != "" {
+		t.Fatalf("result=%+v error=%v", result, err)
+	}
+}
+
+func assertWorkspaceAnalysisTerminal(t *testing.T, err error, operationID foundation.ID, call domain.ToolCall) {
+	t.Helper()
+	terminal, found := WorkspaceAnalysisToolTerminalFromError(err)
+	if !found || terminal.OperationID != operationID || terminal.CallID != call.ID ||
+		terminal.CallStatus != call.Status || terminal.ErrorCode != call.ErrorCode {
+		t.Fatalf("terminal=%+v found=%t call=%+v error=%v", terminal, found, call, err)
+	}
+}
+
+func TestExecutionServiceWorkspaceAnalysisStartedReplayNeverReentersExecutor(t *testing.T) {
+	contract := workspaceAnalysisGitExecutionContract()
+	executor := &executionTestExecutor{result: ExecutorResult{Output: workspaceAnalysisGitExecutionOutput()}}
+	service, repository, policy := newExecutionTestService(t, contract, executor)
+	command := workspaceAnalysisGitExecutionCommand(policy)
+	prepared, err := service.prepareToolExecution(context.Background(), command.Tool, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := service.startedCall(command.Tool, prepared.contract, prepared.arguments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository.workspaceAuthorize = &WorkspaceAnalysisToolAuthorizationResult{
+		Call:          started,
+		OperationID:   "00000000-0000-4000-8000-000000000301",
+		ReservationID: "00000000-0000-4000-8000-000000000302",
+		Disposition:   WorkspaceAnalysisToolAuthorizationReconcile,
+	}
+
+	_, err = service.ExecuteWorkspaceAnalysisTool(context.Background(), command)
+	if errorCode(err) != errorCodeCallInProgress || executor.calls != 0 || len(repository.receiptFinalized) != 0 ||
+		len(repository.workspaceFinalized) != 0 {
+		t.Fatalf("error=%v executor=%d receipts=%d terminal=%d",
+			err, executor.calls, len(repository.receiptFinalized), len(repository.workspaceFinalized))
+	}
+	if _, found := WorkspaceAnalysisToolTerminalFromError(err); found {
+		t.Fatalf("reconcile error carries terminal evidence: %v", err)
+	}
+}
+
+func TestExecutionServiceWorkspaceAnalysisRejectsAuthorizationBindingDrift(t *testing.T) {
+	contract := workspaceAnalysisGitExecutionContract()
+	executor := &executionTestExecutor{result: ExecutorResult{Output: workspaceAnalysisGitExecutionOutput()}}
+	service, repository, policy := newExecutionTestService(t, contract, executor)
+	command := workspaceAnalysisGitExecutionCommand(policy)
+	prepared, err := service.prepareToolExecution(context.Background(), command.Tool, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := service.startedCall(command.Tool, prepared.contract, prepared.arguments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started.RequestHash = strings.Repeat("f", 64)
+	repository.workspaceAuthorize = &WorkspaceAnalysisToolAuthorizationResult{
+		Call:          started,
+		OperationID:   "00000000-0000-4000-8000-000000000301",
+		ReservationID: "00000000-0000-4000-8000-000000000302",
+		Disposition:   WorkspaceAnalysisToolAuthorizationReconcile,
+	}
+
+	_, err = service.ExecuteWorkspaceAnalysisTool(context.Background(), command)
+	if errorCode(err) != errorCodeWorkspaceAnalysisAuthorizationInvalid || executor.calls != 0 ||
+		len(repository.receiptFinalized) != 0 || len(repository.workspaceFinalized) != 0 {
+		t.Fatalf("error=%v executor=%d receipts=%d terminal=%d",
+			err, executor.calls, len(repository.receiptFinalized), len(repository.workspaceFinalized))
+	}
+	if _, found := WorkspaceAnalysisToolTerminalFromError(err); found {
+		t.Fatalf("authorization drift carries terminal evidence: %v", err)
+	}
+}
+
+func TestExecutionServiceRejectsPrivateBindingForLegacyDefinition(t *testing.T) {
+	contract := testContract("SearchKnowledge", 1)
+	executor := &executionTestExecutor{result: ExecutorResult{
+		Output: json.RawMessage(`{}`),
+		PrivateBinding: &ExecutorPrivateBinding{
+			Schema:   domain.SchemaRef{ID: "tool.search_knowledge.private_binding", Version: 1},
+			Document: json.RawMessage(`{"items":[]}`),
+		},
+	}}
+	service, repository, _ := newExecutionTestService(t, contract, executor)
+
+	_, err := service.Execute(context.Background(), executionTestCommand(contract.Definition.Ref.Name, json.RawMessage(`{}`)))
+	if errorCode(err) != errorCodeOutputInvalid || executor.calls != 1 || len(repository.receiptFinalized) != 0 ||
+		len(repository.finalized) != 1 || repository.finalized[0].Status != domain.CallFailed {
+		t.Fatalf("error=%v execute=%d receipt=%d finalized=%+v", err, executor.calls, len(repository.receiptFinalized), repository.finalized)
+	}
+}
+
 func TestExecutionServiceRejectsAmbiguousAllowedVersions(t *testing.T) {
 	contract := testContract("SearchKnowledge", 1)
 	executor := &executionTestExecutor{result: ExecutorResult{Output: json.RawMessage(`{}`)}}
@@ -623,6 +1242,64 @@ func trustedWriteExecutionContract() Contract {
 	contract.Definition.IdempotencyMode = domain.IdempotencyRequired
 	contract.Definition.AllowedWorkflows = []domain.WorkflowBinding{{Key: "change-control.safe-writeback", Version: 1}}
 	return contract
+}
+
+func workspaceAnalysisSearchExecutionContract() Contract {
+	contract := testContract("SearchKnowledge", 2)
+	contract.Definition.OutputSchema = domain.SchemaRef{ID: "tool.search_knowledge.output", Version: 2}
+	contract.Definition.RequiredCapability = capability.ReadLocal
+	contract.Definition.SideEffectLevel = domain.SideEffectNone
+	contract.Definition.InvocationPolicy = domain.InvocationTrustedWorkflowOnly
+	contract.Definition.ResultPersistencePolicy = domain.ResultPersistenceCanonical
+	contract.Definition.AllowedWorkflows = []domain.WorkflowBinding{{Key: "workspace-analysis", Version: 1}}
+	contract.Definition.MaxOutputBytes = domain.SearchKnowledgeV2ReceiptMaxOutputBytes
+	return contract
+}
+
+func workspaceAnalysisGitExecutionContract() Contract {
+	contract := testContract("ReadGitStatus", 2)
+	contract.Definition.InputSchema = domain.SchemaRef{ID: "tool.read_git_status.input", Version: 1}
+	contract.Definition.OutputSchema = domain.SchemaRef{ID: "tool.read_git_status.output", Version: 1}
+	contract.Definition.RequiredCapability = capability.ReadLocal
+	contract.Definition.SideEffectLevel = domain.SideEffectNone
+	contract.Definition.InvocationPolicy = domain.InvocationTrustedWorkflowOnly
+	contract.Definition.ResultPersistencePolicy = domain.ResultPersistenceCanonical
+	contract.Definition.Timeout = 10 * time.Second
+	contract.Definition.AllowedWorkflows = []domain.WorkflowBinding{{Key: "workspace-analysis", Version: 1}}
+	contract.Definition.MaxInputBytes = 4 * 1024
+	contract.Definition.MaxOutputBytes = domain.ReadGitStatusV2ReceiptMaxOutputBytes
+	return contract
+}
+
+func workspaceAnalysisGitExecutionCommand(policy *executionTestPolicy) ExecuteWorkspaceAnalysisToolCommand {
+	identity := executionTestIdentity()
+	identity.NodeKey = string(agentdomain.WorkspaceAnalysisOperationNodeInspectWorkspace)
+	policy.policy.Identity = identity
+	policy.policy.WorkflowKey = "workspace-analysis"
+	policy.policy.NodeKind = "agent.workspace-analysis.inspect_workspace"
+	policy.policy.Permissions = []capability.Capability{capability.ReadLocal}
+	policy.policy.AllowedTools = []domain.ToolRef{{Name: "ReadGitStatus", Version: 2}}
+	return ExecuteWorkspaceAnalysisToolCommand{
+		OperationKey: agentdomain.WorkspaceAnalysisOperationKey{
+			AnalysisRunID: "00000000-0000-4000-8000-000000000006",
+			NodeKey:       agentdomain.WorkspaceAnalysisOperationNodeInspectWorkspace,
+			Kind:          agentdomain.WorkspaceAnalysisOperationGitStatus,
+			Ordinal:       1,
+		},
+		Tool: ExecuteToolCommand{
+			Identity: identity, Invocation: domain.InvocationSourceTrustedWorkflow, CallNo: 1,
+			Request: domain.ToolRequestV1{
+				SchemaVersion: domain.ToolRequestSchemaVersionV1,
+				ToolName:      "ReadGitStatus",
+				Arguments:     json.RawMessage(`{}`),
+				Reason:        "inspect workspace git aggregate",
+			},
+		},
+	}
+}
+
+func workspaceAnalysisGitExecutionOutput() json.RawMessage {
+	return json.RawMessage(`{"branch":"main","clean":true,"conflict_count":0,"head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","object_format":"sha1","staged_count":0,"unstaged_count":0,"untracked_count":0}`)
 }
 
 func leftPad12(value int) string {

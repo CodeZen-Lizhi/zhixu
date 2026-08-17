@@ -192,6 +192,81 @@ func TestAIRuntimeMetricsAcceptOnlyStableBoundedLabels(t *testing.T) {
 	}
 }
 
+func TestWorkspaceAnalysisOutcomeMetricUsesOnlyFixedLowCardinalityLabels(t *testing.T) {
+	labels, err := NewLabels(map[string]string{
+		"mode":               "workspace_analysis",
+		"definition":         "workspace-analysis-v1",
+		"outcome":            "failure",
+		"termination_reason": "WORKSPACE_ANALYSIS_BUDGET_EXHAUSTED",
+	})
+	if err != nil {
+		t.Fatalf("NewLabels: %v", err)
+	}
+	measurement, err := NewMeasurement(MetricWorkspaceAnalysisOutcomeTotal, MetricKindCounter, 1, labels)
+	if err != nil {
+		t.Fatalf("NewMeasurement: %v", err)
+	}
+	if err := NewNoopMetrics().Record(context.Background(), measurement); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	for name, values := range map[string]map[string]string{
+		"workspace identity": {
+			"mode": "workspace_analysis", "definition": "workspace-analysis-v1", "outcome": "failure",
+			"termination_reason": "WORKSPACE_ANALYSIS_BUDGET_EXHAUSTED", "workspace_id": "10000000-0000-4000-8000-000000000001",
+		},
+		"run identity": {
+			"mode": "workspace_analysis", "definition": "workspace-analysis-v1", "outcome": "failure",
+			"termination_reason": "WORKSPACE_ANALYSIS_BUDGET_EXHAUSTED", "run_id": "10000000-0000-4000-8000-000000000002",
+		},
+		"unknown definition": {
+			"mode": "workspace_analysis", "definition": "workspace-analysis-v2", "outcome": "failure",
+			"termination_reason": "WORKSPACE_ANALYSIS_BUDGET_EXHAUSTED",
+		},
+		"unknown reason": {
+			"mode": "workspace_analysis", "definition": "workspace-analysis-v1", "outcome": "failure",
+			"termination_reason": "WORKSPACE_ANALYSIS_PROVIDER_1234567890",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := NewLabels(values); !errors.Is(err, ErrUnboundedMetricLabel) {
+				t.Fatalf("NewLabels error = %v, want %v", err, ErrUnboundedMetricLabel)
+			}
+		})
+	}
+
+	missing, err := NewLabels(map[string]string{"mode": "workspace_analysis", "definition": "workspace-analysis-v1", "outcome": "failure"})
+	if err != nil {
+		t.Fatalf("NewLabels missing: %v", err)
+	}
+	if err := (Measurement{Name: MetricWorkspaceAnalysisOutcomeTotal, Kind: MetricKindCounter, Value: 1, Labels: missing}).Validate(); !errors.Is(err, ErrInvalidMetric) {
+		t.Fatalf("Validate missing termination reason error = %v, want %v", err, ErrInvalidMetric)
+	}
+
+	for _, test := range []struct {
+		status string
+		reason string
+		want   string
+	}{
+		{status: "succeeded", reason: "COMPLETED", want: "completed"},
+		{status: "refused", reason: "WORKSPACE_ANALYSIS_CITATION_INVALID", want: "refused"},
+		{status: "clarification_required", reason: "WORKSPACE_ANALYSIS_CLARIFICATION_REQUIRED", want: "clarification_required"},
+		{status: "failed", reason: "WORKSPACE_ANALYSIS_RESULT_UNKNOWN", want: "failure"},
+		{status: "failed", reason: "WORKSPACE_ANALYSIS_RUNTIME_FAILED", want: "failure"},
+		{status: "cancelled", reason: "WORKSPACE_ANALYSIS_CANCELLED", want: "cancelled"},
+	} {
+		measurement, err := NewWorkspaceAnalysisOutcomeMeasurement(test.status, test.reason)
+		if err != nil || measurement.Labels.Map()["outcome"] != test.want {
+			t.Fatalf("status=%q reason=%q measurement=%+v err=%v", test.status, test.reason, measurement, err)
+		}
+	}
+	for _, test := range [][2]string{{"running", "COMPLETED"}, {"succeeded", "WORKSPACE_ANALYSIS_RESULT_UNKNOWN"}, {"completed", "WORKSPACE_ANALYSIS_RUNTIME_FAILED"}, {"failed", "WORKSPACE_ANALYSIS_CITATION_INVALID"}} {
+		if _, err := NewWorkspaceAnalysisOutcomeMeasurement(test[0], test[1]); !errors.Is(err, ErrInvalidMetric) {
+			t.Fatalf("status=%q reason=%q error=%v, want invalid metric", test[0], test[1], err)
+		}
+	}
+}
+
 func TestModelMetricsAllowAgentAndAnswerPhasesOnly(t *testing.T) {
 	for _, phase := range []string{"AGENT", "ANSWER"} {
 		t.Run(phase, func(t *testing.T) {

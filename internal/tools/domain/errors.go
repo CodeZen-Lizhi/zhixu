@@ -19,6 +19,14 @@ const (
 	ErrorCodeIdempotencyBindingInvalid = "TOOL_IDEMPOTENCY_BINDING_INVALID"
 	// ErrorCodeExecutionIdentityInvalid 表示服务端执行身份不完整。
 	ErrorCodeExecutionIdentityInvalid = "TOOL_EXECUTION_IDENTITY_INVALID"
+	// ErrorCodeResultReceiptInvalid 表示 canonical Tool 结果回执不满足冻结契约。
+	ErrorCodeResultReceiptInvalid = "TOOL_RESULT_RECEIPT_INVALID"
+	// ErrorCodeResultReceiptBindingConflict 表示回执与权威 Call 或 Definition 发生漂移。
+	ErrorCodeResultReceiptBindingConflict = "TOOL_RESULT_RECEIPT_BINDING_CONFLICT"
+	// ErrorCodeResultReceiptFailureInvalid 表示 Tool 结果回执失败事实不满足冻结契约。
+	ErrorCodeResultReceiptFailureInvalid = "TOOL_RESULT_RECEIPT_FAILURE_INVALID"
+	// ErrorCodeResultReceiptFailureBindingConflict 表示失败事实与权威 Call 或 Definition 发生漂移。
+	ErrorCodeResultReceiptFailureBindingConflict = "TOOL_RESULT_RECEIPT_FAILURE_BINDING_CONFLICT"
 )
 
 func invalid(code, message string) error {

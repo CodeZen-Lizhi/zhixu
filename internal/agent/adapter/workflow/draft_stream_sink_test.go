@@ -30,6 +30,9 @@ func TestRAGDraftStreamSinkPersistsInOrderAndCompletes(t *testing.T) {
 	if session.Status != agentapplication.DraftStreamCompleted || store.status() != agentapplication.DraftStreamCompleted || strings.Join(store.contents(), "") != "first second third" {
 		t.Fatalf("session=%+v status=%s contents=%q", session, store.status(), store.contents())
 	}
+	if ttl := store.beginTTL(); ttl != ragDraftStreamTTL {
+		t.Fatalf("RAG draft TTL = %s, want %s", ttl, ragDraftStreamTTL)
+	}
 }
 
 func TestRAGDraftStreamSinkPersistsFirstProviderFrameSeparately(t *testing.T) {
@@ -184,6 +187,7 @@ type draftStreamStoreFake struct {
 	appendRelease  chan struct{}
 	waitForContext bool
 	startOnce      sync.Once
+	beginCommand   agentapplication.BeginDraftStreamCommand
 }
 
 func newDraftStreamStoreFake() *draftStreamStoreFake {
@@ -204,9 +208,10 @@ func draftStreamTestBinding() agentapplication.DraftStreamBinding {
 	}
 }
 
-func (store *draftStreamStoreFake) BeginDraftStream(context.Context, agentapplication.BeginDraftStreamCommand) (agentapplication.DraftStreamSession, error) {
+func (store *draftStreamStoreFake) BeginDraftStream(_ context.Context, command agentapplication.BeginDraftStreamCommand) (agentapplication.DraftStreamSession, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	store.beginCommand = command
 	return store.session, nil
 }
 
@@ -285,6 +290,12 @@ func (store *draftStreamStoreFake) contents() []string {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	return append([]string(nil), store.appended...)
+}
+
+func (store *draftStreamStoreFake) beginTTL() time.Duration {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	return store.beginCommand.TTL
 }
 
 func awaitDraftStatus(t *testing.T, store *draftStreamStoreFake, want agentapplication.DraftStreamStatus) {

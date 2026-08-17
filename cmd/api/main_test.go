@@ -162,7 +162,7 @@ func TestAPIHasAllToolContractsWithoutExecutors(t *testing.T) {
 		t.Fatal(err)
 	}
 	contracts, err := toolcatalog.Contracts()
-	if err != nil || len(contracts) != 13 {
+	if err != nil || len(contracts) != 17 {
 		t.Fatalf("contracts=%d err=%v", len(contracts), err)
 	}
 	for _, expected := range contracts {
@@ -215,6 +215,8 @@ func TestAPIWorkflowRegistrationExposesAgentDefinitionOnlyWhenChatEnabled(t *tes
 			}
 			definition, resolveErr := definitions.Resolve(agentworkflow.RelationAssessmentDefinitionKey, agentworkflow.RelationAssessmentDefinitionVersion)
 			ragDefinition, ragResolveErr := definitions.Resolve(conversationworkflow.DefinitionKey, conversationworkflow.DefinitionVersion)
+			workspaceAnalysisDefinition := conversationworkflow.RegisteredWorkspaceAnalysisDefinition()
+			workspaceAnalysis, workspaceAnalysisResolveErr := definitions.Resolve(workspaceAnalysisDefinition.Key, workspaceAnalysisDefinition.Version)
 			if test.enabled {
 				if resolveErr != nil || len(definition.Graph.Nodes) != 1 || definition.Graph.Nodes[0].Kind != agentworkflow.RelationAssessmentNodeKind ||
 					!executors.SupportsContract(agentworkflow.RelationAssessmentNodeKind, agentworkflow.RelationAssessmentInputSchemaVersion) {
@@ -228,6 +230,14 @@ func TestAPIWorkflowRegistrationExposesAgentDefinitionOnlyWhenChatEnabled(t *tes
 				t.Fatalf("disabled chat exposed agent definition=%+v err=%v", definition, resolveErr)
 			} else if ragResolveErr == nil || executors.SupportsContract(conversationworkflow.NodeKind, conversationworkflow.InputSchemaVersion) {
 				t.Fatalf("disabled chat exposed rag definition=%+v err=%v", ragDefinition, ragResolveErr)
+			}
+			if workspaceAnalysisResolveErr == nil {
+				t.Fatalf("generic API exposed internal workspace analysis definition=%+v", workspaceAnalysis)
+			}
+			for _, node := range workspaceAnalysisDefinition.Graph.Nodes {
+				if executors.SupportsContract(node.Kind, node.InputSchemaVersion) {
+					t.Fatalf("generic API exposed internal workspace analysis node contract %s@%d", node.Kind, node.InputSchemaVersion)
+				}
 			}
 		})
 	}
@@ -365,6 +375,12 @@ func TestAPIRegistersAgentDefinitionContractWithoutFakeExecutorWhenChatEnabled(t
 	if _, err := executors.Resolve(conversationworkflow.NodeKind, conversationworkflow.InputSchemaVersion); err == nil {
 		t.Fatal("api constructed a fake RAG executor")
 	}
+	workspaceAnalysis := conversationworkflow.RegisteredWorkspaceAnalysisDefinition()
+	for _, node := range workspaceAnalysis.Graph.Nodes {
+		if executors.SupportsContract(node.Kind, node.InputSchemaVersion) {
+			t.Fatalf("generic API exposed internal workspace analysis node contract %s@%d", node.Kind, node.InputSchemaVersion)
+		}
+	}
 	toolContracts, err := newToolContractRegistry()
 	if err != nil {
 		t.Fatal(err)
@@ -390,6 +406,9 @@ func TestAPIRegistersAgentDefinitionContractWithoutFakeExecutorWhenChatEnabled(t
 	}
 	if _, err := definitions.Resolve(conversationworkflow.DefinitionKey, conversationworkflow.DefinitionVersionV1); err == nil {
 		t.Fatal("api exposed historical v1 RAG definition for new starts")
+	}
+	if resolvedWorkspaceAnalysis, resolveErr := definitions.Resolve(workspaceAnalysis.Key, workspaceAnalysis.Version); resolveErr == nil {
+		t.Fatalf("generic API exposed internal workspace analysis definition=%+v", resolvedWorkspaceAnalysis)
 	}
 	var classified *foundation.Error
 	_, resolveErr := executors.Resolve(agentworkflow.RelationAssessmentNodeKind, agentworkflow.RelationAssessmentInputSchemaVersion)

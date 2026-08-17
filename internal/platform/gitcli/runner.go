@@ -15,16 +15,18 @@ import (
 const defaultCommandOutputLimit = 4 << 20
 
 var (
-	errCommandOutputLimit     = errors.New("git command output exceeds limit")
-	errCommandIndexFileUnsafe = errors.New("git command index file is unsafe")
+	errCommandOutputLimit      = errors.New("git command output exceeds limit")
+	errCommandIndexFileUnsafe  = errors.New("git command index file is unsafe")
+	errCommandConfigHomeUnsafe = errors.New("git command config home is unsafe")
 )
 
-// commandOptions 描述受限 Git 命令执行策略；调用方只能选择读写模式、标准输入和输出上限。
+// commandOptions 描述受限 Git 命令执行策略；隔离目录必须由进程创建并独占。
 type commandOptions struct {
-	ReadOnly       bool
-	Stdin          io.Reader
-	MaxOutputBytes int
-	IndexFile      string
+	ReadOnly          bool
+	Stdin             io.Reader
+	MaxOutputBytes    int
+	IndexFile         string
+	IsolatedConfigDir string
 }
 
 // commandResult 保留命令的有界输出和退出码，供同包 Git Adapter 做稳定语义解析。
@@ -41,6 +43,13 @@ func (c Client) runCommand(ctx context.Context, rootPath string, options command
 	}
 	if options.IndexFile != "" && (!filepath.IsAbs(options.IndexFile) || filepath.Clean(options.IndexFile) != options.IndexFile || strings.ContainsAny(options.IndexFile, "\x00\r\n")) {
 		return commandResult{ExitCode: -1}, errCommandIndexFileUnsafe
+	}
+	if options.IsolatedConfigDir != "" {
+		info, err := os.Lstat(options.IsolatedConfigDir)
+		if err != nil || !filepath.IsAbs(options.IsolatedConfigDir) || filepath.Clean(options.IsolatedConfigDir) != options.IsolatedConfigDir ||
+			strings.ContainsAny(options.IsolatedConfigDir, "\x00\r\n") || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
+			return commandResult{ExitCode: -1}, errCommandConfigHomeUnsafe
+		}
 	}
 	limit := options.MaxOutputBytes
 	if limit <= 0 {
@@ -66,7 +75,7 @@ func (c Client) runCommand(ctx context.Context, rootPath string, options command
 	}
 	commandArgs = append(commandArgs, args...)
 	command := exec.CommandContext(runContext, c.executable, commandArgs...)
-	command.Env = commandEnvironment(options.ReadOnly, options.IndexFile)
+	command.Env = commandEnvironmentWithConfig(options.ReadOnly, options.IndexFile, options.IsolatedConfigDir)
 	command.Stdin = options.Stdin
 	command.Stdout = stdout
 	command.Stderr = stderr
@@ -97,13 +106,18 @@ func (c Client) runCommand(ctx context.Context, rootPath string, options command
 }
 
 func commandEnvironment(readOnly bool, indexFile string) []string {
+	return commandEnvironmentWithConfig(readOnly, indexFile, "")
+}
+
+func commandEnvironmentWithConfig(readOnly bool, indexFile, isolatedConfigDir string) []string {
 	environment := make([]string, 0, len(os.Environ())+6)
 	for _, entry := range os.Environ() {
 		name, _, found := strings.Cut(entry, "=")
 		if !found {
 			continue
 		}
-		if strings.HasPrefix(name, "GIT_") || name == "LC_ALL" || name == "LANG" {
+		if strings.HasPrefix(name, "GIT_") || name == "LC_ALL" || name == "LANG" ||
+			isolatedConfigDir != "" && (name == "HOME" || name == "XDG_CONFIG_HOME") {
 			continue
 		}
 		environment = append(environment, entry)
@@ -121,6 +135,15 @@ func commandEnvironment(readOnly bool, indexFile string) []string {
 	}
 	if indexFile != "" {
 		environment = append(environment, "GIT_INDEX_FILE="+indexFile)
+	}
+	if isolatedConfigDir != "" {
+		environment = append(environment,
+			"HOME="+isolatedConfigDir,
+			"XDG_CONFIG_HOME="+isolatedConfigDir,
+			"GIT_CONFIG_NOSYSTEM=1",
+			"GIT_CONFIG_GLOBAL="+os.DevNull,
+			"GIT_ATTR_NOSYSTEM=1",
+		)
 	}
 	return environment
 }

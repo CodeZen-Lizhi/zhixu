@@ -36,7 +36,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const expectedOpenAPIOperationCount = 188
+const expectedOpenAPIOperationCount = 189
 
 var openAPIOperationMethods = map[string]struct{}{
 	"delete":  {},

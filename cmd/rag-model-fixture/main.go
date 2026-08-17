@@ -23,12 +23,17 @@ import (
 )
 
 const (
-	defaultAddress      = "127.0.0.1:18080"
-	defaultModelVersion = "rag-smoke-v1"
-	maxRequestBytes     = 4 << 20
-	fixtureFinalAnswer  = "Approved recovery requires durable replay without duplicate provider work."
-	defaultBarrierPoll  = 50 * time.Millisecond
-	defaultBarrierWait  = 2 * time.Minute
+	defaultAddress                               = "127.0.0.1:18080"
+	defaultModelVersion                          = "rag-smoke-v1"
+	maxRequestBytes                              = 4 << 20
+	maxWorkspaceAnalysisFixtureExcerptBytes      = 4 << 10
+	fixtureFinalAnswer                           = "Approved recovery requires durable replay without duplicate provider work."
+	fixtureWorkspaceAnalysisCandidate            = "The supplied workspace evidence supports this bounded fixture result [E1]."
+	workspaceAnalysisCandidateResponseSchemaName = "zhixu_workspace_analysis_candidate_v1"
+	defaultBarrierPoll                           = 50 * time.Millisecond
+	defaultBarrierWait                           = 2 * time.Minute
+	fixtureBarrierTokenBytes                     = 16
+	maxFixtureAnswerStreamFrameDelay             = 5 * time.Second
 )
 
 type schemaContract struct {
@@ -42,22 +47,38 @@ type fixtureContractError struct {
 	message string
 }
 
-// fixtureBarrier is an opt-in process-local drain witness. It never changes
+// fixtureBarrier is an opt-in smoke-local drain witness. It never changes
 // the default fixture behavior; a blocked request is released only by an
 // explicitly created file, so a smoke cannot claim quiescence by timeout.
 type fixtureBarrier struct {
-	stage       string
-	releasePath string
-	maxWait     time.Duration
-	poll        time.Duration
+	stage             string
+	releasePath       string
+	enteredPath       string
+	settledPath       string
+	armedPath         string
+	lockPath          string
+	maxWait           time.Duration
+	poll              time.Duration
+	afterClaimForTest func()
 }
 
-func (barrier fixtureBarrier) wait(ctx context.Context, stage string) error {
+type fixtureHandlerConfig struct {
+	barrier                fixtureBarrier
+	answerStreamFrameDelay time.Duration
+}
+
+func (barrier fixtureBarrier) wait(ctx context.Context, stage string) (waitErr error) {
 	if ctx == nil {
 		return fixtureError("barrier_context_invalid", "fixture barrier context is unavailable")
 	}
-	if barrier.stage == "" || barrier.releasePath == "" || barrier.stage != stage {
+	if barrier.stage == "" || barrier.stage != stage {
 		return nil
+	}
+	if barrier.releasePath == "" || barrier.enteredPath == "" || barrier.settledPath == "" || barrier.armedPath == "" || barrier.lockPath == "" ||
+		barrier.releasePath == barrier.enteredPath || barrier.releasePath == barrier.settledPath || barrier.releasePath == barrier.armedPath ||
+		barrier.releasePath == barrier.lockPath || barrier.enteredPath == barrier.settledPath || barrier.enteredPath == barrier.armedPath ||
+		barrier.enteredPath == barrier.lockPath || barrier.settledPath == barrier.armedPath || barrier.settledPath == barrier.lockPath || barrier.armedPath == barrier.lockPath {
+		return fixtureError("barrier_configuration_invalid", "fixture barrier configuration is unavailable")
 	}
 	if barrier.maxWait <= 0 {
 		barrier.maxWait = defaultBarrierWait
@@ -65,14 +86,41 @@ func (barrier fixtureBarrier) wait(ctx context.Context, stage string) error {
 	if barrier.poll <= 0 {
 		barrier.poll = defaultBarrierPoll
 	}
-	log.Printf("rag model fixture barrier waiting stage=%s release=%s", stage, filepath.Base(barrier.releasePath))
 	deadline := time.Now().Add(barrier.maxWait)
+	if err := barrier.acquireClaim(ctx, deadline); err != nil {
+		return err
+	}
+	defer func() {
+		if err := os.Remove(barrier.lockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			waitErr = errors.Join(waitErr, fixtureError("barrier_lock_unavailable", "fixture barrier claim lock could not be released"))
+		}
+	}()
+	token, err := readFixtureBarrierToken(barrier.armedPath)
+	if err != nil {
+		return err
+	}
+	if barrier.afterClaimForTest != nil {
+		barrier.afterClaimForTest()
+	}
+	if err := writeFixtureBarrierAcknowledgement(barrier.enteredPath, token, "entered"); err != nil {
+		return err
+	}
+	// This defer runs before the claim-release defer above, so re-arm can only
+	// observe a generation after its settled acknowledgement is durable.
+	defer func() {
+		if err := writeFixtureBarrierAcknowledgement(barrier.settledPath, token, "settled"); err != nil {
+			waitErr = errors.Join(waitErr, err)
+		}
+	}()
+	log.Printf("rag model fixture barrier waiting stage=%s release=%s", stage, filepath.Base(barrier.releasePath))
 	for {
-		if _, err := os.Stat(barrier.releasePath); err == nil {
+		releasedToken, found, err := readOptionalFixtureBarrierToken(barrier.releasePath)
+		if err != nil {
+			return err
+		}
+		if found && releasedToken == token {
 			log.Printf("rag model fixture barrier released stage=%s", stage)
 			return nil
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return fixtureError("barrier_release_unavailable", "fixture barrier release path is unavailable")
 		}
 		if time.Now().After(deadline) {
 			return fixtureError("barrier_timeout", "fixture barrier release timed out")
@@ -85,6 +133,98 @@ func (barrier fixtureBarrier) wait(ctx context.Context, stage string) error {
 		case <-timer.C:
 		}
 	}
+}
+
+func (barrier fixtureBarrier) acquireClaim(ctx context.Context, deadline time.Time) error {
+	for {
+		err := os.Mkdir(barrier.lockPath, 0o700)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return fixtureError("barrier_lock_unavailable", "fixture barrier claim lock is unavailable")
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if time.Now().After(deadline) {
+			return fixtureError("barrier_lock_timeout", "fixture barrier claim lock timed out")
+		}
+		timer := time.NewTimer(barrier.poll)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func readFixtureBarrierToken(path string) (string, error) {
+	token, found, err := readOptionalFixtureBarrierToken(path)
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return "", fixtureError("barrier_armed_unavailable", "fixture barrier generation is unavailable")
+	}
+	return token, nil
+}
+
+func readOptionalFixtureBarrierToken(path string) (string, bool, error) {
+	file, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fixtureError("barrier_release_unavailable", "fixture barrier release path is unavailable")
+	}
+	defer file.Close()
+	encoded, err := io.ReadAll(io.LimitReader(file, fixtureBarrierTokenBytes*2+2))
+	if err != nil {
+		return "", false, fixtureError("barrier_release_unavailable", "fixture barrier release path is unavailable")
+	}
+	token := strings.TrimSuffix(string(encoded), "\n")
+	if len(encoded) != fixtureBarrierTokenBytes*2+1 || !validFixtureBarrierToken(token) {
+		return "", false, nil
+	}
+	return token, true, nil
+}
+
+func validFixtureBarrierToken(token string) bool {
+	if len(token) != fixtureBarrierTokenBytes*2 {
+		return false
+	}
+	for _, character := range token {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func writeFixtureBarrierAcknowledgement(path, token, acknowledgement string) error {
+	if !validFixtureBarrierToken(token) {
+		return fixtureError("barrier_armed_unavailable", "fixture barrier generation is unavailable")
+	}
+	if acknowledgement != "entered" && acknowledgement != "settled" {
+		return fixtureError("barrier_acknowledgement_invalid", "fixture barrier acknowledgement is invalid")
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return fixtureError("barrier_"+acknowledgement+"_conflict", "fixture barrier "+acknowledgement+" acknowledgement already exists")
+		}
+		return fixtureError("barrier_"+acknowledgement+"_unavailable", "fixture barrier "+acknowledgement+" acknowledgement is unavailable")
+	}
+	if _, err := file.WriteString(token + "\n"); err != nil {
+		_ = file.Close()
+		return fixtureError("barrier_"+acknowledgement+"_unavailable", "fixture barrier "+acknowledgement+" acknowledgement is unavailable")
+	}
+	if err := file.Close(); err != nil {
+		return fixtureError("barrier_"+acknowledgement+"_unavailable", "fixture barrier "+acknowledgement+" acknowledgement is unavailable")
+	}
+	return nil
 }
 
 func (err *fixtureContractError) Error() string { return err.message }
@@ -169,8 +309,21 @@ func main() {
 	if apiKey == "" {
 		log.Fatal("ZHIXU_RAG_FIXTURE_API_KEY must be set")
 	}
-	barrier := fixtureBarrier{stage: os.Getenv("ZHIXU_RAG_FIXTURE_BARRIER_STAGE"), releasePath: os.Getenv("ZHIXU_RAG_FIXTURE_BARRIER_RELEASE_FILE")}
-	handler := newHandlerWithBarrier(envOr("ZHIXU_RAG_FIXTURE_MODEL_VERSION", defaultModelVersion), apiKey, barrier)
+	barrier := fixtureBarrier{
+		stage:       os.Getenv("ZHIXU_RAG_FIXTURE_BARRIER_STAGE"),
+		releasePath: os.Getenv("ZHIXU_RAG_FIXTURE_BARRIER_RELEASE_FILE"),
+		enteredPath: os.Getenv("ZHIXU_RAG_FIXTURE_BARRIER_ENTERED_FILE"),
+		settledPath: os.Getenv("ZHIXU_RAG_FIXTURE_BARRIER_SETTLED_FILE"),
+		armedPath:   os.Getenv("ZHIXU_RAG_FIXTURE_BARRIER_ARMED_FILE"),
+		lockPath:    os.Getenv("ZHIXU_RAG_FIXTURE_BARRIER_LOCK_DIR"),
+	}
+	answerStreamFrameDelay, err := parseFixtureAnswerStreamFrameDelay(os.Getenv("ZHIXU_RAG_FIXTURE_ANSWER_STREAM_FRAME_DELAY_MS"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	handler := newHandlerWithConfig(envOr("ZHIXU_RAG_FIXTURE_MODEL_VERSION", defaultModelVersion), apiKey, fixtureHandlerConfig{
+		barrier: barrier, answerStreamFrameDelay: answerStreamFrameDelay,
+	})
 	server := &http.Server{Addr: address, Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 	log.Printf("rag model fixture listening on %s", address)
 	if err := server.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
@@ -179,10 +332,14 @@ func main() {
 }
 
 func newHandler(modelVersion, apiKey string) http.Handler {
-	return newHandlerWithBarrier(modelVersion, apiKey, fixtureBarrier{})
+	return newHandlerWithConfig(modelVersion, apiKey, fixtureHandlerConfig{})
 }
 
 func newHandlerWithBarrier(modelVersion, apiKey string, barrier fixtureBarrier) http.Handler {
+	return newHandlerWithConfig(modelVersion, apiKey, fixtureHandlerConfig{barrier: barrier})
+}
+
+func newHandlerWithConfig(modelVersion, apiKey string, config fixtureHandlerConfig) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -192,7 +349,7 @@ func newHandlerWithBarrier(modelVersion, apiKey string, barrier fixtureBarrier) 
 		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
-		serveChatWithBarrier(w, r, modelVersion, apiKey, barrier)
+		serveChatWithConfig(w, r, modelVersion, apiKey, config)
 	})
 	return mux
 }
@@ -202,6 +359,10 @@ func serveChat(w http.ResponseWriter, r *http.Request, modelVersion, apiKey stri
 }
 
 func serveChatWithBarrier(w http.ResponseWriter, r *http.Request, modelVersion, apiKey string, barrier fixtureBarrier) {
+	serveChatWithConfig(w, r, modelVersion, apiKey, fixtureHandlerConfig{barrier: barrier})
+}
+
+func serveChatWithConfig(w http.ResponseWriter, r *http.Request, modelVersion, apiKey string, config fixtureHandlerConfig) {
 	if r.Method != http.MethodPost {
 		rejectFixture(w, "request", "method_not_allowed", "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -231,26 +392,46 @@ func serveChatWithBarrier(w http.ResponseWriter, r *http.Request, modelVersion, 
 		rejectFixture(w, fixtureRequestStage(request), "request_contract_unsupported", "unsupported request contract", http.StatusBadRequest)
 		return
 	}
-	if err := barrier.wait(r.Context(), fixtureRequestStage(request)); err != nil {
-		rejectFixtureContract(w, fixtureRequestStage(request), err, http.StatusGatewayTimeout)
-		return
-	}
+	stage := fixtureRequestStage(request)
+	log.Printf("rag model fixture request stage=%s", stage)
 	if request.Stream {
-		if err := validateStreamRequest(request); err != nil {
-			rejectFixtureContract(w, "answer_stream", err, http.StatusUnprocessableEntity)
+		workspaceCandidate, err := validateStreamRequest(request)
+		if err != nil {
+			rejectFixtureContract(w, stage, err, http.StatusUnprocessableEntity)
 			return
 		}
-		serveFinalAnswerStream(w, modelVersion)
+		if workspaceCandidate {
+			evidenceRefs, inputErr := workspaceAnalysisCandidateFixtureInput(request.Messages)
+			if inputErr != nil {
+				rejectFixtureContract(w, stage, inputErr, http.StatusUnprocessableEntity)
+				return
+			}
+			if err := config.barrier.wait(r.Context(), stage); err != nil {
+				rejectFixtureContract(w, stage, err, http.StatusGatewayTimeout)
+				return
+			}
+			serveWorkspaceAnalysisCandidateStream(w, modelVersion, evidenceRefs[0])
+			return
+		}
+		if err := config.barrier.wait(r.Context(), stage); err != nil {
+			rejectFixtureContract(w, stage, err, http.StatusGatewayTimeout)
+			return
+		}
+		serveFinalAnswerStream(r.Context(), w, modelVersion, config.answerStreamFrameDelay)
+		return
+	}
+	if err := config.barrier.wait(r.Context(), stage); err != nil {
+		rejectFixtureContract(w, stage, err, http.StatusGatewayTimeout)
 		return
 	}
 	if request.ResponseFormat.Type == "json_schema" {
 		if err := serveStructuredChat(w, request, modelVersion); err != nil {
-			rejectFixtureContract(w, fixtureRequestStage(request), err, http.StatusUnprocessableEntity)
+			rejectFixtureContract(w, stage, err, http.StatusUnprocessableEntity)
 		}
 		return
 	}
 	if err := serveAgentChat(w, request, modelVersion); err != nil {
-		rejectFixtureContract(w, fixtureRequestStage(request), err, http.StatusUnprocessableEntity)
+		rejectFixtureContract(w, stage, err, http.StatusUnprocessableEntity)
 	}
 }
 
@@ -276,6 +457,9 @@ func fixtureError(reason, message string) error {
 
 func fixtureRequestStage(request chatRequest) string {
 	if request.Stream {
+		if request.ResponseFormat.JSONSchema.Name == workspaceAnalysisCandidateResponseSchemaName {
+			return "workspace_analysis_candidate_stream"
+		}
 		return "answer_stream"
 	}
 	if request.ResponseFormat.Type == "json_schema" {
@@ -329,7 +513,15 @@ func serveStructuredChat(w http.ResponseWriter, request chatRequest, modelVersio
 		if _, leaked := input["model_run_ref"]; leaked {
 			return fixtureError("query_plan_identity_leaked", "query plan provider input contains server identity")
 		}
-		writeCompletion(w, modelVersion, `{"i":"answer from approved recovery evidence","r":["approved recovery"],"d":"","q":"","s":[]}`, nil, "stop")
+		workspaceAnalysis, err := validateWorkspaceAnalysisPlannerFixtureInput(input)
+		if err != nil {
+			return err
+		}
+		content := `{"i":"answer from approved recovery evidence","r":["approved recovery"],"d":"","q":"","s":[]}`
+		if workspaceAnalysis {
+			content = workspaceAnalysisPlannerFixtureResponse(input)
+		}
+		writeCompletion(w, modelVersion, content, nil, "stop")
 		return nil
 	}
 	var schema taskSchema
@@ -343,6 +535,9 @@ func serveStructuredChat(w http.ResponseWriter, request chatRequest, modelVersio
 	}
 	if _, ok := supportedSchemas[contract]; !ok {
 		return fixtureError("structured_schema_unsupported", "unsupported task schema")
+	}
+	if contract.resultType == "faithfulness_review" && !isFaithfulnessReviewSchema(request.ResponseFormat.JSONSchema.Schema) {
+		return fixtureError("faithfulness_review_schema_unsupported", "unsupported faithfulness review schema")
 	}
 	input, err := lastTaskInput(request.Messages)
 	if err != nil {
@@ -378,48 +573,193 @@ func isModelSettingsConnectionSchema(raw json.RawMessage) bool {
 }
 
 func isQueryPlanProviderSchemaV2(raw json.RawMessage) bool {
-	var schema struct {
-		Type                 string                     `json:"type"`
-		AdditionalProperties *bool                      `json:"additionalProperties"`
-		Required             []string                   `json:"required"`
-		Properties           map[string]json.RawMessage `json:"properties"`
-	}
-	if json.Unmarshal(raw, &schema) != nil || schema.Type != "object" || schema.AdditionalProperties == nil ||
-		*schema.AdditionalProperties || len(schema.Required) != 5 || len(schema.Properties) != 5 {
+	var schema map[string]json.RawMessage
+	if json.Unmarshal(raw, &schema) != nil || !hasExactJSONKeys(schema, "type", "additionalProperties", "required", "properties") ||
+		!jsonRawEquals(schema["type"], "object") || !jsonRawEquals(schema["additionalProperties"], false) ||
+		!hasExactJSONStringSet(schema["required"], "i", "r", "d", "q", "s") {
 		return false
 	}
-	required := map[string]struct{}{"i": {}, "r": {}, "d": {}, "q": {}, "s": {}}
-	for _, field := range schema.Required {
-		if _, ok := required[field]; !ok {
-			return false
-		}
-		delete(required, field)
-	}
-	if len(required) != 0 {
+	var properties map[string]json.RawMessage
+	if json.Unmarshal(schema["properties"], &properties) != nil || !hasExactJSONKeys(properties, "i", "r", "d", "q", "s") ||
+		!hasExactStringSchema(properties["i"], 1, 512) || !hasExactStringSchema(properties["d"], 0, 512) ||
+		!hasExactStringSchema(properties["q"], 0, 1024) {
 		return false
 	}
-	for _, field := range []string{"i", "d", "q"} {
-		if !schemaPropertyHasType(schema.Properties[field], "string") {
-			return false
-		}
+	return hasExactProviderStringArraySchema(properties["r"], 0, 3, 512) && hasExactProviderStringArraySchema(properties["s"], 0, 10, 256)
+}
+
+func hasExactProviderStringArraySchema(raw json.RawMessage, minItems, maxItems, maxLength int) bool {
+	var property struct {
+		Type     string          `json:"type"`
+		MinItems int             `json:"minItems"`
+		MaxItems int             `json:"maxItems"`
+		Items    json.RawMessage `json:"items"`
 	}
-	for _, field := range []string{"r", "s"} {
-		var property struct {
-			Type  string          `json:"type"`
-			Items json.RawMessage `json:"items"`
-		}
-		if json.Unmarshal(schema.Properties[field], &property) != nil || property.Type != "array" || !schemaPropertyHasType(property.Items, "string") {
+	return json.Unmarshal(raw, &property) == nil && property.Type == "array" && property.MinItems == minItems &&
+		property.MaxItems == maxItems && hasExactStringSchema(property.Items, 1, maxLength)
+}
+
+func isWorkspaceAnalysisCandidateProviderSchema(raw json.RawMessage) bool {
+	var root map[string]json.RawMessage
+	if json.Unmarshal(raw, &root) != nil || !hasExactJSONKeys(root, "type", "additionalProperties", "required", "properties") ||
+		!jsonRawEquals(root["type"], "object") || !jsonRawEquals(root["additionalProperties"], false) ||
+		!hasExactJSONStringSet(root["required"], "result_type", "schema_id", "schema_version", "payload") {
+		return false
+	}
+	var properties map[string]json.RawMessage
+	if json.Unmarshal(root["properties"], &properties) != nil || !hasExactJSONKeys(properties, "result_type", "schema_id", "schema_version", "payload") ||
+		!jsonRawEquals(properties["result_type"], map[string]any{"const": "workspace_analysis_candidate"}) ||
+		!jsonRawEquals(properties["schema_id"], map[string]any{"const": "agent.workspace-analysis-candidate"}) ||
+		!jsonRawEquals(properties["schema_version"], map[string]any{"const": "1"}) {
+		return false
+	}
+	var payload map[string]json.RawMessage
+	if json.Unmarshal(properties["payload"], &payload) != nil || !hasExactJSONKeys(payload, "type", "additionalProperties", "required", "properties") ||
+		!jsonRawEquals(payload["type"], "object") || !jsonRawEquals(payload["additionalProperties"], false) ||
+		!hasExactJSONStringSet(payload["required"], "answer_markdown", "citation_refs", "proposal_suggestion") {
+		return false
+	}
+	var payloadProperties map[string]json.RawMessage
+	if json.Unmarshal(payload["properties"], &payloadProperties) != nil || !hasExactJSONKeys(payloadProperties, "answer_markdown", "citation_refs", "proposal_suggestion") ||
+		!hasExactStringSchema(payloadProperties["answer_markdown"], 1, 64*1024) ||
+		!hasWorkspaceAnalysisCitationRefsSchema(payloadProperties["citation_refs"]) {
+		return false
+	}
+	return hasWorkspaceAnalysisProposalSchema(payloadProperties["proposal_suggestion"])
+}
+
+func isFaithfulnessReviewSchema(raw json.RawMessage) bool {
+	var root map[string]json.RawMessage
+	if json.Unmarshal(raw, &root) != nil || !hasExactJSONKeys(root, "type", "additionalProperties", "required", "properties") ||
+		!jsonRawEquals(root["type"], "object") || !jsonRawEquals(root["additionalProperties"], false) ||
+		!hasExactJSONStringSet(root["required"], "result_type", "schema_id", "schema_version", "model_run_ref", "payload") {
+		return false
+	}
+	var properties map[string]json.RawMessage
+	if json.Unmarshal(root["properties"], &properties) != nil || !hasExactJSONKeys(properties, "result_type", "schema_id", "schema_version", "model_run_ref", "payload") ||
+		!jsonRawEquals(properties["result_type"], map[string]any{"const": "faithfulness_review"}) ||
+		!jsonRawEquals(properties["schema_id"], map[string]any{"const": "agent.faithfulness-review"}) ||
+		!jsonRawEquals(properties["schema_version"], map[string]any{"const": "v1"}) ||
+		!jsonRawEquals(properties["model_run_ref"], map[string]any{"type": "string", "format": "uuid"}) {
+		return false
+	}
+	var payload map[string]json.RawMessage
+	if json.Unmarshal(properties["payload"], &payload) != nil || !hasExactJSONKeys(payload, "type", "additionalProperties", "required", "properties") ||
+		!jsonRawEquals(payload["type"], "object") || !jsonRawEquals(payload["additionalProperties"], false) ||
+		!hasExactJSONStringSet(payload["required"], "passed", "items", "summary") {
+		return false
+	}
+	var payloadProperties map[string]json.RawMessage
+	if json.Unmarshal(payload["properties"], &payloadProperties) != nil || !hasExactJSONKeys(payloadProperties, "passed", "items", "summary") ||
+		!jsonRawEquals(payloadProperties["passed"], map[string]any{"type": "boolean"}) || !hasExactStringSchema(payloadProperties["summary"], 1, 4096) {
+		return false
+	}
+	return hasFaithfulnessReviewItemsSchema(payloadProperties["items"])
+}
+
+func hasFaithfulnessReviewItemsSchema(raw json.RawMessage) bool {
+	var items struct {
+		Type     string          `json:"type"`
+		MinItems int             `json:"minItems"`
+		MaxItems int             `json:"maxItems"`
+		Items    json.RawMessage `json:"items"`
+	}
+	if json.Unmarshal(raw, &items) != nil || items.Type != "array" || items.MinItems != 1 || items.MaxItems != 500 {
+		return false
+	}
+	var item map[string]json.RawMessage
+	if json.Unmarshal(items.Items, &item) != nil || !hasExactJSONKeys(item, "type", "additionalProperties", "required", "properties") ||
+		!jsonRawEquals(item["type"], "object") || !jsonRawEquals(item["additionalProperties"], false) ||
+		!hasExactJSONStringSet(item["required"], "assertion_id", "verdict", "citation_ids", "reason") {
+		return false
+	}
+	var properties map[string]json.RawMessage
+	return json.Unmarshal(item["properties"], &properties) == nil && hasExactJSONKeys(properties, "assertion_id", "verdict", "citation_ids", "reason") &&
+		hasExactStringSchema(properties["assertion_id"], 1, 128) &&
+		jsonRawEquals(properties["verdict"], map[string]any{"type": "string", "enum": []string{"SUPPORTED", "UNSUPPORTED", "INFERENCE_DISCLOSED"}}) &&
+		hasExactProviderStringArraySchema(properties["citation_ids"], 0, 500, 128) && hasExactStringSchema(properties["reason"], 1, 2048)
+}
+
+func hasWorkspaceAnalysisProposalSchema(raw json.RawMessage) bool {
+	var variants struct {
+		AnyOf []json.RawMessage `json:"anyOf"`
+	}
+	if json.Unmarshal(raw, &variants) != nil || len(variants.AnyOf) != 2 || !jsonRawEquals(variants.AnyOf[0], map[string]any{"type": "null"}) {
+		return false
+	}
+	var proposal map[string]json.RawMessage
+	if json.Unmarshal(variants.AnyOf[1], &proposal) != nil || !hasExactJSONKeys(proposal, "type", "additionalProperties", "required", "properties") ||
+		!jsonRawEquals(proposal["type"], "object") || !jsonRawEquals(proposal["additionalProperties"], false) ||
+		!hasExactJSONStringSet(proposal["required"], "summary", "citation_refs") {
+		return false
+	}
+	var properties map[string]json.RawMessage
+	return json.Unmarshal(proposal["properties"], &properties) == nil && hasExactJSONKeys(properties, "summary", "citation_refs") &&
+		hasExactStringSchema(properties["summary"], 1, 4*1024) && hasWorkspaceAnalysisCitationRefsSchema(properties["citation_refs"])
+}
+
+func hasWorkspaceAnalysisCitationRefsSchema(raw json.RawMessage) bool {
+	var refs struct {
+		Type     string          `json:"type"`
+		MinItems int             `json:"minItems"`
+		MaxItems int             `json:"maxItems"`
+		Items    json.RawMessage `json:"items"`
+	}
+	if json.Unmarshal(raw, &refs) != nil || refs.Type != "array" || refs.MinItems != 1 || refs.MaxItems != 3 {
+		return false
+	}
+	var item struct {
+		Type string   `json:"type"`
+		Enum []string `json:"enum"`
+	}
+	return json.Unmarshal(refs.Items, &item) == nil && item.Type == "string" && len(item.Enum) == 3 &&
+		item.Enum[0] == "E1" && item.Enum[1] == "E2" && item.Enum[2] == "E3"
+}
+
+func hasExactStringSchema(raw json.RawMessage, minLength, maxLength int) bool {
+	var property struct {
+		Type      string `json:"type"`
+		MinLength int    `json:"minLength"`
+		MaxLength int    `json:"maxLength"`
+	}
+	return json.Unmarshal(raw, &property) == nil && property.Type == "string" && property.MinLength == minLength && property.MaxLength == maxLength
+}
+
+func hasExactJSONKeys(values map[string]json.RawMessage, keys ...string) bool {
+	if len(values) != len(keys) {
+		return false
+	}
+	for _, key := range keys {
+		if _, ok := values[key]; !ok {
 			return false
 		}
 	}
 	return true
 }
 
-func schemaPropertyHasType(raw json.RawMessage, expected string) bool {
-	var property struct {
-		Type string `json:"type"`
+func hasExactJSONStringSet(raw json.RawMessage, expected ...string) bool {
+	var values []string
+	if json.Unmarshal(raw, &values) != nil || len(values) != len(expected) {
+		return false
 	}
-	return json.Unmarshal(raw, &property) == nil && property.Type == expected
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		seen[value] = struct{}{}
+	}
+	if len(seen) != len(expected) {
+		return false
+	}
+	for _, value := range expected {
+		if _, ok := seen[value]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func jsonRawEquals(raw json.RawMessage, expected any) bool {
+	encoded, err := json.Marshal(expected)
+	return err == nil && bytes.Equal(bytes.TrimSpace(raw), encoded)
 }
 
 func serveAgentChat(w http.ResponseWriter, request chatRequest, modelVersion string) error {
@@ -462,15 +802,23 @@ func serveAgentChat(w http.ResponseWriter, request chatRequest, modelVersion str
 	return nil
 }
 
-func validateStreamRequest(request chatRequest) error {
-	if request.ResponseFormat.Type != "" || request.ResponseFormat.JSONSchema.Strict || request.StreamOptions == nil || !request.StreamOptions.IncludeUsage ||
-		len(request.Tools) != 0 || !hasExactToolChoice(request.ToolChoice, "none") {
-		return fixtureError("answer_stream_contract_unsupported", "unsupported stream request contract")
+func validateStreamRequest(request chatRequest) (bool, error) {
+	if request.StreamOptions == nil || !request.StreamOptions.IncludeUsage || len(request.Tools) != 0 ||
+		!hasExactToolChoice(request.ToolChoice, "none") {
+		return false, fixtureError("answer_stream_contract_unsupported", "unsupported stream request contract")
 	}
-	return nil
+	if request.ResponseFormat.Type == "" && !request.ResponseFormat.JSONSchema.Strict && request.ResponseFormat.JSONSchema.Name == "" &&
+		len(request.ResponseFormat.JSONSchema.Schema) == 0 {
+		return false, nil
+	}
+	if request.ResponseFormat.Type != "json_schema" || request.ResponseFormat.JSONSchema.Name != workspaceAnalysisCandidateResponseSchemaName ||
+		!request.ResponseFormat.JSONSchema.Strict || !isWorkspaceAnalysisCandidateProviderSchema(request.ResponseFormat.JSONSchema.Schema) {
+		return false, fixtureError("workspace_analysis_candidate_stream_contract_unsupported", "unsupported workspace analysis candidate stream contract")
+	}
+	return true, nil
 }
 
-func serveFinalAnswerStream(w http.ResponseWriter, modelVersion string) {
+func serveFinalAnswerStream(ctx context.Context, w http.ResponseWriter, modelVersion string, frameDelay time.Duration) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	frames := []string{
 		`data: {"id":"stream-rag-smoke","object":"chat.completion.chunk","created":1,"model":"` + modelVersion + `","choices":[{"index":0,"delta":{"role":"assistant","content":"Approved recovery requires durable "},"finish_reason":null}]}` + "\n\n",
@@ -479,11 +827,62 @@ func serveFinalAnswerStream(w http.ResponseWriter, modelVersion string) {
 		"data: [DONE]\n\n",
 	}
 	for _, frame := range frames {
+		if frameDelay > 0 {
+			timer := time.NewTimer(frameDelay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+		}
 		_, _ = io.WriteString(w, frame)
 		if flusher, ok := w.(http.Flusher); ok {
 			flusher.Flush()
 		}
 	}
+}
+
+func parseFixtureAnswerStreamFrameDelay(raw string) (time.Duration, error) {
+	if raw == "" {
+		return 0, nil
+	}
+	milliseconds, err := strconv.Atoi(raw)
+	if err != nil || milliseconds < 1 || strconv.Itoa(milliseconds) != raw {
+		return 0, errors.New("ZHIXU_RAG_FIXTURE_ANSWER_STREAM_FRAME_DELAY_MS must be a canonical positive integer")
+	}
+	delay := time.Duration(milliseconds) * time.Millisecond
+	if delay > maxFixtureAnswerStreamFrameDelay {
+		return 0, errors.New("ZHIXU_RAG_FIXTURE_ANSWER_STREAM_FRAME_DELAY_MS exceeds the bounded maximum")
+	}
+	return delay, nil
+}
+
+func serveWorkspaceAnalysisCandidateStream(w http.ResponseWriter, modelVersion, evidenceRef string) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	candidate := `{"result_type":"workspace_analysis_candidate","schema_id":"agent.workspace-analysis-candidate","schema_version":"1","payload":{"answer_markdown":"` +
+		fixtureWorkspaceAnalysisCandidate + `","citation_refs":["` + evidenceRef + `"],"proposal_suggestion":{"summary":"Review this evidence-backed change in the proposal workspace.","citation_refs":["` + evidenceRef + `"]}}}`
+	split := len(candidate) / 2
+	frames := []string{
+		`data: {"id":"stream-workspace-analysis","object":"chat.completion.chunk","created":1,"model":"` + modelVersion + `","choices":[{"index":0,"delta":{"role":"assistant","content":` + mustJSONQuote(candidate[:split]) + `},"finish_reason":null}]}` + "\n\n",
+		`data: {"id":"stream-workspace-analysis","object":"chat.completion.chunk","created":1,"model":"` + modelVersion + `","choices":[{"index":0,"delta":{"content":` + mustJSONQuote(candidate[split:]) + `},"finish_reason":"stop"}]}` + "\n\n",
+		`data: {"id":"stream-workspace-analysis","object":"chat.completion.chunk","created":1,"model":"` + modelVersion + `","choices":[],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}` + "\n\n",
+		"data: [DONE]\n\n",
+	}
+	for _, frame := range frames {
+		_, _ = io.WriteString(w, frame)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	}
+}
+
+func mustJSONQuote(value string) string {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		panic("fixture candidate stream cannot encode static content")
+	}
+	return string(encoded)
 }
 
 func writeCompletion(w http.ResponseWriter, modelVersion, content string, toolCalls []toolCall, finishReason string) {
@@ -643,6 +1042,9 @@ func fixtureDocument(schema taskSchema, input map[string]any) (map[string]any, e
 			"suggested_actions": []string{"retry with approved evidence"},
 		}
 	case "faithfulness_review":
+		if isWorkspaceAnalysisReviewFixtureInput(input) {
+			return fixtureWorkspaceAnalysisReviewDocument(envelope, input)
+		}
 		targets, _ := input["review_targets"].([]any)
 		items := make([]any, 0, len(targets))
 		for _, raw := range targets {
@@ -664,6 +1066,278 @@ func fixtureDocument(schema taskSchema, input map[string]any) (map[string]any, e
 		return nil, fixtureError("structured_result_type_unsupported", "unsupported schema result type")
 	}
 	return envelope, nil
+}
+
+func fixtureWorkspaceAnalysisReviewDocument(envelope map[string]any, input map[string]any) (map[string]any, error) {
+	modelRunRef, refs, err := workspaceAnalysisReviewFixtureInput(input)
+	if err != nil {
+		return nil, err
+	}
+	if envelope["model_run_ref"] != modelRunRef {
+		return nil, fixtureError("workspace_analysis_review_subject_drift", "workspace analysis review subject drifted")
+	}
+	envelope["payload"] = map[string]any{
+		"passed": true,
+		"items": []any{map[string]any{
+			"assertion_id": "@answer/conclusion", "verdict": "SUPPORTED", "citation_ids": refs,
+			"reason": "deterministic fixture verified the bounded workspace candidate",
+		}},
+		"summary": "the supplied workspace candidate is covered",
+	}
+	return envelope, nil
+}
+
+func validateWorkspaceAnalysisPlannerFixtureInput(input map[string]any) (bool, error) {
+	_, hasWorkspaceGitStatus := input["git_status"]
+	if input["schema_version"] != float64(1) && !hasWorkspaceGitStatus {
+		return false, nil
+	}
+	if !hasExactAnyKeys(input, "schema_version", "untrusted_data", "question", "history", "scope", "answer_depth", "output_format", "git_status") ||
+		input["schema_version"] != float64(1) || input["untrusted_data"] != true || !fixtureBoundedString(input["question"]) ||
+		workspaceAnalysisInputLeaksIdentity(input) {
+		return false, fixtureError("workspace_analysis_plan_input_invalid", "workspace analysis planner input is invalid")
+	}
+	scope, ok := input["scope"].(map[string]any)
+	if !ok || !hasExactAnyKeys(scope, "retrieval_mode", "allow_original_sources", "allow_web") || !fixtureBoundedString(scope["retrieval_mode"]) ||
+		scope["allow_web"] != false {
+		return false, fixtureError("workspace_analysis_plan_input_invalid", "workspace analysis planner input is invalid")
+	}
+	if _, ok := scope["allow_original_sources"].(bool); !ok || !fixtureBoundedString(input["answer_depth"]) || !fixtureBoundedString(input["output_format"]) {
+		return false, fixtureError("workspace_analysis_plan_input_invalid", "workspace analysis planner input is invalid")
+	}
+	if _, ok := input["history"].([]any); !ok {
+		return false, fixtureError("workspace_analysis_plan_input_invalid", "workspace analysis planner input is invalid")
+	}
+	if _, ok := input["git_status"].(map[string]any); !ok {
+		return false, fixtureError("workspace_analysis_plan_input_invalid", "workspace analysis planner input is invalid")
+	}
+	return true, nil
+}
+
+func workspaceAnalysisPlannerFixtureResponse(input map[string]any) string {
+	rewrite := "approved recovery"
+	question, _ := input["question"].(string)
+	for _, field := range strings.Fields(question) {
+		candidate := strings.Trim(field, "\"'()[]{}<>,.;:!?")
+		if validFixtureEvidenceToken(candidate) {
+			rewrite = candidate
+			break
+		}
+	}
+	encoded, err := json.Marshal(struct {
+		Intent                string   `json:"i"`
+		Rewrites              []string `json:"r"`
+		ClarificationReason   string   `json:"d"`
+		ClarificationQuestion string   `json:"q"`
+		SuggestedScopes       []string `json:"s"`
+	}{
+		Intent: "answer from approved recovery evidence", Rewrites: []string{rewrite},
+		SuggestedScopes: []string{},
+	})
+	if err != nil {
+		panic("workspace analysis planner fixture response cannot be encoded")
+	}
+	return string(encoded)
+}
+
+func validFixtureEvidenceToken(value string) bool {
+	const prefix = "durable-rag-"
+	if !strings.HasPrefix(value, prefix) || len(value) != len(prefix)+12 {
+		return false
+	}
+	for _, character := range value[len(prefix):] {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func workspaceAnalysisCandidateFixtureInput(messages []message) ([]string, error) {
+	input, err := lastTaskInput(messages)
+	if err != nil {
+		return nil, fixtureError("workspace_analysis_candidate_input_missing", "workspace analysis candidate input is missing")
+	}
+	if !hasExactAnyKeys(input, "schema_version", "untrusted_data", "question", "history", "answer_depth", "output_format", "git_status", "search", "evidence") ||
+		input["schema_version"] != float64(1) || input["untrusted_data"] != true || !fixtureBoundedString(input["question"]) ||
+		workspaceAnalysisInputLeaksIdentity(input) {
+		return nil, fixtureError("workspace_analysis_candidate_input_invalid", "workspace analysis candidate input is invalid")
+	}
+	if _, ok := input["history"].([]any); !ok {
+		return nil, fixtureError("workspace_analysis_candidate_input_invalid", "workspace analysis candidate input is invalid")
+	}
+	if _, ok := input["git_status"].(map[string]any); !ok {
+		return nil, fixtureError("workspace_analysis_candidate_input_invalid", "workspace analysis candidate input is invalid")
+	}
+	search, ok := input["search"].(map[string]any)
+	if !ok || !hasExactAnyKeys(search, "effective_mode", "hit_count", "degradation_codes") || !fixtureBoundedString(search["effective_mode"]) {
+		return nil, fixtureError("workspace_analysis_candidate_input_invalid", "workspace analysis candidate input is invalid")
+	}
+	if _, ok := search["hit_count"].(float64); !ok {
+		return nil, fixtureError("workspace_analysis_candidate_input_invalid", "workspace analysis candidate input is invalid")
+	}
+	if _, ok := search["degradation_codes"].([]any); !ok || !fixtureBoundedString(input["answer_depth"]) || !fixtureBoundedString(input["output_format"]) {
+		return nil, fixtureError("workspace_analysis_candidate_input_invalid", "workspace analysis candidate input is invalid")
+	}
+	evidence, ok := input["evidence"].([]any)
+	if !ok || len(evidence) < 1 || len(evidence) > 3 {
+		return nil, fixtureError("workspace_analysis_candidate_evidence_invalid", "workspace analysis candidate evidence is invalid")
+	}
+	refs := make([]string, 0, len(evidence))
+	for index, raw := range evidence {
+		item, itemOK := raw.(map[string]any)
+		if !itemOK || !hasExactAnyKeys(item, "evidence_ref", "excerpt", "truncated") || !fixtureBoundedExcerpt(item["excerpt"]) {
+			return nil, fixtureError("workspace_analysis_candidate_evidence_invalid", "workspace analysis candidate evidence is invalid")
+		}
+		ref, refOK := item["evidence_ref"].(string)
+		if !refOK || ref != "E"+strconv.Itoa(index+1) {
+			return nil, fixtureError("workspace_analysis_candidate_evidence_invalid", "workspace analysis candidate evidence is invalid")
+		}
+		if _, truncated := item["truncated"].(bool); !truncated {
+			return nil, fixtureError("workspace_analysis_candidate_evidence_invalid", "workspace analysis candidate evidence is invalid")
+		}
+		refs = append(refs, ref)
+	}
+	return refs, nil
+}
+
+func isWorkspaceAnalysisReviewFixtureInput(input map[string]any) bool {
+	return input["schema_version"] == "agent-workspace-analysis-review-input/v1"
+}
+
+func workspaceAnalysisReviewFixtureInput(input map[string]any) (string, []string, error) {
+	if !hasExactAnyKeys(input, "schema_version", "model_run_ref", "candidate", "review_targets", "evidence") ||
+		input["schema_version"] != "agent-workspace-analysis-review-input/v1" {
+		return "", nil, fixtureError("workspace_analysis_review_input_invalid", "workspace analysis review input is invalid")
+	}
+	modelRunRef, ok := input["model_run_ref"].(string)
+	if !ok || !fixtureCanonicalID(modelRunRef) {
+		return "", nil, fixtureError("workspace_analysis_review_subject_invalid", "workspace analysis review subject is invalid")
+	}
+	candidate, ok := input["candidate"].(map[string]any)
+	if !ok || !hasExactAnyKeys(candidate, "answer_markdown", "citation_refs") || !fixtureBoundedString(candidate["answer_markdown"]) {
+		return "", nil, fixtureError("workspace_analysis_review_candidate_invalid", "workspace analysis review candidate is invalid")
+	}
+	refs, err := workspaceAnalysisFixtureEvidenceRefs(candidate["citation_refs"])
+	if err != nil {
+		return "", nil, err
+	}
+	targets, ok := input["review_targets"].([]any)
+	if !ok || len(targets) != 1 {
+		return "", nil, fixtureError("workspace_analysis_review_targets_invalid", "workspace analysis review targets are invalid")
+	}
+	target, ok := targets[0].(map[string]any)
+	if !ok || !hasExactAnyKeys(target, "id", "text", "kind", "citation_ids") || target["id"] != "@answer/conclusion" ||
+		target["kind"] != "FACTUAL" || target["text"] != candidate["answer_markdown"] {
+		return "", nil, fixtureError("workspace_analysis_review_targets_invalid", "workspace analysis review targets are invalid")
+	}
+	targetRefs, targetErr := workspaceAnalysisFixtureEvidenceRefs(target["citation_ids"])
+	if targetErr != nil || !sameFixtureStrings(targetRefs, refs) {
+		return "", nil, fixtureError("workspace_analysis_review_targets_invalid", "workspace analysis review targets are invalid")
+	}
+	evidence, ok := input["evidence"].([]any)
+	if !ok || len(evidence) != len(refs) {
+		return "", nil, fixtureError("workspace_analysis_review_evidence_invalid", "workspace analysis review evidence is invalid")
+	}
+	for index, raw := range evidence {
+		item, itemOK := raw.(map[string]any)
+		if !itemOK || !hasExactAnyKeys(item, "evidence_ref", "excerpt") || item["evidence_ref"] != refs[index] || !fixtureBoundedExcerpt(item["excerpt"]) {
+			return "", nil, fixtureError("workspace_analysis_review_evidence_invalid", "workspace analysis review evidence is invalid")
+		}
+	}
+	return modelRunRef, refs, nil
+}
+
+func workspaceAnalysisFixtureEvidenceRefs(raw any) ([]string, error) {
+	values, ok := raw.([]any)
+	if !ok || len(values) < 1 || len(values) > 3 {
+		return nil, fixtureError("workspace_analysis_evidence_refs_invalid", "workspace analysis evidence refs are invalid")
+	}
+	refs := make([]string, len(values))
+	for index, rawRef := range values {
+		ref, ok := rawRef.(string)
+		if !ok || ref != "E"+strconv.Itoa(index+1) {
+			return nil, fixtureError("workspace_analysis_evidence_refs_invalid", "workspace analysis evidence refs are invalid")
+		}
+		refs[index] = ref
+	}
+	return refs, nil
+}
+
+func hasExactAnyKeys(values map[string]any, keys ...string) bool {
+	if len(values) != len(keys) {
+		return false
+	}
+	for _, key := range keys {
+		if _, ok := values[key]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func workspaceAnalysisInputLeaksIdentity(value any) bool {
+	switch current := value.(type) {
+	case map[string]any:
+		for key, child := range current {
+			switch strings.ToLower(key) {
+			case "workspace_id", "definition_id", "workflow_run_id", "node_run_id", "node_attempt_id", "analysis_run_id",
+				"operation_id", "reservation_id", "model_run_id", "model_run_ref", "model_call_id", "index_version_id",
+				"embedding_version_id", "definition_hash", "definition_version", "model_settings_revision", "lease_owner", "lease_fence":
+				return true
+			}
+			if workspaceAnalysisInputLeaksIdentity(child) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range current {
+			if workspaceAnalysisInputLeaksIdentity(child) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func fixtureBoundedString(value any) bool {
+	text, ok := value.(string)
+	return ok && text != "" && strings.TrimSpace(text) == text && len(text) <= 64*1024
+}
+
+func fixtureBoundedExcerpt(value any) bool {
+	text, ok := value.(string)
+	return ok && strings.TrimSpace(text) != "" && len(text) <= maxWorkspaceAnalysisFixtureExcerptBytes && !strings.ContainsRune(text, 0)
+}
+
+func fixtureCanonicalID(value string) bool {
+	if len(value) != 36 {
+		return false
+	}
+	for index, character := range value {
+		if index == 8 || index == 13 || index == 18 || index == 23 {
+			if character != '-' {
+				return false
+			}
+			continue
+		}
+		if !(character >= '0' && character <= '9' || character >= 'a' && character <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func sameFixtureStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func hasExactToolChoice(raw json.RawMessage, expected string) bool {

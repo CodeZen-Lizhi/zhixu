@@ -11,11 +11,11 @@ import (
 )
 
 const questionViewColumns = `
-	q.id::text,q.workspace_id::text,q.conversation_id::text,q.ordinal,q.question_text,q.scope::text,
+	q.id::text,q.workspace_id::text,q.conversation_id::text,q.ordinal,q.mode,q.question_text,q.scope::text,
 	q.answer_depth,q.output_format,q.context_through_ordinal,q.context_hash,q.request_hash,q.created_at`
 
 const questionColumns = `
-	id::text,workspace_id::text,conversation_id::text,ordinal,question_text,scope::text,
+	id::text,workspace_id::text,conversation_id::text,ordinal,mode,question_text,scope::text,
 	answer_depth,output_format,context_through_ordinal,context_hash,request_hash,created_at`
 
 const answerViewColumns = `

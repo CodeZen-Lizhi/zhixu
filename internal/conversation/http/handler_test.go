@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	agentdomain "github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/conversation/application"
 	conversationdomain "github.com/CodeZen-Lizhi/zhixu/internal/conversation/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
@@ -39,8 +40,58 @@ func TestSubmitQuestionUsesNestedScopeAndDefaults(t *testing.T) {
 	if service.question.Request.Scope.RetrievalMode != "" || !service.question.Request.Scope.AllowWeb {
 		t.Fatalf("request = %#v", service.question.Request)
 	}
+	if !strings.Contains(recorder.Body.String(), `"mode":"rag"`) {
+		t.Fatalf("missing canonical default mode: %s", recorder.Body.String())
+	}
 	if !strings.Contains(recorder.Body.String(), `"status_url":"/api/v1/answers/`) {
 		t.Fatalf("missing answer status url: %s", recorder.Body.String())
+	}
+}
+
+func TestSubmitQuestionMapsWorkspaceAnalysisMode(t *testing.T) {
+	t.Parallel()
+	service := &fakeService{}
+	router := testRouter(service)
+	body := `{"workspace_id":"` + string(testWorkspaceID) + `","mode":"workspace_analysis","question":"分析当前工作区"}`
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/conversations/"+string(testConversationID)+"/questions", strings.NewReader(body))
+	request.Header.Set("Idempotency-Key", "workspace-analysis-question-1")
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusAccepted || service.question.Request.Mode != conversationdomain.QuestionModeWorkspaceAnalysis ||
+		!strings.Contains(recorder.Body.String(), `"mode":"workspace_analysis"`) {
+		t.Fatalf("response=%d request=%#v body=%s", recorder.Code, service.question.Request, recorder.Body.String())
+	}
+}
+
+func TestSubmitQuestionRejectsUnknownMode(t *testing.T) {
+	t.Parallel()
+	router := testRouter(&fakeService{})
+	body := `{"workspace_id":"` + string(testWorkspaceID) + `","mode":"unbounded_agent","question":"分析当前工作区"}`
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/conversations/"+string(testConversationID)+"/questions", strings.NewReader(body))
+	request.Header.Set("Idempotency-Key", "workspace-analysis-question-invalid-mode")
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), conversationdomain.WorkspaceAnalysisModeInvalidCode) {
+		t.Fatalf("response=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestSubmitQuestionRejectsUnsupportedWorkspaceAnalysisScope(t *testing.T) {
+	t.Parallel()
+	router := testRouter(&fakeService{})
+	body := `{"workspace_id":"` + string(testWorkspaceID) + `","mode":"workspace_analysis","question":"分析当前工作区","scope":{"allow_web":true}}`
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/conversations/"+string(testConversationID)+"/questions", strings.NewReader(body))
+	request.Header.Set("Idempotency-Key", "workspace-analysis-question-unsupported-scope")
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), conversationdomain.WorkspaceAnalysisScopeUnsupportedCode) {
+		t.Fatalf("response=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }
 
@@ -107,6 +158,48 @@ func TestAnswerReturnsCurrentStageAndUsesItInETag(t *testing.T) {
 	if recorder.Code != http.StatusOK || recorder.Header().Get("ETag") != `W/"answer-1-workflow-7-stage-validation.completed"` ||
 		!strings.Contains(recorder.Body.String(), `"current_stage":"validation.completed"`) {
 		t.Fatalf("response = %d %#v %s", recorder.Code, recorder.Header(), recorder.Body.String())
+	}
+}
+
+func TestGetWorkspaceAnalysisTimelineUsesScopedQueryAndTypedResponse(t *testing.T) {
+	t.Parallel()
+	runID := foundation.ID("77777777-7777-4777-8777-777777777777")
+	timeline := validWorkspaceAnalysisTimelineResponse(testWorkspaceID, testAnswerID, runID)
+	service := &fakeService{timeline: timeline}
+	router := testRouter(service)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/answers/"+string(testAnswerID)+"/analysis-timeline?workspace_id="+string(testWorkspaceID), nil)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK || service.timelineQuery.WorkspaceID != testWorkspaceID || service.timelineQuery.AnswerID != testAnswerID ||
+		!strings.Contains(recorder.Body.String(), `"schema_id":"conversation.workspace_analysis_timeline"`) ||
+		!strings.Contains(recorder.Body.String(), `"analysis_run_id":"`+string(runID)+`"`) {
+		t.Fatalf("response=%d query=%#v body=%s", recorder.Code, service.timelineQuery, recorder.Body.String())
+	}
+}
+
+func TestGetWorkspaceAnalysisTimelineRejectsInvalidScopeAndPropagatesServiceError(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		path string
+		err  error
+		code string
+	}{
+		{name: "missing workspace", path: "/api/v1/answers/" + string(testAnswerID) + "/analysis-timeline", code: "CONVERSATION_REQUEST_INVALID"},
+		{name: "invalid answer", path: "/api/v1/answers/not-an-id/analysis-timeline?workspace_id=" + string(testWorkspaceID), code: "CONVERSATION_REQUEST_INVALID"},
+		{name: "service unavailable", path: "/api/v1/answers/" + string(testAnswerID) + "/analysis-timeline?workspace_id=" + string(testWorkspaceID), err: foundation.NewError(foundation.ErrorDependencyUnavailable, "CONVERSATION_WORKSPACE_ANALYSIS_TIMELINE_UNAVAILABLE", false, errors.New("reader unavailable")), code: "CONVERSATION_WORKSPACE_ANALYSIS_TIMELINE_UNAVAILABLE"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			router := testRouter(&fakeService{err: test.err})
+			request := httptest.NewRequest(http.MethodGet, test.path, nil)
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, request)
+			if recorder.Code != http.StatusBadRequest && recorder.Code != http.StatusServiceUnavailable || !strings.Contains(recorder.Body.String(), test.code) {
+				t.Fatalf("response=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+		})
 	}
 }
 
@@ -182,12 +275,14 @@ func testRouter(service Service) http.Handler {
 }
 
 type fakeService struct {
-	question     application.SubmitQuestionCommand
-	feedback     application.SubmitFeedbackCommand
-	conversation conversationdomain.Conversation
-	answer       application.AnswerView
-	turnsQuery   application.ListTurnsQuery
-	err          error
+	question      application.SubmitQuestionCommand
+	feedback      application.SubmitFeedbackCommand
+	conversation  conversationdomain.Conversation
+	answer        application.AnswerView
+	timeline      conversationdomain.WorkspaceAnalysisTimeline
+	timelineQuery application.WorkspaceAnalysisTimelineQuery
+	turnsQuery    application.ListTurnsQuery
+	err           error
 }
 
 func (service *fakeService) CreateConversation(context.Context, application.CreateConversationCommand) (application.CreateConversationResult, error) {
@@ -196,8 +291,12 @@ func (service *fakeService) CreateConversation(context.Context, application.Crea
 }
 func (service *fakeService) SubmitQuestion(_ context.Context, command application.SubmitQuestionCommand) (application.SubmitQuestionResult, error) {
 	service.question = command
+	canonical, err := conversationdomain.CanonicalizeQuestionRequest(command.Request)
+	if err != nil {
+		return application.SubmitQuestionResult{}, err
+	}
 	now := time.Now().UTC()
-	return application.SubmitQuestionResult{Question: conversationdomain.Question{ID: foundation.ID("44444444-4444-4444-8444-444444444444"), Request: command.Request, Ordinal: 1, CreatedAt: now}, Answer: conversationdomain.Answer{ID: testAnswerID, WorkspaceID: testWorkspaceID, ConversationID: testConversationID, QuestionID: foundation.ID("44444444-4444-4444-8444-444444444444"), WorkflowRunID: foundation.ID("55555555-5555-4555-8555-555555555555"), PublicationStatus: conversationdomain.AnswerPublicationPending, Version: 1, CreatedAt: now, UpdatedAt: now}, Workflow: application.WorkflowRunView{RunID: foundation.ID("55555555-5555-4555-8555-555555555555"), Status: "pending", Version: 1, UpdatedAt: now}}, service.err
+	return application.SubmitQuestionResult{Question: conversationdomain.Question{ID: foundation.ID("44444444-4444-4444-8444-444444444444"), Request: canonical, Ordinal: 1, CreatedAt: now}, Answer: conversationdomain.Answer{ID: testAnswerID, WorkspaceID: testWorkspaceID, ConversationID: testConversationID, QuestionID: foundation.ID("44444444-4444-4444-8444-444444444444"), WorkflowRunID: foundation.ID("55555555-5555-4555-8555-555555555555"), PublicationStatus: conversationdomain.AnswerPublicationPending, Version: 1, CreatedAt: now, UpdatedAt: now}, Workflow: application.WorkflowRunView{RunID: foundation.ID("55555555-5555-4555-8555-555555555555"), Status: "pending", Version: 1, UpdatedAt: now}}, service.err
 }
 func (service *fakeService) SubmitFeedback(_ context.Context, command application.SubmitFeedbackCommand) (application.SubmitFeedbackResult, error) {
 	service.feedback = command
@@ -218,6 +317,25 @@ func (service *fakeService) ListTurns(_ context.Context, query application.ListT
 }
 func (service *fakeService) GetAnswer(context.Context, foundation.ID, foundation.ID) (application.AnswerView, error) {
 	return service.answer, service.err
+}
+func (service *fakeService) GetWorkspaceAnalysisTimeline(_ context.Context, query application.WorkspaceAnalysisTimelineQuery) (conversationdomain.WorkspaceAnalysisTimeline, error) {
+	service.timelineQuery = query
+	return service.timeline, service.err
+}
+
+func validWorkspaceAnalysisTimelineResponse(workspaceID, answerID, runID foundation.ID) conversationdomain.WorkspaceAnalysisTimeline {
+	return conversationdomain.WorkspaceAnalysisTimeline{
+		SchemaID: conversationdomain.WorkspaceAnalysisTimelineSchemaID, SchemaVersion: conversationdomain.WorkspaceAnalysisTimelineSchemaVersionV1,
+		WorkspaceID: workspaceID, AnswerID: answerID, AnalysisRunID: runID,
+		RunStatus: conversationdomain.WorkspaceAnalysisTimelineRunQueued, Items: []conversationdomain.WorkspaceAnalysisTimelineItem{},
+		Budget: conversationdomain.WorkspaceAnalysisTimelineBudget{
+			ModelCalls:   conversationdomain.WorkspaceAnalysisTimelineCounter{Max: agentdomain.WorkspaceAnalysisV1MaxModelCalls},
+			ToolCalls:    conversationdomain.WorkspaceAnalysisTimelineCounter{Max: agentdomain.WorkspaceAnalysisV1MaxToolCalls},
+			SourceReads:  conversationdomain.WorkspaceAnalysisTimelineCounter{Max: agentdomain.WorkspaceAnalysisV1MaxSourceReads},
+			InputTokens:  conversationdomain.WorkspaceAnalysisTimelineCounter{Max: agentdomain.WorkspaceAnalysisV1MaxRunInputTokens},
+			OutputTokens: conversationdomain.WorkspaceAnalysisTimelineCounter{Max: agentdomain.WorkspaceAnalysisV1MaxRunOutputTokens},
+		},
+	}
 }
 
 func validAnswerView() application.AnswerView {

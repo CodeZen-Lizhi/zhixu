@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	agentdomain "github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/capability"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	foundationredaction "github.com/CodeZen-Lizhi/zhixu/internal/foundation/redaction"
@@ -25,29 +26,30 @@ const (
 	// toolFinalizationTimeout 限制 caller 取消后同步保存 Tool 终态的恢复窗口。
 	toolFinalizationTimeout = 5 * time.Second
 
-	errorCodeExecutionServiceUnavailable = "TOOL_EXECUTION_SERVICE_UNAVAILABLE"
-	errorCodeExecutionCommandInvalid     = "TOOL_EXECUTION_COMMAND_INVALID"
-	errorCodePolicyInvalid               = "TOOL_POLICY_INVALID"
-	errorCodeAllowedVersionAmbiguous     = "TOOL_ALLOWED_VERSION_AMBIGUOUS"
-	errorCodeInvocationDenied            = "TOOL_INVOCATION_DENIED"
-	errorCodeWorkflowBindingDenied       = "TOOL_WORKFLOW_BINDING_DENIED"
-	errorCodeToolNotAllowed              = "TOOL_NOT_ALLOWED"
-	errorCodePermissionDenied            = "TOOL_PERMISSION_DENIED"
-	errorCodeInputTooLarge               = "TOOL_INPUT_TOO_LARGE"
-	errorCodeInputInvalid                = "TOOL_INPUT_INVALID"
-	errorCodeIdempotencyRequired         = "TOOL_IDEMPOTENCY_REQUIRED"
-	errorCodeIdempotencyUnexpected       = "TOOL_IDEMPOTENCY_UNEXPECTED"
-	errorCodeOutputTooLarge              = "TOOL_OUTPUT_TOO_LARGE"
-	errorCodeOutputInvalid               = "TOOL_OUTPUT_INVALID"
-	errorCodeExecutionFailed             = "TOOL_EXECUTION_FAILED"
-	errorCodeExecutionCancelled          = "TOOL_CANCELED"
-	errorCodeExecutionTimeout            = "TOOL_TIMEOUT"
-	errorCodeOutcomeUnknown              = "TOOL_OUTCOME_UNKNOWN"
-	errorCodeCallInProgress              = "TOOL_CALL_IN_PROGRESS"
-	errorCodeResultReplayUnavailable     = "TOOL_RESULT_REPLAY_UNAVAILABLE"
-	errorCodeRecoveryInvalid             = "TOOL_RECOVERY_INVALID"
-	errorCodeRefusalPersistenceFailed    = "TOOL_REFUSAL_PERSISTENCE_FAILED"
-	errorCodeFinalizationUnknown         = "TOOL_FINALIZATION_UNKNOWN"
+	errorCodeExecutionServiceUnavailable  = "TOOL_EXECUTION_SERVICE_UNAVAILABLE"
+	errorCodeExecutionCommandInvalid      = "TOOL_EXECUTION_COMMAND_INVALID"
+	errorCodePolicyInvalid                = "TOOL_POLICY_INVALID"
+	errorCodeAllowedVersionAmbiguous      = "TOOL_ALLOWED_VERSION_AMBIGUOUS"
+	errorCodeInvocationDenied             = "TOOL_INVOCATION_DENIED"
+	errorCodeWorkflowBindingDenied        = "TOOL_WORKFLOW_BINDING_DENIED"
+	errorCodeToolNotAllowed               = "TOOL_NOT_ALLOWED"
+	errorCodePermissionDenied             = "TOOL_PERMISSION_DENIED"
+	errorCodeInputTooLarge                = "TOOL_INPUT_TOO_LARGE"
+	errorCodeInputInvalid                 = "TOOL_INPUT_INVALID"
+	errorCodeIdempotencyRequired          = "TOOL_IDEMPOTENCY_REQUIRED"
+	errorCodeIdempotencyUnexpected        = "TOOL_IDEMPOTENCY_UNEXPECTED"
+	errorCodeOutputTooLarge               = "TOOL_OUTPUT_TOO_LARGE"
+	errorCodeOutputInvalid                = "TOOL_OUTPUT_INVALID"
+	errorCodeExecutionFailed              = "TOOL_EXECUTION_FAILED"
+	errorCodeExecutionCancelled           = "TOOL_CANCELED"
+	errorCodeExecutionTimeout             = "TOOL_TIMEOUT"
+	errorCodeOutcomeUnknown               = "TOOL_OUTCOME_UNKNOWN"
+	errorCodeCallInProgress               = "TOOL_CALL_IN_PROGRESS"
+	errorCodeResultReplayUnavailable      = "TOOL_RESULT_REPLAY_UNAVAILABLE"
+	errorCodeResultPersistenceUnavailable = "TOOL_RESULT_PERSISTENCE_UNAVAILABLE"
+	errorCodeRecoveryInvalid              = "TOOL_RECOVERY_INVALID"
+	errorCodeRefusalPersistenceFailed     = "TOOL_REFUSAL_PERSISTENCE_FAILED"
+	errorCodeFinalizationUnknown          = "TOOL_FINALIZATION_UNKNOWN"
 )
 
 // ExecuteToolCommand 组合模型请求与仅由服务端提供的执行身份和幂等信息。
@@ -61,10 +63,12 @@ type ExecuteToolCommand struct {
 
 // ToolExecutionResult 返回已持久化调用事实和经过严格验证的不可信 Tool 输出。
 type ToolExecutionResult struct {
-	Call          domain.ToolCall
-	Output        json.RawMessage
-	UntrustedData bool
-	Replayed      bool
+	Call            domain.ToolCall
+	ResultReceiptID foundation.ID
+	OperationID     foundation.ID `json:"-"`
+	Output          json.RawMessage
+	UntrustedData   bool
+	Replayed        bool
 }
 
 // ExecutionService 按固定安全顺序编排策略、Registry、持久化和 typed Executor。
@@ -92,80 +96,151 @@ func NewExecutionService(
 
 // Execute 执行一次服务端持久 Workflow 允许的精确 Tool 调用。
 func (service *ExecutionService) Execute(ctx context.Context, command ExecuteToolCommand) (ToolExecutionResult, error) {
-	if service == nil || service.registry == nil || isNilInterface(service.policies) || isNilInterface(service.calls) || isNilInterface(service.ids) || isNilInterface(service.clock) {
-		return ToolExecutionResult{}, executionError(foundation.ErrorDependencyUnavailable, errorCodeExecutionServiceUnavailable, false, errors.New("tool execution service is not initialized"))
-	}
-	if ctx == nil {
-		return ToolExecutionResult{}, executionError(foundation.ErrorInvalidInput, errorCodeExecutionCommandInvalid, false, errors.New("tool execution context is nil"))
-	}
-	if err := command.Request.Validate(); err != nil {
+	if err := service.validateExecuteToolCommand(ctx, command); err != nil {
 		return ToolExecutionResult{}, err
 	}
-	if err := command.Identity.Validate(); err != nil {
+	prepared, err := service.prepareToolExecution(ctx, command, true)
+	if err != nil {
 		return ToolExecutionResult{}, err
 	}
-	if command.CallNo < 1 || command.CallNo > MaxToolCallNumber || !validInvocationSource(command.Invocation) || !validOptionalReference(command.IdempotencyKey, domain.MaxToolIdempotencyKeyBytes) {
-		return ToolExecutionResult{}, executionError(foundation.ErrorInvalidInput, errorCodeExecutionCommandInvalid, false, errors.New("tool execution command is invalid"))
-	}
 
-	policy, err := service.policies.ResolveToolPolicy(ctx, command.Identity)
-	if err != nil {
-		// 持久策略无法解析时，当前 Attempt/lease 可能已失效或数据库不可用；
-		// 此时不能伪造一个仍具备活动执行身份的 REFUSED 事实。
-		return ToolExecutionResult{}, classifiedOr(err, foundation.ErrorVersionConflict, "TOOL_CONTEXT_STALE", false)
-	}
-	if err := validateWorkflowToolPolicy(policy, command.Identity); err != nil {
-		return ToolExecutionResult{}, service.refuse(ctx, command, nil, err)
-	}
-
-	ref, err := resolveAllowedTool(policy.AllowedTools, command.Request.ToolName)
-	if err != nil {
-		return ToolExecutionResult{}, service.refuse(ctx, command, nil, err)
-	}
-	contract, err := service.registry.ResolveContract(ref)
-	if err != nil {
-		return ToolExecutionResult{}, service.refuse(ctx, command, nil, err)
-	}
-	if !contract.Definition.AllowsInvocation(command.Invocation) {
-		return ToolExecutionResult{}, service.refuse(ctx, command, &contract, executionError(foundation.ErrorPermissionDenied, errorCodeInvocationDenied, false, errors.New("tool invocation source is not allowed")))
-	}
-	if !workflowBindingAllowed(contract.Definition.AllowedWorkflows, policy.WorkflowKey, command.Identity.DefinitionVersion) {
-		return ToolExecutionResult{}, service.refuse(ctx, command, &contract, executionError(foundation.ErrorPermissionDenied, errorCodeWorkflowBindingDenied, false, errors.New("tool contract does not allow workflow definition")))
-	}
-	if !toolRefAllowed(policy.AllowedTools, contract.Definition.Ref) {
-		return ToolExecutionResult{}, service.refuse(ctx, command, &contract, executionError(foundation.ErrorPermissionDenied, errorCodeToolNotAllowed, false, errors.New("workflow node does not allow exact tool version")))
-	}
-	if contract.Definition.RequiredCapability != "" && !capabilityAllowed(policy.Permissions, contract.Definition.RequiredCapability) {
-		return ToolExecutionResult{}, service.refuse(ctx, command, &contract, executionError(foundation.ErrorPermissionDenied, errorCodePermissionDenied, false, errors.New("workflow node lacks exact tool capability")))
-	}
-	executor, err := service.registry.ResolveExecutor(contract.Definition.Ref)
-	if err != nil {
-		return ToolExecutionResult{}, service.refuse(ctx, command, &contract, err)
-	}
-
-	if int64(len(command.Request.Arguments)) > contract.Definition.MaxInputBytes {
-		return ToolExecutionResult{}, service.refuse(ctx, command, &contract, executionError(foundation.ErrorInvalidInput, errorCodeInputTooLarge, false, errors.New("tool input exceeds definition byte limit")))
-	}
-	arguments, err := contract.DecodeInput(command.Request.Arguments)
-	if err != nil || len(arguments) == 0 || int64(len(arguments)) > contract.Definition.MaxInputBytes {
-		return ToolExecutionResult{}, service.refuse(ctx, command, &contract, executionError(foundation.ErrorInvalidInput, errorCodeInputInvalid, false, errOr(err, "tool input decoder returned invalid output")))
-	}
-	if err := validateIdempotency(contract.Definition.IdempotencyMode, command.IdempotencyKey); err != nil {
-		return ToolExecutionResult{}, service.refuse(ctx, command, &contract, err)
-	}
-
-	started, err := service.startedCall(command, contract, arguments)
+	started, err := service.startedCall(command, prepared.contract, prepared.arguments)
 	if err != nil {
 		return ToolExecutionResult{}, err
 	}
 	startResult, err := service.calls.StartCall(ctx, StartCallCommand{
-		Identity: command.Identity, Call: started, AllowedWorkflows: contract.Definition.AllowedWorkflows,
+		Identity: command.Identity, Call: started, AllowedWorkflows: prepared.contract.Definition.AllowedWorkflows,
 	})
 	if err != nil {
 		return ToolExecutionResult{}, err
 	}
+	return service.executeStarted(ctx, command, prepared, startResult, nil)
+}
+
+type preparedToolExecution struct {
+	contract  Contract
+	executor  Executor
+	arguments json.RawMessage
+}
+
+type workspaceAnalysisToolExecutionContext struct {
+	OperationKey     agentdomain.WorkspaceAnalysisOperationKey
+	OperationID      foundation.ID
+	ReceiptFailureID foundation.ID
+}
+
+func (service *ExecutionService) validateExecuteToolCommand(ctx context.Context, command ExecuteToolCommand) error {
+	if err := service.validateExecutionCommandPrerequisites(ctx, command); err != nil {
+		return err
+	}
+	if err := command.Request.Validate(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateExecutionCommandPrerequisites validates the trusted execution
+// envelope without interpreting model-provided Tool input. Workspace Analysis
+// uses its own pre-executor refusal boundary for that input.
+func (service *ExecutionService) validateExecutionCommandPrerequisites(ctx context.Context, command ExecuteToolCommand) error {
+	if service == nil || service.registry == nil || isNilInterface(service.policies) || isNilInterface(service.calls) || isNilInterface(service.ids) || isNilInterface(service.clock) {
+		return executionError(foundation.ErrorDependencyUnavailable, errorCodeExecutionServiceUnavailable, false, errors.New("tool execution service is not initialized"))
+	}
+	if ctx == nil {
+		return executionError(foundation.ErrorInvalidInput, errorCodeExecutionCommandInvalid, false, errors.New("tool execution context is nil"))
+	}
+	if err := command.Identity.Validate(); err != nil {
+		return err
+	}
+	if command.CallNo < 1 || command.CallNo > MaxToolCallNumber || !validInvocationSource(command.Invocation) || !validOptionalReference(command.IdempotencyKey, domain.MaxToolIdempotencyKeyBytes) {
+		return executionError(foundation.ErrorInvalidInput, errorCodeExecutionCommandInvalid, false, errors.New("tool execution command is invalid"))
+	}
+	return nil
+}
+
+func (service *ExecutionService) prepareToolExecution(
+	ctx context.Context,
+	command ExecuteToolCommand,
+	persistRefusal bool,
+) (preparedToolExecution, error) {
+	policy, err := service.policies.ResolveToolPolicy(ctx, command.Identity)
+	if err != nil {
+		// 持久策略无法解析时，当前 Attempt/lease 可能已失效或数据库不可用；
+		// 此时不能伪造一个仍具备活动执行身份的 REFUSED 事实。
+		return preparedToolExecution{}, classifiedOr(err, foundation.ErrorVersionConflict, "TOOL_CONTEXT_STALE", false)
+	}
+	refuse := func(contract *Contract, cause error) error {
+		if !persistRefusal {
+			return cause
+		}
+		return service.refuse(ctx, command, contract, cause)
+	}
+	if err := validateWorkflowToolPolicy(policy, command.Identity); err != nil {
+		return preparedToolExecution{}, refuse(nil, err)
+	}
+
+	ref, err := resolveAllowedTool(policy.AllowedTools, command.Request.ToolName)
+	if err != nil {
+		return preparedToolExecution{}, refuse(nil, err)
+	}
+	contract, err := service.registry.ResolveContract(ref)
+	if err != nil {
+		return preparedToolExecution{}, refuse(nil, err)
+	}
+	if !contract.Definition.AllowsInvocation(command.Invocation) {
+		return preparedToolExecution{}, refuse(&contract, executionError(foundation.ErrorPermissionDenied, errorCodeInvocationDenied, false, errors.New("tool invocation source is not allowed")))
+	}
+	if !workflowBindingAllowed(contract.Definition.AllowedWorkflows, policy.WorkflowKey, command.Identity.DefinitionVersion) {
+		return preparedToolExecution{}, refuse(&contract, executionError(foundation.ErrorPermissionDenied, errorCodeWorkflowBindingDenied, false, errors.New("tool contract does not allow workflow definition")))
+	}
+	if !toolRefAllowed(policy.AllowedTools, contract.Definition.Ref) {
+		return preparedToolExecution{}, refuse(&contract, executionError(foundation.ErrorPermissionDenied, errorCodeToolNotAllowed, false, errors.New("workflow node does not allow exact tool version")))
+	}
+	if contract.Definition.RequiredCapability != "" && !capabilityAllowed(policy.Permissions, contract.Definition.RequiredCapability) {
+		return preparedToolExecution{}, refuse(&contract, executionError(foundation.ErrorPermissionDenied, errorCodePermissionDenied, false, errors.New("workflow node lacks exact tool capability")))
+	}
+	executor, err := service.registry.ResolveExecutor(contract.Definition.Ref)
+	if err != nil {
+		return preparedToolExecution{}, refuse(&contract, err)
+	}
+	if contract.Definition.ResultPersistencePolicy == domain.ResultPersistenceCanonical {
+		if _, err := service.resultReceiptRepository(); err != nil {
+			return preparedToolExecution{}, err
+		}
+	}
+
+	if int64(len(command.Request.Arguments)) > contract.Definition.MaxInputBytes {
+		return preparedToolExecution{}, refuse(&contract, executionError(foundation.ErrorInvalidInput, errorCodeInputTooLarge, false, errors.New("tool input exceeds definition byte limit")))
+	}
+	arguments, err := contract.DecodeInput(command.Request.Arguments)
+	if err != nil || len(arguments) == 0 || int64(len(arguments)) > contract.Definition.MaxInputBytes {
+		return preparedToolExecution{}, refuse(&contract, executionError(foundation.ErrorInvalidInput, errorCodeInputInvalid, false, errOr(err, "tool input decoder returned invalid output")))
+	}
+	if err := validateIdempotency(contract.Definition.IdempotencyMode, command.IdempotencyKey); err != nil {
+		return preparedToolExecution{}, refuse(&contract, err)
+	}
+	return preparedToolExecution{contract: contract, executor: executor, arguments: arguments}, nil
+}
+
+func (service *ExecutionService) executeStarted(
+	ctx context.Context,
+	command ExecuteToolCommand,
+	prepared preparedToolExecution,
+	startResult StartCallResult,
+	workspaceAnalysis *workspaceAnalysisToolExecutionContext,
+) (ToolExecutionResult, error) {
+	contract, executor, arguments := prepared.contract, prepared.executor, prepared.arguments
+	workspaceAnalysisOperationID := foundation.ID("")
+	if workspaceAnalysis != nil {
+		workspaceAnalysisOperationID = workspaceAnalysis.OperationID
+	}
 	if startResult.Disposition == StartCallReplayed {
-		return service.replay(ctx, command, contract, executor, arguments, startResult.Call)
+		result, err := service.replay(ctx, command, contract, executor, arguments, startResult.Call)
+		if err != nil {
+			return ToolExecutionResult{}, workspaceAnalysisToolTerminalErrorFor(workspaceAnalysisOperationID, startResult.Call, err)
+		}
+		result.OperationID = workspaceAnalysisOperationID
+		return result, nil
 	}
 	if startResult.Disposition != StartCallCreated || startResult.Call.Status != domain.CallStarted {
 		return ToolExecutionResult{}, executionError(foundation.ErrorConsistencyViolation, errorCodePolicyInvalid, false, errors.New("tool call repository returned invalid start disposition"))
@@ -183,11 +258,48 @@ func (service *ExecutionService) Execute(ctx context.Context, command ExecuteToo
 	persistenceContext, persistenceCancel := context.WithTimeout(context.WithoutCancel(ctx), toolFinalizationTimeout)
 	defer persistenceCancel()
 	if executeErr != nil {
-		return ToolExecutionResult{}, service.finishExecutionError(persistenceContext, startResult.Call, contract.Definition, executeErr)
+		return ToolExecutionResult{}, service.finishStartedExecutionError(
+			persistenceContext, command.Identity, startResult.Call, contract.Definition, executeErr, workspaceAnalysisOperationID,
+		)
 	}
 	output, summary, err := validateExecutorResult(contract, executorResult)
 	if err != nil {
-		return ToolExecutionResult{}, service.finishExecutionError(persistenceContext, startResult.Call, contract.Definition, err)
+		if workspaceAnalysis != nil && validReceiptFailureOutputObservation(executorResult.Output) {
+			return ToolExecutionResult{}, service.finishWorkspaceAnalysisReceiptFailure(
+				persistenceContext,
+				command.Identity,
+				*workspaceAnalysis,
+				startResult.Call,
+				contract.Definition,
+				executorResult.Output,
+				nil,
+				nil,
+				domain.ResultReceiptFailureContractInvalid,
+				err,
+			)
+		}
+		return ToolExecutionResult{}, service.finishStartedExecutionError(
+			persistenceContext, command.Identity, startResult.Call, contract.Definition, err, workspaceAnalysisOperationID,
+		)
+	}
+	if err := validateExecutorPrivateBinding(contract.Definition, executorResult); err != nil {
+		if workspaceAnalysis != nil && validReceiptFailureBindingObservation(executorResult.PrivateBinding) {
+			return ToolExecutionResult{}, service.finishWorkspaceAnalysisReceiptFailure(
+				persistenceContext,
+				command.Identity,
+				*workspaceAnalysis,
+				startResult.Call,
+				contract.Definition,
+				output,
+				summary,
+				executorResult.PrivateBinding,
+				domain.ResultReceiptFailureBindingInvalid,
+				err,
+			)
+		}
+		return ToolExecutionResult{}, service.finishStartedExecutionError(
+			persistenceContext, command.Identity, startResult.Call, contract.Definition, err, workspaceAnalysisOperationID,
+		)
 	}
 
 	completedAt := service.now()
@@ -203,16 +315,64 @@ func (service *ExecutionService) Execute(ctx context.Context, command ExecuteToo
 	succeeded.DurationMillis = durationMillis(succeeded.StartedAt, completedAt)
 	succeeded.Version++
 	if err := domain.ValidateToolCall(succeeded); err != nil {
-		return ToolExecutionResult{}, service.finishExecutionError(persistenceContext, startResult.Call, contract.Definition,
-			executionError(foundation.ErrorConsistencyViolation, errorCodeOutputInvalid, false, err))
+		return ToolExecutionResult{}, service.finishStartedExecutionError(
+			persistenceContext, command.Identity, startResult.Call, contract.Definition,
+			executionError(foundation.ErrorConsistencyViolation, errorCodeOutputInvalid, false, err), workspaceAnalysisOperationID,
+		)
 	}
+	if contract.Definition.ResultPersistencePolicy == domain.ResultPersistenceCanonical {
+		receiptID, idErr := service.ids.New()
+		if idErr != nil {
+			return ToolExecutionResult{}, service.finishStartedExecutionError(
+				persistenceContext, command.Identity, startResult.Call, contract.Definition, idErr, workspaceAnalysisOperationID,
+			)
+		}
+		receipts, repositoryErr := service.resultReceiptRepository()
+		if repositoryErr != nil {
+			return ToolExecutionResult{}, repositoryErr
+		}
+		mutation, finalizeErr := receipts.FinalizeCallWithReceipt(persistenceContext, FinalizeCallWithReceiptCommand{
+			ExpectedVersion: startResult.Call.Version,
+			Identity:        command.Identity,
+			Call:            succeeded,
+			Definition:      contract.Definition,
+			ReceiptID:       receiptID,
+			Output:          append(json.RawMessage(nil), output...),
+			PrivateBinding:  cloneExecutorPrivateBinding(executorResult.PrivateBinding),
+		})
+		if finalizeErr != nil {
+			// 该事务拥有 Call、receipt、reservation 与 operation 的唯一关闭权；
+			// 提交不明确时不能用独立 MarkUnknown 事务覆盖或返回尚未证明持久化的输出。
+			return ToolExecutionResult{}, finalizeErr
+		}
+		if !sameCanonicalFinalizationCall(succeeded, mutation.Call) {
+			return ToolExecutionResult{}, executionError(
+				foundation.ErrorConsistencyViolation,
+				errorCodeResultReplayUnavailable,
+				false,
+				errors.New("canonical result repository returned a different tool call"),
+			)
+		}
+		if workspaceAnalysisOperationID != "" && mutation.OperationID != workspaceAnalysisOperationID {
+			return ToolExecutionResult{}, workspaceAnalysisFinalizationUnknown(
+				errors.New("canonical result repository returned a different workspace analysis operation"),
+			)
+		}
+		if err := validatePersistedReceiptResult(contract, mutation.Call, mutation.Receipt); err != nil {
+			return ToolExecutionResult{}, err
+		}
+		return ToolExecutionResult{
+			Call: mutation.Call, ResultReceiptID: mutation.Receipt.ID,
+			OperationID: workspaceAnalysisOperationID,
+			Output:      append(json.RawMessage(nil), mutation.Receipt.Output...), UntrustedData: true, Replayed: mutation.Replayed,
+		}, nil
+	}
+
 	mutation, err := service.calls.FinalizeCall(persistenceContext, FinalizeCallCommand{ExpectedVersion: startResult.Call.Version, Call: succeeded})
 	if err != nil {
 		return ToolExecutionResult{}, service.finalizationUnknown(persistenceContext, startResult.Call, err)
 	}
-	return ToolExecutionResult{
-		Call: mutation.Call, Output: append(json.RawMessage(nil), output...), UntrustedData: true, Replayed: mutation.Replayed,
-	}, nil
+	return ToolExecutionResult{Call: mutation.Call, Output: append(json.RawMessage(nil), output...), UntrustedData: true, Replayed: mutation.Replayed}, nil
 }
 
 func (service *ExecutionService) replay(
@@ -225,6 +385,9 @@ func (service *ExecutionService) replay(
 ) (ToolExecutionResult, error) {
 	if call.Status != domain.CallSucceeded {
 		return replayedExecutionResult(call)
+	}
+	if contract.Definition.ResultPersistencePolicy == domain.ResultPersistenceCanonical {
+		return service.replayPersistedReceipt(ctx, contract, call)
 	}
 	loader, ok := executor.(ResultReceiptLoader)
 	if !ok || isNilInterface(loader) {
@@ -251,6 +414,168 @@ func (service *ExecutionService) replay(
 		return ToolExecutionResult{}, executionError(foundation.ErrorConsistencyViolation, errorCodeResultReplayUnavailable, false, errors.New("canonical result receipt differs from persisted tool call"))
 	}
 	return ToolExecutionResult{Call: call, Output: append(json.RawMessage(nil), output...), UntrustedData: true, Replayed: true}, nil
+}
+
+func (service *ExecutionService) replayPersistedReceipt(ctx context.Context, contract Contract, call domain.ToolCall) (ToolExecutionResult, error) {
+	repository, err := service.resultReceiptRepository()
+	if err != nil {
+		return ToolExecutionResult{}, err
+	}
+	replayContext, cancel := context.WithTimeout(ctx, contract.Definition.Timeout)
+	defer cancel()
+	receipt, err := repository.LoadResultReceipt(replayContext, LoadResultReceiptCommand{Call: call, Definition: contract.Definition})
+	if err == nil && replayContext.Err() != nil {
+		err = replayContext.Err()
+	}
+	if err != nil {
+		return ToolExecutionResult{}, classifiedOr(err, foundation.ErrorDependencyUnavailable, errorCodeResultReplayUnavailable, false)
+	}
+	if err := validatePersistedReceiptResult(contract, call, receipt); err != nil {
+		return ToolExecutionResult{}, err
+	}
+	return ToolExecutionResult{
+		Call: call, ResultReceiptID: receipt.ID,
+		Output: append(json.RawMessage(nil), receipt.Output...), UntrustedData: true, Replayed: true,
+	}, nil
+}
+
+func (service *ExecutionService) resultReceiptRepository() (ResultReceiptRepository, error) {
+	repository, ok := service.calls.(ResultReceiptRepository)
+	if !ok || isNilInterface(repository) {
+		return nil, executionError(foundation.ErrorDependencyUnavailable, errorCodeResultPersistenceUnavailable, false, errors.New("canonical tool result persistence is unavailable"))
+	}
+	return repository, nil
+}
+
+func (service *ExecutionService) resultReceiptFailureRepository() (ResultReceiptFailureRepository, error) {
+	repository, ok := service.calls.(ResultReceiptFailureRepository)
+	if !ok || isNilInterface(repository) {
+		return nil, executionError(
+			foundation.ErrorDependencyUnavailable,
+			errorCodeResultPersistenceUnavailable,
+			false,
+			errors.New("canonical tool result receipt failure persistence is unavailable"),
+		)
+	}
+	return repository, nil
+}
+
+func (service *ExecutionService) finishWorkspaceAnalysisReceiptFailure(
+	ctx context.Context,
+	identity domain.TrustedExecutionIdentity,
+	execution workspaceAnalysisToolExecutionContext,
+	started domain.ToolCall,
+	definition domain.Definition,
+	observedOutput json.RawMessage,
+	validatedSummary json.RawMessage,
+	observedBinding *ExecutorPrivateBinding,
+	failureCode domain.ResultReceiptFailureCode,
+	cause error,
+) error {
+	completedAt := service.now()
+	summary := append(json.RawMessage(nil), validatedSummary...)
+	if len(summary) == 0 {
+		var err error
+		summary, err = responseSummary(definition, observedOutput, 0)
+		if err != nil {
+			return workspaceAnalysisFinalizationUnknown(errors.Join(cause, err))
+		}
+	}
+	succeeded := started
+	succeeded.Status = domain.CallSucceeded
+	succeeded.ResponseHash = hashBytes(observedOutput)
+	succeeded.ResponseBytes = int64(len(observedOutput))
+	succeeded.ResponseSummary = summary
+	succeeded.CompletedAt = &completedAt
+	succeeded.DurationMillis = durationMillis(succeeded.StartedAt, completedAt)
+	succeeded.Version++
+	if err := domain.ValidateToolCall(succeeded); err != nil {
+		return workspaceAnalysisFinalizationUnknown(errors.Join(cause, err))
+	}
+
+	outputBytes := int64(len(observedOutput))
+	failureDraft := domain.ResultReceiptFailureDraft{
+		ID:                  execution.ReceiptFailureID,
+		OperationID:         execution.OperationID,
+		AnalysisRunID:       execution.OperationKey.AnalysisRunID,
+		FailureCode:         failureCode,
+		ObservedOutputHash:  succeeded.ResponseHash,
+		ObservedOutputBytes: &outputBytes,
+		CheckedAt:           completedAt,
+		CreatedAt:           completedAt,
+	}
+	if failureCode == domain.ResultReceiptFailureBindingInvalid {
+		bindingBytes := int64(0)
+		bindingDocument := json.RawMessage(nil)
+		if observedBinding != nil {
+			bindingDocument = observedBinding.Document
+			bindingBytes = int64(len(bindingDocument))
+		}
+		failureDraft.ObservedBindingHash = hashBytes(bindingDocument)
+		failureDraft.ObservedBindingBytes = &bindingBytes
+	}
+	repository, err := service.resultReceiptFailureRepository()
+	if err != nil {
+		return err
+	}
+	mutation, err := repository.FinalizeCallWithReceiptFailure(ctx, FinalizeCallWithReceiptFailureCommand{
+		ExpectedVersion: started.Version,
+		Identity:        identity,
+		Call:            succeeded,
+		Definition:      definition,
+		Failure:         failureDraft,
+	})
+	if err != nil {
+		// 该 UoW 同时拥有 Call、failure、reservation 与 operation；提交不确定时禁止用其他事务覆盖。
+		return err
+	}
+	if err := validateReceiptFailureMutation(succeeded, definition, failureDraft, mutation); err != nil {
+		return workspaceAnalysisFinalizationUnknown(err)
+	}
+	return workspaceAnalysisReceiptFailureTerminalErrorFor(
+		mutation.OperationID,
+		mutation.Failure,
+		workspaceAnalysisReceiptFailureCause(mutation.Failure, definition),
+	)
+}
+
+func validateReceiptFailureMutation(
+	expectedCall domain.ToolCall,
+	definition domain.Definition,
+	expectedFailure domain.ResultReceiptFailureDraft,
+	mutation ResultReceiptFailureMutationResult,
+) error {
+	if !sameCanonicalFinalizationCall(expectedCall, mutation.Call) || mutation.OperationID != expectedFailure.OperationID ||
+		mutation.Failure.OperationID != expectedFailure.OperationID ||
+		mutation.Failure.AnalysisRunID != expectedFailure.AnalysisRunID ||
+		mutation.Failure.FailureCode != expectedFailure.FailureCode ||
+		mutation.Failure.ObservedOutputHash != expectedFailure.ObservedOutputHash ||
+		!equalOptionalInt64(mutation.Failure.ObservedOutputBytes, expectedFailure.ObservedOutputBytes) ||
+		mutation.Failure.ObservedBindingHash != expectedFailure.ObservedBindingHash ||
+		!equalOptionalInt64(mutation.Failure.ObservedBindingBytes, expectedFailure.ObservedBindingBytes) ||
+		(!mutation.Replayed && mutation.Failure.ID != expectedFailure.ID) {
+		return errors.New("canonical result receipt failure repository returned a different binding")
+	}
+	if err := domain.ValidateResultReceiptFailure(mutation.Failure, mutation.Call, definition); err != nil {
+		return errors.Join(errors.New("canonical result receipt failure is invalid"), err)
+	}
+	return nil
+}
+
+func validReceiptFailureOutputObservation(output json.RawMessage) bool {
+	bytes := int64(len(output))
+	return bytes > 0 && bytes <= domain.ResultReceiptFailureMaxObservedOutputBytes
+}
+
+func validReceiptFailureBindingObservation(binding *ExecutorPrivateBinding) bool {
+	if binding == nil {
+		return true
+	}
+	return int64(len(binding.Document)) <= domain.ResultReceiptFailureMaxObservedBindingBytes
+}
+
+func equalOptionalInt64(left, right *int64) bool {
+	return left == nil && right == nil || left != nil && right != nil && *left == *right
 }
 
 // RecoverStaleStarted 将失去可信 Run/Node/Attempt lease 的 STARTED 调用有界归约为 UNKNOWN。
@@ -352,6 +677,82 @@ func (service *ExecutionService) refusedCall(command ExecuteToolCommand, contrac
 	return call, nil
 }
 
+func (service *ExecutionService) finishStartedExecutionError(
+	ctx context.Context,
+	identity domain.TrustedExecutionIdentity,
+	started domain.ToolCall,
+	definition domain.Definition,
+	cause error,
+	workspaceAnalysisOperationID foundation.ID,
+) error {
+	if workspaceAnalysisOperationID == "" {
+		return service.finishExecutionError(ctx, started, definition, cause)
+	}
+	return service.finishWorkspaceAnalysisExecutionError(ctx, identity, workspaceAnalysisOperationID, started, definition, cause)
+}
+
+func (service *ExecutionService) finishWorkspaceAnalysisExecutionError(
+	ctx context.Context,
+	identity domain.TrustedExecutionIdentity,
+	operationID foundation.ID,
+	started domain.ToolCall,
+	definition domain.Definition,
+	cause error,
+) error {
+	repository, err := service.workspaceAnalysisToolOperationRepository()
+	if err != nil {
+		return err
+	}
+	completedAt := service.now()
+	terminal := started
+	terminal.CompletedAt = &completedAt
+	terminal.DurationMillis = durationMillis(terminal.StartedAt, completedAt)
+	terminal.Version++
+	if mustMarkUnknown(definition.SideEffectLevel, cause) {
+		terminal.Status = domain.CallUnknown
+		terminal.ErrorCode = errorCodeOutcomeUnknown
+		mutation, err := repository.FinalizeWorkspaceAnalysisToolCall(ctx, FinalizeWorkspaceAnalysisToolCallCommand{
+			ExpectedVersion: started.Version, Identity: identity, Call: terminal,
+		})
+		if err != nil || !sameWorkspaceAnalysisTerminalCall(terminal, mutation.Call) {
+			return workspaceAnalysisFinalizationUnknown(errors.Join(cause, errOr(err, "workspace analysis terminal finalization drifted")))
+		}
+		return workspaceAnalysisToolTerminalErrorFor(
+			operationID,
+			mutation.Call,
+			executionError(foundation.ErrorManualRecoveryRequired, errorCodeOutcomeUnknown, false, cause),
+		)
+	}
+
+	classified := classifyExecutionFailure(cause)
+	terminal.Status = domain.CallFailed
+	terminal.ErrorCode = classified.Code
+	terminal.Retryable = classified.Retryable
+	mutation, err := repository.FinalizeWorkspaceAnalysisToolCall(ctx, FinalizeWorkspaceAnalysisToolCallCommand{
+		ExpectedVersion: started.Version, Identity: identity, Call: terminal,
+	})
+	if err != nil || !sameWorkspaceAnalysisTerminalCall(terminal, mutation.Call) {
+		// 专用 Repository 已按完整事务闭包尝试 commit-loss recovery；不得再用通用 MarkUnknown
+		// 单独覆盖 Call，否则会破坏 Operation/Reservation 的原子性。
+		return workspaceAnalysisFinalizationUnknown(errors.Join(cause, errOr(err, "workspace analysis terminal finalization drifted")))
+	}
+	return workspaceAnalysisToolTerminalErrorFor(operationID, mutation.Call, classified)
+}
+
+func workspaceAnalysisFinalizationUnknown(cause error) error {
+	return executionError(foundation.ErrorManualRecoveryRequired, errorCodeFinalizationUnknown, false, cause)
+}
+
+func sameWorkspaceAnalysisTerminalCall(expected, actual domain.ToolCall) bool {
+	return domain.ValidateToolCall(actual) == nil && expected.ID == actual.ID &&
+		expected.WorkspaceID == actual.WorkspaceID && expected.WorkflowRunID == actual.WorkflowRunID &&
+		expected.NodeRunID == actual.NodeRunID && expected.NodeAttemptID == actual.NodeAttemptID &&
+		expected.CallNo == actual.CallNo && expected.Status == actual.Status &&
+		expected.ErrorCode == actual.ErrorCode && expected.Retryable == actual.Retryable &&
+		expected.Version == actual.Version && expected.StartedAt.Equal(actual.StartedAt) &&
+		sameWorkspaceAnalysisToolRequest(expected, actual)
+}
+
 func (service *ExecutionService) finishExecutionError(ctx context.Context, started domain.ToolCall, definition domain.Definition, cause error) error {
 	if mustMarkUnknown(definition.SideEffectLevel, cause) {
 		completedAt := service.now()
@@ -380,6 +781,19 @@ func (service *ExecutionService) finishExecutionError(ctx context.Context, start
 		return service.finalizationUnknown(ctx, started, err)
 	}
 	return classified
+}
+
+func (service *ExecutionService) workspaceAnalysisToolOperationRepository() (WorkspaceAnalysisToolOperationRepository, error) {
+	repository, ok := service.calls.(WorkspaceAnalysisToolOperationRepository)
+	if !ok || isNilInterface(repository) {
+		return nil, executionError(
+			foundation.ErrorDependencyUnavailable,
+			errorCodeResultPersistenceUnavailable,
+			false,
+			errors.New("workspace analysis tool operation persistence is unavailable"),
+		)
+	}
+	return repository, nil
 }
 
 func (service *ExecutionService) finalizationUnknown(ctx context.Context, started domain.ToolCall, cause error) error {
@@ -562,6 +976,83 @@ func validateExecutorResult(contract Contract, result ExecutorResult) (json.RawM
 		return nil, nil, executionError(foundation.ErrorConsistencyViolation, errorCodeOutputInvalid, false, err)
 	}
 	return output, summary, nil
+}
+
+func validateExecutorPrivateBinding(definition domain.Definition, result ExecutorResult) error {
+	switch definition.ResultPersistencePolicy {
+	case domain.ResultPersistenceDisabled:
+		if result.PrivateBinding != nil {
+			return executionError(foundation.ErrorNonRetryableFailure, errorCodeOutputInvalid, false, errors.New("tool executor returned a private binding without canonical persistence"))
+		}
+		return nil
+	case domain.ResultPersistenceCanonical:
+		contract, found := domain.WorkspaceAnalysisResultReceiptContract(definition.Ref)
+		if !found || contract.OutputSchema != definition.OutputSchema || contract.MaxOutputBytes != definition.MaxOutputBytes ||
+			result.ResultRef != "" || result.SideEffectType != "" || result.SideEffectID != "" {
+			return executionError(foundation.ErrorConsistencyViolation, errorCodeOutputInvalid, false, errors.New("canonical tool executor result does not match its persistence contract"))
+		}
+		if result.PrivateBinding == nil {
+			if contract.RequiresPrivateBinding {
+				return executionError(foundation.ErrorNonRetryableFailure, errorCodeOutputInvalid, false, errors.New("canonical tool executor omitted its private binding"))
+			}
+			return nil
+		}
+		if result.PrivateBinding.Schema != contract.PrivateBindingSchema || len(result.PrivateBinding.Document) == 0 ||
+			int64(len(result.PrivateBinding.Document)) > contract.MaxPrivateBindingBytes {
+			return executionError(foundation.ErrorNonRetryableFailure, errorCodeOutputInvalid, false, errors.New("canonical tool executor private binding is invalid"))
+		}
+		return nil
+	default:
+		return executionError(foundation.ErrorConsistencyViolation, errorCodeOutputInvalid, false, errors.New("tool result persistence policy is unsupported"))
+	}
+}
+
+func validatePersistedReceiptResult(contract Contract, call domain.ToolCall, receipt domain.ResultReceipt) error {
+	if err := domain.ValidateResultReceipt(receipt, call, contract.Definition); err != nil {
+		return executionError(foundation.ErrorConsistencyViolation, errorCodeResultReplayUnavailable, false, err)
+	}
+	output, summary, err := validateExecutorResult(contract, ExecutorResult{Output: receipt.Output})
+	if err != nil {
+		return err
+	}
+	if hashBytes(output) != call.ResponseHash || int64(len(output)) != call.ResponseBytes || !jsonDocumentsEqual(summary, call.ResponseSummary) {
+		return executionError(foundation.ErrorConsistencyViolation, errorCodeResultReplayUnavailable, false, errors.New("canonical result receipt differs from persisted tool call"))
+	}
+	return nil
+}
+
+func sameCanonicalFinalizationCall(expected, actual domain.ToolCall) bool {
+	return expected.ID == actual.ID && expected.WorkspaceID == actual.WorkspaceID &&
+		expected.WorkflowRunID == actual.WorkflowRunID && expected.NodeRunID == actual.NodeRunID &&
+		expected.NodeAttemptID == actual.NodeAttemptID && expected.CallNo == actual.CallNo &&
+		expected.RequestedToolName == actual.RequestedToolName && equalToolRef(expected.Tool, actual.Tool) &&
+		expected.DefinitionHash == actual.DefinitionHash && equalSchemaRef(expected.InputSchema, actual.InputSchema) &&
+		equalSchemaRef(expected.OutputSchema, actual.OutputSchema) && expected.Capability == actual.Capability &&
+		expected.SideEffectLevel == actual.SideEffectLevel && expected.InvocationPolicy == actual.InvocationPolicy &&
+		expected.IdempotencyKey == actual.IdempotencyKey && expected.RequestHash == actual.RequestHash &&
+		expected.RequestBytes == actual.RequestBytes && jsonDocumentsEqual(expected.RequestSummary, actual.RequestSummary) &&
+		expected.ResponseHash == actual.ResponseHash && expected.ResponseBytes == actual.ResponseBytes &&
+		jsonDocumentsEqual(expected.ResponseSummary, actual.ResponseSummary) && expected.ResultRef == actual.ResultRef &&
+		expected.SideEffectType == actual.SideEffectType && expected.SideEffectID == actual.SideEffectID &&
+		expected.Status == actual.Status && expected.ErrorCode == actual.ErrorCode && expected.Retryable == actual.Retryable &&
+		expected.Version == actual.Version && expected.StartedAt.Equal(actual.StartedAt)
+}
+
+func equalToolRef(left, right *domain.ToolRef) bool {
+	return left == nil && right == nil || left != nil && right != nil && *left == *right
+}
+
+func equalSchemaRef(left, right *domain.SchemaRef) bool {
+	return left == nil && right == nil || left != nil && right != nil && *left == *right
+}
+
+func cloneExecutorPrivateBinding(binding *ExecutorPrivateBinding) *ExecutorPrivateBinding {
+	if binding == nil {
+		return nil
+	}
+	clone := *binding
+	clone.Document = append(json.RawMessage(nil), binding.Document...)
+	return &clone
 }
 
 func replayedExecutionResult(call domain.ToolCall) (ToolExecutionResult, error) {

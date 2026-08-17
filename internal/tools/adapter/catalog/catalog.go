@@ -14,13 +14,16 @@ import (
 const (
 	toolVersionV1   int64 = 1
 	toolVersionV2   int64 = 2
+	toolVersionV3   int64 = 3
 	schemaVersionV1 int64 = 1
+	schemaVersionV2 int64 = 2
 
 	agentRAGWorkflowKey       = "agent-rag"
 	agentRAGAnswerWorkflowKey = "agent-rag-answer"
 	safeWritebackWorkflowKey  = "change-control.safe-writeback"
 	indexMaintenanceWorkflow  = "retrieval.index-maintenance"
 	regressionEvaluationFlow  = "evaluation.regression"
+	workspaceAnalysisFlow     = "workspace-analysis"
 	builtinWorkflowVersionV1  = int64(1)
 	agentRAGAnswerVersionV2   = int64(2)
 	localReadTimeout          = 15 * time.Second
@@ -35,8 +38,10 @@ type contractSeed struct {
 	version         int64
 	description     string
 	inputSchemaID   string
+	inputSchemaVer  int64
 	inputSchema     string
 	outputSchemaID  string
+	outputSchemaVer int64
 	outputSchema    string
 	decodeInput     application.DocumentDecoder
 	decodeOutput    application.DocumentDecoder
@@ -46,6 +51,7 @@ type contractSeed struct {
 	timeout         time.Duration
 	retry           domain.RetryPolicy
 	idempotency     domain.IdempotencyMode
+	resultPolicy    domain.ResultPersistencePolicy
 	sensitiveFields []string
 	workflow        string
 	workflowVersion int64
@@ -53,25 +59,34 @@ type contractSeed struct {
 	maxOutputBytes  int64
 }
 
-// Contracts 构造全部 13 个内置 Tool 的不可变契约；结果只描述能力，不表示已启用或可执行。
+// Contracts 构造全部内置 Tool 的不可变契约；结果只描述能力，不表示已启用或可执行。
 func Contracts() ([]application.Contract, error) {
 	seeds := builtinSeeds()
 	contracts := make([]application.Contract, 0, len(seeds))
 	for _, seed := range seeds {
+		inputSchemaVersion := seed.inputSchemaVer
+		if inputSchemaVersion == 0 {
+			inputSchemaVersion = schemaVersionV1
+		}
+		outputSchemaVersion := seed.outputSchemaVer
+		if outputSchemaVersion == 0 {
+			outputSchemaVersion = schemaVersionV1
+		}
 		definition, err := domain.CanonicalizeDefinition(domain.Definition{
-			Ref:                  domain.ToolRef{Name: seed.name, Version: seed.version},
-			Description:          seed.description,
-			InputSchema:          domain.SchemaRef{ID: seed.inputSchemaID, Version: schemaVersionV1},
-			InputSchemaDocument:  json.RawMessage(seed.inputSchema),
-			OutputSchema:         domain.SchemaRef{ID: seed.outputSchemaID, Version: schemaVersionV1},
-			OutputSchemaDocument: json.RawMessage(seed.outputSchema),
-			RequiredCapability:   seed.capability,
-			SideEffectLevel:      seed.sideEffect,
-			InvocationPolicy:     seed.invocation,
-			Timeout:              seed.timeout,
-			RetryPolicy:          seed.retry,
-			IdempotencyMode:      seed.idempotency,
-			SensitiveFields:      seed.sensitiveFields,
+			Ref:                     domain.ToolRef{Name: seed.name, Version: seed.version},
+			Description:             seed.description,
+			InputSchema:             domain.SchemaRef{ID: seed.inputSchemaID, Version: inputSchemaVersion},
+			InputSchemaDocument:     json.RawMessage(seed.inputSchema),
+			OutputSchema:            domain.SchemaRef{ID: seed.outputSchemaID, Version: outputSchemaVersion},
+			OutputSchemaDocument:    json.RawMessage(seed.outputSchema),
+			RequiredCapability:      seed.capability,
+			SideEffectLevel:         seed.sideEffect,
+			InvocationPolicy:        seed.invocation,
+			ResultPersistencePolicy: seed.resultPolicy,
+			Timeout:                 seed.timeout,
+			RetryPolicy:             seed.retry,
+			IdempotencyMode:         seed.idempotency,
+			SensitiveFields:         seed.sensitiveFields,
 			AllowedWorkflows: []domain.WorkflowBinding{{
 				Key: seed.workflow, Version: seed.workflowVersion,
 			}},
@@ -88,7 +103,7 @@ func Contracts() ([]application.Contract, error) {
 	return contracts, nil
 }
 
-// NewFrozenContractRegistry 构造 API、Worker 与 trusted audit 共用的全部 13 项冻结契约目录。
+// NewFrozenContractRegistry 构造 API、Worker 与 trusted audit 共用的全部冻结契约目录。
 // 该 Registry 不包含 Executor，因此不会把 contract-only Tool 宣称为可执行。
 func NewFrozenContractRegistry() (*application.Registry, error) {
 	contracts, err := Contracts()
@@ -234,6 +249,46 @@ func builtinSeeds() []contractSeed {
 			timeout: localReadTimeout, retry: localRetry, idempotency: domain.IdempotencyNone,
 			workflow: agentRAGAnswerWorkflowKey, workflowVersion: agentRAGAnswerVersionV2,
 			maxInputBytes: maxMediumDocumentBytes, maxOutputBytes: maxMediumDocumentBytes,
+		},
+		{
+			name: "ReadGitStatus", version: toolVersionV2, description: "Inspect attached workspace Git state and return aggregate change counts without paths or diffs.",
+			inputSchemaID: "tool.read_git_status.input", inputSchema: readGitStatusInputSchema,
+			outputSchemaID: "tool.read_git_status.output", outputSchema: readGitStatusOutputSchema,
+			decodeInput: decodeReadGitStatusInput, decodeOutput: decodeReadGitStatusV2Output,
+			capability: capability.ReadLocal, sideEffect: domain.SideEffectNone, invocation: domain.InvocationTrustedWorkflowOnly,
+			timeout: 10 * time.Second, retry: noRetry, idempotency: domain.IdempotencyNone, resultPolicy: domain.ResultPersistenceCanonical,
+			workflow: workspaceAnalysisFlow, workflowVersion: builtinWorkflowVersionV1,
+			maxInputBytes: 4 * 1024, maxOutputBytes: domain.ReadGitStatusV2ReceiptMaxOutputBytes,
+		},
+		{
+			name: "SearchKnowledge", version: toolVersionV2, description: "Search approved workspace knowledge and expose only bounded run-local evidence references.",
+			inputSchemaID: "tool.search_knowledge.input", inputSchemaVer: schemaVersionV2, inputSchema: searchKnowledgeV2InputSchema,
+			outputSchemaID: "tool.search_knowledge.output", outputSchemaVer: schemaVersionV2, outputSchema: searchKnowledgeV2OutputSchema,
+			decodeInput: decodeSearchKnowledgeV2Input, decodeOutput: decodeSearchKnowledgeV2Output,
+			capability: capability.ReadLocal, sideEffect: domain.SideEffectNone, invocation: domain.InvocationTrustedWorkflowOnly,
+			timeout: localReadTimeout, retry: noRetry, idempotency: domain.IdempotencyNone, resultPolicy: domain.ResultPersistenceCanonical,
+			sensitiveFields: []string{"/items", "/query"}, workflow: workspaceAnalysisFlow, workflowVersion: builtinWorkflowVersionV1,
+			maxInputBytes: maxSmallDocumentBytes, maxOutputBytes: domain.SearchKnowledgeV2ReceiptMaxOutputBytes,
+		},
+		{
+			name: "ReadSource", version: toolVersionV3, description: "Open one server-selected run-local evidence reference and return a bounded excerpt.",
+			inputSchemaID: "tool.read_source.input", inputSchemaVer: schemaVersionV2, inputSchema: readSourceV3InputSchema,
+			outputSchemaID: "tool.read_source.output", outputSchemaVer: schemaVersionV2, outputSchema: readSourceV3OutputSchema,
+			decodeInput: decodeReadSourceV3Input, decodeOutput: decodeReadSourceV3Output,
+			capability: capability.ReadLocal, sideEffect: domain.SideEffectNone, invocation: domain.InvocationTrustedWorkflowOnly,
+			timeout: localReadTimeout, retry: noRetry, idempotency: domain.IdempotencyNone, resultPolicy: domain.ResultPersistenceCanonical,
+			sensitiveFields: []string{"/excerpt"}, workflow: workspaceAnalysisFlow, workflowVersion: builtinWorkflowVersionV1,
+			maxInputBytes: 4 * 1024, maxOutputBytes: domain.ReadSourceV3ReceiptMaxOutputBytes,
+		},
+		{
+			name: "ValidateCitation", version: toolVersionV3, description: "Validate candidate evidence references after resolving their complete same-run identities server-side.",
+			inputSchemaID: "tool.validate_citation.input", inputSchemaVer: schemaVersionV2, inputSchema: validateCitationV3InputSchema,
+			outputSchemaID: "tool.validate_citation.output", outputSchemaVer: schemaVersionV2, outputSchema: validateCitationV3OutputSchema,
+			decodeInput: decodeValidateCitationV3Input, decodeOutput: decodeValidateCitationV3Output,
+			capability: capability.ReadLocal, sideEffect: domain.SideEffectNone, invocation: domain.InvocationTrustedWorkflowOnly,
+			timeout: localReadTimeout, retry: noRetry, idempotency: domain.IdempotencyNone, resultPolicy: domain.ResultPersistenceCanonical,
+			workflow: workspaceAnalysisFlow, workflowVersion: builtinWorkflowVersionV1,
+			maxInputBytes: 16 * 1024, maxOutputBytes: domain.ValidateCitationV3ReceiptMaxOutputBytes,
 		},
 	}
 }

@@ -30,6 +30,7 @@ export const invalidateRagEvent = async (
   const conversations = new Set<string>();
   const turns = new Set<string>();
   const answers = new Set<string>();
+  const analysisTimelines = new Set<string>();
   for (const target of event.invalidations) {
     switch (target.resource) {
       case "conversation":
@@ -50,6 +51,11 @@ export const invalidateRagEvent = async (
         break;
       }
     }
+  }
+  if (event.type.startsWith("workspace_analysis.")) {
+    const answerId = event.payloadSummary.answerId;
+    if (answerId !== undefined) analysisTimelines.add(answerId);
+    for (const answerId of answers) analysisTimelines.add(answerId);
   }
   if (resetConversationList) {
     await queryClient.resetQueries(
@@ -72,6 +78,12 @@ export const invalidateRagEvent = async (
   for (const answerId of answers) {
     await queryClient.invalidateQueries(
       { queryKey: ragQueryKeys.answer(workspaceId, answerId), exact: true },
+      { throwOnError: true },
+    );
+  }
+  for (const answerId of analysisTimelines) {
+    await queryClient.invalidateQueries(
+      { queryKey: ragQueryKeys.analysisTimeline(workspaceId, answerId), exact: true },
       { throwOnError: true },
     );
   }

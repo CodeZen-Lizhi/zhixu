@@ -92,7 +92,7 @@ func TestAPIArtifactWorkflowCompositionUsesOneAuthoritativeRuntime(t *testing.T)
 	}
 	service, runtime, generation, err := newAPIArtifactWorkflowComponents(
 		pool, config.Defaults(), workspaces, fakeFileScanner{}, nil,
-		foundation.NewUUIDGenerator(nil), foundation.SystemClock{},
+		foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, nil,
 	)
 	if err != nil || service == nil || runtime == nil || generation == nil {
 		t.Fatalf("service=%#v runtime=%#v generation=%#v err=%v", service, runtime, generation, err)

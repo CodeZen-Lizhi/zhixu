@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"sort"
 	"sync"
@@ -52,7 +53,22 @@ type ExecutorResult struct {
 	ResultRef      string
 	SideEffectType string
 	SideEffectID   string
+	PrivateBinding *ExecutorPrivateBinding `json:"-"`
 }
+
+// ExecutorPrivateBinding 是仅供显式 opt-in Tool 回执持久化的 server-only 文档。
+type ExecutorPrivateBinding struct {
+	Schema   domain.SchemaRef
+	Document json.RawMessage `json:"-"`
+}
+
+// String 只投影 Schema 和长度，禁止调试日志输出私有文档。
+func (binding ExecutorPrivateBinding) String() string {
+	return fmt.Sprintf("ExecutorPrivateBinding{schema:%s@%d bytes:%d}", binding.Schema.ID, binding.Schema.Version, len(binding.Document))
+}
+
+// GoString 避免 %#v 绕过私有绑定的安全 String 投影。
+func (binding ExecutorPrivateBinding) GoString() string { return binding.String() }
 
 // Executor 执行一个已经通过 Registry、Policy 和 Schema 校验的 Tool。
 type Executor interface {

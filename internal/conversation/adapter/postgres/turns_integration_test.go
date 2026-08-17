@@ -277,6 +277,14 @@ func (fixture conversationRuntimeFixture) modelCallID(ordinal int64) foundation.
 	return conversationTurnID(fixture.idBase + int(ordinal)*10 + 7)
 }
 
+func (fixture conversationRuntimeFixture) memorySnapshotID(ordinal int64) foundation.ID {
+	return conversationTurnID(fixture.idBase + int(ordinal)*10 + 8)
+}
+
+func (fixture conversationRuntimeFixture) memoryClaimantID(ordinal int64) foundation.ID {
+	return conversationTurnID(fixture.idBase + int(ordinal)*10 + 9)
+}
+
 func seedConversationRuntimeBase(
 	t *testing.T,
 	ctx context.Context,
@@ -403,18 +411,41 @@ func seedTerminalModelRun(
 ) {
 	t.Helper()
 	modelRunID := fixture.modelRunID(ordinal)
+	memorySnapshotID := fixture.memorySnapshotID(ordinal)
+	memorySchema := "agent-rag-memory-context/v1"
+	memoryDigest := strings.Repeat("8", 64)
+	const memoryItemCount = 0
+	const memoryBytes = 1
+	if _, err := pool.Exec(ctx, `INSERT INTO agent.rag_memory_snapshot(
+		id,workspace_id,workflow_run_id,node_run_id,node_attempt_id,claimant_id,
+		owner_kind,owner_id,task_scope_id,status,created_at,updated_at
+	) VALUES($1,$2,$3,$4,$5,$6,'USER',$7,$8,'PREPARING',$9,$9)`,
+		string(memorySnapshotID), string(fixture.workspaceID), string(fixture.runID(ordinal)),
+		string(fixture.nodeID(ordinal)), string(fixture.attemptID(ordinal)), string(fixture.memoryClaimantID(ordinal)),
+		string(fixture.conversationID), string(fixture.conversationID), at); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := pool.Exec(ctx, `INSERT INTO agent.model_run(
 		id,workspace_id,workflow_run_id,node_run_id,node_attempt_id,
 		adapter_name,adapter_version,model_id,model_version,profile_id,profile_version,
 		prompt_template_id,prompt_template_version,output_schema_id,output_schema_version,
-		reduced_schema_id,reduced_schema_version,retrieval_index_version_id,status,version,started_at,updated_at
+		reduced_schema_id,reduced_schema_version,retrieval_index_version_id,
+		memory_snapshot_id,memory_context_schema_version,memory_context_digest,memory_context_item_count,memory_context_bytes,
+		status,version,started_at,updated_at
 	) VALUES($1,$2,$3,$4,$5,'openai-compatible','v1','model-test','2026-07-01','default','v1',
-		'rag-answer','v2','agent.rag-answer','v2','agent.refusal','v1',$6,'RUNNING',1,$7,$7)`,
+		'rag-answer','v2','agent.rag-answer','v2','agent.refusal','v1',$6,$7,$8,$9,$10,$11,'RUNNING',1,$12,$12)`,
 		string(modelRunID), string(fixture.workspaceID), string(fixture.runID(ordinal)), string(fixture.nodeID(ordinal)),
-		string(fixture.attemptID(ordinal)), string(fixture.indexID), at); err != nil {
+		string(fixture.attemptID(ordinal)), string(fixture.indexID), string(memorySnapshotID), memorySchema, memoryDigest,
+		memoryItemCount, memoryBytes, at); err != nil {
 		t.Fatal(err)
 	}
-	callCompletedAt := at.Add(time.Millisecond)
+	if _, err := pool.Exec(ctx, `UPDATE agent.rag_memory_snapshot SET
+		status='READY',context_schema_version=$2,context_digest=$3,context_item_count=$4,context_bytes=$5,
+		model_run_id=$6,updated_at=$7 WHERE id=$1`, string(memorySnapshotID), memorySchema, memoryDigest,
+		memoryItemCount, memoryBytes, string(modelRunID), at.Add(time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	callCompletedAt := at.Add(2 * time.Millisecond)
 	if _, err := pool.Exec(ctx, `INSERT INTO agent.model_call(
 		id,model_run_id,call_no,phase,adapter_name,adapter_version,model_id,model_version,profile_id,profile_version,
 		prompt_template_id,prompt_template_version,output_schema_id,output_schema_version,max_output_tokens,
@@ -443,7 +474,7 @@ func seedTerminalModelRun(
 	}
 	if _, err := pool.Exec(ctx, `UPDATE agent.model_run SET
 		status=$2,final_result_type=$3,error_code=$4,version=2,updated_at=$5,completed_at=$5 WHERE id=$1`,
-		string(modelRunID), modelStatus, resultType, errorCode, at.Add(2*time.Millisecond)); err != nil {
+		string(modelRunID), modelStatus, resultType, errorCode, at.Add(3*time.Millisecond)); err != nil {
 		t.Fatal(err)
 	}
 }

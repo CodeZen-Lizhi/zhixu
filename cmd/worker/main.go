@@ -21,10 +21,13 @@ import (
 	agentretrieval "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/retrieval"
 	agentworkflow "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/workflow"
 	agentapplication "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
+	agentdomain "github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
 	artifactauthoring "github.com/CodeZen-Lizhi/zhixu/internal/artifact/adapter/authoring"
 	artifactpostgres "github.com/CodeZen-Lizhi/zhixu/internal/artifact/adapter/postgres"
 	artifactapplication "github.com/CodeZen-Lizhi/zhixu/internal/artifact/application"
 	artifactworkflow "github.com/CodeZen-Lizhi/zhixu/internal/artifact/workflow"
+	auditpostgres "github.com/CodeZen-Lizhi/zhixu/internal/audit/adapter/postgres"
+	auditapplication "github.com/CodeZen-Lizhi/zhixu/internal/audit/application"
 	authoringchangecontrol "github.com/CodeZen-Lizhi/zhixu/internal/authoring/adapter/changecontrol"
 	authoringpostgres "github.com/CodeZen-Lizhi/zhixu/internal/authoring/adapter/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/capability"
@@ -40,6 +43,7 @@ import (
 	collectionpostgres "github.com/CodeZen-Lizhi/zhixu/internal/collection/adapter/postgres"
 	collectionapplication "github.com/CodeZen-Lizhi/zhixu/internal/collection/application"
 	conversationpostgres "github.com/CodeZen-Lizhi/zhixu/internal/conversation/adapter/postgres"
+	conversationworkflow "github.com/CodeZen-Lizhi/zhixu/internal/conversation/workflow"
 	eventspostgres "github.com/CodeZen-Lizhi/zhixu/internal/events/adapter/postgres"
 	exportcollection "github.com/CodeZen-Lizhi/zhixu/internal/export/adapter/collection"
 	exportlocalfs "github.com/CodeZen-Lizhi/zhixu/internal/export/adapter/localfs"
@@ -205,36 +209,39 @@ type gitSyncAutoScheduler interface {
 }
 
 type workerComponents struct {
-	safeWriteback      *changecontrolworkflow.Node
-	tools              toolRuntimeComponents
-	agentCapability    agentCapabilityStatus
-	artifact           artifactWorkflowComponents
-	captureExecutor    *captureworkflow.Executor
-	captureOutbox      captureOutboxDispatchService
-	captureProfile     agentCapabilityStatus
-	organizingExecutor *organizingworkflow.Executor
-	organizingOutbox   organizingOutboxDispatchService
-	gitSyncWorker      *gitsyncapplication.Worker
-	gitSyncScheduler   *gitsyncapplication.AutoSyncScheduler
-	gitSyncCapability  agentCapabilityStatus
-	reindexWorker      *reindexriver.Worker
-	dispatcher         *retrievalruntime.Runner
-	runtimeClient      *riveradapter.Client
-	definitions        *workflowapplication.DefinitionRegistry
-	executors          *workflowapplication.ExecutorRegistry
-	runtimeGeneration  workerRuntimeGenerationBuilder
-	sourceProcessing   sourceProcessingComponents
-	reindexRuntime     *workerReindexProcessorAcquirer
-	semanticScan       *graphworkflow.SemanticLinkScanExecutor
-	healthScan         *healthworkflowadapter.HealthScanExecutor
-	healthScanStart    *healthapplication.ScanService
-	healthSchedule     *healthapplication.ScheduleService
-	healthAffected     *healthapplication.AffectedChangeDispatcher
-	timelineProject    *knowledgeapplication.TimelineProjectionDispatcher
-	citationBackfill   *artifactapplication.CitationBackfillDispatcher
-	exportWorker       *exportriver.Worker
-	exportService      *exportapplication.Service
-	memoryExpiry       memoryExpiryService
+	workerID        foundation.ID
+	safeWriteback   *changecontrolworkflow.Node
+	tools           toolRuntimeComponents
+	agentCapability agentCapabilityStatus
+	// workspaceAnalysisCapability 表示可选工作区分析子组合的启动状态；它绝不影响固定 RAG 就绪。
+	workspaceAnalysisCapability agentCapabilityStatus
+	artifact                    artifactWorkflowComponents
+	captureExecutor             *captureworkflow.Executor
+	captureOutbox               captureOutboxDispatchService
+	captureProfile              agentCapabilityStatus
+	organizingExecutor          *organizingworkflow.Executor
+	organizingOutbox            organizingOutboxDispatchService
+	gitSyncWorker               *gitsyncapplication.Worker
+	gitSyncScheduler            *gitsyncapplication.AutoSyncScheduler
+	gitSyncCapability           agentCapabilityStatus
+	reindexWorker               *reindexriver.Worker
+	dispatcher                  *retrievalruntime.Runner
+	runtimeClient               *riveradapter.Client
+	definitions                 *workflowapplication.DefinitionRegistry
+	executors                   *workflowapplication.ExecutorRegistry
+	runtimeGeneration           workerRuntimeGenerationBuilder
+	sourceProcessing            sourceProcessingComponents
+	reindexRuntime              *workerReindexProcessorAcquirer
+	semanticScan                *graphworkflow.SemanticLinkScanExecutor
+	healthScan                  *healthworkflowadapter.HealthScanExecutor
+	healthScanStart             *healthapplication.ScanService
+	healthSchedule              *healthapplication.ScheduleService
+	healthAffected              *healthapplication.AffectedChangeDispatcher
+	timelineProject             *knowledgeapplication.TimelineProjectionDispatcher
+	citationBackfill            *artifactapplication.CitationBackfillDispatcher
+	exportWorker                *exportriver.Worker
+	exportService               *exportapplication.Service
+	memoryExpiry                memoryExpiryService
 	// interviewCompletion 是 reservation/hidden hold 维护依赖。
 	interviewCompletion interviewCompletionMaintenanceService
 	// learningPathMaintenance 是 Review Path reservation/hidden hold 维护依赖。
@@ -253,10 +260,18 @@ type toolRuntimeComponents struct {
 	// workflow/definition 只服务迁移前 agent-rag@1 的持久回放。
 	// 新模型 Tool Calling 由 Eino AgentRuntime 通过 RAGAgentToolBridge 执行，
 	// 不会创建本包的 Workflow Node。
-	workflow       *toolworkflow.Executor
-	definition     *workflowdomain.RegisteredDefinition
-	enabledRefs    []toolsdomain.ToolRef
-	runtimeEnabled bool
+	workflow                    *toolworkflow.Executor
+	definition                  *workflowdomain.RegisteredDefinition
+	enabledRefs                 []toolsdomain.ToolRef
+	runtimeEnabled              bool
+	workspaceAnalysisCapability agentCapabilityStatus
+	workspaceAnalysisAudit      *auditapplication.Recorder
+	workspaceAnalysisActorRef   string
+}
+
+type toolExecutorRegistration struct {
+	ref      toolsdomain.ToolRef
+	executor toolsapplication.Executor
 }
 
 type agentCapabilityStatus struct {
@@ -549,6 +564,13 @@ func run(configPath string, logger *slog.Logger) error {
 		resumeQueue = modelSnapshot.Rollout.Phase == modelsettingsdomain.RolloutPhaseIdle ||
 			modelSnapshot.Rollout.Phase == modelsettingsdomain.RolloutPhaseFailed
 	}
+	workspaceAnalysisCapability, err := newWorkerWorkspaceAnalysisCapability(
+		database.DB(), cfg, components, configuredModels,
+	)
+	if err != nil {
+		logger.Warn("workspace analysis worker capability is unavailable", "error_code", agentapplication.ErrorCodeWorkspaceAnalysisCapabilityUnavailable)
+		workspaceAnalysisCapability = nil
+	}
 	if err := startWorkerRuntime(
 		processContext,
 		resumeQueue,
@@ -561,6 +583,14 @@ func run(configPath string, logger *slog.Logger) error {
 	); err != nil {
 		logger.Error("workflow runtime could not be started", "error_code", "WORKFLOW_RIVER_CLIENT_START_FAILED")
 		return err
+	}
+	if workspaceAnalysisCapability != nil {
+		advertiseContext, cancelAdvertise := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
+		advertiseErr := workspaceAnalysisCapability.Advertise(advertiseContext)
+		cancelAdvertise()
+		if advertiseErr != nil {
+			logger.Warn("workspace analysis worker capability advertisement failed", "error_code", agentapplication.ErrorCodeWorkspaceAnalysisCapabilityUnavailable)
+		}
 	}
 	readiness.SetReindexDispatcherStarted(components.dispatcher.Started())
 	gitSyncProcessContext, cancelGitSyncProcess := context.WithCancel(processContext)
@@ -616,6 +646,12 @@ func run(configPath string, logger *slog.Logger) error {
 
 	ticker := time.NewTicker(cfg.HealthInterval)
 	defer ticker.Stop()
+	var workspaceAnalysisCapabilityTicks <-chan time.Time
+	if workspaceAnalysisCapability != nil {
+		capabilityTicker := time.NewTicker(workspaceAnalysisCapabilityHeartbeatInterval)
+		defer capabilityTicker.Stop()
+		workspaceAnalysisCapabilityTicks = capabilityTicker.C
+	}
 	captureTicker := time.NewTicker(captureDispatchInterval)
 	defer captureTicker.Stop()
 	shutdownMode := shutdownGraceful
@@ -663,6 +699,13 @@ func run(configPath string, logger *slog.Logger) error {
 			runErr = runtimeErr
 			logger.Error("workspace root grant ownership was lost", "error_code", "WORKSPACE_GRANT_STALE")
 			goto shutdown
+		case <-workspaceAnalysisCapabilityTicks:
+			heartbeatContext, cancelHeartbeat := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
+			heartbeatErr := workspaceAnalysisCapability.Renew(heartbeatContext)
+			cancelHeartbeat()
+			if heartbeatErr != nil {
+				logger.Warn("workspace analysis worker capability heartbeat failed", "error_code", agentapplication.ErrorCodeWorkspaceAnalysisCapabilityUnavailable)
+			}
 		case <-captureTicker.C:
 			if !modelDrain.ProducersEnabled() {
 				continue
@@ -745,6 +788,14 @@ func run(configPath string, logger *slog.Logger) error {
 shutdown:
 	readiness.BeginShutdown()
 	readiness.SetReindexDispatcherStarted(false)
+	if workspaceAnalysisCapability != nil {
+		releaseContext, cancelRelease := context.WithTimeout(context.Background(), cfg.DatabasePingTimeout)
+		releaseErr := workspaceAnalysisCapability.Release(releaseContext)
+		cancelRelease()
+		if releaseErr != nil {
+			logger.Warn("workspace analysis worker capability release failed", "error_code", agentapplication.ErrorCodeWorkspaceAnalysisCapabilityUnavailable)
+		}
+	}
 	shutdownStartedAt := time.Now()
 	runtimeShutdownDeadline, hardShutdownDeadline := workerShutdownDeadlines(
 		shutdownStartedAt, cfg.WorkerSoftStopTimeout, cfg.WorkerHardStopTimeout, cfg.ShutdownTimeout,
@@ -1238,10 +1289,31 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	if err != nil {
 		return workerComponents{}, err
 	}
-	toolComponents, err := newToolRuntimeComponents(db, cfg, workspaceRepository, gitRepository, models)
+	workerID, err := foundation.NewUUIDGenerator(nil).New()
 	if err != nil {
 		return workerComponents{}, err
 	}
+	var workspaceAnalysisAudit *auditapplication.Recorder
+	workspaceAnalysisActorRef := ""
+	if cfg.WorkspaceAnalysisWorkerEnabled {
+		auditRepository, auditErr := auditpostgres.NewRepository(db)
+		if auditErr == nil {
+			auditRecorder, recorderErr := auditapplication.NewRecorder(auditRepository)
+			if recorderErr == nil {
+				workspaceAnalysisAudit = auditRecorder
+				workspaceAnalysisActorRef = fmt.Sprintf("worker:%s", workerID)
+			}
+		}
+	}
+	toolComponents, err := newToolRuntimeComponents(
+		db, cfg, workspaceRepository, gitRepository,
+		toolRuntimeCompositionInput{models: models, workspaceAnalysisAudit: workspaceAnalysisAudit},
+	)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	toolComponents.workspaceAnalysisAudit = workspaceAnalysisAudit
+	toolComponents.workspaceAnalysisActorRef = workspaceAnalysisActorRef
 	authoringRepository, err := authoringpostgres.NewRepository(db)
 	if err != nil {
 		return workerComponents{}, err
@@ -1293,10 +1365,6 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 		return workerComponents{}, err
 	}
 	inserter, err := riveradapter.NewJobInserter(insertClient)
-	if err != nil {
-		return workerComponents{}, err
-	}
-	workerID, err := foundation.NewUUIDGenerator(nil).New()
 	if err != nil {
 		return workerComponents{}, err
 	}
@@ -1406,16 +1474,45 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	if err != nil {
 		return workerComponents{}, err
 	}
-	terminalHooks, err := workflowapplication.NewCompositeWorkflowTerminalHook(
+	workspaceAnalysisWorkerEnabled := cfg.WorkspaceAnalysisWorkerEnabled &&
+		toolComponents.workspaceAnalysisAudit != nil && toolComponents.workspaceAnalysisActorRef != ""
+	var workspaceAnalysisControlHook workflowapplication.WorkflowControlHook
+	terminalHookComponents := []workflowapplication.WorkflowTerminalHook{
 		artifactTerminal,
 		organizingworkflow.NewTerminalHook(),
-	)
+	}
+	if workspaceAnalysisWorkerEnabled {
+		workspaceAnalysisCancellationAudit, workspaceAnalysisControlErr := conversationpostgres.NewWorkspaceAnalysisCancellationAuditHook(
+			toolComponents.workspaceAnalysisAudit,
+		)
+		if workspaceAnalysisControlErr == nil {
+			workspaceAnalysisControlHook = workspaceAnalysisCancellationAudit
+		} else {
+			workspaceAnalysisWorkerEnabled = false
+		}
+	}
+	if workspaceAnalysisWorkerEnabled {
+		workspaceAnalysisCancellationTerminal, workspaceAnalysisTerminalErr := conversationpostgres.NewWorkspaceAnalysisCancellationTerminalHookWithAudit(
+			healthEvents,
+			foundation.NewUUIDGenerator(nil),
+			toolComponents.workspaceAnalysisAudit,
+			toolComponents.workspaceAnalysisActorRef,
+		)
+		if workspaceAnalysisTerminalErr == nil {
+			terminalHookComponents = append(terminalHookComponents, workspaceAnalysisCancellationTerminal)
+		} else {
+			workspaceAnalysisWorkerEnabled = false
+			workspaceAnalysisControlHook = nil
+		}
+	}
+	terminalHooks, err := workflowapplication.NewCompositeWorkflowTerminalHook(terminalHookComponents...)
 	if err != nil {
 		return workerComponents{}, err
 	}
 	runtimeRepository, err := workflowpostgres.NewRuntimeRepositoryWithHooks(db, inserter, workflowpostgres.RuntimeRepositoryHooks{
 		CancellationSafety:      cancellationGuard,
 		Terminal:                terminalHooks,
+		Control:                 workspaceAnalysisControlHook,
 		ModelRuntimeFreshWithin: modelBinding.runtimeFreshWithin,
 	})
 	if err != nil {
@@ -1467,7 +1564,11 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	if err != nil {
 		return workerComponents{}, err
 	}
-	agentComponents, err := newAgentWorkflowComponentsWithToolsAndMetrics(db, cfg, workspaceRepository, memoryService, toolComponents, metrics, models)
+	agentConfig := cfg
+	agentConfig.WorkspaceAnalysisWorkerEnabled = workspaceAnalysisWorkerEnabled
+	agentComponents, err := newAgentWorkflowComponentsWithToolsAndMetrics(
+		db, agentConfig, workspaceRepository, memoryService, runtimeRepository, toolComponents, metrics, models,
+	)
 	if err != nil {
 		return workerComponents{}, err
 	}
@@ -1498,6 +1599,15 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 		}
 		if err := executors.Register(agentworkflow.RAGWorkflowNodeKind, agentworkflow.RAGWorkflowInputSchemaVersion, agentComponents.rag); err != nil {
 			return workerComponents{}, err
+		}
+		if err := registerWorkerWorkspaceAnalysisExecutors(executors, agentComponents); err != nil {
+			agentComponents.workspaceInspect = nil
+			agentComponents.workspaceRetrieve = nil
+			agentComponents.workspaceRead = nil
+			agentComponents.workspaceSynthesize = nil
+			agentComponents.workspaceValidate = nil
+			agentComponents.workspaceReview = nil
+			agentComponents.workspaceAnalysisCapability = agentCapabilityStatus{code: agentapplication.ErrorCodeWorkspaceAnalysisCapabilityUnavailable}
 		}
 	}
 	artifactIDs := foundation.NewUUIDGenerator(nil)
@@ -1598,7 +1708,7 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 			artifactAgentRepository, artifactTerminal, runtimeRepository, workflowRepository,
 			captureRepository, captureFetcher, memoryService,
 			organizingRepository, organizingArtifacts, organizingProposals, organizingRenderer, documentContentReader,
-			metrics,
+			metrics, toolComponents.workspaceAnalysisAudit, toolComponents.workspaceAnalysisActorRef,
 		)
 	}
 	for _, kind := range organizingworkflow.ExecutorNodeKinds() {
@@ -1663,6 +1773,11 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 		}
 		if err := definitions.Register(agentworkflow.RegisteredRAGDefinitionV2()); err != nil {
 			return workerComponents{}, err
+		}
+		if agentComponents.workspaceAnalysisCapability.available && agentComponents.workspaceReview != nil {
+			if err := definitions.Register(conversationworkflow.RegisteredWorkspaceAnalysisDefinition()); err != nil {
+				agentComponents.workspaceAnalysisCapability = agentCapabilityStatus{code: agentapplication.ErrorCodeWorkspaceAnalysisCapabilityUnavailable}
+			}
 		}
 	}
 	if artifactComponents.executor != nil {
@@ -1820,8 +1935,13 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	if err != nil {
 		return workerComponents{}, err
 	}
+	workspaceAnalysisCapability := agentComponents.workspaceAnalysisCapability
+	if cfg.WorkspaceAnalysisWorkerEnabled && !workspaceAnalysisWorkerEnabled {
+		workspaceAnalysisCapability = agentCapabilityStatus{code: agentapplication.ErrorCodeWorkspaceAnalysisCapabilityUnavailable}
+	}
 	return workerComponents{
-		safeWriteback: node, tools: toolComponents, agentCapability: agentComponents.capability, artifact: artifactComponents,
+		workerID: workerID, safeWriteback: node, tools: toolComponents, agentCapability: agentComponents.capability,
+		workspaceAnalysisCapability: workspaceAnalysisCapability, artifact: artifactComponents,
 		captureExecutor: captureExecutor, captureOutbox: captureOutbox, captureProfile: captureProfileCapability,
 		organizingExecutor: organizingExecutor, organizingOutbox: organizingOutbox,
 		gitSyncWorker: gitSyncWorker, gitSyncScheduler: gitSyncScheduler, gitSyncCapability: gitSyncCapability,
@@ -1855,6 +1975,8 @@ func newWorkerRuntimeGenerationBuilder(
 	organizingRenderer *organizingworkflow.EvidenceRenderer,
 	documentContentReader *organizingowner.DocumentContentReader,
 	metrics observability.Metrics,
+	workspaceAnalysisAudit *auditapplication.Recorder,
+	workspaceAnalysisActorRef string,
 ) workerRuntimeGenerationBuilder {
 	return func(ctx context.Context, models *modelsettingsruntime.Models) (*workerRuntimeGeneration, error) {
 		if ctx == nil || models == nil || models.Revision() <= 0 {
@@ -1880,16 +2002,23 @@ func newWorkerRuntimeGenerationBuilder(
 			return nil, err
 		}
 
-		toolComponents, err := newToolRuntimeComponents(db, cfg, workspaceRepository, gitRepository, models)
+		toolComponents, err := newToolRuntimeComponents(
+			db, cfg, workspaceRepository, gitRepository,
+			toolRuntimeCompositionInput{models: models, workspaceAnalysisAudit: workspaceAnalysisAudit},
+		)
 		if err != nil {
 			return nil, err
 		}
+		toolComponents.workspaceAnalysisAudit = workspaceAnalysisAudit
+		toolComponents.workspaceAnalysisActorRef = workspaceAnalysisActorRef
 		revision := models.Revision()
 		sourceProcessing, err := newSourceProcessingComponents(db, cfg, workspaceRepository, gitRepository, &revision, models)
 		if err != nil {
 			return nil, err
 		}
-		agentComponents, err := newAgentWorkflowComponentsWithToolsAndMetrics(db, cfg, workspaceRepository, memoryService, toolComponents, metrics, models)
+		agentComponents, err := newAgentWorkflowComponentsWithToolsAndMetrics(
+			db, cfg, workspaceRepository, memoryService, runtimeRepository, toolComponents, metrics, models,
+		)
 		if err != nil {
 			return nil, err
 		}
@@ -1996,7 +2125,71 @@ func registerWorkerAgentExecutors(registry *workflowapplication.ExecutorRegistry
 	if err := registry.Register(agentworkflow.RelationAssessmentNodeKind, agentworkflow.RelationAssessmentInputSchemaVersion, relation); err != nil {
 		return err
 	}
-	return registry.Register(agentworkflow.RAGWorkflowNodeKind, agentworkflow.RAGWorkflowInputSchemaVersion, rag)
+	if err := registry.Register(agentworkflow.RAGWorkflowNodeKind, agentworkflow.RAGWorkflowInputSchemaVersion, rag); err != nil {
+		return err
+	}
+	return registerWorkerWorkspaceAnalysisExecutors(registry, components)
+}
+
+func registerWorkerWorkspaceAnalysisExecutors(
+	registry *workflowapplication.ExecutorRegistry,
+	components agentWorkflowComponents,
+) error {
+	if components.workspaceInspect == nil && components.workspaceRetrieve == nil && components.workspaceRead == nil &&
+		components.workspaceSynthesize == nil && components.workspaceValidate == nil && components.workspaceReview == nil {
+		return nil
+	}
+	if components.workspaceInspect == nil || components.workspaceRetrieve == nil || components.workspaceRead == nil ||
+		components.workspaceSynthesize == nil || components.workspaceValidate == nil || components.workspaceReview == nil {
+		return foundation.NewError(
+			foundation.ErrorDependencyUnavailable,
+			"WORKER_WORKSPACE_ANALYSIS_EXECUTORS_UNAVAILABLE",
+			false,
+			errors.New("workspace analysis worker executors are incomplete"),
+		)
+	}
+	if registry == nil {
+		return foundation.NewError(
+			foundation.ErrorDependencyUnavailable,
+			"WORKER_WORKSPACE_ANALYSIS_EXECUTOR_REGISTRY_UNAVAILABLE",
+			false,
+			errors.New("workspace analysis executor registry is unavailable"),
+		)
+	}
+	for _, item := range []struct {
+		key      string
+		executor workflowapplication.Executor
+	}{
+		{conversationworkflow.WorkspaceAnalysisNodeInspectWorkspace, components.workspaceInspect},
+		{conversationworkflow.WorkspaceAnalysisNodeRetrieveEvidence, components.workspaceRetrieve},
+		{conversationworkflow.WorkspaceAnalysisNodeReadEvidence, components.workspaceRead},
+		{conversationworkflow.WorkspaceAnalysisNodeSynthesizeAnswer, components.workspaceSynthesize},
+		{conversationworkflow.WorkspaceAnalysisNodeValidateCitations, components.workspaceValidate},
+		{conversationworkflow.WorkspaceAnalysisNodeReviewPublish, components.workspaceReview},
+	} {
+		node, found := workerWorkspaceAnalysisNode(item.key)
+		if !found {
+			return foundation.NewError(
+				foundation.ErrorConsistencyViolation,
+				"WORKER_WORKSPACE_ANALYSIS_CONTRACT_INVALID",
+				false,
+				errors.New("workspace analysis node is missing"),
+			)
+		}
+		if err := registry.Register(node.Kind, node.InputSchemaVersion, item.executor); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func workerWorkspaceAnalysisNode(key string) (workflowdomain.NodeDefinition, bool) {
+	for _, node := range conversationworkflow.RegisteredWorkspaceAnalysisDefinition().Graph.Nodes {
+		if node.Key == key {
+			return node, true
+		}
+	}
+	return workflowdomain.NodeDefinition{}, false
 }
 
 func registerWorkerArtifactExecutor(registry *workflowapplication.ExecutorRegistry, components artifactWorkflowComponents) error {
@@ -2012,7 +2205,42 @@ func registerWorkerArtifactExecutor(registry *workflowapplication.ExecutorRegist
 	return registry.Register(artifactworkflow.NodeKind, artifactworkflow.InputSchemaVersion, executor)
 }
 
-func newToolRuntimeComponents(db *pgxpool.Pool, cfg config.Config, workspaceRepository *workspacepostgres.Repository, gitInspector *gitcli.WritebackClient, modelRuntimes ...*modelsettingsruntime.Models) (toolRuntimeComponents, error) {
+type toolRuntimeCompositionInput struct {
+	models                 *modelsettingsruntime.Models
+	workspaceAnalysisAudit *auditapplication.Recorder
+}
+
+func newToolRuntimeComponents(
+	db *pgxpool.Pool,
+	cfg config.Config,
+	workspaceRepository *workspacepostgres.Repository,
+	gitInspector *gitcli.WritebackClient,
+	inputs ...toolRuntimeCompositionInput,
+) (toolRuntimeComponents, error) {
+	if len(inputs) > 1 {
+		return toolRuntimeComponents{}, errors.New("tool runtime composition accepts at most one input")
+	}
+	var input toolRuntimeCompositionInput
+	if len(inputs) == 1 {
+		input = inputs[0]
+	}
+	var modelRuntimes []*modelsettingsruntime.Models
+	if input.models != nil {
+		modelRuntimes = append(modelRuntimes, input.models)
+	}
+	return newToolRuntimeComponentsWithWorkspaceAnalysisAudit(
+		db, cfg, workspaceRepository, gitInspector, input.workspaceAnalysisAudit, modelRuntimes...,
+	)
+}
+
+func newToolRuntimeComponentsWithWorkspaceAnalysisAudit(
+	db *pgxpool.Pool,
+	cfg config.Config,
+	workspaceRepository *workspacepostgres.Repository,
+	gitInspector *gitcli.WritebackClient,
+	workspaceAnalysisAudit *auditapplication.Recorder,
+	modelRuntimes ...*modelsettingsruntime.Models,
+) (toolRuntimeComponents, error) {
 	models, err := modelRuntimeForComposition(cfg, modelRuntimes...)
 	if err != nil {
 		return toolRuntimeComponents{}, err
@@ -2028,6 +2256,20 @@ func newToolRuntimeComponents(db *pgxpool.Pool, cfg config.Config, workspaceRepo
 	if err != nil {
 		return toolRuntimeComponents{}, err
 	}
+	workspaceAnalysisCapability := agentCapabilityStatus{}
+	if cfg.WorkspaceAnalysisWorkerEnabled {
+		workspaceAnalysisCapability.code = agentapplication.ErrorCodeWorkspaceAnalysisCapabilityUnavailable
+		eventStore, eventErr := eventspostgres.NewStore(db)
+		if eventErr == nil && workspaceAnalysisAudit != nil {
+			eventRepository, repositoryErr := toolpostgres.NewRepositoryWithWorkspaceAnalysisEventsAndAudit(db, eventStore, workspaceAnalysisAudit)
+			if repositoryErr == nil {
+				repository = eventRepository
+				workspaceAnalysisCapability = agentCapabilityStatus{available: true}
+			} else {
+				workspaceAnalysisCapability.code = agentapplication.ErrorCodeWorkspaceAnalysisCapabilityUnavailable
+			}
+		}
+	}
 	auditService, err := toolsapplication.NewTrustedWriteAuditService(contracts, repository, foundation.NewUUIDGenerator(nil), foundation.SystemClock{})
 	if err != nil {
 		return toolRuntimeComponents{}, err
@@ -2036,7 +2278,10 @@ func newToolRuntimeComponents(db *pgxpool.Pool, cfg config.Config, workspaceRepo
 	if err != nil {
 		return toolRuntimeComponents{}, err
 	}
-	components := toolRuntimeComponents{contracts: contracts, repository: repository, writebackAudit: writebackAudit}
+	components := toolRuntimeComponents{
+		contracts: contracts, repository: repository, writebackAudit: writebackAudit,
+		workspaceAnalysisCapability: workspaceAnalysisCapability,
+	}
 	if cfg.ToolRuntimeMode == config.ToolModeDisabled {
 		return components, nil
 	}
@@ -2084,13 +2329,9 @@ func newToolRuntimeComponents(db *pgxpool.Pool, cfg config.Config, workspaceRepo
 	if err != nil {
 		return toolRuntimeComponents{}, err
 	}
-
 	executionRegistry := toolsapplication.NewExecutionRegistry()
 	refs := enabledReadToolRefs()
-	enabled := []struct {
-		ref      toolsdomain.ToolRef
-		executor toolsapplication.Executor
-	}{
+	enabled := []toolExecutorRegistration{
 		{refs[0], searchExecutor},
 		{refs[1], readSourceExecutor},
 		{refs[2], citationExecutor},
@@ -2111,6 +2352,34 @@ func newToolRuntimeComponents(db *pgxpool.Pool, cfg config.Config, workspaceRepo
 			return toolRuntimeComponents{}, err
 		}
 		components.enabledRefs = append(components.enabledRefs, item.ref)
+	}
+	if cfg.WorkspaceAnalysisWorkerEnabled && components.workspaceAnalysisCapability.available {
+		workspaceAnalysisTools, workspaceAnalysisErr := newWorkspaceAnalysisToolExecutors(
+			workspaceRepository, repository, searchService, searchRepository, evidenceReference, eligibility,
+		)
+		if workspaceAnalysisErr == nil {
+			for _, item := range workspaceAnalysisTools {
+				contract, contractErr := contracts.ResolveContract(item.ref)
+				if contractErr != nil {
+					workspaceAnalysisErr = contractErr
+					break
+				}
+				if registerErr := executionRegistry.RegisterContract(contract); registerErr != nil {
+					workspaceAnalysisErr = registerErr
+					break
+				}
+				if registerErr := executionRegistry.RegisterExecutor(item.ref, item.executor); registerErr != nil {
+					workspaceAnalysisErr = registerErr
+					break
+				}
+				components.enabledRefs = append(components.enabledRefs, item.ref)
+			}
+		}
+		if workspaceAnalysisErr == nil {
+			components.workspaceAnalysisCapability = agentCapabilityStatus{available: true}
+		} else {
+			components.workspaceAnalysisCapability = agentCapabilityStatus{code: agentapplication.ErrorCodeWorkspaceAnalysisCapabilityUnavailable}
+		}
 	}
 	if err := executionRegistry.Freeze(); err != nil {
 		return toolRuntimeComponents{}, err
@@ -2133,6 +2402,54 @@ func newToolRuntimeComponents(db *pgxpool.Pool, cfg config.Config, workspaceRepo
 	components.definition = &workflowDefinition
 	components.runtimeEnabled = true
 	return components, nil
+}
+
+// newWorkspaceAnalysisToolExecutors constructs the four additional immutable
+// read-only Tool versions before they are registered. Keeping construction
+// separate prevents a partial optional Tool set from leaking into the fixed
+// RAG runtime when any Workspace Analysis dependency is unavailable.
+func newWorkspaceAnalysisToolExecutors(
+	workspaceRepository *workspacepostgres.Repository,
+	repository *toolpostgres.Repository,
+	searchService *retrievalapplication.SearchService,
+	searchRepository *retrievalpostgres.SearchRepository,
+	evidenceReference *retrievalapplication.EvidenceReferenceService,
+	eligibility *knowledgeapplication.EvidenceEligibilityService,
+) ([]toolExecutorRegistration, error) {
+	statusInspector, err := gitcli.NewStatusAggregateClient(gitcli.New(""), workspaceRepository)
+	if err != nil {
+		return nil, err
+	}
+	gitStatusExecutor, err := toolworkspace.NewReadGitStatusV2Executor(statusInspector)
+	if err != nil {
+		return nil, err
+	}
+	searchExecutor, err := toolretrieval.NewSearchKnowledgeV2Executor(searchService, searchRepository)
+	if err != nil {
+		return nil, err
+	}
+	readSourceResolver, err := toolretrieval.NewReadSourceV3ReceiptResolver(repository)
+	if err != nil {
+		return nil, err
+	}
+	readSourceExecutor, err := toolretrieval.NewReadSourceV3Executor(readSourceResolver, evidenceReference)
+	if err != nil {
+		return nil, err
+	}
+	validateCitationResolver, err := toolretrieval.NewValidateCitationV3ReceiptResolver(repository)
+	if err != nil {
+		return nil, err
+	}
+	validateCitationExecutor, err := toolretrieval.NewValidateCitationV3Executor(validateCitationResolver, evidenceReference, eligibility)
+	if err != nil {
+		return nil, err
+	}
+	return []toolExecutorRegistration{
+		{ref: toolsdomain.ToolRef{Name: "ReadGitStatus", Version: 2}, executor: gitStatusExecutor},
+		{ref: toolsdomain.ToolRef{Name: "SearchKnowledge", Version: 2}, executor: searchExecutor},
+		{ref: toolsdomain.ToolRef{Name: "ReadSource", Version: 3}, executor: readSourceExecutor},
+		{ref: toolsdomain.ToolRef{Name: "ValidateCitation", Version: 3}, executor: validateCitationExecutor},
+	}, nil
 }
 
 func validateToolCompositionMode(cfg config.Config) error {
@@ -2301,17 +2618,24 @@ func artifactWorkflowReadiness(components workerComponents) bool {
 }
 
 type agentWorkflowComponents struct {
-	relation            *agentworkflow.Executor
-	rag                 *agentworkflow.RAGWorkflowExecutor
-	model               agentapplication.ChatModel
-	contract            platformmodels.ChatContract
-	relationScheduler   agentapplication.StructuredPhaseScheduler
-	ragScheduler        agentapplication.StructuredPhaseScheduler
-	ragRuntimeScheduler agentapplication.RAGExecutionScheduler
-	artifactScheduler   agentapplication.StructuredPhaseScheduler
-	captureScheduler    agentapplication.StructuredPhaseScheduler
-	organizingScheduler agentapplication.StructuredPhaseScheduler
-	capability          agentCapabilityStatus
+	relation                    *agentworkflow.Executor
+	rag                         *agentworkflow.RAGWorkflowExecutor
+	workspaceInspect            *agentworkflow.WorkspaceAnalysisInspectExecutor
+	workspaceRetrieve           *agentworkflow.WorkspaceAnalysisRetrieveExecutor
+	workspaceRead               *agentworkflow.WorkspaceAnalysisReadEvidenceExecutor
+	workspaceSynthesize         *agentworkflow.WorkspaceAnalysisSynthesizeExecutor
+	workspaceValidate           *agentworkflow.WorkspaceAnalysisValidateCitationsExecutor
+	workspaceReview             *agentworkflow.WorkspaceAnalysisReviewPublishExecutor
+	model                       agentapplication.ChatModel
+	contract                    platformmodels.ChatContract
+	relationScheduler           agentapplication.StructuredPhaseScheduler
+	ragScheduler                agentapplication.StructuredPhaseScheduler
+	ragRuntimeScheduler         agentapplication.RAGExecutionScheduler
+	artifactScheduler           agentapplication.StructuredPhaseScheduler
+	captureScheduler            agentapplication.StructuredPhaseScheduler
+	organizingScheduler         agentapplication.StructuredPhaseScheduler
+	capability                  agentCapabilityStatus
+	workspaceAnalysisCapability agentCapabilityStatus
 }
 
 // newStructuredPhaseScheduler 在 Composition Root 编译一次 Eino 短 Graph。
@@ -2332,20 +2656,41 @@ func newRAGExecutionScheduler(metrics ...observability.Metrics) (agentapplicatio
 // composition tests. Production composition must pass the frozen Tool runtime
 // and Metrics through newAgentWorkflowComponentsWithToolsAndMetrics.
 func newAgentWorkflowComponents(db *pgxpool.Pool, cfg config.Config, workspaceRepository *workspacepostgres.Repository, memoryService *memoryapplication.Service, modelRuntimes ...*modelsettingsruntime.Models) (agentWorkflowComponents, error) {
-	return newAgentWorkflowComponentsWithDependencies(db, cfg, workspaceRepository, memoryService, toolRuntimeComponents{}, false, nil, modelRuntimes...)
+	return newAgentWorkflowComponentsWithDependencies(db, cfg, workspaceRepository, memoryService, nil, toolRuntimeComponents{}, false, nil, modelRuntimes...)
 }
 
 // newAgentWorkflowComponentsWithTools composes the formal v2 RAG runtime with
 // the same frozen model runtime and the sole project Tool execution boundary.
 func newAgentWorkflowComponentsWithTools(db *pgxpool.Pool, cfg config.Config, workspaceRepository *workspacepostgres.Repository, memoryService *memoryapplication.Service, tools toolRuntimeComponents, modelRuntimes ...*modelsettingsruntime.Models) (agentWorkflowComponents, error) {
-	return newAgentWorkflowComponentsWithDependencies(db, cfg, workspaceRepository, memoryService, tools, true, nil, modelRuntimes...)
+	return newAgentWorkflowComponentsWithDependencies(db, cfg, workspaceRepository, memoryService, nil, tools, true, nil, modelRuntimes...)
 }
 
-func newAgentWorkflowComponentsWithToolsAndMetrics(db *pgxpool.Pool, cfg config.Config, workspaceRepository *workspacepostgres.Repository, memoryService *memoryapplication.Service, tools toolRuntimeComponents, metrics observability.Metrics, modelRuntimes ...*modelsettingsruntime.Models) (agentWorkflowComponents, error) {
-	return newAgentWorkflowComponentsWithDependencies(db, cfg, workspaceRepository, memoryService, tools, true, metrics, modelRuntimes...)
+func newAgentWorkflowComponentsWithToolsAndMetrics(
+	db *pgxpool.Pool,
+	cfg config.Config,
+	workspaceRepository *workspacepostgres.Repository,
+	memoryService *memoryapplication.Service,
+	runtimeRepository *workflowpostgres.RuntimeRepository,
+	tools toolRuntimeComponents,
+	metrics observability.Metrics,
+	modelRuntimes ...*modelsettingsruntime.Models,
+) (agentWorkflowComponents, error) {
+	return newAgentWorkflowComponentsWithDependencies(
+		db, cfg, workspaceRepository, memoryService, runtimeRepository, tools, true, metrics, modelRuntimes...,
+	)
 }
 
-func newAgentWorkflowComponentsWithDependencies(db *pgxpool.Pool, cfg config.Config, workspaceRepository *workspacepostgres.Repository, memoryService *memoryapplication.Service, tools toolRuntimeComponents, requireV2Runtime bool, metrics observability.Metrics, modelRuntimes ...*modelsettingsruntime.Models) (agentWorkflowComponents, error) {
+func newAgentWorkflowComponentsWithDependencies(
+	db *pgxpool.Pool,
+	cfg config.Config,
+	workspaceRepository *workspacepostgres.Repository,
+	memoryService *memoryapplication.Service,
+	runtimeRepository *workflowpostgres.RuntimeRepository,
+	tools toolRuntimeComponents,
+	requireV2Runtime bool,
+	metrics observability.Metrics,
+	modelRuntimes ...*modelsettingsruntime.Models,
+) (agentWorkflowComponents, error) {
 	models, err := modelRuntimeForComposition(cfg, modelRuntimes...)
 	if err != nil {
 		return agentWorkflowComponents{}, err
@@ -2361,6 +2706,7 @@ func newAgentWorkflowComponentsWithDependencies(db *pgxpool.Pool, cfg config.Con
 	}
 	var agentRuntime agentapplication.AgentRuntime
 	var answerStream agentapplication.AnswerStreamRuntime
+	var workspaceCandidateStream agentapplication.WorkspaceAnalysisCandidateStreamRuntime
 	if requireV2Runtime {
 		if err := validateRAGWorkerJobTimeout(cfg.WorkerJobTimeout, contract.Timeout); err != nil {
 			return agentWorkflowComponents{}, err
@@ -2466,6 +2812,27 @@ func newAgentWorkflowComponentsWithDependencies(db *pgxpool.Pool, cfg config.Con
 	if err != nil {
 		return agentWorkflowComponents{}, err
 	}
+	workspaceFinalizerStore, err := conversationpostgres.NewWorkspaceAnalysisFinalizer(
+		db, eventStore, foundation.NewUUIDGenerator(nil),
+	)
+	if err != nil {
+		return agentWorkflowComponents{}, err
+	}
+	if cfg.WorkspaceAnalysisWorkerEnabled && tools.workspaceAnalysisAudit != nil && tools.workspaceAnalysisActorRef != "" {
+		auditedFinalizer, auditErr := conversationpostgres.NewWorkspaceAnalysisFinalizerWithAudit(
+			db, eventStore, foundation.NewUUIDGenerator(nil),
+			tools.workspaceAnalysisAudit, tools.workspaceAnalysisActorRef,
+		)
+		if auditErr == nil {
+			workspaceFinalizerStore = auditedFinalizer
+		} else {
+			tools.workspaceAnalysisAudit = nil
+		}
+	}
+	workspaceFinalizer, err := agentworkflow.NewWorkspaceAnalysisFinalizerWithMetrics(workspaceFinalizerStore, metrics)
+	if err != nil {
+		return agentWorkflowComponents{}, err
+	}
 	draftStreams, err := conversationpostgres.NewDraftStreamRepository(db)
 	if err != nil {
 		return agentWorkflowComponents{}, err
@@ -2508,11 +2875,144 @@ func newAgentWorkflowComponentsWithDependencies(db *pgxpool.Pool, cfg config.Con
 	if err != nil {
 		return agentWorkflowComponents{}, err
 	}
+	var workspaceInspect *agentworkflow.WorkspaceAnalysisInspectExecutor
+	var workspaceRetrieve *agentworkflow.WorkspaceAnalysisRetrieveExecutor
+	var workspaceRead *agentworkflow.WorkspaceAnalysisReadEvidenceExecutor
+	var workspaceSynthesize *agentworkflow.WorkspaceAnalysisSynthesizeExecutor
+	var workspaceValidate *agentworkflow.WorkspaceAnalysisValidateCitationsExecutor
+	var workspaceReview *agentworkflow.WorkspaceAnalysisReviewPublishExecutor
+	workspaceAnalysisCapability := agentCapabilityStatus{}
+	if cfg.WorkspaceAnalysisWorkerEnabled {
+		workspaceAnalysisCapability.code = agentapplication.ErrorCodeWorkspaceAnalysisCapabilityUnavailable
+	}
+	buildWorkspaceAnalysis := func() error {
+		if err := validateWorkspaceAnalysisWorkerRuntime(cfg, contract.Timeout, tools.contracts); err != nil {
+			return err
+		}
+		runtimeChat := models.RuntimeChat()
+		workspaceCandidateStream, err = agenteino.NewWorkspaceAnalysisCandidateStreamRuntime(runtimeChat.Model())
+		if err != nil {
+			return err
+		}
+		workspaceInspect, err = agentworkflow.NewWorkspaceAnalysisInspectExecutor(agentworkflow.WorkspaceAnalysisInspectExecutorDependencies{
+			Context: conversationRepository, Runs: repository, Tools: tools.execution,
+			Finalizer: workspaceFinalizer, Clock: foundation.SystemClock{},
+		})
+		if err != nil {
+			return err
+		}
+		planner, plannerErr := agentapplication.NewWorkspaceAnalysisRetrievalPlanRunner(
+			agentapplication.WorkspaceAnalysisRetrievalPlanRunnerDependencies{
+				Model: model, Catalog: catalog, Repository: repository,
+				IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{},
+			},
+		)
+		if plannerErr != nil {
+			return plannerErr
+		}
+		workspaceRetrieve, err = agentworkflow.NewWorkspaceAnalysisRetrieveExecutor(
+			agentworkflow.WorkspaceAnalysisRetrieveExecutorDependencies{
+				Context: conversationRepository, Runs: repository,
+				Inputs: runtimeRepository, Stages: runtimeRepository,
+				Retrieval: searchRepository, Planner: planner, Tools: tools.execution, Receipts: tools.repository,
+				Finalizer: workspaceFinalizer, Clock: foundation.SystemClock{},
+			},
+		)
+		if err != nil {
+			return err
+		}
+		workspaceRead, err = agentworkflow.NewWorkspaceAnalysisReadEvidenceExecutor(
+			agentworkflow.WorkspaceAnalysisReadEvidenceExecutorDependencies{
+				Context: conversationRepository, Runs: repository,
+				Inputs: runtimeRepository, Stages: runtimeRepository,
+				Receipts: tools.repository, Tools: tools.execution,
+				Finalizer: workspaceFinalizer, Clock: foundation.SystemClock{},
+			},
+		)
+		if err != nil {
+			return err
+		}
+		candidateDrafts, draftErr := agentworkflow.NewWorkspaceAnalysisCandidateDraftCoordinator(
+			agentworkflow.WorkspaceAnalysisCandidateDraftCoordinatorDependencies{
+				Store: draftStreams, Loader: draftStreams,
+			},
+		)
+		if draftErr != nil {
+			return draftErr
+		}
+		synthesisRunner, synthesisErr := agentapplication.NewWorkspaceAnalysisSynthesisRunner(
+			agentapplication.WorkspaceAnalysisSynthesisRunnerDependencies{
+				Runtime: workspaceCandidateStream, Catalog: catalog, Repository: repository, Drafts: candidateDrafts,
+				IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{},
+			},
+		)
+		if synthesisErr != nil {
+			return synthesisErr
+		}
+		workspaceSynthesize, err = agentworkflow.NewWorkspaceAnalysisSynthesizeExecutor(
+			agentworkflow.WorkspaceAnalysisSynthesizeExecutorDependencies{
+				Context: conversationRepository, Runs: repository,
+				Inputs: runtimeRepository, Stages: runtimeRepository, Evidence: tools.repository,
+				Synthesis: synthesisRunner, Finalizer: workspaceFinalizer, Clock: foundation.SystemClock{},
+			},
+		)
+		if err != nil {
+			return err
+		}
+		workspaceValidate, err = agentworkflow.NewWorkspaceAnalysisValidateCitationsExecutor(
+			agentworkflow.WorkspaceAnalysisValidateCitationsExecutorDependencies{
+				Context: conversationRepository, Runs: repository,
+				Inputs: runtimeRepository, Stages: runtimeRepository,
+				Authority: tools.repository, Receipts: tools.repository, Tools: tools.execution,
+				Finalizer: workspaceFinalizer, Clock: foundation.SystemClock{},
+			},
+		)
+		if err != nil {
+			return err
+		}
+		reviewRunner, reviewErr := agentapplication.NewWorkspaceAnalysisReviewRunner(
+			agentapplication.WorkspaceAnalysisReviewRunnerDependencies{
+				Model: model, Catalog: catalog, Repository: repository,
+				IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{},
+			},
+		)
+		if reviewErr != nil {
+			return reviewErr
+		}
+		workspaceReview, err = agentworkflow.NewWorkspaceAnalysisReviewPublishExecutor(
+			agentworkflow.WorkspaceAnalysisReviewPublishExecutorDependencies{
+				Context: conversationRepository, Runs: repository,
+				Inputs: runtimeRepository, Stages: runtimeRepository, Candidates: repository,
+				Evidence: tools.repository, Validation: tools.repository,
+				Review: reviewRunner, Finalizer: workspaceFinalizer, Clock: foundation.SystemClock{},
+			},
+		)
+		if err != nil {
+			return err
+		}
+		return nil
+	}
+	if requireV2Runtime && runtimeRepository != nil && cfg.WorkspaceAnalysisWorkerEnabled &&
+		tools.workspaceAnalysisCapability.available && tools.workspaceAnalysisAudit != nil && tools.workspaceAnalysisActorRef != "" {
+		if err := buildWorkspaceAnalysis(); err == nil {
+			workspaceAnalysisCapability = agentCapabilityStatus{available: true}
+		} else {
+			workspaceInspect = nil
+			workspaceRetrieve = nil
+			workspaceRead = nil
+			workspaceSynthesize = nil
+			workspaceValidate = nil
+			workspaceReview = nil
+		}
+	}
 	return agentWorkflowComponents{
-		relation: relation, rag: rag, model: model, contract: contract,
+		relation: relation, rag: rag, workspaceInspect: workspaceInspect,
+		workspaceRetrieve: workspaceRetrieve, workspaceRead: workspaceRead, workspaceSynthesize: workspaceSynthesize,
+		workspaceValidate: workspaceValidate, workspaceReview: workspaceReview,
+		model: model, contract: contract,
 		relationScheduler: relationScheduler, ragScheduler: ragScheduler, ragRuntimeScheduler: ragRuntimeScheduler,
 		artifactScheduler: artifactScheduler, captureScheduler: captureScheduler, organizingScheduler: organizingScheduler,
-		capability: agentCapabilityStatus{available: true},
+		capability: agentCapabilityStatus{available: true}, workspaceAnalysisCapability: workspaceAnalysisCapability,
 	}, nil
 }
 
@@ -2736,6 +3236,72 @@ func validateRAGWorkerJobTimeout(jobTimeout, modelCallTimeout time.Duration) err
 			"WORKER_RAG_EINO_TIMEOUT_BUDGET_INVALID",
 			false,
 			errors.New("worker job timeout does not cover the complete Eino RAG attempt and bounded non-model work"),
+		)
+	}
+	return nil
+}
+
+func validateWorkspaceAnalysisWorkerRuntime(
+	cfg config.Config,
+	modelCallTimeout time.Duration,
+	contracts *toolsapplication.Registry,
+) error {
+	if contracts == nil || modelCallTimeout <= 0 {
+		return foundation.NewError(
+			foundation.ErrorDependencyUnavailable,
+			"WORKER_WORKSPACE_ANALYSIS_RUNTIME_CONTRACT_UNAVAILABLE",
+			false,
+			errors.New("workspace analysis frozen runtime contract is unavailable"),
+		)
+	}
+	resolveTimeout := func(ref toolsdomain.ToolRef) (time.Duration, error) {
+		contract, err := contracts.ResolveContract(ref)
+		if err != nil {
+			return 0, err
+		}
+		if contract.Definition.Ref != ref || contract.Definition.Timeout <= 0 {
+			return 0, foundation.NewError(
+				foundation.ErrorConsistencyViolation,
+				"WORKER_WORKSPACE_ANALYSIS_RUNTIME_CONTRACT_INVALID",
+				false,
+				errors.New("workspace analysis tool timeout contract is invalid"),
+			)
+		}
+		return contract.Definition.Timeout, nil
+	}
+	gitTimeout, err := resolveTimeout(toolsdomain.ToolRef{Name: "ReadGitStatus", Version: 2})
+	if err != nil {
+		return err
+	}
+	searchTimeout, err := resolveTimeout(toolsdomain.ToolRef{Name: "SearchKnowledge", Version: 2})
+	if err != nil {
+		return err
+	}
+	readTimeout, err := resolveTimeout(toolsdomain.ToolRef{Name: "ReadSource", Version: 3})
+	if err != nil {
+		return err
+	}
+	validateTimeout, err := resolveTimeout(toolsdomain.ToolRef{Name: "ValidateCitation", Version: 3})
+	if err != nil {
+		return err
+	}
+	deadlines, err := agentdomain.DeriveWorkspaceAnalysisV1Deadlines(agentdomain.WorkspaceAnalysisV1Timeouts{
+		PlanModelTimeout: modelCallTimeout, SynthesisModelTimeout: modelCallTimeout, ReviewModelTimeout: modelCallTimeout,
+		GitToolTimeout: gitTimeout, SearchToolTimeout: searchTimeout, SourceReadToolTimeout: readTimeout,
+		ValidateCitationToolTimeout: validateTimeout,
+	})
+	if err != nil {
+		return err
+	}
+	if err := deadlines.ValidateRuntimeReadiness(agentdomain.WorkspaceAnalysisRuntimeLimits{
+		RiverJobTimeout: cfg.WorkerJobTimeout, LeaseDuration: cfg.WorkflowLeaseDuration,
+		HeartbeatInterval: cfg.WorkflowHeartbeatInterval,
+	}); err != nil {
+		return foundation.NewError(
+			foundation.ErrorInvalidInput,
+			"WORKER_WORKSPACE_ANALYSIS_RUNTIME_BUDGET_INVALID",
+			false,
+			err,
 		)
 	}
 	return nil

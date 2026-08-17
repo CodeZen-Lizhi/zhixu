@@ -22,11 +22,12 @@ const (
 
 // Dependencies 是 Conversation Application Service 的显式端口集合。
 type Dependencies struct {
-	Repository         Repository
-	QuestionDispatcher QuestionDispatcher
-	FeedbackRepository FeedbackRepository
-	IDs                foundation.IDGenerator
-	Clock              foundation.Clock
+	Repository                      Repository
+	QuestionDispatcher              QuestionDispatcher
+	FeedbackRepository              FeedbackRepository
+	WorkspaceAnalysisTimelineReader WorkspaceAnalysisTimelineReader
+	IDs                             foundation.IDGenerator
+	Clock                           foundation.Clock
 }
 
 // Service 编排 Conversation 命令和查询，不复制 Workflow 或 Answer 状态机。
@@ -34,6 +35,7 @@ type Service struct {
 	repository Repository
 	questions  QuestionDispatcher
 	feedback   FeedbackRepository
+	timelines  WorkspaceAnalysisTimelineReader
 	ids        foundation.IDGenerator
 	clock      foundation.Clock
 }
@@ -45,7 +47,8 @@ func NewService(dependencies Dependencies) (*Service, error) {
 	}
 	return &Service{
 		repository: dependencies.Repository, questions: dependencies.QuestionDispatcher, feedback: dependencies.FeedbackRepository,
-		ids: dependencies.IDs, clock: dependencies.Clock,
+		timelines: dependencies.WorkspaceAnalysisTimelineReader,
+		ids:       dependencies.IDs, clock: dependencies.Clock,
 	}, nil
 }
 

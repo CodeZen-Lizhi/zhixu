@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation/strictjson"
 	"github.com/CodeZen-Lizhi/zhixu/internal/tools/application"
+	toolsdomain "github.com/CodeZen-Lizhi/zhixu/internal/tools/domain"
 )
 
 const (
@@ -55,6 +57,24 @@ type searchKnowledgeItem struct {
 	Snippet         string `json:"snippet"`
 }
 
+type searchKnowledgeV2Input struct {
+	Query string `json:"query"`
+	Mode  string `json:"mode"`
+	Limit int    `json:"limit"`
+}
+
+type searchKnowledgeV2Output struct {
+	EffectiveMode string                        `json:"effective_mode"`
+	Items         []searchKnowledgeV2OutputItem `json:"items"`
+	Degradations  []string                      `json:"degradations"`
+}
+
+type searchKnowledgeV2OutputItem struct {
+	EvidenceRef string `json:"evidence_ref"`
+	Rank        int    `json:"rank"`
+	Snippet     string `json:"snippet"`
+}
+
 type readSourceInput struct {
 	SourceVersionID string `json:"source_version_id"`
 	SourceSpanID    string `json:"source_span_id"`
@@ -65,6 +85,17 @@ type readSourceOutput struct {
 	SourceSpanID    string `json:"source_span_id"`
 	ContentHash     string `json:"content_hash"`
 	Excerpt         string `json:"excerpt"`
+}
+
+type readSourceV3Input struct {
+	EvidenceRef string `json:"evidence_ref"`
+}
+
+type readSourceV3Output struct {
+	EvidenceRef string `json:"evidence_ref"`
+	ContentHash string `json:"content_hash"`
+	Truncated   *bool  `json:"truncated"`
+	Excerpt     string `json:"excerpt"`
 }
 
 type readDocumentInput struct {
@@ -113,6 +144,22 @@ type citationValidationResult struct {
 
 type validateCitationOutput struct {
 	Results []citationValidationResult `json:"results"`
+}
+
+type validateCitationV3Input struct {
+	CandidateID   string   `json:"candidate_id"`
+	CandidateHash string   `json:"candidate_hash"`
+	EvidenceRefs  []string `json:"evidence_refs"`
+}
+
+type validateCitationV3Output struct {
+	Results []validateCitationV3OutputItem `json:"results"`
+}
+
+type validateCitationV3OutputItem struct {
+	EvidenceRef string `json:"evidence_ref"`
+	Valid       *bool  `json:"valid"`
+	ReasonCode  string `json:"reason_code"`
 }
 
 type calculateDiffInput struct {
@@ -184,18 +231,25 @@ type runRegressionEvaluationOutput struct {
 var (
 	decodeSearchKnowledgeInput          = strictDecoder(maxSmallDocumentBytes, validateSearchKnowledgeInput)
 	decodeSearchKnowledgeOutput         = strictDecoder(maxContentDocumentBytes, validateSearchKnowledgeOutput)
+	decodeSearchKnowledgeV2Input        = strictDecoder(maxSmallDocumentBytes, validateSearchKnowledgeV2Input)
+	decodeSearchKnowledgeV2Output       = canonicalReceiptDecoder(toolsdomain.SearchKnowledgeV2ReceiptMaxOutputBytes, validateSearchKnowledgeV2Output)
 	decodeReadSourceInput               = strictDecoder(maxSmallDocumentBytes, validateReadSourceInput)
 	decodeReadSourceOutput              = strictDecoder(maxMediumDocumentBytes, validateReadSourceOutput)
+	decodeReadSourceV3Input             = strictDecoder(4*1024, validateReadSourceV3Input)
+	decodeReadSourceV3Output            = canonicalReceiptDecoder(toolsdomain.ReadSourceV3ReceiptMaxOutputBytes, validateReadSourceV3Output)
 	decodeReadDocumentInput             = strictDecoder(maxSmallDocumentBytes, validateReadDocumentInput)
 	decodeReadDocumentOutput            = strictDecoder(maxContentDocumentBytes, validateReadDocumentOutput)
 	decodeFetchWebPageInput             = strictDecoder(maxSmallDocumentBytes, validateFetchWebPageInput)
 	decodeFetchWebPageOutput            = strictDecoder(maxContentDocumentBytes, validateFetchWebPageOutput)
 	decodeValidateCitationInput         = strictDecoder(maxMediumDocumentBytes, validateValidateCitationInput)
 	decodeValidateCitationOutput        = strictDecoder(maxMediumDocumentBytes, validateValidateCitationOutput)
+	decodeValidateCitationV3Input       = strictDecoder(16*1024, validateValidateCitationV3Input)
+	decodeValidateCitationV3Output      = canonicalReceiptDecoder(toolsdomain.ValidateCitationV3ReceiptMaxOutputBytes, validateValidateCitationV3Output)
 	decodeCalculateDiffInput            = strictDecoder(maxContentDocumentBytes, validateCalculateDiffInput)
 	decodeCalculateDiffOutput           = strictDecoder(maxContentDocumentBytes, validateCalculateDiffOutput)
 	decodeReadGitStatusInput            = strictDecoder(maxSmallDocumentBytes, func(readGitStatusInput) error { return nil })
 	decodeReadGitStatusOutput           = strictDecoder(maxSmallDocumentBytes, validateReadGitStatusOutput)
+	decodeReadGitStatusV2Output         = canonicalReceiptDecoder(toolsdomain.ReadGitStatusV2ReceiptMaxOutputBytes, validateReadGitStatusOutput)
 	decodeApplyApprovedPatchInput       = strictDecoder(maxSmallDocumentBytes, validateWritebackExecutionInput)
 	decodeApplyApprovedPatchOutput      = strictDecoder(maxSmallDocumentBytes, validateApplyApprovedPatchOutput)
 	decodeCreateGitCommitInput          = strictDecoder(maxSmallDocumentBytes, validateWritebackExecutionInput)
@@ -221,6 +275,27 @@ func strictDecoder[T any](maxDocumentBytes int64, validate func(T) error) applic
 		canonical, err := json.Marshal(value)
 		if err != nil {
 			return nil, err
+		}
+		return canonical, nil
+	}
+}
+
+func canonicalReceiptDecoder[T any](maxDocumentBytes int64, validate func(T) error) application.DocumentDecoder {
+	decode := strictDecoder(maxDocumentBytes, validate)
+	return func(raw []byte) (json.RawMessage, error) {
+		validated, err := decode(raw)
+		if err != nil {
+			return nil, err
+		}
+		var value map[string]any
+		decoder := json.NewDecoder(strings.NewReader(string(validated)))
+		decoder.UseNumber()
+		if err := decoder.Decode(&value); err != nil || value == nil {
+			return nil, invalidDocument()
+		}
+		canonical, err := json.Marshal(value)
+		if err != nil || int64(len(canonical)) > maxDocumentBytes {
+			return nil, invalidDocument()
 		}
 		return canonical, nil
 	}
@@ -255,6 +330,27 @@ func validateSearchKnowledgeOutput(value searchKnowledgeOutput) error {
 	return nil
 }
 
+func validateSearchKnowledgeV2Input(value searchKnowledgeV2Input) error {
+	if !validText(value.Query, 1, maxQueryBytes) || !validSearchMode(value.Mode) || value.Limit < 1 || value.Limit > 5 {
+		return invalidDocument()
+	}
+	return nil
+}
+
+func validateSearchKnowledgeV2Output(value searchKnowledgeV2Output) error {
+	if !validSearchMode(value.EffectiveMode) || value.Items == nil || len(value.Items) > 5 ||
+		value.Degradations == nil || len(value.Degradations) > 16 || !sort.StringsAreSorted(value.Degradations) ||
+		!validUniqueTokens(value.Degradations) {
+		return invalidDocument()
+	}
+	for index, item := range value.Items {
+		if item.EvidenceRef != evidenceRef(index+1) || item.Rank != index+1 || !validText(item.Snippet, 1, 4*1024) {
+			return invalidDocument()
+		}
+	}
+	return nil
+}
+
 func validateReadSourceInput(value readSourceInput) error {
 	if !validID(value.SourceVersionID) || !validID(value.SourceSpanID) {
 		return invalidDocument()
@@ -265,6 +361,21 @@ func validateReadSourceInput(value readSourceInput) error {
 func validateReadSourceOutput(value readSourceOutput) error {
 	if validateReadSourceInput(readSourceInput{SourceVersionID: value.SourceVersionID, SourceSpanID: value.SourceSpanID}) != nil ||
 		!validHash(value.ContentHash, 64) || !validText(value.Excerpt, 1, int(maxMediumDocumentBytes)) {
+		return invalidDocument()
+	}
+	return nil
+}
+
+func validateReadSourceV3Input(value readSourceV3Input) error {
+	if !validEvidenceRef(value.EvidenceRef, 3) {
+		return invalidDocument()
+	}
+	return nil
+}
+
+func validateReadSourceV3Output(value readSourceV3Output) error {
+	if !validEvidenceRef(value.EvidenceRef, 3) || !validHash(value.ContentHash, 64) || value.Truncated == nil ||
+		!validText(value.Excerpt, 1, 4*1024) {
 		return invalidDocument()
 	}
 	return nil
@@ -324,6 +435,32 @@ func validateValidateCitationOutput(value validateCitationOutput) error {
 			return invalidDocument()
 		}
 		seen[key] = struct{}{}
+	}
+	return nil
+}
+
+func validateValidateCitationV3Input(value validateCitationV3Input) error {
+	if !validID(value.CandidateID) || !validHash(value.CandidateHash, 64) ||
+		len(value.EvidenceRefs) < 1 || len(value.EvidenceRefs) > 3 || !validUniqueEvidenceRefs(value.EvidenceRefs, 3) {
+		return invalidDocument()
+	}
+	return nil
+}
+
+func validateValidateCitationV3Output(value validateCitationV3Output) error {
+	if len(value.Results) < 1 || len(value.Results) > 3 {
+		return invalidDocument()
+	}
+	seen := make(map[string]struct{}, len(value.Results))
+	for _, result := range value.Results {
+		if !validEvidenceRef(result.EvidenceRef, 3) || result.Valid == nil || !validCitationReason(result.ReasonCode) ||
+			(*result.Valid != (result.ReasonCode == "OK")) {
+			return invalidDocument()
+		}
+		if _, duplicate := seen[result.EvidenceRef]; duplicate {
+			return invalidDocument()
+		}
+		seen[result.EvidenceRef] = struct{}{}
 	}
 	return nil
 }
@@ -459,6 +596,28 @@ func validUniqueTokens(values []string) bool {
 		seen[value] = struct{}{}
 	}
 	return true
+}
+
+func validUniqueEvidenceRefs(values []string, maximum int) bool {
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if !validEvidenceRef(value, maximum) {
+			return false
+		}
+		if _, duplicate := seen[value]; duplicate {
+			return false
+		}
+		seen[value] = struct{}{}
+	}
+	return true
+}
+
+func validEvidenceRef(value string, maximum int) bool {
+	return len(value) == 2 && value[0] == 'E' && value[1] >= '1' && value[1] <= byte('0'+maximum)
+}
+
+func evidenceRef(ordinal int) string {
+	return string([]byte{'E', byte('0' + ordinal)})
 }
 
 func validUniqueCitationTuples(values []citationTuple) bool {

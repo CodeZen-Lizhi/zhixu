@@ -3,17 +3,150 @@ package postgres
 import (
 	"context"
 	"errors"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
+	agentapplication "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
+	agentdomain "github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
+	conversationapplication "github.com/CodeZen-Lizhi/zhixu/internal/conversation/application"
+	conversationdomain "github.com/CodeZen-Lizhi/zhixu/internal/conversation/domain"
 	conversationworkflow "github.com/CodeZen-Lizhi/zhixu/internal/conversation/workflow"
 	eventsapplication "github.com/CodeZen-Lizhi/zhixu/internal/events/application"
 	eventsdomain "github.com/CodeZen-Lizhi/zhixu/internal/events/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	retrievaldomain "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
 	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
+
+func TestQuestionWorkflowDispatchPlanSelectsCanonicalModeWithoutChangingRAG(t *testing.T) {
+	question := conversationdomain.Question{
+		ID: "8c000000-0000-4000-8000-000000000003",
+		Request: conversationdomain.QuestionRequest{
+			WorkspaceID: "8c000000-0000-4000-8000-000000000001", ConversationID: "8c000000-0000-4000-8000-000000000002",
+			Mode: conversationdomain.QuestionModeRAG,
+		},
+		Ordinal: 2, ContextHash: strings.Repeat("a", 64),
+	}
+	answerID := foundation.ID("8c000000-0000-4000-8000-000000000004")
+	rag, err := buildQuestionWorkflowDispatchPlan(question, answerID)
+	if err != nil || !reflect.DeepEqual(rag.definition, conversationworkflow.RegisteredDefinitionV2()) ||
+		rag.idempotencyKey != questionWorkflowIdempotencyKey(question.ID) || rag.root.Key != conversationworkflow.NodeKey {
+		t.Fatalf("rag plan=%#v err=%v", rag, err)
+	}
+	if _, err := conversationworkflow.DecodeInput(rag.input); err != nil {
+		t.Fatalf("RAG input=%s err=%v", rag.input, err)
+	}
+
+	question.Request.Mode = conversationdomain.QuestionModeWorkspaceAnalysis
+	analysis, err := buildQuestionWorkflowDispatchPlan(question, answerID)
+	if err != nil || !reflect.DeepEqual(analysis.definition, conversationworkflow.RegisteredWorkspaceAnalysisDefinition()) ||
+		analysis.idempotencyKey != "workspace-analysis-question:"+string(question.ID) ||
+		analysis.root.Key != conversationworkflow.WorkspaceAnalysisNodeInspectWorkspace {
+		t.Fatalf("analysis plan=%#v err=%v", analysis, err)
+	}
+	input, err := conversationworkflow.DecodeWorkspaceAnalysisInput(analysis.input)
+	if err != nil || input.QuestionID != question.ID || input.AnswerID != answerID || input.ContextHash != question.ContextHash {
+		t.Fatalf("analysis input=%s decoded=%#v err=%v", analysis.input, input, err)
+	}
+}
+
+func TestQuestionDispatcherRejectsWorkspaceAnalysisBeforeOpeningTransactionWhenCapabilityIsOff(t *testing.T) {
+	dispatcher, err := NewQuestionDispatcher(
+		&questionConstructorDB{}, &questionConstructorRuntime{}, &questionConstructorAppender{},
+		foundation.NewUUIDGenerator(nil), foundation.SystemClock{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := conversationdomain.CanonicalizeQuestionRequest(conversationdomain.QuestionRequest{
+		WorkspaceID: "8c000000-0000-4000-8000-000000000001", ConversationID: "8c000000-0000-4000-8000-000000000002",
+		Mode: conversationdomain.QuestionModeWorkspaceAnalysis, QuestionText: "inspect the workspace",
+		Scope: conversationdomain.QuestionScope{RetrievalMode: retrievaldomain.SearchModeHybrid},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash, err := conversationdomain.ComputeQuestionRequestHash(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = dispatcher.SubmitQuestion(context.Background(), conversationapplication.SubmitQuestionRecord{
+		Request: request, RequestHash: hash, IdempotencyKey: "workspace-analysis-disabled",
+	})
+	var classified *foundation.Error
+	if !errors.As(err, &classified) || classified.Kind != foundation.ErrorDependencyUnavailable ||
+		classified.Code != conversationdomain.WorkspaceAnalysisCapabilityUnavailableCode || classified.Retryable {
+		t.Fatalf("SubmitQuestion() error=%#v", err)
+	}
+}
+
+func TestQuestionDispatcherWorkspaceAnalysisStartedEventIsExactAndReplayBound(t *testing.T) {
+	appender := &workspaceAnalysisEventCapture{}
+	dispatcher := &QuestionDispatcher{events: appender}
+	run := agentdomain.WorkspaceAnalysisRun{
+		ID:             "8c000000-0000-4000-8000-000000000011",
+		WorkspaceID:    "8c000000-0000-4000-8000-000000000012",
+		ConversationID: "8c000000-0000-4000-8000-000000000013",
+		QuestionID:     "8c000000-0000-4000-8000-000000000014",
+		AnswerID:       "8c000000-0000-4000-8000-000000000015",
+		WorkflowRunID:  "8c000000-0000-4000-8000-000000000016",
+		Status:         agentdomain.WorkspaceAnalysisRunQueued,
+		Version:        1,
+		CreatedAt:      time.Date(2026, 8, 17, 9, 0, 0, 0, time.UTC),
+	}
+	if err := dispatcher.appendWorkspaceAnalysisStartedEvent(context.Background(), nil, run, false); err != nil {
+		t.Fatalf("appendWorkspaceAnalysisStartedEvent(new) = %v", err)
+	}
+	if len(appender.requests) != 1 {
+		t.Fatalf("new event requests=%#v", appender.requests)
+	}
+	request := appender.requests[0]
+	if request.Type != "workspace_analysis.started" ||
+		request.SourceEventRef != "workspace_analysis.started:"+string(run.ID)+":v1" ||
+		request.ResourceRef != "workspace_analysis:"+string(run.ID) || request.ResourceVersion != 1 ||
+		request.PayloadSummary.ConversationID == nil || *request.PayloadSummary.ConversationID != run.ConversationID ||
+		request.PayloadSummary.WorkflowRunID == nil || *request.PayloadSummary.WorkflowRunID != run.WorkflowRunID ||
+		request.PayloadSummary.QuestionID == nil || *request.PayloadSummary.QuestionID != run.QuestionID ||
+		request.PayloadSummary.AnswerID == nil || *request.PayloadSummary.AnswerID != run.AnswerID ||
+		request.PayloadSummary.Status != "queued" || request.PayloadSummary.ModelRunID != nil ||
+		!request.OccurredAt.Equal(run.CreatedAt) {
+		t.Fatalf("started event protocol=%#v", request)
+	}
+	appender.replay = true
+	if err := dispatcher.appendWorkspaceAnalysisStartedEvent(context.Background(), nil, run, true); err != nil {
+		t.Fatalf("appendWorkspaceAnalysisStartedEvent(replay) = %v", err)
+	}
+	terminalRun := run
+	terminalRun.Status = agentdomain.WorkspaceAnalysisRunSucceeded
+	terminalRun.Version = 7
+	terminalRun.UpdatedAt = run.CreatedAt.Add(time.Minute)
+	if err := dispatcher.appendWorkspaceAnalysisStartedEvent(context.Background(), nil, terminalRun, true); err != nil {
+		t.Fatalf("appendWorkspaceAnalysisStartedEvent(terminal replay) = %v", err)
+	}
+	if len(appender.requests) != 3 || !reflect.DeepEqual(appender.requests[0], appender.requests[2]) {
+		t.Fatalf("terminal replay changed immutable started event: %#v", appender.requests)
+	}
+	appender.replay = false
+	if err := dispatcher.appendWorkspaceAnalysisStartedEvent(context.Background(), nil, run, true); err == nil {
+		t.Fatal("started event replay accepted a missing event")
+	}
+}
+
+func TestNewQuestionDispatcherWithWorkspaceAnalysisRejectsTypedNilStarter(t *testing.T) {
+	var starter *questionAnalysisRunStarter
+	_, err := NewQuestionDispatcherWithWorkspaceAnalysis(
+		&questionConstructorDB{}, &questionConstructorRuntime{}, &questionConstructorAppender{},
+		foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, starter,
+	)
+	var classified *foundation.Error
+	if !errors.As(err, &classified) || classified.Code != ErrorCodeQuestionDispatchUnavailable {
+		t.Fatalf("constructor error=%#v", err)
+	}
+}
 
 func TestNewQuestionDispatcherRejectsTypedNilDependencies(t *testing.T) {
 	db := &questionConstructorDB{}
@@ -138,6 +271,12 @@ type questionConstructorRuntime struct{}
 
 func (*questionConstructorRuntime) StartTx(context.Context, pgx.Tx, workflowapplication.RuntimeStartRequest) (workflowapplication.RuntimeStartResult, error) {
 	return workflowapplication.RuntimeStartResult{}, errors.New("unused")
+}
+
+type questionAnalysisRunStarter struct{}
+
+func (*questionAnalysisRunStarter) StartWorkspaceAnalysisRunTx(context.Context, any, agentapplication.WorkspaceAnalysisRunStartCommand) (agentdomain.WorkspaceAnalysisRun, error) {
+	return agentdomain.WorkspaceAnalysisRun{}, errors.New("unused")
 }
 
 type questionConstructorAppender struct{}

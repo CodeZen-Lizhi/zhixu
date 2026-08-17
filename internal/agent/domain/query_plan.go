@@ -126,6 +126,28 @@ func (result RAGQueryPlanProviderResultV2) Compose(modelRunRef foundation.ID, so
 	return composed, nil
 }
 
+// ComposeWorkspaceAnalysis 注入服务端 ModelRun 身份，并复用同一改写锚定规则生成独立工作区分析 Envelope。
+func (result RAGQueryPlanProviderResultV2) ComposeWorkspaceAnalysis(
+	modelRunRef foundation.ID,
+	sourceQuery string,
+) (WorkspaceAnalysisPlanResult, error) {
+	composed, err := result.Compose(modelRunRef, sourceQuery)
+	if err != nil {
+		return WorkspaceAnalysisPlanResult{}, err
+	}
+	workspacePlan := WorkspaceAnalysisPlanResult{
+		ResultType:    ResultTypeWorkspaceAnalysisPlan,
+		SchemaID:      WorkspaceAnalysisPlanSchemaID,
+		SchemaVersion: OutputSchemaVersionV1,
+		ModelRunRef:   composed.ModelRunRef,
+		Payload:       composed.Payload,
+	}
+	if err := workspacePlan.Validate(); err != nil {
+		return WorkspaceAnalysisPlanResult{}, err
+	}
+	return workspacePlan, nil
+}
+
 func anchoredQueryPlanRewrites(sourceQuery string, providerRewrites []string) []string {
 	rewrites := make([]string, 0, maxQueryRewrites)
 	rewrites = append(rewrites, sourceQuery)
@@ -208,6 +230,24 @@ type RAGQueryPlanResult struct {
 	Payload       RAGQueryPlanPayload `json:"payload"`
 }
 
+// WorkspaceAnalysisPlanResult 是工作区分析检索节点可恢复的独立计划 Envelope。
+type WorkspaceAnalysisPlanResult struct {
+	ResultType    string              `json:"result_type"`
+	SchemaID      string              `json:"schema_id"`
+	SchemaVersion string              `json:"schema_version"`
+	ModelRunRef   foundation.ID       `json:"model_run_ref"`
+	Payload       RAGQueryPlanPayload `json:"payload"`
+}
+
+// Validate 校验工作区分析计划的 exact Envelope 与有界检索载荷。
+func (result WorkspaceAnalysisPlanResult) Validate() error {
+	if result.ResultType != ResultTypeWorkspaceAnalysisPlan || result.SchemaID != WorkspaceAnalysisPlanSchemaID ||
+		result.SchemaVersion != OutputSchemaVersionV1 || !canonicalID(result.ModelRunRef) {
+		return invalid(ErrorCodeSchemaInvalid, "workspace analysis plan envelope is invalid")
+	}
+	return result.Payload.Validate()
+}
+
 // Validate 校验 Query Plan Envelope 与载荷。
 func (result RAGQueryPlanResult) Validate() error {
 	if result.ResultType != ResultTypeRAGQueryPlan || result.SchemaID != RAGQueryPlanSchemaID ||
@@ -220,6 +260,11 @@ func (result RAGQueryPlanResult) Validate() error {
 // DecodeRAGQueryPlan 严格解析一个 RAG Query Plan v1 文档。
 func DecodeRAGQueryPlan(raw []byte, limits DecodeLimits) (RAGQueryPlanResult, error) {
 	return DecodeStrict(raw, limits, RAGQueryPlanResult.Validate)
+}
+
+// DecodeWorkspaceAnalysisPlan 严格解析工作区分析 Query Plan v1 文档。
+func DecodeWorkspaceAnalysisPlan(raw []byte, limits DecodeLimits) (WorkspaceAnalysisPlanResult, error) {
+	return DecodeStrict(raw, limits, WorkspaceAnalysisPlanResult.Validate)
 }
 
 func uniquePlanTexts(values []string, required bool, maximumItems, maximumBytes int) bool {

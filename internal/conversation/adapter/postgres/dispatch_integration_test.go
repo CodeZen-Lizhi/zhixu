@@ -10,13 +10,18 @@ import (
 	"testing"
 	"time"
 
+	agentpostgres "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/postgres"
+	agentapplication "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
+	agentdomain "github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
 	conversationapplication "github.com/CodeZen-Lizhi/zhixu/internal/conversation/application"
 	conversationdomain "github.com/CodeZen-Lizhi/zhixu/internal/conversation/domain"
 	conversationworkflow "github.com/CodeZen-Lizhi/zhixu/internal/conversation/workflow"
 	eventspostgres "github.com/CodeZen-Lizhi/zhixu/internal/events/adapter/postgres"
 	eventsapplication "github.com/CodeZen-Lizhi/zhixu/internal/events/application"
+	eventsdomain "github.com/CodeZen-Lizhi/zhixu/internal/events/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	retrievaldomain "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
+	toolcatalog "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/catalog"
 	workflowpostgres "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/postgres"
 	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
 	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
@@ -118,6 +123,375 @@ func TestQuestionDispatcherAtomicallyCreatesAndExactlyReplaysQuestionWorkflowAnd
 	var classified *foundation.Error
 	if !errors.As(err, &classified) || classified.Kind != foundation.ErrorVersionConflict || classified.Code != "CONVERSATION_QUESTION_IDEMPOTENCY_CONFLICT" {
 		t.Fatalf("SubmitQuestion(conflict) error = %#v", err)
+	}
+}
+
+func TestQuestionDispatcherWorkspaceAnalysisAtomicallyCreatesAndReplaysFrozenRun(t *testing.T) {
+	conversationRepository, pool, ctx := newConversationTestRepository(t)
+	workspaceID := conversationPostgresID(330)
+	conversationID := conversationPostgresID(331)
+	seedConversationWorkspaces(t, ctx, pool, workspaceID)
+	createdAt := time.Date(2026, 8, 16, 9, 0, 0, 0, time.UTC)
+	if _, err := conversationRepository.CreateConversation(ctx, conversationCreateRecord(
+		t, workspaceID, conversationID, "Workspace analysis", "workspace-analysis-conversation", createdAt,
+	)); err != nil {
+		t.Fatal(err)
+	}
+	dispatcher := newWorkspaceAnalysisQuestionDispatcherIntegration(t, pool)
+	record := workspaceAnalysisQuestionDispatchRecord(
+		t, workspaceID, conversationID, "Inspect the repository and explain the approved evidence.", "workspace-analysis-question-1",
+	)
+
+	created, err := dispatcher.SubmitQuestion(ctx, record)
+	if err != nil || created.Replayed || created.Answer.PublicationStatus != conversationdomain.AnswerPublicationPending ||
+		created.Answer.WorkflowRunID != created.Workflow.RunID || created.NodeRunID == "" || created.JobID < 1 {
+		var classified *foundation.Error
+		if errors.As(err, &classified) {
+			t.Fatalf("SubmitQuestion(workspace analysis)=%#v err=%v cause=%v", created, err, classified.Cause)
+		}
+		t.Fatalf("SubmitQuestion(workspace analysis)=%#v err=%v", created, err)
+	}
+
+	snapshot, err := toolcatalog.WorkspaceAnalysisToolCatalogSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition := conversationworkflow.RegisteredWorkspaceAnalysisDefinition()
+	var mode, definitionKey, definitionHash, toolCatalogHash, nodeKey, nodeType, status string
+	var definitionVersion, configRevision, version int64
+	var maxNodes, maxModelCalls, maxToolCalls, maxSourceReads, maxConcurrency int
+	var maxInputTokens, maxOutputTokens int64
+	var runCreatedAt, deadlineAt time.Time
+	if err := pool.QueryRow(ctx, `SELECT q.mode,d.key,d.version,wa.definition_hash,wa.tool_catalog_hash,
+		wa.config_revision,wa.status,wa.version,wa.created_at,wa.deadline_at,
+		wa.max_nodes,wa.max_model_calls,wa.max_tool_calls,wa.max_source_reads,wa.max_tool_concurrency,
+		wa.max_input_tokens,wa.max_output_tokens,n.node_key,n.node_type
+		FROM agent.question q
+		JOIN agent.answer a ON a.question_id=q.id AND a.workspace_id=q.workspace_id
+		JOIN workflow.run w ON w.id=a.workflow_run_id AND w.workspace_id=a.workspace_id
+		JOIN workflow.definition d ON d.id=w.definition_id
+		JOIN workflow.node_run n ON n.run_id=w.id
+		JOIN agent.workspace_analysis_run wa ON wa.question_id=q.id AND wa.workspace_id=q.workspace_id
+		WHERE q.workspace_id=$1 AND q.id=$2`, string(workspaceID), string(created.Question.ID)).Scan(
+		&mode, &definitionKey, &definitionVersion, &definitionHash, &toolCatalogHash,
+		&configRevision, &status, &version, &runCreatedAt, &deadlineAt,
+		&maxNodes, &maxModelCalls, &maxToolCalls, &maxSourceReads, &maxConcurrency,
+		&maxInputTokens, &maxOutputTokens, &nodeKey, &nodeType,
+	); err != nil {
+		t.Fatal(err)
+	}
+	deadlines, err := agentapplication.DeriveWorkspaceAnalysisV1Deadlines(workspaceAnalysisDispatchTimeouts(snapshot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode != string(conversationdomain.QuestionModeWorkspaceAnalysis) || definitionKey != definition.Key ||
+		definitionVersion != definition.Version || definitionHash != definition.GraphHash || toolCatalogHash != snapshot.Hash ||
+		configRevision != 1 || status != "queued" || version != 1 || !deadlineAt.Equal(runCreatedAt.Add(deadlines.RunDeadline())) ||
+		maxNodes != agentapplication.WorkspaceAnalysisV1MaxNodes || maxModelCalls != agentapplication.WorkspaceAnalysisV1MaxModelCalls ||
+		maxToolCalls != agentapplication.WorkspaceAnalysisV1MaxToolCalls || maxSourceReads != agentapplication.WorkspaceAnalysisV1MaxSourceReads ||
+		maxConcurrency != agentapplication.WorkspaceAnalysisV1MaxToolConcurrency || maxInputTokens != agentapplication.WorkspaceAnalysisV1MaxRunInputTokens ||
+		maxOutputTokens != agentapplication.WorkspaceAnalysisV1MaxRunOutputTokens ||
+		nodeKey != conversationworkflow.WorkspaceAnalysisNodeInspectWorkspace || nodeType != "agent.workspace-analysis.inspect_workspace" {
+		t.Fatalf("workspace analysis binding mode=%s definition=%s@%d hashes=%s/%s config=%d status=%s v%d node=%s/%s budget=%d/%d/%d/%d/%d/%d/%d",
+			mode, definitionKey, definitionVersion, definitionHash, toolCatalogHash, configRevision, status, version, nodeKey, nodeType,
+			maxNodes, maxModelCalls, maxToolCalls, maxSourceReads, maxConcurrency, maxInputTokens, maxOutputTokens)
+	}
+	var startedEventCount int64
+	var startedResourceRef, startedSourceRef, startedSummary string
+	if err := pool.QueryRow(ctx, `SELECT
+		count(*),min(resource_ref),min(source_event_ref),min(payload_summary::text)
+		FROM ops.server_event
+		WHERE workspace_id=$1 AND event_type='workspace_analysis.started' AND workflow_run_id=$2`,
+		string(workspaceID), string(created.Workflow.RunID),
+	).Scan(&startedEventCount, &startedResourceRef, &startedSourceRef, &startedSummary); err != nil {
+		t.Fatal(err)
+	}
+	startedPayload, err := eventsdomain.DecodePayloadSummary([]byte(startedSummary))
+	if err != nil {
+		t.Fatalf("started event summary=%s err=%v", startedSummary, err)
+	}
+	if startedEventCount != 1 || startedResourceRef == "" ||
+		!strings.HasPrefix(startedSourceRef, "workspace_analysis.started:") ||
+		startedPayload.QuestionID == nil || *startedPayload.QuestionID != created.Question.ID ||
+		startedPayload.AnswerID == nil || *startedPayload.AnswerID != created.Answer.ID ||
+		startedPayload.WorkflowRunID == nil || *startedPayload.WorkflowRunID != created.Workflow.RunID ||
+		startedPayload.Status != "queued" ||
+		strings.Contains(startedSummary, record.Request.QuestionText) || strings.Contains(startedSummary, "prompt") {
+		t.Fatalf("started event count=%d resource=%q source=%q summary=%s payload=%#v",
+			startedEventCount, startedResourceRef, startedSourceRef, startedSummary, startedPayload)
+	}
+
+	var runInput, nodeInput []byte
+	if err := pool.QueryRow(ctx, `SELECT w.input,n.input FROM workflow.run w JOIN workflow.node_run n ON n.run_id=w.id WHERE w.id=$1`,
+		string(created.Workflow.RunID)).Scan(&runInput, &nodeInput); err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range [][]byte{runInput, nodeInput} {
+		input, err := conversationworkflow.DecodeWorkspaceAnalysisInput(raw)
+		if err != nil || input.QuestionID != created.Question.ID || input.AnswerID != created.Answer.ID ||
+			input.ConversationID != conversationID || strings.Contains(string(raw), record.Request.QuestionText) {
+			t.Fatalf("workspace analysis input=%s decoded=%#v err=%v", raw, input, err)
+		}
+	}
+	if _, err := pool.Exec(ctx, `UPDATE agent.workspace_analysis_run
+		SET status='running',version=version+1,updated_at=clock_timestamp()
+		WHERE workspace_id=$1 AND question_id=$2 AND status='queued' AND version=1`,
+		string(workspaceID), string(created.Question.ID),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	replayed, err := dispatcher.SubmitQuestion(ctx, record)
+	if err != nil || !replayed.Replayed || replayed.Question.ID != created.Question.ID || replayed.Answer.ID != created.Answer.ID ||
+		replayed.Workflow.RunID != created.Workflow.RunID || replayed.NodeRunID != created.NodeRunID || replayed.JobID != created.JobID {
+		t.Fatalf("SubmitQuestion(workspace analysis replay)=%#v err=%v", replayed, err)
+	}
+	var analysisRuns, workflowRuns, jobs int
+	var replayStartedEventCount int64
+	if err := pool.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM agent.workspace_analysis_run WHERE workspace_id=$1 AND question_id=$2),
+		(SELECT count(*) FROM workflow.run WHERE workspace_id=$1 AND id=$3),
+		(SELECT count(*) FROM workflow.river_job WHERE id=$4)`,
+		string(workspaceID), string(created.Question.ID), string(created.Workflow.RunID), created.JobID,
+	).Scan(&analysisRuns, &workflowRuns, &jobs); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM ops.server_event
+		WHERE workspace_id=$1 AND workflow_run_id=$2 AND event_type='workspace_analysis.started'`,
+		string(workspaceID), string(created.Workflow.RunID),
+	).Scan(&replayStartedEventCount); err != nil {
+		t.Fatal(err)
+	}
+	if analysisRuns != 1 || workflowRuns != 1 || jobs != 1 || replayStartedEventCount != 1 {
+		t.Fatalf("analysis_runs=%d workflow_runs=%d jobs=%d started_events=%d", analysisRuns, workflowRuns, jobs, replayStartedEventCount)
+	}
+
+	ragConflict := record
+	ragConflict.Request.Mode = conversationdomain.QuestionModeRAG
+	ragConflict.RequestHash, err = conversationdomain.ComputeQuestionRequestHash(ragConflict.Request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = dispatcher.SubmitQuestion(ctx, ragConflict)
+	requireQuestionDispatchError(t, err, foundation.ErrorVersionConflict, ErrorCodeQuestionIdempotencyConflict)
+}
+
+func TestQuestionDispatcherWorkspaceAnalysisRunFailureRollsBackEveryDispatchFact(t *testing.T) {
+	conversationRepository, pool, ctx := newConversationTestRepository(t)
+	workspaceID := conversationPostgresID(340)
+	conversationID := conversationPostgresID(341)
+	seedConversationWorkspaces(t, ctx, pool, workspaceID)
+	if _, err := conversationRepository.CreateConversation(ctx, conversationCreateRecord(
+		t, workspaceID, conversationID, "Workspace analysis rollback", "workspace-analysis-rollback-conversation", time.Now().UTC(),
+	)); err != nil {
+		t.Fatal(err)
+	}
+	runtime, events := newQuestionDispatchDependencies(t, pool)
+	dispatcher, err := NewQuestionDispatcherWithWorkspaceAnalysis(
+		pool, runtime, events, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, &failingWorkspaceAnalysisRunStarter{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := workspaceAnalysisQuestionDispatchRecord(t, workspaceID, conversationID, "Inspect atomically", "workspace-analysis-rollback-1")
+	_, err = dispatcher.SubmitQuestion(ctx, record)
+	var classified *foundation.Error
+	if !errors.As(err, &classified) || classified.Code != agentapplication.ErrorCodeWorkspaceAnalysisRunStartUnavailable {
+		t.Fatalf("SubmitQuestion() error=%#v", err)
+	}
+
+	var conversationVersion int64
+	var questions, answers, definitions, runs, nodes, analysisRuns, outbox, jobs, eventsCount int
+	if err := pool.QueryRow(ctx, `SELECT
+		(SELECT version FROM agent.conversation WHERE workspace_id=$1 AND id=$2),
+		(SELECT count(*) FROM agent.question WHERE workspace_id=$1 AND conversation_id=$2),
+		(SELECT count(*) FROM agent.answer WHERE workspace_id=$1 AND conversation_id=$2),
+		(SELECT count(*) FROM workflow.definition WHERE workspace_id=$1 AND key='workspace-analysis'),
+		(SELECT count(*) FROM workflow.run WHERE workspace_id=$1),
+		(SELECT count(*) FROM workflow.node_run n JOIN workflow.run w ON w.id=n.run_id WHERE w.workspace_id=$1),
+		(SELECT count(*) FROM agent.workspace_analysis_run WHERE workspace_id=$1),
+		(SELECT count(*) FROM workflow.outbox_event WHERE workspace_id=$1),
+		(SELECT count(*) FROM workflow.river_job j JOIN workflow.node_run n ON n.id=(j.args->>'node_run_id')::uuid
+		 JOIN workflow.run w ON w.id=n.run_id WHERE w.workspace_id=$1),
+		(SELECT count(*) FROM ops.server_event WHERE workspace_id=$1 AND event_type<>'conversation.created')`,
+		string(workspaceID), string(conversationID),
+	).Scan(&conversationVersion, &questions, &answers, &definitions, &runs, &nodes, &analysisRuns, &outbox, &jobs, &eventsCount); err != nil {
+		t.Fatal(err)
+	}
+	if conversationVersion != 1 || questions != 0 || answers != 0 || definitions != 0 || runs != 0 || nodes != 0 ||
+		analysisRuns != 0 || outbox != 0 || jobs != 0 || eventsCount != 0 {
+		t.Fatalf("version=%d questions=%d answers=%d definitions=%d runs=%d nodes=%d analysis=%d outbox=%d jobs=%d events=%d",
+			conversationVersion, questions, answers, definitions, runs, nodes, analysisRuns, outbox, jobs, eventsCount)
+	}
+}
+
+func TestQuestionDispatcherWorkspaceAnalysisAuditFailureRollsBackEveryDispatchFact(t *testing.T) {
+	conversationRepository, pool, ctx := newConversationTestRepository(t)
+	workspaceID := conversationPostgresID(345)
+	conversationID := conversationPostgresID(346)
+	seedConversationWorkspaces(t, ctx, pool, workspaceID)
+	if _, err := conversationRepository.CreateConversation(ctx, conversationCreateRecord(
+		t, workspaceID, conversationID, "Workspace analysis audit rollback", "workspace-analysis-audit-rollback-conversation", time.Now().UTC(),
+	)); err != nil {
+		t.Fatal(err)
+	}
+	cause := errors.New("injected workspace analysis audit failure")
+	dispatcher := newWorkspaceAnalysisQuestionDispatcherAtRevisionAndAuditIntegration(
+		t, pool, pool, 1, &workspaceAnalysisAuditCapture{err: cause},
+	)
+	record := workspaceAnalysisQuestionDispatchRecord(
+		t, workspaceID, conversationID, "Inspect atomically with audit", "workspace-analysis-audit-rollback-1",
+	)
+	if _, err := dispatcher.SubmitQuestion(ctx, record); !errors.Is(err, cause) {
+		t.Fatalf("SubmitQuestion() error=%s", conversationErrorChain(err))
+	}
+
+	var conversationVersion int64
+	var questions, answers, definitions, runs, nodes, analysisRuns, outbox, jobs, eventsCount, auditCount int
+	if err := pool.QueryRow(ctx, `SELECT
+		(SELECT version FROM agent.conversation WHERE workspace_id=$1 AND id=$2),
+		(SELECT count(*) FROM agent.question WHERE workspace_id=$1 AND conversation_id=$2),
+		(SELECT count(*) FROM agent.answer WHERE workspace_id=$1 AND conversation_id=$2),
+		(SELECT count(*) FROM workflow.definition WHERE workspace_id=$1 AND key='workspace-analysis'),
+		(SELECT count(*) FROM workflow.run WHERE workspace_id=$1),
+		(SELECT count(*) FROM workflow.node_run n JOIN workflow.run w ON w.id=n.run_id WHERE w.workspace_id=$1),
+		(SELECT count(*) FROM agent.workspace_analysis_run WHERE workspace_id=$1),
+		(SELECT count(*) FROM workflow.outbox_event WHERE workspace_id=$1),
+		(SELECT count(*) FROM workflow.river_job j JOIN workflow.node_run n ON n.id=(j.args->>'node_run_id')::uuid
+		 JOIN workflow.run w ON w.id=n.run_id WHERE w.workspace_id=$1),
+		(SELECT count(*) FROM ops.server_event WHERE workspace_id=$1 AND event_type<>'conversation.created'),
+		(SELECT count(*) FROM ops.audit_event WHERE workspace_id=$1)`,
+		string(workspaceID), string(conversationID),
+	).Scan(
+		&conversationVersion, &questions, &answers, &definitions, &runs, &nodes,
+		&analysisRuns, &outbox, &jobs, &eventsCount, &auditCount,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if conversationVersion != 1 || questions != 0 || answers != 0 || definitions != 0 || runs != 0 || nodes != 0 ||
+		analysisRuns != 0 || outbox != 0 || jobs != 0 || eventsCount != 0 || auditCount != 0 {
+		t.Fatalf(
+			"version=%d questions=%d answers=%d definitions=%d runs=%d nodes=%d analysis=%d outbox=%d jobs=%d events=%d audit=%d",
+			conversationVersion, questions, answers, definitions, runs, nodes, analysisRuns, outbox, jobs, eventsCount, auditCount,
+		)
+	}
+}
+
+func TestQuestionDispatcherWorkspaceAnalysisExactlyReplaysCommitResponseLoss(t *testing.T) {
+	conversationRepository, pool, ctx := newConversationTestRepository(t)
+	workspaceID := conversationPostgresID(350)
+	conversationID := conversationPostgresID(351)
+	seedConversationWorkspaces(t, ctx, pool, workspaceID)
+	if _, err := conversationRepository.CreateConversation(ctx, conversationCreateRecord(
+		t, workspaceID, conversationID, "Workspace analysis response loss", "workspace-analysis-response-loss-conversation", time.Now().UTC(),
+	)); err != nil {
+		t.Fatal(err)
+	}
+	auditRecorder, auditStore := newWorkspaceAnalysisAuditIntegration(t, pool)
+	lossDB := &conversationCommitResponseLossDB{Pool: pool, loseNext: true}
+	dispatcher := newWorkspaceAnalysisQuestionDispatcherAtRevisionAndAuditIntegration(t, lossDB, pool, 1, auditRecorder)
+	record := workspaceAnalysisQuestionDispatchRecord(
+		t, workspaceID, conversationID, "Inspect after the response is lost", "workspace-analysis-response-loss-1",
+	)
+	if _, err := dispatcher.SubmitQuestion(ctx, record); err == nil {
+		t.Fatal("SubmitQuestion() did not expose the injected commit response loss")
+	}
+
+	var questionID, answerID, workflowRunID, nodeRunID, analysisRunID string
+	var jobID int64
+	if err := pool.QueryRow(ctx, `SELECT q.id::text,a.id::text,a.workflow_run_id::text,n.id::text,j.id,wa.id::text
+		FROM agent.question q
+		JOIN agent.answer a ON a.question_id=q.id AND a.workspace_id=q.workspace_id
+		JOIN workflow.node_run n ON n.run_id=a.workflow_run_id
+		JOIN workflow.river_job j ON (j.args->>'node_run_id')::uuid=n.id
+		JOIN agent.workspace_analysis_run wa ON wa.question_id=q.id AND wa.workspace_id=q.workspace_id
+		WHERE q.workspace_id=$1 AND q.conversation_id=$2 AND q.idempotency_key=$3`,
+		string(workspaceID), string(conversationID), record.IdempotencyKey,
+	).Scan(&questionID, &answerID, &workflowRunID, &nodeRunID, &jobID, &analysisRunID); err != nil {
+		t.Fatal(err)
+	}
+
+	replayDispatcher := newWorkspaceAnalysisQuestionDispatcherAtRevisionAndAuditIntegration(t, lossDB, pool, 2, auditRecorder)
+	replayed, err := replayDispatcher.SubmitQuestion(ctx, record)
+	if err != nil || !replayed.Replayed || string(replayed.Question.ID) != questionID || string(replayed.Answer.ID) != answerID ||
+		string(replayed.Workflow.RunID) != workflowRunID || string(replayed.NodeRunID) != nodeRunID || replayed.JobID != jobID {
+		t.Fatalf("SubmitQuestion(workspace analysis response-loss replay)=%#v err=%v", replayed, err)
+	}
+	var analysisRuns int
+	var persistedConfigRevision int64
+	if err := pool.QueryRow(ctx, `SELECT count(*),max(config_revision) FROM agent.workspace_analysis_run
+		WHERE workspace_id=$1 AND question_id=$2 AND id=$3`, string(workspaceID), questionID, analysisRunID).Scan(
+		&analysisRuns, &persistedConfigRevision,
+	); err != nil {
+		t.Fatal(err)
+	}
+	var startedEvents int64
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM ops.server_event
+		WHERE workspace_id=$1 AND workflow_run_id=$2 AND event_type='workspace_analysis.started'`,
+		string(workspaceID), workflowRunID,
+	).Scan(&startedEvents); err != nil {
+		t.Fatal(err)
+	}
+	if analysisRuns != 1 || persistedConfigRevision != 1 || startedEvents != 1 {
+		t.Fatalf("workspace analysis run count=%d config_revision=%d started_events=%d", analysisRuns, persistedConfigRevision, startedEvents)
+	}
+	auditEvent := requireWorkspaceAnalysisAuditEventIntegration(
+		t, ctx, auditStore, workspaceID, "workspace-analysis:run-started:"+analysisRunID+":v1",
+	)
+	if auditEvent.WorkspaceID == nil || *auditEvent.WorkspaceID != workspaceID ||
+		string(auditEvent.ActorType) != "AGENT" || auditEvent.ActorRef != workspaceAnalysisAuditAgentRef ||
+		auditEvent.Action != workspaceAnalysisRunStartedAuditAction || string(auditEvent.Outcome) != "SUCCEEDED" ||
+		auditEvent.ErrorCode != "" || auditEvent.ResourceType != workspaceAnalysisAuditResourceType ||
+		auditEvent.ResourceRef != "workspace_analysis:"+analysisRunID {
+		t.Fatalf("workspace analysis started audit=%#v", auditEvent)
+	}
+	requireWorkspaceAnalysisAuditJSONObjectIntegration(t, auditEvent.Correlation, map[string]any{
+		"analysis_run_id": analysisRunID, "workflow_run_id": workflowRunID,
+		"conversation_id": string(conversationID), "question_id": questionID, "answer_id": answerID,
+	})
+	requireWorkspaceAnalysisAuditJSONObjectIntegration(t, auditEvent.Metadata, map[string]any{
+		"definition_key": "workspace-analysis", "definition_version": float64(1),
+		"policy_version": float64(1), "config_revision": float64(1), "status": "queued",
+	})
+	requireWorkspaceAnalysisAuditSafeIntegration(t, auditEvent, record.Request.QuestionText)
+}
+
+func TestQuestionDispatcherWorkspaceAnalysisUsesWallClockAfterTransactionDelay(t *testing.T) {
+	conversationRepository, pool, ctx := newConversationTestRepository(t)
+	workspaceID := conversationPostgresID(360)
+	conversationID := conversationPostgresID(361)
+	seedConversationWorkspaces(t, ctx, pool, workspaceID)
+	if _, err := conversationRepository.CreateConversation(ctx, conversationCreateRecord(
+		t, workspaceID, conversationID, "Workspace analysis delayed transaction", "workspace-analysis-delayed-conversation",
+		time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC),
+	)); err != nil {
+		t.Fatal(err)
+	}
+	delayedDB := &delayedQuestionDispatchDB{Pool: pool}
+	dispatcher := newWorkspaceAnalysisQuestionDispatcherWithDBIntegration(t, delayedDB, pool)
+	created, err := dispatcher.SubmitQuestion(ctx, workspaceAnalysisQuestionDispatchRecord(
+		t, workspaceID, conversationID, "Inspect after waiting for the transaction", "workspace-analysis-delayed-1",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var deadlineAt time.Time
+	if err := pool.QueryRow(ctx, `SELECT deadline_at FROM agent.workspace_analysis_run
+		WHERE workspace_id=$1 AND question_id=$2`, string(workspaceID), string(created.Question.ID)).Scan(&deadlineAt); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := toolcatalog.WorkspaceAnalysisToolCatalogSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadlines, err := agentapplication.DeriveWorkspaceAnalysisV1Deadlines(workspaceAnalysisDispatchTimeouts(snapshot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Question.CreatedAt.Sub(delayedDB.transactionStartedAt) < 50*time.Millisecond ||
+		!deadlineAt.Equal(created.Question.CreatedAt.Add(deadlines.RunDeadline())) {
+		t.Fatalf("transaction_started_at=%s question_created_at=%s deadline_at=%s",
+			delayedDB.transactionStartedAt, created.Question.CreatedAt, deadlineAt)
 	}
 }
 
@@ -639,7 +1013,7 @@ func TestQuestionDispatcherExactlyReplaysExistingQuestionAfterConversationArchiv
 	if err != nil {
 		t.Fatal(err)
 	}
-	archivedAt := now.Add(time.Minute)
+	archivedAt := created.Question.CreatedAt.Add(time.Minute)
 	if _, err := pool.Exec(ctx, `UPDATE agent.conversation SET
 		status='archived',archived_at=$2,last_activity_at=$2,updated_at=$2,version=version+1
 		WHERE id=$1`, string(conversationID), archivedAt); err != nil {
@@ -751,6 +1125,76 @@ func newQuestionDispatcherIntegration(t *testing.T, pool *pgxpool.Pool) *Questio
 	return dispatcher
 }
 
+func newWorkspaceAnalysisQuestionDispatcherIntegration(t *testing.T, pool *pgxpool.Pool) *QuestionDispatcher {
+	return newWorkspaceAnalysisQuestionDispatcherWithDBIntegration(t, pool, pool)
+}
+
+func newWorkspaceAnalysisQuestionDispatcherWithDBIntegration(t *testing.T, db DB, pool *pgxpool.Pool) *QuestionDispatcher {
+	return newWorkspaceAnalysisQuestionDispatcherAtRevisionIntegration(t, db, pool, 1)
+}
+
+func newWorkspaceAnalysisQuestionDispatcherAtRevisionIntegration(t *testing.T, db DB, pool *pgxpool.Pool, configRevision int64) *QuestionDispatcher {
+	return newWorkspaceAnalysisQuestionDispatcherAtRevisionAndAuditIntegration(t, db, pool, configRevision, nil)
+}
+
+func newWorkspaceAnalysisQuestionDispatcherAtRevisionAndAuditIntegration(
+	t *testing.T,
+	db DB,
+	pool *pgxpool.Pool,
+	configRevision int64,
+	audit WorkspaceAnalysisAuditRecorder,
+) *QuestionDispatcher {
+	t.Helper()
+	runtime, events := newQuestionDispatchDependencies(t, pool)
+	repository, err := agentpostgres.NewRepository(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := toolcatalog.WorkspaceAnalysisToolCatalogSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := agentapplication.NewWorkspaceAnalysisRunService(
+		repository,
+		foundation.NewUUIDGenerator(nil),
+		agentapplication.WorkspaceAnalysisRunStartConfig{
+			DefinitionHash:                  conversationworkflow.RegisteredWorkspaceAnalysisDefinition().GraphHash,
+			ToolCatalogHash:                 snapshot.Hash,
+			ConfigRevision:                  configRevision,
+			Timeouts:                        workspaceAnalysisDispatchTimeouts(snapshot),
+			SynthesisProfileMaxOutputTokens: int(agentapplication.WorkspaceAnalysisV1SynthesisMaxOutputTokens),
+			RuntimeLimits: agentapplication.WorkspaceAnalysisRuntimeLimits{
+				RiverJobTimeout: time.Hour, LeaseDuration: 30 * time.Second, HeartbeatInterval: 5 * time.Second,
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dispatcher *QuestionDispatcher
+	if isNilInterface(audit) {
+		dispatcher, err = NewQuestionDispatcherWithWorkspaceAnalysis(
+			db, runtime, events, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, service,
+		)
+	} else {
+		dispatcher, err = NewQuestionDispatcherWithWorkspaceAnalysisAndAudit(
+			db, runtime, events, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, service, audit,
+		)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dispatcher
+}
+
+func workspaceAnalysisDispatchTimeouts(snapshot toolcatalog.WorkspaceAnalysisToolCatalog) agentapplication.WorkspaceAnalysisV1Timeouts {
+	return agentapplication.WorkspaceAnalysisV1Timeouts{
+		PlanModelTimeout: 2 * time.Minute, SynthesisModelTimeout: 5 * time.Minute, ReviewModelTimeout: 3 * time.Minute,
+		GitToolTimeout: snapshot.ReadGitStatusTimeout, SearchToolTimeout: snapshot.SearchKnowledgeTimeout,
+		SourceReadToolTimeout: snapshot.ReadSourceTimeout, ValidateCitationToolTimeout: snapshot.ValidateCitationTimeout,
+	}
+}
+
 func newQuestionDispatchDependencies(t *testing.T, pool *pgxpool.Pool) (*workflowpostgres.RuntimeRepository, *eventspostgres.Store) {
 	t.Helper()
 	events, err := eventspostgres.NewStore(pool)
@@ -788,12 +1232,60 @@ func questionDispatchRecord(t *testing.T, workspaceID, conversationID foundation
 	return conversationapplication.SubmitQuestionRecord{Request: request, IdempotencyKey: idempotencyKey, RequestHash: requestHash}
 }
 
+func workspaceAnalysisQuestionDispatchRecord(t *testing.T, workspaceID, conversationID foundation.ID, questionText, idempotencyKey string) conversationapplication.SubmitQuestionRecord {
+	t.Helper()
+	request, err := conversationdomain.CanonicalizeQuestionRequest(conversationdomain.QuestionRequest{
+		WorkspaceID: workspaceID, ConversationID: conversationID, Mode: conversationdomain.QuestionModeWorkspaceAnalysis,
+		QuestionText: questionText, Scope: conversationdomain.QuestionScope{RetrievalMode: retrievaldomain.SearchModeHybrid},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestHash, err := conversationdomain.ComputeQuestionRequestHash(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return conversationapplication.SubmitQuestionRecord{Request: request, IdempotencyKey: idempotencyKey, RequestHash: requestHash}
+}
+
 func requireQuestionDispatchError(t *testing.T, err error, kind foundation.ErrorKind, code string) {
 	t.Helper()
 	var classified *foundation.Error
 	if !errors.As(err, &classified) || classified.Kind != kind || classified.Code != code {
 		t.Fatalf("dispatch error = %#v, want kind=%s code=%s", err, kind, code)
 	}
+}
+
+type failingWorkspaceAnalysisRunStarter struct{}
+
+func (*failingWorkspaceAnalysisRunStarter) StartWorkspaceAnalysisRunTx(context.Context, any, agentapplication.WorkspaceAnalysisRunStartCommand) (agentdomain.WorkspaceAnalysisRun, error) {
+	return agentdomain.WorkspaceAnalysisRun{}, foundation.NewError(
+		foundation.ErrorDependencyUnavailable,
+		agentapplication.ErrorCodeWorkspaceAnalysisRunStartUnavailable,
+		true,
+		errors.New("injected workspace analysis run failure"),
+	)
+}
+
+type delayedQuestionDispatchDB struct {
+	*pgxpool.Pool
+	transactionStartedAt time.Time
+}
+
+func (database *delayedQuestionDispatchDB) Begin(ctx context.Context) (pgx.Tx, error) {
+	transaction, err := database.Pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := transaction.QueryRow(ctx, `SELECT CURRENT_TIMESTAMP`).Scan(&database.transactionStartedAt); err != nil {
+		_ = transaction.Rollback(ctx)
+		return nil, err
+	}
+	if _, err := transaction.Exec(ctx, `SELECT pg_sleep(0.075)`); err != nil {
+		_ = transaction.Rollback(ctx)
+		return nil, err
+	}
+	return transaction, nil
 }
 
 func assertQuestionDispatchHasNoPartialFacts(t *testing.T, ctx context.Context, pool *pgxpool.Pool, workspaceID, conversationID foundation.ID) {

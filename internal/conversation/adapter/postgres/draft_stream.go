@@ -29,8 +29,10 @@ func NewDraftStreamRepository(db DB) (*DraftStreamRepository, error) {
 	return &DraftStreamRepository{db: db}, nil
 }
 
-// BeginDraftStream validates the active runtime claim with database time,
-// supersedes a prior recoverable generation, and creates the next generation.
+// BeginDraftStream validates the active runtime claim with database time. The
+// same Attempt may only replay its original unexpired session; only a
+// replacement Attempt may supersede the prior projection and create a new
+// generation.
 func (repository *DraftStreamRepository) BeginDraftStream(ctx context.Context, command agentapplication.BeginDraftStreamCommand) (agentapplication.DraftStreamSession, error) {
 	if repository == nil || isNilInterface(repository.db) {
 		return agentapplication.DraftStreamSession{}, dependency(ErrorCodeDraftStreamUnavailable, errors.New("draft stream repository is unavailable"))
@@ -50,7 +52,7 @@ func (repository *DraftStreamRepository) BeginDraftStream(ctx context.Context, c
 	if err != nil {
 		return agentapplication.DraftStreamSession{}, err
 	}
-	existing, found, err := findCurrentDraftByBinding(ctx, tx, command.DraftStreamBinding)
+	existing, found, err := findDraftByBinding(ctx, tx, command.DraftStreamBinding)
 	if err != nil {
 		return agentapplication.DraftStreamSession{}, err
 	}
@@ -58,7 +60,19 @@ func (repository *DraftStreamRepository) BeginDraftStream(ctx context.Context, c
 	if err != nil {
 		return agentapplication.DraftStreamSession{}, err
 	}
-	if found && existing.ExpiresAt.After(now) {
+	if found {
+		if existing.Status != agentapplication.DraftStreamActive && existing.Status != agentapplication.DraftStreamCompleted && existing.Status != agentapplication.DraftStreamDegraded {
+			return agentapplication.DraftStreamSession{}, conflict(
+				ErrorCodeDraftStreamConflict,
+				errors.New("terminal draft session cannot be reopened by the same attempt"),
+			)
+		}
+		if !existing.ExpiresAt.After(now) {
+			return agentapplication.DraftStreamSession{}, conflict(
+				ErrorCodeDraftStreamConflict,
+				errors.New("expired draft session cannot be reopened by the same attempt"),
+			)
+		}
 		if err := tx.Commit(ctx); err != nil {
 			return agentapplication.DraftStreamSession{}, classify(err, ErrorCodeDraftStreamUnavailable)
 		}
@@ -255,6 +269,51 @@ func (repository *DraftStreamRepository) ReadDraftStream(ctx context.Context, qu
 	return agentapplication.DraftStreamReadResult{Session: &session, Chunks: chunks}, nil
 }
 
+// LoadWorkspaceAnalysisCandidateDraftSession 按 Candidate 的首次 Attempt 读取不可重新创建的 Draft 终态。
+// 该恢复查询不依赖当前 replacement Attempt 的 lease，也不返回 chunk 正文。
+func (repository *DraftStreamRepository) LoadWorkspaceAnalysisCandidateDraftSession(
+	ctx context.Context,
+	query agentapplication.WorkspaceAnalysisCandidateDraftQuery,
+) (agentapplication.DraftStreamSession, error) {
+	if repository == nil || isNilInterface(repository.db) {
+		return agentapplication.DraftStreamSession{}, dependency(ErrorCodeDraftStreamUnavailable, errors.New("draft stream repository is unavailable"))
+	}
+	if ctx == nil {
+		return agentapplication.DraftStreamSession{}, invalid(ErrorCodeDraftStreamInvalid, errors.New("workspace analysis draft context is nil"))
+	}
+	if err := query.Validate(); err != nil {
+		return agentapplication.DraftStreamSession{}, err
+	}
+	rows, err := repository.db.Query(ctx, `SELECT `+draftSessionColumns+`
+		FROM agent.answer_draft_session
+		WHERE workspace_id=$1 AND answer_id=$2 AND node_attempt_id=$3
+		  AND status IN ('COMPLETED','DEGRADED')
+		ORDER BY generation DESC LIMIT 2`,
+		string(query.WorkspaceID), string(query.AnswerID), string(query.NodeAttemptID))
+	if err != nil {
+		return agentapplication.DraftStreamSession{}, classify(err, ErrorCodeDraftStreamUnavailable)
+	}
+	defer rows.Close()
+	sessions := make([]agentapplication.DraftStreamSession, 0, 2)
+	for rows.Next() {
+		session, scanErr := scanDraftSession(rows)
+		if scanErr != nil {
+			return agentapplication.DraftStreamSession{}, classify(scanErr, ErrorCodeDraftStreamUnavailable)
+		}
+		sessions = append(sessions, session)
+	}
+	if err := rows.Err(); err != nil {
+		return agentapplication.DraftStreamSession{}, classify(err, ErrorCodeDraftStreamUnavailable)
+	}
+	if len(sessions) == 0 {
+		return agentapplication.DraftStreamSession{}, notFound(ErrorCodeDraftStreamConflict, pgx.ErrNoRows)
+	}
+	if len(sessions) != 1 {
+		return agentapplication.DraftStreamSession{}, conflict(ErrorCodeDraftStreamConflict, errors.New("workspace analysis candidate has multiple terminal draft sessions"))
+	}
+	return sessions[0], nil
+}
+
 func (repository *DraftStreamRepository) transitionDraftStream(ctx context.Context, command agentapplication.DraftStreamTransitionCommand, target agentapplication.DraftStreamStatus) (agentapplication.DraftStreamSession, error) {
 	if repository == nil || isNilInterface(repository.db) {
 		return agentapplication.DraftStreamSession{}, dependency(ErrorCodeDraftStreamUnavailable, errors.New("draft stream repository is unavailable"))
@@ -433,12 +492,13 @@ func loadDraftSession(ctx context.Context, tx pgx.Tx, sessionID foundation.ID, f
 	return session, nil
 }
 
-func findCurrentDraftByBinding(ctx context.Context, tx pgx.Tx, binding agentapplication.DraftStreamBinding) (agentapplication.DraftStreamSession, bool, error) {
+func findDraftByBinding(ctx context.Context, tx pgx.Tx, binding agentapplication.DraftStreamBinding) (agentapplication.DraftStreamSession, bool, error) {
 	session, err := scanDraftSession(tx.QueryRow(ctx, `SELECT `+draftSessionColumns+`
-		FROM agent.answer_draft_session
-		WHERE workspace_id=$1 AND answer_id=$2 AND workflow_run_id=$3 AND node_run_id=$4 AND node_attempt_id=$5
-		  AND attempt_no=$6 AND lease_owner=$7 AND status IN ('ACTIVE','COMPLETED','DEGRADED')
-		FOR UPDATE`, string(binding.WorkspaceID), string(binding.AnswerID), string(binding.WorkflowRunID), string(binding.NodeRunID),
+			FROM agent.answer_draft_session
+			WHERE workspace_id=$1 AND answer_id=$2 AND workflow_run_id=$3 AND node_run_id=$4 AND node_attempt_id=$5
+			  AND attempt_no=$6 AND lease_owner=$7
+			ORDER BY generation DESC LIMIT 1
+			FOR UPDATE`, string(binding.WorkspaceID), string(binding.AnswerID), string(binding.WorkflowRunID), string(binding.NodeRunID),
 		string(binding.NodeAttemptID), binding.AttemptNo, binding.LeaseOwner))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return agentapplication.DraftStreamSession{}, false, nil
@@ -528,3 +588,4 @@ func allowedDraftTransition(current, target agentapplication.DraftStreamStatus) 
 }
 
 var _ agentapplication.DraftStreamStore = (*DraftStreamRepository)(nil)
+var _ agentapplication.WorkspaceAnalysisCandidateDraftSessionLoader = (*DraftStreamRepository)(nil)

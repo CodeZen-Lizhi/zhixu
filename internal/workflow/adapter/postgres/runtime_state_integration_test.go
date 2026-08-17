@@ -713,7 +713,19 @@ func TestRuntimeStatePauseResumeAndCancelAreIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	hook := &terminalHookRecorder{}
-	repository, err := NewRuntimeRepositoryWithHooks(pool, inserter, RuntimeRepositoryHooks{Terminal: hook})
+	controlHook := &workflowControlHookRecorder{inspect: func(ctx context.Context, tx pgx.Tx, event application.WorkflowControlEvent) error {
+		var commandCount int
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM workflow.control_command WHERE run_id=$1 AND command=$2 AND idempotency_key=$3`,
+			string(event.WorkflowRunID), string(event.Action), event.IdempotencyKey,
+		).Scan(&commandCount); err != nil {
+			return err
+		}
+		if commandCount != 1 || event.PersistedControl.WorkflowRunID != event.WorkflowRunID || event.PersistedControl.Version <= event.ExpectedVersion {
+			return fmt.Errorf("control hook observed commands=%d event=%+v", commandCount, event)
+		}
+		return nil
+	}}
+	repository, err := NewRuntimeRepositoryWithHooks(pool, inserter, RuntimeRepositoryHooks{Terminal: hook, Control: controlHook})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -811,6 +823,10 @@ func TestRuntimeStatePauseResumeAndCancelAreIdempotent(t *testing.T) {
 	}
 	if len(hook.events) != 1 {
 		t.Fatalf("direct cancel replay terminal calls=%d", len(hook.events))
+	}
+	if len(controlHook.events) != 3 || controlHook.events[0].Action != application.ControlActionPause ||
+		controlHook.events[1].Action != application.ControlActionResume || controlHook.events[2].Action != application.ControlActionCancel {
+		t.Fatalf("control events=%+v", controlHook.events)
 	}
 }
 
@@ -1733,6 +1749,26 @@ type terminalHookRecorder struct {
 	events  []application.WorkflowNodeTerminalEvent
 	inspect func(context.Context, pgx.Tx, application.WorkflowNodeTerminalEvent) error
 	err     error
+}
+
+type workflowControlHookRecorder struct {
+	events  []application.WorkflowControlEvent
+	inspect func(context.Context, pgx.Tx, application.WorkflowControlEvent) error
+	err     error
+}
+
+func (hook *workflowControlHookRecorder) OnWorkflowControl(ctx context.Context, transaction any, event application.WorkflowControlEvent) error {
+	tx, ok := transaction.(pgx.Tx)
+	if !ok {
+		return errors.New("control hook transaction is not pgx.Tx")
+	}
+	hook.events = append(hook.events, event)
+	if hook.inspect != nil {
+		if err := hook.inspect(ctx, tx, event); err != nil {
+			return err
+		}
+	}
+	return hook.err
 }
 
 func (hook *terminalHookRecorder) OnWorkflowNodeTerminal(ctx context.Context, transaction any, event application.WorkflowNodeTerminalEvent) error {

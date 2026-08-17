@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -46,6 +47,27 @@ func TestContractRegistryFreezesAndReturnsDeepCopies(t *testing.T) {
 	}
 	if err := registry.RegisterContract(testContract("ReadSource", 1)); err == nil {
 		t.Fatal("frozen registry accepted registration")
+	}
+}
+
+func TestExecutorPrivateBindingFormattingAndJSONNeverExposeDocument(t *testing.T) {
+	const canary = "private-binding-canary"
+	binding := ExecutorPrivateBinding{
+		Schema:   domain.SchemaRef{ID: "tool.search_knowledge.private_binding", Version: 1},
+		Document: json.RawMessage(`{"value":"` + canary + `"}`),
+	}
+	result := ExecutorResult{Output: json.RawMessage(`{}`), PrivateBinding: &binding}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []string{
+		binding.String(), fmt.Sprintf("%+v", binding), fmt.Sprintf("%#v", binding),
+		fmt.Sprintf("%+v", result), fmt.Sprintf("%#v", result), string(encoded),
+	} {
+		if strings.Contains(value, canary) {
+			t.Fatalf("private binding leaked through formatting: %s", value)
+		}
 	}
 }
 

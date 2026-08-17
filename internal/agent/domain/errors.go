@@ -2,6 +2,7 @@
 package domain
 
 import (
+	"context"
 	"errors"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
@@ -13,6 +14,16 @@ func NewValidationExhaustedError(cause error) error {
 		cause = errors.New("structured output validation exhausted")
 	}
 	return foundation.NewError(foundation.ErrorNonRetryableFailure, ErrorCodeValidationExhausted, false, cause)
+}
+
+// NewWorkspaceAnalysisPreAuthorizationDeadlineError 创建数据库授权前截止时间不足的稳定终止标记。
+func NewWorkspaceAnalysisPreAuthorizationDeadlineError() error {
+	return foundation.NewError(
+		foundation.ErrorNonRetryableFailure,
+		ErrorCodeWorkspaceAnalysisPreAuthorizationDeadline,
+		false,
+		context.DeadlineExceeded,
+	)
 }
 
 const (
@@ -54,6 +65,8 @@ const (
 	ErrorCodeMemorySnapshotInvalid = "AGENT_MEMORY_SNAPSHOT_INVALID"
 	// ErrorCodeValidationExhausted 表示 INITIAL、REPAIR、REDUCED 均未得到合法输出。
 	ErrorCodeValidationExhausted = "VALIDATION_EXHAUSTED"
+	// ErrorCodeWorkspaceAnalysisPreAuthorizationDeadline 表示数据库证明剩余期限不足以安全授权并持久完成调用。
+	ErrorCodeWorkspaceAnalysisPreAuthorizationDeadline = "AGENT_WORKSPACE_ANALYSIS_PRE_AUTHORIZATION_DEADLINE"
 )
 
 func invalid(code, message string) error {

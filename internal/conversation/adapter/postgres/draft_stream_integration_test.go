@@ -60,6 +60,26 @@ func TestDraftStreamRepositoryFencesLeaseAndKeepsOrderedChunks(t *testing.T) {
 	if err != nil || replayed.ID != session.ID || replayed.Generation != session.Generation {
 		t.Fatalf("same attempt begin replay = %#v, %v", replayed, err)
 	}
+	if _, err := pool.Exec(ctx, `UPDATE agent.answer_draft_session
+		SET expires_at=clock_timestamp()-interval '1 millisecond' WHERE id=$1`, string(session.ID)); err != nil {
+		t.Fatal(err)
+	}
+	_, expiredReplayErr := repository.BeginDraftStream(ctx, agentapplication.BeginDraftStreamCommand{DraftStreamBinding: binding, TTL: time.Minute})
+	var expiredReplay *foundation.Error
+	if !errors.As(expiredReplayErr, &expiredReplay) || expiredReplay.Kind != foundation.ErrorVersionConflict || expiredReplay.Code != ErrorCodeDraftStreamConflict {
+		t.Fatalf("expired same-attempt begin error = %#v", expiredReplayErr)
+	}
+	var sameAttemptSessions int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM agent.answer_draft_session WHERE node_attempt_id=$1`, string(binding.NodeAttemptID)).Scan(&sameAttemptSessions); err != nil {
+		t.Fatal(err)
+	}
+	if sameAttemptSessions != 1 {
+		t.Fatalf("same attempt draft sessions = %d, want 1", sameAttemptSessions)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE agent.answer_draft_session
+		SET expires_at=clock_timestamp()+interval '1 minute' WHERE id=$1`, string(session.ID)); err != nil {
+		t.Fatal(err)
+	}
 	claimTx, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -150,6 +170,41 @@ func TestDraftStreamRepositoryFencesLeaseAndKeepsOrderedChunks(t *testing.T) {
 				t.Fatalf("unbound draft replay = %#v, %v", unbound, readErr)
 			}
 		})
+	}
+	terminalBinding := agentapplication.DraftStreamBinding{
+		WorkspaceID: workspaceID, AnswerID: mismatchFixture.answerID(2), WorkflowRunID: mismatchFixture.runID(2), NodeRunID: mismatchFixture.nodeID(2),
+		NodeAttemptID: mismatchFixture.attemptID(2), AttemptNo: 1, LeaseOwner: "conversation-worker",
+	}
+	if _, err := pool.Exec(ctx, `UPDATE workflow.node_run
+		SET attempt=1,version=version+1,updated_at=clock_timestamp() WHERE id=$1`, string(terminalBinding.NodeRunID)); err != nil {
+		t.Fatal(err)
+	}
+	terminalSession, err := repository.BeginDraftStream(ctx, agentapplication.BeginDraftStreamCommand{
+		DraftStreamBinding: terminalBinding,
+		TTL:                agentapplication.WorkspaceAnalysisV1MaxRunDuration,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retention := terminalSession.ExpiresAt.Sub(terminalSession.CreatedAt); retention != agentapplication.WorkspaceAnalysisV1MaxRunDuration {
+		t.Fatalf("Workspace Analysis draft retention = %s, want %s", retention, agentapplication.WorkspaceAnalysisV1MaxRunDuration)
+	}
+	if _, err := repository.AbortDraftStream(ctx, agentapplication.DraftStreamTransitionCommand{SessionID: terminalSession.ID, Binding: terminalBinding}); err != nil {
+		t.Fatal(err)
+	}
+	_, terminalReplayErr := repository.BeginDraftStream(ctx, agentapplication.BeginDraftStreamCommand{
+		DraftStreamBinding: terminalBinding,
+		TTL:                agentapplication.WorkspaceAnalysisV1MaxRunDuration,
+	})
+	var terminalReplay *foundation.Error
+	if !errors.As(terminalReplayErr, &terminalReplay) || terminalReplay.Kind != foundation.ErrorVersionConflict || terminalReplay.Code != ErrorCodeDraftStreamConflict {
+		t.Fatalf("terminal same-attempt begin error = %#v", terminalReplayErr)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM agent.answer_draft_session WHERE node_attempt_id=$1`, string(terminalBinding.NodeAttemptID)).Scan(&sameAttemptSessions); err != nil {
+		t.Fatal(err)
+	}
+	if sameAttemptSessions != 1 {
+		t.Fatalf("terminal same-attempt draft sessions = %d, want 1", sameAttemptSessions)
 	}
 	afterFirst := agentapplication.DraftStreamReadCursor{Generation: session.Generation, Sequence: 1}
 	page, err = repository.ReadDraftStream(ctx, agentapplication.DraftStreamReadQuery{WorkspaceID: workspaceID, AnswerID: binding.AnswerID, After: &afterFirst, Limit: 10})

@@ -934,6 +934,58 @@ for (const [path, schema] of [
 }
 
 const schemas = document.components.schemas;
+const workspaceAnalysisTimelinePath = "/api/v1/answers/{answer_id}/analysis-timeline";
+const workspaceAnalysisTimelineOperation = document.paths?.[workspaceAnalysisTimelinePath]?.get;
+const workspaceAnalysisTimelineParameters = document.paths?.[workspaceAnalysisTimelinePath]?.parameters ?? [];
+if (workspaceAnalysisTimelineOperation?.operationId !== "getWorkspaceAnalysisTimeline" ||
+    workspaceAnalysisTimelineOperation.security !== undefined || workspaceAnalysisTimelineOperation.requestBody !== undefined ||
+    workspaceAnalysisTimelineParameters.map((parameter) => parameter.$ref).join(",") !==
+      "#/components/parameters/AnswerID,#/components/parameters/WorkspaceIDQuery" ||
+    workspaceAnalysisTimelineOperation.responses?.["200"]?.content?.["application/json"]?.schema?.$ref !==
+      "#/components/schemas/WorkspaceAnalysisTimeline") {
+  throw new Error("Workspace Analysis timeline operation must remain authenticated, Answer/Workspace-scoped, and authoritative");
+}
+for (const status of ["400", "404", "405", "500", "503"]) {
+  if (resolveRef(workspaceAnalysisTimelineOperation.responses?.[status])?.content?.["application/json"]?.schema?.$ref !==
+      "#/components/schemas/Problem") {
+    throw new Error(`Workspace Analysis timeline ${status} must return Problem`);
+  }
+}
+const workspaceAnalysisTimelineBudgetFields = [
+  "model_calls", "tool_calls", "source_reads", "input_tokens", "output_tokens", "estimated_cost_microunits",
+];
+const workspaceAnalysisTimelineBudget = schemas.WorkspaceAnalysisTimelineBudget;
+if (workspaceAnalysisTimelineBudget?.type !== "object" || workspaceAnalysisTimelineBudget.additionalProperties !== false ||
+    workspaceAnalysisTimelineBudget.required?.join(",") !== workspaceAnalysisTimelineBudgetFields.join(",") ||
+    Object.keys(workspaceAnalysisTimelineBudget.properties ?? {}).join(",") !== workspaceAnalysisTimelineBudgetFields.join(",") ||
+    workspaceAnalysisTimelineBudgetFields.slice(0, 5).some((field) =>
+      workspaceAnalysisTimelineBudget.properties?.[field]?.$ref !== "#/components/schemas/WorkspaceAnalysisTimelineCounter") ||
+    workspaceAnalysisTimelineBudget.properties?.estimated_cost_microunits?.oneOf?.[0]?.$ref !==
+      "#/components/schemas/WorkspaceAnalysisTimelineCounter" ||
+    workspaceAnalysisTimelineBudget.properties?.estimated_cost_microunits?.oneOf?.[1]?.type !== "null") {
+  throw new Error("WorkspaceAnalysisTimelineBudget must retain all durable usage/maxima dimensions");
+}
+const workspaceAnalysisToolRefs = schemas.WorkspaceAnalysisTimelineToolRef?.oneOf ?? [];
+const workspaceAnalysisExactToolRefs = ["ReadGitStatus@2", "SearchKnowledge@2", "ReadSource@3", "ValidateCitation@3"];
+if (workspaceAnalysisToolRefs.length !== workspaceAnalysisExactToolRefs.length ||
+    workspaceAnalysisToolRefs.map((schema) => `${schema.properties?.name?.const}@${schema.properties?.version?.const}`).join(",") !==
+      workspaceAnalysisExactToolRefs.join(",") ||
+    workspaceAnalysisToolRefs.some((schema) => schema.type !== "object" || schema.additionalProperties !== false ||
+      schema.required?.join(",") !== "name,version" || Object.keys(schema.properties ?? {}).join(",") !== "name,version")) {
+  throw new Error("WorkspaceAnalysisTimelineToolRef must retain the exact frozen name/version pairs");
+}
+const workspaceAnalysisTimelineErrorCodes = [
+  "WORKSPACE_ANALYSIS_EVIDENCE_INSUFFICIENT", "WORKSPACE_ANALYSIS_CITATION_INVALID",
+  "WORKSPACE_ANALYSIS_FAITHFULNESS_REJECTED", "WORKSPACE_ANALYSIS_MODEL_REFUSED",
+  "WORKSPACE_ANALYSIS_BUDGET_EXHAUSTED", "WORKSPACE_ANALYSIS_RECEIPT_INVALID",
+  "WORKSPACE_ANALYSIS_RESULT_UNKNOWN", "WORKSPACE_ANALYSIS_DEADLINE_EXCEEDED",
+  "WORKSPACE_ANALYSIS_MODEL_FAILED", "WORKSPACE_ANALYSIS_TOOL_FAILED", "WORKSPACE_ANALYSIS_RUNTIME_FAILED",
+  "WORKSPACE_ANALYSIS_CANCELLED", null,
+];
+if (JSON.stringify(schemas.WorkspaceAnalysisTimelineItem?.properties?.error_code?.enum) !==
+    JSON.stringify(workspaceAnalysisTimelineErrorCodes)) {
+  throw new Error("Workspace Analysis timeline item error_code must remain a closed public-code enum");
+}
 const revisionPreviewPath = "/api/v1/proposals/{proposal_id}/revision-merge-previews";
 const revisionCollectionPath = "/api/v1/proposals/{proposal_id}/revisions";
 const revisionDetailPath = "/api/v1/proposals/{proposal_id}/revisions/{revision_id}";

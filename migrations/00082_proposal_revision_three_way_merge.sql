@@ -576,15 +576,15 @@ DECLARE
 BEGIN
     SELECT count(*)
       INTO invalid_authorization_count
-      FROM change_control.tool_authorization authorization
-      JOIN change_control.proposal proposal ON proposal.id=authorization.proposal_id
+      FROM change_control.tool_authorization auth
+      JOIN change_control.proposal proposal ON proposal.id=auth.proposal_id
       LEFT JOIN change_control.proposal_revision_dispatch dispatch
-        ON dispatch.proposal_id=authorization.proposal_id
-       AND dispatch.revision_id=authorization.revision_id
-     WHERE authorization.status IN ('issued','consumed')
-       AND (proposal.current_revision_id IS DISTINCT FROM authorization.revision_id
-            OR dispatch.approval_id IS DISTINCT FROM authorization.approval_id
-            OR dispatch.workflow_run_id IS DISTINCT FROM authorization.workflow_run_id);
+        ON dispatch.proposal_id=auth.proposal_id
+       AND dispatch.revision_id=auth.revision_id
+     WHERE auth.status IN ('issued','consumed')
+       AND (proposal.current_revision_id IS DISTINCT FROM auth.revision_id
+            OR dispatch.approval_id IS DISTINCT FROM auth.approval_id
+            OR dispatch.workflow_run_id IS DISTINCT FROM auth.workflow_run_id);
     SELECT count(*)
       INTO invalid_execution_count
       FROM change_control.writeback_execution execution

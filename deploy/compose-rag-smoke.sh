@@ -10,9 +10,19 @@ readonly NETNS_COMPOSE_FILE="${SCRIPT_DIR}/compose.netns.yml"
 readonly STATIC_MODELS_COMPOSE_FILE="${SCRIPT_DIR}/compose.static-models.yml"
 readonly RAG_COMPOSE_FILE="${SCRIPT_DIR}/compose.rag-smoke.yml"
 readonly RAG_HOST_RELAY_COMPOSE_FILE="${SCRIPT_DIR}/compose.rag-host-relay-smoke.yml"
+readonly WORKSPACE_ANALYSIS_OTLP_COMPOSE_FILE="${SCRIPT_DIR}/compose.workspace-analysis-otlp-smoke.yml"
 readonly ENV_FILE="${REPOSITORY_ROOT}/.env.example"
 readonly REAL_PROVIDER_MODE="${ZHIXU_COMPOSE_RAG_REAL_PROVIDER:-0}"
 readonly REAL_PROVIDER_PREFLIGHT_ONLY="${ZHIXU_COMPOSE_RAG_REAL_PROVIDER_PREFLIGHT_ONLY:-0}"
+readonly RAG_BROWSER_MODE="${ZHIXU_COMPOSE_RAG_BROWSER:-0}"
+readonly WORKSPACE_ANALYSIS_MODE="${ZHIXU_COMPOSE_WORKSPACE_ANALYSIS:-0}"
+readonly WORKSPACE_ANALYSIS_OTLP_MODE="${ZHIXU_COMPOSE_WORKSPACE_ANALYSIS_OTLP:-0}"
+readonly WORKSPACE_ANALYSIS_WORKER_RESTART_MODE="${ZHIXU_COMPOSE_WORKSPACE_ANALYSIS_WORKER_RESTART:-0}"
+readonly WORKSPACE_ANALYSIS_BARRIER_CONTAINER_RELEASE_FILE='/tmp/zhixu-workspace-analysis-candidate.release'
+readonly WORKSPACE_ANALYSIS_BARRIER_CONTAINER_ENTERED_FILE='/tmp/zhixu-workspace-analysis-candidate.entered'
+readonly WORKSPACE_ANALYSIS_BARRIER_CONTAINER_SETTLED_FILE='/tmp/zhixu-workspace-analysis-candidate.settled'
+readonly WORKSPACE_ANALYSIS_BARRIER_CONTAINER_ARMED_FILE='/tmp/zhixu-workspace-analysis-candidate.armed'
+readonly WORKSPACE_ANALYSIS_BARRIER_CONTAINER_LOCK_DIR='/tmp/zhixu-workspace-analysis-candidate.claim'
 readonly TIMEOUT_SECONDS="${ZHIXU_COMPOSE_RAG_SMOKE_TIMEOUT_SECONDS:-300}"
 readonly POLL_INTERVAL_SECONDS="${ZHIXU_COMPOSE_RAG_SMOKE_POLL_INTERVAL_SECONDS:-2}"
 readonly REQUEST_TIMEOUT_SECONDS="${ZHIXU_COMPOSE_RAG_SMOKE_REQUEST_TIMEOUT_SECONDS:-15}"
@@ -42,12 +52,20 @@ COOKIE_JAR=""
 SESSION_TOKEN=""
 VITE_BASE_URL=""
 VITE_PID=""
+PLAYWRIGHT_PID=""
 PROVIDER_HOST_RELAY_PID=""
 PROVIDER_HOST_RELAY_PORT=""
 PROVIDER_HOST_RELAY_CONFIG_FILE=""
 PROVIDER_HOST_RELAY_BINARY=""
 RAG_REAL_PROVIDER_TRANSPORT_RESOLVED="${ZHIXU_RAG_REAL_PROVIDER_TRANSPORT:-direct}"
 RAG_NETNS_OVERRIDE_FILE=""
+WORKSPACE_DOCKER_LOG=""
+WORKSPACE_ANALYSIS_BARRIER_DIR=""
+WORKSPACE_ANALYSIS_BARRIER_READY_FILE=""
+WORKSPACE_ANALYSIS_BARRIER_ENTERED_FILE=""
+WORKSPACE_ANALYSIS_BARRIER_SETTLED_FILE=""
+WORKSPACE_ANALYSIS_BARRIER_TOKEN=""
+WORKSPACE_ANALYSIS_BROWSER_PROGRESS_FILE=""
 
 log() { printf '[compose-rag-smoke] %s\n' "$1"; }
 
@@ -61,11 +79,96 @@ compose() {
   else
     compose_files+=(-f "${STATIC_MODELS_COMPOSE_FILE}" -f "${RAG_COMPOSE_FILE}")
   fi
+  [[ "${WORKSPACE_ANALYSIS_OTLP_MODE}" != 1 ]] || compose_files+=(-f "${WORKSPACE_ANALYSIS_OTLP_COMPOSE_FILE}")
   [[ -z "${CANARY_COMPOSE_FILE}" ]] || compose_files+=(-f "${CANARY_COMPOSE_FILE}")
   [[ -z "${GRANT_COMPOSE_FILE}" || ! -f "${GRANT_COMPOSE_FILE}" ]] || compose_files+=(-f "${GRANT_COMPOSE_FILE}")
   [[ -z "${MAIN_NETNS_OVERRIDE_FILE}" || ! -f "${MAIN_NETNS_OVERRIDE_FILE}" ]] || compose_files+=(-f "${MAIN_NETNS_OVERRIDE_FILE}")
   [[ -z "${RAG_NETNS_OVERRIDE_FILE}" || ! -f "${RAG_NETNS_OVERRIDE_FILE}" ]] || compose_files+=(-f "${RAG_NETNS_OVERRIDE_FILE}")
   docker compose --project-name "${PROJECT_NAME}" "${compose_files[@]}" --env-file "${ENV_FILE}" "$@"
+}
+
+assert_workspace_analysis_otlp_metrics() {
+  local metrics_file="${STATE_DIR}/workspace-analysis-worker-otlp.prom"
+  compose stop --timeout 45 worker >/dev/null || fail 'could not gracefully stop the Workspace Analysis Worker for OTLP flush'
+  compose exec -T --user 10001:10001 rag-model-fixture \
+    wget -q -O - http://127.0.0.1:8889/metrics >"${metrics_file}" || \
+    fail 'could not read the isolated OpenTelemetry Collector projection'
+  chmod 0600 "${metrics_file}"
+  python3 - "${metrics_file}" <<'PY' || fail 'Worker OTLP metric projection is incomplete or unsafe'
+import re
+import sys
+
+path = sys.argv[1]
+expected_names = {
+    "workspace_analysis_outcome_total",
+    "runtime_process_presence",
+    "runtime_telemetry_required",
+}
+series = {}
+with open(path, encoding="utf-8") as stream:
+    for raw in stream:
+        name = raw.split("{", 1)[0]
+        if name not in expected_names:
+            continue
+        matched = re.fullmatch(r'([a-zA-Z_:][a-zA-Z0-9_:]*)\{([^}]*)\} ([0-9]+(?:\.[0-9]+)?)\n?', raw)
+        if matched is None:
+            raise SystemExit(1)
+        pairs = re.findall(r'([a-zA-Z_][a-zA-Z0-9_]*)="([^"\\]*)"', matched.group(2))
+        labels = dict(pairs)
+        if len(labels) != len(pairs) or ",".join(f'{key}="{value}"' for key, value in pairs) != matched.group(2):
+            raise SystemExit(1)
+        series.setdefault(matched.group(1), []).append((labels, float(matched.group(3))))
+
+resource = {
+    "service_name": "zhixu-worker",
+    "service_version": "dev",
+    "deployment_environment": "development",
+    "job": "zhixu-worker",
+}
+expected = {
+    "workspace_analysis_outcome_total": (resource | {
+        "mode": "workspace_analysis",
+        "definition": "workspace-analysis-v1",
+        "outcome": "completed",
+        "termination_reason": "COMPLETED",
+    }, 1.0),
+    "runtime_process_presence": (resource, 1.0),
+    "runtime_telemetry_required": (resource, 1.0),
+}
+def fail_projection():
+    for metric_name in sorted(expected_names):
+        observed = series.get(metric_name, [])
+        print(
+            "metric_projection"
+            f"|name={metric_name}"
+            f"|series={len(observed)}"
+            f"|keys={';'.join(','.join(sorted(labels)) for labels, _ in observed)}"
+            f"|values={','.join(str(value) for _, value in observed)}",
+            file=sys.stderr,
+        )
+    raise SystemExit(1)
+
+if set(series) != set(expected):
+    fail_projection()
+for name, (expected_labels, expected_value) in expected.items():
+    if len(series[name]) != 1:
+        fail_projection()
+    labels, value = series[name][0]
+    if labels != expected_labels or value != expected_value:
+        fail_projection()
+PY
+}
+
+wait_for_workspace_analysis_otlp_collector() {
+  local started_at=${SECONDS}
+  while (( SECONDS - started_at < 30 )); do
+    if compose exec -T --user 10001:10001 rag-model-fixture \
+      wget -q -O /dev/null http://127.0.0.1:13133/ >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  fail 'OpenTelemetry Collector did not become healthy before Worker startup'
 }
 
 bootstrap_compose() {
@@ -91,20 +194,147 @@ diagnose() {
     printf '[compose-rag-smoke] diagnostic: safe model fixture contract rejections\n%s\n' "${fixture_rejections}" >&2
   fi
 
+  local fixture_stages
+  fixture_stages="$(compose logs --no-color --tail 100 rag-model-fixture 2>/dev/null | \
+    grep -oE 'rag model fixture request stage=[a-z_]+' | sort | uniq -c | head -20 || true)"
+  if [[ -n "${fixture_stages}" ]]; then
+    printf '[compose-rag-smoke] diagnostic: safe model fixture request stage counts\n%s\n' "${fixture_stages}" >&2
+  fi
+
   if [[ -n "${STATE_DIR}" && -f "${STATE_DIR}/playwright.log" ]]; then
-    local browser_failure_count browser_gate_codes
-    browser_failure_count="$(grep -Ec '(^[[:space:]]*[0-9]+\)|Error:|Timeout|waiting for|at .*rag-real-provider\.smoke\.spec\.ts)' "${STATE_DIR}/playwright.log" 2>/dev/null || true)"
+    local browser_failure_count browser_failure_locations browser_gate_codes browser_runtime_issues
+    browser_failure_count="$(grep -Ec '(^[[:space:]]*[0-9]+\)|Error:|Timeout|waiting for|at .*(rag-real-provider|rag-fixture|workspace-analysis)\.smoke\.spec\.ts)' "${STATE_DIR}/playwright.log" 2>/dev/null || true)"
     if [[ "${browser_failure_count}" != 0 ]]; then
       printf '[compose-rag-smoke] diagnostic: Playwright failure details omitted; matched lines=%s\n' "${browser_failure_count}" >&2
     fi
-    browser_gate_codes="$(grep -oE 'RAG_BROWSER_[A-Z0-9_]+' "${STATE_DIR}/playwright.log" 2>/dev/null | sort -u | head -20 || true)"
+    browser_failure_locations="$(grep -oE '(rag-real-provider|rag-fixture|workspace-analysis)\.smoke\.spec\.ts:[0-9]+:[0-9]+' \
+      "${STATE_DIR}/playwright.log" 2>/dev/null | sort -u | head -20 || true)"
+    if [[ -n "${browser_failure_locations}" ]]; then
+      printf '[compose-rag-smoke] diagnostic: safe Playwright failure locations\n%s\n' "${browser_failure_locations}" >&2
+    fi
+    browser_gate_codes="$(grep -oE '(RAG_BROWSER|RAG_FIXTURE_BROWSER|WORKSPACE_ANALYSIS_BROWSER)_[A-Z0-9_]+' "${STATE_DIR}/playwright.log" 2>/dev/null | sort -u | head -20 || true)"
     if [[ -n "${browser_gate_codes}" ]]; then
       printf '[compose-rag-smoke] diagnostic: safe browser gate codes\n%s\n' "${browser_gate_codes}" >&2
     fi
+    browser_runtime_issues="$(grep -oE '(desktop|mobile)\.(console\.(warning|error)(\.[a-z0-9_]+)?|pageerror|http\.[0-9]{3})' \
+      "${STATE_DIR}/playwright.log" 2>/dev/null | sort -u | head -20 || true)"
+    if [[ -n "${browser_runtime_issues}" ]]; then
+      printf '[compose-rag-smoke] diagnostic: safe browser runtime issue classes\n%s\n' "${browser_runtime_issues}" >&2
+    fi
+  fi
+  local workspace_analysis_browser_submitted=0
+  if [[ -n "${WORKSPACE_ANALYSIS_BROWSER_PROGRESS_FILE}" && -f "${WORKSPACE_ANALYSIS_BROWSER_PROGRESS_FILE}" ]]; then
+    local browser_progress
+    browser_progress="$(grep -E '^(STARTED|CHAT_READY|TITLE_FILLED|CREATE_SUBMITTED|CREATE_ACCEPTED|CONVERSATION_ROUTED|CONVERSATION_CREATED|MODE_SELECTED|QUESTION_ACCEPTED|STOP_VISIBLE|STOP_REQUEST_SENT|STOP_RESPONSE_NONE|STOP_RESPONSE_VERSION_CONFLICT_ONLY|STOP_RESPONSE_INVALID|STOP_VERSION_REFRESHED|STOP_ACCEPTED|STOP_CLICKED|TERMINAL_VISIBLE|TIMELINE_VERIFIED|DESKTOP_VERIFIED|MOBILE_VERIFIED|COMPLETED)$' \
+      "${WORKSPACE_ANALYSIS_BROWSER_PROGRESS_FILE}" | tail -1 || true)"
+    [[ -z "${browser_progress}" ]] || printf '[compose-rag-smoke] diagnostic: Workspace Analysis browser progress=%s\n' "${browser_progress}" >&2
+    case "${browser_progress}" in
+      QUESTION_ACCEPTED|STOP_VISIBLE|STOP_REQUEST_SENT|STOP_RESPONSE_NONE|STOP_RESPONSE_VERSION_CONFLICT_ONLY|STOP_RESPONSE_INVALID|STOP_VERSION_REFRESHED|STOP_ACCEPTED|STOP_CLICKED|TERMINAL_VISIBLE|TIMELINE_VERIFIED|DESKTOP_VERIFIED|MOBILE_VERIFIED|COMPLETED)
+        workspace_analysis_browser_submitted=1
+        ;;
+    esac
+  fi
+
+  if [[ -n "${WORKSPACE_ANALYSIS_BARRIER_TOKEN}" && -n "${PROJECT_NAME}" ]]; then
+    compose exec -T --user 10001:10001 rag-model-fixture sh -ec '
+      token="$6"
+      current() { [ -f "$1" ] && [ "$(cat "$1")" = "${token}" ]; }
+      armed=0; entered=0; settled=0; released=0; claimed=0
+      current "$1" && armed=1
+      current "$2" && entered=1
+      current "$3" && settled=1
+      current "$4" && released=1
+      [ ! -d "$5" ] || claimed=1
+      printf "barrier_state|armed_current=%s|entered_current=%s|settled_current=%s|release_current=%s|claim_locked=%s\n" \
+        "${armed}" "${entered}" "${settled}" "${released}" "${claimed}"
+    ' sh "${WORKSPACE_ANALYSIS_BARRIER_CONTAINER_ARMED_FILE}" \
+      "${WORKSPACE_ANALYSIS_BARRIER_CONTAINER_ENTERED_FILE}" \
+      "${WORKSPACE_ANALYSIS_BARRIER_CONTAINER_SETTLED_FILE}" \
+      "${WORKSPACE_ANALYSIS_BARRIER_CONTAINER_RELEASE_FILE}" \
+      "${WORKSPACE_ANALYSIS_BARRIER_CONTAINER_LOCK_DIR}" \
+      "${WORKSPACE_ANALYSIS_BARRIER_TOKEN}" >&2 2>/dev/null || true
+  fi
+
+  if [[ -n "${WORKSPACE_DOCKER_LOG}" && -f "${WORKSPACE_DOCKER_LOG}" ]]; then
+    python3 - "${WORKSPACE_DOCKER_LOG}" >&2 <<'PY' || true
+import json
+import re
+import sys
+
+seen = set()
+with open(sys.argv[1], encoding="utf-8", errors="replace") as stream:
+    for raw in stream:
+        start = raw.find("{")
+        if start < 0:
+            text_match = re.search(r"\blevel=ERROR\b.*?\bmsg=(?:\"([^\"]{1,160})\"|([^\s]+))", raw)
+            if text_match:
+                message = text_match.group(1) or text_match.group(2) or ""
+                stage = message if re.fullmatch(r"[a-z][a-z0-9_]{0,63}", message) else "unclassified_non_json"
+                if stage not in seen:
+                    seen.add(stage)
+                    print("[compose-rag-smoke] diagnostic: runtime error stage: " + stage)
+                if len(seen) >= 20:
+                    break
+            compose_categories = (
+                (r"dependency failed to start", "dependency_failed_to_start"),
+                (r" is unhealthy", "service_unhealthy"),
+                (r"failed to start", "service_failed_to_start"),
+                (r"Error response from daemon", "daemon_error"),
+                (r"no such service", "service_missing"),
+                (r"exited with code", "service_exited_nonzero"),
+            )
+            for pattern, category in compose_categories:
+                if re.search(pattern, raw, re.IGNORECASE) and category not in seen:
+                    seen.add(category)
+                    print("[compose-rag-smoke] diagnostic: runtime compose: " + category)
+                if len(seen) >= 20:
+                    break
+            if len(seen) >= 20:
+                break
+            continue
+        try:
+            entry = json.loads(raw[start:])
+        except json.JSONDecodeError:
+            continue
+        if str(entry.get("level", "")).upper() != "ERROR":
+            continue
+        message = str(entry.get("msg", ""))
+        code = str(entry.get("error_code", ""))
+        stage = message if re.fullmatch(r"[a-z][a-z0-9_]{0,63}", message) else "unclassified_json"
+        if code and not re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", code):
+            code = ""
+        summary = stage + ((" (" + code + ")") if code else "")
+        if summary in seen:
+            continue
+        seen.add(summary)
+        print("[compose-rag-smoke] diagnostic: runtime error stage: " + summary)
+        if len(seen) >= 20:
+            break
+PY
+  fi
+
+  if [[ -n "${PROJECT_NAME}" ]]; then
+    compose exec -T postgres psql -Atq --username "${ZHIXU_POSTGRES_USER}" --dbname "${ZHIXU_POSTGRES_DB}" <<'SQL' >&2 2>/dev/null || true
+SELECT 'workspace_switch|'||phase||'|'||COALESCE(result,'')||'|'||COALESCE(error_code,'')||'|'||version::text
+FROM ops.workspace_switch
+ORDER BY created_at DESC,id DESC
+LIMIT 1;
+SELECT 'workspace_control|'||COALESCE(operation_phase,'')||'|'||COALESCE(last_error_code,'')||'|'||state_version::text
+FROM ops.workspace_control_state
+WHERE singleton=true;
+SELECT 'workspace_runtime|'||role||'|'||phase||'|'||version::text
+FROM ops.workspace_runtime
+ORDER BY role;
+SQL
   fi
 
   local diagnostic_answer_id="${CURRENT_ANSWER_ID}"
-  if [[ -z "${diagnostic_answer_id}" && -n "${WORKSPACE_ID}" ]]; then
+  if [[ "${workspace_analysis_browser_submitted}" == 1 && -n "${WORKSPACE_ID}" ]]; then
+    diagnostic_answer_id="$(compose exec -T postgres psql -Atq --username "${ZHIXU_POSTGRES_USER}" --dbname "${ZHIXU_POSTGRES_DB}" \
+      --set workspace_id="${WORKSPACE_ID}" \
+      -c "SELECT answer.id::text FROM agent.answer answer JOIN agent.workspace_analysis_run analysis ON analysis.answer_id=answer.id AND analysis.workspace_id=answer.workspace_id WHERE answer.workspace_id=:'workspace_id' ORDER BY answer.created_at DESC,answer.id DESC LIMIT 1" \
+      2>/dev/null || true)"
+  elif [[ -z "${diagnostic_answer_id}" && -n "${WORKSPACE_ID}" ]]; then
     diagnostic_answer_id="$(compose exec -T postgres psql -Atq --username "${ZHIXU_POSTGRES_USER}" --dbname "${ZHIXU_POSTGRES_DB}" \
       --set workspace_id="${WORKSPACE_ID}" \
       -c "SELECT id::text FROM agent.answer WHERE workspace_id=:'workspace_id' ORDER BY created_at DESC,id DESC LIMIT 1" \
@@ -144,6 +374,18 @@ WHERE a.id=:'answer_id' ORDER BY c.started_at DESC,c.id DESC LIMIT 20;
 SELECT 'tool_call|'||c.requested_tool_name||'@'||COALESCE(c.tool_version::text,'')||'|'||c.status||'|'||COALESCE(c.error_code,'')||'|'||c.node_run_id::text||'|'||c.node_attempt_id::text||'|'||c.call_no::text
 FROM workflow.tool_call c JOIN agent.answer a ON a.workflow_run_id=c.workflow_run_id
 WHERE a.id=:'answer_id' ORDER BY c.started_at DESC,c.id DESC LIMIT 20;
+SELECT 'search_receipt|'||jsonb_array_length(document->'items')::text||'|'||
+       COALESCE(document->>'effective_mode','')||'|'||jsonb_array_length(document->'degradations')::text
+FROM agent.answer a
+JOIN agent.workspace_analysis_run analysis ON analysis.answer_id=a.id AND analysis.workspace_id=a.workspace_id
+JOIN agent.workspace_analysis_operation operation
+  ON operation.analysis_run_id=analysis.id
+ AND operation.operation_kind='KNOWLEDGE_SEARCH'
+ AND operation.ordinal=1
+JOIN workflow.tool_result_receipt receipt
+  ON receipt.id=operation.result_id
+CROSS JOIN LATERAL (SELECT convert_from(receipt.output_document,'UTF8')::jsonb AS document) decoded
+WHERE a.id=:'answer_id';
 SELECT 'draft|'||d.generation::text||'|'||d.status
 FROM agent.answer_draft_session d WHERE d.answer_id=:'answer_id' ORDER BY d.updated_at DESC,d.id DESC LIMIT 20;
 SQL
@@ -192,6 +434,15 @@ stop_vite() {
   VITE_PID=""
 }
 
+stop_playwright() {
+  [[ -n "${PLAYWRIGHT_PID}" ]] || return 0
+  if kill -0 "${PLAYWRIGHT_PID}" >/dev/null 2>&1; then
+    kill -TERM -- "-${PLAYWRIGHT_PID}" >/dev/null 2>&1 || kill -TERM "${PLAYWRIGHT_PID}" >/dev/null 2>&1 || true
+  fi
+  wait "${PLAYWRIGHT_PID}" >/dev/null 2>&1 || true
+  PLAYWRIGHT_PID=""
+}
+
 stop_provider_host_relay() {
   [[ -n "${PROVIDER_HOST_RELAY_PID}" ]] || return 0
   if kill -0 "${PROVIDER_HOST_RELAY_PID}" >/dev/null 2>&1; then
@@ -205,11 +456,14 @@ cleanup() {
   local exit_code=$?
   local cleanup_exit=0
   trap - EXIT HUP INT TERM
+  stop_playwright
   stop_vite
   if [[ -n "${PROJECT_NAME}" && "${REAL_PROVIDER_PREFLIGHT_ONLY}" != 1 ]]; then
     if [[ -n "${GRANT_COMPOSE_FILE}" && -f "${GRANT_COMPOSE_FILE}" ]]; then
-      compose stop proxy app-model-relay worker-model-relay app worker >/dev/null 2>&1 || cleanup_exit=1
-      compose rm --force --stop proxy firewall app-model-relay worker-model-relay app worker >/dev/null 2>&1 || cleanup_exit=1
+      compose stop proxy app-model-relay worker-model-relay app worker >/dev/null 2>&1 || \
+        log "consumer pre-stop returned nonzero; full project cleanup will verify removal"
+      compose rm --force --stop proxy firewall app-model-relay worker-model-relay app worker >/dev/null 2>&1 || \
+        log "consumer pre-remove returned nonzero; full project cleanup will verify removal"
     fi
     cleanup_compose_smoke_project_images "${PROJECT_NAME}" "${NETNS_PROJECT_NAME}" || cleanup_exit=1
   fi
@@ -403,6 +657,499 @@ run_real_provider_browser() {
   log "browser evidence: ${browser_evidence}"
 }
 
+run_fixed_rag_browser() {
+  local question=$1
+  (
+    cd "${REPOSITORY_ROOT}"
+    ZHIXU_PLAYWRIGHT_BASE_URL="${VITE_BASE_URL}" \
+    ZHIXU_RAG_FIXTURE_SMOKE_BASE_URL="${VITE_BASE_URL}" \
+    ZHIXU_RAG_FIXTURE_SMOKE_SESSION_TOKEN="${SESSION_TOKEN}" \
+    ZHIXU_RAG_FIXTURE_SMOKE_CSRF_TOKEN="${CSRF_TOKEN}" \
+    ZHIXU_RAG_FIXTURE_SMOKE_WORKSPACE_ID="${WORKSPACE_ID}" \
+    ZHIXU_RAG_FIXTURE_SMOKE_QUESTION="${question}" \
+    ZHIXU_PLAYWRIGHT_OUTPUT_DIR="${STATE_DIR}/playwright-rag-fixture" \
+      npm run test:e2e --prefix web -- rag-fixture.smoke.spec.ts
+  ) >"${STATE_DIR}/playwright.log" 2>&1 || fail 'Playwright fixed RAG fixture smoke failed'
+}
+
+persist_fixed_rag_browser_artifacts() {
+  local destination=${ZHIXU_RAG_FIXTURE_SMOKE_ARTIFACT_DIR:-} source_file copied=0
+  [[ -n "${destination}" ]] || return 0
+  [[ "${destination}" == /* && "${destination}" != / && ! -e "${destination}" && ! -L "${destination}" ]] || \
+    fail 'fixed RAG browser artifact directory must be a new absolute path'
+  mkdir -m 0700 -- "${destination}" || fail 'could not create the fixed RAG browser artifact directory'
+  while IFS= read -r source_file; do
+    cp -- "${source_file}" "${destination}/$(basename -- "${source_file}")" || \
+      fail 'could not persist a fixed RAG browser screenshot'
+    chmod 0600 "${destination}/$(basename -- "${source_file}")"
+    copied=$((copied + 1))
+  done < <(find "${STATE_DIR}/playwright-rag-fixture" -type f \
+    \( -name 'rag-fixture-desktop.png' -o -name 'rag-fixture-mobile.png' \) -print)
+  [[ "${copied}" == 2 ]] || fail 'fixed RAG browser smoke did not produce both bounded screenshots'
+  log "fixed RAG browser artifacts: ${destination}"
+}
+
+run_workspace_analysis_browser() {
+  local question=$1 private_marker=$2 expected_terminal=${3:-completed} started_at=${SECONDS} browser_ready=0 fixture_entered=0
+  local fixture_entry_required=1
+  [[ "${expected_terminal}" == completed || "${expected_terminal}" == refused || "${expected_terminal}" == cancelled ]] || \
+    fail 'Workspace Analysis browser terminal expectation is invalid'
+  [[ "${expected_terminal}" == completed ]] || fixture_entry_required=0
+  [[ -n "${WORKSPACE_ANALYSIS_BARRIER_READY_FILE}" ]] || fail 'Workspace Analysis browser barrier is unavailable'
+  [[ -n "${WORKSPACE_ANALYSIS_BARRIER_ENTERED_FILE}" ]] || fail 'Workspace Analysis fixture barrier is unavailable'
+  [[ -n "${WORKSPACE_ANALYSIS_BARRIER_TOKEN}" ]] || fail 'Workspace Analysis fixture barrier generation is unavailable'
+  rm -f -- "${WORKSPACE_ANALYSIS_BARRIER_READY_FILE}"
+  (
+    cd "${REPOSITORY_ROOT}"
+    export ZHIXU_PLAYWRIGHT_BASE_URL="${VITE_BASE_URL}" \
+    ZHIXU_WORKSPACE_ANALYSIS_SMOKE_BASE_URL="${VITE_BASE_URL}" \
+    ZHIXU_WORKSPACE_ANALYSIS_SMOKE_SESSION_TOKEN="${SESSION_TOKEN}" \
+    ZHIXU_WORKSPACE_ANALYSIS_SMOKE_CSRF_TOKEN="${CSRF_TOKEN}" \
+    ZHIXU_WORKSPACE_ANALYSIS_SMOKE_WORKSPACE_ID="${WORKSPACE_ID}" \
+    ZHIXU_WORKSPACE_ANALYSIS_SMOKE_QUESTION="${question}" \
+    ZHIXU_WORKSPACE_ANALYSIS_SMOKE_PRIVATE_MARKER="${private_marker}" \
+    ZHIXU_WORKSPACE_ANALYSIS_SMOKE_BARRIER_READY_FILE="${WORKSPACE_ANALYSIS_BARRIER_READY_FILE}" \
+    ZHIXU_WORKSPACE_ANALYSIS_SMOKE_PROGRESS_FILE="${WORKSPACE_ANALYSIS_BROWSER_PROGRESS_FILE}" \
+    ZHIXU_WORKSPACE_ANALYSIS_SMOKE_EXPECTED_TERMINAL="${expected_terminal}" \
+    ZHIXU_PLAYWRIGHT_OUTPUT_DIR="${STATE_DIR}/playwright-workspace-analysis-${expected_terminal}"
+    exec python3 -c 'import os; os.setsid(); os.execvp("npm", ["npm", "run", "test:e2e", "--prefix", "web", "--", "workspace-analysis.smoke.spec.ts"])'
+  ) >"${STATE_DIR}/playwright.log" 2>&1 &
+  PLAYWRIGHT_PID=$!
+
+  while (( SECONDS - started_at < 60 )); do
+    if [[ -f "${WORKSPACE_ANALYSIS_BARRIER_READY_FILE}" ]]; then
+      browser_ready=1
+    fi
+    if workspace_analysis_fixture_barrier_entered; then
+      fixture_entered=1
+    fi
+    if [[ "${browser_ready}" == 1 && ( "${fixture_entry_required}" == 0 || "${fixture_entered}" == 1 ) ]]; then
+      break
+    fi
+    if ! kill -0 "${PLAYWRIGHT_PID}" >/dev/null 2>&1; then
+      wait "${PLAYWRIGHT_PID}" >/dev/null 2>&1 || true
+      PLAYWRIGHT_PID=""
+      fail 'Playwright Workspace Analysis smoke exited before observing the pending state'
+    fi
+    sleep 1
+  done
+  if [[ "${browser_ready}" != 1 || ( "${fixture_entry_required}" == 1 && "${fixture_entered}" != 1 ) ]]; then
+    stop_playwright
+    fail 'Workspace Analysis browser did not observe the required pending-state barrier'
+  fi
+  release_workspace_analysis_fixture_barrier
+  if ! wait "${PLAYWRIGHT_PID}"; then
+    PLAYWRIGHT_PID=""
+    fail 'Playwright Workspace Analysis smoke failed'
+  fi
+  PLAYWRIGHT_PID=""
+  [[ "${expected_terminal}" != completed ]] || persist_workspace_analysis_browser_artifacts
+}
+
+persist_workspace_analysis_browser_artifacts() {
+  local destination=${ZHIXU_WORKSPACE_ANALYSIS_SMOKE_ARTIFACT_DIR:-} source_file copied=0
+  [[ -n "${destination}" ]] || return 0
+  [[ "${destination}" == /* && "${destination}" != / && ! -e "${destination}" && ! -L "${destination}" ]] || \
+    fail 'Workspace Analysis browser artifact directory must be a new absolute path'
+  mkdir -m 0700 -- "${destination}" || fail 'could not create the Workspace Analysis browser artifact directory'
+  while IFS= read -r source_file; do
+    cp -- "${source_file}" "${destination}/$(basename -- "${source_file}")" || \
+      fail 'could not persist a Workspace Analysis browser screenshot'
+    chmod 0600 "${destination}/$(basename -- "${source_file}")"
+    copied=$((copied + 1))
+  done < <(find "${STATE_DIR}/playwright-workspace-analysis-completed" -type f \
+    \( -name 'workspace-analysis-desktop.png' -o -name 'workspace-analysis-mobile.png' \) -print)
+  [[ "${copied}" == 2 ]] || fail 'Workspace Analysis browser smoke did not produce both bounded screenshots'
+  log "browser artifacts: ${destination}"
+}
+
+release_workspace_analysis_fixture_barrier() {
+  compose exec -T --user 10001:10001 rag-model-fixture sh -ec '
+    token="$(cat "$1")"
+    [ "${token}" = "$3" ]
+    temporary="$2.$$.tmp"
+    umask 077
+    printf "%s\\n" "${token}" >"${temporary}"
+    mv -f -- "${temporary}" "$2"
+    [ -f "$2" ] && [ "$(cat "$2")" = "${token}" ]
+  ' sh "${WORKSPACE_ANALYSIS_BARRIER_CONTAINER_ARMED_FILE}" \
+    "${WORKSPACE_ANALYSIS_BARRIER_CONTAINER_RELEASE_FILE}" "${WORKSPACE_ANALYSIS_BARRIER_TOKEN}" >/dev/null || \
+    fail 'could not release the Workspace Analysis model fixture barrier'
+}
+
+arm_workspace_analysis_fixture_barrier() {
+  local token
+  if [[ -n "${WORKSPACE_ANALYSIS_BARRIER_TOKEN}" ]] && workspace_analysis_fixture_barrier_entered; then
+    wait_for_workspace_analysis_fixture_barrier_settled "${WORKSPACE_ANALYSIS_BARRIER_TOKEN}"
+  fi
+  token="$(random_hex 16)" || fail 'could not generate the Workspace Analysis fixture barrier generation'
+  [[ "${token}" =~ ^[0-9a-f]{32}$ ]] || fail 'Workspace Analysis fixture barrier generation is invalid'
+  WORKSPACE_ANALYSIS_BARRIER_TOKEN=""
+  compose exec -T --user 10001:10001 rag-model-fixture sh -ec '
+    actual_stage="$(tr "\\000" "\\n" </proc/1/environ | sed -n "s/^ZHIXU_RAG_FIXTURE_BARRIER_STAGE=//p")"
+    actual_release="$(tr "\\000" "\\n" </proc/1/environ | sed -n "s/^ZHIXU_RAG_FIXTURE_BARRIER_RELEASE_FILE=//p")"
+    actual_entered="$(tr "\\000" "\\n" </proc/1/environ | sed -n "s/^ZHIXU_RAG_FIXTURE_BARRIER_ENTERED_FILE=//p")"
+    actual_settled="$(tr "\\000" "\\n" </proc/1/environ | sed -n "s/^ZHIXU_RAG_FIXTURE_BARRIER_SETTLED_FILE=//p")"
+    actual_armed="$(tr "\\000" "\\n" </proc/1/environ | sed -n "s/^ZHIXU_RAG_FIXTURE_BARRIER_ARMED_FILE=//p")"
+    actual_lock="$(tr "\\000" "\\n" </proc/1/environ | sed -n "s/^ZHIXU_RAG_FIXTURE_BARRIER_LOCK_DIR=//p")"
+    [ "${actual_stage}" = "$2" ] && [ "${actual_release}" = "$3" ] && [ "${actual_entered}" = "$4" ] && \
+      [ "${actual_settled}" = "$5" ] && [ "${actual_armed}" = "$6" ] && [ "${actual_lock}" = "$7" ]
+    attempt=0
+    umask 077
+    while ! mkdir "$7" 2>/dev/null; do
+      [ -d "$7" ] || exit 1
+      attempt=$((attempt + 1))
+      [ "${attempt}" -lt "$8" ] || exit 1
+      sleep 1
+    done
+    trap "rmdir -- \"\$7\"" 0
+    if [ -f "$4" ]; then
+      previous_token="$(cat "$6")"
+      [ "$(cat "$4")" = "${previous_token}" ] && [ -f "$5" ] && [ "$(cat "$5")" = "${previous_token}" ]
+    fi
+    rm -f -- "$3" "$4" "$5" "$6"
+    temporary="$6.$$.tmp"
+    printf "%s\\n" "$1" >"${temporary}"
+    mv -f -- "${temporary}" "$6"
+    [ -f "$6" ] && [ "$(cat "$6")" = "$1" ] && [ ! -e "$3" ] && [ ! -e "$4" ] && [ ! -e "$5" ]
+  ' sh "${token}" workspace_analysis_candidate_stream \
+    "${WORKSPACE_ANALYSIS_BARRIER_CONTAINER_RELEASE_FILE}" \
+    "${WORKSPACE_ANALYSIS_BARRIER_CONTAINER_ENTERED_FILE}" \
+    "${WORKSPACE_ANALYSIS_BARRIER_CONTAINER_SETTLED_FILE}" \
+    "${WORKSPACE_ANALYSIS_BARRIER_CONTAINER_ARMED_FILE}" \
+    "${WORKSPACE_ANALYSIS_BARRIER_CONTAINER_LOCK_DIR}" "${TIMEOUT_SECONDS}" >/dev/null || \
+    fail 'could not arm the Workspace Analysis model fixture barrier'
+  WORKSPACE_ANALYSIS_BARRIER_TOKEN="${token}"
+}
+
+workspace_analysis_fixture_barrier_entered() {
+  compose exec -T --user 10001:10001 rag-model-fixture sh -ec '
+    [ -f "$1" ] && [ -f "$2" ] && [ "$(cat "$1")" = "$3" ] && [ "$(cat "$2")" = "$3" ]
+  ' sh "${WORKSPACE_ANALYSIS_BARRIER_CONTAINER_ENTERED_FILE}" \
+    "${WORKSPACE_ANALYSIS_BARRIER_CONTAINER_ARMED_FILE}" "${WORKSPACE_ANALYSIS_BARRIER_TOKEN}" >/dev/null 2>&1
+}
+
+workspace_analysis_fixture_barrier_settled() {
+  local token=${1:-${WORKSPACE_ANALYSIS_BARRIER_TOKEN}}
+  compose exec -T --user 10001:10001 rag-model-fixture sh -ec '
+    [ -f "$1" ] && [ -f "$2" ] && [ "$(cat "$1")" = "$3" ] && [ "$(cat "$2")" = "$3" ]
+  ' sh "${WORKSPACE_ANALYSIS_BARRIER_CONTAINER_SETTLED_FILE}" \
+    "${WORKSPACE_ANALYSIS_BARRIER_CONTAINER_ARMED_FILE}" "${token}" >/dev/null 2>&1
+}
+
+wait_for_workspace_analysis_fixture_barrier_settled() {
+  local token=$1 started_at=${SECONDS}
+  while (( SECONDS - started_at < 30 )); do
+    if workspace_analysis_fixture_barrier_settled "${token}"; then
+      return 0
+    fi
+    sleep 1
+  done
+  fail 'Workspace Analysis fixture barrier did not settle the current generation'
+}
+
+wait_for_workspace_analysis_capability() {
+  local started_at=${SECONDS} ready
+  while (( SECONDS - started_at < TIMEOUT_SECONDS )); do
+    ready="$(compose exec -T postgres psql -Atq --username "${ZHIXU_POSTGRES_USER}" --dbname "${ZHIXU_POSTGRES_DB}" -c \
+      "SELECT count(*) FROM agent.workspace_analysis_worker_capability WHERE released_at IS NULL AND lease_until>clock_timestamp() AND config_revision=1")" || \
+      fail 'could not read Workspace Analysis capability'
+    [[ "${ready}" =~ ^[1-9][0-9]*$ ]] && return 0
+    sleep "${POLL_INTERVAL_SECONDS}"
+  done
+  fail 'Workspace Analysis worker did not advertise a fresh capability'
+}
+
+workspace_analysis_database_projection() {
+  local answer_id=$1
+  compose exec -T postgres psql -Atq --username "${ZHIXU_POSTGRES_USER}" --dbname "${ZHIXU_POSTGRES_DB}" \
+    --set workspace_id="${WORKSPACE_ID}" --set answer_id="${answer_id}" <<'SQL'
+SELECT concat_ws('|',run.status,run.settled_model_calls,run.settled_tool_calls,run.settled_source_reads,
+  (SELECT count(*) FROM agent.workspace_analysis_operation operation WHERE operation.analysis_run_id=run.id AND operation.call_kind='MODEL' AND operation.status='SUCCEEDED'),
+  (SELECT count(*) FROM agent.workspace_analysis_operation operation WHERE operation.analysis_run_id=run.id AND operation.call_kind='TOOL' AND operation.status='SUCCEEDED'),
+  (SELECT count(*) FROM workflow.tool_result_receipt receipt JOIN agent.workspace_analysis_operation operation ON operation.result_id=receipt.id WHERE operation.analysis_run_id=run.id),
+  (SELECT count(*) FROM agent.workspace_analysis_candidate candidate WHERE candidate.analysis_run_id=run.id),
+  (SELECT count(*) FROM agent.workspace_analysis_model_result result WHERE result.analysis_run_id=run.id),
+  (SELECT count(*) FROM agent.workspace_analysis_publication_proof proof WHERE proof.analysis_run_id=run.id))
+FROM agent.workspace_analysis_run run
+WHERE run.workspace_id=:'workspace_id' AND run.answer_id=:'answer_id';
+SQL
+}
+
+wait_for_workspace_analysis_fixture_barrier_entered() {
+  local started_at=${SECONDS}
+  while (( SECONDS - started_at < TIMEOUT_SECONDS )); do
+    if workspace_analysis_fixture_barrier_entered; then
+      return 0
+    fi
+    sleep 1
+  done
+  fail 'Workspace Analysis restart smoke did not enter the candidate barrier'
+}
+
+workspace_analysis_restart_inflight_projection() {
+  local answer_id=$1
+  compose exec -T postgres psql -Atq --username "${ZHIXU_POSTGRES_USER}" --dbname "${ZHIXU_POSTGRES_DB}" \
+    --set answer_id="${answer_id}" <<'SQL'
+SELECT concat_ws('|',operation.status,model_call.status,reservation.status,attempt.status,job.state,
+       attempt.river_job_attempt,job.attempt)
+FROM agent.workspace_analysis_run analysis
+JOIN agent.workspace_analysis_operation operation
+  ON operation.analysis_run_id=analysis.id AND operation.node_key='synthesize_answer'
+ AND operation.operation_kind='ANSWER_SYNTHESIS' AND operation.ordinal=1
+JOIN agent.model_call model_call ON model_call.id=operation.model_call_id
+JOIN agent.workspace_analysis_budget_reservation reservation ON reservation.operation_id=operation.id
+JOIN workflow.node_attempt attempt ON attempt.id=operation.latest_node_attempt_id
+JOIN workflow.river_job job ON job.id=attempt.river_job_id
+WHERE analysis.answer_id=:'answer_id';
+SQL
+}
+
+wait_for_workspace_analysis_restart_lease_expiry() {
+  local answer_id=$1 started_at=${SECONDS} expired
+  while (( SECONDS - started_at < 30 )); do
+    expired="$(compose exec -T postgres psql -Atq --username "${ZHIXU_POSTGRES_USER}" --dbname "${ZHIXU_POSTGRES_DB}" \
+      --set answer_id="${answer_id}" <<'SQL'
+SELECT count(*)
+FROM agent.workspace_analysis_run analysis
+JOIN agent.workspace_analysis_operation operation
+  ON operation.analysis_run_id=analysis.id AND operation.node_key='synthesize_answer'
+JOIN workflow.node_attempt attempt ON attempt.id=operation.latest_node_attempt_id
+WHERE analysis.answer_id=:'answer_id'
+  AND attempt.status='running'
+  AND attempt.lease_until<=clock_timestamp();
+SQL
+)" || fail 'could not read the killed Workspace Analysis lease'
+    [[ "${expired}" == 1 ]] && return 0
+    sleep 1
+  done
+  fail 'killed Workspace Analysis Attempt lease did not expire'
+}
+
+age_workspace_analysis_river_job_for_restart_smoke() {
+  local answer_id=$1 rescued_job_id
+  # This only accelerates the disposable clock horizon. River still owns the
+  # running -> retryable rescue transition and the replacement delivery.
+  rescued_job_id="$(compose exec -T postgres psql -Atq --username "${ZHIXU_POSTGRES_USER}" --dbname "${ZHIXU_POSTGRES_DB}" \
+    --set answer_id="${answer_id}" <<'SQL'
+WITH target AS MATERIALIZED (
+  SELECT attempt.river_job_id
+  FROM agent.workspace_analysis_run analysis
+  JOIN agent.workspace_analysis_operation operation
+    ON operation.analysis_run_id=analysis.id AND operation.node_key='synthesize_answer'
+   AND operation.operation_kind='ANSWER_SYNTHESIS' AND operation.ordinal=1
+  JOIN workflow.node_attempt attempt ON attempt.id=operation.latest_node_attempt_id
+  WHERE analysis.answer_id=:'answer_id'
+    AND attempt.status='running'
+    AND attempt.lease_until<=clock_timestamp()
+    AND attempt.river_job_id IS NOT NULL
+)
+UPDATE workflow.river_job job
+SET attempted_at=clock_timestamp()-interval '31 minutes'
+FROM target
+WHERE job.id=target.river_job_id AND job.state='running'
+RETURNING job.id;
+SQL
+)" || fail 'could not age the exact killed River Job for rescue'
+  [[ "${rescued_job_id}" =~ ^[1-9][0-9]*$ ]] || fail 'restart fault injection did not bind exactly one running River Job'
+}
+
+kill_workspace_analysis_worker() {
+  local worker_container_id worker_pid worker_state started_at=${SECONDS}
+  worker_container_id="$(compose ps -q worker)"
+  [[ "${worker_container_id}" =~ ^[0-9a-f]{64}$ ]] || fail 'Workspace Analysis Worker container identity is unavailable'
+  worker_pid="$(docker inspect --format '{{.State.Pid}}' "${worker_container_id}")" || fail 'could not read the Workspace Analysis Worker process identity'
+  [[ "${worker_pid}" =~ ^[1-9][0-9]*$ ]] || fail 'Workspace Analysis Worker process is not running'
+  compose kill --signal SIGKILL worker >/dev/null || fail 'could not SIGKILL the Workspace Analysis Worker'
+  while (( SECONDS - started_at < 15 )); do
+    worker_state="$(docker inspect --format '{{.State.Status}}|{{.RestartCount}}' "${worker_container_id}" 2>/dev/null || true)"
+    case "${worker_state}" in
+      exited\|0) printf '%s|%s\n' "${worker_container_id}" "${worker_pid}"; return 0 ;;
+      *\|[1-9]*) fail 'Workspace Analysis Worker restarted automatically after SIGKILL' ;;
+    esac
+    sleep 1
+  done
+  fail 'Workspace Analysis Worker did not remain stopped after SIGKILL'
+}
+
+start_workspace_analysis_replacement_worker() {
+  local killed_container_id=${1%%|*} killed_pid=${1##*|} replacement_container_id replacement_pid
+  compose up --detach --no-deps --wait worker >/dev/null || fail 'could not start the replacement Workspace Analysis Worker'
+  replacement_container_id="$(compose ps -q worker)"
+  replacement_pid="$(docker inspect --format '{{.State.Pid}}' "${replacement_container_id}")" || fail 'could not read the replacement Worker process identity'
+  [[ "${replacement_container_id}" =~ ^[0-9a-f]{64}$ && "${replacement_pid}" =~ ^[1-9][0-9]*$ ]] || \
+    fail 'replacement Workspace Analysis Worker is not running'
+  [[ "${replacement_container_id}" != "${killed_container_id}" || "${replacement_pid}" != "${killed_pid}" ]] || \
+    fail 'Workspace Analysis Worker process identity did not change after manual restart'
+}
+
+wait_for_workspace_analysis_restart_terminal() {
+  local answer_id=$1 started_at=${SECONDS} publication workflow
+  while (( SECONDS - started_at < TIMEOUT_SECONDS )); do
+    if workspace_analysis_fixture_barrier_entered; then
+      fail 'replacement Workspace Analysis Attempt duplicated the interrupted model call'
+    fi
+    request_json GET "/api/v1/answers/${answer_id}?workspace_id=${WORKSPACE_ID}" 200 '' 'Workspace Analysis restart answer status'
+    publication="$(jq -r '.publication_status' "${LAST_RESPONSE_FILE}")"
+    workflow="$(jq -r '.workflow.status' "${LAST_RESPONSE_FILE}")"
+    if [[ "${publication}:${workflow}" == 'failed:failed' ]]; then
+      cp "${LAST_RESPONSE_FILE}" "${STATE_DIR}/restart-answer.json"
+      return 0
+    fi
+    case "${publication}" in
+      completed|refused|clarification_required|cancelled) fail "Workspace Analysis restart reached unexpected terminal state ${publication}/${workflow}" ;;
+    esac
+    sleep "${POLL_INTERVAL_SECONDS}"
+  done
+  fail 'Workspace Analysis Worker restart recovery timed out'
+}
+
+workspace_analysis_restart_database_projection() {
+  local answer_id=$1
+  compose exec -T postgres psql -Atq --username "${ZHIXU_POSTGRES_USER}" --dbname "${ZHIXU_POSTGRES_DB}" \
+    --set answer_id="${answer_id}" <<'SQL'
+WITH target AS (
+  SELECT analysis.*,answer.publication_status,answer.result_type,answer.result,workflow_run.status AS workflow_status
+  FROM agent.workspace_analysis_run analysis
+  JOIN agent.answer answer ON answer.id=analysis.answer_id AND answer.workspace_id=analysis.workspace_id
+  JOIN workflow.run workflow_run ON workflow_run.id=analysis.workflow_run_id
+  WHERE analysis.answer_id=:'answer_id'
+)
+SELECT concat_ws('|',
+  target.status,target.termination_reason,target.publication_status,target.result_type,target.workflow_status,
+  target.result->'payload'->>'termination_reason',
+  (SELECT count(*) FROM agent.workspace_analysis_operation operation WHERE operation.analysis_run_id=target.id),
+  (SELECT count(DISTINCT (operation.node_key,operation.operation_kind,operation.ordinal)) FROM agent.workspace_analysis_operation operation WHERE operation.analysis_run_id=target.id),
+  (SELECT count(*) FROM agent.workspace_analysis_operation operation WHERE operation.analysis_run_id=target.id AND operation.call_kind='MODEL'),
+  (SELECT count(*) FROM agent.workspace_analysis_operation operation JOIN agent.model_call model_call ON model_call.id=operation.model_call_id WHERE operation.analysis_run_id=target.id),
+  (SELECT count(DISTINCT model_call.model_run_id) FROM agent.workspace_analysis_operation operation JOIN agent.model_call model_call ON model_call.id=operation.model_call_id WHERE operation.analysis_run_id=target.id),
+  (SELECT count(*) FROM agent.workspace_analysis_operation operation WHERE operation.analysis_run_id=target.id AND operation.call_kind='TOOL'),
+  (SELECT count(*) FROM agent.workspace_analysis_operation operation JOIN workflow.tool_call tool_call ON tool_call.id=operation.tool_call_id WHERE operation.analysis_run_id=target.id),
+  (SELECT count(*) FROM agent.workspace_analysis_operation operation JOIN workflow.tool_result_receipt receipt ON receipt.id=operation.result_id WHERE operation.analysis_run_id=target.id AND operation.result_kind='TOOL_RESULT_RECEIPT'),
+  (SELECT count(*) FROM agent.workspace_analysis_budget_reservation reservation WHERE reservation.analysis_run_id=target.id),
+  (SELECT count(*) FROM agent.workspace_analysis_budget_reservation reservation WHERE reservation.analysis_run_id=target.id AND reservation.status='RESERVED'),
+  (SELECT count(*) FROM agent.workspace_analysis_operation operation WHERE operation.analysis_run_id=target.id AND operation.status='UNKNOWN'),
+  (SELECT count(*) FROM agent.workspace_analysis_operation operation JOIN agent.model_call model_call ON model_call.id=operation.model_call_id WHERE operation.analysis_run_id=target.id AND model_call.status='UNKNOWN'),
+  (SELECT count(*) FROM agent.workspace_analysis_operation operation JOIN agent.model_call model_call ON model_call.id=operation.model_call_id JOIN agent.model_run model_run ON model_run.id=model_call.model_run_id WHERE operation.analysis_run_id=target.id AND model_run.status='UNKNOWN'),
+  (SELECT count(*) FROM agent.workspace_analysis_budget_reservation reservation
+    WHERE reservation.analysis_run_id=target.id AND reservation.status='UNKNOWN_CHARGED'
+      AND reservation.settled_model_calls=reservation.reserved_model_calls
+      AND reservation.settled_tool_calls=reservation.reserved_tool_calls
+      AND reservation.settled_source_reads=reservation.reserved_source_reads
+      AND reservation.settled_input_tokens=reservation.reserved_input_tokens
+      AND reservation.settled_output_tokens=reservation.reserved_output_tokens
+      AND reservation.settled_cost_microunits IS NOT DISTINCT FROM reservation.reserved_cost_microunits),
+  (SELECT count(*) FROM agent.workspace_analysis_candidate candidate WHERE candidate.analysis_run_id=target.id),
+  (SELECT count(*) FROM agent.workspace_analysis_publication_proof proof WHERE proof.analysis_run_id=target.id),
+  (SELECT count(*) FROM agent.workspace_analysis_termination_proof proof WHERE proof.analysis_run_id=target.id),
+  (SELECT count(*) FROM agent.workspace_analysis_termination_proof proof
+    JOIN agent.workspace_analysis_operation operation
+      ON operation.id=proof.operation_id AND operation.analysis_run_id=proof.analysis_run_id
+    WHERE proof.analysis_run_id=target.id AND proof.reason='WORKSPACE_ANALYSIS_RESULT_UNKNOWN'
+      AND operation.node_key='synthesize_answer'
+      AND proof.terminal_node_attempt_id=operation.latest_node_attempt_id),
+  (SELECT count(*) FROM agent.workspace_analysis_operation operation WHERE operation.analysis_run_id=target.id AND operation.operation_kind='SOURCE_READ'),
+  (SELECT count(*) FROM workflow.node_attempt attempt JOIN workflow.node_run node ON node.id=attempt.node_run_id WHERE node.run_id=target.workflow_run_id AND node.node_key='synthesize_answer'),
+  (SELECT count(*) FROM workflow.node_attempt attempt JOIN workflow.node_run node ON node.id=attempt.node_run_id WHERE node.run_id=target.workflow_run_id AND node.node_key='synthesize_answer' AND attempt.status='lease_lost'),
+  (SELECT count(*) FROM workflow.node_attempt attempt JOIN workflow.node_run node ON node.id=attempt.node_run_id WHERE node.run_id=target.workflow_run_id AND node.node_key='synthesize_answer' AND attempt.status='manual_recovery'),
+  (SELECT count(*) FROM workflow.node_attempt attempt JOIN workflow.node_run node ON node.id=attempt.node_run_id WHERE node.run_id=target.workflow_run_id AND node.node_key='synthesize_answer' AND attempt.river_job_attempt>=2),
+  (SELECT count(DISTINCT attempt.river_job_id) FROM workflow.node_attempt attempt JOIN workflow.node_run node ON node.id=attempt.node_run_id WHERE node.run_id=target.workflow_run_id AND node.node_key='synthesize_answer'),
+  (SELECT count(*) FROM agent.workspace_analysis_operation operation WHERE operation.analysis_run_id=target.id AND operation.node_key='synthesize_answer' AND operation.first_node_attempt_id<>operation.latest_node_attempt_id),
+  target.reserved_model_calls,target.reserved_tool_calls,target.reserved_source_reads,target.reserved_input_tokens,target.reserved_output_tokens,
+  target.settled_model_calls,target.settled_tool_calls,target.settled_source_reads,
+  CASE WHEN (
+    SELECT ROW(COALESCE(sum(reservation.settled_model_calls),0)::bigint,COALESCE(sum(reservation.settled_tool_calls),0)::bigint,
+               COALESCE(sum(reservation.settled_source_reads),0)::bigint,COALESCE(sum(reservation.settled_input_tokens),0)::bigint,
+               COALESCE(sum(reservation.settled_output_tokens),0)::bigint)
+    FROM agent.workspace_analysis_budget_reservation reservation WHERE reservation.analysis_run_id=target.id
+  )=ROW(target.settled_model_calls::bigint,target.settled_tool_calls::bigint,target.settled_source_reads::bigint,target.settled_input_tokens::bigint,target.settled_output_tokens::bigint) THEN 1 ELSE 0 END,
+  (SELECT COALESCE(max((job.metadata->>'river:rescue_count')::integer),0) FROM workflow.node_attempt attempt JOIN workflow.node_run node ON node.id=attempt.node_run_id JOIN workflow.river_job job ON job.id=attempt.river_job_id WHERE node.run_id=target.workflow_run_id AND node.node_key='synthesize_answer'),
+  (SELECT COALESCE(max(job.attempt),0) FROM workflow.node_attempt attempt JOIN workflow.node_run node ON node.id=attempt.node_run_id JOIN workflow.river_job job ON job.id=attempt.river_job_id WHERE node.run_id=target.workflow_run_id AND node.node_key='synthesize_answer')
+)
+FROM target;
+SQL
+}
+
+workspace_analysis_candidate_fixture_request_count() {
+  compose logs --no-color rag-model-fixture 2>/dev/null | \
+    awk 'index($0,"rag model fixture request stage=workspace_analysis_candidate_stream") { count++ } END { print count+0 }'
+}
+
+run_workspace_analysis_worker_restart_smoke() {
+  local analysis_question=$1 run_id=$2 conversation_id answer_id payload inflight killed_identity old_barrier_token projection projection_delimiters
+  local candidate_requests_before candidate_requests_after
+  local run_status termination publication result_type workflow_status answer_reason operation_count logical_count
+  local model_operations model_calls model_runs tool_operations tool_calls receipts reservations open_reservations
+  local unknown_operations unknown_model_calls unknown_model_runs unknown_charged candidates publication_proofs termination_proofs result_unknown_termination_proofs source_reads attempts lease_lost manual_recovery
+  local rescued_attempts river_jobs attempt_rebound reserved_models reserved_tools reserved_sources reserved_input reserved_output
+  local settled_models settled_tools settled_sources budget_matches river_rescues river_attempt
+
+  candidate_requests_before="$(workspace_analysis_candidate_fixture_request_count)" || fail 'could not capture the candidate fixture request baseline'
+  [[ "${candidate_requests_before}" =~ ^[0-9]+$ ]] || fail 'candidate fixture request baseline is invalid'
+  arm_workspace_analysis_fixture_barrier
+  request_json POST /api/v1/conversations 201 "$(jq -cn --arg workspace "${WORKSPACE_ID}" '{workspace_id:$workspace,title:"Compose Workspace Analysis Worker restart smoke"}')" \
+    'Workspace Analysis restart conversation creation' "workspace-analysis-restart-conversation-${run_id}"
+  conversation_id="$(jq -er '.id' "${LAST_RESPONSE_FILE}")"
+  payload="$(jq -cn --arg workspace "${WORKSPACE_ID}" --arg question "${analysis_question}" '{workspace_id:$workspace,mode:"workspace_analysis",question:$question,scope:{retrieval_mode:"keyword"},answer_depth:"standard",output_format:"markdown"}')"
+  request_json POST "/api/v1/conversations/${conversation_id}/questions" 202 "${payload}" \
+    'Workspace Analysis restart question submission' "workspace-analysis-restart-question-${run_id}"
+  answer_id="$(jq -er '.answer.id' "${LAST_RESPONSE_FILE}")"
+  CURRENT_ANSWER_ID="${answer_id}"
+  wait_for_workspace_analysis_fixture_barrier_entered
+  inflight="$(workspace_analysis_restart_inflight_projection "${answer_id}")" || fail 'could not read the interrupted Workspace Analysis model operation'
+  [[ "${inflight}" == 'STARTED|STARTED|RESERVED|running|running|1|1' ]] || \
+    fail "Workspace Analysis candidate call was not durably in flight (${inflight})"
+
+  old_barrier_token="${WORKSPACE_ANALYSIS_BARRIER_TOKEN}"
+  killed_identity="$(kill_workspace_analysis_worker)"
+  wait_for_workspace_analysis_fixture_barrier_settled "${old_barrier_token}"
+  wait_for_workspace_analysis_restart_lease_expiry "${answer_id}"
+  age_workspace_analysis_river_job_for_restart_smoke "${answer_id}"
+  arm_workspace_analysis_fixture_barrier
+  start_workspace_analysis_replacement_worker "${killed_identity}"
+  wait_for_workspace_analysis_restart_terminal "${answer_id}"
+  jq -e '
+    .publication_status=="failed" and .result_type=="workspace_analysis_termination" and .workflow.status=="failed"
+    and .result.payload.termination_reason=="WORKSPACE_ANALYSIS_RESULT_UNKNOWN"
+  ' "${STATE_DIR}/restart-answer.json" >/dev/null || fail 'Workspace Analysis restart Answer omitted the RESULT_UNKNOWN terminal fact'
+
+  projection="$(workspace_analysis_restart_database_projection "${answer_id}")" || fail 'could not read the Workspace Analysis restart database projection'
+  projection_delimiters="${projection//[^|]/}"
+  [[ "${#projection_delimiters}" == 41 ]] || fail 'Workspace Analysis restart database projection did not return exactly 42 fields'
+  IFS='|' read -r run_status termination publication result_type workflow_status answer_reason operation_count logical_count \
+    model_operations model_calls model_runs tool_operations tool_calls receipts reservations open_reservations \
+    unknown_operations unknown_model_calls unknown_model_runs unknown_charged candidates publication_proofs termination_proofs result_unknown_termination_proofs source_reads attempts lease_lost manual_recovery \
+    rescued_attempts river_jobs attempt_rebound reserved_models reserved_tools reserved_sources reserved_input reserved_output \
+    settled_models settled_tools settled_sources budget_matches river_rescues river_attempt <<<"${projection}"
+  [[ "${run_status}|${termination}|${publication}|${result_type}|${workflow_status}|${answer_reason}" == \
+    'failed|WORKSPACE_ANALYSIS_RESULT_UNKNOWN|failed|workspace_analysis_termination|failed|WORKSPACE_ANALYSIS_RESULT_UNKNOWN' ]] || \
+    fail 'Workspace Analysis restart did not converge to the authoritative RESULT_UNKNOWN terminal state'
+  [[ "${source_reads}" =~ ^[1-3]$ && "${model_operations}" == 2 && "${tool_operations}" -eq $((source_reads + 2)) && \
+    "${operation_count}" -eq $((model_operations + tool_operations)) && "${logical_count}" == "${operation_count}" ]] || \
+    fail 'Workspace Analysis restart logical operation projection is inconsistent'
+  [[ "${model_calls}" == "${model_operations}" && "${model_runs}" == "${model_operations}" && \
+    "${tool_calls}" == "${tool_operations}" && "${receipts}" == "${tool_operations}" && "${reservations}" == "${operation_count}" ]] || \
+    fail 'Workspace Analysis restart duplicated a Call, receipt, Model Run, or reservation'
+  [[ "${open_reservations}" == 0 && "${unknown_operations}" == 1 && "${unknown_model_calls}" == 1 && \
+    "${unknown_model_runs}" == 1 && "${unknown_charged}" == 1 && "${candidates}" == 0 && \
+    "${publication_proofs}" == 0 && "${termination_proofs}" == 1 && "${result_unknown_termination_proofs}" == 1 ]] || \
+    fail 'Workspace Analysis restart did not close the interrupted model operation exactly once'
+  [[ "${attempts}" == 2 && "${lease_lost}" == 1 && "${manual_recovery}" == 1 && "${rescued_attempts}" == 1 && \
+    "${river_jobs}" == 1 && "${attempt_rebound}" == 1 && "${river_rescues}" -ge 1 && "${river_attempt}" -ge 2 ]] || \
+    fail 'Workspace Analysis restart omitted River rescue, lease_lost, or replacement Attempt evidence'
+  [[ "${reserved_models}|${reserved_tools}|${reserved_sources}|${reserved_input}|${reserved_output}" == '0|0|0|0|0' && \
+    "${settled_models}" == 2 && "${settled_tools}" == "${tool_operations}" && "${settled_sources}" == "${source_reads}" && "${budget_matches}" == 1 ]] || \
+    fail 'Workspace Analysis restart duplicated or stranded budget accounting'
+  candidate_requests_after="$(workspace_analysis_candidate_fixture_request_count)" || fail 'could not read the candidate fixture request count after restart'
+  [[ "${candidate_requests_after}" -eq $((candidate_requests_before + 1)) ]] || \
+    fail 'Workspace Analysis restart invoked the candidate Provider more than once'
+  if workspace_analysis_fixture_barrier_entered; then
+    fail 'replacement Workspace Analysis generation entered the candidate Provider barrier'
+  fi
+  release_workspace_analysis_fixture_barrier
+  log 'passed: real Worker SIGKILL, generation settlement, River rescue, lease_lost replacement, RESULT_UNKNOWN, and exact-once durable facts'
+}
+
 wait_for_proposal() {
   local proposal_id=$1 workflow_path=$2 started_at=${SECONDS} proposal_status workflow_status
   while (( SECONDS - started_at < TIMEOUT_SECONDS )); do
@@ -514,24 +1261,52 @@ seed_knowledge_eligibility() {
 }
 
 activate_workspace_grant() {
-  local database_url workspace_switch_log workspace_switch_code workspace_control_binary workspace_control_env workspace_control_result control_instance_id granted_workspace_id
+  local database_url workspace_switch_log workspace_switch_code workspace_control_binary workspace_control_env workspace_control_result workspace_docker_wrapper control_instance_id granted_workspace_id
   database_url="postgres://${ZHIXU_POSTGRES_USER}:${ZHIXU_POSTGRES_PASSWORD}@127.0.0.1:${POSTGRES_PORT}/${ZHIXU_POSTGRES_DB}?sslmode=disable"
   workspace_switch_log="${STATE_DIR}/workspace-switch.log"
   workspace_control_binary="${STATE_DIR}/zhixu-workspacectl"
   workspace_control_env="${STATE_DIR}/workspacectl.env"
   workspace_control_result="${STATE_DIR}/workspace-switch.json"
+  workspace_docker_wrapper="${STATE_DIR}/workspace-docker"
+  WORKSPACE_DOCKER_LOG="${STATE_DIR}/workspace-docker.log"
   cp "${ENV_FILE}" "${workspace_control_env}"
   chmod 600 "${workspace_control_env}"
+  : >"${WORKSPACE_DOCKER_LOG}"
+  chmod 600 "${WORKSPACE_DOCKER_LOG}"
+  cat >"${workspace_docker_wrapper}" <<'SH'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+arguments=("$@")
+command_log="$(mktemp "${ZHIXU_WORKSPACE_DOCKER_LOG}.XXXXXX")"
+trap 'rm -f -- "${command_log}"' EXIT
+set +e
+docker "${arguments[@]}" 2>"${command_log}"
+status=$?
+set -e
+cat "${command_log}" >>"${ZHIXU_WORKSPACE_DOCKER_LOG}"
+if [[ ${status} -ne 0 ]]; then
+  for ((index = 0; index < ${#arguments[@]}; index++)); do
+    if [[ "${arguments[index]}" == up ]]; then
+      docker "${arguments[@]:0:index}" logs --no-color --tail 200 app worker >>"${ZHIXU_WORKSPACE_DOCKER_LOG}" 2>&1 || true
+      break
+    fi
+  done
+fi
+exit "${status}"
+SH
+  chmod 700 "${workspace_docker_wrapper}"
   go build -mod=vendor -o "${workspace_control_binary}" ./cmd/workspacectl >/dev/null || \
     fail 'could not build the one-shot Workspace control binary'
   chmod 700 "${workspace_control_binary}"
   control_instance_id="$(python3 -c 'import uuid; print(uuid.uuid4())')" || fail 'could not create the one-shot Workspace controller identity'
   exec 8<<<"${database_url}"
-  if ! "${workspace_control_binary}" switch \
+  if ! ZHIXU_WORKSPACE_DOCKER_LOG="${WORKSPACE_DOCKER_LOG}" "${workspace_control_binary}" switch \
     --workspace-root "${WORKSPACE_ROOT}" --workspace-name 'Compose RAG Smoke' \
     --idempotency-key "compose-rag-workspace-${PROJECT_NAME}" --control-instance-id "${control_instance_id}" \
     --compose-file "${RUNTIME_COMPOSE_FILE}" --env-file "${workspace_control_env}" \
-    --grant-override "${GRANT_COMPOSE_FILE}" --compose-project "${PROJECT_NAME}" --database-url-fd 8 --timeout 2m \
+    --grant-override "${GRANT_COMPOSE_FILE}" --compose-project "${PROJECT_NAME}" --docker-executable "${workspace_docker_wrapper}" \
+    --database-url-fd 8 --timeout 2m \
       >"${workspace_control_result}" 2>"${workspace_switch_log}"; then
     exec 8<&-
     workspace_switch_code="$(python3 - "${workspace_switch_log}" <<'PY'
@@ -539,7 +1314,7 @@ import re
 import sys
 
 with open(sys.argv[1], encoding="utf-8") as stream:
-    matches = re.findall(r'"error_code"\\s*:\\s*"([A-Z0-9_]+)"', stream.read())
+    matches = re.findall(r'"error_code"\s*:\s*"([A-Z0-9_]+)"', stream.read())
 print(matches[-1] if matches else "WORKSPACE_SWITCH_FAILED")
 PY
 )"
@@ -561,15 +1336,34 @@ main() {
   docker compose version >/dev/null 2>&1 || fail 'Docker Compose v2 is unavailable'
   [[ "${REAL_PROVIDER_MODE}" =~ ^[01]$ ]] || fail 'real Provider mode must be 0 or 1'
   [[ "${REAL_PROVIDER_PREFLIGHT_ONLY}" =~ ^[01]$ ]] || fail 'real Provider preflight-only mode must be 0 or 1'
+  [[ "${RAG_BROWSER_MODE}" =~ ^[01]$ ]] || fail 'fixed RAG browser mode must be 0 or 1'
+  [[ "${WORKSPACE_ANALYSIS_MODE}" =~ ^[01]$ ]] || fail 'Workspace Analysis mode must be 0 or 1'
+  [[ "${WORKSPACE_ANALYSIS_OTLP_MODE}" =~ ^[01]$ ]] || fail 'Workspace Analysis OTLP mode must be 0 or 1'
+  [[ "${WORKSPACE_ANALYSIS_WORKER_RESTART_MODE}" =~ ^[01]$ ]] || fail 'Workspace Analysis Worker restart mode must be 0 or 1'
   if [[ "${REAL_PROVIDER_PREFLIGHT_ONLY}" == 1 && "${REAL_PROVIDER_MODE}" != 1 ]]; then
     fail 'real Provider preflight-only mode requires real Provider mode'
+  fi
+  if [[ "${RAG_BROWSER_MODE}" == 1 && ( "${REAL_PROVIDER_MODE}" == 1 || "${WORKSPACE_ANALYSIS_MODE}" == 1 ) ]]; then
+    fail 'fixed RAG browser smoke cannot be combined with real Provider or Workspace Analysis mode'
+  fi
+  if [[ "${WORKSPACE_ANALYSIS_MODE}" == 1 && "${REAL_PROVIDER_MODE}" == 1 ]]; then
+    fail 'Workspace Analysis deterministic smoke cannot be combined with real Provider mode'
+  fi
+  if [[ "${WORKSPACE_ANALYSIS_WORKER_RESTART_MODE}" == 1 && "${WORKSPACE_ANALYSIS_MODE}" != 1 ]]; then
+    fail 'Workspace Analysis Worker restart smoke requires Workspace Analysis mode'
+  fi
+  if [[ "${WORKSPACE_ANALYSIS_OTLP_MODE}" == 1 && "${WORKSPACE_ANALYSIS_MODE}" != 1 ]]; then
+    fail 'Workspace Analysis OTLP smoke requires Workspace Analysis mode'
+  fi
+  if [[ "${WORKSPACE_ANALYSIS_OTLP_MODE}" == 1 && "${WORKSPACE_ANALYSIS_WORKER_RESTART_MODE}" == 1 ]]; then
+    fail 'Workspace Analysis OTLP smoke cannot be combined with Worker restart mode'
   fi
   [[ "${TIMEOUT_SECONDS}" =~ ^[1-9][0-9]*$ ]] || fail 'timeout must be a positive integer'
   [[ "${POLL_INTERVAL_SECONDS}" =~ ^[1-9][0-9]*$ ]] || fail 'poll interval must be a positive integer'
   [[ "${REQUEST_TIMEOUT_SECONDS}" =~ ^[1-9][0-9]*$ ]] || fail 'request timeout must be a positive integer'
   if [[ "${REAL_PROVIDER_PREFLIGHT_ONLY}" != 1 ]]; then
     for command in curl git go; do require_command "${command}"; done
-    if [[ "${REAL_PROVIDER_MODE}" == 1 ]]; then
+    if [[ "${REAL_PROVIDER_MODE}" == 1 || "${RAG_BROWSER_MODE}" == 1 || "${WORKSPACE_ANALYSIS_MODE}" == 1 ]]; then
       require_command node
       require_command npm
     fi
@@ -581,13 +1375,22 @@ main() {
   trap 'exit 130' INT
   trap 'exit 143' TERM
   STATE_DIR="$(cd -- "${STATE_DIR}" && pwd -P)"
-  local run_id http_port vite_port='' target_path evidence_token chat_canary canary_compose_file
+  WORKSPACE_ANALYSIS_BARRIER_DIR="${STATE_DIR}/workspace-analysis-barrier"
+  WORKSPACE_ANALYSIS_BARRIER_READY_FILE="${WORKSPACE_ANALYSIS_BARRIER_DIR}/browser-ready"
+  WORKSPACE_ANALYSIS_BARRIER_ENTERED_FILE="${WORKSPACE_ANALYSIS_BARRIER_CONTAINER_ENTERED_FILE}"
+  WORKSPACE_ANALYSIS_BARRIER_SETTLED_FILE="${WORKSPACE_ANALYSIS_BARRIER_CONTAINER_SETTLED_FILE}"
+  WORKSPACE_ANALYSIS_BROWSER_PROGRESS_FILE="${WORKSPACE_ANALYSIS_BARRIER_DIR}/browser-progress"
+  mkdir -m 0755 -- "${WORKSPACE_ANALYSIS_BARRIER_DIR}"
+  local run_id http_port vite_port='' target_path evidence_token chat_canary canary_compose_file workspace_analysis_barrier_stage=''
+  local fixture_answer_stream_frame_delay_ms=''
   local chat_runtime_base_url='' embedding_runtime_base_url='' ollama_tags_url=''
   run_id="$(random_hex 6)"; PROJECT_NAME="zhixu-rag-smoke-${run_id}"; http_port="$(allocate_port)"; POSTGRES_PORT="$(allocate_port)"
-  [[ "${REAL_PROVIDER_MODE}" != 1 ]] || vite_port="$(allocate_port)"
+  [[ "${REAL_PROVIDER_MODE}" != 1 && "${RAG_BROWSER_MODE}" != 1 && "${WORKSPACE_ANALYSIS_MODE}" != 1 ]] || vite_port="$(allocate_port)"
   API_BASE_URL="http://127.0.0.1:${http_port}"; AUTH_ORIGIN="${API_BASE_URL}"; WORKSPACE_ROOT="${STATE_DIR}/project"; target_path='docs/rag-smoke.md'
-  [[ "${REAL_PROVIDER_MODE}" != 1 ]] || VITE_BASE_URL="http://127.0.0.1:${vite_port}"
+  [[ "${REAL_PROVIDER_MODE}" != 1 && "${RAG_BROWSER_MODE}" != 1 && "${WORKSPACE_ANALYSIS_MODE}" != 1 ]] || VITE_BASE_URL="http://127.0.0.1:${vite_port}"
   evidence_token="durable-rag-${run_id}"; chat_canary="chat_${run_id}_$(random_hex 12)"
+  [[ "${WORKSPACE_ANALYSIS_MODE}" != 1 ]] || workspace_analysis_barrier_stage='workspace_analysis_candidate_stream'
+  [[ "${RAG_BROWSER_MODE}" != 1 ]] || fixture_answer_stream_frame_delay_ms='750'
   if [[ "${REAL_PROVIDER_MODE}" == 1 ]]; then
     rag_real_provider_configure "${chat_canary}" || fail 'real Provider configuration is invalid'
     case "${RAG_REAL_PROVIDER_TRANSPORT_RESOLVED}" in
@@ -635,17 +1438,11 @@ PY
   fi
   canary_compose_file="${STATE_DIR}/compose.canary.yml"
   if [[ "${REAL_PROVIDER_MODE}" == 1 ]]; then
-    cat >"${canary_compose_file}" <<YAML
+  cat >"${canary_compose_file}" <<YAML
 services:
   postgres:
     ports:
       - "127.0.0.1:${POSTGRES_PORT}:5432"
-  app:
-    ports: !override
-      - target: 8080
-        published: "${http_port}"
-        host_ip: 127.0.0.1
-        protocol: tcp
 YAML
   else
   cat >"${canary_compose_file}" <<YAML
@@ -656,12 +1453,14 @@ services:
   rag-model-fixture:
     environment:
       ZHIXU_RAG_FIXTURE_API_KEY: ${chat_canary}
+      ZHIXU_RAG_FIXTURE_BARRIER_STAGE: ${workspace_analysis_barrier_stage}
+      ZHIXU_RAG_FIXTURE_BARRIER_RELEASE_FILE: ${WORKSPACE_ANALYSIS_BARRIER_CONTAINER_RELEASE_FILE}
+      ZHIXU_RAG_FIXTURE_BARRIER_ENTERED_FILE: ${WORKSPACE_ANALYSIS_BARRIER_CONTAINER_ENTERED_FILE}
+      ZHIXU_RAG_FIXTURE_BARRIER_SETTLED_FILE: ${WORKSPACE_ANALYSIS_BARRIER_CONTAINER_SETTLED_FILE}
+      ZHIXU_RAG_FIXTURE_BARRIER_ARMED_FILE: ${WORKSPACE_ANALYSIS_BARRIER_CONTAINER_ARMED_FILE}
+      ZHIXU_RAG_FIXTURE_BARRIER_LOCK_DIR: ${WORKSPACE_ANALYSIS_BARRIER_CONTAINER_LOCK_DIR}
+      ZHIXU_RAG_FIXTURE_ANSWER_STREAM_FRAME_DELAY_MS: ${fixture_answer_stream_frame_delay_ms}
   app:
-    ports: !override
-      - target: 8080
-        published: "${http_port}"
-        host_ip: 127.0.0.1
-        protocol: tcp
     environment:
       ZHIXU_CHAT_API_KEY: ${chat_canary}
   worker:
@@ -676,6 +1475,17 @@ YAML
   export ZHIXU_HTTP_PORT="${http_port}" ZHIXU_POSTGRES_DB='zhixu_rag_smoke' ZHIXU_POSTGRES_USER='zhixu_rag_smoke'
   export ZHIXU_POSTGRES_PASSWORD="pg_${run_id}_$(random_hex 12)"
   export ZHIXU_AUTH_MODE='required' ZHIXU_AUTH_BOOTSTRAP_TOKEN="auth_${run_id}_$(random_hex 24)"
+  export ZHIXU_WORKSPACE_ANALYSIS_CONFIG_REVISION=1
+  if [[ "${WORKSPACE_ANALYSIS_MODE}" == 1 ]]; then
+    export ZHIXU_WORKSPACE_ANALYSIS_API_ENABLED=true ZHIXU_WORKSPACE_ANALYSIS_WORKER_ENABLED=true
+  else
+    export ZHIXU_WORKSPACE_ANALYSIS_API_ENABLED=false ZHIXU_WORKSPACE_ANALYSIS_WORKER_ENABLED=false
+  fi
+  if [[ "${WORKSPACE_ANALYSIS_WORKER_RESTART_MODE}" == 1 ]]; then
+    export ZHIXU_WORKER_RESTART_POLICY='no'
+    export ZHIXU_WORKER_JOB_TIMEOUT='15m' ZHIXU_WORKER_RESCUE_STUCK_AFTER='30m'
+    export ZHIXU_WORKFLOW_LEASE='8s' ZHIXU_WORKFLOW_HEARTBEAT='1s'
+  fi
   if [[ "${REAL_PROVIDER_MODE}" == 1 ]]; then
     export ZHIXU_AUTH_ALLOWED_ORIGINS="${AUTH_ORIGIN},${VITE_BASE_URL}" ZHIXU_AUTH_SECURE_COOKIE='false'
     # The real slow-model gate may legitimately consume all ten bounded RAG
@@ -691,6 +1501,9 @@ YAML
     export ZHIXU_EMBEDDING_BASE_URL="${embedding_runtime_base_url}" ZHIXU_EMBEDDING_API_KEY="${RAG_REAL_PROVIDER_EMBEDDING_API_KEY}"
     export ZHIXU_EMBEDDING_MODEL="${RAG_REAL_PROVIDER_EMBEDDING_MODEL}" ZHIXU_EMBEDDING_DIMENSIONS="${RAG_REAL_PROVIDER_EMBEDDING_DIMENSIONS}"
     export ZHIXU_EMBEDDING_NORMALIZATION='l2' ZHIXU_EMBEDDING_DISTANCE_METRIC='cosine' ZHIXU_EMBEDDING_TIMEOUT="${RAG_REAL_PROVIDER_EMBEDDING_TIMEOUT}"
+  elif [[ "${RAG_BROWSER_MODE}" == 1 || "${WORKSPACE_ANALYSIS_MODE}" == 1 ]]; then
+    export ZHIXU_AUTH_ALLOWED_ORIGINS="${AUTH_ORIGIN},${VITE_BASE_URL}" ZHIXU_AUTH_SECURE_COOKIE='false'
+    export ZHIXU_EMBEDDING_PROVIDER='disabled' ZHIXU_EMBEDDING_BASE_URL='' ZHIXU_EMBEDDING_API_KEY='' ZHIXU_EMBEDDING_MODEL='' ZHIXU_EMBEDDING_DIMENSIONS='0'
   else
     export ZHIXU_AUTH_ALLOWED_ORIGINS="${AUTH_ORIGIN}" ZHIXU_AUTH_SECURE_COOKIE='false'
     export ZHIXU_EMBEDDING_PROVIDER='disabled' ZHIXU_EMBEDDING_BASE_URL='' ZHIXU_EMBEDDING_API_KEY='' ZHIXU_EMBEDDING_MODEL='' ZHIXU_EMBEDDING_DIMENSIONS='0'
@@ -703,6 +1516,15 @@ YAML
     log 'validating and building disposable RAG Compose stack'
   fi
   compose config --quiet
+  if [[ "${WORKSPACE_ANALYSIS_WORKER_RESTART_MODE}" == 1 ]]; then
+    compose --profile workspace-runtime config --format json | jq -e '
+      .services.worker.restart == "no"
+      and .services.worker.environment.ZHIXU_WORKER_JOB_TIMEOUT == "15m"
+      and .services.worker.environment.ZHIXU_WORKER_RESCUE_STUCK_AFTER == "30m"
+      and .services.worker.environment.ZHIXU_WORKFLOW_LEASE == "8s"
+      and .services.worker.environment.ZHIXU_WORKFLOW_HEARTBEAT == "1s"
+    ' >/dev/null || fail 'Workspace Analysis Worker restart runtime is not fail-closed'
+  fi
   if [[ "${REAL_PROVIDER_MODE}" == 1 ]]; then
     compose --profile workspace-runtime config --format json | jq -e \
       --arg job_timeout "${ZHIXU_WORKER_JOB_TIMEOUT}" \
@@ -814,6 +1636,14 @@ YAML
   bootstrap_compose run --rm --no-deps -T migrate >/dev/null
   if [[ "${REAL_PROVIDER_MODE}" != 1 ]]; then
     compose up --detach --no-deps --wait rag-model-fixture >/dev/null
+    if [[ "${WORKSPACE_ANALYSIS_MODE}" == 1 ]]; then
+      arm_workspace_analysis_fixture_barrier
+      release_workspace_analysis_fixture_barrier
+    fi
+    if [[ "${WORKSPACE_ANALYSIS_OTLP_MODE}" == 1 ]]; then
+      compose up --detach --no-deps otel-collector >/dev/null
+      wait_for_workspace_analysis_otlp_collector
+    fi
   fi
   start_provider_host_relay
   log 'activating an exact Workspace grant through one-shot workspacectl'
@@ -843,6 +1673,104 @@ YAML
   SOURCE_VERSION_ID="$(jq -er --arg token "${evidence_token}" '.items[] | select(.snippet|contains($token)) | .provenances[0].source_version_href | split("/")[-1]' "${LAST_RESPONSE_FILE}")"
   SOURCE_SPAN_ID="${citation_href##*/}"
   seed_knowledge_eligibility
+
+  if [[ "${WORKSPACE_ANALYSIS_MODE}" == 1 ]]; then
+    local analysis_question analysis_conversation_id analysis_answer_id analysis_replay_id analysis_timeline_path
+    local analysis_projection replay_projection proposal_count_before proposal_count_after git_head_before git_head_after git_status_before git_status_after
+    local run_status settled_models settled_tools settled_sources model_operations tool_operations receipts candidates model_results publication_proofs
+    local analysis_watermark analysis_sse_file analysis_curl_status
+
+    wait_for_workspace_analysis_capability
+    proposal_count_before="$(compose exec -T postgres psql -Atq --username "${ZHIXU_POSTGRES_USER}" --dbname "${ZHIXU_POSTGRES_DB}" -c \
+      "SELECT count(*) FROM change_control.proposal WHERE workspace_id='${WORKSPACE_ID}'")" || fail 'could not capture the Proposal baseline'
+    git_head_before="$(git -C "${WORKSPACE_ROOT}" rev-parse HEAD)" || fail 'could not capture the Git HEAD baseline'
+    git_status_before="$(git -C "${WORKSPACE_ROOT}" status --porcelain=v2 --untracked-files=all)" || fail 'could not capture the Git status baseline'
+
+    request_json POST /api/v1/conversations 201 "$(jq -cn --arg workspace "${WORKSPACE_ID}" '{workspace_id:$workspace,title:"Compose Workspace Analysis smoke"}')" 'Workspace Analysis conversation creation' "workspace-analysis-conversation-${run_id}"
+    analysis_conversation_id="$(jq -er '.id' "${LAST_RESPONSE_FILE}")"
+    analysis_watermark="$(compose exec -T postgres psql -Atq --username "${ZHIXU_POSTGRES_USER}" --dbname "${ZHIXU_POSTGRES_DB}" -c \
+      "SELECT COALESCE(max(seq),0) FROM ops.server_event WHERE workspace_id='${WORKSPACE_ID}'")"
+    [[ "${analysis_watermark}" =~ ^[1-9][0-9]*$ ]] || fail 'could not establish the Workspace Analysis SSE watermark'
+    analysis_question="Analyze the approved recovery evidence token ${evidence_token} and recommend the bounded next step with citations."
+    question_payload="$(jq -cn --arg workspace "${WORKSPACE_ID}" --arg question "${analysis_question}" '{workspace_id:$workspace,mode:"workspace_analysis",question:$question,scope:{retrieval_mode:"keyword"},answer_depth:"standard",output_format:"markdown"}')"
+    request_json POST "/api/v1/conversations/${analysis_conversation_id}/questions" 202 "${question_payload}" 'Workspace Analysis question submission' "workspace-analysis-question-${run_id}"
+    jq -e '.question.mode=="workspace_analysis" and .answer.publication_status=="pending"' "${LAST_RESPONSE_FILE}" >/dev/null || fail 'Workspace Analysis submission omitted canonical mode or pending Answer'
+    analysis_answer_id="$(jq -er '.answer.id' "${LAST_RESPONSE_FILE}")"
+    CURRENT_ANSWER_ID="${analysis_answer_id}"
+    wait_for_answer "${analysis_answer_id}"
+    jq -e --arg workspace "${WORKSPACE_ID}" '
+      .publication_status=="completed" and .result_type=="workspace_analysis" and .workflow.status=="succeeded"
+      and .retrieval_summary==null and .current_stage==null and (.citations|length)>0
+      and ([.citations[].workspace_id]|all(.==$workspace))
+      and .result.payload.termination_reason=="COMPLETED"
+      and .result.payload.proposal_suggestion.href=="/proposals"
+    ' "${STATE_DIR}/completed-answer.json" >/dev/null || fail 'Workspace Analysis Answer omitted its validated terminal projection'
+
+    analysis_timeline_path="/api/v1/answers/${analysis_answer_id}/analysis-timeline?workspace_id=${WORKSPACE_ID}"
+    request_json GET "${analysis_timeline_path}" 200 '' 'Workspace Analysis timeline'
+    jq -e '
+      .schema_id=="conversation.workspace_analysis_timeline" and .schema_version=="v1"
+      and .run_status=="succeeded" and .termination_reason=="COMPLETED"
+	      and .budget.model_calls.used==3 and .budget.tool_calls.used>=4
+	      and (.budget.source_reads.used>=1 and .budget.source_reads.used<=3 and .budget.source_reads.max==3)
+      and ([.items[]|select(.kind=="node" and .status=="succeeded")]|length)==6
+      and ([.items[]|select(.kind=="model" and .status=="succeeded")]|length)==3
+      and ([.items[]|select(.kind=="tool" and .status=="succeeded")]|length)==.budget.tool_calls.used
+    ' "${LAST_RESPONSE_FILE}" >/dev/null || fail 'Workspace Analysis timeline omitted the complete safe dependency projection'
+
+    analysis_projection="$(workspace_analysis_database_projection "${analysis_answer_id}")" || fail 'could not read Workspace Analysis database projection'
+    IFS='|' read -r run_status settled_models settled_tools settled_sources model_operations tool_operations receipts candidates model_results publication_proofs <<<"${analysis_projection}"
+    [[ "${run_status}" == succeeded && "${settled_models}" == 3 && "${model_operations}" == 3 && "${candidates}" == 1 && "${model_results}" == 2 && "${publication_proofs}" == 1 ]] || \
+      fail 'Workspace Analysis database projection omitted model, candidate, review, or publication facts'
+    [[ "${settled_sources}" =~ ^[1-3]$ && "${settled_tools}" -eq $((settled_sources + 3)) && "${tool_operations}" == "${settled_tools}" && "${receipts}" == "${settled_tools}" ]] || \
+      fail 'Workspace Analysis database projection omitted the exact Git/Search/Read/Validate receipt chain'
+
+    request_json POST "/api/v1/conversations/${analysis_conversation_id}/questions" 200 "${question_payload}" 'Workspace Analysis exact replay' "workspace-analysis-question-${run_id}"
+    analysis_replay_id="$(jq -er '.answer.id' "${LAST_RESPONSE_FILE}")"
+    [[ "${analysis_replay_id}" == "${analysis_answer_id}" ]] || fail 'Workspace Analysis replay created another Answer'
+    replay_projection="$(workspace_analysis_database_projection "${analysis_answer_id}")" || fail 'could not reread Workspace Analysis database projection'
+    [[ "${replay_projection}" == "${analysis_projection}" ]] || fail 'Workspace Analysis replay duplicated or mutated durable facts'
+
+    analysis_sse_file="${STATE_DIR}/workspace-analysis-events.sse"
+    set +e
+    curl --silent --connect-timeout 5 --max-time 2 --cookie "${COOKIE_JAR}" --header "Last-Event-ID: ${analysis_watermark}" --output "${analysis_sse_file}" "${API_BASE_URL}/api/v1/events?workspace_id=${WORKSPACE_ID}"
+    analysis_curl_status=$?
+    set -e
+    [[ ${analysis_curl_status} -eq 0 || ${analysis_curl_status} -eq 28 ]] || fail 'Workspace Analysis SSE replay request failed'
+    grep -Eq '^event: workspace_analysis\.started$' "${analysis_sse_file}" || fail 'Workspace Analysis SSE replay omitted the started invalidation'
+    grep -Eq '^event: workspace_analysis\.terminated$' "${analysis_sse_file}" || fail 'Workspace Analysis SSE replay omitted the terminal invalidation'
+    if grep -Fq -- "${evidence_token}" "${analysis_sse_file}" || grep -Fq -- "${WORKSPACE_ROOT}" "${analysis_sse_file}" || \
+      grep -Fq -- "${ZHIXU_POSTGRES_PASSWORD}" "${analysis_sse_file}" || grep -Fq -- "${ZHIXU_AUTH_BOOTSTRAP_TOKEN}" "${analysis_sse_file}" || \
+      grep -Fq -- "${chat_canary}" "${analysis_sse_file}" || grep -Fq -- "server_binding" "${analysis_sse_file}"; then
+      fail 'Workspace Analysis SSE replay leaked evidence, credentials, paths, or private bindings'
+    fi
+
+    if [[ "${WORKSPACE_ANALYSIS_OTLP_MODE}" == 1 ]]; then
+      assert_workspace_analysis_otlp_metrics
+    else
+      arm_workspace_analysis_fixture_barrier
+      start_vite "${vite_port}"
+      run_workspace_analysis_browser "${analysis_question}" "${WORKSPACE_ROOT}" cancelled
+      arm_workspace_analysis_fixture_barrier
+      run_workspace_analysis_browser "${analysis_question}" "${WORKSPACE_ROOT}" completed
+      if [[ "${WORKSPACE_ANALYSIS_WORKER_RESTART_MODE}" == 1 ]]; then
+        run_workspace_analysis_worker_restart_smoke "${analysis_question}" "${run_id}"
+      fi
+    fi
+
+    proposal_count_after="$(compose exec -T postgres psql -Atq --username "${ZHIXU_POSTGRES_USER}" --dbname "${ZHIXU_POSTGRES_DB}" -c \
+      "SELECT count(*) FROM change_control.proposal WHERE workspace_id='${WORKSPACE_ID}'")" || fail 'could not verify the Proposal boundary'
+    git_head_after="$(git -C "${WORKSPACE_ROOT}" rev-parse HEAD)" || fail 'could not verify Git HEAD'
+    git_status_after="$(git -C "${WORKSPACE_ROOT}" status --porcelain=v2 --untracked-files=all)" || fail 'could not verify Git status'
+    [[ "${proposal_count_after}" == "${proposal_count_before}" ]] || fail 'Workspace Analysis created or mutated a Proposal'
+    [[ "${git_head_after}" == "${git_head_before}" && "${git_status_after}" == "${git_status_before}" ]] || fail 'Workspace Analysis mutated the Git repository'
+    if [[ "${WORKSPACE_ANALYSIS_OTLP_MODE}" == 1 ]]; then
+      log 'passed: deterministic Workspace Analysis Worker OTLP Metrics export, exact labels, replay uniqueness, and graceful flush'
+    else
+      log 'passed: deterministic Workspace Analysis API/River/Worker/PostgreSQL receipts, replay, SSE, Stop cancellation, read-only boundary, and desktop/mobile browser'
+    fi
+    return 0
+  fi
 
   if [[ "${REAL_PROVIDER_MODE}" == 1 ]]; then
     local embedding_projection real_question real_model_calls real_tool_calls real_tool_call_count real_unexpected_tool_calls real_draft_sessions real_model_version
@@ -927,7 +1855,17 @@ YAML
   request_json GET "/api/v1/answers/${answer_id}?workspace_id=${WORKSPACE_ID}" 200 '' 'answer after feedback'
   jq -e --slurpfile before "${STATE_DIR}/completed-answer.json" '.publication_status==$before[0].publication_status and .result==$before[0].result and .citations==$before[0].citations' "${LAST_RESPONSE_FILE}" >/dev/null || fail 'feedback mutated the published Answer'
 
-  log 'passed: public ingestion/approval/reindex, eligibility-only seed, Conversation/River/RAG, Citation, SSE and Feedback replay'
+  if [[ "${RAG_BROWSER_MODE}" == 1 ]]; then
+    start_vite "${vite_port}"
+    run_fixed_rag_browser 'What does the approved recovery evidence require?'
+    persist_fixed_rag_browser_artifacts
+  fi
+
+  if [[ "${RAG_BROWSER_MODE}" == 1 ]]; then
+    log 'passed: deterministic fixed RAG API/River/Worker/PostgreSQL, keyword SSE draft/final Answer, Citation, desktop/mobile browser and replay'
+  else
+    log 'passed: public ingestion/approval/reindex, eligibility-only seed, Conversation/River/RAG, Citation, SSE and Feedback replay'
+  fi
 }
 
 main "$@"

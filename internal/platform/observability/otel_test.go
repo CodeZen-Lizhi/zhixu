@@ -61,6 +61,11 @@ func TestOTLPExporterUsesProjectConfigurationAndExactResource(t *testing.T) {
 
 	var capture otlpRequestCapture
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if strings.HasSuffix(request.URL.Path, "/v1/metrics") {
+			response.Header().Set("Content-Type", "application/x-protobuf")
+			response.WriteHeader(http.StatusOK)
+			return
+		}
 		capture.record(t, request)
 		response.Header().Set("Content-Type", "application/x-protobuf")
 		response.WriteHeader(http.StatusOK)
@@ -164,6 +169,11 @@ func TestOTLPExporterUsesProjectConfigurationAndExactResource(t *testing.T) {
 func TestOTLPCollectorPreservesCrossProcessParentChildTrace(t *testing.T) {
 	var capture otlpRequestCapture
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if strings.HasSuffix(request.URL.Path, "/v1/metrics") {
+			response.Header().Set("Content-Type", "application/x-protobuf")
+			response.WriteHeader(http.StatusOK)
+			return
+		}
 		capture.record(t, request)
 		response.Header().Set("Content-Type", "application/x-protobuf")
 		response.WriteHeader(http.StatusOK)

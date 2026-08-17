@@ -624,10 +624,24 @@ func (r *RuntimeRepository) Control(ctx context.Context, command application.Con
 	if _, err := tx.Exec(ctx, `INSERT INTO workflow.control_command(id,run_id,command,idempotency_key,request_hash,expected_version,result,created_at,completed_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$8)`, string(commandID), string(run.ID), string(command.Action), command.IdempotencyKey, command.RequestHash, command.ExpectedVersion, resultJSON, now); err != nil {
 		return application.ControlPersistenceResult{}, classify(err, "WORKFLOW_CONTROL_CREATE_FAILED")
 	}
+	if err := r.notifyWorkflowControl(ctx, tx, application.WorkflowControlEvent{
+		WorkspaceID: run.WorkspaceID, WorkflowRunID: run.ID, Action: command.Action,
+		IdempotencyKey: command.IdempotencyKey, ExpectedVersion: command.ExpectedVersion,
+		PersistedControl: result, OccurredAt: now,
+	}); err != nil {
+		return application.ControlPersistenceResult{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return application.ControlPersistenceResult{}, classify(err, "WORKFLOW_CONTROL_COMMIT_FAILED")
 	}
 	return result, nil
+}
+
+func (r *RuntimeRepository) notifyWorkflowControl(ctx context.Context, transaction any, event application.WorkflowControlEvent) error {
+	if r == nil || r.control == nil {
+		return nil
+	}
+	return r.control.OnWorkflowControl(ctx, transaction, event)
 }
 
 func (r *RuntimeRepository) notifyDirectlyCancelledWorkflowNode(ctx context.Context, tx pgx.Tx, run domain.Run, node domain.NodeRun, terminalAt time.Time) error {

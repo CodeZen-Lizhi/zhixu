@@ -9,6 +9,7 @@ import (
 
 	agentdomain "github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	foundationstrictjson "github.com/CodeZen-Lizhi/zhixu/internal/foundation/strictjson"
 )
 
 // AnswerResultType 区分可发布回答、拒答和澄清结果。
@@ -81,9 +82,15 @@ func ValidateAnswer(answer Answer) error {
 		}
 		return nil
 	}
-	if answer.ModelRunID == nil || answer.Version != 2 || len(answer.Result) == 0 || !validLowerHash(answer.ResultHash) ||
-		answer.RetrievalSummary == nil || answer.PublishedAt == nil || !answer.PublishedAt.Equal(answer.UpdatedAt) ||
+	if answer.Version != 2 || len(answer.Result) == 0 || !validLowerHash(answer.ResultHash) ||
+		answer.PublishedAt == nil || !answer.PublishedAt.Equal(answer.UpdatedAt) ||
 		answer.PublishedAt.Before(answer.CreatedAt) {
+		return invalid(ErrorCodeAnswerInvalid, "published answer bundle is incomplete", nil)
+	}
+	if workspaceAnalysisAnswerBundle(answer) {
+		return validateWorkspaceAnalysisAnswerBundle(answer, seen)
+	}
+	if answer.ModelRunID == nil || answer.RetrievalSummary == nil {
 		return invalid(ErrorCodeAnswerInvalid, "published answer bundle is incomplete", nil)
 	}
 	modelRunID, err := foundation.ParseID(string(*answer.ModelRunID))
@@ -156,6 +163,45 @@ func projectPublishedAnswer(resultType AnswerResultType, raw json.RawMessage) (P
 			assistantText = decoded.Payload.Question
 			document, err = json.Marshal(decoded)
 		}
+	case AnswerResultWorkspaceAnalysis:
+		var decoded WorkspaceAnalysisAnswerResult
+		decoded, err = decodeWorkspaceAnalysisAnswer(raw)
+		if err == nil {
+			modelRunID = decoded.ModelRunRef
+			assistantText = decoded.Payload.AnswerMarkdown
+			citations = append(citations, decoded.Payload.Citations...)
+			document, err = json.Marshal(decoded)
+		}
+	case AnswerResultWorkspaceAnalysisRefusal:
+		var decoded WorkspaceAnalysisRefusalResult
+		decoded, err = decodeWorkspaceAnalysisRefusal(raw)
+		if err == nil {
+			if decoded.ModelRunRef != nil {
+				modelRunID = *decoded.ModelRunRef
+			}
+			assistantText = decoded.Payload.Summary
+			document, err = json.Marshal(decoded)
+		}
+	case AnswerResultWorkspaceAnalysisTermination:
+		status := WorkspaceAnalysisPublicationFailed
+		var persisted workspaceAnalysisNullableEnvelope[WorkspaceAnalysisTerminationPayload]
+		persisted, err = foundationstrictjson.DecodeObject[workspaceAnalysisNullableEnvelope[WorkspaceAnalysisTerminationPayload]](
+			raw, workspaceAnalysisDecodeLimits(), nil,
+		)
+		if err == nil && persisted.Payload != nil && persisted.Payload.TerminationReason == WorkspaceAnalysisCancelled {
+			status = WorkspaceAnalysisPublicationCancelled
+		}
+		var decoded WorkspaceAnalysisTerminationResult
+		if err == nil {
+			decoded, err = decodeWorkspaceAnalysisTermination(raw, status)
+		}
+		if err == nil {
+			if decoded.ModelRunRef != nil {
+				modelRunID = *decoded.ModelRunRef
+			}
+			assistantText = decoded.Payload.Summary
+			document, err = json.Marshal(decoded)
+		}
 	default:
 		return PublishedAnswerProjection{}, invalid(ErrorCodeAnswerInvalid, "answer result type is unsupported", nil)
 	}
@@ -189,10 +235,40 @@ const (
 // ValidateAnswerPublicationTransition 校验 Answer 只能从 pending 进入一个终态。
 func ValidateAnswerPublicationTransition(from, to AnswerPublicationStatus) error {
 	if from == AnswerPublicationPending &&
-		(to == AnswerPublicationCompleted || to == AnswerPublicationRefused || to == AnswerPublicationClarificationRequired) {
+		(to == AnswerPublicationCompleted || to == AnswerPublicationRefused || to == AnswerPublicationClarificationRequired ||
+			to == WorkspaceAnalysisPublicationFailed || to == WorkspaceAnalysisPublicationCancelled) {
 		return nil
 	}
 	return versionConflict(ErrorCodeAnswerTransitionInvalid, "answer publication transition is not allowed")
+}
+
+func workspaceAnalysisAnswerBundle(answer Answer) bool {
+	return answer.ResultType == AnswerResultWorkspaceAnalysis ||
+		answer.ResultType == AnswerResultWorkspaceAnalysisRefusal ||
+		answer.ResultType == AnswerResultWorkspaceAnalysisTermination ||
+		(answer.ResultType == AnswerResultClarification && answer.RetrievalSummary == nil)
+}
+
+func validateWorkspaceAnalysisAnswerBundle(answer Answer, seen map[foundation.ID]struct{}) error {
+	if answer.RetrievalSummary != nil {
+		return invalid(ErrorCodeAnswerInvalid, "workspace analysis answer cannot contain a rag retrieval summary", nil)
+	}
+	published, err := CanonicalizeWorkspaceAnalysisPublishedResult(answer.PublicationStatus, answer.ResultType, answer.Result)
+	if err != nil || published.Hash != answer.ResultHash || !bytes.Equal(answer.Result, published.Document) ||
+		(answer.ModelRunID == nil) != (published.ModelRunID == nil) {
+		return invalid(ErrorCodeAnswerInvalid, "workspace analysis answer result binding or hash is inconsistent", err)
+	}
+	if published.ModelRunID == nil {
+		return nil
+	}
+	modelRunID, parseErr := foundation.ParseID(string(*published.ModelRunID))
+	if parseErr != nil || modelRunID != *published.ModelRunID || *answer.ModelRunID != modelRunID {
+		return invalid(ErrorCodeAnswerInvalid, "workspace analysis answer model run identity is invalid", parseErr)
+	}
+	if _, duplicate := seen[modelRunID]; duplicate {
+		return invalid(ErrorCodeAnswerInvalid, "workspace analysis answer model run identity is reused", nil)
+	}
+	return nil
 }
 
 // ResultTypeForPublicationStatus 返回一个 Answer 发布终态唯一允许的结果类型；非终态或未知状态返回空值。

@@ -54,6 +54,9 @@ const (
 	MetricRAGOutcomeTotal MetricName = "rag.outcome_total"
 	// MetricRAGGraphNodeResultTotal 是 Eino RAG Graph 固定节点的运行结果计数。
 	MetricRAGGraphNodeResultTotal MetricName = "agent.rag.graph_node.result_total"
+	// MetricWorkspaceAnalysisOutcomeTotal 是受限工作区分析 Run 的持久终态计数。
+	// 它只接受固定 mode、Definition、outcome 和终止原因，不得携带任何运行身份。
+	MetricWorkspaceAnalysisOutcomeTotal MetricName = "workspace_analysis.outcome_total"
 )
 
 // MetricKind controls aggregation semantics in concrete adapters.
@@ -83,6 +86,7 @@ type metricDefinition struct {
 	labels   []string
 	allowed  map[string]struct{}
 	required map[string]struct{}
+	values   map[string]map[string]struct{}
 }
 
 var metricDefinitions = map[MetricName]metricDefinition{
@@ -109,20 +113,39 @@ var metricDefinitions = map[MetricName]metricDefinition{
 	MetricAgentResultTotal:         newMetricDefinition(MetricKindCounter, []string{"result", "error_code"}, []string{"result"}),
 	MetricRAGOutcomeTotal:          newMetricDefinition(MetricKindCounter, []string{"outcome", "error_code"}, []string{"outcome"}),
 	MetricRAGGraphNodeResultTotal:  newMetricDefinition(MetricKindCounter, []string{"node_kind", "result", "error_code"}, []string{"node_kind", "result"}),
+	MetricWorkspaceAnalysisOutcomeTotal: newMetricDefinitionWithValues(MetricKindCounter,
+		[]string{"mode", "definition", "outcome", "termination_reason"},
+		[]string{"mode", "definition", "outcome", "termination_reason"}, map[string][]string{
+			"mode":               {"workspace_analysis"},
+			"definition":         {"workspace-analysis-v1"},
+			"outcome":            {"completed", "refused", "clarification_required", "failure", "cancelled"},
+			"termination_reason": {"COMPLETED", "WORKSPACE_ANALYSIS_EVIDENCE_INSUFFICIENT", "WORKSPACE_ANALYSIS_CITATION_INVALID", "WORKSPACE_ANALYSIS_FAITHFULNESS_REJECTED", "WORKSPACE_ANALYSIS_MODEL_REFUSED", "WORKSPACE_ANALYSIS_CLARIFICATION_REQUIRED", "WORKSPACE_ANALYSIS_BUDGET_EXHAUSTED", "WORKSPACE_ANALYSIS_RECEIPT_INVALID", "WORKSPACE_ANALYSIS_RESULT_UNKNOWN", "WORKSPACE_ANALYSIS_DEADLINE_EXCEEDED", "WORKSPACE_ANALYSIS_MODEL_FAILED", "WORKSPACE_ANALYSIS_TOOL_FAILED", "WORKSPACE_ANALYSIS_RUNTIME_FAILED", "WORKSPACE_ANALYSIS_CANCELLED"},
+		}),
 }
 
 func newMetricDefinition(kind MetricKind, allowed, required []string) metricDefinition {
+	return newMetricDefinitionWithValues(kind, allowed, required, nil)
+}
+
+func newMetricDefinitionWithValues(kind MetricKind, allowed, required []string, values map[string][]string) metricDefinition {
 	definition := metricDefinition{
 		kind:     kind,
 		labels:   append([]string(nil), allowed...),
 		allowed:  make(map[string]struct{}, len(allowed)),
 		required: make(map[string]struct{}, len(required)),
+		values:   make(map[string]map[string]struct{}, len(values)),
 	}
 	for _, key := range allowed {
 		definition.allowed[key] = struct{}{}
 	}
 	for _, key := range required {
 		definition.required[key] = struct{}{}
+	}
+	for key, candidates := range values {
+		definition.values[key] = make(map[string]struct{}, len(candidates))
+		for _, candidate := range candidates {
+			definition.values[key][candidate] = struct{}{}
+		}
 	}
 	return definition
 }
@@ -164,6 +187,7 @@ func NewLabels(values map[string]string) (Labels, error) {
 
 var globallyAllowedMetricLabels = map[string]struct{}{
 	"queue": {}, "node_kind": {}, "result": {}, "error_code": {}, "shutdown_kind": {}, "component": {}, "phase": {}, "outcome": {},
+	"mode": {}, "definition": {}, "termination_reason": {},
 }
 
 var boundedMetricLabelValues = map[string]map[string]struct{}{
@@ -173,7 +197,16 @@ var boundedMetricLabelValues = map[string]map[string]struct{}{
 	"shutdown_kind": {"graceful": {}, "forced": {}},
 	"component":     {"eino_chat": {}},
 	"phase":         {"PLAN": {}, "AGENT": {}, "ANSWER": {}, "INITIAL": {}, "REPAIR": {}, "REDUCED": {}, "REVIEW": {}},
-	"outcome":       {"completed": {}, "refused": {}, "clarification_required": {}, "failure": {}},
+	"outcome":       {"completed": {}, "refused": {}, "clarification_required": {}, "failure": {}, "cancelled": {}},
+	"mode":          {"rag": {}, "workspace_analysis": {}},
+	"definition":    {"agent-rag-answer-v1": {}, "agent-rag-answer-v2": {}, "workspace-analysis-v1": {}},
+	"termination_reason": {
+		"COMPLETED": {}, "WORKSPACE_ANALYSIS_EVIDENCE_INSUFFICIENT": {}, "WORKSPACE_ANALYSIS_CITATION_INVALID": {},
+		"WORKSPACE_ANALYSIS_FAITHFULNESS_REJECTED": {}, "WORKSPACE_ANALYSIS_MODEL_REFUSED": {}, "WORKSPACE_ANALYSIS_CLARIFICATION_REQUIRED": {},
+		"WORKSPACE_ANALYSIS_BUDGET_EXHAUSTED": {}, "WORKSPACE_ANALYSIS_RECEIPT_INVALID": {}, "WORKSPACE_ANALYSIS_RESULT_UNKNOWN": {},
+		"WORKSPACE_ANALYSIS_DEADLINE_EXCEEDED": {}, "WORKSPACE_ANALYSIS_MODEL_FAILED": {}, "WORKSPACE_ANALYSIS_TOOL_FAILED": {},
+		"WORKSPACE_ANALYSIS_RUNTIME_FAILED": {}, "WORKSPACE_ANALYSIS_CANCELLED": {},
+	},
 }
 
 func isLongNumericIdentifier(value string) bool {
@@ -230,6 +263,11 @@ func (measurement Measurement) Validate() error {
 		if _, allowed := definition.allowed[key]; !allowed {
 			return ErrUnboundedMetricLabel
 		}
+		if values, bounded := definition.values[key]; bounded {
+			if _, allowed := values[measurement.Labels.values[key]]; !allowed {
+				return ErrUnboundedMetricLabel
+			}
+		}
 	}
 	for key := range definition.required {
 		if _, found := measurement.Labels.values[key]; !found {
@@ -273,6 +311,67 @@ func RecordTelemetryRequired(ctx context.Context, metrics Metrics, required bool
 		return err
 	}
 	return metrics.Record(ctx, measurement)
+}
+
+// NewWorkspaceAnalysisOutcomeMeasurement creates a terminal Run metric from
+// the persisted status and termination reason. Both values are checked as a
+// pair so an unknown status or an impossible reason cannot enter telemetry.
+// The metric intentionally contains no workspace, run, answer, tool, or
+// receipt identity.
+func NewWorkspaceAnalysisOutcomeMeasurement(status, terminationReason string) (Measurement, error) {
+	outcome, valid := workspaceAnalysisMetricOutcome(status)
+	if !valid || !workspaceAnalysisMetricReasonAllowed(status, terminationReason) {
+		return Measurement{}, ErrInvalidMetric
+	}
+	labels, err := NewLabels(map[string]string{
+		"mode":               "workspace_analysis",
+		"definition":         "workspace-analysis-v1",
+		"outcome":            outcome,
+		"termination_reason": terminationReason,
+	})
+	if err != nil {
+		return Measurement{}, err
+	}
+	return NewMeasurement(MetricWorkspaceAnalysisOutcomeTotal, MetricKindCounter, 1, labels)
+}
+
+func workspaceAnalysisMetricOutcome(status string) (string, bool) {
+	switch status {
+	case "succeeded":
+		return "completed", true
+	case "refused":
+		return "refused", true
+	case "clarification_required":
+		return "clarification_required", true
+	case "failed":
+		return "failure", true
+	case "cancelled":
+		return "cancelled", true
+	default:
+		return "", false
+	}
+}
+
+func workspaceAnalysisMetricReasonAllowed(status, reason string) bool {
+	allowed := workspaceAnalysisMetricReasons
+	_, ok := allowed[status][reason]
+	return ok
+}
+
+var workspaceAnalysisMetricReasons = map[string]map[string]struct{}{
+	"succeeded": {"COMPLETED": {}},
+	"refused": {
+		"WORKSPACE_ANALYSIS_EVIDENCE_INSUFFICIENT": {}, "WORKSPACE_ANALYSIS_CITATION_INVALID": {},
+		"WORKSPACE_ANALYSIS_FAITHFULNESS_REJECTED": {}, "WORKSPACE_ANALYSIS_MODEL_REFUSED": {},
+	},
+	"clarification_required": {"WORKSPACE_ANALYSIS_CLARIFICATION_REQUIRED": {}},
+	"failed": {
+		"WORKSPACE_ANALYSIS_BUDGET_EXHAUSTED": {}, "WORKSPACE_ANALYSIS_RECEIPT_INVALID": {},
+		"WORKSPACE_ANALYSIS_RESULT_UNKNOWN": {}, "WORKSPACE_ANALYSIS_DEADLINE_EXCEEDED": {},
+		"WORKSPACE_ANALYSIS_MODEL_FAILED": {}, "WORKSPACE_ANALYSIS_TOOL_FAILED": {},
+		"WORKSPACE_ANALYSIS_RUNTIME_FAILED": {},
+	},
+	"cancelled": {"WORKSPACE_ANALYSIS_CANCELLED": {}},
 }
 
 type noopMetrics struct{}

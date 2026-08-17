@@ -38,7 +38,7 @@ func TestCanonicalizeQuestionRequestOwnsScopeOptionsAndHash(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if canonical.QuestionText != "How does runtime recovery work?" || canonical.AnswerDepth != AnswerDepthStandard ||
+	if canonical.Mode != QuestionModeRAG || canonical.QuestionText != "How does runtime recovery work?" || canonical.AnswerDepth != AnswerDepthStandard ||
 		canonical.OutputFormat != OutputFormatMarkdown || len(canonical.Scope.Filter.SourceIDs) != 2 ||
 		canonical.Scope.Filter.SourceIDs[0] != "10000000-0000-4000-8000-000000000003" ||
 		len(canonical.Scope.Filter.PathPrefixes) != 1 || canonical.Scope.Filter.PathPrefixes[0] != "docs/runtime" ||
@@ -71,6 +71,53 @@ func TestCanonicalizeQuestionRequestOwnsScopeOptionsAndHash(t *testing.T) {
 	}
 }
 
+func TestCanonicalizeQuestionModeDefaultsToRAGAndRejectsUnknown(t *testing.T) {
+	for _, test := range []struct {
+		input QuestionMode
+		want  QuestionMode
+	}{
+		{want: QuestionModeRAG},
+		{input: QuestionModeRAG, want: QuestionModeRAG},
+		{input: QuestionModeWorkspaceAnalysis, want: QuestionModeWorkspaceAnalysis},
+	} {
+		got, err := CanonicalizeQuestionMode(test.input)
+		if err != nil || got != test.want {
+			t.Fatalf("CanonicalizeQuestionMode(%q)=%q, err=%v, want %q", test.input, got, err, test.want)
+		}
+	}
+	_, err := CanonicalizeQuestionMode("unbounded_agent")
+	var typed *foundation.Error
+	if !errors.As(err, &typed) || typed.Code != WorkspaceAnalysisModeInvalidCode || typed.Kind != foundation.ErrorInvalidInput {
+		t.Fatalf("unknown mode err=%v", err)
+	}
+}
+
+func TestQuestionRequestHashPreservesRAGV1AndSeparatesWorkspaceAnalysisV2(t *testing.T) {
+	base := QuestionRequest{
+		WorkspaceID: testWorkspaceID, ConversationID: testConversationID,
+		QuestionText: "How does runtime recovery work?", Scope: QuestionScope{RetrievalMode: retrievaldomain.SearchModeHybrid},
+	}
+	omittedHash, err := ComputeQuestionRequestHash(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	explicitRAG := base
+	explicitRAG.Mode = QuestionModeRAG
+	ragHash, err := ComputeQuestionRequestHash(explicitRAG)
+	if err != nil || ragHash != omittedHash || ragHash != "be89092d1d00b9a1360fa3ec81ceea575b40166dce4bd4410a726c344ddd2bd6" {
+		t.Fatalf("omitted hash=%s explicit rag hash=%s err=%v", omittedHash, ragHash, err)
+	}
+	workspaceAnalysis := base
+	workspaceAnalysis.Mode = QuestionModeWorkspaceAnalysis
+	workspaceHash, err := ComputeQuestionRequestHash(workspaceAnalysis)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if workspaceHash != "c9a855df8d3eb12dac678a8474b2ec6f58f1f69c21007b29755b97950a32ded3" || workspaceHash == ragHash {
+		t.Fatalf("workspace analysis hash=%s rag hash=%s", workspaceHash, ragHash)
+	}
+}
+
 func TestCanonicalizeQuestionRequestRejectsUnsafeBoundaries(t *testing.T) {
 	base := QuestionRequest{
 		WorkspaceID: testWorkspaceID, ConversationID: testConversationID,
@@ -78,8 +125,9 @@ func TestCanonicalizeQuestionRequestRejectsUnsafeBoundaries(t *testing.T) {
 	}
 	invalidUTF8 := string([]byte{'q', 0xff})
 	tests := []struct {
-		name   string
-		mutate func(*QuestionRequest)
+		name     string
+		wantCode string
+		mutate   func(*QuestionRequest)
 	}{
 		{name: "invalid workspace", mutate: func(value *QuestionRequest) { value.WorkspaceID = "bad" }},
 		{name: "same identities", mutate: func(value *QuestionRequest) { value.ConversationID = value.WorkspaceID }},
@@ -89,6 +137,32 @@ func TestCanonicalizeQuestionRequestRejectsUnsafeBoundaries(t *testing.T) {
 		{name: "oversized question", mutate: func(value *QuestionRequest) { value.QuestionText = strings.Repeat("x", MaxQuestionBytes+1) }},
 		{name: "unknown depth", mutate: func(value *QuestionRequest) { value.AnswerDepth = "verbose" }},
 		{name: "unknown format", mutate: func(value *QuestionRequest) { value.OutputFormat = "json" }},
+		{name: "unknown mode", wantCode: WorkspaceAnalysisModeInvalidCode, mutate: func(value *QuestionRequest) { value.Mode = "unbounded_agent" }},
+		{name: "workspace analysis web scope", wantCode: WorkspaceAnalysisScopeUnsupportedCode, mutate: func(value *QuestionRequest) {
+			value.Mode = QuestionModeWorkspaceAnalysis
+			value.Scope.AllowWeb = true
+		}},
+		{name: "workspace analysis original source scope", wantCode: WorkspaceAnalysisScopeUnsupportedCode, mutate: func(value *QuestionRequest) {
+			value.Mode = QuestionModeWorkspaceAnalysis
+			value.Scope.AllowOriginalSources = true
+		}},
+		{name: "workspace analysis source filter", wantCode: WorkspaceAnalysisScopeUnsupportedCode, mutate: func(value *QuestionRequest) {
+			value.Mode = QuestionModeWorkspaceAnalysis
+			value.Scope.Filter.SourceIDs = []foundation.ID{"10000000-0000-4000-8000-000000000003"}
+		}},
+		{name: "workspace analysis version filter", wantCode: WorkspaceAnalysisScopeUnsupportedCode, mutate: func(value *QuestionRequest) {
+			value.Mode = QuestionModeWorkspaceAnalysis
+			value.Scope.Filter.SourceVersionIDs = []foundation.ID{"10000000-0000-4000-8000-000000000004"}
+		}},
+		{name: "workspace analysis path filter", wantCode: WorkspaceAnalysisScopeUnsupportedCode, mutate: func(value *QuestionRequest) {
+			value.Mode = QuestionModeWorkspaceAnalysis
+			value.Scope.Filter.PathPrefixes = []string{"docs"}
+		}},
+		{name: "workspace analysis time filter", wantCode: WorkspaceAnalysisScopeUnsupportedCode, mutate: func(value *QuestionRequest) {
+			value.Mode = QuestionModeWorkspaceAnalysis
+			capturedAt := time.Date(2026, 8, 16, 0, 0, 0, 0, time.UTC)
+			value.Scope.Filter.CapturedAtFrom = &capturedAt
+		}},
 		{name: "unsafe path", mutate: func(value *QuestionRequest) { value.Scope.Filter.PathPrefixes = []string{"../secret"} }},
 		{name: "oversized scope", mutate: func(value *QuestionRequest) {
 			value.Scope.Filter.PathPrefixes = []string{strings.Repeat("x", MaxQuestionScopeBytes)}
@@ -100,7 +174,11 @@ func TestCanonicalizeQuestionRequestRejectsUnsafeBoundaries(t *testing.T) {
 			test.mutate(&value)
 			_, err := CanonicalizeQuestionRequest(value)
 			var typed *foundation.Error
-			if !errors.As(err, &typed) || typed.Code != ErrorCodeQuestionInvalid || typed.Kind != foundation.ErrorInvalidInput {
+			wantCode := test.wantCode
+			if wantCode == "" {
+				wantCode = ErrorCodeQuestionInvalid
+			}
+			if !errors.As(err, &typed) || typed.Code != wantCode || typed.Kind != foundation.ErrorInvalidInput {
 				t.Fatalf("err=%v", err)
 			}
 		})

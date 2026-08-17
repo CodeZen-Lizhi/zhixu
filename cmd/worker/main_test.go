@@ -17,10 +17,12 @@ import (
 
 	agentworkflow "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/workflow"
 	agentapplication "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
+	agentdomain "github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/capability"
 	captureapplication "github.com/CodeZen-Lizhi/zhixu/internal/capture/application"
 	captureprofile "github.com/CodeZen-Lizhi/zhixu/internal/capture/profile"
 	captureworkflow "github.com/CodeZen-Lizhi/zhixu/internal/capture/workflow"
+	conversationworkflow "github.com/CodeZen-Lizhi/zhixu/internal/conversation/workflow"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	memorydomain "github.com/CodeZen-Lizhi/zhixu/internal/memory/domain"
 	modelsettingsdomain "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/domain"
@@ -29,6 +31,7 @@ import (
 	platformmodels "github.com/CodeZen-Lizhi/zhixu/internal/platform/models"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
 	retrievaldomain "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
+	toolcatalog "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/catalog"
 	toolworkflow "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/workflow"
 	toolsapplication "github.com/CodeZen-Lizhi/zhixu/internal/tools/application"
 	toolsdomain "github.com/CodeZen-Lizhi/zhixu/internal/tools/domain"
@@ -369,6 +372,71 @@ func TestAgentWorkflowReadinessRejectsPartialChatComposition(t *testing.T) {
 	}
 }
 
+func TestWorkspaceAnalysisExecutorRegistrationRejectsPartialComposition(t *testing.T) {
+	if err := registerWorkerWorkspaceAnalysisExecutors(nil, agentWorkflowComponents{}); err != nil {
+		t.Fatalf("empty workspace analysis executor set should remain disabled: %v", err)
+	}
+	for _, partial := range []agentWorkflowComponents{
+		{workspaceInspect: &agentworkflow.WorkspaceAnalysisInspectExecutor{}},
+		{workspaceRetrieve: &agentworkflow.WorkspaceAnalysisRetrieveExecutor{}},
+		{workspaceRead: &agentworkflow.WorkspaceAnalysisReadEvidenceExecutor{}},
+		{workspaceSynthesize: &agentworkflow.WorkspaceAnalysisSynthesizeExecutor{}},
+		{workspaceValidate: &agentworkflow.WorkspaceAnalysisValidateCitationsExecutor{}},
+		{workspaceReview: &agentworkflow.WorkspaceAnalysisReviewPublishExecutor{}},
+		{
+			workspaceInspect:  &agentworkflow.WorkspaceAnalysisInspectExecutor{},
+			workspaceRetrieve: &agentworkflow.WorkspaceAnalysisRetrieveExecutor{},
+		},
+	} {
+		err := registerWorkerWorkspaceAnalysisExecutors(nil, partial)
+		var classified *foundation.Error
+		if !errors.As(err, &classified) || classified.Code != "WORKER_WORKSPACE_ANALYSIS_EXECUTORS_UNAVAILABLE" {
+			t.Fatalf("partial=%+v error=%v", partial, err)
+		}
+	}
+	complete := agentWorkflowComponents{
+		workspaceInspect:    &agentworkflow.WorkspaceAnalysisInspectExecutor{},
+		workspaceRetrieve:   &agentworkflow.WorkspaceAnalysisRetrieveExecutor{},
+		workspaceRead:       &agentworkflow.WorkspaceAnalysisReadEvidenceExecutor{},
+		workspaceSynthesize: &agentworkflow.WorkspaceAnalysisSynthesizeExecutor{},
+		workspaceValidate:   &agentworkflow.WorkspaceAnalysisValidateCitationsExecutor{},
+		workspaceReview:     &agentworkflow.WorkspaceAnalysisReviewPublishExecutor{},
+	}
+	err := registerWorkerWorkspaceAnalysisExecutors(nil, complete)
+	var classified *foundation.Error
+	if !errors.As(err, &classified) || classified.Code != "WORKER_WORKSPACE_ANALYSIS_EXECUTOR_REGISTRY_UNAVAILABLE" {
+		t.Fatalf("complete nil-registry error=%v", err)
+	}
+}
+
+func TestWorkspaceAnalysisUnavailableSkipsAllWorkflowExecutorRegistrations(t *testing.T) {
+	catalog, err := workflowapplication.NewValidationCatalog([]int{1}, capability.All())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := workflowapplication.NewExecutorRegistry(catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Register("fixed-rag", 1, workerUnavailableExecutor{code: agentworkflow.ErrorCodeCapabilityUnavailable}); err != nil {
+		t.Fatal(err)
+	}
+	components := agentWorkflowComponents{
+		workspaceAnalysisCapability: agentCapabilityStatus{code: agentapplication.ErrorCodeWorkspaceAnalysisCapabilityUnavailable},
+	}
+	if err := registerWorkerWorkspaceAnalysisExecutors(registry, components); err != nil {
+		t.Fatalf("unavailable optional composition must not block fixed executor registry: %v", err)
+	}
+	if err := registry.Freeze(); err != nil {
+		t.Fatal(err)
+	}
+	for _, node := range conversationworkflow.RegisteredWorkspaceAnalysisDefinition().Graph.Nodes {
+		if registry.SupportsContract(node.Kind, node.InputSchemaVersion) {
+			t.Fatalf("workspace analysis executor remained registered: %s@%d", node.Kind, node.InputSchemaVersion)
+		}
+	}
+}
+
 func TestWorkerToolSubsetContainsOnlyApprovedRealReadExecutors(t *testing.T) {
 	want := []toolsdomain.ToolRef{
 		{Name: "SearchKnowledge", Version: 1}, {Name: "ReadSource", Version: 1},
@@ -457,6 +525,40 @@ func TestValidateRAGWorkerJobTimeoutRequiresAttemptHeadroom(t *testing.T) {
 	if err := validateRAGWorkerJobTimeout(minimumJobTimeout, modelCallTimeout); err != nil {
 		t.Fatalf("validate timeout with headroom: %v", err)
 	}
+}
+
+func TestWorkspaceAnalysisWorkerRuntimeReadinessUsesFrozenToolTimeouts(t *testing.T) {
+	contracts, err := toolcatalog.NewFrozenContractRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Defaults()
+	if err := validateWorkspaceAnalysisWorkerRuntime(cfg, cfg.ChatTimeout, contracts); err != nil {
+		t.Fatalf("default runtime readiness: %v", err)
+	}
+
+	invalidJob := cfg
+	invalidJob.WorkerJobTimeout = time.Second
+	if err := validateWorkspaceAnalysisWorkerRuntime(invalidJob, cfg.ChatTimeout, contracts); workspaceAnalysisWorkerErrorCode(err) != "WORKER_WORKSPACE_ANALYSIS_RUNTIME_BUDGET_INVALID" {
+		t.Fatalf("job timeout error=%v", err)
+	}
+	invalidLease := cfg
+	invalidLease.WorkflowLeaseDuration = agentdomain.WorkspaceAnalysisV1DurableCompletionMargin
+	invalidLease.WorkflowHeartbeatInterval = time.Second
+	if err := validateWorkspaceAnalysisWorkerRuntime(invalidLease, cfg.ChatTimeout, contracts); workspaceAnalysisWorkerErrorCode(err) != "WORKER_WORKSPACE_ANALYSIS_RUNTIME_BUDGET_INVALID" {
+		t.Fatalf("lease error=%v", err)
+	}
+	if err := validateWorkspaceAnalysisWorkerRuntime(cfg, cfg.ChatTimeout, nil); workspaceAnalysisWorkerErrorCode(err) != "WORKER_WORKSPACE_ANALYSIS_RUNTIME_CONTRACT_UNAVAILABLE" {
+		t.Fatalf("contracts error=%v", err)
+	}
+}
+
+func workspaceAnalysisWorkerErrorCode(err error) string {
+	var classified *foundation.Error
+	if errors.As(err, &classified) {
+		return classified.Code
+	}
+	return ""
 }
 
 func TestDispatchCaptureOutboxUsesBoundedBatchAndRedactedLogs(t *testing.T) {

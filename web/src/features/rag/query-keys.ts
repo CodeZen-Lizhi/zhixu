@@ -9,4 +9,6 @@ export const ragQueryKeys = {
     [...ragQueryKeys.turns(workspaceId, conversationId), "latest"] as const,
   answer: (workspaceId: string, answerId: string) =>
     [...ragQueryKeys.all(workspaceId), "answer", answerId] as const,
+  analysisTimeline: (workspaceId: string, answerId: string) =>
+    [...ragQueryKeys.answer(workspaceId, answerId), "analysis-timeline"] as const,
 };

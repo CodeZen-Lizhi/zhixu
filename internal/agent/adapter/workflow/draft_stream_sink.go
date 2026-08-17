@@ -43,6 +43,15 @@ func beginRAGDraftStream(
 	store agentapplication.DraftStreamStore,
 	binding agentapplication.DraftStreamBinding,
 ) (*ragDraftStreamSink, error) {
+	return beginDraftStream(ctx, store, binding, ragDraftStreamTTL)
+}
+
+func beginDraftStream(
+	ctx context.Context,
+	store agentapplication.DraftStreamStore,
+	binding agentapplication.DraftStreamBinding,
+	ttl time.Duration,
+) (*ragDraftStreamSink, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -51,7 +60,7 @@ func beginRAGDraftStream(
 	}
 	session, err := store.BeginDraftStream(ctx, agentapplication.BeginDraftStreamCommand{
 		DraftStreamBinding: binding,
-		TTL:                ragDraftStreamTTL,
+		TTL:                ttl,
 	})
 	if err != nil {
 		return nil, err
