@@ -373,3 +373,25 @@ Eino/eino-ext 已成为生产唯一 AI Runtime，旧 direct 实现已删除并�
 ### Status
 
 [OK] **Completed**
+
+
+## Session 64: 完成 TODO 8 前端 OpenAPI 客户端与 Zod 接入
+
+**Date**: 2026-08-19
+**Task**: 完成 TODO 8 前端 OpenAPI 客户端与 Zod 接入
+**Branch**: `dev`
+
+### Summary
+
+完成 189 个 OpenAPI operation 的生成客户端与 26 个生产 API 模块全量迁移，保留共享 Transport、严格响应边界及专用流与文件 Adapter；OpenAPI 漂移、前端全量门禁和 Chromium smoke 通过，并同步需求优化清单。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `75e9c569` | (see git log) |
+| `22dcd506` | (see git log) |
+
+### Status
+
+[OK] **Completed**
