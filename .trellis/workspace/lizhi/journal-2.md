@@ -352,3 +352,24 @@ Eino/eino-ext 已成为生产唯一 AI Runtime，旧 direct 实现已删除并�
 ### Next Steps
 
 - 下次执行 ./zhixu up 或 restart 时清理旧版 exited one-shot 容器
+
+
+## Session 63: 交付 OpenAPI 契约门禁
+
+**Date**: 2026-08-18
+**Task**: 交付 OpenAPI 契约门禁
+**Branch**: `dev`
+
+### Summary
+
+锁定 Spectral 与 oasdiff，补齐 OpenAPI 通用错误响应、SSE 和 discriminator 契约，接入 Makefile/CI，并完成文档、规范与独立审查。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `54c24fce` | (see git log) |
+
+### Status
+
+[OK] **Completed**
