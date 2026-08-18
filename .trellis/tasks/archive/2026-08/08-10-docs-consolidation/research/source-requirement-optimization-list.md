@@ -1,5 +1,7 @@
 # 2026-08-01 需求优化清单
 
+> 状态同步（2026-08-19）：TODO 7、TODO 8 已依据对应 Trellis 任务、路线图和自动化验收结果收口；本文件继续保留原始需求与验收边界，详细实现证据以任务产物和 `docs/roadmap.md` 为准。
+
 ## TODO 概览
 
 > 人天为单名熟悉项目的工程师完成实现与重点验证的初步预估，不含需求澄清、外部协调和发布观察。
@@ -10,14 +12,14 @@
 - [ ] TODO 4. 自动合成可持续演进的知识笔记（P0，高优先级，25-35 人天）：持续整合多篇资料，去重补全、保留冲突和缺口，并附可核验来源。
 - [x] TODO 5. 将后端 HTTP 层从 Chi 迁移到 Gin（P0，已完成，15-25 人天）：采用国内使用广泛的 Gin 和 validator，保持现有 HTTP、安全与 SSE 契约兼容。
 - [x] TODO 6. 使用 Eino 收敛 AI 通用基础设施（P0，已完成，20-30 人天）：以 Eino/eino-ext 承担模型、Tool Calling、流式输出和 Agent 通用编排，并作为 TODO 2 的基础设施前置。
-- [ ] TODO 7. 使用 Spectral 和 oasdiff 建立 OpenAPI 契约门禁（P1，中优先级，3-5 人天）：用成熟标准工具替换通用手写校验，只保留项目专属断言。
-- [ ] TODO 8. 生成前端 OpenAPI 客户端并接入 Zod（P1，中优先级，8-12 人天）：生成类型和请求代码，逐步删除重复的手写 Transport 与 DTO 解析。
+- [x] TODO 7. 使用 Spectral 和 oasdiff 建立 OpenAPI 契约门禁（P1，已完成，3-5 人天）：用成熟标准工具替换通用手写校验，只保留项目专属断言。
+- [x] TODO 8. 生成前端 OpenAPI 客户端并接入 Zod（P1，已完成，8-12 人天）：生成类型和请求代码，逐步删除重复的手写 Transport 与 DTO 解析。
 - [ ] TODO 9. 使用 Testcontainers-Go 管理数据库集成测试（P0，GORM 迁移前置，5-8 人天）：自动创建、迁移和销毁 PostgreSQL/pgvector 测试环境，并作为 Atlas、GORM 与 River 数据库门禁。
 - [ ] TODO 10. 将应用数据访问层全面迁移到 GORM（P0，高优先级、高风险，80-120 人天）：用 GORM 统一 Repository 和事务入口，复杂 PostgreSQL 查询继续通过 GORM Raw/Exec 执行。
 - [ ] TODO 11. 评估并接入 gin-contrib/sessions（P2，低优先级，5-8 人天）：在 Gin 和 GORM 迁移完成后，仅替换框架能够完整覆盖的 Session 通用机制。
 - [x] TODO 12. 优先使用浏览器原生 EventSource（P2，已完成，3-5 人天）：替换可由 Web 标准覆盖的 SSE 解析与重连代码，保留必要的最小 Fetch 适配器。
 
-依赖顺序：TODO 6 支撑 TODO 2；TODO 7 完成后再执行 TODO 8；数据库方向按 TODO 9 → TODO 3 → TODO 10 推进，TODO 3 的 Atlas 是唯一 Schema 迁移事实源；TODO 5 和 TODO 10 完成后再执行 TODO 11。
+依赖顺序：TODO 6 支撑 TODO 2；TODO 7 → TODO 8 已按依赖顺序完成；数据库方向按 TODO 9 → TODO 3 → TODO 10 推进，TODO 3 的 Atlas 是唯一 Schema 迁移事实源；TODO 5 和 TODO 10 完成后再执行 TODO 11。
 
 ## TODO 1. 固定 Docker 页面入口并取消一次性控制凭证
 
@@ -227,9 +229,10 @@
 
 ## TODO 7. 使用 Spectral 和 oasdiff 建立 OpenAPI 契约门禁
 
-- [ ] 状态：待规划（标准工具替换）
-- 优先级：P1（中优先级）
-- 预估工期：3-5 人天
+- [x] 状态：已收口（2026-08-18）
+- 优先级：P1（已完成）
+- 预估工期：3-5 人天（仅作已完成事项的规模参考）
+- 发布说明：Spectral `6.16.3` 与 oasdiff `v1.29.1` 已锁定并接入 Makefile/CI；项目代码保留标准工具无法表达的专属契约断言，Breaking Change 基线与漂移门禁均可复现执行。
 
 ### 当前问题
 
@@ -256,9 +259,10 @@
 
 ## TODO 8. 生成前端 OpenAPI 客户端并接入 Zod
 
-- [ ] 状态：待规划（依赖 TODO 7）
-- 优先级：P1（中优先级）
-- 预估工期：8-12 人天
+- [x] 状态：已收口（2026-08-19）
+- 优先级：P1（已完成）
+- 预估工期：8-12 人天（仅作已完成事项的规模参考）
+- 发布说明：189 个 operation 已按 26 个稳定领域 tag 生成并完成生产接入；普通 JSON 使用对应 `*ApiRaw`，关键不可信响应保留 Zod/strict owner，SSE、multipart 和 Blob 仅保留必要 Adapter。生成漂移、前端 lint/typecheck/test/build 与 Chromium smoke 均已通过。
 
 ### 当前问题
 
