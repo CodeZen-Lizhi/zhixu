@@ -182,7 +182,7 @@ describe("Document History API boundary", () => {
 
     const call = vi.mocked(fetch).mock.calls[0];
     expect(call?.[0]).toBe(`/api/v1/workspaces/${workspaceId}/documents/${documentId}/history?limit=30&cursor=signed-next-cursor`);
-    expect(call?.[1]?.method).toBeUndefined();
+    expect(call?.[1]?.method).toBe("GET");
   });
 
   it("compares exact refs and binds the response to the requested HEAD and path", async () => {

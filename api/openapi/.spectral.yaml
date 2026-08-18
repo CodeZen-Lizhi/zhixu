@@ -2,8 +2,8 @@ extends:
   - spectral:oas
 
 rules:
-  # TODO 8 will revisit generator-driven tags and descriptions based on client value.
-  operation-tags: off
+  # Tags are the stable module boundary for the generated typescript-fetch client.
+  operation-tags: error
   operation-description: off
 
   # This self-hosted project has no truthful public maintenance contact to publish.

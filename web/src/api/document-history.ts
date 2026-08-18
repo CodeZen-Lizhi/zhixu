@@ -1,7 +1,12 @@
 /** Document 文件历史、比较与恢复的唯一 HTTP 边界。 */
 
-import { authFetch } from "./auth";
 import { strictJson } from "./exports";
+import { DocumentHistoryApi } from "./generated/apis/DocumentHistoryApi";
+import {
+  generatedConfiguration,
+  generatedRawResponse,
+  generatedRequestInit,
+} from "./generated-client";
 import { canonicalUuidPattern as uuidPattern, hasExactKeys, isAbortError, isRecord } from "../shared/codec";
 
 export type DocumentHistoryEntryKind = "MANAGED" | "EXTERNAL" | "CURRENT_CHANGE";
@@ -173,6 +178,7 @@ const encoder = new TextEncoder();
 const maxCursorBytes = 4096;
 const maxContentBytes = 10 * 1024 * 1024;
 const maxPatchBytes = 2 * 1024 * 1024;
+const documentHistoryApi = new DocumentHistoryApi(generatedConfiguration);
 
 const baseEntryKeys = ["kind", "commit", "parent_commits", "author_name", "author_email", "committed_at", "summary"] as const;
 const managedEntryKeys = [
@@ -509,13 +515,10 @@ const decodeProblem = (payload: unknown, status: number): DocumentHistoryApiErro
   }
 };
 
-const request = async (path: string, init: RequestInit, successStatuses: readonly number[]): Promise<unknown> => {
-  const headers = new Headers(init.headers);
-  headers.set("Accept", "application/json");
-  if (init.body !== undefined) headers.set("Content-Type", "application/json");
+const request = async (operation: Promise<Response>, successStatuses: readonly number[]): Promise<unknown> => {
   let response: Response;
   try {
-    response = await authFetch(path, { ...init, headers });
+    response = await operation;
   } catch (error: unknown) {
     if (isAbortError(error)) throw error;
     throw new DocumentHistoryApiError("NETWORK_ERROR", "NETWORK_ERROR", "无法连接文档历史 API。", { retryable: true, cause: error });
@@ -578,8 +581,6 @@ const requireIdempotencyKey = (value: unknown): string => {
   return value;
 };
 
-const withSignal = (signal?: AbortSignal): RequestInit => signal === undefined ? {} : { signal };
-
 export const isDocumentHistoryId = (value: string): boolean => uuidPattern.test(value);
 
 export const listDocumentHistory = async (
@@ -589,13 +590,12 @@ export const listDocumentHistory = async (
   const workspaceId = requireUuid(input.workspaceId, "workspaceId");
   const documentId = requireUuid(input.documentId, "documentId");
   const limit = requirePositiveInteger(input.limit ?? 30, "limit", 50);
-  const query = new URLSearchParams({ limit: String(limit) });
-  if (input.cursor !== undefined) query.set("cursor", requireCursor(input.cursor));
-  const payload = await request(
-    `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/documents/${encodeURIComponent(documentId)}/history?${query.toString()}`,
-    withSignal(signal),
-    [200],
-  );
+  const payload = await request(generatedRawResponse(documentHistoryApi.listDocumentHistoryRaw({
+    workspaceId,
+    documentId,
+    limit,
+    ...(input.cursor === undefined ? {} : { cursor: requireCursor(input.cursor) }),
+  }, generatedRequestInit(signal))), [200]);
   return decodeDocumentHistoryPage(payload, { workspaceId, documentId });
 };
 
@@ -610,13 +610,13 @@ export const compareDocumentHistory = async (
   const left = requireVersionRef(input.left, "left");
   const right = requireVersionRef(input.right, "right");
   if (left === right) throw invalidRequest("compare");
-  const query = new URLSearchParams({ left, right });
   const binding = { workspaceId, documentId, expectedHead, expectedPath, left, right };
-  const payload = await request(
-    `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/documents/${encodeURIComponent(documentId)}/history/compare?${query.toString()}`,
-    withSignal(signal),
-    [200],
-  );
+  const payload = await request(generatedRawResponse(documentHistoryApi.compareDocumentHistoryRaw({
+    left,
+    right,
+    workspaceId,
+    documentId,
+  }, generatedRequestInit(signal))), [200]);
   return decodeDocumentHistoryCompare(payload, binding);
 };
 
@@ -631,15 +631,14 @@ export const createDocumentRestorePreview = async (
     expectedHead: requireObjectId(input.expectedHead, "expectedHead"),
     expectedDocumentVersion: requirePositiveInteger(input.expectedDocumentVersion, "expectedDocumentVersion"),
   };
-  const payload = await request(
-    `/api/v1/workspaces/${encodeURIComponent(binding.workspaceId)}/documents/${encodeURIComponent(binding.documentId)}/restore-previews`,
-    {
-      method: "POST",
-      body: JSON.stringify({ target_commit: binding.targetCommit, expected_document_version: binding.expectedDocumentVersion }),
-      ...withSignal(signal),
+  const payload = await request(generatedRawResponse(documentHistoryApi.createDocumentRestorePreviewRaw({
+    workspaceId: binding.workspaceId,
+    documentId: binding.documentId,
+    documentRestorePreviewRequest: {
+      target_commit: binding.targetCommit,
+      expected_document_version: binding.expectedDocumentVersion,
     },
-    [200],
-  );
+  }, generatedRequestInit(signal))), [200]);
   return decodeDocumentRestorePreview(payload, binding);
 };
 
@@ -649,20 +648,16 @@ export const createDocumentRestoreProposal = async (
 ): Promise<DocumentRestoreProposalResult> => {
   const workspaceId = requireUuid(input.workspaceId, "workspaceId");
   const documentId = requireUuid(input.documentId, "documentId");
-  const payload = await request(
-    `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/documents/${encodeURIComponent(documentId)}/restore-proposals`,
-    {
-      method: "POST",
-      headers: { "Idempotency-Key": requireIdempotencyKey(input.idempotencyKey) },
-      body: JSON.stringify({
-        target_commit: requireObjectId(input.targetCommit, "targetCommit"),
-        expected_head: requireObjectId(input.expectedHead, "expectedHead"),
-        expected_document_version: requirePositiveInteger(input.expectedDocumentVersion, "expectedDocumentVersion"),
-        preview_hash: requireHash(input.previewHash, "previewHash"),
-      }),
-      ...withSignal(signal),
+  const payload = await request(generatedRawResponse(documentHistoryApi.createDocumentRestoreProposalRaw({
+    idempotencyKey: requireIdempotencyKey(input.idempotencyKey),
+    workspaceId,
+    documentId,
+    documentRestoreProposalRequest: {
+      target_commit: requireObjectId(input.targetCommit, "targetCommit"),
+      expected_head: requireObjectId(input.expectedHead, "expectedHead"),
+      expected_document_version: requirePositiveInteger(input.expectedDocumentVersion, "expectedDocumentVersion"),
+      preview_hash: requireHash(input.previewHash, "previewHash"),
     },
-    [200, 201],
-  );
+  }, generatedRequestInit(signal))), [200, 201]);
   return decodeDocumentRestoreProposal(payload);
 };

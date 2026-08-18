@@ -1,6 +1,11 @@
-import { authFetch } from "./auth";
 import { strictJson } from "./exports";
-import { canonicalUuidPattern as uuidPattern, hasOnlyKeys } from "../shared/codec";
+import { GitSyncApi } from "./generated/apis/GitSyncApi";
+import {
+  generatedConfiguration,
+  generatedRawResponse,
+  generatedRequestInit,
+} from "./generated-client";
+import { canonicalUuidPattern as uuidPattern, hasOnlyKeys, isAbortError } from "../shared/codec";
 
 export type GitSecretAction = { action: "keep" | "clear" } | { action: "replace"; value: string };
 export type GitSyncRunStatus = "PENDING" | "FETCHING" | "COMPARING" | "FAST_FORWARDING" | "PUSHING" | "VERIFYING" | "SUCCEEDED" | "CONFLICT" | "FAILED" | "STALE" | "MANUAL_RECOVERY_REQUIRED";
@@ -119,6 +124,7 @@ const rfc3339Pattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\
 const errorCodePattern = /^[A-Z][A-Z0-9_]{0,127}$/;
 const maxCursorBytes = 2048;
 const encoder = new TextEncoder();
+const gitSyncApi = new GitSyncApi(generatedConfiguration);
 
 const record = (value: unknown, field: string): Record<string, unknown> => {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw boundary(field);
@@ -345,7 +351,12 @@ export const decodeGitSyncStatus = (input: unknown): GitSyncStatus => {
 
 const parseResponse = async (response: Response): Promise<unknown> => {
   let body: unknown;
-  try { body = strictJson(await response.text()); } catch { throw new GitSyncApiError("INVALID_RESPONSE", "Git 同步 API 返回了无效或包含重复字段的 JSON。", response.status, false); }
+  try {
+    body = strictJson(await response.text());
+  } catch (error: unknown) {
+    if (isAbortError(error)) throw error;
+    throw new GitSyncApiError("INVALID_RESPONSE", "Git 同步 API 返回了无效或包含重复字段的 JSON。", response.status, false);
+  }
   if (response.ok) return body;
   try {
     const problem = record(body, "problem");
@@ -362,13 +373,11 @@ const parseResponse = async (response: Response): Promise<unknown> => {
   }
 };
 
-const request = async (path: string, init: RequestInit, signal?: AbortSignal): Promise<unknown> => {
+const request = async (operation: Promise<Response>): Promise<unknown> => {
   try {
-    const headers = new Headers(init.headers);
-    headers.set("Accept", "application/json");
-    return await parseResponse(await authFetch(path, { ...init, headers, ...(signal === undefined ? {} : { signal }) }));
+    return await parseResponse(await operation);
   } catch (error: unknown) {
-    if (error instanceof GitSyncApiError || error instanceof DOMException && error.name === "AbortError") throw error;
+    if (error instanceof GitSyncApiError || isAbortError(error)) throw error;
     throw new GitSyncApiError("NETWORK_ERROR", "无法连接 Git 同步服务。", 0, true);
   }
 };
@@ -380,52 +389,100 @@ const requireIdempotencyKey = (value: string): string => {
   return value;
 };
 const requireRevision = (value: number, field: string, minimum = 0): void => { if (!Number.isSafeInteger(value) || value < minimum) throw invalidRequest(field); };
-const jsonMutation = (method: string, body: unknown, idempotencyKey: string): RequestInit => ({
-  method, headers: { "Content-Type": "application/json", "Idempotency-Key": requireIdempotencyKey(idempotencyKey) }, body: JSON.stringify(body),
-});
-const base = (workspaceId: string): string => `/api/v1/workspaces/${encodeURIComponent(workspaceId)}`;
+type GitTestSecretAction = { action: "keep" } | { action: "replace"; value: string };
+const requireTestSecretAction = (value: GitSecretAction): GitTestSecretAction => {
+  if (value.action === "clear") throw invalidRequest("token.action");
+  if ("value" in value) return { action: "replace", value: value.value };
+  return { action: "keep" };
+};
 
 export const getGitSyncStatus = async (workspaceIdValue: string, signal?: AbortSignal): Promise<GitSyncStatus> => {
-  const workspaceId = requireWorkspaceID(workspaceIdValue); const status = decodeGitSyncStatus(await request(`${base(workspaceId)}/git-sync`, {}, signal));
+  const workspaceId = requireWorkspaceID(workspaceIdValue);
+  const status = decodeGitSyncStatus(await request(generatedRawResponse(gitSyncApi.getGitSyncStatusRaw(
+    { workspaceId },
+    generatedRequestInit(signal),
+  ))));
   if (status.config.workspaceId !== workspaceId || status.currentRun !== undefined && status.currentRun.workspaceId !== workspaceId) throw boundary("status.workspace_binding");
   return status;
 };
 export const getGitRemoteConfig = async (workspaceIdValue: string, signal?: AbortSignal): Promise<GitRemoteConfig> => {
-  const workspaceId = requireWorkspaceID(workspaceIdValue); const config = decodeGitRemoteConfig(await request(`${base(workspaceId)}/git-remote`, {}, signal));
+  const workspaceId = requireWorkspaceID(workspaceIdValue);
+  const config = decodeGitRemoteConfig(await request(generatedRawResponse(gitSyncApi.getGitRemoteConfigRaw(
+    { workspaceId },
+    generatedRequestInit(signal),
+  ))));
   if (config.workspaceId !== workspaceId) throw boundary("config.workspace_binding"); return config;
 };
 export const saveGitRemoteConfig = async (workspaceIdValue: string, input: SaveGitRemoteInput, signal?: AbortSignal): Promise<GitRemoteConfig> => {
   const workspaceId = requireWorkspaceID(workspaceIdValue); requireRevision(input.expectedRevision, "expectedRevision");
-  const config = decodeGitRemoteConfig(await request(`${base(workspaceId)}/git-remote`, jsonMutation("PUT", { expected_revision: input.expectedRevision, remote_url: input.remoteUrl, branch: input.branch, auto_sync: input.autoSync, token: input.token }, input.idempotencyKey), signal));
+  const config = decodeGitRemoteConfig(await request(generatedRawResponse(gitSyncApi.saveGitRemoteConfigRaw({
+    idempotencyKey: requireIdempotencyKey(input.idempotencyKey),
+    workspaceId,
+    saveGitRemoteConfigRequest: {
+      expected_revision: input.expectedRevision,
+      remote_url: input.remoteUrl,
+      branch: input.branch,
+      auto_sync: input.autoSync,
+      token: input.token,
+    },
+  }, generatedRequestInit(signal)))));
   if (config.workspaceId !== workspaceId) throw boundary("config.workspace_binding"); return config;
 };
 export const removeGitRemoteConfig = async (workspaceIdValue: string, input: RemoveGitRemoteInput, signal?: AbortSignal): Promise<GitRemoteConfig> => {
   const workspaceId = requireWorkspaceID(workspaceIdValue); requireRevision(input.expectedRevision, "expectedRevision");
-  const config = decodeGitRemoteConfig(await request(`${base(workspaceId)}/git-remote`, jsonMutation("DELETE", { expected_revision: input.expectedRevision }, input.idempotencyKey), signal));
+  const config = decodeGitRemoteConfig(await request(generatedRawResponse(gitSyncApi.removeGitRemoteConfigRaw({
+    idempotencyKey: requireIdempotencyKey(input.idempotencyKey),
+    workspaceId,
+    removeGitRemoteConfigRequest: { expected_revision: input.expectedRevision },
+  }, generatedRequestInit(signal)))));
   if (config.workspaceId !== workspaceId) throw boundary("config.workspace_binding"); return config;
 };
 export const testGitRemoteConfig = async (workspaceIdValue: string, input: TestGitRemoteInput, signal?: AbortSignal): Promise<{ remoteUrl: string; branch: string }> => {
   const workspaceId = requireWorkspaceID(workspaceIdValue); requireRevision(input.expectedRevision, "expectedRevision");
-  const value = record(await request(`${base(workspaceId)}/git-remote/tests`, jsonMutation("POST", { expected_revision: input.expectedRevision, remote_url: input.remoteUrl, branch: input.branch, token: input.token }, input.idempotencyKey), signal), "test");
+  const value = record(await request(generatedRawResponse(gitSyncApi.testGitRemoteConfigRaw({
+    workspaceId,
+    testGitRemoteConfigRequest: {
+      expected_revision: input.expectedRevision,
+      remote_url: input.remoteUrl,
+      branch: input.branch,
+      token: requireTestSecretAction(input.token),
+    },
+  }, generatedRequestInit(signal, {
+    headers: {
+      "Content-Type": "application/json",
+      "Idempotency-Key": requireIdempotencyKey(input.idempotencyKey),
+    },
+  })))), "test");
   exact(value, ["status", "remote_url", "branch"], "test");
   if (value.status !== "ok") throw boundary("status");
   return { remoteUrl: validRemoteURL(value.remote_url, "remote_url"), branch: validBranch(value.branch, "branch") };
 };
 export const createGitSyncRun = async (workspaceIdValue: string, input: CreateGitSyncRunInput, signal?: AbortSignal): Promise<GitSyncRun> => {
-  const workspaceId = requireWorkspaceID(workspaceIdValue); const run = decodeGitSyncRun(await request(`${base(workspaceId)}/git-sync/runs`, { method: "POST", headers: { "Idempotency-Key": requireIdempotencyKey(input.idempotencyKey) } }, signal));
+  const workspaceId = requireWorkspaceID(workspaceIdValue);
+  const run = decodeGitSyncRun(await request(generatedRawResponse(gitSyncApi.createGitSyncRunRaw({
+    idempotencyKey: requireIdempotencyKey(input.idempotencyKey),
+    workspaceId,
+  }, generatedRequestInit(signal)))));
   if (run.workspaceId !== workspaceId) throw boundary("run.workspace_binding"); return run;
 };
 export const retryGitSyncRun = async (workspaceIdValue: string, runIdValue: string, input: RetryGitSyncRunInput, signal?: AbortSignal): Promise<GitSyncRun> => {
   const workspaceId = requireWorkspaceID(workspaceIdValue); const runId = requireRunID(runIdValue); requireRevision(input.expectedVersion, "expectedVersion", 1);
-  const run = decodeGitSyncRun(await request(`${base(workspaceId)}/git-sync/runs/${encodeURIComponent(runId)}/retries`, jsonMutation("POST", { expected_version: input.expectedVersion }, input.idempotencyKey), signal));
+  const run = decodeGitSyncRun(await request(generatedRawResponse(gitSyncApi.retryGitSyncRunRaw({
+    idempotencyKey: requireIdempotencyKey(input.idempotencyKey),
+    workspaceId,
+    runId,
+    retryGitSyncRunRequest: { expected_version: input.expectedVersion },
+  }, generatedRequestInit(signal)))));
   if (run.workspaceId !== workspaceId) throw boundary("run.workspace_binding"); return run;
 };
 export const listGitSyncRuns = async (workspaceIdValue: string, cursor?: string, limit = 10, signal?: AbortSignal): Promise<GitSyncRunPage> => {
   const workspaceId = requireWorkspaceID(workspaceIdValue);
   if (cursor !== undefined && (cursor.trim() === "" || encoder.encode(cursor).byteLength > maxCursorBytes) || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw invalidRequest("list");
-  const params = new URLSearchParams({ limit: String(limit) });
-  if (cursor) params.set("cursor", cursor);
-  const value = record(await request(`${base(workspaceId)}/git-sync/runs?${params.toString()}`, {}, signal), "runs");
+  const value = record(await request(generatedRawResponse(gitSyncApi.listGitSyncRunsRaw({
+    workspaceId,
+    limit,
+    ...(cursor === undefined ? {} : { cursor }),
+  }, generatedRequestInit(signal)))), "runs");
   exact(value, ["items", "next_cursor"], "runs");
   if (!Array.isArray(value.items) || value.items.length > 100) throw boundary("items");
   const nextCursor = optionalString(value.next_cursor, "next_cursor");

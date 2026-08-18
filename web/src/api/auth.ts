@@ -1,9 +1,36 @@
+import { z } from "zod";
+
+import { canonicalUuidPattern as uuidPattern, isAbortError } from "../shared/codec";
+import { AuthApi } from "./generated/apis/AuthApi";
+import type { ApiResponse } from "./generated/runtime";
 import {
-  canonicalUuidPattern as uuidPattern,
-  hasOnlyKeys,
-  isAbortError,
-  isRecord,
-} from "../shared/codec";
+  AuthApiError,
+  clearCsrfToken,
+  getCsrfToken,
+  invalidateAuthSession,
+  setCsrfToken,
+  subscribeAuthInvalidation,
+  subscribeCsrfTokenChanges,
+} from "./auth-session-state";
+import {
+  generatedBrowserSecurity,
+  generatedConfiguration,
+  generatedRawResponse,
+  generatedRequestInit,
+} from "./generated-client";
+import { decodeApiProblem, ProblemValidationError } from "./problem";
+
+export {
+  AuthApiError,
+  clearCsrfToken,
+  getCsrfToken,
+  invalidateAuthSession,
+  setCsrfToken,
+  subscribeAuthInvalidation,
+  subscribeCsrfTokenChanges,
+};
+export type { AuthInvalidationReason } from "./auth-session-state";
+export { apiBaseUrl, authFetch } from "./transport";
 
 export type AuthCapability =
   | "READ_LOCAL"
@@ -60,164 +87,72 @@ export interface ApiTokenPage {
   nextCursor?: string;
 }
 
-export class AuthApiError extends Error {
-  readonly code: string;
-  readonly status: number | null;
-  readonly retryable: boolean;
-
-  constructor(code: string, message: string, status: number | null, retryable: boolean, options?: ErrorOptions) {
-    super(message, options);
-    this.name = "AuthApiError";
-    this.code = code;
-    this.status = status;
-    this.retryable = retryable;
-  }
-}
-
-const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
-const csrfStorageKey = "zhixu.csrf-token";
 const rfc3339Pattern = /^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,9})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/;
-const capabilityValues: readonly AuthCapability[] = [
+const capabilityValues = [
   "READ_LOCAL", "READ_EXTERNAL", "WRITE_PROPOSAL", "WRITE_KNOWLEDGE", "GIT_WRITE", "INDEX_MAINTENANCE", "EVALUATION_RUN", "MANAGE_SYSTEM_SETTINGS",
-];
-export type AuthInvalidationReason =
-  | { kind: "unauthorized" }
-  | { kind: "storage_unavailable"; error: AuthApiError };
+] as const satisfies readonly AuthCapability[];
 
-const authInvalidationListeners = new Set<(reason: AuthInvalidationReason) => void>();
-
-/** 订阅服务端返回 401 后的全局认证失效通知。 */
-export const subscribeAuthInvalidation = (listener: (reason: AuthInvalidationReason) => void): (() => void) => {
-  authInvalidationListeners.add(listener);
-  return () => authInvalidationListeners.delete(listener);
-};
-
-const notifyAuthInvalidation = (reason: AuthInvalidationReason): void => {
-  for (const listener of [...authInvalidationListeners]) listener(reason);
-};
-
-const storageFailure = (operation: "read" | "write" | "remove", cause: unknown): never => {
-  const message = operation === "read"
-    ? "浏览器无法读取 Session 恢复状态，请允许本站存储后重新登录。"
-    : operation === "write"
-      ? "浏览器无法保存 Session 恢复状态，请允许本站存储后重新登录。"
-      : "浏览器无法清理 Session 恢复状态，请允许本站存储后重新登录。";
-  const error = new AuthApiError("AUTH_STORAGE_UNAVAILABLE", message, null, false, { cause });
-  notifyAuthInvalidation({ kind: "storage_unavailable", error });
-  throw error;
-};
-
-const readStorage = (operation: "read" | "write" | "remove"): Storage | undefined => {
-  if (typeof window === "undefined") return undefined;
-  try {
-    return window.localStorage;
-  } catch (error: unknown) {
-    return storageFailure(operation, error);
-  }
-};
-
-export const getCsrfToken = (): string | undefined => {
-  let value: string | null | undefined;
-  try {
-    value = readStorage("read")?.getItem(csrfStorageKey);
-  } catch (error: unknown) {
-    if (error instanceof AuthApiError && error.code === "AUTH_STORAGE_UNAVAILABLE") throw error;
-    return storageFailure("read", error);
-  }
-  return value === undefined || value === null || value === "" ? undefined : value;
-};
-
-export const setCsrfToken = (value: string): void => {
-  try {
-    readStorage("write")?.setItem(csrfStorageKey, value);
-  } catch (error: unknown) {
-    if (error instanceof AuthApiError && error.code === "AUTH_STORAGE_UNAVAILABLE") throw error;
-    storageFailure("write", error);
-  }
-};
-
-export const clearCsrfToken = (): void => {
-  try {
-    readStorage("remove")?.removeItem(csrfStorageKey);
-  } catch (error: unknown) {
-    if (error instanceof AuthApiError && error.code === "AUTH_STORAGE_UNAVAILABLE") throw error;
-    storageFailure("remove", error);
-  }
-};
-
-/** 将 REST 与 SSE 的 401 收敛到同一个本地认证失效入口。 */
-export const invalidateAuthSession = (): void => {
-  clearCsrfToken();
-  notifyAuthInvalidation({ kind: "unauthorized" });
-};
-
-/** 订阅其他同源 Tab 的 CSRF 恢复状态变化。 */
-export const subscribeCsrfTokenChanges = (listener: () => void): (() => void) => {
-  if (typeof window === "undefined") return () => undefined;
-  const handleStorage = (event: StorageEvent): void => {
-    if (event.key !== csrfStorageKey) return;
-    try {
-      const storage = readStorage("read");
-      if (event.storageArea !== null && event.storageArea !== storage) return;
-    } catch {
-      return;
-    }
-    listener();
-  };
-  window.addEventListener("storage", handleStorage);
-  return () => window.removeEventListener("storage", handleStorage);
-};
-
-const stringValue = (record: Record<string, unknown>, field: string): string => {
-  const value = record[field];
-  if (typeof value !== "string" || value.trim() === "") throw new AuthApiError("INVALID_RESPONSE", `认证响应字段无效：${field}`, null, false);
-  return value;
-};
-
-const optionalString = (record: Record<string, unknown>, field: string): string | undefined => {
-  const value = record[field];
-  if (value === undefined) return undefined;
-  return stringValue(record, field);
-};
-
-const assertExactKeys = (record: Record<string, unknown>, allowed: readonly string[], field: string): void => {
-  if (!hasOnlyKeys(record, allowed)) {
-    throw new AuthApiError("INVALID_RESPONSE", `认证响应包含未知字段：${field}`, null, false);
-  }
-};
-
-const uuidValue = (record: Record<string, unknown>, field: string, status: number | null = null): string => {
-  const value = record[field];
-  if (typeof value !== "string" || value.trim() === "" || !uuidPattern.test(value)) {
-    throw new AuthApiError("INVALID_RESPONSE", `认证响应 UUID 无效：${field}`, status, false);
-  }
-  return value;
-};
-
-const dateTimeValue = (record: Record<string, unknown>, field: string): string => {
-  const value = stringValue(record, field);
+const nonEmptyStringSchema = z.string().refine((value) => value.trim() !== "");
+const uuidSchema = nonEmptyStringSchema.regex(uuidPattern);
+const dateTimeSchema = nonEmptyStringSchema.refine((value) => {
   const year = Number(value.slice(0, 4));
   const month = Number(value.slice(5, 7));
   const day = Number(value.slice(8, 10));
   const daysInMonth = month === 2
     ? (year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0) ? 29 : 28)
     : month === 4 || month === 6 || month === 9 || month === 11 ? 30 : 31;
-  if (!rfc3339Pattern.test(value) || year < 1 || day > daysInMonth || !Number.isFinite(Date.parse(value))) {
-    throw new AuthApiError("INVALID_RESPONSE", `认证响应时间无效：${field}`, null, false);
+  return rfc3339Pattern.test(value)
+    && year >= 1
+    && day <= daysInMonth
+    && Number.isFinite(Date.parse(value));
+});
+const capabilitySchema = z.enum(capabilityValues);
+const scopesSchema = z.array(capabilitySchema)
+  .min(1)
+  .max(capabilityValues.length)
+  .refine((values) => new Set(values).size === values.length);
+const sessionCredentialSchema = z.strictObject({
+  session_id: uuidSchema,
+  csrf_token: nonEmptyStringSchema.length(43),
+  expires_at: dateTimeSchema,
+});
+const sessionInfoSchema = z.strictObject({
+  id: uuidSchema,
+  user_label: nonEmptyStringSchema,
+  scopes: scopesSchema,
+  created_at: dateTimeSchema,
+  last_seen_at: dateTimeSchema,
+  expires_at: dateTimeSchema,
+  revoked_at: dateTimeSchema.optional(),
+});
+const apiTokenInfoSchema = z.strictObject({
+  id: uuidSchema,
+  name: nonEmptyStringSchema,
+  scopes: scopesSchema,
+  created_at: dateTimeSchema,
+  last_used_at: dateTimeSchema.optional(),
+  expires_at: dateTimeSchema,
+  revoked_at: dateTimeSchema.optional(),
+});
+const apiTokenCredentialSchema = z.strictObject({
+  id: uuidSchema,
+  name: nonEmptyStringSchema,
+  scopes: scopesSchema,
+  expires_at: dateTimeSchema,
+  token: nonEmptyStringSchema.length(43),
+});
+const apiTokenPageSchema = z.strictObject({
+  items: z.array(apiTokenInfoSchema).max(100),
+  next_cursor: nonEmptyStringSchema.max(2048).optional(),
+});
+const authApi = new AuthApi(generatedConfiguration);
+
+const parseAuthResponse = <T>(schema: z.ZodType<T>, value: unknown, label: string, status: number | null = null): T => {
+  const result = schema.safeParse(value);
+  if (!result.success) {
+    throw new AuthApiError("INVALID_RESPONSE", `${label}结构无效`, status, false);
   }
-  return value;
-};
-
-const capability = (value: unknown): AuthCapability => {
-  if (typeof value === "string" && (capabilityValues as readonly string[]).includes(value)) return value as AuthCapability;
-  throw new AuthApiError("INVALID_RESPONSE", "认证响应包含未知 Capability", null, false);
-};
-
-const scopes = (value: unknown): AuthCapability[] => {
-  if (!Array.isArray(value) || value.length === 0 || value.length > capabilityValues.length) throw new AuthApiError("INVALID_RESPONSE", "认证响应 scopes 无效", null, false);
-  const result = value.map(capability);
-  if (new Set(result).size !== result.length) throw new AuthApiError("INVALID_RESPONSE", "认证响应 scopes 重复", null, false);
-  return result;
+  return result.data;
 };
 
 const readPayload = async (response: Response): Promise<unknown> => {
@@ -225,48 +160,24 @@ const readPayload = async (response: Response): Promise<unknown> => {
   try {
     return await response.json();
   } catch (error: unknown) {
+    if (isAbortError(error)) throw error;
     throw new AuthApiError("INVALID_RESPONSE", "认证 API 返回了无效 JSON", response.status, false, { cause: error });
   }
 };
 
 const readError = (payload: unknown, response: Response): AuthApiError => {
-  if (!isRecord(payload)) throw new AuthApiError("INVALID_RESPONSE", "认证 API 错误响应结构无效", response.status, false);
-  if (!hasOnlyKeys(payload, ["error_code", "message", "retryable", "workflow_run_id", "details"])) {
-    throw new AuthApiError("INVALID_RESPONSE", "认证 API 错误响应包含未知字段：Problem", response.status, false);
-  }
-  const code = stringValue(payload, "error_code");
-  const message = stringValue(payload, "message");
-  if (typeof payload.retryable !== "boolean") throw new AuthApiError("INVALID_RESPONSE", "认证 API 错误响应字段无效：retryable", response.status, false);
-  if (payload.workflow_run_id !== undefined) uuidValue(payload, "workflow_run_id", response.status);
-  if (payload.details !== undefined && !isRecord(payload.details)) throw new AuthApiError("INVALID_RESPONSE", "认证 API 错误响应字段无效：details", response.status, false);
-  return new AuthApiError(code, message, response.status, payload.retryable);
-};
-
-const unsafeMethod = (method: string): boolean => !["GET", "HEAD", "OPTIONS"].includes(method.toUpperCase());
-
-/** 为所有业务 API 统一附加同源 Cookie、CSRF 和请求媒体类型边界。 */
-export const authFetch = async (path: string, init: RequestInit = {}): Promise<Response> => {
-  const headers = new Headers(init.headers);
-  if (!headers.has("Accept")) headers.set("Accept", "application/json");
-  const multipartBody = typeof FormData !== "undefined" && init.body instanceof FormData;
-  if (init.body !== undefined && !multipartBody && !headers.has("Content-Type")) {
-    headers.set("Content-Type", "application/json");
-  }
-  const method = (init.method ?? "GET").toUpperCase();
-  if (unsafeMethod(method) && !headers.has("Authorization") && !path.endsWith("/auth/sessions")) {
-    const csrf = getCsrfToken();
-    if (csrf !== undefined) headers.set("X-CSRF-Token", csrf);
-  }
-  const response = await fetch(`${apiBaseUrl}${path}`, { ...init, headers, credentials: "include" });
-  if (response.status === 401 && path !== "/api/v1/auth/sessions") {
-    invalidateAuthSession();
-  }
-  return response;
-};
-
-const authRequestFetch = async (path: string, init: RequestInit = {}): Promise<Response> => {
   try {
-    return await authFetch(path, init);
+    const problem = decodeApiProblem(payload);
+    return new AuthApiError(problem.errorCode, problem.message, response.status, problem.retryable);
+  } catch (error: unknown) {
+    if (!(error instanceof ProblemValidationError)) throw error;
+    throw new AuthApiError("INVALID_RESPONSE", "认证 API 错误响应结构无效", response.status, false);
+  }
+};
+
+const authOperationResponse = async <T>(operation: Promise<ApiResponse<T>>): Promise<Response> => {
+  try {
+    return await generatedRawResponse(operation);
   } catch (error: unknown) {
     if (isAbortError(error)) throw error;
     if (error instanceof AuthApiError) throw error;
@@ -274,61 +185,59 @@ const authRequestFetch = async (path: string, init: RequestInit = {}): Promise<R
   }
 };
 
-const request = async (path: string, init: RequestInit = {}): Promise<unknown> => {
-  const response = await authRequestFetch(path, init);
+const request = async <T>(operation: Promise<ApiResponse<T>>): Promise<unknown> => {
+  const response = await authOperationResponse(operation);
   const payload = await readPayload(response);
   if (!response.ok) throw readError(payload, response);
   return payload;
 };
 
 export const decodeSessionCredential = (value: unknown): SessionCredential => {
-  if (!isRecord(value)) throw new AuthApiError("INVALID_RESPONSE", "Session 凭据响应结构无效", null, false);
-  assertExactKeys(value, ["session_id", "csrf_token", "expires_at"], "SessionCredential");
-  const csrfToken = stringValue(value, "csrf_token");
-  if (csrfToken.length !== 43) throw new AuthApiError("INVALID_RESPONSE", "CSRF Token 长度无效", null, false);
-  return { sessionId: uuidValue(value, "session_id"), csrfToken, expiresAt: dateTimeValue(value, "expires_at") };
+  const credential = parseAuthResponse(sessionCredentialSchema, value, "Session 凭据响应");
+  return { sessionId: credential.session_id, csrfToken: credential.csrf_token, expiresAt: credential.expires_at };
 };
 
 export const decodeSessionInfo = (value: unknown): SessionInfo => {
-  if (!isRecord(value)) throw new AuthApiError("INVALID_RESPONSE", "Session 响应结构无效", null, false);
-  assertExactKeys(value, ["id", "user_label", "scopes", "created_at", "last_seen_at", "expires_at", "revoked_at"], "SessionInfo");
-  const revokedAt = optionalString(value, "revoked_at");
+  const session = parseAuthResponse(sessionInfoSchema, value, "Session 响应");
   return {
-    id: uuidValue(value, "id"), userLabel: stringValue(value, "user_label"), scopes: scopes(value.scopes),
-    createdAt: dateTimeValue(value, "created_at"), lastSeenAt: dateTimeValue(value, "last_seen_at"), expiresAt: dateTimeValue(value, "expires_at"),
-    ...(revokedAt === undefined ? {} : { revokedAt: dateTimeValue({ revoked_at: revokedAt }, "revoked_at") }),
+    id: session.id,
+    userLabel: session.user_label,
+    scopes: [...session.scopes],
+    createdAt: session.created_at,
+    lastSeenAt: session.last_seen_at,
+    expiresAt: session.expires_at,
+    ...(session.revoked_at === undefined ? {} : { revokedAt: session.revoked_at }),
   };
 };
 
 export const decodeApiTokenInfo = (value: unknown): ApiTokenInfo => {
-  if (!isRecord(value)) throw new AuthApiError("INVALID_RESPONSE", "API Token 响应结构无效", null, false);
-  assertExactKeys(value, ["id", "name", "scopes", "created_at", "last_used_at", "expires_at", "revoked_at"], "APITokenInfo");
-  const lastUsedAt = optionalString(value, "last_used_at");
-  const revokedAt = optionalString(value, "revoked_at");
+  const token = parseAuthResponse(apiTokenInfoSchema, value, "API Token 响应");
   return {
-    id: uuidValue(value, "id"), name: stringValue(value, "name"), scopes: scopes(value.scopes), createdAt: dateTimeValue(value, "created_at"),
-    ...(lastUsedAt === undefined ? {} : { lastUsedAt: dateTimeValue({ last_used_at: lastUsedAt }, "last_used_at") }),
-    expiresAt: dateTimeValue(value, "expires_at"),
-    ...(revokedAt === undefined ? {} : { revokedAt: dateTimeValue({ revoked_at: revokedAt }, "revoked_at") }),
+    id: token.id,
+    name: token.name,
+    scopes: [...token.scopes],
+    createdAt: token.created_at,
+    ...(token.last_used_at === undefined ? {} : { lastUsedAt: token.last_used_at }),
+    expiresAt: token.expires_at,
+    ...(token.revoked_at === undefined ? {} : { revokedAt: token.revoked_at }),
   };
 };
 
 export const decodeApiTokenCredential = (value: unknown): ApiTokenCredential => {
-  if (!isRecord(value)) throw new AuthApiError("INVALID_RESPONSE", "API Token 创建响应结构无效", null, false);
-  assertExactKeys(value, ["id", "name", "scopes", "expires_at", "token"], "APITokenCredential");
-  const token = stringValue(value, "token");
-  if (token.length !== 43) throw new AuthApiError("INVALID_RESPONSE", "API Token 长度无效", null, false);
+  const credential = parseAuthResponse(apiTokenCredentialSchema, value, "API Token 创建响应");
   return {
-    id: uuidValue(value, "id"),
-    name: stringValue(value, "name"),
-    scopes: scopes(value.scopes),
-    expiresAt: dateTimeValue(value, "expires_at"),
-    token,
+    id: credential.id,
+    name: credential.name,
+    scopes: [...credential.scopes],
+    expiresAt: credential.expires_at,
+    token: credential.token,
   };
 };
 
 export const bootstrapSession = async (bootstrapToken: string): Promise<SessionCredential> => {
-  const response = await authRequestFetch("/api/v1/auth/sessions", { method: "POST", headers: { Authorization: `Bearer ${bootstrapToken}` } });
+  const response = await authOperationResponse(authApi.exchangeBootstrapForSessionRaw({
+    headers: { Authorization: `Bearer ${bootstrapToken}` },
+  }));
   const payload = await readPayload(response);
   if (!response.ok) throw readError(payload, response);
   const credential = decodeSessionCredential(payload);
@@ -336,42 +245,50 @@ export const bootstrapSession = async (bootstrapToken: string): Promise<SessionC
   return credential;
 };
 
-export const getCurrentSession = async (signal?: AbortSignal): Promise<SessionInfo> => decodeSessionInfo(await request("/api/v1/auth/session", signal === undefined ? undefined : { signal }));
+export const getCurrentSession = async (signal?: AbortSignal): Promise<SessionInfo> =>
+  decodeSessionInfo(await request(authApi.getCurrentSessionRaw(generatedRequestInit(signal))));
 
 export const rotateSession = async (): Promise<SessionCredential> => {
-  const credential = decodeSessionCredential(await request("/api/v1/auth/session/rotate", { method: "POST" }));
+  const credential = decodeSessionCredential(await request(authApi.rotateSessionRaw(generatedBrowserSecurity())));
   setCsrfToken(credential.csrfToken);
   return credential;
 };
 
 export const revokeSession = async (): Promise<void> => {
-  await request("/api/v1/auth/session", { method: "DELETE" });
+  await request(authApi.revokeCurrentSessionRaw(generatedBrowserSecurity()));
   clearCsrfToken();
 };
 
 export const decodeApiTokenPage = (payload: unknown): ApiTokenPage => {
-  if (!isRecord(payload)) throw new AuthApiError("INVALID_RESPONSE", "API Token 列表响应结构无效", null, false);
-  assertExactKeys(payload, ["items", "next_cursor"], "APITokenPage");
-  if (!Array.isArray(payload.items) || payload.items.length > 100) throw new AuthApiError("INVALID_RESPONSE", "API Token 列表响应结构无效", null, false);
-  const nextCursor = optionalString(payload, "next_cursor");
-  if (nextCursor !== undefined && nextCursor.length > 2048) throw new AuthApiError("INVALID_RESPONSE", "API Token cursor 无效", null, false);
-  return { items: payload.items.map(decodeApiTokenInfo), ...(nextCursor === undefined ? {} : { nextCursor }) };
+  const page = parseAuthResponse(apiTokenPageSchema, payload, "API Token 列表响应");
+  return {
+    items: page.items.map(decodeApiTokenInfo),
+    ...(page.next_cursor === undefined ? {} : { nextCursor: page.next_cursor }),
+  };
 };
 
 export const listApiTokens = async (cursor?: string, limit = 30, signal?: AbortSignal): Promise<ApiTokenPage> => {
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100 || (cursor !== undefined && (cursor === "" || cursor.length > 2048))) {
     throw new AuthApiError("AUTH_REQUEST_INVALID", "API Token 分页参数无效", null, false);
   }
-  const query = new URLSearchParams({ limit: String(limit) });
-  if (cursor !== undefined) query.set("cursor", cursor);
-  return decodeApiTokenPage(await request(`/api/v1/auth/api-tokens?${query.toString()}`, signal === undefined ? undefined : { signal }));
+  return decodeApiTokenPage(await request(authApi.listApiTokensRaw({
+    limit,
+    ...(cursor === undefined ? {} : { cursor }),
+  }, generatedRequestInit(signal))));
 };
 
 export const createApiToken = async (input: CreateApiTokenInput): Promise<ApiTokenCredential> => {
-  const payload = await request("/api/v1/auth/api-tokens", { method: "POST", body: JSON.stringify({ name: input.name, scopes: input.scopes, expires_in_seconds: input.expiresInSeconds ?? 0 }) });
+  const payload = await request(authApi.createApiTokenRaw({
+    ...generatedBrowserSecurity(),
+    createAPITokenRequest: {
+      name: input.name,
+      scopes: input.scopes,
+      expires_in_seconds: input.expiresInSeconds ?? 0,
+    },
+  }));
   return decodeApiTokenCredential(payload);
 };
 
 export const revokeApiToken = async (id: string): Promise<void> => {
-  await request(`/api/v1/auth/api-tokens/${encodeURIComponent(id)}`, { method: "DELETE" });
+  await request(authApi.revokeApiTokenRaw({ ...generatedBrowserSecurity(), tokenId: id }));
 };

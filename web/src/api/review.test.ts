@@ -322,7 +322,7 @@ describe("review API", () => {
     vi.stubGlobal("fetch", fetchMock);
 
 		await expect(listReviewDue(workspaceId, sessionId, deckId)).resolves.toMatchObject({ workspaceId, items: [{ card: { id: cardId, question: dueCard.question } }] });
-		expect(fetchMock.mock.calls[0]?.[0]).toBe(`/api/v1/review/due?workspace_id=${workspaceId}&session_id=${sessionId}&limit=20&deck_id=${deckId}`);
+		expect(fetchMock.mock.calls[0]?.[0]).toBe(`/api/v1/review/due?workspace_id=${workspaceId}&session_id=${sessionId}&deck_id=${deckId}&limit=20`);
 
     expect(() => decodeReviewDuePage({
       workspace_id: workspaceId,

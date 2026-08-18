@@ -64,6 +64,9 @@ jobs:
       - name: Run quality gates
         run: make test
 
+      - name: Check generated OpenAPI client drift
+        run: make openapi-generate-check
+
       - name: Run OpenAPI breaking-change gate
         env:
           OPENAPI_BASE_REVISION: ${{ github.event.pull_request.base.sha || github.event.before }}

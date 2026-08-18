@@ -559,6 +559,7 @@ describe("GraphPage", () => {
 
     expect(screen.queryByText("该来源片段直接支持当前关系。")).not.toBeInTheDocument();
     expect(screen.getByRole("status", { name: "正在加载关系证据" })).toBeInTheDocument();
+    await waitFor(() => expect(evidenceCallCount).toBe(2));
     await act(async () => {
       resolveReopenedEvidence?.(jsonResponse(refreshedEvidenceResponse));
       await Promise.resolve();

@@ -1,0 +1,7 @@
+{"file":".trellis/spec/frontend/type-safety.md","reason":"审查生成 wire 是否泄漏、Zod 是否只在关键边界 fail closed，以及是否出现 any/强转。"}
+{"file":".trellis/tasks/08-18-openapi-client-zod-integration/research/frontend-api-quality-gates.md","reason":"审查测试、错误状态、缓存、Workspace、SSE 和浏览器质量门禁。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"审查 OpenAPI -> generated -> Transport -> Domain -> Store/Feature 的数据流是否只有一个验证 owner。"}
+{"file":"docs/architecture/application-contracts.md","reason":"审查 API、Problem、Workspace、Query、SSE、Version 和 Idempotency 契约是否保持兼容。"}
+{"file":"docs/architecture/adr/0028-openapi-contract-gates.md","reason":"审查生成前后是否仍满足锁定的契约门禁、breaking gate 和供应链约束。"}
+{"file":".trellis/tasks/08-18-openapi-client-zod-integration/research/generator-compatibility.md","reason":"按实测风险审查 generator 版本、normalizer、runtime template 和公共类型 any 泄漏。"}
+{"file":".trellis/tasks/08-18-openapi-client-zod-integration/research/operation-migration-matrix.md","reason":"逐项核对 26 个生产模块、特殊媒体边界和未迁移 operation。"}

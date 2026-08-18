@@ -1,5 +1,6 @@
-import { authFetch } from "./auth";
 import { isAbortError, isRecord } from "../shared/codec";
+import { WorkspacesApi } from "./generated/apis/WorkspacesApi";
+import { generatedConfiguration, generatedRawResponse } from "./generated-client";
 
 export interface ScannedFile {
   relativePath: string;
@@ -29,6 +30,7 @@ export class WorkspaceApiError extends Error {
     this.retryable = retryable;
   }
 }
+const workspacesApi = new WorkspacesApi(generatedConfiguration);
 
 const stringField = (record: Record<string, unknown>, field: string): string => {
   const value = record[field];
@@ -71,13 +73,10 @@ export const decodeWorkspaceScan = (value: unknown): WorkspaceScan => {
   return { workspaceId: stringField(value, "workspace_id"), files, count };
 };
 
-const request = async (path: string, init?: RequestInit): Promise<unknown> => {
+const scanWorkspaceResponse = async (workspaceId: string): Promise<unknown> => {
   let response: Response;
   try {
-    response = await authFetch(path, {
-      headers: { Accept: "application/json", ...(init?.body === undefined ? {} : { "Content-Type": "application/json" }) },
-      ...init,
-    });
+    response = await generatedRawResponse(workspacesApi.scanWorkspaceRaw({ workspaceId }));
   } catch (error: unknown) {
     if (isAbortError(error)) throw error;
     throw new WorkspaceApiError("NETWORK_ERROR", "无法连接 Workspace API。", true);
@@ -99,4 +98,4 @@ const request = async (path: string, init?: RequestInit): Promise<unknown> => {
 };
 
 export const scanWorkspace = async (id: string): Promise<WorkspaceScan> =>
-  decodeWorkspaceScan(await request(`/api/v1/workspaces/${encodeURIComponent(id)}/scan`, { method: "POST" }));
+  decodeWorkspaceScan(await scanWorkspaceResponse(id));

@@ -24,6 +24,10 @@ M9 Export 已在 Collection 详情交付 `MARKDOWN|METADATA_JSON` Panel，并在
 AC-33 已由 Markdown、领域 Metadata JSON 与真实附件 ZIP 闭环关闭；`EVALUATION_JSON|AUDIT_JSON` 继续不公开。
 M10-02 已交付严格认证 API 边界、`AuthProvider`/`AuthBoundary`、Session 恢复、CSRF 注入和登录/登出状态；
 Bootstrap Token 只用于一次交换，浏览器持久化的唯一认证派生值是 CSRF Token，业务授权仍由后端裁决。
+TODO 8 已将 189 个 OpenAPI operation 按 26 个领域 tag 生成 `typescript-fetch` client，并把现有
+26 个生产 API 模块迁移到生成 Raw operation 与共享 Transport；Zod 严格拥有 Problem/Auth 边界，
+其他模块继续由原 strict decoder 校验领域不变量。原生 EventSource 与 Answer Draft stream 是仅有的
+专用协议 owner，生成/漂移/公共模型由 Makefile 与 CI 门禁锁定。
 工作台导航与首页已重构为白蓝低噪声信息架构：未连接 `/dashboard` 是不发业务请求的知识脉络入口，已连接首页仅投影有界真实待办与最近捕获资料；导航归属由路由展示表统一派生，系统状态收敛至五类 Settings 的 `section=system`。
 Quick Capture 已由 AppShell 单例提供文字、链接、文件和图片入口，`/inbox` 同时展示 Capture 与 Workspace Scan，
 `/captures/:captureId` 分层恢复原始来源、处理状态与候选画像；严格 wire、焦点恢复和降级语义见 `capture-workbench.md`。
@@ -78,7 +82,7 @@ M8-03 已交付 `/interviews`、Interview-origin Learning Path 和 `/memories`�
 | [组件规范](./component-guidelines.md) | 组合、Props、UI 状态和可访问性 | 已记录白蓝低噪声 Dashboard、Active Workspace 启动/重连边界、M7-01 Graph 与 M9 Monaco DiffEditor 安全卸载契约 |
 | [Hook 规范](./hook-guidelines.md) | Query、Command、URL 和 SSE Hook | Query Key Factory 和 Hook Test Harness |
 | [状态管理](./state-management.md) | Server、URL、Local Draft 和 Event 所有权 | 已记录服务端 Active Workspace 单一 Owner、Workspace 清理顺序、M9 唯一 SSE Owner、Export recovery 与 M10 Auth/CSRF 契约 |
-| [类型安全](./type-safety.md) | API/SSE 校验和 Domain UI Type | 已记录 Timeline/Impact v1/v2 与 downstream Proposal、M7-03 Collection/Health、M9 Business/M9-03 Export 与 M10 Auth 响应/Problem 的严格解码 |
+| [类型安全](./type-safety.md) | API/SSE 校验和 Domain UI Type | 已记录 Generated Raw/Transport/Zod 边界，以及 Timeline/Impact、Collection/Health、Business/Export/Auth 的严格解码 |
 | [模型设置前端契约](./model-settings.md) | strict wire、desired/active/applied、双进程热应用、Session-only 与 Secret 生命周期 | 无重启 Save-and-Apply、恢复状态和桌面/移动真实容器门禁 |
 | [Artifact 工作台契约](./artifact-workbench.md) | Artifact wire、Query、generation 恢复、GAP/export/publish UI 边界 | M8-01 decoder、组件、桌面/移动真实浏览器闭环已验证 |
 | [快速记录工作台契约](./capture-workbench.md) | Capture/Profile strict wire、Dialog、Inbox、详情、焦点与恢复 | 真实 API/Worker 下 TEXT Capture、降级画像及桌面/移动交互已验证 |
@@ -86,7 +90,7 @@ M8-03 已交付 `/interviews`、Interview-origin Learning Path 和 `/memories`�
 | [材料整理工作台契约](./organizing-workbench.md) | Material/Template/Snapshot/Run strict wire、服务端 Draft、Human Task Evidence/GAP/Diff 与结果恢复 | Decoder、Query、组件、lint/typecheck/test/build 及父任务桌面/移动真实浏览器门禁已验证 |
 | [文档文件历史工作台契约](./document-history-workbench.md) | History strict wire、Workspace/head/path/version/cursor Query、compare、restore preview/Proposal 与 SSE recovery | Decoder、Query/SSE、组件、Monaco、lint/typecheck/test/build 及父任务桌面/移动真实浏览器门禁已验证 |
 | [Git 同步设置前端契约](./git-sync-settings.md) | strict wire、Workspace binding、Secret 生命周期、配置/状态/重试、轮询恢复与响应式边界 | Decoder、Query/Mutation、组件、lint/typecheck/test/build及真实 API/Worker 桌面/390x844 分叉冲突、有界预览与重试门禁已验证 |
-| [质量规范](./quality-guidelines.md) | 测试、禁止模式和 Review Gate | 已记录 Timeline/Impact strict decoder、状态/幂等/异步投影门禁，以及 Graph、Collection/Health、Review/Shared Path/Interview/Memory、Export 与认证浏览器门禁 |
+| [质量规范](./quality-guidelines.md) | 测试、禁止模式和 Review Gate | 已记录生成漂移/单一路径门禁，以及 Timeline/Impact、Graph、Collection/Health、Review/Shared Path/Interview/Memory、Export 与认证浏览器门禁 |
 
 ## 开发前检查清单
 

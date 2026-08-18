@@ -1,9 +1,19 @@
-import { authFetch } from "./auth";
+import { ConversationApi } from "./generated/apis/ConversationApi";
+import { TimelineApi } from "./generated/apis/TimelineApi";
+import {
+  generatedConfiguration,
+  generatedRawResponse,
+  generatedRequestInit,
+} from "./generated-client";
 import {
   canonicalUuidPattern as uuidPattern,
   hasOnlyKeys,
+  isAbortError,
   isRecord,
 } from "../shared/codec";
+
+const conversationApi = new ConversationApi(generatedConfiguration);
+const timelineApi = new TimelineApi(generatedConfiguration);
 
 export type ConversationStatus = "open" | "archived";
 export type SearchMode = "keyword" | "semantic" | "hybrid";
@@ -904,43 +914,60 @@ export const decodeProblem = (value: unknown): Problem => { if (!isRecord(value)
 const validateUuid = (value: unknown, field: string): string => { if (typeof value !== "string" || !uuidPattern.test(value)) throw invalidRequest(field); return value };
 const validateText = (value: unknown, field: string, max: number, allowEmpty = false): string => { if (typeof value !== "string" || (!allowEmpty && value.trim() === "") || value.trim() !== value || value.includes("\0") || textEncoder.encode(value).length > max) throw invalidRequest(field); return value };
 const validateKey = (value: unknown): string => validateText(value, "idempotencyKey", 128);
-const query = (input: ListInput | GetInput): string => {
-  validateUuid(input.workspaceId, "workspaceId");
-  const params = new URLSearchParams({ workspace_id: input.workspaceId });
+const listRequestParameters = (input: ListInput | GetInput) => {
+  const workspaceId = validateUuid(input.workspaceId, "workspaceId");
   const cursor: unknown = Reflect.get(input, "cursor");
-  if (cursor !== undefined) params.set("cursor", validateText(cursor, "cursor", 2048));
+  const validatedCursor = cursor === undefined ? undefined : validateText(cursor, "cursor", 2048);
   const limit: unknown = Reflect.get(input, "limit");
   if (limit !== undefined) {
     if (typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw invalidRequest("limit");
-    params.set("limit", String(limit));
   }
-  return params.toString();
+  return {
+    workspaceId,
+    ...(validatedCursor === undefined ? {} : { cursor: validatedCursor }),
+    ...(limit === undefined ? {} : { limit }),
+  };
 };
-const request = async <T>(path: string, init: RequestInit, decoder: (value: unknown) => T): Promise<{ value: T; response: Response }> => {
-  let response: Response; try { response = await authFetch(path, init) } catch (error: unknown) { if (error instanceof DOMException && error.name === "AbortError") throw error; throw new ConversationApiError({ errorCode: "NETWORK_ERROR", message: "无法连接 Conversation API。", retryable: true }, null, { cause: error }) }
-  let payload: unknown; try { payload = await response.json() } catch (error: unknown) { throw new ConversationApiError({ errorCode: "INVALID_RESPONSE", message: "Conversation API 返回了无效 JSON。", retryable: false }, response.status, { cause: error }) }
+const generatedResponse = async (operation: Promise<Response>): Promise<Response> => {
+  try { return await operation; } catch (error: unknown) { if (isAbortError(error)) throw error; throw new ConversationApiError({ errorCode: "NETWORK_ERROR", message: "无法连接 Conversation API。", retryable: true }, null, { cause: error }) }
+};
+const request = async <T>(operation: Promise<Response>, decoder: (value: unknown) => T): Promise<{ value: T; response: Response }> => {
+  const response = await generatedResponse(operation);
+  let payload: unknown; try { payload = await response.json() } catch (error: unknown) { if (isAbortError(error)) throw error; throw new ConversationApiError({ errorCode: "INVALID_RESPONSE", message: "Conversation API 返回了无效 JSON。", retryable: false }, response.status, { cause: error }) }
   if (!response.ok) { try { throw new ConversationApiError(decodeProblem(payload), response.status) } catch (error: unknown) { if (error instanceof ConversationApiError && error.errorCode !== "INVALID_RESPONSE") throw error; throw new ConversationApiError({ errorCode: "INVALID_RESPONSE", message: "Conversation API 返回了无效 Problem。", retryable: false }, response.status, { cause: error }) } }
   try { return { value: decoder(payload), response } } catch (error: unknown) { if (error instanceof ConversationApiError) throw new ConversationApiError({ errorCode: error.errorCode, message: error.message, retryable: false }, response.status, { cause: error }); throw error }
 };
-const jsonHeaders = (key?: string): HeadersInit => ({ Accept: "application/json", "Content-Type": "application/json", ...(key === undefined ? {} : { "Idempotency-Key": key }) });
-const withSignal = (signal?: AbortSignal): Pick<RequestInit, "signal"> => signal === undefined ? {} : { signal };
 const readEtag = (response: Response): string => { const value = response.headers.get("ETag"); if (value === null || !etagPattern.test(value)) throw invalidResponse("ETag"); return value };
 
 export const createConversation = async (input: CreateConversationInput, signal?: AbortSignal): Promise<VersionedResource<Conversation>> => {
   validateUuid(input.workspaceId, "workspaceId"); const key = validateKey(input.idempotencyKey); const title = input.title === undefined || input.title === null ? input.title : validateText(input.title, "title", 512);
-  const result = await request("/api/v1/conversations", { method: "POST", headers: jsonHeaders(key), body: JSON.stringify({ workspace_id: input.workspaceId, ...(title === undefined ? {} : { title }) }), ...withSignal(signal) }, decodeConversation);
+  const operation = conversationApi.createConversationRaw({
+    idempotencyKey: key,
+    createConversationRequest: { workspace_id: input.workspaceId, ...(title === undefined ? {} : { title }) },
+  }, generatedRequestInit(signal));
+  const result = await request(generatedRawResponse(operation), decodeConversation);
   return { resource: result.value, etag: readEtag(result.response), notModified: false };
 };
-export const listConversations = async (input: ListInput, signal?: AbortSignal): Promise<Page<Conversation>> => (await request(`/api/v1/conversations?${query(input)}`, { method: "GET", headers: { Accept: "application/json" }, ...withSignal(signal) }, decodeConversationPage)).value;
-const getVersioned = async <T>(path: string, input: GetInput, decoder: (value: unknown) => T, signal?: AbortSignal): Promise<VersionedResource<T>> => {
-  validateUuid(input.id, "id"); if (input.ifNoneMatch !== undefined && !etagPattern.test(input.ifNoneMatch)) throw invalidRequest("ifNoneMatch");
-  let response: Response; try { response = await authFetch(`${path}?${query(input)}`, { method: "GET", headers: { Accept: "application/json", ...(input.ifNoneMatch === undefined ? {} : { "If-None-Match": input.ifNoneMatch }) }, ...withSignal(signal) }) } catch (error: unknown) { if (error instanceof DOMException && error.name === "AbortError") throw error; throw new ConversationApiError({ errorCode: "NETWORK_ERROR", message: "无法连接 Conversation API。", retryable: true }, null, { cause: error }) }
-  if (response.status === 304) return { resource: null, etag: input.ifNoneMatch ?? null, notModified: true };
-  let payload: unknown; try { payload = await response.json() } catch { throw new ConversationApiError({ errorCode: "INVALID_RESPONSE", message: "Conversation API 返回了无效 JSON。", retryable: false }, response.status) }
+export const listConversations = async (input: ListInput, signal?: AbortSignal): Promise<Page<Conversation>> => {
+  const parameters = listRequestParameters(input);
+  const operation = conversationApi.listConversationsRaw(parameters, generatedRequestInit(signal));
+  return (await request(generatedRawResponse(operation), decodeConversationPage)).value;
+};
+const getVersioned = async <T>(operation: Promise<Response>, ifNoneMatch: string | undefined, decoder: (value: unknown) => T): Promise<VersionedResource<T>> => {
+  const response = await generatedResponse(operation);
+  if (response.status === 304) return { resource: null, etag: ifNoneMatch ?? null, notModified: true };
+  let payload: unknown; try { payload = await response.json() } catch (error: unknown) { if (isAbortError(error)) throw error; throw new ConversationApiError({ errorCode: "INVALID_RESPONSE", message: "Conversation API 返回了无效 JSON。", retryable: false }, response.status) }
   if (!response.ok) { try { throw new ConversationApiError(decodeProblem(payload), response.status) } catch (error: unknown) { if (error instanceof ConversationApiError && error.errorCode !== "INVALID_RESPONSE") throw error; throw new ConversationApiError({ errorCode: "INVALID_RESPONSE", message: "Conversation API 返回了无效 Problem。", retryable: false }, response.status) } }
   return { resource: decoder(payload), etag: readEtag(response), notModified: false };
 };
-export const getConversation = (input: GetInput, signal?: AbortSignal): Promise<VersionedResource<Conversation>> => getVersioned(`/api/v1/conversations/${validateUuid(input.id, "id")}`, input, decodeConversation, signal);
+export const getConversation = async (input: GetInput, signal?: AbortSignal): Promise<VersionedResource<Conversation>> => {
+  const conversationId = validateUuid(input.id, "id");
+  if (input.ifNoneMatch !== undefined && !etagPattern.test(input.ifNoneMatch)) throw invalidRequest("ifNoneMatch");
+  const { workspaceId } = listRequestParameters(input);
+  const operation = conversationApi.getConversationRaw({ conversationId, workspaceId }, generatedRequestInit(signal,
+    input.ifNoneMatch === undefined ? {} : { headers: { "If-None-Match": input.ifNoneMatch } }));
+  return getVersioned(generatedRawResponse(operation), input.ifNoneMatch, decodeConversation);
+};
 export const submitQuestion = async (input: SubmitQuestionInput, signal?: AbortSignal): Promise<QuestionAcceptance> => {
   validateUuid(input.workspaceId, "workspaceId"); validateUuid(input.conversationId, "conversationId"); const key = validateKey(input.idempotencyKey); const questionText = validateText(input.question, "question", 8192);
   const mode = input.scope?.retrievalMode ?? "hybrid"; if (!["keyword", "semantic", "hybrid"].includes(mode)) throw invalidRequest("scope.retrievalMode");
@@ -949,21 +976,44 @@ export const submitQuestion = async (input: SubmitQuestionInput, signal?: AbortS
   const from = input.scope?.capturedAtFrom ?? null; const before = input.scope?.capturedAtBefore ?? null; for (const [field, value] of [["capturedAtFrom", from], ["capturedAtBefore", before]] as const) if (value !== null) { try { timestamp(value, field) } catch { throw invalidRequest(field) } }
   if (from !== null && before !== null && Date.parse(from) >= Date.parse(before)) throw invalidRequest("scope.timeRange");
   const depth = input.answerDepth ?? "standard"; const format = input.outputFormat ?? "markdown"; if (!["concise", "standard", "detailed"].includes(depth)) throw invalidRequest("answerDepth"); if (!["markdown", "outline"].includes(format)) throw invalidRequest("outputFormat");
-  const body = { workspace_id: input.workspaceId, ...(input.mode === undefined ? {} : { mode: input.mode }), question: questionText, scope: { retrieval_mode: mode, source_ids: sourceIds, source_version_ids: sourceVersionIds, path_prefixes: paths, captured_at_from: from, captured_at_before: before, allow_original_sources: input.scope?.allowOriginalSources ?? false, allow_web: input.scope?.allowWeb ?? false }, answer_depth: depth, output_format: format };
-  return (await request(`/api/v1/conversations/${input.conversationId}/questions`, { method: "POST", headers: jsonHeaders(key), body: JSON.stringify(body), ...withSignal(signal) }, decodeQuestionAcceptance)).value;
+  const body = { workspace_id: input.workspaceId, ...(input.mode === undefined ? {} : { mode: input.mode }), question: questionText, scope: { retrieval_mode: mode, source_ids: [...sourceIds], source_version_ids: [...sourceVersionIds], path_prefixes: [...paths], captured_at_from: from, captured_at_before: before, allow_original_sources: input.scope?.allowOriginalSources ?? false, allow_web: input.scope?.allowWeb ?? false }, answer_depth: depth, output_format: format };
+  const operation = conversationApi.submitQuestionRaw({
+    conversationId: input.conversationId,
+    idempotencyKey: key,
+    submitQuestionRequest: body,
+  }, generatedRequestInit(signal));
+  return (await request(generatedRawResponse(operation), decodeQuestionAcceptance)).value;
 };
-export const listTurns = async (input: ListInput & { conversationId: string }, signal?: AbortSignal): Promise<Page<Turn>> => { validateUuid(input.conversationId, "conversationId"); return (await request(`/api/v1/conversations/${input.conversationId}/turns?${query(input)}`, { method: "GET", headers: { Accept: "application/json" }, ...withSignal(signal) }, decodeTurnPage)).value };
+export const listTurns = async (input: ListInput & { conversationId: string }, signal?: AbortSignal): Promise<Page<Turn>> => {
+  const conversationId = validateUuid(input.conversationId, "conversationId");
+  const parameters = listRequestParameters(input);
+  const operation = conversationApi.listConversationTurnsRaw({ conversationId, ...parameters }, generatedRequestInit(signal));
+  return (await request(generatedRawResponse(operation), decodeTurnPage)).value;
+};
 export const getLatestTurn = async (input: { workspaceId: string; conversationId: string }, signal?: AbortSignal): Promise<Turn | null> => {
   validateUuid(input.workspaceId, "workspaceId"); validateUuid(input.conversationId, "conversationId");
-  const page = (await request(`/api/v1/conversations/${input.conversationId}/turns?workspace_id=${input.workspaceId}&latest=true`, { method: "GET", headers: { Accept: "application/json" }, ...withSignal(signal) }, decodeTurnPage)).value;
+  const operation = conversationApi.listConversationTurnsRaw({
+    conversationId: input.conversationId,
+    workspaceId: input.workspaceId,
+    latest: true,
+  }, generatedRequestInit(signal));
+  const page = (await request(generatedRawResponse(operation), decodeTurnPage)).value;
   if (page.items.length > 1 || page.nextCursor !== undefined) throw invalidResponse("latest_turn");
   return page.items[0] ?? null;
 };
-export const getAnswer = (input: GetInput, signal?: AbortSignal): Promise<VersionedResource<Answer>> => getVersioned(`/api/v1/answers/${validateUuid(input.id, "id")}`, input, decodeAnswer, signal);
+export const getAnswer = async (input: GetInput, signal?: AbortSignal): Promise<VersionedResource<Answer>> => {
+  const answerId = validateUuid(input.id, "id");
+  if (input.ifNoneMatch !== undefined && !etagPattern.test(input.ifNoneMatch)) throw invalidRequest("ifNoneMatch");
+  const { workspaceId } = listRequestParameters(input);
+  const operation = conversationApi.getAnswerRaw({ answerId, workspaceId }, generatedRequestInit(signal,
+    input.ifNoneMatch === undefined ? {} : { headers: { "If-None-Match": input.ifNoneMatch } }));
+  return getVersioned(generatedRawResponse(operation), input.ifNoneMatch, decodeAnswer);
+};
 export const getWorkspaceAnalysisTimeline = async (input: { workspaceId: string; answerId: string }, signal?: AbortSignal): Promise<WorkspaceAnalysisTimeline> => {
   const workspaceId = validateUuid(input.workspaceId, "workspaceId");
   const answerId = validateUuid(input.answerId, "answerId");
-  const timeline = (await request(`/api/v1/answers/${answerId}/analysis-timeline?workspace_id=${workspaceId}`, { method: "GET", headers: { Accept: "application/json" }, ...withSignal(signal) }, decodeWorkspaceAnalysisTimeline)).value;
+  const operation = timelineApi.getWorkspaceAnalysisTimelineRaw({ answerId, workspaceId }, generatedRequestInit(signal));
+  const timeline = (await request(generatedRawResponse(operation), decodeWorkspaceAnalysisTimeline)).value;
   if (timeline.workspaceId !== workspaceId || timeline.answerId !== answerId) throw invalidResponse("workspace_analysis_timeline.binding");
   return timeline;
 };
@@ -971,5 +1021,10 @@ export const submitFeedback = async (input: SubmitFeedbackInput, signal?: AbortS
   validateUuid(input.workspaceId, "workspaceId"); validateUuid(input.answerId, "answerId"); const key = validateKey(input.idempotencyKey); if (!["helpful", "incorrect", "irrelevant_citation", "broken_citation", "missing_source"].includes(input.feedbackType)) throw invalidRequest("feedbackType");
   const citationType = input.feedbackType === "irrelevant_citation" || input.feedbackType === "broken_citation"; const citation = input.citationId ?? null; if ((citationType && citation === null) || (!citationType && citation !== null)) throw invalidRequest("citationId"); if (citation !== null) validateText(citation, "citationId", 128);
   const comment = input.comment ?? null; if (comment !== null) validateText(comment, "comment", 2048);
-  return (await request(`/api/v1/answers/${input.answerId}/feedback`, { method: "POST", headers: jsonHeaders(key), body: JSON.stringify({ workspace_id: input.workspaceId, feedback_type: input.feedbackType, citation_id: citation, comment }), ...withSignal(signal) }, decodeAnswerFeedback)).value;
+  const operation = conversationApi.submitAnswerFeedbackRaw({
+    answerId: input.answerId,
+    idempotencyKey: key,
+    submitFeedbackRequest: { workspace_id: input.workspaceId, feedback_type: input.feedbackType, citation_id: citation, comment },
+  }, generatedRequestInit(signal));
+  return (await request(generatedRawResponse(operation), decodeAnswerFeedback)).value;
 };

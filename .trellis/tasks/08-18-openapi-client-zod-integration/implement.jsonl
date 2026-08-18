@@ -1,0 +1,8 @@
+{"file":".trellis/spec/frontend/index.md","reason":"确认 React/TanStack Query、API edge、SSE 和生成 wire 类型的层边界。"}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"约束 generated wire、Domain UI Model、strict decoder、Zod 和禁止 any/强转。"}
+{"file":".trellis/tasks/08-18-openapi-client-zod-integration/research/frontend-api-quality-gates.md","reason":"提炼当前任务必须完整注入的前端 API、缓存、错误、测试和浏览器门禁。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"要求在 OpenAPI、Transport、API owner、Store、Feature 之间先定义数据流和验证 owner。"}
+{"file":"docs/architecture/application-contracts.md","reason":"确认 API/SSE/Workspace/Problem/TanStack Query 的跨层契约与唯一 owner。"}
+{"file":"docs/architecture/adr/0028-openapi-contract-gates.md","reason":"锁定 Spectral、oasdiff、OpenAPI authority 和升级/兼容性边界。"}
+{"file":".trellis/tasks/08-18-openapi-client-zod-integration/research/generator-compatibility.md","reason":"记录 typescript-fetch、Zod、normalizer 和 runtime template 的已验证兼容性事实。"}
+{"file":".trellis/tasks/08-18-openapi-client-zod-integration/research/operation-migration-matrix.md","reason":"提供 26 个生产模块到 189 个 operation 的全量迁移和专用 Adapter 对应。"}

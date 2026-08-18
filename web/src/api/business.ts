@@ -1,5 +1,12 @@
 /* eslint-disable @typescript-eslint/consistent-type-definitions, @typescript-eslint/no-non-null-assertion, @typescript-eslint/restrict-template-expressions */
-import { authFetch } from "./auth";
+import { BusinessApi } from "./generated/apis/BusinessApi";
+import { BusinessRevisionsApi } from "./generated/apis/BusinessRevisionsApi";
+import { SourceSpansApi } from "./generated/apis/SourceSpansApi";
+import {
+  generatedConfiguration,
+  generatedRawResponse,
+  generatedRequestInit,
+} from "./generated-client";
 import { graphNodeRefIdentity, graphRelationTypeCompatible, isSymmetricGraphRelationType } from "./graph";
 import { ApiBoundaryError } from "./system-status";
 import type { ArtifactImpactBinding, ReviewCardImpactBinding } from "./timeline";
@@ -8,6 +15,10 @@ import {
   hasOnlyKeys,
   isAbortError,
 } from "../shared/codec";
+
+const businessApi = new BusinessApi(generatedConfiguration);
+const businessRevisionsApi = new BusinessRevisionsApi(generatedConfiguration);
+const sourceSpansApi = new SourceSpansApi(generatedConfiguration);
 
 export type Page<T> = { items: T[]; nextCursor?: string };
 export type SourceSecurityStatus = "pending" | "passed" | "quarantined";
@@ -734,10 +745,9 @@ const decodeBusinessProblem = (value: unknown, response: Response): BusinessApiE
     { errorCode, ...(details === undefined ? {} : { details }) },
   );
 };
-const request = async (path: string, init?: RequestInit): Promise<unknown> => {
+const request = async (operation: Promise<Response>): Promise<unknown> => {
   let response: Response;
-  const headers = new Headers(init?.headers); headers.set("Accept", "application/json"); if (init?.body !== undefined) headers.set("Content-Type", "application/json");
-  try { response = await authFetch(path, { ...init, headers }); }
+  try { response = await operation; }
   catch (error: unknown) {
     if (isAbortError(error)) throw error;
     throw new BusinessApiError("NETWORK_ERROR", "无法连接业务 API。", true, undefined, { cause: error });
@@ -932,13 +942,21 @@ const decodeDownstreamUpdate = (value: unknown, expectedWorkspaceId: string): Do
 };
 
 export const listSourceVersions = (workspaceId: string, params: SourceVersionListParams = {}, signal?: AbortSignal): Promise<Page<SourceVersionItem>> => {
-  const query = new URLSearchParams({ ...(params.cursor ? { cursor: params.cursor } : {}), ...(params.limit ? { limit: String(params.limit) } : {}), ...(params.securityStatus ? { security_status: params.securityStatus } : {}), ...(params.ingestionStatus ? { ingestion_status: params.ingestionStatus } : {}), ...(params.workflowStatus ? { workflow_status: params.workflowStatus } : {}), ...(params.indexStatus ? { index_status: params.indexStatus } : {}), ...(params.mimeType ? { mime_type: params.mimeType } : {}) });
-  return request(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/source-versions${query.size ? `?${query}` : ""}`, signal === undefined ? undefined : { signal }).then((v) => page(v, (item) => decodeSource(item, workspaceId)));
+  const operation = sourceSpansApi.listSourceVersionsRaw({
+    workspaceId,
+    ...(params.cursor ? { cursor: params.cursor } : {}),
+    ...(params.limit ? { limit: params.limit } : {}),
+    ...(params.securityStatus ? { securityStatus: params.securityStatus } : {}),
+    ...(params.ingestionStatus ? { ingestionStatus: params.ingestionStatus } : {}),
+    ...(params.workflowStatus ? { workflowStatus: params.workflowStatus } : {}),
+    ...(params.indexStatus ? { indexStatus: params.indexStatus } : {}),
+    ...(params.mimeType ? { mimeType: params.mimeType } : {}),
+  }, generatedRequestInit(signal));
+  return request(generatedRawResponse(operation)).then((v) => page(v, (item) => decodeSource(item, workspaceId)));
 };
-export const getSourceVersion = (workspaceId: string, sourceVersionId: string, signal?: AbortSignal): Promise<SourceVersionItem> => request(
-  `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/source-versions/${encodeURIComponent(sourceVersionId)}`,
-  signal === undefined ? undefined : { signal },
-).then((value) => {
+export const getSourceVersion = (workspaceId: string, sourceVersionId: string, signal?: AbortSignal): Promise<SourceVersionItem> => request(generatedRawResponse(
+  sourceSpansApi.getEvidenceSourceVersionRaw({ workspaceId, sourceVersionId }, generatedRequestInit(signal)),
+)).then((value) => {
   const r = record(value, "source_version");
   exact(r, ["workspace_id", "source_id", "source_version_id", "source_type", "logical_name", "relative_path", "content_hash", "byte_size", "media_type", "security_status", "ingestion_status", "workflow_status", "index_status", "captured_at"], "source_version");
   boundValue(uuidValue(r, "workspace_id"), workspaceId, "source_version.workspace_id");
@@ -963,12 +981,25 @@ export const getSourceVersion = (workspaceId: string, sourceVersionId: string, s
   };
 });
 export const listProposals = (workspaceId: string, params: ProposalListParams = {}, signal?: AbortSignal): Promise<Page<ProposalSummary>> => {
-  const query = new URLSearchParams({ ...(params.cursor ? { cursor: params.cursor } : {}), ...(params.limit ? { limit: String(params.limit) } : {}), ...(params.status ? { status: params.status } : {}), ...(params.type ? { proposal_type: params.type } : {}), ...(params.risk ? { risk: params.risk } : {}), ...(params.createdAfter ? { created_after: params.createdAfter } : {}) });
-  return request(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/proposals${query.size ? `?${query}` : ""}`, signal === undefined ? undefined : { signal }).then((v) => page(v, (item) => decodeProposal(item, workspaceId)));
+  const operation = businessApi.listProposalsRaw({
+    workspaceId,
+    ...(params.cursor ? { cursor: params.cursor } : {}),
+    ...(params.limit ? { limit: params.limit } : {}),
+    ...(params.status ? { status: params.status } : {}),
+    ...(params.type ? { proposalType: params.type } : {}),
+    ...(params.risk ? { risk: params.risk } : {}),
+    ...(params.createdAfter ? { createdAfter: params.createdAfter } : {}),
+  }, generatedRequestInit(signal));
+  return request(generatedRawResponse(operation)).then((v) => page(v, (item) => decodeProposal(item, workspaceId)));
 };
 export const listWorkflows = (workspaceId: string, params: WorkflowListParams = {}, signal?: AbortSignal): Promise<Page<WorkflowSummary>> => {
-  const query = new URLSearchParams({ ...(params.cursor ? { cursor: params.cursor } : {}), ...(params.limit ? { limit: String(params.limit) } : {}), ...(params.status ? { status: params.status } : {}) });
-  return request(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/workflows${query.size ? `?${query}` : ""}`, signal === undefined ? undefined : { signal }).then((v) => page(v, (item) => decodeWorkflow(item, workspaceId)));
+  const operation = businessApi.listWorkflowRunsRaw({
+    workspaceId,
+    ...(params.cursor ? { cursor: params.cursor } : {}),
+    ...(params.limit ? { limit: params.limit } : {}),
+    ...(params.status ? { status: params.status } : {}),
+  }, generatedRequestInit(signal));
+  return request(generatedRawResponse(operation)).then((v) => page(v, (item) => decodeWorkflow(item, workspaceId)));
 };
 
 export const decodeProposalDetail = async (v: unknown, workspaceId: string, id: string): Promise<ProposalDetail> => {
@@ -1205,9 +1236,11 @@ export const decodeProposalDetail = async (v: unknown, workspaceId: string, id: 
   };
 };
 export const getProposal = (workspaceId: string, id: string, signal?: AbortSignal): Promise<ProposalDetail> =>
-  request(`/api/v1/proposals/${encodeURIComponent(id)}`, signal === undefined ? undefined : { signal })
+  request(generatedRawResponse(businessApi.getProposalRaw({ proposalId: id }, generatedRequestInit(signal))))
     .then((value) => decodeProposalDetail(value, workspaceId, id));
-export const getProposalCurrentContent = (workspaceId: string, id: string, binding: { targetPath: string; targetMode: ProposalTargetMode; baseHash: string }, signal?: AbortSignal): Promise<ProposalCurrentContent> => request(`/api/v1/proposals/${encodeURIComponent(id)}/current-content`, signal === undefined ? undefined : { signal }).then((v) => {
+export const getProposalCurrentContent = (workspaceId: string, id: string, binding: { targetPath: string; targetMode: ProposalTargetMode; baseHash: string }, signal?: AbortSignal): Promise<ProposalCurrentContent> => request(generatedRawResponse(
+  businessRevisionsApi.getProposalCurrentContentRaw({ proposalId: id }, generatedRequestInit(signal)),
+)).then((v) => {
   const r = record(v, "proposal_current_content");
   exact(r, ["proposal_id", "workspace_id", "target_path", "target_mode", "content", "current_hash", "base_hash", "base_hash_match"], "proposal_current_content");
   const targetMode = boundValue(literalValue(r, "target_mode", ["REPLACE", "CREATE_ONLY"] as const), binding.targetMode, "proposal_current_content.target_mode") as ProposalTargetMode;
@@ -1228,7 +1261,12 @@ export const getProposalCurrentContent = (workspaceId: string, id: string, bindi
     baseHashMatch,
   };
 });
-export const preflightProposal = (id: string, input: { revisionId: string; changeHash: string; targetMode: ProposalTargetMode; baseHash: string }): Promise<ProposalApplyPreflight> => request(`/api/v1/proposals/${encodeURIComponent(id)}/apply-preflight`, { method: "POST", body: JSON.stringify({ revision_id: input.revisionId, approved_change_hash: input.changeHash }) }).then((v) => {
+export const preflightProposal = (id: string, input: { revisionId: string; changeHash: string; targetMode: ProposalTargetMode; baseHash: string }): Promise<ProposalApplyPreflight> => request(generatedRawResponse(
+  businessApi.checkProposalApplyPreflightRaw({
+    proposalId: id,
+    applyPreflightRequest: { revision_id: input.revisionId, approved_change_hash: input.changeHash },
+  }, generatedRequestInit()),
+)).then((v) => {
   const r = record(v, "proposal_apply_preflight");
   exact(r, ["proposal_id", "revision_id", "change_hash", "target_mode", "base_hash", "preflight_passed", "mode", "write_performed"], "proposal_apply_preflight");
   if (r.preflight_passed !== true || r.mode !== "preflight_only" || r.write_performed !== false) throw new BusinessApiError("INVALID_RESPONSE", "Proposal preflight 响应语义无效", false);
@@ -1244,10 +1282,9 @@ export const preflightProposal = (id: string, input: { revisionId: string; chang
     writePerformed: false,
   };
 });
-export const getWorkflow = (workspaceId: string, id: string, signal?: AbortSignal): Promise<WorkflowDetail> => request(`/api/v1/workflows/${encodeURIComponent(id)}`, {
-  ...(signal === undefined ? {} : { signal }),
-  headers: { "X-Workspace-ID": workspaceId },
-}).then((v) => {
+export const getWorkflow = (workspaceId: string, id: string, signal?: AbortSignal): Promise<WorkflowDetail> => request(generatedRawResponse(
+  businessApi.getWorkflowRunRaw({ runId: id, xWorkspaceID: workspaceId }, generatedRequestInit(signal)),
+)).then((v) => {
   const r = record(v, "workflow");
   exact(r, ["id", "workspace_id", "definition_id", "status", "input", "output", "version", "created_at", "updated_at", "completed_at", "pause_requested", "cancel_requested", "human_task"], "workflow");
   const input = requiredFieldValue(r, "input");
@@ -1273,11 +1310,15 @@ export const submitWorkflowHumanDecision = (
   const payload = task.decisionKind === "approval_with_target_path"
     ? { approved: decision.approved, target_path: targetPath }
     : { approved: decision.approved };
-  return request(`/api/v1/workflows/${encodeURIComponent(runId)}/human-tasks/${encodeURIComponent(task.id)}/decision`, {
-    method: "POST",
-    headers: { "Idempotency-Key": `workflow-human-${task.id}-${String(task.targetVersion)}`, "X-Workspace-ID": workspaceId },
-    body: JSON.stringify({ target_version: task.targetVersion, decision: payload }),
-  }).then((value) => {
+  const idempotencyKey = `workflow-human-${task.id}-${String(task.targetVersion)}`;
+  return request(generatedRawResponse(businessApi.submitHumanDecisionRaw({
+    runId,
+    taskId: task.id,
+    xWorkspaceID: workspaceId,
+    humanDecisionRequest: { target_version: task.targetVersion, decision: payload },
+  }, generatedRequestInit(undefined, {
+    headers: { "Idempotency-Key": idempotencyKey, "X-Workspace-ID": workspaceId },
+  })))).then((value) => {
     const response = record(value, "workflow_human_decision");
     exact(response, ["id", "run_id", "node_run_id", "status", "target_version", "decision", "submitted_at"], "workflow_human_decision");
     boundValue(uuidValue(response, "id"), task.id, "workflow_human_decision.id");
@@ -1291,7 +1332,14 @@ export const submitWorkflowHumanDecision = (
     if (returnedDecision.approved !== decision.approved || ("target_path" in payload && returnedDecision.target_path !== payload.target_path)) throw new BusinessApiError("INVALID_RESPONSE", "Workflow Human Task 决策回执不一致", false);
   });
 };
-export const decideProposal = (id: string, input: { revisionId: string; changeHash: string; decision: "approved" | "rejected"; proposalType: ProposalType }): Promise<ApprovalDecisionResult> => request(`/api/v1/proposals/${encodeURIComponent(id)}/approvals`, { method: "POST", headers: { "Idempotency-Key": `m9-approval-${id}-${input.decision}-${input.changeHash}` }, body: JSON.stringify({ revision_id: input.revisionId, change_hash: input.changeHash, decision: input.decision }) }).then((value) => {
+export const decideProposal = (id: string, input: { revisionId: string; changeHash: string; decision: "approved" | "rejected"; proposalType: ProposalType }): Promise<ApprovalDecisionResult> => request(generatedRawResponse(
+  businessApi.decideProposalRaw({
+    proposalId: id,
+    proposalDecisionRequest: { revision_id: input.revisionId, change_hash: input.changeHash, decision: input.decision },
+  }, generatedRequestInit(undefined, {
+    headers: { "Idempotency-Key": `m9-approval-${id}-${input.decision}-${input.changeHash}` },
+  })),
+)).then((value) => {
   const r = record(value, "approval_decision");
   exact(r, ["id", "proposal_id", "revision_id", "change_hash", "decision", "approved_git_head", "workflow_run_id", "workflow_status_url", "dispatch_status", "decided_at"], "approval_decision");
   const decision = literalValue(r, "decision", ["approved", "rejected"]);
@@ -1324,13 +1372,27 @@ export const decideProposal = (id: string, input: { revisionId: string; changeHa
     ...(dispatchStatus === undefined ? {} : { dispatchStatus }),
   };
 });
-export const controlWorkflow = (workspaceId: string, id: string, action: "pause" | "resume" | "cancel", expectedVersion: number): Promise<WorkflowControlResult> => request(`/api/v1/workflows/${encodeURIComponent(id)}/${action}`, { method: "POST", headers: { "Idempotency-Key": `m9-workflow-${id}-${action}-${expectedVersion}`, "X-Workspace-ID": workspaceId }, body: JSON.stringify({ expected_version: expectedVersion }) }).then((value) => {
-  const r = record(value, "workflow_control");
-  exact(r, ["workflow_run_id", "status", "version", "status_url", "pause_requested", "cancel_requested"], "workflow_control");
-  const workflowRunId = boundValue(uuidValue(r, "workflow_run_id"), id, "workflow_control.workflow_run_id");
-  const statusUrl = stringValue(r, "status_url")!;
-  if (statusUrl !== `/api/v1/workflows/${workflowRunId}`) throw new BusinessApiError("INVALID_RESPONSE", "Workflow 控制响应 URL 绑定不一致", false);
-  const version = integerValue(r, "version", 1);
-  if (version <= expectedVersion) throw new BusinessApiError("INVALID_RESPONSE", "Workflow 控制响应未推进版本", false);
-  return { workflowRunId, status: workflowStatus(r, "status"), version, statusUrl, pauseRequested: boolValue(r, "pause_requested"), cancelRequested: boolValue(r, "cancel_requested") };
-});
+export const controlWorkflow = (workspaceId: string, id: string, action: "pause" | "resume" | "cancel", expectedVersion: number): Promise<WorkflowControlResult> => {
+  const requestParameters = {
+    runId: id,
+    idempotencyKey: `m9-workflow-${id}-${action}-${expectedVersion}`,
+    xWorkspaceID: workspaceId,
+    workflowControlRequest: { expected_version: expectedVersion },
+  };
+  const init = generatedRequestInit();
+  const operation = action === "pause"
+    ? businessApi.pauseWorkflowRaw(requestParameters, init)
+    : action === "resume"
+      ? businessApi.resumeWorkflowRaw(requestParameters, init)
+      : businessApi.cancelWorkflowRaw(requestParameters, init);
+  return request(generatedRawResponse(operation)).then((value) => {
+    const r = record(value, "workflow_control");
+    exact(r, ["workflow_run_id", "status", "version", "status_url", "pause_requested", "cancel_requested"], "workflow_control");
+    const workflowRunId = boundValue(uuidValue(r, "workflow_run_id"), id, "workflow_control.workflow_run_id");
+    const statusUrl = stringValue(r, "status_url")!;
+    if (statusUrl !== `/api/v1/workflows/${workflowRunId}`) throw new BusinessApiError("INVALID_RESPONSE", "Workflow 控制响应 URL 绑定不一致", false);
+    const version = integerValue(r, "version", 1);
+    if (version <= expectedVersion) throw new BusinessApiError("INVALID_RESPONSE", "Workflow 控制响应未推进版本", false);
+    return { workflowRunId, status: workflowStatus(r, "status"), version, statusUrl, pauseRequested: boolValue(r, "pause_requested"), cancelRequested: boolValue(r, "cancel_requested") };
+  });
+};

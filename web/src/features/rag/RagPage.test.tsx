@@ -466,7 +466,7 @@ describe("WorkspaceAnalysisTimeline", () => {
 });
 
 describe("CitationInspector", () => {
-  it("使用应用内受控读取按钮，不渲染绕过 authFetch 的原始 Span 链接", () => {
+  it("使用应用内受控读取按钮，不渲染绕过认证 API 边界的原始 Span 链接", () => {
     renderWithAppProviders(<CitationInspector citation={{
       id: citationId,
       workspaceId,

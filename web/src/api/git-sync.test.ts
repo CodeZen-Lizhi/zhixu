@@ -1,7 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-
-const authFetch = vi.hoisted(() => vi.fn<typeof fetch>());
-vi.mock("./auth", () => ({ authFetch }));
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createGitSyncRun, decodeGitRemoteConfig, decodeGitSyncRun, decodeGitSyncStatus, getGitSyncStatus, saveGitRemoteConfig } from "./git-sync";
 
@@ -34,8 +31,12 @@ const without = (value: Record<string, unknown>, field: string): Record<string, 
 };
 
 beforeEach(() => {
-  authFetch.mockReset();
+  vi.stubGlobal("fetch", vi.fn<typeof fetch>());
   vi.stubGlobal("crypto", { randomUUID: () => "30000000-0000-4000-8000-000000000001" });
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
 });
 
 describe("Git sync API boundary", () => {
@@ -97,14 +98,14 @@ describe("Git sync API boundary", () => {
   });
 
   it("decodes status without accepting a secret field", async () => {
-    authFetch.mockResolvedValue(new Response(JSON.stringify({ config: configWire(), current_run: runWire() }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({ config: configWire(), current_run: runWire() }), { status: 200, headers: { "Content-Type": "application/json" } }));
     const result = await getGitSyncStatus(workspaceId);
     expect(result.currentRun?.status).toBe("SUCCEEDED");
     expect(result.currentRun?.indexStatus).toBe("FAILED");
   });
 
   it("accepts an unconfigured status without a current run", async () => {
-    authFetch.mockResolvedValue(new Response(JSON.stringify({
+    vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({
       config: {
         workspace_id: workspaceId, configured: false, remote_url: null, branch: null,
         auto_sync: false, token_configured: false, revision: 0, created_at: null, updated_at: null,
@@ -131,11 +132,11 @@ describe("Git sync API boundary", () => {
 
   it("sends replacement token only in the mutation body and never expects it back", async () => {
     const responsePayload = configWire();
-    authFetch.mockResolvedValue(new Response(JSON.stringify(responsePayload), { status: 201, headers: { "Content-Type": "application/json" } }));
+    vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify(responsePayload), { status: 201, headers: { "Content-Type": "application/json" } }));
     const token = "git-token-that-must-not-persist";
     await saveGitRemoteConfig(workspaceId, { expectedRevision: 2, remoteUrl: configWire().remote_url, branch: "main", autoSync: false, token: { action: "replace", value: token }, idempotencyKey: "git-remote-save-test-1" });
 
-    const [path, init] = authFetch.mock.calls[0] ?? [];
+    const [path, init] = vi.mocked(fetch).mock.calls[0] ?? [];
     expect(path).toBe(`/api/v1/workspaces/${workspaceId}/git-remote`);
     expect(init?.method).toBe("PUT");
     expect(typeof init?.body).toBe("string");
@@ -146,12 +147,12 @@ describe("Git sync API boundary", () => {
   });
 
   it("uses the caller-owned key for a response-loss retry instead of generating a second command", async () => {
-    authFetch.mockRejectedValueOnce(new TypeError("response lost"));
-    authFetch.mockResolvedValueOnce(new Response(JSON.stringify(runWire()), { status: 202, headers: { "Content-Type": "application/json" } }));
+    vi.mocked(fetch).mockRejectedValueOnce(new TypeError("response lost"));
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify(runWire()), { status: 202, headers: { "Content-Type": "application/json" } }));
     const input = { idempotencyKey: "git-sync-create-retry-1" };
     await expect(createGitSyncRun(workspaceId, input)).rejects.toMatchObject({ code: "NETWORK_ERROR" });
     await expect(createGitSyncRun(workspaceId, input)).resolves.toMatchObject({ id: runId });
-    expect(new Headers(authFetch.mock.calls[0]?.[1]?.headers).get("Idempotency-Key")).toBe(input.idempotencyKey);
-    expect(new Headers(authFetch.mock.calls[1]?.[1]?.headers).get("Idempotency-Key")).toBe(input.idempotencyKey);
+    expect(new Headers(vi.mocked(fetch).mock.calls[0]?.[1]?.headers).get("Idempotency-Key")).toBe(input.idempotencyKey);
+    expect(new Headers(vi.mocked(fetch).mock.calls[1]?.[1]?.headers).get("Idempotency-Key")).toBe(input.idempotencyKey);
   });
 });

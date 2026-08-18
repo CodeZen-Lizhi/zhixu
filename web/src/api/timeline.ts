@@ -1,7 +1,14 @@
 /** Timeline / Impact 的唯一 HTTP 边界；页面只消费这里验证后的领域投影。 */
 
-import { authFetch } from "./auth";
+import { TimelineApi } from "./generated/apis/TimelineApi";
+import {
+  generatedConfiguration,
+  generatedRawResponse,
+  generatedRequestInit,
+} from "./generated-client";
 import { canonicalUuidPattern as uuidPattern, hasOnlyKeys, isAbortError, isRecord } from "../shared/codec";
+
+const timelineApi = new TimelineApi(generatedConfiguration);
 
 export const timelineEventTypes = [
   "PROPOSAL_CREATED", "APPROVAL_GRANTED", "APPROVAL_REJECTED", "GIT_COMMITTED",
@@ -911,14 +918,13 @@ const decodeProblem = (value: unknown, status: number): TimelineApiError => {
 };
 
 const request = async <T>(
-  path: string,
-  init: RequestInit | undefined,
+  operation: Promise<Response>,
   expectedStatuses: readonly number[],
   decode: (value: unknown, status: number) => T,
 ): Promise<T> => {
   let response: Response;
   try {
-    response = await authFetch(path, init);
+    response = await operation;
   } catch (error: unknown) {
     if (isAbortError(error)) throw error;
     throw new TimelineApiError("NETWORK_ERROR", "NETWORK_ERROR", "无法连接 Timeline/Impact API。", true, null, { cause: error });
@@ -970,34 +976,39 @@ const requireSafeText = (value: string, field: string, maximum: number): string 
   }
 };
 
-const queryForList = (input: ListTimelineInput): URLSearchParams => {
-  const query = new URLSearchParams();
+const listRequestParameters = (input: ListTimelineInput, workspaceId: string) => {
   const eventTypes = input.eventTypes ?? [];
   if (eventTypes.length > 32 || new Set(eventTypes).size !== eventTypes.length || eventTypes.some((item) => !timelineEventTypes.includes(item))) throw invalidRequest("eventTypes");
-  for (const eventType of eventTypes) query.append("event_type", eventType);
   if (input.aggregateType !== undefined) {
     if (!timelineAggregateTypes.includes(input.aggregateType)) throw invalidRequest("aggregateType");
-    query.set("aggregate_type", input.aggregateType);
   }
-  if (input.aggregateId !== undefined) query.set("aggregate_id", requireUuid(input.aggregateId, "aggregateId"));
-  if (input.sourceEventRef !== undefined) query.set("source_event_ref", requireSafeText(input.sourceEventRef, "sourceEventRef", 512));
-  if (input.occurredAfter !== undefined) query.set("occurred_after", requireTimestamp(input.occurredAfter, "occurredAfter"));
-  if (input.occurredBefore !== undefined) query.set("occurred_before", requireTimestamp(input.occurredBefore, "occurredBefore"));
+  const aggregateId = input.aggregateId === undefined ? undefined : requireUuid(input.aggregateId, "aggregateId");
+  const sourceEventRef = input.sourceEventRef === undefined ? undefined : requireSafeText(input.sourceEventRef, "sourceEventRef", 512);
+  const occurredAfter = input.occurredAfter === undefined ? undefined : requireTimestamp(input.occurredAfter, "occurredAfter");
+  const occurredBefore = input.occurredBefore === undefined ? undefined : requireTimestamp(input.occurredBefore, "occurredBefore");
   if (input.occurredAfter !== undefined && input.occurredBefore !== undefined && compareTimelineTimestamps(input.occurredAfter, input.occurredBefore) > 0) throw invalidRequest("occurredRange");
   const limit = input.limit ?? 25;
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > maxTimelineItems) throw invalidRequest("limit");
-  query.set("limit", String(limit));
-  if (input.cursor !== undefined) query.set("cursor", requireSafeText(input.cursor, "cursor", maxCursorBytes));
-  return query;
+  const cursor = input.cursor === undefined ? undefined : requireSafeText(input.cursor, "cursor", maxCursorBytes);
+  return {
+    workspaceId,
+    ...(eventTypes.length === 0 ? {} : { eventType: [...eventTypes] }),
+    ...(input.aggregateType === undefined ? {} : { aggregateType: input.aggregateType }),
+    ...(aggregateId === undefined ? {} : { aggregateId }),
+    ...(sourceEventRef === undefined ? {} : { sourceEventRef }),
+    ...(occurredAfter === undefined ? {} : { occurredAfter }),
+    ...(occurredBefore === undefined ? {} : { occurredBefore }),
+    limit,
+    ...(cursor === undefined ? {} : { cursor }),
+  };
 };
 
 export const listTimeline = (input: ListTimelineInput, signal?: AbortSignal): Promise<TimelinePage> => {
   const workspaceId = requireUuid(input.workspaceId, "workspaceId");
-  const query = queryForList(input);
+  const parameters = listRequestParameters(input, workspaceId);
   const limit = input.limit ?? 25;
   return request(
-    `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/timeline?${query.toString()}`,
-    signal === undefined ? { headers: { Accept: "application/json" } } : { headers: { Accept: "application/json" }, signal },
+    generatedRawResponse(timelineApi.listKnowledgeTimelineRaw(parameters, generatedRequestInit(signal))),
     [200],
     (value) => {
       const page = decodeTimelinePage(value);
@@ -1011,8 +1022,7 @@ export const getTimelineEvent = (workspaceIdValue: string, eventIdValue: string,
   const workspaceId = requireUuid(workspaceIdValue, "workspaceId");
   const eventId = requireUuid(eventIdValue, "eventId");
   return request(
-    `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/timeline/${encodeURIComponent(eventId)}`,
-    signal === undefined ? { headers: { Accept: "application/json" } } : { headers: { Accept: "application/json" }, signal },
+    generatedRawResponse(timelineApi.getKnowledgeTimelineEventRaw({ workspaceId, eventId }, generatedRequestInit(signal))),
     [200],
     (value) => {
       const event = decodeTimelineEvent(value);
@@ -1027,8 +1037,12 @@ export const analyzeImpact = (input: AnalyzeImpactInput, signal?: AbortSignal): 
   const eventId = requireUuid(input.eventId, "eventId");
   const idempotencyKey = requireKey(input.idempotencyKey);
   return request(
-    `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/timeline/${encodeURIComponent(eventId)}/impact-analysis`,
-    { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey }, body: "{}", ...(signal === undefined ? {} : { signal }) },
+    generatedRawResponse(timelineApi.analyzeKnowledgeImpactRaw({
+      workspaceId,
+      eventId,
+      idempotencyKey,
+      body: {},
+    }, generatedRequestInit(signal))),
     [200, 201],
     (value, status) => {
       const result = decodeImpactAnalysisResult(value);
@@ -1043,8 +1057,7 @@ export const getImpactReport = (workspaceIdValue: string, reportIdValue: string,
   const workspaceId = requireUuid(workspaceIdValue, "workspaceId");
   const reportId = requireUuid(reportIdValue, "reportId");
   return request(
-    `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/impact-reports/${encodeURIComponent(reportId)}`,
-    signal === undefined ? { headers: { Accept: "application/json" } } : { headers: { Accept: "application/json" }, signal },
+    generatedRawResponse(timelineApi.getKnowledgeImpactReportRaw({ workspaceId, reportId }, generatedRequestInit(signal))),
     [200],
     (value) => {
       const report = decodeImpactReport(value);
@@ -1065,14 +1078,17 @@ export const createDownstreamUpdateProposal = (input: CreateDownstreamUpdateProp
     input.targetType === "ARTIFACT" && input.action !== "REGENERATE_ARTIFACT" ||
     input.targetType === "REVIEW_CARD" && input.action !== "REVALIDATE_REVIEW_CARD"
   ) throw invalidRequest("targetAction");
+  // The generated oneOf omits the shared target_id property, but the HTTP contract requires it.
+  const targetBinding = { target_id: targetId };
   return request(
-    `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/impact-reports/${encodeURIComponent(reportId)}/proposals`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey },
-      body: JSON.stringify({ target_type: input.targetType, target_id: targetId, action: input.action }),
-      ...(signal === undefined ? {} : { signal }),
-    },
+    generatedRawResponse(timelineApi.createImpactDownstreamUpdateProposalRaw({
+      workspaceId,
+      reportId,
+      idempotencyKey,
+      createDownstreamUpdateProposalRequest: input.targetType === "ARTIFACT"
+        ? { target_type: "ARTIFACT", action: "REGENERATE_ARTIFACT", ...targetBinding }
+        : { target_type: "REVIEW_CARD", action: "REVALIDATE_REVIEW_CARD", ...targetBinding },
+    }, generatedRequestInit(signal))),
     [200, 201],
     (value, status) => {
       const proposal = decodeDownstreamUpdateProposal(value);

@@ -296,7 +296,7 @@ Useful standalone checks:
 ```bash
 make go-test go-vet
 make web-lint web-typecheck web-test web-build
-make openapi-check compose-check docker-build
+make openapi-check openapi-generate-check compose-check docker-build
 OPENAPI_BASE_REVISION=<40-character-lowercase-commit-sha> make openapi-breaking-check
 ZHIXU_TEST_DATABASE_URL='postgres://...' make rag-integration
 ZHIXU_TEST_DATABASE_URL='postgres://...' make graph-integration
@@ -310,10 +310,16 @@ make compose-rag-smoke
 make compose-rag-real-provider-smoke
 ```
 
-OpenAPI 工具依赖独立于 Web 产品依赖：先执行 `make openapi-install`，再执行
-`make openapi-check`。对已提交历史的兼容性判断必须显式传入完整 40 位小写 base commit SHA；
-PR/push CI 分别使用事件提供的 base/before SHA，缺失或不可读取即失败。工具版本、离线镜像要求、
-180 天弃用策略、批准 breaking change 和仓库外 branch protection 核验见
+OpenAPI 工具依赖独立于 Web 产品依赖：先执行 `make openapi-install`。修改契约或前端 API
+边界时，运行 `make openapi-check`、`make openapi-generate` 和
+`make openapi-generate-check`；最后一个命令会从权威契约确定性再生成、比较已提交
+`web/src/api/generated/` 并严格编译公共生成类型。生成目录禁止手改，normalizer 只允许 manifest
+登记的兼容投影。锁定版本、升级/回滚和模板边界见
+[`api/openapi/GENERATOR.md`](api/openapi/GENERATOR.md)。
+
+对已提交历史的兼容性判断必须显式传入完整 40 位小写 base commit SHA；PR/push CI 分别使用事件提供的
+base/before SHA，缺失或不可读取即失败。工具版本、离线镜像要求、180 天弃用策略、批准 breaking
+change 和仓库外 branch protection 核验见
 [ADR-0028](docs/architecture/adr/0028-openapi-contract-gates.md)。
 
 `rag-integration` uses a caller-supplied disposable PostgreSQL target and proves the public HTTP→River→Retrieval→

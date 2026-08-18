@@ -1,12 +1,20 @@
 /** Review 的唯一网络边界：严格隔离 Deck、待复习投影与服务端评分结果。 */
 
-import { authFetch } from "./auth";
 import {
   canonicalUuidPattern as uuidPattern,
   hasOnlyKeys,
   isAbortError,
   isRecord,
 } from "../shared/codec";
+import { ReviewApi as GeneratedReviewApi } from "./generated/apis/ReviewApi";
+import type { ReviewEditCardRequest as GeneratedReviewEditCardRequest } from "./generated/models";
+import {
+  generatedConfiguration,
+  generatedRawResponse,
+  generatedRequestInit,
+} from "./generated-client";
+
+const reviewApi = new GeneratedReviewApi(generatedConfiguration);
 
 export type ReviewDeckStatus = "ACTIVE" | "PAUSED" | "ARCHIVED";
 export type ReviewCardStatus =
@@ -1557,16 +1565,12 @@ const readProblem = (value: unknown, status: number): ReviewApiError => {
   );
 };
 const request = async (
-  path: string,
-  init: RequestInit = {},
+  operation: Promise<Response>,
   expectedStatuses?: readonly number[],
 ): Promise<unknown> => {
-  const headers = new Headers(init.headers);
-  headers.set("Accept", "application/json");
-  if (init.body !== undefined) headers.set("Content-Type", "application/json");
   let response: Response;
   try {
-    response = await authFetch(path, { ...init, headers });
+    response = await operation;
   } catch (error: unknown) {
     if (isAbortError(error)) throw error;
     if (error instanceof ReviewApiError) throw error;
@@ -1583,6 +1587,7 @@ const request = async (
   try {
     payload = parseStrictJson(await response.text());
   } catch (error: unknown) {
+    if (isAbortError(error)) throw error;
     throw new ReviewApiError(
       "INVALID_RESPONSE",
       "INVALID_RESPONSE",
@@ -1600,17 +1605,6 @@ const request = async (
     throw invalidResponse("http_status", response.status);
   return payload;
 };
-const deckPath = (deckId: string): string =>
-  `/api/v1/review/decks/${encodeURIComponent(requireUuid(deckId, "deckId"))}`;
-const cardPath = (cardId: string): string =>
-  `/api/v1/review/cards/${encodeURIComponent(requireUuid(cardId, "cardId"))}`;
-const schedulePath = (
-  input: ReviewDeckScheduleInput,
-  action: "pause" | "resume" | "reset",
-): string => `${deckPath(input.deckId)}/schedule/${action}`;
-const commandHeaders = (idempotencyKey: string): HeadersInit => ({
-  "Idempotency-Key": requireKey(idempotencyKey),
-});
 const assertDeck = (
   deck: ReviewDeck,
   workspaceId: string,
@@ -1650,7 +1644,7 @@ const requireAnswerPoints = (value: string[]): string[] => {
 const requireEvidence = (
   value: unknown,
   claimId: string,
-): Record<string, string>[] => {
+): ReviewCardRequestBody["evidence"] => {
   if (!Array.isArray(value) || value.length === 0 || value.length > 128)
     throw invalidRequest("evidence");
   const seen = new Set<string>();
@@ -1683,9 +1677,11 @@ const requireEvidence = (
     };
   });
 };
+type ReviewCardRequestBody = Omit<GeneratedReviewEditCardRequest, "expected_version">;
+
 const reviewCardBody = (
   input: CreateReviewCardInput,
-): Record<string, unknown> => {
+): ReviewCardRequestBody => {
   const workspaceId = requireUuid(input.workspaceId, "workspaceId");
   const claimId = requireUuid(input.claimId, "claimId");
   if (!cardTypes.includes(input.cardType)) throw invalidRequest("cardType");
@@ -1713,14 +1709,12 @@ export const listReviewDecks = async (
   signal?: AbortSignal,
 ): Promise<{ workspaceId: string; items: ReviewDeck[] }> => {
   const expectedWorkspaceId = requireUuid(workspaceId, "workspaceId");
-  const query = new URLSearchParams({
-    workspace_id: expectedWorkspaceId,
-    limit: "50",
-  });
   const page = decodeReviewDeckPage(
     await request(
-      `/api/v1/review/decks?${query}`,
-      signal === undefined ? {} : { signal },
+      generatedRawResponse(reviewApi.listReviewDecksRaw(
+        { workspaceId: expectedWorkspaceId, limit: 50 },
+        generatedRequestInit(signal),
+      )),
       [200],
     ),
   );
@@ -1738,8 +1732,10 @@ export const getReviewDeck = async (
   const expectedDeckId = requireUuid(deckId, "deckId");
   const deck = decodeReviewDeck(
     await request(
-      `${deckPath(expectedDeckId)}?${new URLSearchParams({ workspace_id: expectedWorkspaceId })}`,
-      signal === undefined ? {} : { signal },
+      generatedRawResponse(reviewApi.getReviewDeckRaw(
+        { deckId: expectedDeckId, workspaceId: expectedWorkspaceId },
+        generatedRequestInit(signal),
+      )),
       [200],
     ),
   );
@@ -1753,14 +1749,12 @@ export const listReviewCards = async (
 ): Promise<ReviewCardPage> => {
   const expectedWorkspaceId = requireUuid(workspaceId, "workspaceId");
   const expectedDeckId = requireUuid(deckId, "deckId");
-  const query = new URLSearchParams({
-    workspace_id: expectedWorkspaceId,
-    limit: "200",
-  });
   const page = decodeReviewCardPage(
     await request(
-      `${deckPath(expectedDeckId)}/cards?${query}`,
-      signal === undefined ? {} : { signal },
+      generatedRawResponse(reviewApi.listReviewCardsRaw(
+        { deckId: expectedDeckId, workspaceId: expectedWorkspaceId, limit: 200 },
+        generatedRequestInit(signal),
+      )),
       [200],
     ),
   );
@@ -1780,13 +1774,11 @@ export const createReviewCard = async (
   const deckId = requireUuid(input.deckId, "deckId");
   const card = decodeReviewCard(
     await request(
-      `${deckPath(deckId)}/cards`,
-      {
-        method: "POST",
-        headers: commandHeaders(input.idempotencyKey),
-        body: JSON.stringify(reviewCardBody(input)),
-        ...(signal === undefined ? {} : { signal }),
-      },
+      generatedRawResponse(reviewApi.createReviewCardRaw({
+        deckId,
+        idempotencyKey: requireKey(input.idempotencyKey),
+        reviewCreateCardRequest: reviewCardBody(input),
+      }, generatedRequestInit(signal))),
       [200, 201],
     ),
   );
@@ -1802,16 +1794,14 @@ export const editReviewCard = async (
   const cardId = requireUuid(input.cardId, "cardId");
   const card = decodeReviewCard(
     await request(
-      cardPath(cardId),
-      {
-        method: "PUT",
-        headers: commandHeaders(input.idempotencyKey),
-        body: JSON.stringify({
+      generatedRawResponse(reviewApi.editReviewCardRaw({
+        cardId,
+        idempotencyKey: requireKey(input.idempotencyKey),
+        reviewEditCardRequest: {
           ...reviewCardBody(input),
           expected_version: requireVersion(input.expectedVersion),
-        }),
-        ...(signal === undefined ? {} : { signal }),
-      },
+        },
+      }, generatedRequestInit(signal))),
       [200],
     ),
   );
@@ -1831,19 +1821,23 @@ const decideReviewCard = async (
     1024,
     action !== "invalidate",
   );
+  const requestParameters = {
+    cardId,
+    idempotencyKey: requireKey(input.idempotencyKey),
+    reviewCardDecisionRequest: {
+      workspace_id: workspaceId,
+      expected_version: requireVersion(input.expectedVersion),
+      reason,
+    },
+  };
+  const operation = action === "approve"
+    ? reviewApi.approveReviewCardRaw(requestParameters, generatedRequestInit(signal))
+    : action === "reject"
+      ? reviewApi.rejectReviewCardRaw(requestParameters, generatedRequestInit(signal))
+      : reviewApi.invalidateReviewCardRaw(requestParameters, generatedRequestInit(signal));
   const card = decodeReviewCard(
     await request(
-      `${cardPath(cardId)}/${action}`,
-      {
-        method: "POST",
-        headers: commandHeaders(input.idempotencyKey),
-        body: JSON.stringify({
-          workspace_id: workspaceId,
-          expected_version: requireVersion(input.expectedVersion),
-          reason,
-        }),
-        ...(signal === undefined ? {} : { signal }),
-      },
+      generatedRawResponse(operation),
       [200, 201],
     ),
   );
@@ -1877,18 +1871,15 @@ export const createReviewDeck = async (
     throw invalidRequest("dailyLimit");
   const deck = decodeReviewDeck(
     await request(
-      "/api/v1/review/decks",
-      {
-        method: "POST",
-        headers: commandHeaders(input.idempotencyKey),
-        body: JSON.stringify({
+      generatedRawResponse(reviewApi.createReviewDeckRaw({
+        idempotencyKey: requireKey(input.idempotencyKey),
+        reviewCreateDeckRequest: {
           workspace_id: workspaceId,
           name,
           scope: requireJsonObject(input.scope, "scope"),
           daily_limit: input.dailyLimit,
-        }),
-        ...(signal === undefined ? {} : { signal }),
-      },
+        },
+      }, generatedRequestInit(signal))),
       [200, 201],
     ),
   );
@@ -1902,18 +1893,22 @@ const changeReviewDeckSchedule = async (
 ): Promise<ReviewDeck> => {
   const workspaceId = requireUuid(input.workspaceId, "workspaceId");
   const deckId = requireUuid(input.deckId, "deckId");
+  const requestParameters = {
+    deckId,
+    idempotencyKey: requireKey(input.idempotencyKey),
+    reviewDeckScheduleRequest: {
+      workspace_id: workspaceId,
+      expected_version: requireVersion(input.expectedVersion),
+    },
+  };
+  const operation = action === "pause"
+    ? reviewApi.pauseReviewDeckScheduleRaw(requestParameters, generatedRequestInit(signal))
+    : action === "resume"
+      ? reviewApi.resumeReviewDeckScheduleRaw(requestParameters, generatedRequestInit(signal))
+      : reviewApi.resetReviewDeckScheduleRaw(requestParameters, generatedRequestInit(signal));
   const deck = decodeReviewDeck(
     await request(
-      schedulePath({ ...input, workspaceId, deckId }, action),
-      {
-        method: "POST",
-        headers: commandHeaders(input.idempotencyKey),
-        body: JSON.stringify({
-          workspace_id: workspaceId,
-          expected_version: requireVersion(input.expectedVersion),
-        }),
-        ...(signal === undefined ? {} : { signal }),
-      },
+      generatedRawResponse(operation),
       [200],
     ),
   );
@@ -1941,18 +1936,16 @@ export const listReviewDue = async (
 ): Promise<ReviewDuePage> => {
   const expectedWorkspaceId = requireUuid(workspaceId, "workspaceId");
   const expectedSessionId = requireUuid(sessionId, "sessionId");
-  const query = new URLSearchParams({
-    workspace_id: expectedWorkspaceId,
-    session_id: expectedSessionId,
-    limit: "20",
-  });
   const expectedDeckId =
     deckId === undefined ? undefined : requireUuid(deckId, "deckId");
-  if (expectedDeckId !== undefined) query.set("deck_id", expectedDeckId);
   const page = decodeReviewDuePage(
     await request(
-      `/api/v1/review/due?${query}`,
-      signal === undefined ? {} : { signal },
+      generatedRawResponse(reviewApi.listReviewDueCardsRaw({
+        workspaceId: expectedWorkspaceId,
+        sessionId: expectedSessionId,
+        limit: 20,
+        ...(expectedDeckId === undefined ? {} : { deckId: expectedDeckId }),
+      }, generatedRequestInit(signal))),
       [200],
     ),
   );
@@ -1976,18 +1969,15 @@ export const startReviewSession = async (
   const deckId = requireUuid(input.deckId, "deckId");
   const session = decodeReviewSession(
     await request(
-      "/api/v1/review/sessions",
-      {
-        method: "POST",
-        headers: commandHeaders(input.idempotencyKey),
-        body: JSON.stringify({
+      generatedRawResponse(reviewApi.startReviewSessionRaw({
+        idempotencyKey: requireKey(input.idempotencyKey),
+        reviewStartSessionRequest: {
           workspace_id: workspaceId,
           deck_id: deckId,
           session_type: "REVIEW",
           config: requireJsonObject(input.config, "config"),
-        }),
-        ...(signal === undefined ? {} : { signal }),
-      },
+        },
+      }, generatedRequestInit(signal))),
       [200, 201],
     ),
   );
@@ -2004,16 +1994,14 @@ export const completeReviewSession = async (
   const sessionId = requireUuid(input.sessionId, "sessionId");
   const session = decodeReviewSession(
     await request(
-      `/api/v1/review/sessions/${encodeURIComponent(sessionId)}/complete`,
-      {
-        method: "POST",
-        headers: commandHeaders(input.idempotencyKey),
-        body: JSON.stringify({
+      generatedRawResponse(reviewApi.completeReviewSessionRaw({
+        sessionId,
+        idempotencyKey: requireKey(input.idempotencyKey),
+        reviewCompleteSessionRequest: {
           workspace_id: workspaceId,
           cancelled: input.cancelled,
-        }),
-        ...(signal === undefined ? {} : { signal }),
-      },
+        },
+      }, generatedRequestInit(signal))),
       [200],
     ),
   );
@@ -2039,20 +2027,18 @@ export const submitReviewAnswer = async (
   if (![1, 2, 3, 4].includes(input.rating)) throw invalidRequest("rating");
   const result = decodeReviewAnswerResult(
     await request(
-      `/api/v1/review/sessions/${encodeURIComponent(sessionId)}/answers`,
-      {
-        method: "POST",
-        headers: commandHeaders(input.idempotencyKey),
-        // Score、答案要点、证据与调度均是服务端可信事实，浏览器只提交自己的回答和自评。
-        body: JSON.stringify({
+      generatedRawResponse(reviewApi.submitReviewAnswerRaw({
+        sessionId,
+        idempotencyKey: requireKey(input.idempotencyKey),
+        reviewSubmitAnswerRequest: {
+          // Score、答案要点、证据与调度均是服务端可信事实，浏览器只提交自己的回答和自评。
           workspace_id: workspaceId,
           card_id: cardId,
           question_ref: questionRef,
           user_answer: userAnswer,
           rating: input.rating,
-        }),
-        ...(signal === undefined ? {} : { signal }),
-      },
+        },
+      }, generatedRequestInit(signal))),
       [200, 201],
     ),
   );
@@ -2066,9 +2052,6 @@ export const submitReviewAnswer = async (
   return result;
 };
 
-const reviewLearningPathPath = (answerId: string): string =>
-  `/api/v1/review/answers/${encodeURIComponent(requireUuid(answerId, "answerId"))}/learning-path`;
-
 export const getReviewLearningPath = async (
   workspaceId: string,
   answerId: string,
@@ -2076,13 +2059,12 @@ export const getReviewLearningPath = async (
 ): Promise<ReviewLearningPathResult> => {
   const validWorkspaceId = requireUuid(workspaceId, "workspaceId");
   const validAnswerId = requireUuid(answerId, "answerId");
-  const query = new URLSearchParams({ workspace_id: validWorkspaceId });
   return decodeReviewLearningPathResult(
     await request(
-      `${reviewLearningPathPath(validAnswerId)}?${query.toString()}`,
-      {
-        ...(signal === undefined ? {} : { signal }),
-      },
+      generatedRawResponse(reviewApi.getReviewLearningPathRaw(
+        { workspaceId: validWorkspaceId, answerId: validAnswerId },
+        generatedRequestInit(signal),
+      )),
       [200],
     ),
     validWorkspaceId,
@@ -2098,14 +2080,12 @@ export const createReviewLearningPath = async (
   const answerId = requireUuid(input.answerId, "answerId");
   return decodeReviewLearningPathResult(
     await request(
-      reviewLearningPathPath(answerId),
-      {
-        method: "POST",
-        headers: commandHeaders(input.idempotencyKey),
+      generatedRawResponse(reviewApi.createReviewLearningPathRaw({
+        answerId,
+        idempotencyKey: requireKey(input.idempotencyKey),
         // Gap、Evidence 和 Artifact 绑定由服务端从已持久化的 Review Answer 推导，客户端只请求创建。
-        body: JSON.stringify({ workspace_id: workspaceId }),
-        ...(signal === undefined ? {} : { signal }),
-      },
+        createReviewLearningPathRequest: { workspace_id: workspaceId },
+      }, generatedRequestInit(signal))),
       [200, 201],
     ),
     workspaceId,
@@ -2123,17 +2103,15 @@ export const updateReviewLearningPathStatus = async (
     throw invalidRequest("status");
   return decodeReviewLearningPathStatusResult(
     await request(
-      `${reviewLearningPathPath(answerId)}/status`,
-      {
-        method: "PUT",
-        headers: commandHeaders(input.idempotencyKey),
-        body: JSON.stringify({
+      generatedRawResponse(reviewApi.updateReviewLearningPathStatusRaw({
+        answerId,
+        idempotencyKey: requireKey(input.idempotencyKey),
+        updateReviewLearningPathStatusRequest: {
           workspace_id: workspaceId,
           expected_version: requireVersion(input.expectedVersion),
           status: input.status,
-        }),
-        ...(signal === undefined ? {} : { signal }),
-      },
+        },
+      }, generatedRequestInit(signal))),
       [200],
     ),
     workspaceId,
@@ -2152,17 +2130,16 @@ export const updateReviewLearningPathStep = async (
     throw invalidRequest("status");
   return decodeReviewLearningPathStepResult(
     await request(
-      `${reviewLearningPathPath(answerId)}/steps/${encodeURIComponent(stepId)}`,
-      {
-        method: "PUT",
-        headers: commandHeaders(input.idempotencyKey),
-        body: JSON.stringify({
+      generatedRawResponse(reviewApi.updateReviewLearningPathStepRaw({
+        answerId,
+        stepId,
+        idempotencyKey: requireKey(input.idempotencyKey),
+        updateReviewLearningPathStepRequest: {
           workspace_id: workspaceId,
           expected_version: requireVersion(input.expectedVersion),
           status: input.status,
-        }),
-        ...(signal === undefined ? {} : { signal }),
-      },
+        },
+      }, generatedRequestInit(signal))),
       [200],
     ),
     workspaceId,

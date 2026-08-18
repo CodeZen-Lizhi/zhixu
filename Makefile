@@ -2,7 +2,7 @@ SHELL := /bin/sh
 DOCKER_COMPOSE ?= docker compose
 
 .PHONY: test migrate go-test go-vet web-install web-lint web-typecheck web-test web-build eino-test eino-vet eino-live-smoke eino-live-smoke-env eino-live-smoke-contract eino-live-chat-smoke eino-live-query-plan-smoke eino-live-rag-metadata-smoke eino-live-openai-embedding-smoke eino-live-ollama-embedding-smoke eino-stable-observation-test eino-stable-observation-preflight eino-stable-observation-start eino-stable-observation-day eino-stable-observation-attest eino-stable-observation-verify agent-eval semantic-link-eval openapi-check trellis-script-test task-context-check auth-integration tool-integration rag-integration workspace-analysis-integration workspace-analysis-terminal-matrix workspace-analysis-fault-smoke graph-integration graph-smoke graph-benchmark benchmark-capacity semantic-link-integration semantic-link-fault-smoke semantic-link-browser-smoke semantic-link-smoke collection-health-integration collection-health-fault-smoke collection-health-benchmark collection-health-browser-smoke collection-health-secret-scan collection-health-smoke artifact-browser-smoke m8-learning-browser-smoke export-browser-smoke timeline-impact-integration timeline-impact-fault-smoke timeline-impact-worker-smoke compose-auth-check compose-runtime-check compose-bootstrap-check compose-runtime-contract compose-netns-check compose-netns-contract compose-workspace-check compose-workspace-contract compose-static-models-check compose-smoke-cleanup-contract smoke-image-cleanup-contract compose-rag-real-provider-contract compose-workspace-analysis-compat-contract compose-workspace-analysis-worker-restart-contract compose-workspace-analysis-otlp-contract compose-auth-smoke compose-check launcher-contract model-secrets-init-contract architecture-quality-baseline docker-build compose-up compose-down compose-reset compose-search-smoke compose-tool-smoke compose-rag-smoke compose-rag-browser-smoke compose-workspace-analysis-smoke compose-workspace-analysis-otlp-smoke compose-workspace-analysis-compat-smoke compose-workspace-analysis-worker-restart-smoke compose-rag-real-provider-preflight compose-rag-real-provider-smoke compose-model-runtime-hot-activation-smoke
-.PHONY: openapi-install openapi-lint openapi-project-check openapi-route-check openapi-breaking-check
+.PHONY: openapi-install openapi-lint openapi-project-check openapi-route-check openapi-tags-check openapi-generated-typecheck openapi-generate openapi-generate-check openapi-breaking-check
 
 test: trellis-script-test task-context-check go-test go-vet web-lint web-typecheck web-test web-build eino-test eino-vet eino-live-smoke-contract eino-stable-observation-test agent-eval openapi-check compose-check
 
@@ -209,7 +209,20 @@ openapi-project-check:
 openapi-route-check:
 	GIN_MODE=test go test -count=1 -timeout 60s ./internal/app -run '^TestRouter(RoutesExactlyMatchOpenAPI|MetricsIsTheOnlyOptionalRuntimeRoute)$$'
 
-openapi-check: openapi-lint openapi-project-check openapi-route-check
+openapi-tags-check:
+	node api/openapi/tag-manifest.mjs
+
+openapi-generated-typecheck:
+	npm run typecheck:generated --prefix web
+
+openapi-check: openapi-lint openapi-project-check openapi-route-check openapi-tags-check
+
+openapi-generate: openapi-check
+	npm run generate --prefix api/openapi
+
+openapi-generate-check: openapi-check
+	npm run generate:check --prefix api/openapi
+	$(MAKE) --no-print-directory openapi-generated-typecheck
 
 openapi-breaking-check:
 	api/openapi/breaking-check.sh

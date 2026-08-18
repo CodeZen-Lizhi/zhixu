@@ -87,7 +87,7 @@ describe("exports API", () => {
     expect(() => decodeJob({ ...succeededJob, ...extra, [field]: value })).toThrow(/job.lifecycle_time/);
   });
 
-  it("downloads through authFetch and rejects unsafe response headers", async () => {
+  it("downloads through the generated client and rejects unsafe response headers", async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response("hello export", { status: 200, headers: { "Content-Type": "text/markdown; charset=utf-8", "Content-Length": "12", "Content-Disposition": `attachment; filename="collection-${collectionId}-${exportId}.md"`, "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff" } }));
     vi.stubGlobal("fetch", fetchMock);
     await expect(downloadExport(workspaceId, decodeJob(succeededJob))).resolves.toMatchObject({ filename: `collection-${collectionId}-${exportId}.md`, contentType: "text/markdown" });

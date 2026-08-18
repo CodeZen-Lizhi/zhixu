@@ -271,9 +271,9 @@ describe("Organizing API boundary", () => {
       { workspaceId, kind: "CLAIM", reference: { claimId: id("38") } },
     ]);
     const [path, init] = vi.mocked(fetch).mock.calls[0] ?? [];
-    expect(path).toBe(`/api/v1/workspaces/${workspaceId}/organizing/materials/search?q=${encodeURIComponent("幂等 恢复").replace("%20", "+")}&kind=CLAIM&limit=12`);
+    expect(path).toBe(`/api/v1/workspaces/${workspaceId}/organizing/materials/search?q=${encodeURIComponent("幂等 恢复")}&kind=CLAIM&limit=12`);
     expect(init?.credentials).toBe("include");
-    expect(init).not.toHaveProperty("method");
+    expect(init?.method).toBe("GET");
   });
 
   it("rejects frozen fields in an identity-only material search result", async () => {

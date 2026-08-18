@@ -12,6 +12,7 @@
     "build": "tsc --noEmit && vite build",
     "lint": "eslint src e2e vite.config.ts playwright.config.ts",
     "typecheck": "tsc --noEmit",
+    "typecheck:generated": "tsc --noEmit -p tsconfig.generated.json",
     "test": "vitest run",
     "test:e2e": "playwright test"
   },
@@ -31,7 +32,8 @@
     "react-dom": "19.2.7",
     "react-markdown": "10.1.0",
     "react-router-dom": "7.18.1",
-    "remark-gfm": "4.0.1"
+    "remark-gfm": "4.0.1",
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@playwright/test": "1.61.1",

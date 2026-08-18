@@ -19,6 +19,21 @@
 - Cursor 只能由服务端生成，绑定规范请求、Workspace、版本/offset 和完整性校验；篡改、过期、重启失效或作用域变化都明确失败，不能静默回第一页。
 - 所有大列表和图查询服务端有界；排序必须稳定，页面不能先取全量再本地分页。
 
+### 前端生成客户端与运行时校验
+
+- `api/openapi/openapi.json` 通过稳定领域 tag 生成 `web/src/api/generated/**` 的
+  `typescript-fetch` wire/client；生成目录只读、不得承载业务逻辑，并由
+  `make openapi-generate-check` 检查确定性漂移。
+- 普通 JSON、multipart 和下载 operation 都由生成 `*ApiRaw` 构造 URL、method、参数与 body；
+  `web/src/api/transport.ts` 唯一拥有 API base URL、Cookie/API Token、CSRF、Abort 与 401 Session
+  失效。生成参数使用当前页面 Origin 满足契约签名，实际线路 Origin 由浏览器控制；模块不得另建
+  通用 fetch/认证路径。
+- 网络响应在项目 API owner 中仍视为不可信输入。共享 Problem、Session/API Token 等选定高风险边界
+  使用 Zod strict schema；模块现有 strict decoder 继续校验 Workspace、资源、版本、hash、状态联合等
+  领域不变量，再投影为与传输无关的 Domain Model。
+- 原生 EventSource 与 Answer Draft stream 保留专用 owner。Blob/multipart Adapter 只处理媒体完整性、
+  FormData 或流生命周期，不复制 URL、认证、CSRF 和通用错误映射。
+
 ## 2. 业务 API 不变量
 
 ### Active Workspace
@@ -82,7 +97,7 @@ SSE 用于“某个服务端事实可能变化”的有序通知，不是第二�
 Routes / Pages
   -> Feature Modules
      -> Domain UI Models
-        -> Query / Command Clients -> strict API boundary
+        -> Query / Command Clients -> strict API owner -> generated client -> shared Transport
         -> shared SSE Event Store
 Shared UI -> Feature Modules
 ```
@@ -90,11 +105,13 @@ Shared UI -> Feature Modules
 ### Feature 与 wire 所有权
 
 - Route/Page 只组合 Feature；Feature 内部实现私有，禁止跨 Feature 内部导入。
-- `web/src/api/*` 是原始 HTTP `unknown` 的唯一 strict decoder/client owner，`web/src/events/**` 是原生 EventSource adapter、
+- `web/src/api/*` 是原始 HTTP `unknown` 的唯一 strict decoder/domain owner，生成 client 只负责 wire/request，
+  `web/src/events/**` 是原生 EventSource adapter、
   strict MessageEvent/Envelope decode 和 Event Store 的唯一 owner；Feature、Hook 和 Component 不解析 raw JSON、snake_case、
   cursor、event frame 或 Problem。
 - Search、Conversation、Events、Graph、Semantic Links、Collections、Health、Business、Exports 和 Attachment Exports 各有一个 wire owner。相同字段不得在多个组件本地强转。
 - Generated/Wire Type 停留在边缘，Feature 使用 Domain UI Model；组件库类型不能成为业务状态类型。
+  生成目录、项目 Transport、模块 strict owner 和 Domain Model 是单向依赖，不允许 generated type 进入 Store/组件。
 
 ### 状态所有权
 

@@ -73,7 +73,7 @@ describe("source span API boundary", () => {
     expect(() => decodeSourceSpan({ ...payload, source_version: { ...payload.source_version, captured_at: "2026-02-31T08:09:10Z" } }, reference)).toThrow(SourceSpanApiError);
   });
 
-  it("401 经由 authFetch 清理认证状态并通知 AuthProvider", async () => {
+  it("401 经由共享 Transport 清理认证状态并通知 AuthProvider", async () => {
     const listener = vi.fn();
     const unsubscribe = subscribeAuthInvalidation(listener);
     setCsrfToken("c".repeat(43));

@@ -18,10 +18,119 @@
       "apiBearer": []
     }
   ],
+  "tags": [
+    {
+      "name": "Auth",
+      "description": "Authentication sessions and API token lifecycle."
+    },
+    {
+      "name": "Workspaces",
+      "description": "Workspace activation, metadata, and workspace scans."
+    },
+    {
+      "name": "System",
+      "description": "Public system capability and runtime status."
+    },
+    {
+      "name": "Health",
+      "description": "Liveness, readiness, and knowledge health operations."
+    },
+    {
+      "name": "ModelSettings",
+      "description": "Managed model settings and activation operations."
+    },
+    {
+      "name": "Captures",
+      "description": "Capture creation, upload, retrieval, and retry operations."
+    },
+    {
+      "name": "Authoring",
+      "description": "Working drafts, authoring projections, and publication commands."
+    },
+    {
+      "name": "DocumentHistory",
+      "description": "Document history, comparison, and restore operations."
+    },
+    {
+      "name": "SourceSpans",
+      "description": "Source versions, ingestion, knowledge profiles, and evidence spans."
+    },
+    {
+      "name": "Organizing",
+      "description": "Material organizing drafts, templates, snapshots, and runs."
+    },
+    {
+      "name": "GitSync",
+      "description": "Git remote configuration and synchronization operations."
+    },
+    {
+      "name": "Business",
+      "description": "Workflow, proposal, approval, and change-control operations."
+    },
+    {
+      "name": "BusinessRevisions",
+      "description": "Proposal current-content and revision-history operations."
+    },
+    {
+      "name": "Conversation",
+      "description": "Conversation, question, answer, and feedback operations."
+    },
+    {
+      "name": "Timeline",
+      "description": "Knowledge timeline and impact-analysis operations."
+    },
+    {
+      "name": "Search",
+      "description": "Knowledge search operations."
+    },
+    {
+      "name": "Graph",
+      "description": "Canonical graph query and evidence operations."
+    },
+    {
+      "name": "Collections",
+      "description": "Collection definition, validation, and result operations."
+    },
+    {
+      "name": "SemanticLinks",
+      "description": "Semantic-link candidate and scan operations."
+    },
+    {
+      "name": "Review",
+      "description": "Review decks, cards, sessions, and learning-path operations."
+    },
+    {
+      "name": "Interview",
+      "description": "Interview sessions, turns, and interview learning-path operations."
+    },
+    {
+      "name": "Memory",
+      "description": "Memory candidate and lifecycle operations."
+    },
+    {
+      "name": "Artifacts",
+      "description": "Artifact planning, authoring, generation, and publication operations."
+    },
+    {
+      "name": "Exports",
+      "description": "Collection and artifact export job operations."
+    },
+    {
+      "name": "AttachmentExports",
+      "description": "Workspace attachment ZIP export operations."
+    },
+    {
+      "name": "Events",
+      "description": "Server event stream operations."
+    }
+  ],
   "paths": {
     "/livez": {
       "get": {
         "operationId": "getLiveness",
+        "tags": [
+          "Health"
+        ],
         "security": [],
         "responses": {
           "200": {
@@ -50,6 +159,9 @@
     "/readyz": {
       "get": {
         "operationId": "getReadiness",
+        "tags": [
+          "Health"
+        ],
         "security": [],
         "responses": {
           "200": {
@@ -88,6 +200,9 @@
     "/api/v1/system/status": {
       "get": {
         "operationId": "getSystemStatus",
+        "tags": [
+          "System"
+        ],
         "security": [],
         "responses": {
           "200": {
@@ -116,6 +231,9 @@
     "/api/v1/settings/models": {
       "get": {
         "operationId": "getModelSettings",
+        "tags": [
+          "ModelSettings"
+        ],
         "description": "Returns the non-sensitive desired and active model settings, per-process applied revisions, and rollout state. API keys, ciphertext, key identifiers, nonces, and instance identifiers are never returned. Bearer API Tokens cannot access this system-secret management endpoint.",
         "security": [
           {
@@ -160,6 +278,9 @@
       },
       "put": {
         "operationId": "updateModelSettings",
+        "tags": [
+          "ModelSettings"
+        ],
         "description": "Creates a new immutable desired revision. Saving does not change the active revision; the activation endpoint applies an exact saved revision in the existing API and Worker processes. Bearer API Tokens cannot access this system-secret management endpoint.",
         "parameters": [
           {
@@ -234,6 +355,9 @@
     "/api/v1/settings/models/activations": {
       "post": {
         "operationId": "startModelSettingsActivation",
+        "tags": [
+          "ModelSettings"
+        ],
         "description": "Starts or idempotently observes an in-process activation for the exact desired revision. The request never carries model settings, credentials, endpoints, rollout identifiers, or client-selected phases. Request cancellation stops only the HTTP wait; the durable activation continues. Bearer API Tokens cannot access this system-secret management endpoint.",
         "parameters": [
           {
@@ -308,6 +432,9 @@
     "/api/v1/settings/models/test": {
       "post": {
         "operationId": "testModelSettings",
+        "tags": [
+          "ModelSettings"
+        ],
         "description": "Tests exactly one Chat or Embedding draft from the API container without persisting it. Failures may include only bounded, sanitized Provider or transport diagnostics; credentials, endpoints, request bodies, raw responses, and internal errors are never echoed. Every response uses Cache-Control: no-store. Bearer API Tokens cannot access this system-secret management endpoint.",
         "parameters": [
           {
@@ -391,6 +518,9 @@
     "/api/v1/workspaces": {
       "post": {
         "operationId": "createWorkspace",
+        "tags": [
+          "Workspaces"
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -464,6 +594,9 @@
     "/api/v1/workspaces/active": {
       "get": {
         "operationId": "getActiveWorkspace",
+        "tags": [
+          "Workspaces"
+        ],
         "x-required-capability": "READ_LOCAL",
         "description": "Returns the unique active Workspace only after its current root grant has been verified. This operation never creates, opens, or switches a Workspace root.",
         "responses": {
@@ -554,6 +687,9 @@
       ],
       "get": {
         "operationId": "getWorkspace",
+        "tags": [
+          "Workspaces"
+        ],
         "responses": {
           "200": {
             "description": "Persisted Workspace with refreshed Git status.",
@@ -638,6 +774,9 @@
       ],
       "post": {
         "operationId": "scanWorkspace",
+        "tags": [
+          "Workspaces"
+        ],
         "description": "Safely discovers supported files, hashes them and registers immutable Source/SourceVersion metadata without modifying user files. It does not claim parse or index completion.",
         "responses": {
           "200": {
@@ -713,6 +852,9 @@
       ],
       "post": {
         "operationId": "createCapture",
+        "tags": [
+          "Captures"
+        ],
         "description": "Durably records immutable text or URL provenance in the Workspace Inbox. A new command returns 201; an exact Idempotency-Key replay returns the original Capture with 200. URL content is fetched asynchronously after the Source exists.",
         "x-required-capability": "WRITE_PROPOSAL",
         "parameters": [
@@ -783,6 +925,9 @@
       },
       "get": {
         "operationId": "listCaptures",
+        "tags": [
+          "Captures"
+        ],
         "description": "Returns a stable Workspace-bound Inbox page, including URL Captures that do not yet have a Source Version.",
         "x-required-capability": "READ_LOCAL",
         "parameters": [
@@ -867,6 +1012,9 @@
       ],
       "post": {
         "operationId": "uploadCapture",
+        "tags": [
+          "Captures"
+        ],
         "description": "Durably stores one server-sniffed document or image as immutable managed content before asynchronous processing. The filename is display metadata and never a filesystem path.",
         "x-required-capability": "WRITE_PROPOSAL",
         "parameters": [
@@ -959,6 +1107,9 @@
       ],
       "get": {
         "operationId": "getCapture",
+        "tags": [
+          "Captures"
+        ],
         "description": "Returns the authoritative Capture orchestration state. Original content bytes and managed storage locations are not returned.",
         "x-required-capability": "READ_LOCAL",
         "responses": {
@@ -1019,6 +1170,9 @@
       ],
       "post": {
         "operationId": "retryCapture",
+        "tags": [
+          "Captures"
+        ],
         "description": "Schedules a new durable processing run for a retryable terminal Capture without changing its immutable input. A new retry returns 202; an exact replay returns 200.",
         "x-required-capability": "WRITE_PROPOSAL",
         "parameters": [
@@ -1102,6 +1256,9 @@
       ],
       "post": {
         "operationId": "createWorkingDraft",
+        "tags": [
+          "Authoring"
+        ],
         "description": "Creates an empty, Workspace-scoped Working Draft. A new command returns 201; an exact Idempotency-Key replay returns the original durable draft with 200.",
         "x-required-capability": "WRITE_PROPOSAL",
         "x-error-codes": [
@@ -1171,6 +1328,9 @@
       },
       "get": {
         "operationId": "listWorkingDrafts",
+        "tags": [
+          "Authoring"
+        ],
         "description": "Returns a Workspace-bound, stable keyset page of server-persisted Working Draft summaries. Draft bodies are retrieved only through the detail endpoint. The opaque cursor is bound to the Workspace, status filter, and limit.",
         "x-required-capability": "READ_LOCAL",
         "parameters": [
@@ -1207,6 +1367,9 @@
       ],
       "get": {
         "operationId": "getWorkingDraft",
+        "tags": [
+          "Authoring"
+        ],
         "description": "Returns one Workspace-bound Working Draft for server-backed editing recovery.",
         "x-required-capability": "READ_LOCAL",
         "responses": {
@@ -1222,6 +1385,9 @@
       },
       "put": {
         "operationId": "updateWorkingDraft",
+        "tags": [
+          "Authoring"
+        ],
         "description": "CAS-updates the mutable Working Draft. expected_version is mandatory; stale updates and Idempotency-Key reuse with different content return 409 without silently overwriting the server version.",
         "x-required-capability": "WRITE_PROPOSAL",
         "x-error-codes": [
@@ -1285,6 +1451,9 @@
       ],
       "post": {
         "operationId": "freezeWorkingDraft",
+        "tags": [
+          "Authoring"
+        ],
         "description": "Validates and atomically freezes a Working Draft into a Document Draft and immutable Article Revision. A new freeze returns 201; an exact Idempotency-Key replay returns the same identities with 200.",
         "x-required-capability": "WRITE_PROPOSAL",
         "x-error-codes": [
@@ -1358,6 +1527,9 @@
       ],
       "post": {
         "operationId": "publishArticleRevision",
+        "tags": [
+          "Authoring"
+        ],
         "description": "Creates the controlled file_patch Proposal from the frozen server-owned Article Revision. It never accepts client content, path, base hash, or Proposal fields. A new binding returns 201; an exact successful Idempotency-Key replay returns it with 200. A deterministic missing-parent failure abandons the reservation; the same key stably replays WRITEBACK_TARGET_PARENT_NOT_FOUND with 404, and recovery requires correcting the path, freezing a new Revision, and using a new key.",
         "x-required-capability": "WRITE_PROPOSAL",
         "x-error-codes": [
@@ -1426,6 +1598,9 @@
       ],
       "get": {
         "operationId": "getDocumentDraft",
+        "tags": [
+          "Authoring"
+        ],
         "description": "Returns one Workspace-bound Document Draft, its latest frozen Article Revision when present, and its publication recovery state when present.",
         "x-required-capability": "READ_LOCAL",
         "responses": {
@@ -1447,6 +1622,9 @@
       ],
       "get": {
         "operationId": "listDocumentHistory",
+        "tags": [
+          "DocumentHistory"
+        ],
         "description": "Returns a bounded path history bound to the current Document version, branch and HEAD. The opaque cursor is process-local and becomes stale when any bound fact changes.",
         "x-required-capability": "READ_LOCAL",
         "x-error-codes": ["DOCUMENT_HISTORY_INVALID", "DOCUMENT_HISTORY_CURSOR_INVALID", "DOCUMENT_HISTORY_CURSOR_STALE", "DOCUMENT_HISTORY_NOT_FOUND", "DOCUMENT_HISTORY_OUTPUT_TOO_LARGE", "DOCUMENT_HISTORY_DETACHED_HEAD", "DOCUMENT_HISTORY_GIT_UNSAFE", "DOCUMENT_HISTORY_GIT_TIMEOUT", "DOCUMENT_HISTORY_GIT_CANCELLED", "DOCUMENT_HISTORY_GIT_UNAVAILABLE", "DOCUMENT_HISTORY_RESULT_INVALID", "DOCUMENT_HISTORY_HTTP_UNAVAILABLE"],
@@ -1475,6 +1653,9 @@
       ],
       "get": {
         "operationId": "compareDocumentHistory",
+        "tags": [
+          "DocumentHistory"
+        ],
         "description": "Returns complete bounded contents and a unified patch for two verified versions of the current canonical Document path.",
         "x-required-capability": "READ_LOCAL",
         "x-error-codes": ["DOCUMENT_HISTORY_INVALID", "DOCUMENT_HISTORY_CURSOR_STALE", "DOCUMENT_HISTORY_NOT_FOUND", "DOCUMENT_HISTORY_OUTPUT_TOO_LARGE", "DOCUMENT_HISTORY_DETACHED_HEAD", "DOCUMENT_HISTORY_GIT_UNSAFE", "DOCUMENT_HISTORY_GIT_TIMEOUT", "DOCUMENT_HISTORY_GIT_CANCELLED", "DOCUMENT_HISTORY_GIT_UNAVAILABLE", "DOCUMENT_HISTORY_RESULT_INVALID", "DOCUMENT_HISTORY_HTTP_UNAVAILABLE"],
@@ -1503,6 +1684,9 @@
       ],
       "post": {
         "operationId": "createDocumentRestorePreview",
+        "tags": [
+          "DocumentHistory"
+        ],
         "description": "Re-reads the current Git and Document baseline and returns a server-derived restore preview. It never writes the worktree or creates a Proposal.",
         "x-required-capability": "READ_LOCAL",
         "x-error-codes": ["DOCUMENT_HISTORY_INVALID", "INVALID_JSON", "UNSUPPORTED_MEDIA_TYPE", "DOCUMENT_HISTORY_NOT_FOUND", "DOCUMENT_RESTORE_STALE", "DOCUMENT_HISTORY_OUTPUT_TOO_LARGE", "DOCUMENT_HISTORY_DETACHED_HEAD", "DOCUMENT_HISTORY_GIT_UNSAFE", "DOCUMENT_HISTORY_GIT_TIMEOUT", "DOCUMENT_HISTORY_GIT_CANCELLED", "DOCUMENT_HISTORY_GIT_UNAVAILABLE", "DOCUMENT_HISTORY_RESULT_INVALID", "DOCUMENT_HISTORY_HTTP_UNAVAILABLE"],
@@ -1533,6 +1717,9 @@
       ],
       "post": {
         "operationId": "createDocumentRestoreProposal",
+        "tags": [
+          "DocumentHistory"
+        ],
         "description": "Re-verifies the preview against the current Document and Git facts, then creates a governed restore_document Proposal containing only server-read target bytes. An exact Idempotency-Key replay returns 200.",
         "x-required-capability": "WRITE_PROPOSAL",
         "x-error-codes": ["DOCUMENT_HISTORY_INVALID", "INVALID_JSON", "UNSUPPORTED_MEDIA_TYPE", "IDEMPOTENCY_KEY_REUSED", "DOCUMENT_HISTORY_NOT_FOUND", "DOCUMENT_RESTORE_DIRTY_WORKTREE", "DOCUMENT_RESTORE_STALE", "DOCUMENT_HISTORY_OUTPUT_TOO_LARGE", "DOCUMENT_HISTORY_DETACHED_HEAD", "DOCUMENT_HISTORY_GIT_UNSAFE", "DOCUMENT_HISTORY_GIT_TIMEOUT", "DOCUMENT_HISTORY_GIT_CANCELLED", "DOCUMENT_HISTORY_GIT_UNAVAILABLE", "DOCUMENT_HISTORY_RESULT_INVALID", "DOCUMENT_HISTORY_HTTP_UNAVAILABLE"],
@@ -1569,6 +1756,9 @@
       ],
       "get": {
         "operationId": "getAuthoringOverview",
+        "tags": [
+          "Authoring"
+        ],
         "description": "Returns bounded, server-owned Authoring overview projections. Working Draft bodies and browser-local draft state are never included.",
         "x-required-capability": "READ_LOCAL",
         "responses": {
@@ -1594,6 +1784,9 @@
       ],
       "get": {
         "operationId": "listDocumentDrafts",
+        "tags": [
+          "Authoring"
+        ],
         "description": "Returns a Workspace-bound, stable keyset page of formal Documents whose lifecycle_status is DRAFT. The opaque cursor is bound to the Workspace and limit.",
         "x-required-capability": "READ_LOCAL",
         "parameters": [
@@ -1629,6 +1822,9 @@
       ],
       "get": {
         "operationId": "getDocumentKnowledgeProfile",
+        "tags": [
+          "SourceSpans"
+        ],
         "description": "Returns the authoritative document knowledge profile and its current immutable revision. Evidence is carried by source span IDs in the revision content.",
         "x-required-capability": "READ_LOCAL",
         "responses": {
@@ -1660,6 +1856,9 @@
       ],
       "post": {
         "operationId": "retryDocumentKnowledgeProfile",
+        "tags": [
+          "SourceSpans"
+        ],
         "description": "CAS-rebuilds a retryable failed, capability-unavailable, or stale profile while preserving the immutable Source Version, completed ingestion/index facts, and any previously readable Profile Revision. A new rebuild returns 202; an exact replay returns 200.",
         "x-required-capability": "WRITE_PROPOSAL",
         "parameters": [ { "$ref": "#/components/parameters/IdempotencyKey" } ],
@@ -1707,6 +1906,9 @@
       ],
       "post": {
         "operationId": "processSourceVersion",
+        "tags": [
+          "SourceSpans"
+        ],
         "description": "Validates, parses and chunks immutable Content Artifact bytes. Replays are idempotent and return persisted Attempt state.",
         "requestBody": {
           "required": true,
@@ -1819,6 +2021,9 @@
       ],
       "post": {
         "operationId": "startWorkflow",
+        "tags": [
+          "Business"
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -1902,6 +2107,9 @@
       },
       "get": {
         "operationId": "listWorkflowRuns",
+        "tags": [
+          "Business"
+        ],
         "parameters": [
           {
             "name": "cursor",
@@ -1985,6 +2193,9 @@
       ],
       "get": {
         "operationId": "getWorkflowRun",
+        "tags": [
+          "Business"
+        ],
         "responses": {
           "200": {
             "description": "Current durable Workflow Run state.",
@@ -2072,6 +2283,9 @@
       ],
       "post": {
         "operationId": "pauseWorkflow",
+        "tags": [
+          "Business"
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -2172,6 +2386,9 @@
       ],
       "post": {
         "operationId": "resumeWorkflow",
+        "tags": [
+          "Business"
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -2272,6 +2489,9 @@
       ],
       "post": {
         "operationId": "cancelWorkflow",
+        "tags": [
+          "Business"
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -2371,6 +2591,9 @@
       ],
       "post": {
         "operationId": "submitHumanDecision",
+        "tags": [
+          "Business"
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -2465,6 +2688,9 @@
       ],
       "post": {
         "operationId": "createProposal",
+        "tags": [
+          "Business"
+        ],
         "description": "Creates a ready-for-review Proposal with an explicit immutable risk level and an immutable Revision. No Workspace file is modified.",
         "requestBody": {
           "required": true,
@@ -2565,6 +2791,9 @@
       },
       "get": {
         "operationId": "listProposals",
+        "tags": [
+          "Business"
+        ],
         "x-error-codes": [
           "PROPOSAL_REVISION_CAPABILITY_INVALID"
         ],
@@ -2687,6 +2916,9 @@
       ],
       "get": {
         "operationId": "getProposal",
+        "tags": [
+          "Business"
+        ],
         "responses": {
           "200": {
             "description": "Current consistent Proposal and Revision with an explicit nullable Approval snapshot.",
@@ -2764,6 +2996,9 @@
       ],
       "post": {
         "operationId": "decideProposal",
+        "tags": [
+          "Business"
+        ],
         "x-error-codes": [
           "PROPOSAL_REVISION_WORKFLOW_CANCEL_UNAVAILABLE"
         ],
@@ -2871,6 +3106,9 @@
       ],
       "post": {
         "operationId": "checkProposalApplyPreflight",
+        "tags": [
+          "Business"
+        ],
         "description": "Reads the real target file hash inside the persisted Workspace and verifies Approval, Revision, Change Hash and base hash. It performs no write and issues no write authorization. downstream_update is approval-only and always fails closed with 409 DOWNSTREAM_UPDATE_APPLY_UNAVAILABLE.",
         "x-error-codes": [
           "DOWNSTREAM_UPDATE_APPLY_UNAVAILABLE",
@@ -2966,6 +3204,9 @@
     "/api/v1/conversations": {
       "post": {
         "operationId": "createConversation",
+        "tags": [
+          "Conversation"
+        ],
         "parameters": [
           {
             "$ref": "#/components/parameters/IdempotencyKey"
@@ -3030,6 +3271,9 @@
       },
       "get": {
         "operationId": "listConversations",
+        "tags": [
+          "Conversation"
+        ],
         "parameters": [
           {
             "$ref": "#/components/parameters/WorkspaceIDQuery"
@@ -3087,6 +3331,9 @@
       ],
       "get": {
         "operationId": "getConversation",
+        "tags": [
+          "Conversation"
+        ],
         "responses": {
           "200": {
             "description": "Conversation resource.",
@@ -3138,6 +3385,9 @@
       ],
       "post": {
         "operationId": "submitQuestion",
+        "tags": [
+          "Conversation"
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -3243,6 +3493,9 @@
       ],
       "get": {
         "operationId": "listConversationTurns",
+        "tags": [
+          "Conversation"
+        ],
         "responses": {
           "200": {
             "description": "Stable ordinal-ordered Turn page, or one latest Turn when latest=true.",
@@ -3289,6 +3542,9 @@
       ],
       "get": {
         "operationId": "getAnswer",
+        "tags": [
+          "Conversation"
+        ],
         "responses": {
           "200": {
             "description": "Authoritative Answer and Workflow projection.",
@@ -3340,6 +3596,9 @@
       ],
       "get": {
         "operationId": "getWorkspaceAnalysisTimeline",
+        "tags": [
+          "Timeline"
+        ],
         "responses": {
           "200": {
             "description": "Authoritative, bounded Workspace Analysis timeline snapshot.",
@@ -3386,6 +3645,9 @@
       ],
       "post": {
         "operationId": "submitAnswerFeedback",
+        "tags": [
+          "Conversation"
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -3469,6 +3731,9 @@
       ],
       "get": {
         "operationId": "subscribeAnswerDraft",
+        "tags": [
+          "Conversation"
+        ],
         "responses": {
           "200": {
             "description": "Transient final-answer draft SSE. Only chunk frames carry an id (generation:sequence). reset/end require the client to discard the draft and refetch the authoritative Answer; this stream never carries durable Server Events or a published Answer body.",
@@ -3522,6 +3787,9 @@
     "/api/v1/events": {
       "get": {
         "operationId": "subscribeServerEvents",
+        "tags": [
+          "Events"
+        ],
         "parameters": [
           {
             "$ref": "#/components/parameters/WorkspaceIDQuery"
@@ -3610,6 +3878,9 @@
     "/api/v1/search": {
       "post": {
         "operationId": "searchKnowledge",
+        "tags": [
+          "Search"
+        ],
         "description": "Runs an Active-only bounded Keyword, Semantic or Hybrid retrieval query. This is a read-only query and does not require Idempotency-Key.",
         "requestBody": {
           "required": true,
@@ -3704,6 +3975,9 @@
     "/api/v1/graph/global": {
       "post": {
         "operationId": "getGraphGlobalPage",
+        "tags": [
+          "Graph"
+        ],
         "description": "Reads a bounded Topic cluster page from the formal Graph projection. The opaque cursor is carried in the JSON body and is bound to the canonical request and result fingerprint.",
         "requestBody": {
           "required": true,
@@ -3799,6 +4073,9 @@
     "/api/v1/graph/neighborhood": {
       "post": {
         "operationId": "getGraphNeighborhoodPage",
+        "tags": [
+          "Graph"
+        ],
         "description": "Reads a bounded local Graph closure around a center node. The opaque cursor is only valid for depth=1 neighborhood paging and is carried in the JSON body.",
         "requestBody": {
           "required": true,
@@ -3904,6 +4181,9 @@
     "/api/v1/graph/path": {
       "post": {
         "operationId": "findGraphPath",
+        "tags": [
+          "Graph"
+        ],
         "description": "Finds the bounded shortest path between two Graph nodes without mutating state. The service returns either a proved shortest path or an explicit no-path result.",
         "requestBody": {
           "required": true,
@@ -4019,6 +4299,9 @@
     "/api/v1/graph/nodes": {
       "get": {
         "operationId": "searchGraphNodes",
+        "tags": [
+          "Graph"
+        ],
         "description": "Searches bounded active Topic and formal Claim summaries within one Workspace. Unknown query parameters and duplicate keys are rejected.",
         "parameters": [
           {
@@ -4148,6 +4431,9 @@
       ],
       "get": {
         "operationId": "getGraphNodeDetail",
+        "tags": [
+          "Graph"
+        ],
         "responses": {
           "200": {
             "description": "A single Workspace-scoped Graph node detail projection.",
@@ -4245,6 +4531,9 @@
       ],
       "get": {
         "operationId": "getGraphRelationDetail",
+        "tags": [
+          "Graph"
+        ],
         "responses": {
           "200": {
             "description": "A single Workspace-scoped Graph relation detail projection.",
@@ -4348,6 +4637,9 @@
       ],
       "get": {
         "operationId": "getGraphRelationEvidencePage",
+        "tags": [
+          "Graph"
+        ],
         "description": "Reads a bounded stable page of relation-owned evidence. The response `source_href` and `span_href` values can be followed directly, and `edge.evidence_href` is compatible with the required `workspace_id` query contract on this route.",
         "responses": {
           "200": {
@@ -4432,6 +4724,9 @@
     "/api/v1/graph/candidates": {
       "get": {
         "operationId": "listSemanticLinkCandidates",
+        "tags": [
+          "SemanticLinks"
+        ],
         "description": "Lists a stable bounded page of reviewable Semantic Link Candidates. Candidates are not formal Graph relations. A TOPIC scope uses direct Topic membership; a SMART_COLLECTION scope evaluates only Claim-Claim pairs from the frozen Collection result binding.",
         "parameters": [
           {
@@ -4570,6 +4865,9 @@
       ],
       "get": {
         "operationId": "getSemanticLinkCandidate",
+        "tags": [
+          "SemanticLinks"
+        ],
         "responses": {
           "200": {
             "description": "A Workspace-scoped Candidate with bounded evidence excerpts.",
@@ -4625,6 +4923,9 @@
       ],
       "post": {
         "operationId": "decideSemanticLinkCandidate",
+        "tags": [
+          "SemanticLinks"
+        ],
         "description": "Records one versioned Candidate decision. Confirm creates a typed Relation Proposal but never writes a formal Relation directly.",
         "requestBody": {
           "required": true,
@@ -4691,6 +4992,9 @@
     "/api/v1/graph/candidate-scans": {
       "post": {
         "operationId": "startSemanticLinkCandidateScan",
+        "tags": [
+          "SemanticLinks"
+        ],
         "description": "Starts or exactly replays a durable bounded Topic or SMART_COLLECTION scan. The scan is a Candidate workflow and never writes a formal Graph relation.",
         "parameters": [
           {
@@ -4766,6 +5070,9 @@
       ],
       "get": {
         "operationId": "getSemanticLinkCandidateScan",
+        "tags": [
+          "SemanticLinks"
+        ],
         "description": "Reads the Workspace-scoped durable Semantic Link scan projection and its persisted counters.",
         "responses": {
           "200": {
@@ -4828,6 +5135,9 @@
       ],
       "get": {
         "operationId": "getEvidenceSourceVersion",
+        "tags": [
+          "SourceSpans"
+        ],
         "responses": {
           "200": {
             "description": "Immutable Source Version metadata plus current ingestion, Workflow and Active Index projections for this Workspace.",
@@ -4940,6 +5250,9 @@
       ],
       "get": {
         "operationId": "getEvidenceSourceSpan",
+        "tags": [
+          "SourceSpans"
+        ],
         "description": "Reads a bounded excerpt from the immutable Content Artifact after verifying Workspace, Source Version, Projection and Span bindings.",
         "responses": {
           "200": {
@@ -5024,6 +5337,9 @@
     "/api/v1/collections": {
       "get": {
         "operationId": "listCollections",
+        "tags": [
+          "Collections"
+        ],
         "parameters": [
           {
             "$ref": "#/components/parameters/WorkspaceIDQuery"
@@ -5089,6 +5405,9 @@
       },
       "post": {
         "operationId": "createCollection",
+        "tags": [
+          "Collections"
+        ],
         "parameters": [
           {
             "$ref": "#/components/parameters/IdempotencyKey"
@@ -5153,6 +5472,9 @@
     "/api/v1/collections/validate": {
       "post": {
         "operationId": "validateCollection",
+        "tags": [
+          "Collections"
+        ],
         "requestBody": {
           "required": true,
           "x-max-body-bytes": 65536,
@@ -5196,6 +5518,9 @@
     "/api/v1/collections/preview": {
       "post": {
         "operationId": "previewCollection",
+        "tags": [
+          "Collections"
+        ],
         "requestBody": {
           "required": true,
           "x-max-body-bytes": 65536,
@@ -5245,6 +5570,9 @@
     "/api/v1/collections/{collection_id}": {
       "get": {
         "operationId": "getCollection",
+        "tags": [
+          "Collections"
+        ],
         "parameters": [
           {
             "name": "collection_id",
@@ -5292,6 +5620,9 @@
       },
       "put": {
         "operationId": "updateCollection",
+        "tags": [
+          "Collections"
+        ],
         "parameters": [
           {
             "name": "collection_id",
@@ -5358,6 +5689,9 @@
     "/api/v1/collections/{collection_id}/archive": {
       "post": {
         "operationId": "archiveCollection",
+        "tags": [
+          "Collections"
+        ],
         "parameters": [
           {
             "name": "collection_id",
@@ -5424,6 +5758,9 @@
     "/api/v1/collections/{collection_id}/results": {
       "get": {
         "operationId": "getCollectionResults",
+        "tags": [
+          "Collections"
+        ],
         "parameters": [
           {
             "name": "collection_id",
@@ -5482,6 +5819,9 @@
     "/api/v1/health/summary": {
       "get": {
         "operationId": "getHealthSummary",
+        "tags": [
+          "Health"
+        ],
         "parameters": [
           {
             "$ref": "#/components/parameters/WorkspaceIDQuery"
@@ -5519,6 +5859,9 @@
     "/api/v1/health/issues": {
       "get": {
         "operationId": "listHealthIssues",
+        "tags": [
+          "Health"
+        ],
         "parameters": [
           {
             "$ref": "#/components/parameters/WorkspaceIDQuery"
@@ -5614,6 +5957,9 @@
     "/api/v1/health/issues/{issue_id}": {
       "get": {
         "operationId": "getHealthIssue",
+        "tags": [
+          "Health"
+        ],
         "parameters": [
           {
             "name": "issue_id",
@@ -5663,6 +6009,9 @@
     "/api/v1/health/issues/{issue_id}/observations": {
       "get": {
         "operationId": "listHealthIssueObservations",
+        "tags": [
+          "Health"
+        ],
         "description": "Returns a bounded keyset page ordered by observed_at descending and id ascending. The opaque cursor is bound to workspace, issue, history kind and limit.",
         "parameters": [
           {
@@ -5732,6 +6081,9 @@
     "/api/v1/health/issues/{issue_id}/decisions": {
       "get": {
         "operationId": "listHealthIssueDecisions",
+        "tags": [
+          "Health"
+        ],
         "description": "Returns a bounded keyset page ordered by created_at descending and id ascending. The opaque cursor is bound to workspace, issue, history kind and limit.",
         "parameters": [
           {
@@ -5799,6 +6151,9 @@
       },
       "post": {
         "operationId": "decideHealthIssue",
+        "tags": [
+          "Health"
+        ],
         "parameters": [
           {
             "name": "issue_id",
@@ -5868,6 +6223,9 @@
     "/api/v1/health/issues/{issue_id}/repair-proposals": {
       "post": {
         "operationId": "createHealthRepairProposal",
+        "tags": [
+          "Health"
+        ],
         "description": "Reserved repair entry point. No executable repair Proposal owner is available in this release.",
         "parameters": [
           {
@@ -5908,6 +6266,9 @@
     "/api/v1/health/scans": {
       "post": {
         "operationId": "startHealthScan",
+        "tags": [
+          "Health"
+        ],
         "parameters": [
           {
             "$ref": "#/components/parameters/IdempotencyKey"
@@ -5972,6 +6333,9 @@
     "/api/v1/health/scans/{scan_id}": {
       "get": {
         "operationId": "getHealthScan",
+        "tags": [
+          "Health"
+        ],
         "parameters": [
           {
             "name": "scan_id",
@@ -6021,6 +6385,9 @@
     "/api/v1/health/schedules": {
       "get": {
         "operationId": "getHealthSchedule",
+        "tags": [
+          "Health"
+        ],
         "parameters": [
           {
             "$ref": "#/components/parameters/WorkspaceIDQuery"
@@ -6068,6 +6435,9 @@
       },
       "put": {
         "operationId": "updateHealthSchedule",
+        "tags": [
+          "Health"
+        ],
         "parameters": [
           {
             "$ref": "#/components/parameters/IdempotencyKey"
@@ -6146,6 +6516,9 @@
       ],
       "get": {
         "operationId": "getProposalCurrentContent",
+        "tags": [
+          "BusinessRevisions"
+        ],
         "description": "Reads a bounded UTF-8 current Workspace file snapshot for a file_patch Proposal and reports whether it still matches the immutable base hash. It performs no write.",
         "responses": {
           "200": {
@@ -6198,6 +6571,9 @@
       ],
       "post": {
         "operationId": "previewProposalRevisionMerge",
+        "tags": [
+          "BusinessRevisions"
+        ],
         "description": "Reads the authoritative base, current Workspace and proposed Revision text, then computes a side-effect-free marker-free three-way merge preview.",
         "x-required-capability": "READ_LOCAL",
         "x-error-codes": [
@@ -6253,6 +6629,9 @@
       ],
       "get": {
         "operationId": "listProposalRevisions",
+        "tags": [
+          "BusinessRevisions"
+        ],
         "description": "Returns a bounded newest-first immutable Revision history without revision or base snapshot bodies.",
         "x-required-capability": "READ_LOCAL",
         "x-error-codes": [
@@ -6294,6 +6673,9 @@
       },
       "post": {
         "operationId": "appendProposalRevision",
+        "tags": [
+          "BusinessRevisions"
+        ],
         "description": "Recomputes the authoritative merge, verifies every conflict acknowledgement, then atomically appends one immutable Revision. It never approves or writes the Workspace file.",
         "x-required-capability": "WRITE_PROPOSAL",
         "x-error-codes": [
@@ -6384,6 +6766,9 @@
       ],
       "get": {
         "operationId": "getProposalRevision",
+        "tags": [
+          "BusinessRevisions"
+        ],
         "description": "Returns one exact immutable historical Revision with its optional base snapshot, lineage, Approval and Workflow binding.",
         "x-required-capability": "READ_LOCAL",
         "x-error-codes": [
@@ -6428,6 +6813,9 @@
       ],
       "get": {
         "operationId": "listSourceVersions",
+        "tags": [
+          "SourceSpans"
+        ],
         "parameters": [
           {
             "name": "cursor",
@@ -6548,6 +6936,9 @@
     "/api/v1/auth/sessions": {
       "post": {
         "operationId": "exchangeBootstrapForSession",
+        "tags": [
+          "Auth"
+        ],
         "security": [
           {
             "bootstrapBearer": []
@@ -6592,6 +6983,9 @@
     "/api/v1/auth/session": {
       "get": {
         "operationId": "getCurrentSession",
+        "tags": [
+          "Auth"
+        ],
         "security": [
           {
             "sessionCookie": []
@@ -6624,6 +7018,9 @@
       },
       "delete": {
         "operationId": "revokeCurrentSession",
+        "tags": [
+          "Auth"
+        ],
         "parameters": [
           {
             "$ref": "#/components/parameters/Origin"
@@ -6662,6 +7059,9 @@
     "/api/v1/auth/session/rotate": {
       "post": {
         "operationId": "rotateSession",
+        "tags": [
+          "Auth"
+        ],
         "parameters": [
           {
             "$ref": "#/components/parameters/Origin"
@@ -6714,6 +7114,9 @@
     "/api/v1/auth/api-tokens": {
       "get": {
         "operationId": "listApiTokens",
+        "tags": [
+          "Auth"
+        ],
         "parameters": [
           {
             "name": "cursor",
@@ -6766,6 +7169,9 @@
       },
       "post": {
         "operationId": "createApiToken",
+        "tags": [
+          "Auth"
+        ],
         "parameters": [
           {
             "$ref": "#/components/parameters/Origin"
@@ -6832,6 +7238,9 @@
       ],
       "delete": {
         "operationId": "revokeApiToken",
+        "tags": [
+          "Auth"
+        ],
         "parameters": [
           {
             "$ref": "#/components/parameters/Origin"
@@ -6884,6 +7293,9 @@
       ],
       "get": {
         "operationId": "listKnowledgeTimeline",
+        "tags": [
+          "Timeline"
+        ],
         "x-required-capability": "READ_LOCAL",
         "parameters": [
           {
@@ -7015,6 +7427,9 @@
       ],
       "get": {
         "operationId": "getKnowledgeTimelineEvent",
+        "tags": [
+          "Timeline"
+        ],
         "x-required-capability": "READ_LOCAL",
         "responses": {
           "200": {
@@ -7074,6 +7489,9 @@
       ],
       "post": {
         "operationId": "analyzeKnowledgeImpact",
+        "tags": [
+          "Timeline"
+        ],
         "x-required-capability": "WRITE_PROPOSAL",
         "parameters": [
           {
@@ -7145,6 +7563,9 @@
     "/api/v1/exports": {
       "post": {
         "operationId": "createExport",
+        "tags": [
+          "Exports"
+        ],
         "description": "Creates a recoverable Smart Collection export. A new job returns 202; an exact Idempotency-Key replay returns the original job with 200.",
         "x-required-capability": "READ_LOCAL",
         "x-error-codes": [
@@ -7286,6 +7707,9 @@
       ],
       "get": {
         "operationId": "getExport",
+        "tags": [
+          "Exports"
+        ],
         "description": "Returns the strict public projection of one Workspace-bound export job without exposing server file paths.",
         "x-required-capability": "READ_LOCAL",
         "x-error-codes": [
@@ -7355,6 +7779,9 @@
       ],
       "get": {
         "operationId": "downloadExport",
+        "tags": [
+          "Exports"
+        ],
         "description": "Revalidates the persisted result binding before preparing a Markdown or metadata JSON attachment. A successful response records server-side download preparation, not complete client receipt.",
         "x-required-capability": "READ_LOCAL",
         "x-error-codes": [
@@ -7456,6 +7883,9 @@
       ],
       "post": {
         "operationId": "createAttachmentExport",
+        "tags": [
+          "AttachmentExports"
+        ],
         "description": "Creates a recoverable export of the Workspace attachments directory. A new job returns 202; an exact Idempotency-Key replay returns the original job with 200.",
         "x-required-capability": "READ_LOCAL",
         "x-error-codes": [
@@ -7584,6 +8014,9 @@
       },
       "get": {
         "operationId": "listAttachmentExports",
+        "tags": [
+          "AttachmentExports"
+        ],
         "description": "Lists Workspace attachment export jobs using a stable opaque cursor bound to the Workspace, attachment scope and limit.",
         "x-required-capability": "READ_LOCAL",
         "x-error-codes": [
@@ -7675,6 +8108,9 @@
       ],
       "get": {
         "operationId": "getAttachmentExport",
+        "tags": [
+          "AttachmentExports"
+        ],
         "description": "Returns the strict tagged projection of one Workspace attachment export without exposing source or generated file paths.",
         "x-required-capability": "READ_LOCAL",
         "x-error-codes": [
@@ -7748,6 +8184,9 @@
       ],
       "get": {
         "operationId": "downloadAttachmentExport",
+        "tags": [
+          "AttachmentExports"
+        ],
         "description": "Revalidates the persisted archive binding before preparing the attachment ZIP. A successful response records server-side download preparation, not complete client receipt.",
         "x-required-capability": "READ_LOCAL",
         "x-error-codes": [
@@ -7839,6 +8278,9 @@
       ],
       "get": {
         "operationId": "listCollectionExports",
+        "tags": [
+          "Exports"
+        ],
         "description": "Lists export jobs for one required Smart Collection using a stable opaque cursor bound to Workspace, Collection and limit.",
         "x-required-capability": "READ_LOCAL",
         "x-error-codes": [
@@ -7919,6 +8361,9 @@
     "/api/v1/review/decks": {
       "get": {
         "operationId": "listReviewDecks",
+        "tags": [
+          "Review"
+        ],
         "x-required-capability": "READ_LOCAL",
         "parameters": [
           {
@@ -7968,6 +8413,9 @@
       },
       "post": {
         "operationId": "createReviewDeck",
+        "tags": [
+          "Review"
+        ],
         "x-required-capability": "WRITE_PROPOSAL",
         "description": "Creates a Review Deck. When authenticated with the Session cookie, this unsafe request also requires the configured Origin and X-CSRF-Token; Bearer API Tokens use their scoped capability instead.",
         "parameters": [
@@ -8040,6 +8488,9 @@
     "/api/v1/review/decks/{deck_id}": {
       "get": {
         "operationId": "getReviewDeck",
+        "tags": [
+          "Review"
+        ],
         "x-required-capability": "READ_LOCAL",
         "parameters": [
           {
@@ -8093,6 +8544,9 @@
     "/api/v1/review/decks/{deck_id}/cards": {
       "get": {
         "operationId": "listReviewCards",
+        "tags": [
+          "Review"
+        ],
         "x-required-capability": "READ_LOCAL",
         "description": "Lists the complete cards for one Workspace Deck so users can review and manage drafts, approvals, rejections, edits, and invalidations.",
         "parameters": [
@@ -8169,6 +8623,9 @@
       },
       "post": {
         "operationId": "createReviewCard",
+        "tags": [
+          "Review"
+        ],
         "x-required-capability": "WRITE_PROPOSAL",
         "description": "Creates a draft Card bound to a confirmed Claim and source evidence; it is not schedulable until approved.",
         "parameters": [
@@ -8250,6 +8707,9 @@
     "/api/v1/review/cards/{card_id}": {
       "put": {
         "operationId": "editReviewCard",
+        "tags": [
+          "Review"
+        ],
         "x-required-capability": "WRITE_PROPOSAL",
         "description": "Replaces a Review Card's learning content with a CAS-protected DRAFT. The changed evidence binding must be approved again before the Card returns to the due queue.",
         "parameters": [
@@ -8321,6 +8781,9 @@
     "/api/v1/review/decks/{deck_id}/schedule/pause": {
       "post": {
         "operationId": "pauseReviewDeckSchedule",
+        "tags": [
+          "Review"
+        ],
         "x-required-capability": "WRITE_PROPOSAL",
         "parameters": [
           {
@@ -8391,6 +8854,9 @@
     "/api/v1/review/decks/{deck_id}/schedule/resume": {
       "post": {
         "operationId": "resumeReviewDeckSchedule",
+        "tags": [
+          "Review"
+        ],
         "x-required-capability": "WRITE_PROPOSAL",
         "parameters": [
           {
@@ -8461,6 +8927,9 @@
     "/api/v1/review/decks/{deck_id}/schedule/reset": {
       "post": {
         "operationId": "resetReviewDeckSchedule",
+        "tags": [
+          "Review"
+        ],
         "x-required-capability": "WRITE_PROPOSAL",
         "parameters": [
           {
@@ -8531,6 +9000,9 @@
     "/api/v1/review/due": {
       "get": {
         "operationId": "listReviewDueCards",
+        "tags": [
+          "Review"
+        ],
         "x-required-capability": "READ_LOCAL",
         "parameters": [
           {
@@ -8613,6 +9085,9 @@
     "/api/v1/review/cards/{card_id}/approve": {
       "post": {
         "operationId": "approveReviewCard",
+        "tags": [
+          "Review"
+        ],
         "x-required-capability": "WRITE_PROPOSAL",
         "parameters": [
           {
@@ -8693,6 +9168,9 @@
     "/api/v1/review/cards/{card_id}/reject": {
       "post": {
         "operationId": "rejectReviewCard",
+        "tags": [
+          "Review"
+        ],
         "x-required-capability": "WRITE_PROPOSAL",
         "parameters": [
           {
@@ -8773,6 +9251,9 @@
     "/api/v1/review/cards/{card_id}/invalidate": {
       "post": {
         "operationId": "invalidateReviewCard",
+        "tags": [
+          "Review"
+        ],
         "x-required-capability": "WRITE_PROPOSAL",
         "parameters": [
           {
@@ -8853,6 +9334,9 @@
     "/api/v1/review/invalidation": {
       "post": {
         "operationId": "invalidateReviewCards",
+        "tags": [
+          "Review"
+        ],
         "x-required-capability": "WRITE_PROPOSAL",
         "description": "Invalidates the next server-bounded batch of matching active Cards after a narrow Claim or source-evidence lifecycle change. At least one selector is required; supplied selectors are combined with AND. Repeat with a new Idempotency-Key while has_more is true.",
         "parameters": [
@@ -8925,6 +9409,9 @@
     "/api/v1/review/sessions": {
       "post": {
         "operationId": "startReviewSession",
+        "tags": [
+          "Review"
+        ],
         "x-required-capability": "WRITE_PROPOSAL",
         "parameters": [
           {
@@ -8996,6 +9483,9 @@
     "/api/v1/review/sessions/{session_id}/complete": {
       "post": {
         "operationId": "completeReviewSession",
+        "tags": [
+          "Review"
+        ],
         "x-required-capability": "WRITE_PROPOSAL",
         "description": "Completes or cancels one active Session. The same Idempotency-Key with the same payload returns the durable receipt; a changed payload or a closed Session returns a conflict.",
         "parameters": [
@@ -9067,6 +9557,9 @@
     "/api/v1/review/sessions/{session_id}/answers": {
       "post": {
         "operationId": "submitReviewAnswer",
+        "tags": [
+          "Review"
+        ],
         "x-required-capability": "WRITE_PROPOSAL",
         "description": "Submits only the user's answer and self-rating. The server generates the evidence-bound score and atomically advances the frozen FSRS schedule; clients cannot submit score or feedback fields.",
         "parameters": [
@@ -9189,6 +9682,9 @@
       ],
       "get": {
         "operationId": "getReviewLearningPath",
+        "tags": [
+          "Review"
+        ],
         "x-required-capability": "READ_LOCAL",
         "description": "Returns the Learning Path derived from one persisted Review Answer. The path, steps, evidence bindings, and Artifact binding are server-owned.",
         "parameters": [
@@ -9239,6 +9735,9 @@
       },
       "post": {
         "operationId": "createReviewLearningPath",
+        "tags": [
+          "Review"
+        ],
         "x-required-capability": "WRITE_PROPOSAL",
         "description": "Creates a Learning Path only when the server-derived persisted Review score has actionable gaps. Clients cannot submit gaps, citations, or Artifact bindings.",
         "parameters": [
@@ -9325,6 +9824,9 @@
     "/api/v1/review/answers/{answer_id}/learning-path/status": {
       "put": {
         "operationId": "updateReviewLearningPathStatus",
+        "tags": [
+          "Review"
+        ],
         "x-required-capability": "WRITE_PROPOSAL",
         "parameters": [
           {
@@ -9402,6 +9904,9 @@
     "/api/v1/review/answers/{answer_id}/learning-path/steps/{step_id}": {
       "put": {
         "operationId": "updateReviewLearningPathStep",
+        "tags": [
+          "Review"
+        ],
         "x-required-capability": "WRITE_PROPOSAL",
         "parameters": [
           {
@@ -9488,6 +9993,9 @@
     "/api/v1/memories": {
       "get": {
         "operationId": "listMemories",
+        "tags": [
+          "Memory"
+        ],
         "x-required-capability": "READ_LOCAL",
         "description": "Lists only the authenticated principal's Memory records in one Workspace. Memory is user context, never a Knowledge Citation.",
         "parameters": [
@@ -9589,6 +10097,9 @@
       },
       "post": {
         "operationId": "createMemoryCandidate",
+        "tags": [
+          "Memory"
+        ],
         "x-required-capability": "WRITE_PROPOSAL",
         "description": "Creates a non-effective user-originated Memory Candidate. The server assigns USER/user:manual provenance; it cannot enter Agent, Interview, or RAG context until the owner explicitly confirms it.",
         "parameters": [
@@ -9677,6 +10188,9 @@
       ],
       "get": {
         "operationId": "getMemory",
+        "tags": [
+          "Memory"
+        ],
         "x-required-capability": "READ_LOCAL",
         "parameters": [
           {
@@ -9719,6 +10233,9 @@
       },
       "put": {
         "operationId": "editMemory",
+        "tags": [
+          "Memory"
+        ],
         "x-required-capability": "WRITE_PROPOSAL",
         "description": "Edits mutable Memory content, task scope, or expiry while preserving its server-controlled type and source provenance.",
         "parameters": [
@@ -9779,6 +10296,9 @@
       },
       "delete": {
         "operationId": "deleteMemory",
+        "tags": [
+          "Memory"
+        ],
         "x-required-capability": "WRITE_PROPOSAL",
         "parameters": [
           {
@@ -9840,6 +10360,9 @@
     "/api/v1/memories/{memory_id}/confirm": {
       "post": {
         "operationId": "confirmMemory",
+        "tags": [
+          "Memory"
+        ],
         "x-required-capability": "WRITE_PROPOSAL",
         "description": "The sole command that moves a Candidate into confirmed ACTIVE Memory.",
         "parameters": [
@@ -9911,6 +10434,9 @@
     "/api/v1/memories/{memory_id}/pause": {
       "post": {
         "operationId": "pauseMemory",
+        "tags": [
+          "Memory"
+        ],
         "x-required-capability": "WRITE_PROPOSAL",
         "parameters": [
           {
@@ -9981,6 +10507,9 @@
     "/api/v1/memories/{memory_id}/resume": {
       "post": {
         "operationId": "resumeMemory",
+        "tags": [
+          "Memory"
+        ],
         "x-required-capability": "WRITE_PROPOSAL",
         "parameters": [
           {
@@ -10051,6 +10580,9 @@
     "/api/v1/review/interviews": {
       "get": {
         "operationId": "listInterviews",
+        "tags": [
+          "Interview"
+        ],
         "x-required-capability": "READ_LOCAL",
         "description": "Lists recoverable Interview Session summaries in one Workspace without questions, answers, evidence, or command receipts.",
         "parameters": [
@@ -10112,6 +10644,9 @@
       },
       "post": {
         "operationId": "startInterview",
+        "tags": [
+          "Interview"
+        ],
         "x-required-capability": "WRITE_PROPOSAL",
         "description": "Starts an evidence-bound Interview with a frozen configuration and persisted initial questions. The user cannot supply questions, scores, or evidence.",
         "parameters": [
@@ -10184,6 +10719,9 @@
     "/api/v1/review/interviews/{session_id}": {
       "get": {
         "operationId": "getInterview",
+        "tags": [
+          "Interview"
+        ],
         "x-required-capability": "READ_LOCAL",
         "parameters": [
           {
@@ -10237,6 +10775,9 @@
     "/api/v1/review/interviews/{session_id}/turns": {
       "post": {
         "operationId": "submitInterviewTurn",
+        "tags": [
+          "Interview"
+        ],
         "x-required-capability": "WRITE_PROPOSAL",
         "description": "Submits only a user answer. The server produces the score, follow-up decision, and next question from persisted evidence.",
         "parameters": [
@@ -10308,6 +10849,9 @@
     "/api/v1/review/interviews/{session_id}/complete": {
       "post": {
         "operationId": "completeInterview",
+        "tags": [
+          "Interview"
+        ],
         "x-required-capability": "WRITE_PROPOSAL",
         "description": "Completes a persisted Interview exactly once and creates the evidence-bound report and Learning Path Artifact bindings.",
         "parameters": [
@@ -10379,6 +10923,9 @@
     "/api/v1/review/interviews/{session_id}/learning-paths/{path_id}/steps/{step_id}/memory-candidate": {
       "post": {
         "operationId": "suggestInterviewMemoryCandidate",
+        "tags": [
+          "Interview"
+        ],
         "x-required-capability": "WRITE_PROPOSAL",
         "description": "Creates only a task-scoped Memory Candidate from one persisted Learning Path step. A separate user confirmation is still required before the Memory becomes ACTIVE.",
         "parameters": [
@@ -10478,6 +11025,9 @@
     "/api/v1/review/learning-paths/{path_id}/status": {
       "put": {
         "operationId": "updateLearningPathStatus",
+        "tags": [
+          "Review"
+        ],
         "x-required-capability": "WRITE_PROPOSAL",
         "parameters": [
           {
@@ -10548,6 +11098,9 @@
     "/api/v1/review/learning-paths/{path_id}/steps/{step_id}": {
       "put": {
         "operationId": "updateLearningPathStep",
+        "tags": [
+          "Review"
+        ],
         "x-required-capability": "WRITE_PROPOSAL",
         "parameters": [
           {
@@ -10627,6 +11180,9 @@
     "/api/v1/artifacts": {
       "get": {
         "operationId": "listArtifacts",
+        "tags": [
+          "Artifacts"
+        ],
         "parameters": [
           {
             "$ref": "#/components/parameters/WorkspaceIDQuery"
@@ -10685,6 +11241,9 @@
       },
       "post": {
         "operationId": "planArtifact",
+        "tags": [
+          "Artifacts"
+        ],
         "description": "Creates an isolated Artifact and its initial immutable Revision. It does not create a formal Document or default RAG input.",
         "parameters": [
           {
@@ -10764,6 +11323,9 @@
       ],
       "get": {
         "operationId": "getArtifact",
+        "tags": [
+          "Artifacts"
+        ],
         "parameters": [
           {
             "$ref": "#/components/parameters/WorkspaceIDQuery"
@@ -10818,6 +11380,9 @@
       ],
       "post": {
         "operationId": "submitArtifactOutline",
+        "tags": [
+          "Artifacts"
+        ],
         "parameters": [
           {
             "$ref": "#/components/parameters/IdempotencyKey"
@@ -10889,6 +11454,9 @@
       ],
       "post": {
         "operationId": "approveArtifactOutline",
+        "tags": [
+          "Artifacts"
+        ],
         "parameters": [
           {
             "$ref": "#/components/parameters/IdempotencyKey"
@@ -10960,6 +11528,9 @@
       ],
       "post": {
         "operationId": "startArtifactRevision",
+        "tags": [
+          "Artifacts"
+        ],
         "description": "Returns a DRAFT, APPROVED or EXPORTED Artifact to GENERATING so its existing immutable Revision can be revised section by section. The current Revision remains unchanged until a section replacement creates the next Revision.",
         "parameters": [
           {
@@ -11032,6 +11603,9 @@
       ],
       "post": {
         "operationId": "recordArtifactSection",
+        "tags": [
+          "Artifacts"
+        ],
         "description": "Records one human-authored immutable section revision after server-side verification of every supplied retrieval Citation identity. The server fixes creator=HUMAN; clients cannot supply creator, generation metadata, verified hashes or excerpts.",
         "parameters": [
           {
@@ -11104,6 +11678,9 @@
       ],
       "post": {
         "operationId": "generateArtifactSection",
+        "tags": [
+          "Artifacts"
+        ],
         "description": "Atomically freezes one approved Artifact section and starts its controlled Workflow. The request cannot supply content, Citations, creator, model, prompt, schema or generation metadata. First acceptance and exact Idempotency-Key replay both return 202 with the authoritative durable generation and Workflow binding.",
         "parameters": [
           {
@@ -11192,6 +11769,9 @@
       ],
       "get": {
         "operationId": "listArtifactSectionGenerations",
+        "tags": [
+          "Artifacts"
+        ],
         "description": "Returns the authoritative latest non-completed Generation for each unfinished section in current outline order. This read remains available when Chat generation is disabled.",
         "x-required-capability": "READ_LOCAL",
         "parameters": [
@@ -11248,6 +11828,9 @@
       ],
       "post": {
         "operationId": "approveArtifactDraft",
+        "tags": [
+          "Artifacts"
+        ],
         "parameters": [
           {
             "$ref": "#/components/parameters/IdempotencyKey"
@@ -11319,6 +11902,9 @@
       ],
       "post": {
         "operationId": "exportArtifactMarkdown",
+        "tags": [
+          "Artifacts"
+        ],
         "description": "Exports only the current approved immutable Revision to managed storage. Export does not publish formal knowledge.",
         "parameters": [
           {
@@ -11400,6 +11986,9 @@
       ],
       "get": {
         "operationId": "getArtifactExport",
+        "tags": [
+          "Exports"
+        ],
         "parameters": [
           {
             "$ref": "#/components/parameters/WorkspaceIDQuery"
@@ -11454,6 +12043,9 @@
       ],
       "post": {
         "operationId": "createArtifactPublishProposal",
+        "tags": [
+          "Artifacts"
+        ],
         "description": "Creates only a frozen PUBLISH_ARTIFACT Change Control Proposal bound to this current approved Revision. It never creates a Document, Git write or index entry directly.",
         "parameters": [
           {
@@ -11535,6 +12127,9 @@
       ],
       "get": {
         "operationId": "getKnowledgeImpactReport",
+        "tags": [
+          "Timeline"
+        ],
         "x-required-capability": "READ_LOCAL",
         "responses": {
           "200": {
@@ -11594,6 +12189,9 @@
       ],
       "post": {
         "operationId": "createImpactDownstreamUpdateProposal",
+        "tags": [
+          "Timeline"
+        ],
         "description": "Creates one approval-only downstream_update Proposal for an exact owner-backed target in the latest READY impact-report/v2. It never applies the update, creates a Workflow, grants write authorization, or mutates the target.",
         "x-required-capability": "WRITE_PROPOSAL",
         "x-error-codes": [
@@ -11713,6 +12311,9 @@
       ],
       "post": {
         "operationId": "createOrganizingDraft",
+        "tags": [
+          "Organizing"
+        ],
         "description": "Creates a recoverable Suggested Material Set. Creation does not select a Template Revision or authorize generation.",
         "x-required-capability": "WRITE_PROPOSAL",
         "parameters": [
@@ -11746,6 +12347,9 @@
       ],
       "get": {
         "operationId": "getOrganizingDraft",
+        "tags": [
+          "Organizing"
+        ],
         "x-required-capability": "READ_LOCAL",
         "responses": {
           "200": { "description": "Workspace-owned mutable Draft.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrganizingDraftEnvelope" } } } },
@@ -11760,6 +12364,9 @@
       },
       "put": {
         "operationId": "updateOrganizingDraft",
+        "tags": [
+          "Organizing"
+        ],
         "description": "CAS-updates intent and the exact selected Template Revision.",
         "x-required-capability": "WRITE_PROPOSAL",
         "parameters": [
@@ -11793,6 +12400,9 @@
       ],
       "post": {
         "operationId": "suggestOrganizingMaterials",
+        "tags": [
+          "Organizing"
+        ],
         "description": "CAS-replaces server-hydrated suggestions while retaining explicit user selections.",
         "x-required-capability": "WRITE_PROPOSAL",
         "parameters": [
@@ -11826,6 +12436,9 @@
       ],
       "post": {
         "operationId": "addOrganizingMaterial",
+        "tags": [
+          "Organizing"
+        ],
         "description": "Adds one identity-only reference. The server resolves ownership, title, availability, hashes, and Evidence.",
         "x-required-capability": "WRITE_PROPOSAL",
         "parameters": [
@@ -11861,6 +12474,9 @@
       ],
       "patch": {
         "operationId": "setOrganizingMaterialSelection",
+        "tags": [
+          "Organizing"
+        ],
         "description": "CAS-updates the user's explicit authorization for one suggested material.",
         "x-required-capability": "WRITE_PROPOSAL",
         "parameters": [
@@ -11888,6 +12504,9 @@
       },
       "delete": {
         "operationId": "removeOrganizingMaterial",
+        "tags": [
+          "Organizing"
+        ],
         "x-required-capability": "WRITE_PROPOSAL",
         "parameters": [
           { "$ref": "#/components/parameters/IdempotencyKey" }
@@ -11920,6 +12539,9 @@
       ],
       "post": {
         "operationId": "confirmOrganizingDraft",
+        "tags": [
+          "Organizing"
+        ],
         "description": "Atomically freezes the selected inputs and exact Template Revision into an immutable Snapshot and durable Workflow-start outbox. No Workflow Run is invented before dispatch starts.",
         "x-required-capability": "WRITE_PROPOSAL",
         "parameters": [
@@ -11953,6 +12575,9 @@
       ],
       "get": {
         "operationId": "searchOrganizingMaterials",
+        "tags": [
+          "Organizing"
+        ],
         "description": "Searches one Workspace-owned material kind and returns identity-only selectors. Adding a result re-resolves owner facts.",
         "x-required-capability": "READ_LOCAL",
         "parameters": [
@@ -11992,6 +12617,9 @@
       ],
       "get": {
         "operationId": "getOrganizingSnapshot",
+        "tags": [
+          "Organizing"
+        ],
         "description": "Returns an immutable Workflow input Snapshot.",
         "x-required-capability": "READ_LOCAL",
         "responses": {
@@ -12012,6 +12640,9 @@
       ],
       "get": {
         "operationId": "listOrganizingTemplates",
+        "tags": [
+          "Organizing"
+        ],
         "description": "Lists built-in templates and Workspace-owned custom templates.",
         "x-required-capability": "READ_LOCAL",
         "parameters": [
@@ -12038,6 +12669,9 @@
       },
       "post": {
         "operationId": "createOrganizingTemplate",
+        "tags": [
+          "Organizing"
+        ],
         "description": "Creates a constrained Workspace-owned Template and immutable Revision 1.",
         "x-required-capability": "WRITE_PROPOSAL",
         "parameters": [
@@ -12071,6 +12705,9 @@
       ],
       "get": {
         "operationId": "getOrganizingTemplate",
+        "tags": [
+          "Organizing"
+        ],
         "x-required-capability": "READ_LOCAL",
         "responses": {
           "200": { "description": "Template and exact current Revision.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrganizingTemplateEnvelope" } } } },
@@ -12091,6 +12728,9 @@
       ],
       "post": {
         "operationId": "cloneOrganizingTemplate",
+        "tags": [
+          "Organizing"
+        ],
         "description": "Clones a built-in Template into an independent Workspace-owned Template.",
         "x-required-capability": "WRITE_PROPOSAL",
         "parameters": [
@@ -12125,6 +12765,9 @@
       ],
       "post": {
         "operationId": "reviseOrganizingTemplate",
+        "tags": [
+          "Organizing"
+        ],
         "description": "Appends an immutable custom Template Revision and advances its current pointer by CAS.",
         "x-required-capability": "WRITE_PROPOSAL",
         "parameters": [
@@ -12159,6 +12802,9 @@
       ],
       "get": {
         "operationId": "getOrganizingRun",
+        "tags": [
+          "Organizing"
+        ],
         "description": "Returns the true Snapshot-scoped Outbox state plus any immutable Workflow binding and terminal result. Missing rows remain Not Found and are never inferred as PENDING.",
         "x-required-capability": "READ_LOCAL",
         "responses": {
@@ -12177,6 +12823,9 @@
       "parameters": [ { "$ref": "#/components/parameters/GitSyncWorkspaceID" } ],
       "get": {
         "operationId": "getGitRemoteConfig",
+        "tags": [
+          "GitSync"
+        ],
         "description": "Returns the Workspace-scoped remote projection. Credentials are represented only by token_configured and are never readable.",
         "x-required-capability": "READ_LOCAL",
         "x-error-codes": ["GIT_SYNC_INVALID", "GIT_SYNC_UNAVAILABLE", "GIT_SYNC_STATE_CORRUPT", "GIT_SYNC_HTTP_UNAVAILABLE", "INTERNAL_ERROR"],
@@ -12187,6 +12836,9 @@
       },
       "put": {
         "operationId": "saveGitRemoteConfig",
+        "tags": [
+          "GitSync"
+        ],
         "description": "CAS updates the Workspace HTTPS remote. Token values are accepted only for this request and are never returned.",
         "x-required-capability": "GIT_WRITE",
         "x-error-codes": ["GIT_SYNC_INVALID", "INVALID_JSON", "UNSUPPORTED_MEDIA_TYPE", "GIT_REMOTE_SECRET_ACTION_INVALID", "GIT_REMOTE_SECRET_UNAVAILABLE", "GIT_REMOTE_URL_INVALID", "GIT_REMOTE_BRANCH_INVALID", "GIT_SYNC_OFFLINE", "GIT_SYNC_IDEMPOTENCY_CONFLICT", "GIT_REMOTE_REVISION_CONFLICT", "GIT_SYNC_RUN_ACTIVE", "GIT_SYNC_RUN_NOT_FOUND", "GIT_SYNC_UNAVAILABLE", "GIT_SYNC_STATE_CORRUPT", "GIT_SYNC_HTTP_UNAVAILABLE", "INTERNAL_ERROR"],
@@ -12200,6 +12852,9 @@
       },
       "delete": {
         "operationId": "removeGitRemoteConfig",
+        "tags": [
+          "GitSync"
+        ],
         "description": "CAS appends an unconfigured revision and removes the encrypted credential. Exact Idempotency-Key replays return the original projection.",
         "x-required-capability": "GIT_WRITE",
         "x-error-codes": ["GIT_SYNC_INVALID", "INVALID_JSON", "UNSUPPORTED_MEDIA_TYPE", "GIT_SYNC_IDEMPOTENCY_CONFLICT", "GIT_REMOTE_REVISION_CONFLICT", "GIT_SYNC_RUN_ACTIVE", "GIT_SYNC_UNAVAILABLE", "GIT_SYNC_STATE_CORRUPT", "GIT_SYNC_HTTP_UNAVAILABLE", "INTERNAL_ERROR"],
@@ -12215,6 +12870,9 @@
       "parameters": [ { "$ref": "#/components/parameters/GitSyncWorkspaceID" } ],
       "post": {
         "operationId": "testGitRemoteConfig",
+        "tags": [
+          "GitSync"
+        ],
         "description": "Tests an HTTPS remote draft with a kept or replacement token, without persisting or returning credential material.",
         "x-required-capability": "GIT_WRITE",
         "x-error-codes": ["GIT_SYNC_INVALID", "INVALID_JSON", "UNSUPPORTED_MEDIA_TYPE", "GIT_REMOTE_SECRET_ACTION_INVALID", "GIT_REMOTE_SECRET_UNAVAILABLE", "GIT_REMOTE_URL_INVALID", "GIT_REMOTE_BRANCH_INVALID", "GIT_REMOTE_REVISION_CONFLICT", "GIT_SYNC_CONFIG_STALE", "GIT_SYNC_REF_DRIFT", "GIT_SYNC_AUTHENTICATION_FAILED", "GIT_SYNC_OFFLINE", "GIT_SYNC_UNAVAILABLE", "GIT_SYNC_STATE_CORRUPT", "GIT_SYNC_HTTP_UNAVAILABLE", "INTERNAL_ERROR"],
@@ -12229,6 +12887,9 @@
       "parameters": [ { "$ref": "#/components/parameters/GitSyncWorkspaceID" } ],
       "get": {
         "operationId": "getGitSyncStatus",
+        "tags": [
+          "GitSync"
+        ],
         "description": "Returns credential-free configuration and the latest persisted SyncRun, keeping Git and index follow-up state separate.",
         "x-required-capability": "READ_LOCAL",
         "x-error-codes": ["GIT_SYNC_INVALID", "GIT_SYNC_UNAVAILABLE", "GIT_SYNC_STATE_CORRUPT", "GIT_SYNC_HTTP_UNAVAILABLE", "INTERNAL_ERROR"],
@@ -12242,6 +12903,9 @@
       "parameters": [ { "$ref": "#/components/parameters/GitSyncWorkspaceID" } ],
       "get": {
         "operationId": "listGitSyncRuns",
+        "tags": [
+          "GitSync"
+        ],
         "description": "Lists Workspace-bound runs with an opaque cursor bound to the requested Workspace and limit.",
         "x-required-capability": "READ_LOCAL",
         "x-error-codes": ["GIT_SYNC_INVALID", "GIT_SYNC_UNAVAILABLE", "GIT_SYNC_STATE_CORRUPT", "GIT_SYNC_HTTP_UNAVAILABLE", "INTERNAL_ERROR"],
@@ -12253,6 +12917,9 @@
       },
       "post": {
         "operationId": "createGitSyncRun",
+        "tags": [
+          "GitSync"
+        ],
         "description": "Queues one manual Git synchronization. The request body must be empty; an exact Idempotency-Key replay returns the original run.",
         "x-required-capability": "GIT_WRITE",
         "x-error-codes": ["GIT_SYNC_INVALID", "GIT_REMOTE_NOT_CONFIGURED", "GIT_REMOTE_SECRET_UNAVAILABLE", "GIT_SYNC_CONFIG_STALE", "GIT_SYNC_IDEMPOTENCY_CONFLICT", "GIT_SYNC_RUN_ACTIVE", "GIT_SYNC_UNAVAILABLE", "GIT_SYNC_STATE_CORRUPT", "GIT_SYNC_HTTP_UNAVAILABLE", "INTERNAL_ERROR"],
@@ -12268,6 +12935,9 @@
       "parameters": [ { "$ref": "#/components/parameters/GitSyncWorkspaceID" }, { "$ref": "#/components/parameters/GitSyncRunID" } ],
       "get": {
         "operationId": "getGitSyncRun",
+        "tags": [
+          "GitSync"
+        ],
         "description": "Returns one credential-free SyncRun only when both the Workspace and run identity match.",
         "x-required-capability": "READ_LOCAL",
         "x-error-codes": ["GIT_SYNC_INVALID", "GIT_SYNC_RUN_NOT_FOUND", "GIT_SYNC_UNAVAILABLE", "GIT_SYNC_STATE_CORRUPT", "GIT_SYNC_HTTP_UNAVAILABLE", "INTERNAL_ERROR"],
@@ -12281,6 +12951,9 @@
       "parameters": [ { "$ref": "#/components/parameters/GitSyncWorkspaceID" }, { "$ref": "#/components/parameters/GitSyncRunID" } ],
       "post": {
         "operationId": "retryGitSyncRun",
+        "tags": [
+          "GitSync"
+        ],
         "description": "CAS retries a failed index follow-up in place or creates a new RETRY SyncRun for another terminal Git result.",
         "x-required-capability": "GIT_WRITE",
         "x-error-codes": ["GIT_SYNC_INVALID", "INVALID_JSON", "UNSUPPORTED_MEDIA_TYPE", "GIT_SYNC_RUN_NOT_FOUND", "GIT_SYNC_RUN_TRANSITION_CONFLICT", "GIT_SYNC_IDEMPOTENCY_CONFLICT", "GIT_REMOTE_NOT_CONFIGURED", "GIT_REMOTE_SECRET_UNAVAILABLE", "GIT_SYNC_CONFIG_STALE", "GIT_SYNC_RUN_ACTIVE", "GIT_SYNC_UNAVAILABLE", "GIT_SYNC_STATE_CORRUPT", "GIT_SYNC_HTTP_UNAVAILABLE", "INTERNAL_ERROR"],

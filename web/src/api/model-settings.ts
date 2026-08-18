@@ -1,4 +1,14 @@
-import { authFetch } from "./auth";
+import { ModelSettingsApi } from "./generated/apis/ModelSettingsApi";
+import type {
+  TestModelSettingsRequest as GeneratedTestModelSettingsRequest,
+  UpdateModelSettingsRequest as GeneratedUpdateModelSettingsRequest,
+} from "./generated/models";
+import {
+  generatedBrowserSecurity,
+  generatedConfiguration,
+  generatedRawResponse,
+  generatedRequestInit,
+} from "./generated-client";
 import {
   canonicalUuidPattern as uuidPattern,
   hasExactKeys,
@@ -215,6 +225,7 @@ const utf8Encoder = new TextEncoder();
 const tokenPattern = /^[A-Z][A-Z0-9_]{0,127}$/;
 const diagnosticTokenPattern = /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/;
 const diagnosticControlPattern = /[\p{Cc}\p{Cf}]/u;
+const modelSettingsApi = new ModelSettingsApi(generatedConfiguration);
 export const modelSettingsOllamaRelayUrl = "http://127.0.0.1:11434";
 
 const canonicalEscapedPath = (path: string): string | undefined => {
@@ -725,7 +736,64 @@ const requireEnum = <T extends string>(value: unknown, values: readonly T[], fie
   return value as T;
 };
 
-const encodeSecret = (secret: unknown, field: string, sensitiveValues: string[]): Record<string, unknown> => {
+interface EncodedChatSettingsBase {
+  api_style: ChatAPIStyle;
+  adapter_version: string;
+}
+
+type EncodedChatSettings =
+  | EncodedChatSettingsBase & {
+    provider: "disabled";
+    base_url: "";
+    model: "";
+    model_version: "";
+    api_key: { action: "clear" };
+  }
+  | EncodedChatSettingsBase & {
+    provider: "ollama";
+    api_style: "chat_completions";
+    base_url: typeof modelSettingsOllamaRelayUrl;
+    model: string;
+    model_version: string;
+    api_key: { action: "clear" };
+  }
+  | EncodedChatSettingsBase & {
+    provider: "openai-compatible";
+    base_url: string;
+    model: string;
+    model_version: string;
+    api_key: ModelSecretInput;
+  };
+
+interface EncodedEmbeddingSettingsBase {
+  normalization: EmbeddingNormalization;
+  distance_metric: EmbeddingDistanceMetric;
+}
+
+type EncodedEmbeddingSettings =
+  | EncodedEmbeddingSettingsBase & {
+    provider: "disabled";
+    base_url: "";
+    model: "";
+    dimensions: 0;
+    api_key: { action: "clear" };
+  }
+  | EncodedEmbeddingSettingsBase & {
+    provider: "ollama";
+    base_url: string;
+    model: string;
+    dimensions: number;
+    api_key: { action: "clear" };
+  }
+  | EncodedEmbeddingSettingsBase & {
+    provider: "openai-compatible";
+    base_url: string;
+    model: string;
+    dimensions: number;
+    api_key: ModelSecretInput;
+  };
+
+const encodeSecret = (secret: unknown, field: string, sensitiveValues: string[]): ModelSecretInput => {
   if (!isRecord(secret)) throw invalidRequest(field);
   const action = secret.action;
   if (action === "keep" || action === "clear") {
@@ -739,7 +807,7 @@ const encodeSecret = (secret: unknown, field: string, sensitiveValues: string[])
   return { action: "replace", value: secret.value };
 };
 
-const encodeChat = (input: unknown, field: string, sensitiveValues: string[]): Record<string, unknown> => {
+const encodeChat = (input: unknown, field: string, sensitiveValues: string[]): EncodedChatSettings => {
   if (!isRecord(input)) throw invalidRequest(field);
   exactRequest(input, ["provider", "apiStyle", "baseUrl", "model", "modelVersion", "adapterVersion", "apiKey"], field);
   const provider = requireEnum(input.provider, chatProviders, `${field}.provider`);
@@ -752,10 +820,17 @@ const encodeChat = (input: unknown, field: string, sensitiveValues: string[]): R
   const apiKey = encodeSecret(input.apiKey, `${field}.apiKey`, sensitiveValues);
   if (provider === "disabled" && (baseUrl !== "" || model !== "" || modelVersion !== "" || apiKey.action !== "clear")) throw invalidRequest(`${field}.providerSettings`);
   if (provider === "ollama" && (apiStyle !== "chat_completions" || apiKey.action !== "clear")) throw invalidRequest(`${field}.providerSettings`);
-  return { provider, api_style: apiStyle, base_url: baseUrl, model, model_version: modelVersion, adapter_version: adapterVersion, api_key: apiKey };
+  switch (provider) {
+    case "disabled":
+      return { provider, api_style: apiStyle, base_url: "", model: "", model_version: "", adapter_version: adapterVersion, api_key: { action: "clear" } };
+    case "ollama":
+      return { provider, api_style: "chat_completions", base_url: modelSettingsOllamaRelayUrl, model, model_version: modelVersion, adapter_version: adapterVersion, api_key: { action: "clear" } };
+    case "openai-compatible":
+      return { provider, api_style: apiStyle, base_url: baseUrl, model, model_version: modelVersion, adapter_version: adapterVersion, api_key: apiKey };
+  }
 };
 
-const encodeEmbedding = (input: unknown, field: string, sensitiveValues: string[]): Record<string, unknown> => {
+const encodeEmbedding = (input: unknown, field: string, sensitiveValues: string[]): EncodedEmbeddingSettings => {
   if (!isRecord(input)) throw invalidRequest(field);
   exactRequest(input, ["provider", "baseUrl", "model", "dimensions", "normalization", "distanceMetric", "apiKey"], field);
   const provider = requireEnum(input.provider, embeddingProviders, `${field}.provider`);
@@ -769,7 +844,14 @@ const encodeEmbedding = (input: unknown, field: string, sensitiveValues: string[
   if (provider === "disabled" && (baseUrl !== "" || model !== "" || dimensions !== 0 || apiKey.action !== "clear")) throw invalidRequest(`${field}.providerSettings`);
   if (provider !== "disabled" && (dimensions < 1 || dimensions > 16_000)) throw invalidRequest(`${field}.dimensions`);
   if (provider === "ollama" && apiKey.action !== "clear") throw invalidRequest(`${field}.apiKey`);
-  return { provider, base_url: baseUrl, model, dimensions, normalization, distance_metric: distanceMetric, api_key: apiKey };
+  switch (provider) {
+    case "disabled":
+      return { provider, base_url: "", model: "", dimensions: 0, normalization, distance_metric: distanceMetric, api_key: { action: "clear" } };
+    case "ollama":
+      return { provider, base_url: baseUrl, model, dimensions, normalization, distance_metric: distanceMetric, api_key: { action: "clear" } };
+    case "openai-compatible":
+      return { provider, base_url: baseUrl, model, dimensions, normalization, distance_metric: distanceMetric, api_key: apiKey };
+  }
 };
 
 const decodeProblemDetails = (value: Record<string, unknown>, status: number): Readonly<ModelSettingsProblemDetails> => {
@@ -836,10 +918,10 @@ const containsSensitiveValue = (value: unknown, sensitiveValues: readonly string
   return Object.entries(value).some(([key, item]) => containsSensitiveValue(key, sensitiveValues) || containsSensitiveValue(item, sensitiveValues));
 };
 
-const request = async (path: string, init: RequestInit = {}, sensitiveValues: readonly string[] = []): Promise<unknown> => {
+const request = async (operation: Promise<Response>, sensitiveValues: readonly string[] = []): Promise<unknown> => {
   let response: Response;
   try {
-    response = await authFetch(path, init);
+    response = await operation;
   } catch (error: unknown) {
     if (isAbortError(error)) throw error;
     throw new ModelSettingsApiError("NETWORK_ERROR", "NETWORK_ERROR", "无法连接模型设置 API。", true);
@@ -871,38 +953,34 @@ const request = async (path: string, init: RequestInit = {}, sensitiveValues: re
   return payload;
 };
 
-const signalInit = (signal?: AbortSignal): RequestInit => signal === undefined ? {} : { signal };
-
 export const getModelSettings = async (signal?: AbortSignal): Promise<ModelSettingsResponse> =>
-  decodeModelSettingsResponse(await request("/api/v1/settings/models", { ...signalInit(signal), cache: "no-store" }));
+  decodeModelSettingsResponse(await request(generatedRawResponse(modelSettingsApi.getModelSettingsRaw(
+    generatedRequestInit(signal, { cache: "no-store" }),
+  ))));
 
 export const updateModelSettings = async (input: UpdateModelSettingsInput, signal?: AbortSignal): Promise<ModelSettingsResponse> => {
   if (!isRecord(input)) throw invalidRequest("body");
   exactRequest(input, ["expectedRevision", "chat", "embedding"], "body");
   const sensitiveValues: string[] = [];
-  const body = {
+  const body: GeneratedUpdateModelSettingsRequest = {
     expected_revision: requireRevision(input.expectedRevision, "expectedRevision"),
     chat: encodeChat(input.chat, "chat", sensitiveValues),
     embedding: encodeEmbedding(input.embedding, "embedding", sensitiveValues),
   };
-  return decodeModelSettingsResponse(await request("/api/v1/settings/models", {
-    ...signalInit(signal),
-    cache: "no-store",
-    method: "PUT",
-    body: JSON.stringify(body),
-  }, sensitiveValues));
+  return decodeModelSettingsResponse(await request(generatedRawResponse(modelSettingsApi.updateModelSettingsRaw({
+    ...generatedBrowserSecurity(),
+    updateModelSettingsRequest: body,
+  }, generatedRequestInit(signal, { cache: "no-store" }))), sensitiveValues));
 };
 
 export const startModelSettingsActivation = async (input: StartModelSettingsActivationInput, signal?: AbortSignal): Promise<ModelSettingsResponse> => {
   if (!isRecord(input)) throw invalidRequest("body");
   exactRequest(input, ["expectedRevision"], "body");
   const body = { expected_revision: requireRevision(input.expectedRevision, "expectedRevision") };
-  return decodeModelSettingsResponse(await request("/api/v1/settings/models/activations", {
-    ...signalInit(signal),
-    cache: "no-store",
-    method: "POST",
-    body: JSON.stringify(body),
-  }));
+  return decodeModelSettingsResponse(await request(generatedRawResponse(modelSettingsApi.startModelSettingsActivationRaw({
+    ...generatedBrowserSecurity(),
+    startModelSettingsActivationRequest: body,
+  }, generatedRequestInit(signal, { cache: "no-store" })))));
 };
 
 export const testModelSettings = async (input: TestModelSettingsInput, signal?: AbortSignal): Promise<ModelSettingsTestResult> => {
@@ -911,21 +989,25 @@ export const testModelSettings = async (input: TestModelSettingsInput, signal?: 
 	const requiredKeys = target === "chat" ? ["target", "chat"] : ["target", "embedding"];
 	if (!requiredKeys.every((key) => Object.hasOwn(input, key)) || !hasOnlyKeys(input, [...requiredKeys, "idempotencyKey"])) throw invalidRequest("body");
   const sensitiveValues: string[] = [];
-  const body = input.target === "chat"
-    ? { target: "chat", chat: encodeChat(input.chat, "chat", sensitiveValues) }
-    : { target: "embedding", embedding: encodeEmbedding(input.embedding, "embedding", sensitiveValues) };
-	if (input.target === "chat" ? input.chat.provider === "disabled" : input.embedding.provider === "disabled") throw invalidRequest("provider");
+	let body: GeneratedTestModelSettingsRequest;
+	if (input.target === "chat") {
+		const chat = encodeChat(input.chat, "chat", sensitiveValues);
+		if (chat.provider === "disabled") throw invalidRequest("provider");
+		body = { target: "chat", chat };
+	} else {
+		const embedding = encodeEmbedding(input.embedding, "embedding", sensitiveValues);
+		if (embedding.provider === "disabled") throw invalidRequest("provider");
+		body = { target: "embedding", embedding };
+	}
 	const idempotencyKey = input.idempotencyKey ?? `model-settings-test-${crypto.randomUUID()}`;
 	if (idempotencyKey === "" || idempotencyKey.trim() !== idempotencyKey || new TextEncoder().encode(idempotencyKey).byteLength > 128 || /[\u0000-\u001f\u007f]/.test(idempotencyKey)) throw invalidRequest("idempotencyKey");
   let payload: unknown;
   try {
-		payload = await request("/api/v1/settings/models/test", {
-      ...signalInit(signal),
-      cache: "no-store",
-			method: "POST",
-			headers: { "Idempotency-Key": idempotencyKey },
-      body: JSON.stringify(body),
-    }, sensitiveValues);
+		payload = await request(generatedRawResponse(modelSettingsApi.testModelSettingsRaw({
+			...generatedBrowserSecurity(),
+			idempotencyKey,
+			testModelSettingsRequest: body,
+		}, generatedRequestInit(signal, { cache: "no-store" }))), sensitiveValues);
   } catch (error: unknown) {
     if (error instanceof ModelSettingsApiError && error.details?.target !== undefined && error.details.target !== target) {
       throw invalidResponse("problem.details.target_binding", error.status);

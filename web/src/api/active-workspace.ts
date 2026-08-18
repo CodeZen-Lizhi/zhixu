@@ -1,4 +1,3 @@
-import { authFetch } from "./auth";
 import {
   canonicalUuidPattern as uuidPattern,
   hasExactKeys,
@@ -6,6 +5,8 @@ import {
   isAbortError,
   isRecord,
 } from "../shared/codec";
+import { WorkspacesApi } from "./generated/apis/WorkspacesApi";
+import { generatedConfiguration, generatedRawResponse, generatedRequestInit } from "./generated-client";
 
 export type ActiveWorkspaceStatus = "active";
 export type ActiveWorkspaceAvailability = "available" | "unavailable" | "migration_required";
@@ -34,6 +35,7 @@ export class ActiveWorkspaceApiError extends Error {
 const controlCharacterPattern = /[\u0000-\u001f\u007f]/;
 const activeWorkspaceKeys = ["id", "name", "root_path", "status", "availability", "version"] as const;
 const problemKeys = ["error_code", "message", "retryable", "workflow_run_id", "details"] as const;
+const workspacesApi = new WorkspacesApi(generatedConfiguration);
 
 const invalidResponse = (field: string): ActiveWorkspaceApiError =>
   new ActiveWorkspaceApiError("INVALID_RESPONSE", `Active Workspace 响应字段无效：${field}`, false);
@@ -115,10 +117,7 @@ const readProblem = (value: unknown, response: Response): ActiveWorkspaceApiErro
 export const getActiveWorkspace = async (signal?: AbortSignal): Promise<ActiveWorkspace> => {
   let response: Response;
   try {
-    response = await authFetch("/api/v1/workspaces/active", {
-      ...(signal === undefined ? {} : { signal }),
-      headers: { Accept: "application/json" },
-    });
+    response = await generatedRawResponse(workspacesApi.getActiveWorkspaceRaw(generatedRequestInit(signal)));
   } catch (error: unknown) {
     if (isAbortError(error)) throw error;
     throw new ActiveWorkspaceApiError("NETWORK_ERROR", "无法连接 Active Workspace API。", true, {

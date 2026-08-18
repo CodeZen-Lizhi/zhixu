@@ -4,18 +4,19 @@
 
 ## 适用范围
 
-适用于 TypeScript、API/SSE 边界、URL 输入、Form 和 Domain UI Projection。仓库已有 TypeScript 工具链；
-M6-D Search 使用不新增依赖的手写严格 Decoder。Generated Client 与通用 Runtime Validation 方案仍需
-后续任务统一，不能因此弱化当前 `unknown` 边界。
+适用于 TypeScript、API/SSE 边界、URL 输入、Form 和 Domain UI Projection。普通 HTTP operation 已通过
+锁定的 OpenAPI Generator `typescript-fetch` 客户端发出；生成 wire type 只停留在 API 边缘。Zod
+负责共享 Problem 和认证等选定高风险边界，既有模块 strict decoder 继续拥有额外领域不变量。
 
 ## 已确认事实
 
 - `docs/architecture/system-design.md` 选择 TypeScript。
 - `docs/architecture/application-contracts.md` 要求生成 OpenAPI、检查 Breaking Change、Generated Client 仅位于前端边缘，并使用 Problem Details、Cursor Pagination、ETag/Version 和强类型 SSE Envelope。
 - `docs/architecture/application-contracts.md` 将 Generated/Typed API Client 与 Domain UI Model 分离。
-- 当前 Search Decoder 不依赖 Runtime Validation Library；不得在规范中虚构未安装包或 Generator。
-- TODO 8 之前，OpenAPI 质量与历史兼容性已由 `make openapi-check` 与带显式 40 位 SHA 的
-  `make openapi-breaking-check` 锁定；这不是生成客户端或 Zod 已接入的证据。
+- OpenAPI Generator wrapper `2.40.1`、generator `7.24.0` 和 Zod `4.4.3` 已由仓库
+  manifest/lock/config 锁定；精确生成与升级边界见 `api/openapi/GENERATOR.md`。
+- OpenAPI 质量、生成漂移和历史兼容性分别由 `make openapi-check`、
+  `make openapi-generate-check` 与带显式 40 位 SHA 的 `make openapi-breaking-check` 锁定。
 
 ## 类型所有权
 
@@ -35,8 +36,8 @@ M6-D Search 使用不新增依赖的手写严格 Decoder。Generated Client 与�
 - Form 在构造 Command 前校验用户输入，同时保留服务端 Field Error。
 - Date/Time 在线路边界保持序列化字符串，再显式格式化显示；不得假设浏览器解析语义。
 
-若后续引入 Runtime Validation Library，必须先写入 Manifest/Lockfile 并通过回归；当前 Search Decoder
-使用项目现有 TypeScript 能力实现同等严格边界，不因此引入未批准依赖。
+Zod 不是生成模型的平行副本。只有共享 Problem、认证凭据/Session 或其他经风险证明的判别边界使用
+项目 owned schema；Search 等已具备完整领域不变量的 strict decoder 继续从 `unknown` fail closed。
 
 ### M6-D Search Decoder 契约
 
@@ -65,6 +66,8 @@ M6-D Search 使用不新增依赖的手写严格 Decoder。Generated Client 与�
 - 两个消费者读取同一无类型 Payload 时，先集中归一化。
 - 显式 Narrow Error，不假设 Catch Value 是 `Error`。
 - Generated File 只读，并可从权威契约复现。
+- 普通 HTTP operation 通过生成 `*ApiRaw` 和唯一 `transportFetch` 发出；项目 owner 只补领域
+  projection、严格校验和生成器无法表达的最小媒体/协议行为。
 - Search Feature/Component 只消费解码后的 `SearchResponse`；禁止再次访问原始 snake_case DTO。
 
 ## 禁止模式
@@ -88,17 +91,90 @@ git diff --check
 
 M1 后，Canonical Frontend Gate 必须运行 Generated Client Drift Check、Type Check、Lint、Unit Test 和 Production Build；边界测试覆盖无效 API、SSE、URL 和 Form 输入。
 
+```bash
+make openapi-check
+make openapi-generate-check
+npm run lint --prefix web
+npm run typecheck --prefix web
+npm run test --prefix web
+npm run build --prefix web
+```
+
 M6-D 还必须运行 Search Decoder 单测，覆盖正常/空结果、三模式/降级、vector distance、非法 UUID/时间/
 Hash/非有限分数、未知 mode/capability、缺失 href、空 `heading_path` 数组、错误 cursor/Problem 类型和请求序列化。只有实际命令
 结果可声明通过。
 
-## 当前待统一项
+## Scenario: TODO 8 Generated API 与 Runtime Validation 边界
 
-OpenAPI Generator、通用 Runtime Validator、Error Narrowing Helper 与跨 Feature Status Union 生成方式仍待
-TODO 8 统一；Manifest 和 Lockfile 证明前不得增加包名或版本。TODO 8 只能在已锁定的 OpenAPI 质量和
-breaking gate 上引入生成客户端，不能删除当前严格 Decoder 或把生成类型直接泄漏到 Feature/Component。
-当前 Search 手写 Decoder 是明确边界，不是允许其他 Feature 复制 DTO/Decoder 的先例。工具版本、base SHA、
-180 天弃用和批准 breaking 的边界见
+### 1. Scope / Trigger
+
+- 修改 `api/openapi/openapi.json`、operation tag、生成配置/模板、`web/src/api/generated/**`、
+  `generated-client.ts`、`transport.ts`、Problem/Zod schema 或任一 API owner 时应用。
+
+### 2. Signatures
+
+```ts
+generatedConfiguration: Configuration
+generatedRequestInit(signal?, override?): RequestInit
+generatedRawResponse(operation): Promise<Response>
+transportFetch(input, init?): Promise<Response>
+```
+
+- `web/src/api/generated/**` 是可再生只读 wire/client 层；`web/src/api/*.ts` 返回稳定 Domain Model。
+
+### 3. Contracts
+
+- 189 个 operation 必须各有一个稳定领域 tag；生成结果不得出现 `DefaultApi`。普通 JSON、multipart
+  和下载请求都从相应 `*ApiRaw` 获取 path/method/params，不手拼生产 URL。
+- `transportFetch` 唯一拥有 API base URL、Cookie/API Token、CSRF、Header merge、Abort 与 401 Session
+  失效。`generatedBrowserSecurity` 使用当前页面 Origin 满足生成签名，实际线路 Origin 由浏览器控制；
+  生成 client 不拥有 Store、领域错误或业务状态。
+- 生成输入 normalizer 只执行 manifest 登记的兼容投影；权威 OpenAPI 不被改写。公共生成模型禁止
+  `any` 和 `Set`，因为 JSON array 不能以 `Set` 序列化。
+- 网络响应在模块边界仍视为 `unknown`。共享 Problem 与 Auth Session/API Token 使用 Zod strict schema；
+  其他 owner 只保留真正的领域 binding/联合/范围校验，不复制一套完整 OpenAPI schema。
+- SSE 与 Answer Draft stream 保留专用 owner；Blob/multipart 只保留媒体、完整性和流生命周期 Adapter，
+  不复制认证、URL 或错误 Transport。
+
+### 4. Validation & Error Matrix
+
+| 条件 | 必须结果 |
+| --- | --- |
+| operation 缺 tag、生成输出漂移或被手改 | `openapi-check` / `openapi-generate-check` 失败 |
+| normalizer 遇到未登记 schema 形态 | 生成失败，不扩展隐式 fallback |
+| 公共模型出现 `any` / `Set` | generated model/typecheck gate 失败 |
+| Problem/Auth 缺字段、未知字段或联合值非法 | Zod fail closed，返回稳定 `INVALID_RESPONSE`，不含正文 |
+| 模块 Workspace/ID/version/hash/状态 binding 漂移 | 模块 strict decoder 拒绝整个响应 |
+| Abort 或 401 | 保留 Abort identity；401 触发统一 Session 失效 |
+
+### 5. Good / Base / Bad Cases
+
+- Good：API owner 调用生成 Raw operation，把 `Response` 交给自身严格 decoder，并只返回 camelCase
+  Domain Model；生成漂移由 CI 阻断。
+- Base：无额外领域不变量的响应复用生成请求和现有轻量 projection，不额外维护重复 Zod schema。
+- Bad：组件导入 generated model、手改 generated 文件、模块手拼 `/api/v1` URL、以 `as`/fallback
+  接受非法响应，或为每个 DTO 复制完整 Zod schema。
+
+### 6. Tests Required
+
+- `make openapi-check`、`make openapi-generate-check`、generated strict typecheck、web
+  lint/typecheck/test/build 和 `git diff --check`。
+- Transport 覆盖 Cookie/API Token、CSRF、Header merge、API base URL、Abort、401 和正文脱敏，并验证
+  generated Origin 参数与浏览器实际 Origin 行为；
+  每个 API owner 保留请求快照、Problem 与关键 strict decoder fixture。
+- multipart/Blob/SSE/stream owner 分别验证媒体完整性、取消、重连/游标或增量正文行为。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: Feature 手拼 URL 后调用 fetch，并把 generated DTO 直接写入 Query cache。
+Correct: *ApiRaw -> transportFetch -> owner strict decode -> Domain Model -> Query cache。
+
+Wrong: 为绕过 generator 的 uniqueItems 输出而在业务代码接受 Set，或手改生成文件。
+Correct: 权威契约保持 array；登记 normalizer 投影并以生成 drift/public-model gate 锁定。
+```
+
+工具版本、base SHA、180 天弃用和批准 breaking 的边界见
 [`ADR-0028`](../../../docs/architecture/adr/0028-openapi-contract-gates.md)。
 
 ## M6-04 Conversation/RAG Wire Contract
@@ -336,7 +412,7 @@ downloadAttachmentExport(job, signal?): Promise<Blob>
   `scope_kind=WORKSPACE_ATTACHMENTS`、root contract、raw policy、manifest hash、entry count/bytes 和 ZIP hash/size。
 - Job 穷尽 `PENDING|RUNNING|SUCCEEDED|FAILED|EXPIRED|CANCELLED`，并按 scope 校验状态字段组合；只有成功附件
   Job 能携带 manifest/archive binding 与 download URL。空字符串、缺字段或跨 scope 字段都必须拒绝整个响应。
-- 下载只经 `authFetch`，并校验 kind 对应 Content-Type、受控 ASCII filename、Content-Length、
+- 下载通过对应生成 Raw operation 与共享 Transport，并校验 kind 对应 Content-Type、受控 ASCII filename、Content-Length、
   `private, no-store`、`nosniff` 和 Blob size；非 2xx 先严格解码 Problem，`410` 不得变为空 Blob。
 - `AbortError` 保持原 identity。Workspace 切换时迟到的 create/list/get/download 响应不得写入新 Workspace cache。
 

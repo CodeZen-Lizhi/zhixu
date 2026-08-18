@@ -7,9 +7,13 @@
     "node": ">=24.18.0"
   },
   "scripts": {
-    "lint": "spectral lint --ruleset .spectral.yaml --resolver ./local-only-resolver.cjs --fail-severity warn --display-only-failures --format text openapi.json"
+    "lint": "spectral lint --ruleset .spectral.yaml --resolver ./local-only-resolver.cjs --fail-severity warn --display-only-failures --format text openapi.json",
+    "tags:check": "node tag-manifest.mjs",
+    "generate": "node generate-client.mjs",
+    "generate:check": "node generate-client.mjs --check"
   },
   "devDependencies": {
+    "@openapitools/openapi-generator-cli": "2.40.1",
     "@stoplight/spectral-cli": "6.16.3",
     "@stoplight/spectral-ref-resolver": "1.0.5"
   },

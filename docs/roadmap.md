@@ -4,7 +4,7 @@
 
 本路线图只维护未交付方向、优先级、依赖和不可破坏的迁移边界。实际拆分、负责人、状态、验收证据与发布时间在 `.trellis/tasks/` 管理；人天是熟悉项目的单人初估，不含需求澄清、外部协调和发布观察。
 
-当前架构事实以 [架构文档](architecture/README.md) 为准。Gin 与 Eino 已是当前 HTTP/AI Runtime 基线；路线图中的 Atlas、GORM、Testcontainers、生成客户端，以及 `gin-contrib/sessions` 评估仍是候选或未来迁移，不得提前写成当前技术基线。
+当前架构事实以 [架构文档](architecture/README.md) 为准。Gin、Eino 与前端 OpenAPI 生成客户端已是当前 HTTP/AI Runtime 和 API 边界基线；路线图中的 Atlas、GORM、Testcontainers 以及 `gin-contrib/sessions` 评估仍是候选或未来迁移，不得提前写成当前技术基线。
 
 ## 当前交付收口（未完成）
 
@@ -23,7 +23,7 @@
 ```mermaid
 flowchart LR
     Eino["Eino 通用 AI 能力（已交付）"] --> WorkspaceAgent["受限 Workspace Agent"]
-    Spectral["Spectral + oasdiff"] --> GeneratedClient["OpenAPI Generator + Zod"]
+    Spectral["Spectral + oasdiff（已交付）"] --> GeneratedClient["OpenAPI Generator + Zod（已交付）"]
     Testcontainers["Testcontainers-Go"] --> Atlas["Atlas 唯一 Schema 迁移"]
     Atlas --> GORM["GORM 数据访问迁移"]
     Testcontainers --> GORM
@@ -31,7 +31,7 @@ flowchart LR
     GORM --> Sessions
 ```
 
-数据库方向按 Testcontainers → Atlas → GORM 推进；最终切换前 Atlas 必须成为唯一 Schema 事实源。OpenAPI 门禁先于生成客户端。受限 Workspace Agent 依赖已交付的 Eino AI Runtime 基线，并继续拥有自身产品与安全门禁。Gin 已交付；Session 框架评估仍晚于 GORM 收口。
+数据库方向按 Testcontainers → Atlas → GORM 推进；最终切换前 Atlas 必须成为唯一 Schema 事实源。OpenAPI 门禁与生成客户端已按依赖顺序交付。受限 Workspace Agent 依赖已交付的 Eino AI Runtime 基线，并继续拥有自身产品与安全门禁。Gin 已交付；Session 框架评估仍晚于 GORM 收口。
 
 ## 3. 产品方向
 
@@ -89,12 +89,12 @@ flowchart LR
   protection、required checks、CODEOWNERS 与 bypass audit 属于仓库外管理员核验。细节见
   [ADR-0028](architecture/adr/0028-openapi-contract-gates.md)。
 
-### 4.5 TODO 8：生成前端 OpenAPI 客户端并接入 Zod
+### 4.5 已交付 8：生成前端 OpenAPI 客户端并接入 Zod（2026-08-19）
 
-- **优先级/初估**：P1，8–12 人天；依赖 Spectral/oasdiff。
-- **目标**：用锁定版本 OpenAPI Generator `typescript-fetch` 生成类型和请求客户端，接入认证、CSRF、Abort 与 TanStack Query；在关键不可信响应边界继续用 Zod 严格校验。
-- **边界**：生成目录禁止手改或承载业务逻辑，单一命令可确定性再生成且 CI 检查漂移；生成代码与领域 UI Model 隔离。项目 Transport 继续统一 Cookie/API Token、CSRF、Workspace、请求 ID、取消和错误映射；流式下载、SSE、Blob 可保留最小 Adapter。
-- **验收门禁**：关键不可信响应在进入 Store/组件前由 Zod fail closed，错误不泄露响应正文；按 feature 行为对等后删除重复手写 Transport/DTO/Decoder，不长期维护两套解析。
+- **结果**：189 个 operation 已按 26 个稳定领域 tag 生成 `typescript-fetch` API；现有 26 个生产 API 模块的普通 JSON、multipart 与下载请求均使用对应 `*ApiRaw`，不再保留手写普通请求路径。生成目录与领域 UI Model 隔离，模块继续拥有 wire-to-domain 和严格不变量。
+- **工具链**：本地 wrapper `2.40.1`、OpenAPI Generator `7.24.0` 与 Zod `4.4.3` 由 manifest/lock/config 固定；`make openapi-generate-check` 从权威契约重建、检查 drift、公共模型和严格编译，CI 同步执行。normalizer 只投影已登记的 generator 兼容差异，生成目录禁止手改。
+- **保留边界**：共享 Transport 唯一处理 API base URL、Cookie/API Token、CSRF、401、Abort 和 header 合并；generated 参数使用当前页面 Origin 满足契约签名，实际线路 Origin 由浏览器控制。Zod 严格校验共享 Problem、Session 与 API Token，其他高风险领域沿用既有 strict owner。原生 SSE 与 Answer Draft stream 保留专用协议 owner；multipart/Blob 只保留进度、媒体、文件名和完整性薄 Adapter。
+- **验证**：OpenAPI 契约/生成漂移、前端 lint/typecheck、1,233 项 Vitest、production build 与 `git diff --check` 通过；真实 Chromium 本地确定性 smoke 验证 Cookie/CSRF、生成 Search 请求、Workspace A→B URL/cache 收敛、迟到请求取消和严格联合类型页面，控制台无错误或警告。26 模块逐项证据见 [迁移矩阵](../.trellis/tasks/08-18-openapi-client-zod-integration/research/operation-migration-matrix.md)。
 
 ### 4.6 已完成 12：优先使用浏览器原生 EventSource（2026-08-10）
 

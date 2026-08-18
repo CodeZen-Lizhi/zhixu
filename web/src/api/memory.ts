@@ -1,7 +1,14 @@
 /** Memory 的严格网络边界：身份只由服务端认证上下文决定，浏览器不接受或显示 owner。 */
 
-import { authFetch } from "./auth";
 import { canonicalUuidPattern as uuidPattern, hasOnlyKeys, isAbortError, isRecord } from "../shared/codec";
+import { MemoryApi as GeneratedMemoryApi } from "./generated/apis/MemoryApi";
+import {
+  generatedConfiguration,
+  generatedRawResponse,
+  generatedRequestInit,
+} from "./generated-client";
+
+const memoryApi = new GeneratedMemoryApi(generatedConfiguration);
 
 export type MemoryType = "PREFERENCE" | "EPISODIC" | "GOAL" | "FEEDBACK";
 export type MemoryStatus = "CANDIDATE" | "ACTIVE" | "PAUSED" | "EXPIRED" | "DELETED";
@@ -361,13 +368,10 @@ const readProblem = (value: unknown, status: number): MemoryApiError => {
   if (value.details !== undefined) decodeJsonObject(value.details, "problem.details");
   return new MemoryApiError("HTTP_ERROR", errorCode, message, retryable, status);
 };
-const request = async (path: string, init: RequestInit = {}, expectedStatuses?: readonly number[]): Promise<unknown> => {
-  const headers = new Headers(init.headers);
-  headers.set("Accept", "application/json");
-  if (init.body !== undefined) headers.set("Content-Type", "application/json");
+const request = async (operation: Promise<Response>, expectedStatuses?: readonly number[]): Promise<unknown> => {
   let response: Response;
   try {
-    response = await authFetch(path, { ...init, headers });
+    response = await operation;
   } catch (error: unknown) {
     if (isAbortError(error)) throw error;
     throw new MemoryApiError("NETWORK_ERROR", "NETWORK_ERROR", "无法连接 Memory API。", true, null, { cause: error });
@@ -376,6 +380,7 @@ const request = async (path: string, init: RequestInit = {}, expectedStatuses?: 
   try {
     payload = parseStrictJson(await response.text());
   } catch (error: unknown) {
+    if (isAbortError(error)) throw error;
     throw new MemoryApiError("INVALID_RESPONSE", "INVALID_RESPONSE", "Memory API 返回了无效或包含重复字段的 JSON。", false, response.status, { cause: error });
   }
   if (!response.ok) throw readProblem(payload, response.status);
@@ -383,8 +388,6 @@ const request = async (path: string, init: RequestInit = {}, expectedStatuses?: 
   return payload;
 };
 
-const memoryPath = (memoryId: string): string => `/api/v1/memories/${encodeURIComponent(requireUuid(memoryId, "memoryId"))}`;
-const commandHeaders = (key: string): HeadersInit => ({ "Idempotency-Key": requireKey(key) });
 const assertBinding = (memory: MemoryRecord, workspaceId: string, memoryId?: string): MemoryRecord => {
   if (memory.workspaceId !== workspaceId || (memoryId !== undefined && memory.id !== memoryId)) throw invalidResponse("memory.binding");
   return memory;
@@ -412,12 +415,17 @@ export const listMemories = async (input: ListMemoriesInput, signal?: AbortSigna
   const workspaceId = requireUuid(input.workspaceId, "workspaceId");
   const limit = input.limit ?? 50;
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw invalidRequest("limit");
-  const query = new URLSearchParams({ workspace_id: workspaceId, limit: String(limit) });
-  for (const type of input.types ?? []) query.append("type", enumValue(type, memoryTypes, "types"));
-  for (const status of input.statuses ?? []) query.append("status", enumValue(status, memoryStatuses, "statuses"));
   if (new Set(input.types ?? []).size !== (input.types?.length ?? 0) || new Set(input.statuses ?? []).size !== (input.statuses?.length ?? 0)) throw invalidRequest("filters");
-  if (input.cursor !== undefined) query.set("cursor", requireText(input.cursor, "cursor", 4096));
-  const page = decodeMemoryPage(await request(`/api/v1/memories?${query}`, signal === undefined ? {} : { signal }, [200]));
+  const types = input.types?.map((type) => enumValue(type, memoryTypes, "types"));
+  const statuses = input.statuses?.map((status) => enumValue(status, memoryStatuses, "statuses"));
+  const cursor = input.cursor === undefined ? undefined : requireText(input.cursor, "cursor", 4096);
+  const page = decodeMemoryPage(await request(generatedRawResponse(memoryApi.listMemoriesRaw({
+    workspaceId,
+    limit,
+    ...(types === undefined ? {} : { type: types }),
+    ...(statuses === undefined ? {} : { status: statuses }),
+    ...(cursor === undefined ? {} : { cursor }),
+  }, generatedRequestInit(signal))), [200]));
   if (page.workspaceId !== workspaceId) throw invalidResponse("memory_page.workspace_id");
   return page;
 };
@@ -425,12 +433,18 @@ export const listMemories = async (input: ListMemoriesInput, signal?: AbortSigna
 export const getMemory = async (workspaceId: string, memoryId: string, signal?: AbortSignal): Promise<MemoryRecord> => {
   const expectedWorkspaceId = requireUuid(workspaceId, "workspaceId");
   const expectedMemoryId = requireUuid(memoryId, "memoryId");
-  return assertBinding(decodeMemory(await request(`${memoryPath(expectedMemoryId)}?${new URLSearchParams({ workspace_id: expectedWorkspaceId })}`, signal === undefined ? {} : { signal }, [200])), expectedWorkspaceId, expectedMemoryId);
+  return assertBinding(decodeMemory(await request(generatedRawResponse(memoryApi.getMemoryRaw({
+    workspaceId: expectedWorkspaceId,
+    memoryId: expectedMemoryId,
+  }, generatedRequestInit(signal))), [200])), expectedWorkspaceId, expectedMemoryId);
 };
 
 export const createMemoryCandidate = async (input: CreateMemoryCandidateInput, signal?: AbortSignal): Promise<MemoryCommandResult> => {
   const payload = candidatePayload(input);
-  const result = decodeCommandResult(await request("/api/v1/memories", { method: "POST", headers: commandHeaders(input.idempotencyKey), body: JSON.stringify(payload), ...(signal === undefined ? {} : { signal }) }, [200, 201]));
+  const result = decodeCommandResult(await request(generatedRawResponse(memoryApi.createMemoryCandidateRaw({
+    idempotencyKey: requireKey(input.idempotencyKey),
+    createMemoryCandidateRequest: payload,
+  }, generatedRequestInit(signal))), [200, 201]));
   return { ...result, memory: assertBinding(result.memory, payload.workspace_id) };
 };
 
@@ -441,16 +455,33 @@ export const editMemory = async (input: EditMemoryInput, signal?: AbortSignal): 
     ...mutablePayload(input),
   };
   const memoryId = requireUuid(input.memoryId, "memoryId");
-  const result = decodeCommandResult(await request(memoryPath(memoryId), { method: "PUT", headers: commandHeaders(input.idempotencyKey), body: JSON.stringify(payload), ...(signal === undefined ? {} : { signal }) }, [200]));
+  const result = decodeCommandResult(await request(generatedRawResponse(memoryApi.editMemoryRaw({
+    memoryId,
+    idempotencyKey: requireKey(input.idempotencyKey),
+    editMemoryRequest: payload,
+  }, generatedRequestInit(signal))), [200]));
   return { ...result, memory: assertBinding(result.memory, payload.workspace_id, memoryId) };
 };
 
 const transition = async (input: TransitionMemoryInput, action: "confirm" | "pause" | "resume" | "delete", signal?: AbortSignal): Promise<MemoryCommandResult> => {
   const workspaceId = requireUuid(input.workspaceId, "workspaceId");
   const memoryId = requireUuid(input.memoryId, "memoryId");
-  const basePath = memoryPath(memoryId);
-  const path = action === "delete" ? basePath : `${basePath}/${action}`;
-  const result = decodeCommandResult(await request(path, { method: action === "delete" ? "DELETE" : "POST", headers: commandHeaders(input.idempotencyKey), body: JSON.stringify({ workspace_id: workspaceId, expected_version: requireVersion(input.expectedVersion) }), ...(signal === undefined ? {} : { signal }) }, [200]));
+  const requestParameters = {
+    memoryId,
+    idempotencyKey: requireKey(input.idempotencyKey),
+    memoryTransitionRequest: {
+      workspace_id: workspaceId,
+      expected_version: requireVersion(input.expectedVersion),
+    },
+  };
+  const operation = action === "confirm"
+    ? memoryApi.confirmMemoryRaw(requestParameters, generatedRequestInit(signal))
+    : action === "pause"
+      ? memoryApi.pauseMemoryRaw(requestParameters, generatedRequestInit(signal))
+      : action === "resume"
+        ? memoryApi.resumeMemoryRaw(requestParameters, generatedRequestInit(signal))
+        : memoryApi.deleteMemoryRaw(requestParameters, generatedRequestInit(signal));
+  const result = decodeCommandResult(await request(generatedRawResponse(operation), [200]));
   return { ...result, memory: assertBinding(result.memory, workspaceId, memoryId) };
 };
 

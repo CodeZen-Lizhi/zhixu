@@ -1582,7 +1582,9 @@ describe("business API boundary", () => {
     await expect(submitWorkflowHumanDecision(workspaceId, workflowId, workflow.humanTask, { approved: true, targetPath: "notes/merged.md" })).resolves.toBeUndefined();
     const decisionRequest = fetcher.mock.calls.at(1);
     if (!decisionRequest) throw new Error("expected workflow decision request");
-    expect(new Headers((decisionRequest[1] as RequestInit).headers).get("X-Workspace-ID")).toBe(workspaceId);
+    const decisionHeaders = new Headers((decisionRequest[1] as RequestInit).headers);
+    expect(decisionHeaders.get("X-Workspace-ID")).toBe(workspaceId);
+    expect(decisionHeaders.get("Idempotency-Key")).toBe(`workflow-human-${reviewTaskId}-3`);
   });
 
   it("strictly decodes a bound Topic Outline review with Evidence and GAP", async () => {

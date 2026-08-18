@@ -1,5 +1,10 @@
-import { authFetch } from "./auth";
-import { canonicalUuidPattern as uuidPattern, hasOnlyKeys, isRecord } from "../shared/codec";
+import { SourceSpansApi } from "./generated/apis/SourceSpansApi";
+import {
+  generatedConfiguration,
+  generatedRawResponse,
+  generatedRequestInit,
+} from "./generated-client";
+import { canonicalUuidPattern as uuidPattern, hasOnlyKeys, isAbortError, isRecord } from "../shared/codec";
 
 export interface SourceSpanReference {
   workspaceId: string;
@@ -37,6 +42,7 @@ export class SourceSpanApiError extends Error {
 const hashPattern = /^[0-9a-f]{64}$/;
 const rfc3339Pattern = /^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,9})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/;
 const textEncoder = new TextEncoder();
+const sourceSpansApi = new SourceSpansApi(generatedConfiguration);
 
 const invalidResponse = (field: string, status: number | null = null): SourceSpanApiError =>
   new SourceSpanApiError("INVALID_RESPONSE", `Source Span 响应字段无效：${field}`, status, false);
@@ -167,18 +173,22 @@ export const getSourceSpan = async (reference: SourceSpanReference, signal?: Abo
   for (const [field, value] of identifiers) {
     if (!uuidPattern.test(value)) throw new SourceSpanApiError("INVALID_REQUEST", `Source Span 请求字段无效：${field}`, null, false);
   }
-  const path = `/api/v1/workspaces/${encodeURIComponent(reference.workspaceId)}/source-versions/${encodeURIComponent(reference.sourceVersionId)}/spans/${encodeURIComponent(reference.sourceSpanId)}`;
   let response: Response;
   try {
-    response = await authFetch(path, signal === undefined ? undefined : { signal });
+    response = await generatedRawResponse(sourceSpansApi.getEvidenceSourceSpanRaw({
+      workspaceId: reference.workspaceId,
+      sourceVersionId: reference.sourceVersionId,
+      sourceSpanId: reference.sourceSpanId,
+    }, generatedRequestInit(signal)));
   } catch (error: unknown) {
-    if (error instanceof DOMException && error.name === "AbortError") throw error;
+    if (isAbortError(error)) throw error;
     throw new SourceSpanApiError("NETWORK_ERROR", "无法连接 Source Span API。", null, true, { cause: error });
   }
   let payload: unknown;
   try {
     payload = await response.json();
   } catch (error: unknown) {
+    if (isAbortError(error)) throw error;
     throw new SourceSpanApiError("INVALID_RESPONSE", "Source Span API 返回了无效 JSON。", response.status, false, { cause: error });
   }
   if (!response.ok) throw readProblem(payload, response.status);

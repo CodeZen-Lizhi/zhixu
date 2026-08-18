@@ -597,6 +597,28 @@ describe("Semantic Link clients", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("保留 generated fetch 的 AbortError 对象身份", async () => {
+    const aborted = new DOMException("aborted", "AbortError");
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockRejectedValue(aborted));
+
+    await expect(listSemanticLinkCandidates(
+      { workspaceId },
+      new AbortController().signal,
+    )).rejects.toBe(aborted);
+  });
+
+  it("响应头到达后读取 JSON 取消时保留 AbortError 对象身份", async () => {
+    const aborted = new DOMException("aborted", "AbortError");
+    const response = jsonResponse({ workspace_id: workspaceId, items: [] });
+    vi.spyOn(response, "json").mockRejectedValue(aborted);
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValue(response));
+
+    await expect(listSemanticLinkCandidates(
+      { workspaceId },
+      new AbortController().signal,
+    )).rejects.toBe(aborted);
+  });
+
   it("启动 scan 时发送 Idempotency-Key 和严格 snake_case scope", async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
       scan_id: scanId,

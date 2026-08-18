@@ -1,6 +1,16 @@
 /** Interview 与 Learning Path 的唯一 HTTP/JSON 边界。 */
-import { authFetch } from "./auth";
 import { canonicalUuidPattern as uuidPattern, hasOnlyKeys, isAbortError, isRecord } from "../shared/codec";
+import { InterviewApi as GeneratedInterviewApi } from "./generated/apis/InterviewApi";
+import { ReviewApi as GeneratedReviewApi } from "./generated/apis/ReviewApi";
+import type { InterviewConfig as GeneratedInterviewConfig } from "./generated/models";
+import {
+  generatedConfiguration,
+  generatedRawResponse,
+  generatedRequestInit,
+} from "./generated-client";
+
+const interviewApi = new GeneratedInterviewApi(generatedConfiguration);
+const reviewApi = new GeneratedReviewApi(generatedConfiguration);
 
 export type InterviewDifficulty = "FOUNDATION" | "INTERMEDIATE" | "ADVANCED";
 export type InterviewSessionStatus = "ACTIVE" | "COMPLETED" | "CANCELLED";
@@ -976,13 +986,10 @@ const decodeProblem = (value: unknown, status: number): InterviewApiError => {
   );
 };
 
-const request = async (path: string, init: RequestInit = {}, expectedStatuses: readonly number[] = [200]): Promise<unknown> => {
-  const headers = new Headers(init.headers);
-  headers.set("Accept", "application/json");
-  if (init.body !== undefined) headers.set("Content-Type", "application/json");
+const request = async (operation: Promise<Response>, expectedStatuses: readonly number[] = [200]): Promise<unknown> => {
   let response: Response;
   try {
-    response = await authFetch(path, { ...init, headers });
+    response = await operation;
   } catch (error: unknown) {
     if (isAbortError(error)) throw error;
     throw new InterviewApiError("NETWORK_ERROR", "NETWORK_ERROR", "无法连接 Interview API。", true, null, undefined, undefined, { cause: error });
@@ -991,6 +998,7 @@ const request = async (path: string, init: RequestInit = {}, expectedStatuses: r
   try {
     payload = parseStrictJson(await response.text());
   } catch (error: unknown) {
+    if (isAbortError(error)) throw error;
     throw new InterviewApiError("INVALID_RESPONSE", "INVALID_RESPONSE", "Interview API 返回了无效或包含重复字段的 JSON。", false, response.status, undefined, undefined, { cause: error });
   }
   if (!response.ok) throw decodeProblem(payload, response.status);
@@ -998,9 +1006,7 @@ const request = async (path: string, init: RequestInit = {}, expectedStatuses: r
   return payload;
 };
 
-const commandHeaders = (idempotencyKey: string): HeadersInit => ({ "Idempotency-Key": requireIdempotencyKey(idempotencyKey) });
-
-const configToWire = (config: InterviewConfig): Record<string, unknown> => ({
+const configToWire = (config: InterviewConfig): GeneratedInterviewConfig => ({
   schema_version: config.schemaVersion,
   role: config.role,
   scope: {
@@ -1016,11 +1022,10 @@ const configToWire = (config: InterviewConfig): Record<string, unknown> => ({
 export const startInterview = async (input: StartInterviewInput): Promise<StartInterviewResult> => {
   const workspaceId = requireUuid(input.workspaceId, "workspaceId");
   const config = normalizeConfigInput(input.config);
-  const payload = await request("/api/v1/review/interviews", {
-    method: "POST",
-    headers: commandHeaders(input.idempotencyKey),
-    body: JSON.stringify({ workspace_id: workspaceId, config: configToWire(config) }),
-  }, [200, 201]);
+  const payload = await request(generatedRawResponse(interviewApi.startInterviewRaw({
+    idempotencyKey: requireIdempotencyKey(input.idempotencyKey),
+    startInterviewRequest: { workspace_id: workspaceId, config: configToWire(config) },
+  }, generatedRequestInit())), [200, 201]);
   if (!isRecord(payload)) throw invalidResponse("start");
   exact(payload, ["session", "questions", "replayed"], "start");
   const session = decodeSession(payload.session, "start.session");
@@ -1044,11 +1049,12 @@ export const listInterviewSessions = async (input: ListInterviewSessionsInput, s
   if (cursor !== undefined && (cursor === "" || cursor !== cursor.trim() || cursor.length > 4096 || !/^[A-Za-z0-9_-]+$/.test(cursor))) {
     throw invalidRequest("cursor");
   }
-  const query = new URLSearchParams({ workspace_id: workspaceId, limit: String(limit) });
-  if (cursor !== undefined) query.set("cursor", cursor);
   const page = decodeInterviewSessionPage(await request(
-    `/api/v1/review/interviews?${query}`,
-    signal === undefined ? {} : { signal },
+    generatedRawResponse(interviewApi.listInterviewsRaw({
+      workspaceId,
+      limit,
+      ...(cursor === undefined ? {} : { cursor }),
+    }, generatedRequestInit(signal))),
   ));
   if (page.workspaceId !== workspaceId) throw invalidResponse("session_page.workspace_id");
   return page;
@@ -1057,10 +1063,11 @@ export const listInterviewSessions = async (input: ListInterviewSessionsInput, s
 export const getInterview = async (workspaceId: string, sessionId: string, signal?: AbortSignal): Promise<InterviewSnapshot> => {
   const expectedWorkspaceId = requireUuid(workspaceId, "workspaceId");
   const expectedSessionId = requireUuid(sessionId, "sessionId");
-  const query = new URLSearchParams({ workspace_id: expectedWorkspaceId });
   const result = decodeInterviewSnapshot(await request(
-    `/api/v1/review/interviews/${encodeURIComponent(expectedSessionId)}?${query}`,
-    signal === undefined ? {} : { signal },
+    generatedRawResponse(interviewApi.getInterviewRaw({
+      sessionId: expectedSessionId,
+      workspaceId: expectedWorkspaceId,
+    }, generatedRequestInit(signal))),
   ));
   if (result.session.workspaceId !== expectedWorkspaceId || result.session.id !== expectedSessionId) throw invalidResponse("snapshot.binding");
   return result;
@@ -1070,11 +1077,15 @@ export const submitInterviewTurn = async (input: SubmitInterviewTurnInput): Prom
   const workspaceId = requireUuid(input.workspaceId, "workspaceId");
   const sessionId = requireUuid(input.sessionId, "sessionId");
   const questionId = requireUuid(input.questionId, "questionId");
-  const payload = await request(`/api/v1/review/interviews/${encodeURIComponent(sessionId)}/turns`, {
-    method: "POST",
-    headers: commandHeaders(input.idempotencyKey),
-    body: JSON.stringify({ workspace_id: workspaceId, question_id: questionId, user_answer: requireUserAnswer(input.userAnswer) }),
-  });
+  const payload = await request(generatedRawResponse(interviewApi.submitInterviewTurnRaw({
+    sessionId,
+    idempotencyKey: requireIdempotencyKey(input.idempotencyKey),
+    submitInterviewTurnRequest: {
+      workspace_id: workspaceId,
+      question_id: questionId,
+      user_answer: requireUserAnswer(input.userAnswer),
+    },
+  }, generatedRequestInit())));
   if (!isRecord(payload)) throw invalidResponse("turn_result");
   exact(payload, ["turn", "follow_up", "next_question", "replayed"], "turn_result");
   const turn = decodeTurn(payload.turn, workspaceId, sessionId, "turn_result.turn");
@@ -1099,11 +1110,11 @@ export const completeInterview = async (input: CompleteInterviewInput): Promise<
   const workspaceId = requireUuid(input.workspaceId, "workspaceId");
   const sessionId = requireUuid(input.sessionId, "sessionId");
   if (typeof input.manualEnd !== "boolean") throw invalidRequest("manualEnd");
-  const payload = await request(`/api/v1/review/interviews/${encodeURIComponent(sessionId)}/complete`, {
-    method: "POST",
-    headers: commandHeaders(input.idempotencyKey),
-    body: JSON.stringify({ workspace_id: workspaceId, manual_end: input.manualEnd }),
-  });
+  const payload = await request(generatedRawResponse(interviewApi.completeInterviewRaw({
+    sessionId,
+    idempotencyKey: requireIdempotencyKey(input.idempotencyKey),
+    completeInterviewRequest: { workspace_id: workspaceId, manual_end: input.manualEnd },
+  }, generatedRequestInit())));
   if (!isRecord(payload)) throw invalidResponse("complete");
   exact(payload, ["session", "report", "path", "steps", "replayed"], "complete");
   const session = decodeSession(payload.session, "complete.session");
@@ -1122,12 +1133,13 @@ export const suggestInterviewMemoryCandidate = async (input: SuggestInterviewMem
   const pathId = requireUuid(input.pathId, "pathId");
   const stepId = requireUuid(input.stepId, "stepId");
   const payload = await request(
-    `/api/v1/review/interviews/${encodeURIComponent(sessionId)}/learning-paths/${encodeURIComponent(pathId)}/steps/${encodeURIComponent(stepId)}/memory-candidate`,
-    {
-      method: "POST",
-      headers: commandHeaders(input.idempotencyKey),
-      body: JSON.stringify({ workspace_id: workspaceId }),
-    },
+    generatedRawResponse(interviewApi.suggestInterviewMemoryCandidateRaw({
+      sessionId,
+      pathId,
+      stepId,
+      idempotencyKey: requireIdempotencyKey(input.idempotencyKey),
+      interviewMemoryCandidateRequest: { workspace_id: workspaceId },
+    }, generatedRequestInit())),
     [200, 201],
   );
   if (!isRecord(payload)) throw invalidResponse("memory_candidate");
@@ -1143,11 +1155,11 @@ export const updateLearningPathStatus = async (input: UpdateLearningPathStatusIn
   const pathId = requireUuid(input.pathId, "pathId");
   const expectedVersion = requireVersion(input.expectedVersion);
   const status = requirePathStatus(input.status);
-  const payload = await request(`/api/v1/review/learning-paths/${encodeURIComponent(pathId)}/status`, {
-    method: "PUT",
-    headers: commandHeaders(input.idempotencyKey),
-    body: JSON.stringify({ workspace_id: workspaceId, expected_version: expectedVersion, status }),
-  });
+  const payload = await request(generatedRawResponse(reviewApi.updateLearningPathStatusRaw({
+    pathId,
+    idempotencyKey: requireIdempotencyKey(input.idempotencyKey),
+    updateLearningPathStatusRequest: { workspace_id: workspaceId, expected_version: expectedVersion, status },
+  }, generatedRequestInit())));
   if (!isRecord(payload)) throw invalidResponse("path_status");
   exact(payload, ["path", "replayed"], "path_status");
   const path = decodeLearningPath(payload.path, workspaceId, undefined, "path_status.path");
@@ -1161,11 +1173,12 @@ export const updateLearningPathStep = async (input: UpdateLearningPathStepInput)
   const stepId = requireUuid(input.stepId, "stepId");
   const expectedVersion = requireVersion(input.expectedVersion);
   const status = requireStepStatus(input.status);
-  const payload = await request(`/api/v1/review/learning-paths/${encodeURIComponent(pathId)}/steps/${encodeURIComponent(stepId)}`, {
-    method: "PUT",
-    headers: commandHeaders(input.idempotencyKey),
-    body: JSON.stringify({ workspace_id: workspaceId, expected_version: expectedVersion, status }),
-  });
+  const payload = await request(generatedRawResponse(reviewApi.updateLearningPathStepRaw({
+    pathId,
+    stepId,
+    idempotencyKey: requireIdempotencyKey(input.idempotencyKey),
+    updateLearningPathStepRequest: { workspace_id: workspaceId, expected_version: expectedVersion, status },
+  }, generatedRequestInit())));
   if (!isRecord(payload)) throw invalidResponse("path_step");
   exact(payload, ["path", "step", "replayed"], "path_step");
   const path = decodeLearningPath(payload.path, workspaceId, undefined, "path_step.path");

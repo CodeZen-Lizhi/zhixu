@@ -1,5 +1,6 @@
-import { authFetch } from "./auth";
-import { hasOnlyKeys, isRecord } from "../shared/codec";
+import { hasOnlyKeys, isAbortError, isRecord } from "../shared/codec";
+import { SystemApi } from "./generated/apis/SystemApi";
+import { generatedConfiguration, generatedRawResponse, generatedRequestInit } from "./generated-client";
 
 export type SystemOverallStatus = "ready" | "degraded";
 export type DatabaseStatus = "ready" | "unavailable";
@@ -81,6 +82,7 @@ export class ApiBoundaryError extends Error {
     this.retryable = retryable;
   }
 }
+const systemApi = new SystemApi(generatedConfiguration);
 
 const readNonEmptyString = (
   value: unknown,
@@ -234,12 +236,9 @@ export const fetchSystemStatus = async (
 ): Promise<SystemStatus> => {
   let response: Response;
   try {
-    response = await authFetch("/api/v1/system/status", {
-      headers: { Accept: "application/json" },
-      ...(signal === undefined ? {} : { signal }),
-    });
+    response = await generatedRawResponse(systemApi.getSystemStatusRaw(generatedRequestInit(signal)));
   } catch (error: unknown) {
-    if (error instanceof DOMException && error.name === "AbortError") {
+    if (isAbortError(error)) {
       throw error;
     }
     throw new ApiBoundaryError(
@@ -262,6 +261,7 @@ export const fetchSystemStatus = async (
   try {
     payload = await response.json();
   } catch (error: unknown) {
+    if (isAbortError(error)) throw error;
     throw new ApiBoundaryError(
       "INVALID_RESPONSE",
       "系统状态响应不是有效 JSON",

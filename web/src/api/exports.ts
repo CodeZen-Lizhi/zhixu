@@ -1,7 +1,14 @@
 /** Collection Export 的唯一网络边界：只向 Feature 暴露已验证的任务投影。 */
 
-import { authFetch } from "./auth";
 import { canonicalUuidPattern as uuidPattern, hasOnlyKeys, isAbortError, isRecord } from "../shared/codec";
+import { ExportsApi as GeneratedExportsApi } from "./generated/apis/ExportsApi";
+import {
+  generatedConfiguration,
+  generatedRawResponse,
+  generatedRequestInit,
+} from "./generated-client";
+
+const exportsApi = new GeneratedExportsApi(generatedConfiguration);
 
 export type ExportKind = "MARKDOWN" | "METADATA_JSON";
 export type ExportStatus = "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED" | "EXPIRED" | "CANCELLED";
@@ -201,20 +208,19 @@ const decodeProblem = (value: unknown, status: number): ExportApiError => {
   }
 };
 
-const request = async (path: string, init: RequestInit = {}): Promise<unknown> => {
-  const headers = new Headers(init.headers); headers.set("Accept", "application/json"); if (init.body !== undefined) headers.set("Content-Type", "application/json");
+const request = async (operation: Promise<Response>, expectedStatuses: readonly number[]): Promise<unknown> => {
   let response: Response;
-  try { response = await authFetch(path, { ...init, headers }); } catch (error: unknown) { if (isAbortError(error)) throw error; throw new ExportApiError("NETWORK_ERROR", "NETWORK_ERROR", "无法连接 Export API。", true, null, { cause: error }); }
+  try { response = await operation; } catch (error: unknown) { if (isAbortError(error)) throw error; throw new ExportApiError("NETWORK_ERROR", "NETWORK_ERROR", "无法连接 Export API。", true, null, { cause: error }); }
   let payload: unknown;
-  try { payload = strictJson(await response.text()); } catch (error: unknown) { throw new ExportApiError("INVALID_RESPONSE", "INVALID_RESPONSE", "Export API 返回了无效或包含重复字段的 JSON。", false, response.status, { cause: error }); }
+  try { payload = strictJson(await response.text()); } catch (error: unknown) { if (isAbortError(error)) throw error; throw new ExportApiError("INVALID_RESPONSE", "INVALID_RESPONSE", "Export API 返回了无效或包含重复字段的 JSON。", false, response.status, { cause: error }); }
   if (!response.ok) throw decodeProblem(payload, response.status);
+  if (!expectedStatuses.includes(response.status)) throw invalidResponse("http_status", response.status);
   return payload;
 };
 
 const requireUuid = (value: string, field: string): string => { if (!uuidPattern.test(value)) throw invalidRequest(field); return value; };
 const requireHash = (value: string, field: string): string => { if (!hashPattern.test(value)) throw invalidRequest(field); return value; };
 const requireKey = (value: string): string => { if (value.trim() === "" || value !== value.trim() || value.length > 128) throw invalidRequest("idempotencyKey"); return value; };
-const signalInit = (signal?: AbortSignal): RequestInit => signal === undefined ? {} : { signal };
 
 const assertBinding = (job: ExportJob, workspaceId: string, collectionId?: string): ExportJob => {
   if (job.workspaceId !== workspaceId || (collectionId !== undefined && job.collectionId !== collectionId)) throw invalidResponse("job.binding");
@@ -224,7 +230,18 @@ const assertBinding = (job: ExportJob, workspaceId: string, collectionId?: strin
 export const createExport = (input: ExportCreateInput, signal?: AbortSignal): Promise<ExportCreateResult> => {
   const workspaceId = requireUuid(input.workspaceId, "workspaceId"); const collectionId = requireUuid(input.collectionId, "collectionId");
   if (!Number.isSafeInteger(input.collectionVersion) || input.collectionVersion < 1 || !exportKinds.includes(input.kind) || input.fields.length === 0 || new Set(input.fields).size !== input.fields.length || input.fields.some((field) => !exportFields.includes(field))) throw invalidRequest("create");
-  return request("/api/v1/exports", { method: "POST", headers: { "Idempotency-Key": requireKey(input.idempotencyKey) }, body: JSON.stringify({ workspace_id: workspaceId, collection_id: collectionId, collection_version: input.collectionVersion, query_hash: requireHash(input.queryHash, "queryHash"), kind: input.kind, fields: input.fields, redaction_policy: "MASKED" }), ...signalInit(signal) }).then((value) => {
+  return request(generatedRawResponse(exportsApi.createExportRaw({
+    idempotencyKey: requireKey(input.idempotencyKey),
+    exportCreateRequest: {
+      workspace_id: workspaceId,
+      collection_id: collectionId,
+      collection_version: input.collectionVersion,
+      query_hash: requireHash(input.queryHash, "queryHash"),
+      kind: input.kind,
+      fields: input.fields,
+      redaction_policy: "MASKED",
+    },
+  }, generatedRequestInit(signal))), [200, 202]).then((value) => {
     if (!isRecord(value)) throw invalidResponse("create"); exact(value, ["job", "replayed", "dispatch_pending"], "create"); const job = assertBinding(decodeJob(value.job), workspaceId, collectionId);
     return { job, replayed: bool(value.replayed, "create.replayed"), dispatchPending: bool(value.dispatch_pending, "create.dispatch_pending") };
   });
@@ -233,8 +250,12 @@ export const createExport = (input: ExportCreateInput, signal?: AbortSignal): Pr
 export const listCollectionExports = (workspaceIdValue: string, collectionIdValue: string, params: { cursor?: string; limit?: number } = {}, signal?: AbortSignal): Promise<ExportListPage> => {
   const workspaceId = requireUuid(workspaceIdValue, "workspaceId"); const collectionId = requireUuid(collectionIdValue, "collectionId"); const limit = params.limit ?? 25;
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100 || (params.cursor !== undefined && (params.cursor.trim() === "" || utf8Encoder.encode(params.cursor).byteLength > 4096))) throw invalidRequest("list");
-  const query = new URLSearchParams({ collection_id: collectionId, limit: String(limit), ...(params.cursor === undefined ? {} : { cursor: params.cursor }) });
-  return request(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/exports?${query}`, signalInit(signal)).then((value) => {
+  return request(generatedRawResponse(exportsApi.listCollectionExportsRaw({
+    workspaceId,
+    collectionId,
+    limit,
+    ...(params.cursor === undefined ? {} : { cursor: params.cursor }),
+  }, generatedRequestInit(signal))), [200]).then((value) => {
     if (!isRecord(value)) throw invalidResponse("list"); exact(value, ["workspace_id", "items", "next_cursor"], "list"); if (!Array.isArray(value.items) || value.items.length > 100) throw invalidResponse("list.items");
     const pageWorkspaceId = uuid(value.workspace_id, "list.workspace_id"); if (pageWorkspaceId !== workspaceId) throw invalidResponse("list.workspace_id");
     const items = value.items.map(decodeJob).map((job) => assertBinding(job, workspaceId, collectionId)); if (new Set(items.map((job) => job.id)).size !== items.length) throw invalidResponse("list.items");
@@ -244,16 +265,16 @@ export const listCollectionExports = (workspaceIdValue: string, collectionIdValu
 
 export const getExport = (workspaceIdValue: string, exportIdValue: string, signal?: AbortSignal): Promise<ExportJob> => {
   const workspaceId = requireUuid(workspaceIdValue, "workspaceId"); const exportId = requireUuid(exportIdValue, "exportId");
-  return request(`/api/v1/exports/${encodeURIComponent(exportId)}?workspace_id=${encodeURIComponent(workspaceId)}`, signalInit(signal)).then(decodeJob).then((job) => { if (job.id !== exportId) throw invalidResponse("job.id"); return assertBinding(job, workspaceId); });
+  return request(generatedRawResponse(exportsApi.getExportRaw({ workspaceId, exportId }, generatedRequestInit(signal))), [200]).then(decodeJob).then((job) => { if (job.id !== exportId) throw invalidResponse("job.id"); return assertBinding(job, workspaceId); });
 };
 
 export const downloadExport = async (workspaceIdValue: string, job: ExportJob, signal?: AbortSignal): Promise<ExportDownload> => {
   const workspaceId = requireUuid(workspaceIdValue, "workspaceId"); assertBinding(job, workspaceId);
   if (job.status !== "SUCCEEDED" || job.downloadUrl === null) throw invalidRequest("download");
   let response: Response;
-  try { response = await authFetch(job.downloadUrl, signalInit(signal)); } catch (error: unknown) { if (isAbortError(error)) throw error; throw new ExportApiError("NETWORK_ERROR", "NETWORK_ERROR", "无法下载 Export 结果。", true, null, { cause: error }); }
+  try { response = await generatedRawResponse(exportsApi.downloadExportRaw({ workspaceId, exportId: job.id }, generatedRequestInit(signal))); } catch (error: unknown) { if (isAbortError(error)) throw error; throw new ExportApiError("NETWORK_ERROR", "NETWORK_ERROR", "无法下载 Export 结果。", true, null, { cause: error }); }
   if (!response.ok) {
-    let payload: unknown; try { payload = strictJson(await response.text()); } catch { throw new ExportApiError("INVALID_RESPONSE", "INVALID_RESPONSE", "Export 下载错误响应无效。", false, response.status); }
+    let payload: unknown; try { payload = strictJson(await response.text()); } catch (error: unknown) { if (isAbortError(error)) throw error; throw new ExportApiError("INVALID_RESPONSE", "INVALID_RESPONSE", "Export 下载错误响应无效。", false, response.status); }
     throw decodeProblem(payload, response.status);
   }
   const type = response.headers.get("Content-Type")?.split(";", 1)[0]?.toLowerCase(); const contentType = type === "text/markdown" || type === "application/json" ? type : undefined;

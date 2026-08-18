@@ -4,8 +4,9 @@
 
 ## 适用范围
 
-适用于前端实现、测试、生成契约和浏览器行为。仓库已有前端 Manifest、Lockfile 与可执行命令；
-M6-D 当前交付严格 Search API Decoder/Client，不实现 Search 页面。
+适用于前端实现、测试、生成契约和浏览器行为。仓库已有前端 Manifest、Lockfile、锁定的
+OpenAPI Generator/Zod 依赖与可执行命令；普通 HTTP operation 由生成 client 发出，模块 strict
+owner 与浏览器行为仍按风险验证。
 
 ## 已确认事实
 
@@ -19,6 +20,8 @@ M6-D 当前交付严格 Search API Decoder/Client，不实现 Search 页面。
 - 改动保持 Feature Scope，并遵守 Routes → Features → Domain UI/API 边界。
 - 显式表达 Loading、Empty、Error、Degraded、Waiting for Human、Version Conflict 和 Manual Recovery。
 - 使用 Typed API Boundary、稳定 Query Key、Cursor Pagination、Version/ETag 和 Idempotency 契约。
+- 普通 JSON、multipart 与下载请求使用对应生成 `*ApiRaw` 和共享 Transport；生成目录只读，
+  模块只保留 Domain projection、严格校验和最小媒体/协议 Adapter。
 - 清理 Markdown/HTML Preview，并安全显示外部链接目标。
 - 对相应 Feature 实施 Route-level Code Splitting、大表虚拟滚动、Graph 增量加载、大 Diff 分段和 Artifact Chapter Lazy Load。
 - 测试断言用户可观察行为和可访问语义，不依赖私有实现细节。
@@ -59,6 +62,9 @@ M6-D 当前交付严格 Search API Decoder/Client，不实现 Search 页面。
   UUID/Hash/RFC3339、NaN/Inf、未知 mode/capability、缺失 href、错误 cursor 与 Problem；不得只测 happy path。
 - M6-D 至少执行 `npm run lint --prefix web`、`npm run typecheck --prefix web`、
   `npm run test --prefix web` 和 `npm run build --prefix web`；只有实际输出可标记通过。
+- OpenAPI/API 边界改动还必须执行 `make openapi-check` 与 `make openapi-generate-check`，证明
+  189 operation tag、确定性生成、公共模型和 strict generated typecheck；模块请求测试必须覆盖
+  headers/body/Problem/Abort，专用媒体 owner 另覆盖完整性与取消。
 - Workspace 启动边界测试必须覆盖 strict Active 响应、零个/多个/不匹配、认证顺序、重连、A -> B cache/SSE/草稿清理、
   迟到响应、无控制 fragment/Cookie 的多浏览器访问和 `/workspace` 无宿主路径 mutation。
 - 业务事件流单测使用 FakeEventSource 覆盖严格 MessageEvent、串行确认队列、generation、fatal probe 和 Abort；不得用
@@ -76,6 +82,8 @@ M6-D 当前交付严格 Search API Decoder/Client，不实现 Search 页面。
 - List、Graph Expansion 和 Source Content 是否有边界？
 - 测试是否覆盖正常、边界、失败、重连和重复提交？
 - 生成产物是否可复现，依赖变更是否锁定？
+- 普通 HTTP 是否只有生成 Raw operation -> shared Transport -> strict owner 一条生产路径，且
+  SSE/stream/Blob/multipart 例外已经登记而没有复制通用请求逻辑？
 - Search 是否只有一个 Decoder owner，并拒绝未知字段语义、非有限分数和不可打开 Evidence？
 - Cursor invalid/stale 是否显式要求从第一页重启，而不是静默复用旧结果？
 - UI 是否没有把 M6-D Workspace 隔离误当作 M10 Auth/CSRF/Capability 已完成？
@@ -94,7 +102,9 @@ rg -n 'Vitest|Testing Library|Playwright|Accessibility|SSE Reconnect|Virtualized
 git diff --check
 ```
 
-M1 后运行 Canonical Frontend 的锁定安装验证、Lint、Type Check、Unit/Integration Test、Production Build 和选定 Playwright Smoke；M1 必须记录确切命令，不依赖开发者全局工具。
+M1 后运行 Canonical Frontend 的锁定安装验证、OpenAPI 生成漂移、Lint、Type Check、
+Unit/Integration Test、Production Build 和选定 Playwright Smoke；必须记录确切命令，不依赖
+开发者全局工具。
 
 ## 当前后续门禁
 

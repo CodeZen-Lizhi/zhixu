@@ -1,10 +1,22 @@
-import { authFetch } from "./auth";
 import {
   canonicalUuidPattern as uuidPattern,
   hasOnlyKeys,
   isAbortError,
   isRecord,
 } from "../shared/codec";
+import { GraphApi as GeneratedGraphApi } from "./generated/apis/GraphApi";
+import type {
+  GraphFilter as GeneratedGraphFilter,
+  GraphGlobalRequest as GeneratedGraphGlobalRequest,
+  GraphNeighborhoodRequest as GeneratedGraphNeighborhoodRequest,
+  GraphNodeRef as GeneratedGraphNodeRef,
+  GraphPathRequest as GeneratedGraphPathRequest,
+} from "./generated/models";
+import {
+  generatedConfiguration,
+  generatedRawResponse,
+  generatedRequestInit,
+} from "./generated-client";
 
 export type NodeType = "TOPIC" | "CLAIM";
 export type RelationType =
@@ -297,6 +309,11 @@ const textEncoder = new TextEncoder();
 const maxCursorBytes = 2048;
 const maxApplicabilityBytes = 16 * 1024;
 const maxApplicabilityDepth = 16;
+const graphApi = new GeneratedGraphApi(generatedConfiguration).withPreMiddleware(({ url, init }) => Promise.resolve({
+  // 保持迁移前 URLSearchParams 对查询空格的编码，避免改变可观察请求 URL。
+  url: url.replaceAll("%20", "+"),
+  init,
+}));
 
 type InvalidFactory = (field: string) => GraphApiError;
 
@@ -394,6 +411,12 @@ const readConfidence = (
   if (nullable && value === null) return null;
   const result = readFiniteNumber(value, field, fail);
   if (result < 0 || result > 1) throw fail(field);
+  return result;
+};
+
+const readRequiredConfidence = (value: unknown, field: string, fail: InvalidFactory): number => {
+  const result = readConfidence(value, field, false, fail);
+  if (result === null) throw fail(field);
   return result;
 };
 
@@ -511,7 +534,7 @@ const readClaimStatus = (value: unknown, field: string, fail: InvalidFactory = i
   }
 };
 
-const readFilterClaimStatus = (value: unknown, field: string, fail: InvalidFactory): ClaimStatus => {
+const readFilterClaimStatus = (value: unknown, field: string, fail: InvalidFactory): "CONFIRMED" | "DISPUTED" => {
   if (value === "CONFIRMED" || value === "DISPUTED") return value;
   throw fail(field);
 };
@@ -1059,7 +1082,7 @@ const readInputArray = <T>(
   reader: (item: unknown, itemField: string) => T,
 ): T[] => requireUnique(readArray(value, field, maximum, reader, 0, invalidRequest), field, (item) => String(item), invalidRequest);
 
-const encodeFilter = (input: unknown): Record<string, unknown> => {
+const encodeFilter = (input: unknown): GeneratedGraphFilter => {
   const value = inputRecord(input, [
     "nodeTypes", "relationTypes", "topicIds", "relationStatuses", "claimStatuses", "claimMinConfidence",
     "relationMinConfidence", "updatedAfter",
@@ -1069,8 +1092,8 @@ const encodeFilter = (input: unknown): Record<string, unknown> => {
   const topicIds = value.topicIds === undefined ? undefined : readInputArray(value.topicIds, "filter.topicIds", 500, (item, field) => readUuid(item, field, invalidRequest));
   const relationStatuses = value.relationStatuses === undefined ? undefined : readInputArray(value.relationStatuses, "filter.relationStatuses", 2, (item, field) => readRelationStatus(item, field, invalidRequest));
   const claimStatuses = value.claimStatuses === undefined ? undefined : readInputArray(value.claimStatuses, "filter.claimStatuses", 2, (item, field) => readFilterClaimStatus(item, field, invalidRequest));
-  const claimMinConfidence = value.claimMinConfidence === undefined ? undefined : readConfidence(value.claimMinConfidence, "filter.claimMinConfidence", false, invalidRequest);
-  const relationMinConfidence = value.relationMinConfidence === undefined ? undefined : readConfidence(value.relationMinConfidence, "filter.relationMinConfidence", false, invalidRequest);
+  const claimMinConfidence = value.claimMinConfidence === undefined ? undefined : readRequiredConfidence(value.claimMinConfidence, "filter.claimMinConfidence", invalidRequest);
+  const relationMinConfidence = value.relationMinConfidence === undefined ? undefined : readRequiredConfidence(value.relationMinConfidence, "filter.relationMinConfidence", invalidRequest);
   const updatedAfter = value.updatedAfter === undefined ? undefined : readTimestamp(value.updatedAfter, "filter.updatedAfter", invalidRequest);
   return {
     ...(nodeTypes === undefined ? {} : { node_types: nodeTypes }),
@@ -1084,7 +1107,7 @@ const encodeFilter = (input: unknown): Record<string, unknown> => {
   };
 };
 
-const encodeNodeRef = (input: unknown, field: string): { ref: GraphNodeRef; wire: Record<string, unknown> } => {
+const encodeNodeRef = (input: unknown, field: string): { ref: GraphNodeRef; wire: GeneratedGraphNodeRef } => {
   const value = inputRecord(input, ["type", "id"], field);
   const ref: GraphNodeRef = {
     type: readNodeType(value.type, `${field}.type`, invalidRequest),
@@ -1099,7 +1122,7 @@ const optionalLimit = (value: unknown, field: string, maximum: number): number |
 const optionalCursor = (value: unknown, field: string): string | undefined =>
   value === undefined ? undefined : readCursor(value, field, invalidRequest);
 
-const encodeGlobalInput = (input: GraphGlobalInput): Record<string, unknown> => {
+const encodeGlobalInput = (input: GraphGlobalInput): GeneratedGraphGlobalRequest => {
   const value = inputRecord(input, ["workspaceId", "filter", "cursor", "limit"], "input");
   const filter = value.filter === undefined ? undefined : encodeFilter(value.filter);
   const cursor = optionalCursor(value.cursor, "cursor");
@@ -1112,7 +1135,7 @@ const encodeGlobalInput = (input: GraphGlobalInput): Record<string, unknown> => 
   };
 };
 
-const encodeNeighborhoodInput = (input: GraphNeighborhoodInput): Record<string, unknown> => {
+const encodeNeighborhoodInput = (input: GraphNeighborhoodInput): GeneratedGraphNeighborhoodRequest => {
   const value = inputRecord(input, [
     "workspaceId", "center", "depth", "limit", "direction", "filter", "maxNodes", "maxEdges", "maxFrontier", "cursor",
   ], "input");
@@ -1144,7 +1167,7 @@ const encodeNeighborhoodInput = (input: GraphNeighborhoodInput): Record<string, 
   };
 };
 
-const encodePathInput = (input: GraphPathInput): Record<string, unknown> => {
+const encodePathInput = (input: GraphPathInput): GeneratedGraphPathRequest => {
   const value = inputRecord(input, ["workspaceId", "from", "to", "direction", "relationTypes", "maxDepth", "maxVisited"], "input");
   const from = encodeNodeRef(value.from, "from");
   const to = encodeNodeRef(value.to, "to");
@@ -1215,22 +1238,12 @@ const decodeProblem = (value: unknown, status: number): GraphApiError => {
 };
 
 const requestGraph = async <T>(
-  path: string,
-  method: "GET" | "POST",
-  body: Record<string, unknown> | undefined,
+  operation: Promise<Response>,
   decoder: (value: unknown) => T,
-  signal?: AbortSignal,
 ): Promise<T> => {
   let response: Response;
   try {
-    response = await authFetch(path, {
-      method,
-      headers: body === undefined
-        ? { Accept: "application/json" }
-        : { Accept: "application/json", "Content-Type": "application/json" },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      ...(signal === undefined ? {} : { signal }),
-    });
+    response = await operation;
   } catch (error: unknown) {
     if (isAbortError(error)) throw error;
     throw new GraphApiError({ errorCode: "NETWORK_ERROR", message: "无法连接 Graph API。", retryable: true }, null, { cause: error });
@@ -1246,42 +1259,48 @@ const requestGraph = async <T>(
   return decoder(payload);
 };
 
-const queryPath = (path: string, values: Record<string, string | number | undefined>): string => {
-  const query = new URLSearchParams();
-  for (const [key, value] of Object.entries(values)) {
-    if (value !== undefined) query.set(key, String(value));
-  }
-  return `${path}?${query.toString()}`;
-};
-
 export const getGraphGlobalPage = async (input: GraphGlobalInput, signal?: AbortSignal): Promise<GraphGlobalPage> =>
-  requestGraph("/api/v1/graph/global", "POST", encodeGlobalInput(input), (value) => decodeGraphGlobalPage(value, input), signal);
+  requestGraph(generatedRawResponse(graphApi.getGraphGlobalPageRaw(
+    { graphGlobalRequest: encodeGlobalInput(input) },
+    generatedRequestInit(signal),
+  )), (value) => decodeGraphGlobalPage(value, input));
 
 export const getGraphNeighborhood = async (input: GraphNeighborhoodInput, signal?: AbortSignal): Promise<GraphNeighborhood> =>
-  requestGraph("/api/v1/graph/neighborhood", "POST", encodeNeighborhoodInput(input), (value) => decodeGraphNeighborhood(value, input), signal);
+  requestGraph(generatedRawResponse(graphApi.getGraphNeighborhoodPageRaw(
+    { graphNeighborhoodRequest: encodeNeighborhoodInput(input) },
+    generatedRequestInit(signal),
+  )), (value) => decodeGraphNeighborhood(value, input));
 
 export const findGraphPath = async (input: GraphPathInput, signal?: AbortSignal): Promise<GraphPathResult> =>
-  requestGraph("/api/v1/graph/path", "POST", encodePathInput(input), (value) => decodeGraphPathResult(value, input), signal);
+  requestGraph(generatedRawResponse(graphApi.findGraphPathRaw(
+    { graphPathRequest: encodePathInput(input) },
+    generatedRequestInit(signal),
+  )), (value) => decodeGraphPathResult(value, input));
 
 export const searchGraphNodes = async (input: GraphNodeSearchInput, signal?: AbortSignal): Promise<GraphNodeSearchResult> => {
   validateNodeSearchInput(input);
-  return requestGraph(queryPath("/api/v1/graph/nodes", {
-    workspace_id: input.workspaceId,
+  return requestGraph(generatedRawResponse(graphApi.searchGraphNodesRaw({
+    workspaceId: input.workspaceId,
     query: input.query,
-    limit: input.limit,
-  }), "GET", undefined, (value) => decodeGraphNodeSearchResult(value, input), signal);
+    ...(input.limit === undefined ? {} : { limit: input.limit }),
+  }, generatedRequestInit(signal))), (value) => decodeGraphNodeSearchResult(value, input));
 };
 
 export const getGraphNodeDetail = async (input: GraphNodeDetailInput, signal?: AbortSignal): Promise<GraphNode> => {
   validateNodeDetailInput(input);
-  const path = `/api/v1/graph/nodes/${encodeURIComponent(input.nodeType)}/${encodeURIComponent(input.nodeId)}`;
-  return requestGraph(queryPath(path, { workspace_id: input.workspaceId }), "GET", undefined, (value) => decodeGraphNode(value, input), signal);
+  return requestGraph(generatedRawResponse(graphApi.getGraphNodeDetailRaw({
+    nodeType: input.nodeType,
+    nodeId: input.nodeId,
+    workspaceId: input.workspaceId,
+  }, generatedRequestInit(signal))), (value) => decodeGraphNode(value, input));
 };
 
 export const getGraphRelationDetail = async (input: GraphRelationDetailInput, signal?: AbortSignal): Promise<GraphRelationDetail> => {
   validateRelationDetailInput(input);
-  const path = `/api/v1/graph/relations/${encodeURIComponent(input.relationId)}`;
-  return requestGraph(queryPath(path, { workspace_id: input.workspaceId }), "GET", undefined, (value) => decodeGraphRelationDetail(value, input), signal);
+  return requestGraph(generatedRawResponse(graphApi.getGraphRelationDetailRaw({
+    relationId: input.relationId,
+    workspaceId: input.workspaceId,
+  }, generatedRequestInit(signal))), (value) => decodeGraphRelationDetail(value, input));
 };
 
 export const getGraphRelationEvidencePage = async (
@@ -1289,10 +1308,10 @@ export const getGraphRelationEvidencePage = async (
   signal?: AbortSignal,
 ): Promise<GraphRelationEvidencePage> => {
   validateEvidenceInput(input);
-  const path = `/api/v1/graph/relations/${encodeURIComponent(input.relationId)}/evidence`;
-  return requestGraph(queryPath(path, {
-    workspace_id: input.workspaceId,
-    cursor: input.cursor,
-    limit: input.limit,
-  }), "GET", undefined, (value) => decodeGraphRelationEvidencePage(value, input), signal);
+  return requestGraph(generatedRawResponse(graphApi.getGraphRelationEvidencePageRaw({
+    relationId: input.relationId,
+    workspaceId: input.workspaceId,
+    ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+    ...(input.limit === undefined ? {} : { limit: input.limit }),
+  }, generatedRequestInit(signal))), (value) => decodeGraphRelationEvidencePage(value, input));
 };

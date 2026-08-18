@@ -148,7 +148,7 @@ describe("Artifact API boundary", () => {
 
     await expect(getArtifactSectionGenerations(workspaceId, artifactId)).resolves.toMatchObject({ items: [{ generationId, status: "PENDING" }] });
     expect(fetchMock.mock.calls[0]?.[0]).toBe(`/api/v1/artifacts/${artifactId}/section-generations?workspace_id=${workspaceId}`);
-    expect(fetchMock.mock.calls[0]?.[1]?.method).toBeUndefined();
+    expect(fetchMock.mock.calls[0]?.[1]?.method).toBe("GET");
   });
 
   it("rejects refresh generation response binding drift", async () => {

@@ -1,9 +1,20 @@
-import { authFetch } from "./auth";
 import {
   canonicalUuidPattern as uuidPattern,
   hasOnlyKeys,
+  isAbortError,
   isRecord,
 } from "../shared/codec";
+import { BusinessApi as GeneratedBusinessApi } from "./generated/apis/BusinessApi";
+import { SemanticLinksApi as GeneratedSemanticLinksApi } from "./generated/apis/SemanticLinksApi";
+import type {
+  SemanticLinkCandidateDecisionRequest as GeneratedSemanticLinkCandidateDecisionRequest,
+  SemanticLinkScanStartRequest as GeneratedSemanticLinkScanStartRequest,
+} from "./generated/models";
+import {
+  generatedConfiguration,
+  generatedRawResponse,
+  generatedRequestInit,
+} from "./generated-client";
 
 export type NodeType = "TOPIC" | "CLAIM";
 export type RelationType =
@@ -367,6 +378,8 @@ const maxReferenceBytes = 512;
 const maxSummaryBytes = 4096;
 const maxExcerptBytes = 4096;
 const maxFreeTextBytes = 8 * 1024 * 1024;
+const semanticLinksApi = new GeneratedSemanticLinksApi(generatedConfiguration);
+const businessApi = new GeneratedBusinessApi(generatedConfiguration);
 const nodeTypes = ["TOPIC", "CLAIM"] as const;
 const relationTypes = [
   "CITES",
@@ -1278,7 +1291,8 @@ export const decodeSemanticLinkProblem = (value: unknown, status: number | null 
 const readJson = async (response: Response): Promise<unknown> => {
   try {
     return await response.json();
-  } catch {
+  } catch (error: unknown) {
+    if (isAbortError(error)) throw error;
     throw new SemanticLinkApiError({
       errorCode: "INVALID_RESPONSE",
       message: "Semantic Link API 返回了无效 JSON。",
@@ -1287,11 +1301,12 @@ const readJson = async (response: Response): Promise<unknown> => {
   }
 };
 
-const request = async <T>(path: string, init: RequestInit, decode: (value: unknown) => T): Promise<T> => {
+const request = async <T>(operation: Promise<Response>, decode: (value: unknown) => T): Promise<T> => {
   let response: Response;
   try {
-    response = await authFetch(path, init);
-  } catch {
+    response = await operation;
+  } catch (error: unknown) {
+    if (isAbortError(error)) throw error;
     throw new SemanticLinkApiError({
       errorCode: "NETWORK_ERROR",
       message: "无法连接 Semantic Link API。",
@@ -1320,7 +1335,7 @@ const validateIdempotencyKey = (value: string): string => {
   return key;
 };
 
-const serializeScanScope = (scope: SemanticLinkScanScope): Record<string, unknown> => {
+const serializeScanScope = (scope: SemanticLinkScanScope): GeneratedSemanticLinkScanStartRequest["scope"] => {
   if (scope.kind === "SMART_COLLECTION") {
     return {
       kind: scope.kind,
@@ -1339,37 +1354,57 @@ export const listSemanticLinkCandidates = async (
 ): Promise<SemanticLinkCandidatePage> => {
   const workspaceId = readUuid(input.workspaceId, "workspaceId", invalidRequest);
   if ((input.nodeType === undefined) !== (input.nodeId === undefined)) throw invalidRequest("nodeType/nodeId");
-  const query = new URLSearchParams({ workspace_id: workspaceId });
+  let nodeType: NodeType | undefined;
+  let nodeId: string | undefined;
   if (input.nodeType !== undefined && input.nodeId !== undefined) {
-    query.set("node_type", readNodeType(input.nodeType, "nodeType", invalidRequest));
-    query.set("node_id", readUuid(input.nodeId, "nodeId", invalidRequest));
+    nodeType = readNodeType(input.nodeType, "nodeType", invalidRequest);
+    nodeId = readUuid(input.nodeId, "nodeId", invalidRequest);
   }
+  let statuses: SemanticLinkCandidateStatus[] | undefined;
   if (input.statuses !== undefined) {
-    const values = unique(input.statuses.map((item, index) =>
+    statuses = unique(input.statuses.map((item, index) =>
       readEnum(item, `statuses[${String(index)}]`, candidateStatuses, invalidRequest)), "statuses", (item) => item);
-    values.forEach((item) => query.append("status", item));
   }
+  let requestedRelationTypes: RelationType[] | undefined;
   if (input.relationTypes !== undefined) {
-    const values = unique(input.relationTypes.map((item, index) =>
+    requestedRelationTypes = unique(input.relationTypes.map((item, index) =>
       readEnum(item, `relationTypes[${String(index)}]`, relationTypes, invalidRequest)), "relationTypes", (item) => item);
-    values.forEach((item) => query.append("relation_type", item));
   }
+  let requestedReopenedReasons: SemanticLinkReopenedReason[] | undefined;
   if (input.reopenedReasons !== undefined) {
-    const values = unique(input.reopenedReasons.map((item, index) =>
+    requestedReopenedReasons = unique(input.reopenedReasons.map((item, index) =>
       readEnum(item, `reopenedReasons[${String(index)}]`, reopenedReasons, invalidRequest)), "reopenedReasons", (item) => item);
-    values.forEach((item) => query.append("reopened_reason", item));
   }
-  if (input.minConfidence !== undefined) {
-    query.set("min_confidence", String(readConfidence(input.minConfidence, "minConfidence", invalidRequest)));
-  }
-  if (input.cursor !== undefined) query.set("cursor", readCursor(input.cursor, "cursor", invalidRequest));
-  if (input.limit !== undefined) query.set("limit", String(readInteger(input.limit, "limit", 1, 100, invalidRequest)));
-  return request(`/api/v1/graph/candidates?${query.toString()}`, {
-    method: "GET",
-    headers: { Accept: "application/json" },
-    ...(signal === undefined ? {} : { signal }),
-  }, (payload) => decodeSemanticLinkCandidatePage(payload, input));
+  const minConfidence = input.minConfidence === undefined
+    ? undefined
+    : readConfidence(input.minConfidence, "minConfidence", invalidRequest);
+  const cursor = input.cursor === undefined ? undefined : readCursor(input.cursor, "cursor", invalidRequest);
+  const limit = input.limit === undefined ? undefined : readInteger(input.limit, "limit", 1, 100, invalidRequest);
+  return request(generatedRawResponse(semanticLinksApi.listSemanticLinkCandidatesRaw({
+    workspaceId,
+    ...(nodeType === undefined ? {} : { nodeType }),
+    ...(nodeId === undefined ? {} : { nodeId }),
+    ...(statuses === undefined || statuses.length === 0 ? {} : { status: statuses }),
+    ...(requestedRelationTypes === undefined || requestedRelationTypes.length === 0 ? {} : { relationType: requestedRelationTypes }),
+    ...(requestedReopenedReasons === undefined || requestedReopenedReasons.length === 0 ? {} : { reopenedReason: requestedReopenedReasons }),
+    ...(minConfidence === undefined ? {} : { minConfidence }),
+    ...(cursor === undefined ? {} : { cursor }),
+    ...(limit === undefined ? {} : { limit }),
+  }, generatedRequestInit(signal))), (payload) => decodeSemanticLinkCandidatePage(payload, input));
 };
+
+const sendCandidateDecision = (
+  candidateId: string,
+  idempotencyKey: string,
+  body: GeneratedSemanticLinkCandidateDecisionRequest,
+  input: SemanticLinkCandidateDecisionInput,
+): Promise<SemanticLinkDecisionReceipt> => request(generatedRawResponse(
+  semanticLinksApi.decideSemanticLinkCandidateRaw({
+    candidateId,
+    idempotencyKey,
+    semanticLinkCandidateDecisionRequest: body,
+  }),
+), (payload) => readDecisionReceipt(payload, input));
 
 export const decideSemanticLinkCandidate = async (
   input: SemanticLinkCandidateDecisionInput,
@@ -1378,65 +1413,76 @@ export const decideSemanticLinkCandidate = async (
   const candidateId = readUuid(input.candidateId, "candidateId", invalidRequest);
   const workspaceId = readUuid(input.workspaceId, "workspaceId", invalidRequest);
   const action = readDecisionAction(input.action, "action", invalidRequest);
-  const body: Record<string, unknown> = {
-    workspace_id: workspaceId,
-    action,
-    expected_version: readInteger(input.expectedVersion, "expectedVersion", 1, Number.MAX_SAFE_INTEGER, invalidRequest),
-  };
+  const expectedVersion = readInteger(input.expectedVersion, "expectedVersion", 1, Number.MAX_SAFE_INTEGER, invalidRequest);
+  const idempotencyKey = validateIdempotencyKey(input.idempotencyKey);
   const baseKeys = ["candidateId", "workspaceId", "action", "expectedVersion", "idempotencyKey"];
   switch (action) {
-    case "CONFIRM":
+    case "CONFIRM": {
       assertExactKeys(input, baseKeys, "decision", invalidRequest);
-      break;
-    case "CONFIRM_WITH_RELATION_TYPE":
+      return sendCandidateDecision(candidateId, idempotencyKey, {
+        workspace_id: workspaceId,
+        action,
+        expected_version: expectedVersion,
+      }, input);
+    }
+    case "CONFIRM_WITH_RELATION_TYPE": {
       assertExactKeys(input, [...baseKeys, "relationType"], "decision", invalidRequest);
-      body.relation_type = readRelationType(input.relationType, "relationType", invalidRequest);
-      break;
+      return sendCandidateDecision(candidateId, idempotencyKey, {
+        workspace_id: workspaceId,
+        action,
+        expected_version: expectedVersion,
+        relation_type: readRelationType(input.relationType, "relationType", invalidRequest),
+      }, input);
+    }
     case "IGNORE":
-    case "FALSE_POSITIVE":
+    case "FALSE_POSITIVE": {
       assertExactKeys(input, [...baseKeys, "reason"], "decision", invalidRequest);
-      body.reason = readText(input.reason, "reason", maxReasonBytes, false, invalidRequest);
-      break;
-    case "DEFER":
+      return sendCandidateDecision(candidateId, idempotencyKey, {
+        workspace_id: workspaceId,
+        action,
+        expected_version: expectedVersion,
+        reason: readText(input.reason, "reason", maxReasonBytes, false, invalidRequest),
+      }, input);
+    }
+    case "DEFER": {
       assertExactKeys(input, [...baseKeys, "reason", "deferredUntil"], "decision", invalidRequest);
-      if (input.reason !== undefined) body.reason = readText(input.reason, "reason", maxReasonBytes, false, invalidRequest);
-      if (input.deferredUntil !== undefined) body.deferred_until = input.deferredUntil === null
-        ? null
-        : readTimestamp(input.deferredUntil, "deferredUntil", invalidRequest);
-      break;
-    case "RESUME":
+      const body = {
+        workspace_id: workspaceId,
+        action,
+        expected_version: expectedVersion,
+        ...(input.reason === undefined ? {} : { reason: readText(input.reason, "reason", maxReasonBytes, false, invalidRequest) }),
+        ...(input.deferredUntil === undefined
+          ? {}
+          : { deferred_until: input.deferredUntil === null ? null : readTimestamp(input.deferredUntil, "deferredUntil", invalidRequest) }),
+      };
+      return sendCandidateDecision(candidateId, idempotencyKey, body, input);
+    }
+    case "RESUME": {
       assertExactKeys(input, [...baseKeys, "deferredUntil"], "decision", invalidRequest);
+      let deferredUntil: null | undefined;
       if (input.deferredUntil !== undefined) {
         if (input.deferredUntil !== null) throw invalidRequest("deferredUntil");
-        body.deferred_until = null;
+        deferredUntil = null;
       }
-      break;
+      return sendCandidateDecision(candidateId, idempotencyKey, {
+        workspace_id: workspaceId,
+        action,
+        expected_version: expectedVersion,
+        ...(deferredUntil === undefined ? {} : { deferred_until: deferredUntil }),
+      }, input);
+    }
   }
-  return request(`/api/v1/graph/candidates/${encodeURIComponent(candidateId)}/decisions`, {
-    method: "POST",
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/json",
-      "Idempotency-Key": validateIdempotencyKey(input.idempotencyKey),
-    },
-    body: JSON.stringify(body),
-  }, (payload) => readDecisionReceipt(payload, input));
 };
 
 export const startSemanticLinkScan = async (input: StartSemanticLinkScanInput): Promise<SemanticLinkScanAcceptance> => {
   const workspaceId = readUuid(input.workspaceId, "workspaceId", invalidRequest);
-  return request("/api/v1/graph/candidate-scans", {
-    method: "POST",
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/json",
-      "Idempotency-Key": validateIdempotencyKey(input.idempotencyKey),
-    },
-    body: JSON.stringify({
+  return request(generatedRawResponse(semanticLinksApi.startSemanticLinkCandidateScanRaw({
+    idempotencyKey: validateIdempotencyKey(input.idempotencyKey),
+    semanticLinkScanStartRequest: {
       workspace_id: workspaceId,
       scope: serializeScanScope(input.scope),
-    }),
-  }, (payload) => decodeSemanticLinkScanAcceptance(payload, workspaceId));
+    },
+  })), (payload) => decodeSemanticLinkScanAcceptance(payload, workspaceId));
 };
 
 export const getSemanticLinkScan = async (
@@ -1445,11 +1491,10 @@ export const getSemanticLinkScan = async (
 ): Promise<SemanticLinkScan> => {
   const scanId = readUuid(input.scanId, "scanId", invalidRequest);
   const workspaceId = readUuid(input.workspaceId, "workspaceId", invalidRequest);
-  return request(`/api/v1/graph/candidate-scans/${encodeURIComponent(scanId)}?workspace_id=${encodeURIComponent(workspaceId)}`, {
-    method: "GET",
-    headers: { Accept: "application/json" },
-    ...(signal === undefined ? {} : { signal }),
-  }, (payload) => decodeSemanticLinkScan(payload, { scanId, workspaceId }));
+  return request(generatedRawResponse(semanticLinksApi.getSemanticLinkCandidateScanRaw({
+    scanId,
+    workspaceId,
+  }, generatedRequestInit(signal))), (payload) => decodeSemanticLinkScan(payload, { scanId, workspaceId }));
 };
 
 export const getSemanticLinkProposal = async (
@@ -1457,11 +1502,10 @@ export const getSemanticLinkProposal = async (
   signal?: AbortSignal,
 ): Promise<SemanticLinkProposal> => {
   const proposalId = readUuid(input.proposalId, "proposalId", invalidRequest);
-  return request(`/api/v1/proposals/${encodeURIComponent(proposalId)}`, {
-    method: "GET",
-    headers: { Accept: "application/json" },
-    ...(signal === undefined ? {} : { signal }),
-  }, (payload) => decodeSemanticLinkProposal(payload, { proposalId }));
+  return request(generatedRawResponse(businessApi.getProposalRaw(
+    { proposalId },
+    generatedRequestInit(signal),
+  )), (payload) => decodeSemanticLinkProposal(payload, { proposalId }));
 };
 
 export const approveSemanticLinkProposal = async (
@@ -1471,18 +1515,14 @@ export const approveSemanticLinkProposal = async (
   const revisionId = readUuid(input.revisionId, "revisionId", invalidRequest);
   const changeHash = readHash(input.changeHash, "changeHash", false, invalidRequest);
   const decision = readProposalDecision(input.decision, "decision", invalidRequest);
-  return request(`/api/v1/proposals/${encodeURIComponent(proposalId)}/approvals`, {
-    method: "POST",
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
+  return request(generatedRawResponse(businessApi.decideProposalRaw({
+    proposalId,
+    proposalDecisionRequest: {
       revision_id: revisionId,
       change_hash: changeHash,
       decision,
-    }),
-  }, (payload) => {
+    },
+  })), (payload) => {
     const approval = validateApprovalBinding(readApproval(payload, "approval"), { proposalId, revisionId, changeHash, decision }, "approval");
     if (approval.approvedGitHead !== null || approval.workflowRunId !== null || approval.workflowStatusUrl !== null || approval.dispatchStatus !== null) {
       throw invalidResponse("approval");

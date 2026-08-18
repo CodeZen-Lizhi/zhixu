@@ -11,6 +11,7 @@ import {
   updateModelSettings,
   type UpdateModelSettingsInput,
 } from "./model-settings";
+import { setCsrfToken } from "./auth-session-state";
 
 const disabledChat = {
   provider: "disabled",
@@ -338,6 +339,10 @@ describe("model settings API boundary", () => {
     vi.mocked(fetch)
       .mockResolvedValueOnce(new Response(JSON.stringify(disabledResponse), { headers: { "Content-Type": "application/json" } }))
       .mockImplementationOnce((_input, init) => new Promise<Response>((_resolve, reject) => {
+        if (init?.signal?.aborted === true) {
+          reject(new DOMException("aborted", "AbortError"));
+          return;
+        }
         init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
       }));
 
@@ -414,6 +419,8 @@ describe("model settings API boundary", () => {
   });
 
   it("POST activation 只发送 exact revision，并严格解码参与者进度", async () => {
+    const csrfToken = "c".repeat(43);
+    setCsrfToken(csrfToken);
     const preparingResponse = {
       ...configuredResponse,
       rollout: { id: rolloutId, version: 1, phase: "preparing", target_revision: 2, last_error_code: null, retryable: false },
@@ -432,6 +439,9 @@ describe("model settings API boundary", () => {
     const call = vi.mocked(fetch).mock.calls[0];
     expect(call?.[0]).toBe("/api/v1/settings/models/activations");
     expect(call?.[1]).toMatchObject({ method: "POST", cache: "no-store" });
+    const headers = new Headers(call?.[1]?.headers);
+    expect(headers.get("Origin")).toBe(window.location.origin);
+    expect(headers.get("X-CSRF-Token")).toBe(csrfToken);
     expect(callJsonBody(0)).toEqual({ expected_revision: 2 });
     expect(JSON.stringify(callJsonBody(0))).not.toContain("secret-chat-key");
     expect(JSON.stringify(callJsonBody(0))).not.toContain("models.example.test");

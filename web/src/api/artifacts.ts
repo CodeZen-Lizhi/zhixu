@@ -1,7 +1,14 @@
 /** Artifact 的唯一网络边界：严格解码隔离产物及其不可变 Revision。 */
 
-import { authFetch } from "./auth";
 import { canonicalUuidPattern as uuidPattern, hasOnlyKeys, isAbortError, isRecord } from "../shared/codec";
+import { ArtifactsApi as GeneratedArtifactsApi } from "./generated/apis/ArtifactsApi";
+import {
+  generatedConfiguration,
+  generatedRawResponse,
+  generatedRequestInit,
+} from "./generated-client";
+
+const artifactsApi = new GeneratedArtifactsApi(generatedConfiguration);
 
 export type ArtifactStatus = "PLANNING" | "OUTLINE_REVIEW" | "GENERATING" | "DRAFT" | "APPROVED" | "EXPORTED" | "PUBLISH_PROPOSED" | "PUBLISHED" | "ARCHIVED";
 export type CoverageStatus = "COVERED" | "PARTIAL" | "GAP";
@@ -252,60 +259,172 @@ const readProblem = (value: unknown, status: number): ArtifactApiError => {
   const message = typeof value.detail === "string" && value.detail !== "" ? value.detail : typeof value.message === "string" && value.message !== "" ? value.message : `Artifact API 返回 HTTP ${String(status)}。`;
   return new ArtifactApiError("HTTP_ERROR", code, message, value.retryable === true, status);
 };
-const request = async (path: string, init: RequestInit = {}, expectedStatuses?: readonly number[]): Promise<unknown> => {
-  const headers = new Headers(init.headers); headers.set("Accept", "application/json"); if (init.body !== undefined) headers.set("Content-Type", "application/json");
+const request = async (operation: Promise<Response>, expectedStatuses?: readonly number[]): Promise<unknown> => {
   let response: Response;
-  try { response = await authFetch(path, { ...init, headers }); } catch (error: unknown) { if (isAbortError(error)) throw error; throw new ArtifactApiError("NETWORK_ERROR", "NETWORK_ERROR", "无法连接 Artifact API。", true, null, { cause: error }); }
-  let payload: unknown; try { payload = await response.json(); } catch (error: unknown) { throw new ArtifactApiError("INVALID_RESPONSE", "INVALID_RESPONSE", "Artifact API 返回了无效 JSON。", false, response.status, { cause: error }); }
+  try { response = await operation; } catch (error: unknown) { if (isAbortError(error)) throw error; throw new ArtifactApiError("NETWORK_ERROR", "NETWORK_ERROR", "无法连接 Artifact API。", true, null, { cause: error }); }
+  let payload: unknown; try { payload = await response.json(); } catch (error: unknown) { if (isAbortError(error)) throw error; throw new ArtifactApiError("INVALID_RESPONSE", "INVALID_RESPONSE", "Artifact API 返回了无效 JSON。", false, response.status, { cause: error }); }
   if (!response.ok) throw readProblem(payload, response.status);
   if (expectedStatuses !== undefined && !expectedStatuses.includes(response.status)) throw invalidResponse("http_status", response.status);
   return payload;
 };
-const command = (path: string, body: Record<string, unknown>, idempotencyKey: string, expectedWorkspaceId: string, expectedArtifactId: string | undefined, expectedStatuses: readonly number[], signal?: AbortSignal): Promise<ArtifactCommandResult> => request(path, { method: "POST", headers: { "Idempotency-Key": requireKey(idempotencyKey) }, body: JSON.stringify(body), ...(signal === undefined ? {} : { signal }) }, expectedStatuses)
+const command = (operation: Promise<Response>, expectedWorkspaceId: string, expectedArtifactId: string | undefined, expectedStatuses: readonly number[]): Promise<ArtifactCommandResult> => request(operation, expectedStatuses)
   .then(decodeArtifactCommandResult)
   .then((result) => {
     if (result.artifact.workspaceId !== expectedWorkspaceId || (expectedArtifactId !== undefined && result.artifact.id !== expectedArtifactId)) throw invalidResponse("artifact_command.binding");
     return result;
   });
-const pathArtifact = (artifactId: string): string => `/api/v1/artifacts/${encodeURIComponent(requireUuid(artifactId, "artifactId"))}`;
 
 export const listArtifacts = (workspaceId: string, input: { cursor?: string; limit?: number } = {}, signal?: AbortSignal): Promise<ArtifactPage> => {
-  const expectedWorkspaceId = requireUuid(workspaceId, "workspaceId"); const query = new URLSearchParams({ workspace_id: expectedWorkspaceId }); const limit = input.limit ?? 50;
-  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw invalidRequest("limit"); query.set("limit", String(limit)); if (input.cursor !== undefined) { if (input.cursor.trim() === "" || input.cursor.length > 1024) throw invalidRequest("cursor"); query.set("cursor", input.cursor); }
-  return request(`/api/v1/artifacts?${query}`, signal === undefined ? {} : { signal }).then(decodeArtifactPage).then((page) => { if (page.workspaceId !== expectedWorkspaceId) throw invalidResponse("artifact_page.workspace_id"); return page; });
+  const expectedWorkspaceId = requireUuid(workspaceId, "workspaceId");
+  const limit = input.limit ?? 50;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw invalidRequest("limit");
+  if (input.cursor !== undefined && (input.cursor.trim() === "" || input.cursor.length > 1024)) throw invalidRequest("cursor");
+  return request(generatedRawResponse(artifactsApi.listArtifactsRaw({
+    workspaceId: expectedWorkspaceId,
+    limit,
+    ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+  }, generatedRequestInit(signal))))
+    .then(decodeArtifactPage)
+    .then((page) => {
+      if (page.workspaceId !== expectedWorkspaceId) throw invalidResponse("artifact_page.workspace_id");
+      return page;
+    });
 };
-export const getArtifact = (workspaceId: string, artifactId: string, signal?: AbortSignal): Promise<Artifact> => { const expectedWorkspaceId = requireUuid(workspaceId, "workspaceId"); const expectedArtifactId = requireUuid(artifactId, "artifactId"); return request(`${pathArtifact(expectedArtifactId)}?${new URLSearchParams({ workspace_id: expectedWorkspaceId })}`, signal === undefined ? {} : { signal }).then(decodeArtifact).then((artifact) => { if (artifact.workspaceId !== expectedWorkspaceId || artifact.id !== expectedArtifactId) throw invalidResponse("artifact.binding"); return artifact; }); };
+export const getArtifact = (workspaceId: string, artifactId: string, signal?: AbortSignal): Promise<Artifact> => {
+  const expectedWorkspaceId = requireUuid(workspaceId, "workspaceId");
+  const expectedArtifactId = requireUuid(artifactId, "artifactId");
+  return request(generatedRawResponse(artifactsApi.getArtifactRaw({
+    workspaceId: expectedWorkspaceId,
+    artifactId: expectedArtifactId,
+  }, generatedRequestInit(signal))))
+    .then(decodeArtifact)
+    .then((artifact) => {
+      if (artifact.workspaceId !== expectedWorkspaceId || artifact.id !== expectedArtifactId) throw invalidResponse("artifact.binding");
+      return artifact;
+    });
+};
 export const getArtifactSectionGenerations = (workspaceId: string, artifactId: string, signal?: AbortSignal): Promise<ArtifactSectionGenerationPage> => {
   const expectedWorkspaceId = requireUuid(workspaceId, "workspaceId");
   const expectedArtifactId = requireUuid(artifactId, "artifactId");
-  const query = new URLSearchParams({ workspace_id: expectedWorkspaceId });
-  return request(`${pathArtifact(expectedArtifactId)}/section-generations?${query}`, signal === undefined ? {} : { signal }, [200])
+  return request(generatedRawResponse(artifactsApi.listArtifactSectionGenerationsRaw({
+    workspaceId: expectedWorkspaceId,
+    artifactId: expectedArtifactId,
+  }, generatedRequestInit(signal))), [200])
     .then(decodeArtifactSectionGenerationPage)
     .then((page) => {
       if (page.workspaceId !== expectedWorkspaceId || page.artifactId !== expectedArtifactId) throw invalidResponse("artifact_generation_page.binding");
       return page;
     });
 };
-export const planArtifact = (input: PlanArtifactInput, signal?: AbortSignal): Promise<ArtifactCommandResult> => { const workspaceId = requireUuid(input.workspaceId, "workspaceId"); return command("/api/v1/artifacts", { workspace_id: workspaceId, type: requireText(input.type, "type", 128), title: requireText(input.title, "title", 512), scope_definition: requireText(input.scopeDefinition, "scopeDefinition", 16_384) }, input.idempotencyKey, workspaceId, undefined, [200, 201], signal); };
-export const submitArtifactOutline = (input: SubmitOutlineInput, signal?: AbortSignal): Promise<ArtifactCommandResult> => { const workspaceId = requireUuid(input.workspaceId, "workspaceId"); const artifactId = requireUuid(input.artifactId, "artifactId"); const outline = input.outline.map((item) => ({ key: requireText(item.key, "outline.key", 128), title: requireText(item.title, "outline.title", 512) })); if (outline.length === 0 || new Set(outline.map((item) => item.key)).size !== outline.length) throw invalidRequest("outline"); return command(`${pathArtifact(artifactId)}/outline`, { workspace_id: workspaceId, expected_version: requireVersion(input.expectedVersion), outline }, input.idempotencyKey, workspaceId, artifactId, [200], signal); };
-export const approveArtifactOutline = (input: RevisionCommandInput, signal?: AbortSignal): Promise<ArtifactCommandResult> => { const workspaceId = requireUuid(input.workspaceId, "workspaceId"); const artifactId = requireUuid(input.artifactId, "artifactId"); return command(`${pathArtifact(artifactId)}/outline/approve`, { workspace_id: workspaceId, expected_version: requireVersion(input.expectedVersion) }, input.idempotencyKey, workspaceId, artifactId, [200], signal); };
-export const startArtifactRevision = (input: RevisionCommandInput, signal?: AbortSignal): Promise<ArtifactCommandResult> => { const workspaceId = requireUuid(input.workspaceId, "workspaceId"); const artifactId = requireUuid(input.artifactId, "artifactId"); return command(`${pathArtifact(artifactId)}/revisions`, { workspace_id: workspaceId, expected_version: requireVersion(input.expectedVersion) }, input.idempotencyKey, workspaceId, artifactId, [200], signal); };
-export const recordArtifactGapSection = (input: RecordGapSectionInput, signal?: AbortSignal): Promise<ArtifactCommandResult> => { const workspaceId = requireUuid(input.workspaceId, "workspaceId"); const artifactId = requireUuid(input.artifactId, "artifactId"); return command(`${pathArtifact(artifactId)}/sections`, { workspace_id: workspaceId, expected_version: requireVersion(input.expectedVersion), section: { key: requireText(input.sectionKey, "sectionKey", 128), title: requireText(input.title, "title", 512), content: "", citations: [], coverage: { section_key: requireText(input.sectionKey, "sectionKey", 128), status: "GAP", gaps: [{ code: requireText(input.gapCode, "gapCode", 128), description: requireText(input.gapDescription, "gapDescription", 4096) }] } } }, input.idempotencyKey, workspaceId, artifactId, [200], signal); };
+export const planArtifact = (input: PlanArtifactInput, signal?: AbortSignal): Promise<ArtifactCommandResult> => {
+  const workspaceId = requireUuid(input.workspaceId, "workspaceId");
+  return command(generatedRawResponse(artifactsApi.planArtifactRaw({
+    idempotencyKey: requireKey(input.idempotencyKey),
+    artifactPlanRequest: {
+      workspace_id: workspaceId,
+      type: requireText(input.type, "type", 128),
+      title: requireText(input.title, "title", 512),
+      scope_definition: requireText(input.scopeDefinition, "scopeDefinition", 16_384),
+    },
+  }, generatedRequestInit(signal))), workspaceId, undefined, [200, 201]);
+};
+export const submitArtifactOutline = (input: SubmitOutlineInput, signal?: AbortSignal): Promise<ArtifactCommandResult> => {
+  const workspaceId = requireUuid(input.workspaceId, "workspaceId");
+  const artifactId = requireUuid(input.artifactId, "artifactId");
+  const outline = input.outline.map((item) => ({ key: requireText(item.key, "outline.key", 128), title: requireText(item.title, "outline.title", 512) }));
+  if (outline.length === 0 || new Set(outline.map((item) => item.key)).size !== outline.length) throw invalidRequest("outline");
+  return command(generatedRawResponse(artifactsApi.submitArtifactOutlineRaw({
+    artifactId,
+    idempotencyKey: requireKey(input.idempotencyKey),
+    artifactOutlineRequest: { workspace_id: workspaceId, expected_version: requireVersion(input.expectedVersion), outline },
+  }, generatedRequestInit(signal))), workspaceId, artifactId, [200]);
+};
+export const approveArtifactOutline = (input: RevisionCommandInput, signal?: AbortSignal): Promise<ArtifactCommandResult> => {
+  const workspaceId = requireUuid(input.workspaceId, "workspaceId");
+  const artifactId = requireUuid(input.artifactId, "artifactId");
+  return command(generatedRawResponse(artifactsApi.approveArtifactOutlineRaw({
+    artifactId,
+    idempotencyKey: requireKey(input.idempotencyKey),
+    artifactRevisionRequest: { workspace_id: workspaceId, expected_version: requireVersion(input.expectedVersion) },
+  }, generatedRequestInit(signal))), workspaceId, artifactId, [200]);
+};
+export const startArtifactRevision = (input: RevisionCommandInput, signal?: AbortSignal): Promise<ArtifactCommandResult> => {
+  const workspaceId = requireUuid(input.workspaceId, "workspaceId");
+  const artifactId = requireUuid(input.artifactId, "artifactId");
+  return command(generatedRawResponse(artifactsApi.startArtifactRevisionRaw({
+    artifactId,
+    idempotencyKey: requireKey(input.idempotencyKey),
+    artifactRevisionRequest: { workspace_id: workspaceId, expected_version: requireVersion(input.expectedVersion) },
+  }, generatedRequestInit(signal))), workspaceId, artifactId, [200]);
+};
+export const recordArtifactGapSection = (input: RecordGapSectionInput, signal?: AbortSignal): Promise<ArtifactCommandResult> => {
+  const workspaceId = requireUuid(input.workspaceId, "workspaceId");
+  const artifactId = requireUuid(input.artifactId, "artifactId");
+  const sectionKey = requireText(input.sectionKey, "sectionKey", 128);
+  return command(generatedRawResponse(artifactsApi.recordArtifactSectionRaw({
+    artifactId,
+    idempotencyKey: requireKey(input.idempotencyKey),
+    artifactRecordSectionRequest: {
+      workspace_id: workspaceId,
+      expected_version: requireVersion(input.expectedVersion),
+      section: {
+        key: sectionKey,
+        title: requireText(input.title, "title", 512),
+        content: "",
+        citations: [],
+        coverage: {
+          section_key: sectionKey,
+          status: "GAP",
+          gaps: [{ code: requireText(input.gapCode, "gapCode", 128), description: requireText(input.gapDescription, "gapDescription", 4096) }],
+        },
+      },
+    },
+  }, generatedRequestInit(signal))), workspaceId, artifactId, [200]);
+};
 export const generateArtifactSection = (input: GenerateArtifactSectionInput, signal?: AbortSignal): Promise<ArtifactSectionGenerationAcceptance> => {
   const workspaceId = requireUuid(input.workspaceId, "workspaceId");
   const artifactId = requireUuid(input.artifactId, "artifactId");
   const expectedVersion = requireVersion(input.expectedVersion);
   const sectionKey = requireGenerationSectionKey(input.sectionKey);
-  return request(`${pathArtifact(artifactId)}/sections/generate`, {
-    method: "POST",
-    headers: { "Idempotency-Key": requireKey(input.idempotencyKey) },
-    body: JSON.stringify({ workspace_id: workspaceId, expected_version: expectedVersion, section_key: sectionKey }),
-    ...(signal === undefined ? {} : { signal }),
-  }, [202]).then(decodeArtifactSectionGenerationAcceptance).then((generation) => {
+  return request(generatedRawResponse(artifactsApi.generateArtifactSectionRaw({
+    artifactId,
+    idempotencyKey: requireKey(input.idempotencyKey),
+    artifactSectionGenerationRequest: { workspace_id: workspaceId, expected_version: expectedVersion, section_key: sectionKey },
+  }, generatedRequestInit(signal))), [202]).then(decodeArtifactSectionGenerationAcceptance).then((generation) => {
     if (generation.workspaceId !== workspaceId || generation.artifactId !== artifactId || generation.sectionKey !== sectionKey || generation.sourceArtifactVersion !== expectedVersion) throw invalidResponse("artifact_generation.binding");
     return generation;
   });
 };
-export const approveArtifactDraft = (input: RevisionCommandInput, signal?: AbortSignal): Promise<ArtifactCommandResult> => { const workspaceId = requireUuid(input.workspaceId, "workspaceId"); const artifactId = requireUuid(input.artifactId, "artifactId"); return command(`${pathArtifact(artifactId)}/draft/approve`, { workspace_id: workspaceId, expected_version: requireVersion(input.expectedVersion) }, input.idempotencyKey, workspaceId, artifactId, [200], signal); };
-export const exportArtifactMarkdown = (input: RevisionCommandInput, signal?: AbortSignal): Promise<ArtifactCommandResult> => { const workspaceId = requireUuid(input.workspaceId, "workspaceId"); const artifactId = requireUuid(input.artifactId, "artifactId"); return command(`${pathArtifact(artifactId)}/exports/markdown`, { workspace_id: workspaceId, expected_version: requireVersion(input.expectedVersion) }, input.idempotencyKey, workspaceId, artifactId, [200], signal); };
-export const createArtifactPublishProposal = (input: RevisionCommandInput, signal?: AbortSignal): Promise<ArtifactCommandResult> => { const workspaceId = requireUuid(input.workspaceId, "workspaceId"); const artifactId = requireUuid(input.artifactId, "artifactId"); return command(`${pathArtifact(artifactId)}/publish-proposals`, { workspace_id: workspaceId, expected_version: requireVersion(input.expectedVersion) }, input.idempotencyKey, workspaceId, artifactId, [200], signal); };
+const revisionCommand = (
+  input: RevisionCommandInput,
+  operation: (artifactId: string, workspaceId: string, idempotencyKey: string, expectedVersion: number, init: RequestInit) => Promise<Response>,
+  signal?: AbortSignal,
+): Promise<ArtifactCommandResult> => {
+  const workspaceId = requireUuid(input.workspaceId, "workspaceId");
+  const artifactId = requireUuid(input.artifactId, "artifactId");
+  return command(operation(
+    artifactId,
+    workspaceId,
+    requireKey(input.idempotencyKey),
+    requireVersion(input.expectedVersion),
+    generatedRequestInit(signal),
+  ), workspaceId, artifactId, [200]);
+};
+export const approveArtifactDraft = (input: RevisionCommandInput, signal?: AbortSignal): Promise<ArtifactCommandResult> =>
+  revisionCommand(input, (artifactId, workspaceId, idempotencyKey, expectedVersion, init) => generatedRawResponse(artifactsApi.approveArtifactDraftRaw({
+    artifactId,
+    idempotencyKey,
+    artifactRevisionRequest: { workspace_id: workspaceId, expected_version: expectedVersion },
+  }, init)), signal);
+export const exportArtifactMarkdown = (input: RevisionCommandInput, signal?: AbortSignal): Promise<ArtifactCommandResult> =>
+  revisionCommand(input, (artifactId, workspaceId, idempotencyKey, expectedVersion, init) => generatedRawResponse(artifactsApi.exportArtifactMarkdownRaw({
+    artifactId,
+    idempotencyKey,
+    artifactRevisionRequest: { workspace_id: workspaceId, expected_version: expectedVersion },
+  }, init)), signal);
+export const createArtifactPublishProposal = (input: RevisionCommandInput, signal?: AbortSignal): Promise<ArtifactCommandResult> =>
+  revisionCommand(input, (artifactId, workspaceId, idempotencyKey, expectedVersion, init) => generatedRawResponse(artifactsApi.createArtifactPublishProposalRaw({
+    artifactId,
+    idempotencyKey,
+    artifactRevisionRequest: { workspace_id: workspaceId, expected_version: expectedVersion },
+  }, init)), signal);

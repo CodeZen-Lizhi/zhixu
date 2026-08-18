@@ -82,6 +82,23 @@ describe("auth API boundary", () => {
     await expect(getCurrentSession()).rejects.toMatchObject({ code: "INVALID_RESPONSE", status: 503 });
   });
 
+  it("Zod 拒绝非法 Problem 时不把原始响应写入错误或 cause", async () => {
+    const secretMarker = "response-secret-marker";
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({
+      error_code: "AUTH_UNAUTHORIZED",
+      message: "unauthorized",
+      retryable: false,
+      secret_marker: secretMarker,
+    }, 503));
+
+    const error = await getCurrentSession().catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({ code: "INVALID_RESPONSE", status: 503 });
+    expect(Object.prototype.hasOwnProperty.call(error, "cause")).toBe(false);
+    expect(String(error)).not.toContain(secretMarker);
+    expect(JSON.stringify(error)).not.toContain(secretMarker);
+  });
+
   it("为 Cookie 请求附加 credentials、JSON 和 CSRF，并保留 Bearer 例外", async () => {
     setCsrfToken(csrfToken);
     vi.mocked(fetch).mockResolvedValue(jsonResponse({ ok: true }));
@@ -100,6 +117,28 @@ describe("auth API boundary", () => {
     expect(secondCall?.[0]).toBe("/api/v1/auth/sessions");
     expect(secondCall?.[1]?.credentials).toBe("include");
     expect(new Headers(secondCall?.[1]?.headers).get("X-CSRF-Token")).toBeNull();
+  });
+
+  it("接受生成客户端传入的绝对 URL，并沿用同一 CSRF 与 401 边界", async () => {
+    const listener = vi.fn();
+    const unsubscribe = subscribeAuthInvalidation(listener);
+    setCsrfToken(csrfToken);
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({
+      error_code: "AUTH_UNAUTHORIZED",
+      message: "expired",
+      retryable: false,
+    }, 401));
+
+    const input = new URL("https://api.example.test/api/v1/proposals");
+    await authFetch(input, { method: "POST", body: "{}" });
+
+    const call = vi.mocked(fetch).mock.calls.at(-1);
+    expect(call?.[0]).toBe(input);
+    expect(call?.[1]?.credentials).toBe("include");
+    expect(new Headers(call?.[1]?.headers).get("X-CSRF-Token")).toBe(csrfToken);
+    expect(getCsrfToken()).toBeUndefined();
+    expect(listener).toHaveBeenCalledOnce();
+    unsubscribe();
   });
 
   it("保留 FormData 请求体，并让浏览器生成 multipart boundary", async () => {

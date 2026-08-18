@@ -1,9 +1,16 @@
-import { authFetch } from "./auth";
 import {
   canonicalUuidPattern as uuidPattern,
   hasOnlyKeys,
+  isAbortError,
   isRecord,
 } from "../shared/codec";
+import { SearchApi as GeneratedSearchApi } from "./generated/apis/SearchApi";
+import type { SearchRequest as GeneratedSearchRequest } from "./generated/models";
+import {
+  generatedConfiguration,
+  generatedRawResponse,
+  generatedRequestInit,
+} from "./generated-client";
 
 export type SearchMode = "keyword" | "semantic" | "hybrid";
 export type IndexDegradedCapability = "vector";
@@ -128,6 +135,7 @@ const rfc3339Pattern = /^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]
 const textEncoder = new TextEncoder();
 const maxCursorBytes = 2048;
 const maxSnippetBytes = 4096;
+const searchApi = new GeneratedSearchApi(generatedConfiguration);
 
 const assertExactKeys = (
   value: Record<string, unknown>,
@@ -437,7 +445,7 @@ const validateInputMode = (value: unknown): void => {
   throw invalidRequest("retrievalMode");
 };
 
-const encodeSearchInput = (input: SearchInput): Record<string, unknown> => {
+const encodeSearchInput = (input: SearchInput): GeneratedSearchRequest => {
   validateInputUuid(input.workspaceId, "workspaceId");
   if (typeof input.query !== "string" || input.query.includes("\0") ||
       input.query.trim() === "" || textEncoder.encode(input.query.trim()).length > 8 * 1024) {
@@ -510,14 +518,12 @@ export const search = async (input: SearchInput, signal?: AbortSignal): Promise<
   const body = encodeSearchInput(input);
   let response: Response;
   try {
-    response = await authFetch("/api/v1/search", {
-      method: "POST",
-      headers: { Accept: "application/json", "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      ...(signal === undefined ? {} : { signal }),
-    });
+    response = await generatedRawResponse(searchApi.searchKnowledgeRaw(
+      { searchRequest: body },
+      generatedRequestInit(signal),
+    ));
   } catch (error: unknown) {
-    if (error instanceof DOMException && error.name === "AbortError") throw error;
+    if (isAbortError(error)) throw error;
     throw new SearchApiError("NETWORK_ERROR", "无法连接 Search API。", true, null, undefined, { cause: error });
   }
 
@@ -525,6 +531,7 @@ export const search = async (input: SearchInput, signal?: AbortSignal): Promise<
   try {
     payload = await response.json();
   } catch (error: unknown) {
+    if (isAbortError(error)) throw error;
     throw new SearchApiError("INVALID_RESPONSE", "Search API 返回了无效 JSON。", false, response.status, undefined, { cause: error });
   }
   if (!response.ok) throw decodeProblem(payload, response.status);

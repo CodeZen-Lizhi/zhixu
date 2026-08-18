@@ -1,8 +1,6 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const authFetchMock = vi.hoisted(() => vi.fn<typeof fetch>());
-
-vi.mock("./auth", () => ({ authFetch: authFetchMock }));
+const fetchMock = vi.hoisted(() => vi.fn<typeof fetch>());
 
 import {
   TimelineApiError,
@@ -192,8 +190,10 @@ const jsonResponse = (value: unknown, status = 200): Response => new Response(JS
   headers: { "Content-Type": "application/json" },
 });
 
+beforeEach(() => vi.stubGlobal("fetch", fetchMock));
 afterEach(() => {
-  authFetchMock.mockReset();
+  fetchMock.mockReset();
+  vi.unstubAllGlobals();
 });
 
 describe("Timeline API strict boundary", () => {
@@ -259,7 +259,7 @@ describe("Timeline API strict boundary", () => {
   });
 
   it("binds list responses to the requested Workspace and rejects duplicate JSON keys", async () => {
-    authFetchMock
+    fetchMock
       .mockResolvedValueOnce(jsonResponse({ workspace_id: workspaceId, items: [v2NonOwnerEvent()], next_cursor: "opaque-next" }))
       .mockResolvedValueOnce(jsonResponse({ workspace_id: otherWorkspaceId, items: [] }))
       .mockResolvedValueOnce(new Response(`{"workspace_id":"${workspaceId}","items":[],"it\\u0065ms":[]}`, { status: 200 }))
@@ -270,21 +270,21 @@ describe("Timeline API strict boundary", () => {
       items: [{ id: eventId, ownerBinding: null }],
       nextCursor: "opaque-next",
     });
-    expect(authFetchMock.mock.calls[0]?.[0]).toBe(`/api/v1/workspaces/${workspaceId}/timeline?event_type=CONFLICT_OPENED&limit=25`);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(`/api/v1/workspaces/${workspaceId}/timeline?event_type=CONFLICT_OPENED&limit=25`);
     await expect(listTimeline({ workspaceId })).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
     await expect(listTimeline({ workspaceId })).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
     await expect(listTimeline({ workspaceId })).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
   });
 
   it("maps Impact 201/200 to replayed=false/true and sends the same explicit key", async () => {
-    authFetchMock
+    fetchMock
       .mockResolvedValueOnce(jsonResponse({ report: v2Report(), proposal_drafts: [], replayed: false }, 201))
       .mockResolvedValueOnce(jsonResponse({ report: v2Report(), proposal_drafts: [], replayed: true }, 200));
     const input = { workspaceId, eventId, idempotencyKey: "impact-intent-1" };
 
     await expect(analyzeImpact(input)).resolves.toMatchObject({ replayed: false, report: { id: reportId } });
     await expect(analyzeImpact(input)).resolves.toMatchObject({ replayed: true, report: { id: reportId } });
-    for (const call of authFetchMock.mock.calls) {
+    for (const call of fetchMock.mock.calls) {
       expect(call[0]).toBe(`/api/v1/workspaces/${workspaceId}/timeline/${eventId}/impact-analysis`);
       expect(new Headers(call[1]?.headers).get("Idempotency-Key")).toBe("impact-intent-1");
       expect(call[1]?.body).toBe("{}");
@@ -292,7 +292,7 @@ describe("Timeline API strict boundary", () => {
   });
 
   it("creates and exactly replays a downstream Proposal with the endpoint contract", async () => {
-    authFetchMock
+    fetchMock
       .mockResolvedValueOnce(jsonResponse(proposalWire(false), 201))
       .mockResolvedValueOnce(jsonResponse(proposalWire(true), 200));
     const input = {
@@ -306,7 +306,7 @@ describe("Timeline API strict boundary", () => {
 
     await expect(createDownstreamUpdateProposal(input)).resolves.toMatchObject({ id: proposalId, replayed: false });
     await expect(createDownstreamUpdateProposal(input)).resolves.toMatchObject({ id: proposalId, replayed: true });
-    const init = authFetchMock.mock.calls[0]?.[1];
+    const init = fetchMock.mock.calls[0]?.[1];
     expect(new Headers(init?.headers).get("Idempotency-Key")).toBe("downstream-intent-1");
     if (typeof init?.body !== "string") throw new Error("missing Proposal request body");
     expect(JSON.parse(init.body)).toEqual({ target_type: "ARTIFACT", target_id: artifactId, action: "REGENERATE_ARTIFACT" });
@@ -321,7 +321,7 @@ describe("Timeline API strict boundary", () => {
   });
 
   it("accepts an approved replay with a strictly bound non-file Approval", async () => {
-    authFetchMock.mockResolvedValueOnce(jsonResponse(approvedProposalWire(), 200));
+    fetchMock.mockResolvedValueOnce(jsonResponse(approvedProposalWire(), 200));
     const input = {
       workspaceId,
       reportId,
@@ -366,11 +366,11 @@ describe("Timeline API strict boundary", () => {
 
     expect(() => createDownstreamUpdateProposal(unknownTarget)).toThrow(TimelineApiError);
     expect(() => createDownstreamUpdateProposal(unknownAction)).toThrow(TimelineApiError);
-    expect(authFetchMock).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("rejects list pages that exceed the requested limit", async () => {
-    authFetchMock.mockResolvedValueOnce(jsonResponse({
+    fetchMock.mockResolvedValueOnce(jsonResponse({
       workspace_id: workspaceId,
       items: [{ ...v2NonOwnerEvent(), id: laterEventId }, v2NonOwnerEvent()],
     }));
@@ -379,7 +379,7 @@ describe("Timeline API strict boundary", () => {
   });
 
   it("preserves stable 409/503 Problems and classifies an unknown network result", async () => {
-    authFetchMock
+    fetchMock
       .mockResolvedValueOnce(jsonResponse({ error_code: "KNOWLEDGE_IMPACT_CONFLICT", message: "report changed", retryable: false }, 409))
       .mockResolvedValueOnce(jsonResponse({ error_code: "KNOWLEDGE_IMPACT_UNAVAILABLE", message: "owner unavailable", retryable: true }, 503))
       .mockRejectedValueOnce(new TypeError("connection lost"));

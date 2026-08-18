@@ -1,8 +1,8 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const authFetchMock = vi.hoisted(() => vi.fn<typeof fetch>());
+const fetchMock = vi.fn<typeof fetch>();
 
-vi.mock("./auth", () => ({ authFetch: authFetchMock }));
+beforeEach(() => vi.stubGlobal("fetch", fetchMock));
 
 import {
   InterviewApiError,
@@ -46,17 +46,17 @@ const step = { id: stepId, workspace_id: workspaceId, path_id: pathId, step_no: 
 const jsonResponse = (value: unknown, status = 200): Response => new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json" } });
 
 afterEach(() => {
-  authFetchMock.mockReset();
+  fetchMock.mockReset();
   vi.unstubAllGlobals();
 });
 
 describe("interview API", () => {
   it("使用 snake_case 请求体和稳定 Idempotency-Key 创建面试", async () => {
-    authFetchMock.mockResolvedValue(jsonResponse({ session: session(), questions: [question], replayed: false }, 201));
+    fetchMock.mockResolvedValue(jsonResponse({ session: session(), questions: [question], replayed: false }, 201));
 
     await expect(startInterview({ workspaceId, config, idempotencyKey: "interview-start-1" })).resolves.toMatchObject({ session: { id: sessionId }, questions: [{ prompt: question.prompt }] });
-    expect(authFetchMock.mock.calls[0]?.[0]).toBe("/api/v1/review/interviews");
-    const init = authFetchMock.mock.calls[0]?.[1];
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/v1/review/interviews");
+    const init = fetchMock.mock.calls[0]?.[1];
     expect(new Headers(init?.headers).get("Idempotency-Key")).toBe("interview-start-1");
     if (typeof init?.body !== "string") throw new Error("expected JSON request body");
     expect(JSON.parse(init.body)).toEqual({ workspace_id: workspaceId, config: { schema_version: "interview/v1", role: "Go engineer", scope: { claim_ids: [claimId] }, difficulty: "INTERMEDIATE", duration_minutes: 30, question_count: 1, max_follow_ups: 2 } });
@@ -64,7 +64,7 @@ describe("interview API", () => {
 
   it("按 Workspace 游标列出可恢复会话，并拒绝列表泄露题目或失序", async () => {
     const cursor = "eyJ2ZXJzaW9uIjoxfQ";
-    authFetchMock
+    fetchMock
       .mockResolvedValueOnce(jsonResponse({ workspace_id: workspaceId, items: [session()], next_cursor: cursor }))
       .mockResolvedValueOnce(jsonResponse({ workspace_id: workspaceId, items: [{ ...session(), questions: [] }] }));
 
@@ -73,9 +73,9 @@ describe("interview API", () => {
       items: [{ id: sessionId, config: { role: "Go engineer" } }],
       nextCursor: cursor,
     });
-    expect(authFetchMock.mock.calls[0]?.[0]).toBe(`/api/v1/review/interviews?workspace_id=${workspaceId}&limit=20`);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(`/api/v1/review/interviews?workspace_id=${workspaceId}&limit=20`);
     await expect(listInterviewSessions({ workspaceId, limit: 20, cursor })).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
-    expect(authFetchMock.mock.calls[1]?.[0]).toBe(`/api/v1/review/interviews?workspace_id=${workspaceId}&limit=20&cursor=${cursor}`);
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(`/api/v1/review/interviews?workspace_id=${workspaceId}&limit=20&cursor=${cursor}`);
 
     expect(() => decodeInterviewSessionPage({
       workspace_id: workspaceId,
@@ -97,7 +97,7 @@ describe("interview API", () => {
   });
 
   it("在作答前拒绝包含答案要点或证据的题面", async () => {
-    authFetchMock
+    fetchMock
       .mockResolvedValueOnce(jsonResponse({ session: session(), questions: [{ ...question, answer_points: ["hidden answer"] }], replayed: false }))
       .mockResolvedValueOnce(jsonResponse({ session: session(), questions: [{ ...question, evidence: [evidence] }], replayed: false }));
 
@@ -106,7 +106,7 @@ describe("interview API", () => {
   });
 
   it("拒绝漂移证据链接和重复 JSON key", async () => {
-    authFetchMock
+    fetchMock
       .mockResolvedValueOnce(jsonResponse({ turn: { ...turn, score: { ...score, evidence: [{ ...evidence, source_span_href: "/unsafe" }] } }, replayed: false }))
       .mockResolvedValueOnce(new Response(`{"session":${JSON.stringify(session())},"questions":[],"replayed":false,"replayed":false}`, { status: 200, headers: { "Content-Type": "application/json" } }));
 
@@ -115,13 +115,13 @@ describe("interview API", () => {
   });
 
   it("完成面试时要求报告与学习路径属于同一报告", async () => {
-    authFetchMock.mockResolvedValue(jsonResponse({ session: session("COMPLETED"), report, path: { ...path, report_id: artifactId }, steps: [step], replayed: false }));
+    fetchMock.mockResolvedValue(jsonResponse({ session: session("COMPLETED"), report, path: { ...path, report_id: artifactId }, steps: [step], replayed: false }));
     await expect(completeInterview({ workspaceId, sessionId, manualEnd: true, idempotencyKey: "interview-complete-1" })).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
   });
 
   it("只提交 Workspace 和步骤路径来创建待确认 Memory Candidate", async () => {
     const memoryId = "71000000-0000-4000-8000-000000000016";
-    authFetchMock.mockResolvedValue(jsonResponse({ memory_id: memoryId, replayed: false }, 201));
+    fetchMock.mockResolvedValue(jsonResponse({ memory_id: memoryId, replayed: false }, 201));
 
     await expect(suggestInterviewMemoryCandidate({
       workspaceId,
@@ -131,8 +131,8 @@ describe("interview API", () => {
       idempotencyKey: "interview-memory-candidate-1",
     })).resolves.toEqual({ memoryId, replayed: false });
 
-    expect(authFetchMock.mock.calls[0]?.[0]).toBe(`/api/v1/review/interviews/${sessionId}/learning-paths/${pathId}/steps/${stepId}/memory-candidate`);
-    const init = authFetchMock.mock.calls[0]?.[1];
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(`/api/v1/review/interviews/${sessionId}/learning-paths/${pathId}/steps/${stepId}/memory-candidate`);
+    const init = fetchMock.mock.calls[0]?.[1];
     expect(new Headers(init?.headers).get("Idempotency-Key")).toBe("interview-memory-candidate-1");
     if (typeof init?.body !== "string") throw new Error("expected JSON request body");
     expect(JSON.parse(init.body)).toEqual({ workspace_id: workspaceId });

@@ -5,7 +5,15 @@ import {
   type FilePatchRevision,
   type ProposalDetail,
 } from "./business";
+import { BusinessRevisionsApi } from "./generated/apis/BusinessRevisionsApi";
+import {
+  generatedConfiguration,
+  generatedRawResponse,
+  generatedRequestInit,
+} from "./generated-client";
 import { canonicalUuidPattern, hasOnlyKeys } from "../shared/codec";
+
+const businessRevisionsApi = new BusinessRevisionsApi(generatedConfiguration);
 
 export const proposalRevisionMaxBytes = 1024 * 1024;
 export const proposalRevisionMetadataMaxBytes = 64 * 1024;
@@ -365,16 +373,15 @@ export const previewProposalRevision = async (
   binding: ProposalRevisionPreviewBinding,
   signal?: AbortSignal,
 ): Promise<ProposalRevisionMergePreview> => {
-  const value = await requestBusinessJSON(`/api/v1/proposals/${encodeURIComponent(binding.proposalId)}/revision-merge-previews`, {
-    method: "POST",
-    cache: "no-store",
-    ...(signal === undefined ? {} : { signal }),
-    body: JSON.stringify({
+  const operation = businessRevisionsApi.previewProposalRevisionMergeRaw({
+    proposalId: binding.proposalId,
+    proposalRevisionMergePreviewRequest: {
       source_revision_id: binding.sourceRevisionId,
       source_change_hash: binding.sourceChangeHash,
       expected_proposal_version: binding.expectedProposalVersion,
-    }),
-  });
+    },
+  }, generatedRequestInit(signal, { cache: "no-store" }));
+  const value = await requestBusinessJSON(generatedRawResponse(operation));
   return decodeProposalRevisionPreview(value, binding);
 };
 
@@ -388,12 +395,10 @@ export const appendProposalRevision = async (
   if (idempotencyKey === "" || idempotencyKey.length > 128 || idempotencyKey.trim() !== idempotencyKey || /[\u0000-\u001f\u007f]/.test(idempotencyKey)) {
     throw new BusinessApiError("INVALID_RESPONSE", "Proposal Revision Idempotency-Key 无效", false);
   }
-  const value = await requestBusinessJSON(`/api/v1/proposals/${encodeURIComponent(proposalId)}/revisions`, {
-    method: "POST",
-    cache: "no-store",
-    ...(signal === undefined ? {} : { signal }),
-    headers: { "Idempotency-Key": idempotencyKey },
-    body: JSON.stringify({
+  const operation = businessRevisionsApi.appendProposalRevisionRaw({
+    proposalId,
+    idempotencyKey,
+    appendProposalRevisionRequest: {
       expected_proposal_version: input.expectedProposalVersion,
       source_revision_id: input.sourceRevisionId,
       source_change_hash: input.sourceChangeHash,
@@ -405,9 +410,10 @@ export const appendProposalRevision = async (
       evidence_summary: input.evidenceSummary,
       risk: input.risk,
       rollback_plan: input.rollbackPlan,
-      resolved_conflict_ids: input.resolvedConflictIds,
-    }),
-  });
+      resolved_conflict_ids: [...input.resolvedConflictIds],
+    },
+  }, generatedRequestInit(signal, { cache: "no-store" }));
+  const value = await requestBusinessJSON(generatedRawResponse(operation));
   const response = record(value, "Proposal Revision append");
   const replayed = response.replayed;
   if (typeof replayed !== "boolean") throw invalidResponse("Proposal Revision replayed 无效");
@@ -583,14 +589,12 @@ export const listProposalRevisions = async (
   if (params.beforeRevisionNo !== undefined && (!Number.isSafeInteger(params.beforeRevisionNo) || params.beforeRevisionNo <= 1)) {
     throw new BusinessApiError("INVALID_RESPONSE", "Proposal Revision history cursor 无效", false);
   }
-  const query = new URLSearchParams({
-    limit: String(limit),
-    ...(params.beforeRevisionNo === undefined ? {} : { before_revision_no: String(params.beforeRevisionNo) }),
-  });
-  const value = await requestBusinessJSON(`/api/v1/proposals/${encodeURIComponent(binding.proposalId)}/revisions?${query}`, {
-    cache: "no-store",
-    ...(signal === undefined ? {} : { signal }),
-  });
+  const operation = businessRevisionsApi.listProposalRevisionsRaw({
+    proposalId: binding.proposalId,
+    limit,
+    ...(params.beforeRevisionNo === undefined ? {} : { beforeRevisionNo: params.beforeRevisionNo }),
+  }, generatedRequestInit(signal, { cache: "no-store" }));
+  const value = await requestBusinessJSON(generatedRawResponse(operation));
   return decodeProposalRevisionHistory(value, binding, limit);
 };
 
@@ -691,10 +695,11 @@ export const getProposalRevision = async (
   binding: ProposalRevisionHistoryDetailBinding,
   signal?: AbortSignal,
 ): Promise<ProposalRevisionHistoryDetail> => {
-  const value = await requestBusinessJSON(
-    `/api/v1/proposals/${encodeURIComponent(binding.proposalId)}/revisions/${encodeURIComponent(binding.revisionId)}`,
-    { cache: "no-store", ...(signal === undefined ? {} : { signal }) },
-  );
+  const operation = businessRevisionsApi.getProposalRevisionRaw({
+    proposalId: binding.proposalId,
+    revisionId: binding.revisionId,
+  }, generatedRequestInit(signal, { cache: "no-store" }));
+  const value = await requestBusinessJSON(generatedRawResponse(operation));
   return decodeProposalRevisionHistoryDetail(value, binding);
 };
 

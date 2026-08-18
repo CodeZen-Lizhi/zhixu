@@ -1,8 +1,17 @@
 /** Suggested Material Set 与整理模板的唯一网络边界。 */
 
-import { authFetch } from "./auth";
 import { decodeProblem } from "./conversation";
 import { strictJson } from "./exports";
+import { OrganizingApi } from "./generated/apis/OrganizingApi";
+import type {
+  OrganizingAddMaterialRequest as GeneratedOrganizingAddMaterialRequest,
+  OrganizingTemplateDeclaration as GeneratedOrganizingTemplateDeclaration,
+} from "./generated/models";
+import {
+  generatedConfiguration,
+  generatedRawResponse,
+  generatedRequestInit,
+} from "./generated-client";
 import { canonicalUuidPattern as uuidPattern, hasExactKeys, isAbortError, isRecord } from "../shared/codec";
 
 export type OrganizingDraftStatus = "EDITING" | "CONFIRMED";
@@ -326,6 +335,7 @@ const sectionKeyPattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const mandatoryGovernanceSections = ["conflicts", "gaps", "sources"] as const;
 const controlPattern = /[\u0000-\u001f\u007f]/;
 const encoder = new TextEncoder();
+const organizingApi = new OrganizingApi(generatedConfiguration);
 
 const materialKinds = ["SOURCE_VERSION", "DOCUMENT_REVISION", "CLAIM", "SMART_COLLECTION"] as const;
 const materialStatuses = ["AVAILABLE", "STALE", "UNAVAILABLE"] as const;
@@ -719,7 +729,6 @@ const requireKey = (value: string): string => {
   return value;
 };
 
-const withSignal = (signal?: AbortSignal): RequestInit => signal === undefined ? {} : { signal };
 const decodeHttpProblem = (value: unknown, status: number): OrganizingApiError => {
   try {
     const problem = decodeProblem(value);
@@ -734,10 +743,10 @@ const decodeHttpProblem = (value: unknown, status: number): OrganizingApiError =
   }
 };
 
-const request = async (path: string, init: RequestInit, statuses: readonly number[]): Promise<{ payload: unknown; status: number }> => {
+const request = async (operation: Promise<Response>, statuses: readonly number[]): Promise<{ payload: unknown; status: number }> => {
   let response: Response;
   try {
-    response = await authFetch(path, init);
+    response = await operation;
   } catch (error: unknown) {
     if (isAbortError(error)) throw error;
     throw new OrganizingApiError("NETWORK_ERROR", "NETWORK_ERROR", "无法连接整理服务。", null, true, { cause: error });
@@ -756,13 +765,6 @@ const request = async (path: string, init: RequestInit, statuses: readonly numbe
   return { payload, status: response.status };
 };
 
-const mutationInit = (idempotencyKey: string, body: Readonly<Record<string, unknown>>, signal?: AbortSignal, method = "POST"): RequestInit => ({
-  method,
-  headers: { "Idempotency-Key": requireKey(idempotencyKey) },
-  body: JSON.stringify(body),
-  ...withSignal(signal),
-});
-
 const decodeDraftResult = (value: unknown, workspaceId: string, draftId?: string): OrganizingCommandResult => {
   const row = exact(value, ["draft", "replayed"], "draft_command");
   const draft = decodeOrganizingDraft(row.draft);
@@ -776,7 +778,11 @@ const assertReplayStatus = (status: number, replayed: boolean): void => {
 
 export const createOrganizingDraft = async (input: CreateOrganizingDraftInput): Promise<OrganizingCommandResult> => {
   const workspaceId = requireUuid(input.workspaceId, "workspaceId");
-  const result = await request(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/organizing/drafts`, mutationInit(input.idempotencyKey, { intent: requireText(input.intent, "intent", 4096) }, input.signal), [200, 201]);
+  const result = await request(generatedRawResponse(organizingApi.createOrganizingDraftRaw({
+    idempotencyKey: requireKey(input.idempotencyKey),
+    workspaceId,
+    organizingCreateDraftRequest: { intent: requireText(input.intent, "intent", 4096) },
+  }, generatedRequestInit(input.signal))), [200, 201]);
   const decoded = decodeDraftResult(result.payload, workspaceId);
   assertReplayStatus(result.status, decoded.replayed);
   return decoded;
@@ -785,7 +791,10 @@ export const createOrganizingDraft = async (input: CreateOrganizingDraftInput): 
 export const getOrganizingDraft = async (workspaceIdValue: string, draftIdValue: string, signal?: AbortSignal): Promise<OrganizingDraft> => {
   const workspaceId = requireUuid(workspaceIdValue, "workspaceId");
   const draftId = requireUuid(draftIdValue, "draftId");
-  const { payload } = await request(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/organizing/drafts/${encodeURIComponent(draftId)}`, withSignal(signal), [200]);
+  const { payload } = await request(generatedRawResponse(organizingApi.getOrganizingDraftRaw(
+    { workspaceId, draftId },
+    generatedRequestInit(signal),
+  )), [200]);
   const row = exact(payload, ["draft"], "draft_detail");
   const draft = decodeOrganizingDraft(row.draft);
   if (draft.workspaceId !== workspaceId || draft.id !== draftId) throw invalidResponse("draft_detail.binding");
@@ -795,14 +804,28 @@ export const getOrganizingDraft = async (workspaceIdValue: string, draftIdValue:
 export const updateOrganizingDraft = async (input: UpdateOrganizingDraftInput): Promise<OrganizingCommandResult> => {
   const workspaceId = requireUuid(input.workspaceId, "workspaceId");
   const draftId = requireUuid(input.draftId, "draftId");
-  const { payload } = await request(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/organizing/drafts/${encodeURIComponent(draftId)}`, mutationInit(input.idempotencyKey, { expected_version: requireVersion(input.expectedVersion), intent: requireText(input.intent, "intent", 4096), template_revision_id: requireUuid(input.templateRevisionId, "templateRevisionId") }, input.signal, "PUT"), [200]);
+  const { payload } = await request(generatedRawResponse(organizingApi.updateOrganizingDraftRaw({
+    idempotencyKey: requireKey(input.idempotencyKey),
+    workspaceId,
+    draftId,
+    organizingUpdateDraftRequest: {
+      expected_version: requireVersion(input.expectedVersion),
+      intent: requireText(input.intent, "intent", 4096),
+      template_revision_id: requireUuid(input.templateRevisionId, "templateRevisionId"),
+    },
+  }, generatedRequestInit(input.signal))), [200]);
   return decodeDraftResult(payload, workspaceId, draftId);
 };
 
 export const suggestOrganizingMaterials = async (input: OrganizingDraftCommandInput): Promise<OrganizingCommandResult> => {
   const workspaceId = requireUuid(input.workspaceId, "workspaceId");
   const draftId = requireUuid(input.draftId, "draftId");
-  const { payload } = await request(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/organizing/drafts/${encodeURIComponent(draftId)}/suggestions`, mutationInit(input.idempotencyKey, { expected_version: requireVersion(input.expectedVersion) }, input.signal), [200]);
+  const { payload } = await request(generatedRawResponse(organizingApi.suggestOrganizingMaterialsRaw({
+    idempotencyKey: requireKey(input.idempotencyKey),
+    workspaceId,
+    draftId,
+    organizingSuggestRequest: { expected_version: requireVersion(input.expectedVersion) },
+  }, generatedRequestInit(input.signal))), [200]);
   return decodeDraftResult(payload, workspaceId, draftId);
 };
 
@@ -811,8 +834,12 @@ export const searchOrganizingMaterials = async (input: SearchOrganizingMaterials
   const query = requireText(input.query, "query", 256).trim();
   if (encoder.encode(query).byteLength < 2 || controlPattern.test(query)) throw invalidRequest("query");
   const kind = enumValue(input.kind, materialKinds, "kind");
-  const params = new URLSearchParams({ q: query, kind, limit: String(requireLimit(input.limit)) });
-  const { payload } = await request(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/organizing/materials/search?${params.toString()}`, withSignal(input.signal), [200]);
+  const { payload } = await request(generatedRawResponse(organizingApi.searchOrganizingMaterialsRaw({
+    q: query,
+    kind,
+    workspaceId,
+    limit: requireLimit(input.limit),
+  }, generatedRequestInit(input.signal))), [200]);
   const row = exact(payload, ["workspace_id", "items"], "material_search");
   if (uuid(row.workspace_id, "material_search.workspace_id") !== workspaceId) throw invalidResponse("material_search.workspace_id");
   const items = array(row.items, "material_search.items", 25, (item, index) => decodeMaterialSearchResult(item, workspaceId, `material_search.items[${String(index)}]`));
@@ -823,16 +850,22 @@ export const searchOrganizingMaterials = async (input: SearchOrganizingMaterials
 export const addOrganizingMaterial = async (input: AddOrganizingMaterialInput): Promise<OrganizingCommandResult> => {
   const workspaceId = requireUuid(input.workspaceId, "workspaceId");
   const draftId = requireUuid(input.draftId, "draftId");
-  const selector: Record<string, string> = (() => {
+  const expectedVersion = requireVersion(input.expectedVersion);
+  const body: GeneratedOrganizingAddMaterialRequest = (() => {
     switch (input.kind) {
-      case "SOURCE_VERSION": return { source_version_id: requireUuid(input.sourceVersionId, "sourceVersionId") };
-      case "DOCUMENT_REVISION": return { document_id: requireUuid(input.documentId, "documentId"), article_revision_id: requireUuid(input.articleRevisionId, "articleRevisionId") };
-      case "CLAIM": return { claim_id: requireUuid(input.claimId, "claimId") };
-      case "SMART_COLLECTION": return { collection_id: requireUuid(input.collectionId, "collectionId") };
+      case "SOURCE_VERSION": return { expected_version: expectedVersion, kind: input.kind, source_version_id: requireUuid(input.sourceVersionId, "sourceVersionId") };
+      case "DOCUMENT_REVISION": return { expected_version: expectedVersion, kind: input.kind, document_id: requireUuid(input.documentId, "documentId"), article_revision_id: requireUuid(input.articleRevisionId, "articleRevisionId") };
+      case "CLAIM": return { expected_version: expectedVersion, kind: input.kind, claim_id: requireUuid(input.claimId, "claimId") };
+      case "SMART_COLLECTION": return { expected_version: expectedVersion, kind: input.kind, collection_id: requireUuid(input.collectionId, "collectionId") };
       default: throw invalidRequest("kind");
     }
   })();
-  const result = await request(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/organizing/drafts/${encodeURIComponent(draftId)}/materials`, mutationInit(input.idempotencyKey, { expected_version: requireVersion(input.expectedVersion), kind: input.kind, ...selector }, input.signal), [200, 201]);
+  const result = await request(generatedRawResponse(organizingApi.addOrganizingMaterialRaw({
+    idempotencyKey: requireKey(input.idempotencyKey),
+    workspaceId,
+    draftId,
+    organizingAddMaterialRequest: body,
+  }, generatedRequestInit(input.signal))), [200, 201]);
   const decoded = decodeDraftResult(result.payload, workspaceId, draftId);
   assertReplayStatus(result.status, decoded.replayed);
   return decoded;
@@ -842,7 +875,13 @@ export const removeOrganizingMaterial = async (input: RemoveOrganizingMaterialIn
   const workspaceId = requireUuid(input.workspaceId, "workspaceId");
   const draftId = requireUuid(input.draftId, "draftId");
   const materialId = requireUuid(input.materialId, "materialId");
-  const { payload } = await request(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/organizing/drafts/${encodeURIComponent(draftId)}/materials/${encodeURIComponent(materialId)}`, mutationInit(input.idempotencyKey, { expected_version: requireVersion(input.expectedVersion) }, input.signal, "DELETE"), [200]);
+  const { payload } = await request(generatedRawResponse(organizingApi.removeOrganizingMaterialRaw({
+    idempotencyKey: requireKey(input.idempotencyKey),
+    workspaceId,
+    draftId,
+    materialId,
+    organizingExpectedVersionRequest: { expected_version: requireVersion(input.expectedVersion) },
+  }, generatedRequestInit(input.signal))), [200]);
   return decodeDraftResult(payload, workspaceId, draftId);
 };
 
@@ -850,7 +889,16 @@ export const setOrganizingMaterialSelection = async (input: SetOrganizingMateria
   const workspaceId = requireUuid(input.workspaceId, "workspaceId");
   const draftId = requireUuid(input.draftId, "draftId");
   const materialId = requireUuid(input.materialId, "materialId");
-  const { payload } = await request(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/organizing/drafts/${encodeURIComponent(draftId)}/materials/${encodeURIComponent(materialId)}`, mutationInit(input.idempotencyKey, { expected_version: requireVersion(input.expectedVersion), selected: input.selected }, input.signal, "PATCH"), [200]);
+  const { payload } = await request(generatedRawResponse(organizingApi.setOrganizingMaterialSelectionRaw({
+    idempotencyKey: requireKey(input.idempotencyKey),
+    workspaceId,
+    draftId,
+    materialId,
+    organizingMaterialSelectionRequest: {
+      expected_version: requireVersion(input.expectedVersion),
+      selected: input.selected,
+    },
+  }, generatedRequestInit(input.signal))), [200]);
   const result = decodeDraftResult(payload, workspaceId, draftId);
   if (!result.draft.materials.some((material) => material.id === materialId && material.selected === input.selected)) throw invalidResponse("material_selection.binding");
   return result;
@@ -859,7 +907,15 @@ export const setOrganizingMaterialSelection = async (input: SetOrganizingMateria
 export const confirmOrganizingDraft = async (input: ConfirmOrganizingDraftInput): Promise<ConfirmOrganizingDraftResult> => {
   const workspaceId = requireUuid(input.workspaceId, "workspaceId");
   const draftId = requireUuid(input.draftId, "draftId");
-  const { payload, status } = await request(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/organizing/drafts/${encodeURIComponent(draftId)}/confirm`, mutationInit(input.idempotencyKey, { expected_version: requireVersion(input.expectedVersion), template_revision_id: requireUuid(input.templateRevisionId, "templateRevisionId") }, input.signal), [200, 202]);
+  const { payload, status } = await request(generatedRawResponse(organizingApi.confirmOrganizingDraftRaw({
+    idempotencyKey: requireKey(input.idempotencyKey),
+    workspaceId,
+    draftId,
+    organizingConfirmRequest: {
+      expected_version: requireVersion(input.expectedVersion),
+      template_revision_id: requireUuid(input.templateRevisionId, "templateRevisionId"),
+    },
+  }, generatedRequestInit(input.signal))), [200, 202]);
   const row = exact(payload, ["draft", "snapshot", "dispatch_status", "replayed"], "confirm");
   const draft = decodeOrganizingDraft(row.draft);
   const snapshot = decodeOrganizingSnapshot(row.snapshot);
@@ -874,7 +930,10 @@ export const confirmOrganizingDraft = async (input: ConfirmOrganizingDraftInput)
 export const getOrganizingSnapshot = async (workspaceIdValue: string, snapshotIdValue: string, signal?: AbortSignal): Promise<OrganizingSnapshot> => {
   const workspaceId = requireUuid(workspaceIdValue, "workspaceId");
   const snapshotId = requireUuid(snapshotIdValue, "snapshotId");
-  const { payload } = await request(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/organizing/snapshots/${encodeURIComponent(snapshotId)}`, withSignal(signal), [200]);
+  const { payload } = await request(generatedRawResponse(organizingApi.getOrganizingSnapshotRaw(
+    { workspaceId, snapshotId },
+    generatedRequestInit(signal),
+  )), [200]);
   const row = exact(payload, ["snapshot"], "snapshot_detail");
   const snapshot = decodeOrganizingSnapshot(row.snapshot);
   if (snapshot.workspaceId !== workspaceId || snapshot.id !== snapshotId) throw invalidResponse("snapshot_detail.binding");
@@ -883,7 +942,10 @@ export const getOrganizingSnapshot = async (workspaceIdValue: string, snapshotId
 
 export const listOrganizingTemplates = async (workspaceIdValue: string, signal?: AbortSignal): Promise<OrganizingTemplate[]> => {
   const workspaceId = requireUuid(workspaceIdValue, "workspaceId");
-  const { payload } = await request(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/organizing/templates`, withSignal(signal), [200]);
+  const { payload } = await request(generatedRawResponse(organizingApi.listOrganizingTemplatesRaw(
+    { workspaceId },
+    generatedRequestInit(signal),
+  )), [200]);
   const row = exact(payload, ["workspace_id", "items"], "template_list");
   if (uuid(row.workspace_id, "template_list.workspace_id") !== workspaceId) throw invalidResponse("template_list.workspace_id");
   const items = array(row.items, "template_list.items", 100, (item) => decodeOrganizingTemplate(item));
@@ -895,7 +957,10 @@ export const listOrganizingTemplates = async (workspaceIdValue: string, signal?:
 export const getOrganizingTemplate = async (workspaceIdValue: string, templateIdValue: string, signal?: AbortSignal): Promise<OrganizingTemplate> => {
   const workspaceId = requireUuid(workspaceIdValue, "workspaceId");
   const templateId = requireUuid(templateIdValue, "templateId");
-  const { payload } = await request(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/organizing/templates/${encodeURIComponent(templateId)}`, withSignal(signal), [200]);
+  const { payload } = await request(generatedRawResponse(organizingApi.getOrganizingTemplateRaw(
+    { workspaceId, templateId },
+    generatedRequestInit(signal),
+  )), [200]);
   const row = exact(payload, ["template"], "template_detail");
   const template = decodeOrganizingTemplate(row.template);
   if (template.id !== templateId || template.workspaceId !== null && template.workspaceId !== workspaceId) throw invalidResponse("template_detail.binding");
@@ -909,7 +974,7 @@ const decodeTemplateResult = (value: unknown, workspaceId: string, templateId?: 
   return { template, replayed: boolean(row.replayed, "template_command.replayed") };
 };
 
-const encodeTemplateDeclaration = (value: OrganizingTemplateDeclaration): Record<string, unknown> => ({
+const encodeTemplateDeclaration = (value: OrganizingTemplateDeclaration): GeneratedOrganizingTemplateDeclaration => ({
   schema_version: value.schemaVersion,
   kind: value.kind,
   name: value.name,
@@ -936,7 +1001,12 @@ const encodeTemplateDeclaration = (value: OrganizingTemplateDeclaration): Record
 export const cloneOrganizingTemplate = async (input: CloneOrganizingTemplateInput): Promise<{ template: OrganizingTemplate; replayed: boolean }> => {
   const workspaceId = requireUuid(input.workspaceId, "workspaceId");
   const templateId = requireUuid(input.templateId, "templateId");
-  const result = await request(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/organizing/templates/${encodeURIComponent(templateId)}/clone`, mutationInit(input.idempotencyKey, { name: requireText(input.name, "name", 128) }, input.signal), [200, 201]);
+  const result = await request(generatedRawResponse(organizingApi.cloneOrganizingTemplateRaw({
+    idempotencyKey: requireKey(input.idempotencyKey),
+    workspaceId,
+    templateId,
+    organizingTemplateCloneRequest: { name: requireText(input.name, "name", 128) },
+  }, generatedRequestInit(input.signal))), [200, 201]);
   const decoded = decodeTemplateResult(result.payload, workspaceId);
   assertReplayStatus(result.status, decoded.replayed);
   return decoded;
@@ -946,7 +1016,15 @@ export const reviseOrganizingTemplate = async (input: ReviseOrganizingTemplateIn
   const workspaceId = requireUuid(input.workspaceId, "workspaceId");
   const templateId = requireUuid(input.templateId, "templateId");
   const declaration = decodeTemplateDeclaration(encodeTemplateDeclaration(input.declaration), "declaration");
-  const result = await request(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/organizing/templates/${encodeURIComponent(templateId)}/revisions`, mutationInit(input.idempotencyKey, { expected_version: requireVersion(input.expectedVersion), declaration: encodeTemplateDeclaration(declaration) }, input.signal), [200, 201]);
+  const result = await request(generatedRawResponse(organizingApi.reviseOrganizingTemplateRaw({
+    idempotencyKey: requireKey(input.idempotencyKey),
+    workspaceId,
+    templateId,
+    organizingTemplateReviseRequest: {
+      expected_version: requireVersion(input.expectedVersion),
+      declaration: encodeTemplateDeclaration(declaration),
+    },
+  }, generatedRequestInit(input.signal))), [200, 201]);
   const decoded = decodeTemplateResult(result.payload, workspaceId, templateId);
   assertReplayStatus(result.status, decoded.replayed);
   return decoded;
@@ -955,7 +1033,10 @@ export const reviseOrganizingTemplate = async (input: ReviseOrganizingTemplateIn
 export const getOrganizingRun = async (workspaceIdValue: string, snapshotIdValue: string, signal?: AbortSignal): Promise<OrganizingRun> => {
   const workspaceId = requireUuid(workspaceIdValue, "workspaceId");
   const snapshotId = requireUuid(snapshotIdValue, "snapshotId");
-  const { payload } = await request(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/organizing/runs/${encodeURIComponent(snapshotId)}`, withSignal(signal), [200]);
+  const { payload } = await request(generatedRawResponse(organizingApi.getOrganizingRunRaw(
+    { workspaceId, snapshotId },
+    generatedRequestInit(signal),
+  )), [200]);
   const row = exact(payload, ["run"], "run_detail");
   const run = decodeOrganizingRun(row.run, workspaceId);
   if (run.snapshotId !== snapshotId) throw invalidResponse("run_detail.binding");

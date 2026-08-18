@@ -177,4 +177,13 @@ describe("Collection API boundary", () => {
     vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockRejectedValue(abort));
     await expect(listCollections(workspaceId)).rejects.toBe(abort);
   });
+
+  it("preserves AbortError identity when strict text body reading is cancelled", async () => {
+    const abort = new DOMException("cancelled", "AbortError");
+    const response = jsonResponse({ workspace_id: workspaceId, items: [] });
+    vi.spyOn(response, "text").mockRejectedValue(abort);
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValue(response));
+
+    await expect(listCollections(workspaceId)).rejects.toBe(abort);
+  });
 });

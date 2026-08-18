@@ -1,7 +1,16 @@
 /** Smart Collection 的唯一网络边界：所有 unknown 响应在这里解码为领域模型。 */
 
-import { authFetch } from "./auth";
 import { canonicalUuidPattern as uuidPattern, hasOnlyKeys, isAbortError, isRecord } from "../shared/codec";
+import { CollectionsApi as GeneratedCollectionsApi } from "./generated/apis/CollectionsApi";
+import type {
+  CollectionDefinitionRequest as GeneratedCollectionDefinitionRequest,
+  CollectionVersionedRequest as GeneratedCollectionVersionedRequest,
+} from "./generated/models";
+import {
+  generatedConfiguration,
+  generatedRawResponse,
+  generatedRequestInit,
+} from "./generated-client";
 
 export type CollectionStatus = "ACTIVE" | "ARCHIVED";
 export type CollectionViewType = "LIST" | "TABLE" | "COMPACT_CARD";
@@ -200,6 +209,7 @@ export class CollectionApiError extends Error {
 
 const hashPattern = /^[0-9a-f]{64}$/;
 const timestampPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+const collectionsApi = new GeneratedCollectionsApi(generatedConfiguration);
 
 const exact = (value: Record<string, unknown>, keys: readonly string[], field: string): void => {
   if (!hasOnlyKeys(value, keys)) throw invalidResponse(field);
@@ -608,15 +618,12 @@ const readProblem = (value: unknown, status: number): CollectionApiError => {
   if (isRecord(value) && typeof value.error_code === "string" && typeof value.message === "string" && typeof value.retryable === "boolean") return new CollectionApiError("HTTP_ERROR", value.message, value.retryable, status, value.error_code);
   return new CollectionApiError("HTTP_ERROR", `Collection 请求失败（HTTP ${String(status)}）`, status >= 500, status);
 };
-const request = async (path: string, init: RequestInit = {}): Promise<unknown> => {
-  const headers = new Headers(init.headers);
-  headers.set("Accept", "application/json");
-  if (init.body !== undefined) headers.set("Content-Type", "application/json");
+const request = async (operation: Promise<Response>): Promise<unknown> => {
   let response: Response;
-  try { response = await authFetch(path, { ...init, headers }); }
+  try { response = await operation; }
   catch (error: unknown) { if (isAbortError(error)) throw error; throw new CollectionApiError("NETWORK_ERROR", "无法连接 Collection API。", true, null, "NETWORK_ERROR", { cause: error }); }
   let payload: unknown;
-  try { payload = parseStrictJson(await response.text()); } catch (error: unknown) { throw new CollectionApiError("INVALID_RESPONSE", "Collection API 返回了无效或包含重复字段的 JSON。", false, response.status, "INVALID_RESPONSE", { cause: error }); }
+  try { payload = parseStrictJson(await response.text()); } catch (error: unknown) { if (isAbortError(error)) throw error; throw new CollectionApiError("INVALID_RESPONSE", "Collection API 返回了无效或包含重复字段的 JSON。", false, response.status, "INVALID_RESPONSE", { cause: error }); }
   if (!response.ok) throw readProblem(payload, response.status);
   return payload;
 };
@@ -628,15 +635,15 @@ const boundedLimit = (limit: number | undefined, fallback: number): number => {
   if (!Number.isSafeInteger(value) || value < 1 || value > 100) throw invalidRequest("limit");
   return value;
 };
-const queryString = (params: Record<string, string | number | undefined>): string => { const query = new URLSearchParams(); Object.entries(params).forEach(([key, value]) => { if (value !== undefined && value !== "") query.set(key, String(value)); }); return query.toString(); };
-const json = (value: unknown): string => JSON.stringify(value);
-const signalInit = (signal?: AbortSignal): RequestInit => signal === undefined ? {} : { signal };
-const definitionBody = (input: CollectionDefinitionInput | CollectionVersionedInput): Record<string, unknown> => {
+const definitionBody = (input: CollectionDefinitionInput): GeneratedCollectionDefinitionRequest => {
   const name = input.name.trim();
   if (name === "" || name.length > 256) throw invalidRequest("name");
   if ((input.description ?? "").length > 4096) throw invalidRequest("description");
-  if ("expectedVersion" in input && (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1)) throw invalidRequest("expectedVersion");
-  return { workspace_id: requireWorkspace(input.workspaceId), name, description: input.description ?? "", query: encodeQuery(input.query), view_type: input.viewType, view_config: encodeViewConfig(input.viewConfig), ...("expectedVersion" in input ? { expected_version: input.expectedVersion } : {}) };
+  return { workspace_id: requireWorkspace(input.workspaceId), name, description: input.description ?? "", query: encodeQuery(input.query), view_type: input.viewType, view_config: encodeViewConfig(input.viewConfig) };
+};
+const versionedDefinitionBody = (input: CollectionVersionedInput): GeneratedCollectionVersionedRequest => {
+  if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1) throw invalidRequest("expectedVersion");
+  return { ...definitionBody(input), expected_version: input.expectedVersion };
 };
 const assertWorkspace = <T extends { workspaceId: string }>(value: T, workspaceId: string, field: string): T => {
   if (value.workspaceId !== workspaceId) throw invalidResponse(field);
@@ -657,15 +664,24 @@ const assertResultPage = (value: CollectionResultPage, workspaceId: string, coll
 export const listCollections = (workspaceId: string, params: { status?: CollectionStatus[]; cursor?: string; limit?: number } = {}, signal?: AbortSignal): Promise<CollectionList> => {
   const expectedWorkspaceId = requireWorkspace(workspaceId);
   if (params.cursor !== undefined && (params.cursor.trim() === "" || params.cursor.length > 32768)) throw invalidRequest("cursor");
-  const query = new URLSearchParams({ workspace_id: expectedWorkspaceId, limit: String(boundedLimit(params.limit, 50)) });
-  if (params.cursor !== undefined) query.set("cursor", params.cursor);
-  params.status?.forEach((status) => { if (!collectionStatuses.includes(status)) throw invalidRequest("status"); query.append("status", status); });
-  return request(`/api/v1/collections?${query}`, signalInit(signal)).then(decodeList).then((value) => assertWorkspace(value, expectedWorkspaceId, "collection.list.workspace_id"));
+  const statuses = params.status?.map((status) => {
+    if (!collectionStatuses.includes(status)) throw invalidRequest("status");
+    return status;
+  });
+  return request(generatedRawResponse(collectionsApi.listCollectionsRaw({
+    workspaceId: expectedWorkspaceId,
+    ...(statuses === undefined || statuses.length === 0 ? {} : { status: statuses }),
+    limit: boundedLimit(params.limit, 50),
+    ...(params.cursor === undefined ? {} : { cursor: params.cursor }),
+  }, generatedRequestInit(signal)))).then(decodeList).then((value) => assertWorkspace(value, expectedWorkspaceId, "collection.list.workspace_id"));
 };
 export const getCollection = (workspaceId: string, collectionId: string, signal?: AbortSignal): Promise<Collection> => {
   const expectedWorkspaceId = requireWorkspace(workspaceId);
   const expectedCollectionId = requireCollectionId(collectionId);
-  return request(`/api/v1/collections/${encodeURIComponent(expectedCollectionId)}?${queryString({ workspace_id: expectedWorkspaceId })}`, signalInit(signal)).then(decodeCollection).then((value) => assertCollection(value, expectedWorkspaceId, expectedCollectionId));
+  return request(generatedRawResponse(collectionsApi.getCollectionRaw({
+    collectionId: expectedCollectionId,
+    workspaceId: expectedWorkspaceId,
+  }, generatedRequestInit(signal)))).then(decodeCollection).then((value) => assertCollection(value, expectedWorkspaceId, expectedCollectionId));
 };
 export const getCollectionResults = (workspaceId: string, collectionId: string, expectedQueryHash: string, params: { cursor?: string; limit?: number } = {}, signal?: AbortSignal): Promise<CollectionResultPage> => {
   const expectedWorkspaceId = requireWorkspace(workspaceId);
@@ -673,31 +689,63 @@ export const getCollectionResults = (workspaceId: string, collectionId: string, 
   const expectedHash = requireHash(expectedQueryHash, "queryHash");
   const requestCursor = params.cursor;
   if (requestCursor !== undefined && (requestCursor.trim() === "" || requestCursor.length > 32768)) throw invalidRequest("cursor");
-  return request(`/api/v1/collections/${encodeURIComponent(expectedCollectionId)}/results?${queryString({ workspace_id: expectedWorkspaceId, cursor: requestCursor, limit: boundedLimit(params.limit, 25) })}`, signalInit(signal)).then(decodeSavedResultPage).then((value) => assertResultPage(value, expectedWorkspaceId, expectedCollectionId, expectedHash));
+  return request(generatedRawResponse(collectionsApi.getCollectionResultsRaw({
+    collectionId: expectedCollectionId,
+    workspaceId: expectedWorkspaceId,
+    limit: boundedLimit(params.limit, 25),
+    ...(requestCursor === undefined ? {} : { cursor: requestCursor }),
+  }, generatedRequestInit(signal)))).then(decodeSavedResultPage).then((value) => assertResultPage(value, expectedWorkspaceId, expectedCollectionId, expectedHash));
 };
 export const previewCollection = (input: CollectionDefinitionInput & { cursor?: string; limit?: number }, signal?: AbortSignal): Promise<CollectionResultPage> => {
   const expectedWorkspaceId = requireWorkspace(input.workspaceId);
   if (input.cursor !== undefined && (input.cursor.trim() === "" || input.cursor.length > 32768)) throw invalidRequest("cursor");
-  return request("/api/v1/collections/preview", { method: "POST", body: json({ workspace_id: expectedWorkspaceId, query: encodeQuery(input.query), view_type: input.viewType, view_config: encodeViewConfig(input.viewConfig), ...(input.cursor === undefined ? {} : { cursor: input.cursor }), limit: boundedLimit(input.limit, 25) }), ...signalInit(signal) }).then(decodePreviewResultPage).then((value) => assertResultPage(value, expectedWorkspaceId, null));
+  return request(generatedRawResponse(collectionsApi.previewCollectionRaw({
+    collectionPreviewRequest: {
+      workspace_id: expectedWorkspaceId,
+      query: encodeQuery(input.query),
+      view_type: input.viewType,
+      view_config: encodeViewConfig(input.viewConfig),
+      ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+      limit: boundedLimit(input.limit, 25),
+    },
+  }, generatedRequestInit(signal)))).then(decodePreviewResultPage).then((value) => assertResultPage(value, expectedWorkspaceId, null));
 };
 export const validateCollection = (input: CollectionDefinitionInput, signal?: AbortSignal): Promise<CollectionValidation> => {
   const expectedWorkspaceId = requireWorkspace(input.workspaceId);
-  return request("/api/v1/collections/validate", { method: "POST", body: json({ workspace_id: expectedWorkspaceId, query: encodeQuery(input.query), view_type: input.viewType, view_config: encodeViewConfig(input.viewConfig) }), ...signalInit(signal) }).then(decodeValidation).then((value) => assertWorkspace(value, expectedWorkspaceId, "collection.validation.workspace_id"));
+  return request(generatedRawResponse(collectionsApi.validateCollectionRaw({
+    collectionValidationRequest: {
+      workspace_id: expectedWorkspaceId,
+      query: encodeQuery(input.query),
+      view_type: input.viewType,
+      view_config: encodeViewConfig(input.viewConfig),
+    },
+  }, generatedRequestInit(signal)))).then(decodeValidation).then((value) => assertWorkspace(value, expectedWorkspaceId, "collection.validation.workspace_id"));
 };
 export const createCollection = (input: CollectionDefinitionInput, idempotencyKeyValue: string, signal?: AbortSignal): Promise<Collection> => {
   const expectedWorkspaceId = requireWorkspace(input.workspaceId);
-  return request("/api/v1/collections", { method: "POST", headers: { "Idempotency-Key": idempotencyKey(idempotencyKeyValue) }, body: json(definitionBody(input)), ...signalInit(signal) }).then(decodeCollection).then((value) => assertCollection(value, expectedWorkspaceId));
+  return request(generatedRawResponse(collectionsApi.createCollectionRaw({
+    idempotencyKey: idempotencyKey(idempotencyKeyValue),
+    collectionDefinitionRequest: definitionBody(input),
+  }, generatedRequestInit(signal)))).then(decodeCollection).then((value) => assertCollection(value, expectedWorkspaceId));
 };
 export const updateCollection = (collectionId: string, input: CollectionVersionedInput, idempotencyKeyValue: string, signal?: AbortSignal): Promise<Collection> => {
   const expectedWorkspaceId = requireWorkspace(input.workspaceId);
   const expectedCollectionId = requireCollectionId(collectionId);
-  return request(`/api/v1/collections/${encodeURIComponent(expectedCollectionId)}`, { method: "PUT", headers: { "Idempotency-Key": idempotencyKey(idempotencyKeyValue) }, body: json(definitionBody(input)), ...signalInit(signal) }).then(decodeCollection).then((value) => assertCollection(value, expectedWorkspaceId, expectedCollectionId));
+  return request(generatedRawResponse(collectionsApi.updateCollectionRaw({
+    collectionId: expectedCollectionId,
+    idempotencyKey: idempotencyKey(idempotencyKeyValue),
+    collectionVersionedRequest: versionedDefinitionBody(input),
+  }, generatedRequestInit(signal)))).then(decodeCollection).then((value) => assertCollection(value, expectedWorkspaceId, expectedCollectionId));
 };
 export const archiveCollection = (collectionId: string, input: CollectionArchiveInput, idempotencyKeyValue: string, signal?: AbortSignal): Promise<Collection> => {
   const expectedWorkspaceId = requireWorkspace(input.workspaceId);
   const expectedCollectionId = requireCollectionId(collectionId);
   if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1) throw invalidRequest("expectedVersion");
-  return request(`/api/v1/collections/${encodeURIComponent(expectedCollectionId)}/archive`, { method: "POST", headers: { "Idempotency-Key": idempotencyKey(idempotencyKeyValue) }, body: json({ workspace_id: expectedWorkspaceId, expected_version: input.expectedVersion }), ...signalInit(signal) }).then(decodeCollection).then((value) => assertCollection(value, expectedWorkspaceId, expectedCollectionId));
+  return request(generatedRawResponse(collectionsApi.archiveCollectionRaw({
+    collectionId: expectedCollectionId,
+    idempotencyKey: idempotencyKey(idempotencyKeyValue),
+    collectionArchiveRequest: { workspace_id: expectedWorkspaceId, expected_version: input.expectedVersion },
+  }, generatedRequestInit(signal)))).then(decodeCollection).then((value) => assertCollection(value, expectedWorkspaceId, expectedCollectionId));
 };
 
 export { decodeClause, decodeCollection, decodeCollectionItem, decodeList, decodePreviewResultPage, decodeQuery, decodeResultPage, decodeSavedResultPage, decodeValidation, decodeViewConfig };

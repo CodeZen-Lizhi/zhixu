@@ -1,0 +1,21 @@
+{
+  "generatorVersion": "7.24.0",
+  "warnings": [
+    {
+      "contains": "OpenAPI 3.1 support is still in beta",
+      "count": 2
+    },
+    {
+      "contains": "Failed to get the schema name: null",
+      "count": 2
+    },
+    {
+      "contains": "'oneOf' is intended to include only the additional optional OAS extension discriminator object",
+      "count": 24
+    },
+    {
+      "contains": "No application/json content media type found in response",
+      "count": 1
+    }
+  ]
+}

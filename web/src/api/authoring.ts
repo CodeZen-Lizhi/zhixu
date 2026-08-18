@@ -1,8 +1,13 @@
 /** Document Draft 创作的唯一网络边界。 */
 
-import { authFetch } from "./auth";
 import { decodeProblem } from "./conversation";
 import { strictJson } from "./exports";
+import { AuthoringApi } from "./generated/apis/AuthoringApi";
+import {
+  generatedConfiguration,
+  generatedRawResponse,
+  generatedRequestInit,
+} from "./generated-client";
 import { canonicalUuidPattern as uuidPattern, hasExactKeys, isAbortError, isRecord } from "../shared/codec";
 
 export type WorkingDraftStatus = "EDITING" | "ARCHIVED";
@@ -189,6 +194,7 @@ const controlPattern = /[\u0000-\u001f\u007f]/;
 const lineBreakPattern = /[\r\n]/;
 const encoder = new TextEncoder();
 const maxBodyBytes = 10 * 1024 * 1024;
+const authoringApi = new AuthoringApi(generatedConfiguration);
 
 const invalidRequest = (field: string, cause?: unknown): AuthoringApiError =>
   new AuthoringApiError("INVALID_REQUEST", "INVALID_REQUEST", `创作请求字段无效：${field}`, null, false, { cause });
@@ -434,7 +440,6 @@ const requireDraftText = (value: string, field: string, maxBytes: number, lineBr
   return value;
 };
 
-const withSignal = (signal: AbortSignal | undefined): RequestInit => signal === undefined ? {} : { signal };
 const decodeHttpProblem = (value: unknown, status: number): AuthoringApiError => {
   try {
     const problem = decodeProblem(value);
@@ -455,13 +460,12 @@ interface AuthoringJsonResponse {
 }
 
 const request = async (
-  path: string,
-  init: RequestInit,
+  operation: Promise<Response>,
   successStatuses: readonly number[],
 ): Promise<AuthoringJsonResponse> => {
   let response: Response;
   try {
-    response = await authFetch(path, init);
+    response = await operation;
   } catch (error: unknown) {
     if (isAbortError(error)) throw error;
     throw new AuthoringApiError("NETWORK_ERROR", "NETWORK_ERROR", "无法连接创作服务。", null, true, { cause: error });
@@ -487,13 +491,6 @@ const request = async (
   return { payload, status: response.status };
 };
 
-const commandInit = (idempotencyKey: string, body: Readonly<Record<string, unknown>>, signal?: AbortSignal): RequestInit => ({
-  method: "POST",
-  headers: { "Idempotency-Key": requireKey(idempotencyKey) },
-  body: JSON.stringify(body),
-  ...withSignal(signal),
-});
-
 const decodeWorkingDraftCommandResult = (value: unknown, workspaceId: string, draftId?: string): WorkingDraftCommandResult => {
   const row = exact(value, ["working_draft", "replayed"], [], "working_draft_command");
   const workingDraft = assertWorkspace(decodeWorkingDraft(row.working_draft), workspaceId, "working_draft.workspace_id");
@@ -503,11 +500,11 @@ const decodeWorkingDraftCommandResult = (value: unknown, workspaceId: string, dr
 
 export const createWorkingDraft = async (input: CreateWorkingDraftInput): Promise<WorkingDraftCommandResult> => {
   const workspaceId = requireUuid(input.workspaceId, "workspaceId");
-  const { payload, status } = await request(
-    `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/authoring/working-drafts`,
-    commandInit(input.idempotencyKey, {}, input.signal),
-    [200, 201],
-  );
+  const { payload, status } = await request(generatedRawResponse(authoringApi.createWorkingDraftRaw({
+    idempotencyKey: requireKey(input.idempotencyKey),
+    workspaceId,
+    body: {},
+  }, generatedRequestInit(input.signal))), [200, 201]);
   const result = decodeWorkingDraftCommandResult(payload, workspaceId);
   if ((status === 200) !== result.replayed) throw invalidResponse("working_draft_command.status", status);
   return result;
@@ -516,11 +513,10 @@ export const createWorkingDraft = async (input: CreateWorkingDraftInput): Promis
 export const getWorkingDraft = async (workspaceIdValue: string, draftIdValue: string, signal?: AbortSignal): Promise<WorkingDraft> => {
   const workspaceId = requireUuid(workspaceIdValue, "workspaceId");
   const draftId = requireUuid(draftIdValue, "draftId");
-  const { payload } = await request(
-    `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/authoring/working-drafts/${encodeURIComponent(draftId)}`,
-    withSignal(signal),
-    [200],
-  );
+  const { payload } = await request(generatedRawResponse(authoringApi.getWorkingDraftRaw({
+    workspaceId,
+    draftId,
+  }, generatedRequestInit(signal))), [200]);
   const draft = assertWorkspace(decodeWorkingDraft(payload), workspaceId, "working_draft.workspace_id");
   if (draft.id !== draftId) throw invalidResponse("working_draft.id");
   return draft;
@@ -530,32 +526,29 @@ export const updateWorkingDraft = async (input: UpdateWorkingDraftInput): Promis
   const workspaceId = requireUuid(input.workspaceId, "workspaceId");
   const draftId = requireUuid(input.draftId, "draftId");
   const expectedVersion = requireVersion(input.expectedVersion);
-  const { payload } = await request(
-    `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/authoring/working-drafts/${encodeURIComponent(draftId)}`,
-    {
-      method: "PUT",
-      headers: { "Idempotency-Key": requireKey(input.idempotencyKey) },
-      body: JSON.stringify({
-        expected_version: expectedVersion,
-        title: requireDraftText(input.title, "title", 512, false),
-        target_path: requireDraftText(input.targetPath, "targetPath", 4096, false),
-        body: requireDraftText(input.body, "body", maxBodyBytes),
-      }),
-      ...withSignal(input.signal),
+  const { payload } = await request(generatedRawResponse(authoringApi.updateWorkingDraftRaw({
+    idempotencyKey: requireKey(input.idempotencyKey),
+    workspaceId,
+    draftId,
+    updateWorkingDraftRequest: {
+      expected_version: expectedVersion,
+      title: requireDraftText(input.title, "title", 512, false),
+      target_path: requireDraftText(input.targetPath, "targetPath", 4096, false),
+      body: requireDraftText(input.body, "body", maxBodyBytes),
     },
-    [200],
-  );
+  }, generatedRequestInit(input.signal))), [200]);
   return decodeWorkingDraftCommandResult(payload, workspaceId, draftId);
 };
 
 export const freezeWorkingDraft = async (input: FreezeWorkingDraftInput): Promise<FreezeWorkingDraftResult> => {
   const workspaceId = requireUuid(input.workspaceId, "workspaceId");
   const draftId = requireUuid(input.draftId, "draftId");
-  const { payload, status } = await request(
-    `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/authoring/working-drafts/${encodeURIComponent(draftId)}/freeze`,
-    commandInit(input.idempotencyKey, { expected_version: requireVersion(input.expectedVersion) }, input.signal),
-    [200, 201],
-  );
+  const { payload, status } = await request(generatedRawResponse(authoringApi.freezeWorkingDraftRaw({
+    idempotencyKey: requireKey(input.idempotencyKey),
+    workspaceId,
+    draftId,
+    freezeWorkingDraftRequest: { expected_version: requireVersion(input.expectedVersion) },
+  }, generatedRequestInit(input.signal))), [200, 201]);
   const row = exact(payload, ["working_draft", "document", "article_revision", "replayed"], [], "freeze");
   const workingDraft = assertWorkspace(decodeWorkingDraft(row.working_draft), workspaceId, "freeze.working_draft.workspace_id");
   const document = assertWorkspace(decodeDocumentDraft(row.document), workspaceId, "freeze.document.workspace_id");
@@ -572,11 +565,13 @@ export const publishArticleRevision = async (input: PublishRevisionInput): Promi
   const workspaceId = requireUuid(input.workspaceId, "workspaceId");
   const documentId = requireUuid(input.documentId, "documentId");
   const revisionId = requireUuid(input.revisionId, "revisionId");
-  const { payload, status } = await request(
-    `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/documents/${encodeURIComponent(documentId)}/revisions/${encodeURIComponent(revisionId)}/publish-proposals`,
-    commandInit(input.idempotencyKey, {}, input.signal),
-    [200, 201],
-  );
+  const { payload, status } = await request(generatedRawResponse(authoringApi.publishArticleRevisionRaw({
+    idempotencyKey: requireKey(input.idempotencyKey),
+    workspaceId,
+    documentId,
+    revisionId,
+    body: {},
+  }, generatedRequestInit(input.signal))), [200, 201]);
   const row = exact(payload, ["publication", "replayed"], [], "publish");
   const publication = assertWorkspace(decodePublicationBinding(row.publication), workspaceId, "publish.publication.workspace_id");
   if (publication.documentId !== documentId || publication.articleRevisionId !== revisionId) throw invalidResponse("publish.binding");
@@ -588,11 +583,10 @@ export const publishArticleRevision = async (input: PublishRevisionInput): Promi
 export const getDocumentDraft = async (workspaceIdValue: string, documentIdValue: string, signal?: AbortSignal): Promise<DocumentDraftDetail> => {
   const workspaceId = requireUuid(workspaceIdValue, "workspaceId");
   const documentId = requireUuid(documentIdValue, "documentId");
-  const { payload } = await request(
-    `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/documents/${encodeURIComponent(documentId)}`,
-    withSignal(signal),
-    [200],
-  );
+  const { payload } = await request(generatedRawResponse(authoringApi.getDocumentDraftRaw({
+    workspaceId,
+    documentId,
+  }, generatedRequestInit(signal))), [200]);
   const row = exact(payload, ["document", "current_revision", "publication"], [], "document_detail");
   const document = assertWorkspace(decodeDocumentDraft(row.document), workspaceId, "document_detail.document.workspace_id");
   if (document.id !== documentId) throw invalidResponse("document_detail.document.id");
@@ -610,11 +604,9 @@ export const getDocumentDraft = async (workspaceIdValue: string, documentIdValue
 
 export const getAuthoringOverview = async (workspaceIdValue: string, signal?: AbortSignal): Promise<AuthoringOverview> => {
   const workspaceId = requireUuid(workspaceIdValue, "workspaceId");
-  const { payload } = await request(
-    `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/authoring/overview`,
-    withSignal(signal),
-    [200],
-  );
+  const { payload } = await request(generatedRawResponse(authoringApi.getAuthoringOverviewRaw({
+    workspaceId,
+  }, generatedRequestInit(signal))), [200]);
   const row = exact(payload, ["workspace_id", "organizing", "recent_drafts", "pending_publications", "completed_documents"], [], "overview");
   if (uuid(row.workspace_id, "overview.workspace_id") !== workspaceId) throw invalidResponse("overview.workspace_id");
   const organizingRow = exact(row.organizing, ["available", "reason", "href"], [], "overview.organizing");

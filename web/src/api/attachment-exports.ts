@@ -1,8 +1,15 @@
 /** Workspace attachment export 的严格网络边界。 */
 
-import { authFetch } from "./auth";
 import { strictJson } from "./exports";
 import { canonicalUuidPattern as uuidPattern, hasOnlyKeys, isAbortError, isRecord } from "../shared/codec";
+import { AttachmentExportsApi as GeneratedAttachmentExportsApi } from "./generated/apis/AttachmentExportsApi";
+import {
+  generatedConfiguration,
+  generatedRawResponse,
+  generatedRequestInit,
+} from "./generated-client";
+
+const attachmentExportsApi = new GeneratedAttachmentExportsApi(generatedConfiguration);
 
 export type AttachmentExportStatus = "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED" | "EXPIRED" | "CANCELLED";
 
@@ -189,21 +196,18 @@ const decodePage = (value: unknown): AttachmentExportPage => {
   };
 };
 
-const request = async (path: string, init: RequestInit = {}): Promise<unknown> => {
-  const headers = new Headers(init.headers);
-  headers.set("Accept", "application/json");
-  if (init.body !== undefined) headers.set("Content-Type", "application/json");
+const request = async (operation: Promise<Response>, expectedStatuses: readonly number[]): Promise<unknown> => {
   let response: Response;
-  try { response = await authFetch(path, { ...init, headers }); } catch (error: unknown) { if (isAbortError(error)) throw error; throw new AttachmentExportApiError("NETWORK_ERROR", "NETWORK_ERROR", "无法连接附件导出 API。", true, null, { cause: error }); }
+  try { response = await operation; } catch (error: unknown) { if (isAbortError(error)) throw error; throw new AttachmentExportApiError("NETWORK_ERROR", "NETWORK_ERROR", "无法连接附件导出 API。", true, null, { cause: error }); }
   let payload: unknown;
-  try { payload = strictJson(await response.text()); } catch (error: unknown) { throw new AttachmentExportApiError("INVALID_RESPONSE", "INVALID_RESPONSE", "附件导出 API 返回了无效或包含重复字段的 JSON。", false, response.status, { cause: error }); }
+  try { payload = strictJson(await response.text()); } catch (error: unknown) { if (isAbortError(error)) throw error; throw new AttachmentExportApiError("INVALID_RESPONSE", "INVALID_RESPONSE", "附件导出 API 返回了无效或包含重复字段的 JSON。", false, response.status, { cause: error }); }
   if (!response.ok) throw decodeProblem(payload, response.status);
+  if (!expectedStatuses.includes(response.status)) throw invalidResponse("http_status", response.status);
   return payload;
 };
 
 const requireUuid = (value: string, field: string): string => { if (!uuidPattern.test(value)) throw invalidRequest(field); return value; };
 const requireKey = (value: string): string => { if (value.trim() === "" || value !== value.trim() || value.length > 128) throw invalidRequest("idempotencyKey"); return value; };
-const signalInit = (signal?: AbortSignal): RequestInit => signal === undefined ? {} : { signal };
 const assertBinding = (job: AttachmentExportJob, workspaceId: string): AttachmentExportJob => { if (job.workspaceId !== workspaceId) throw invalidResponse("job.binding"); return job; };
 const sha256Hex = async (blob: Blob): Promise<string> => {
   const digest = await globalThis.crypto.subtle.digest("SHA-256", await blob.arrayBuffer());
@@ -214,21 +218,27 @@ export const createAttachmentExport = (input: AttachmentExportCreateInput, signa
   const workspaceId = requireUuid(input.workspaceId, "workspaceId");
   const expiresInSeconds = input.expiresInSeconds;
   if (expiresInSeconds !== undefined && (!Number.isSafeInteger(expiresInSeconds) || expiresInSeconds < 1 || expiresInSeconds > 604800)) throw invalidRequest("expiresInSeconds");
-  return request(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/attachment-exports`, {
-    method: "POST", headers: { "Idempotency-Key": requireKey(input.idempotencyKey) },
-    body: JSON.stringify({ kind: "ATTACHMENTS_ZIP", schema_version: "attachment-export/v1", attachment_root_contract_version: "workspace-attachments/v1", content_policy: "RAW_USER_OWNED", ...(expiresInSeconds === undefined ? {} : { expires_in_seconds: expiresInSeconds }) }),
-    ...signalInit(signal),
-  }).then(decodeCreate).then((result) => { assertBinding(result.job, workspaceId); return result; });
+  return request(generatedRawResponse(attachmentExportsApi.createAttachmentExportRaw({
+    workspaceId,
+    idempotencyKey: requireKey(input.idempotencyKey),
+    attachmentExportCreateRequest: {
+      kind: "ATTACHMENTS_ZIP",
+      schema_version: "attachment-export/v1",
+      attachment_root_contract_version: "workspace-attachments/v1",
+      content_policy: "RAW_USER_OWNED",
+      ...(expiresInSeconds === undefined ? {} : { expires_in_seconds: expiresInSeconds }),
+    },
+  }, generatedRequestInit(signal))), [200, 202]).then(decodeCreate).then((result) => { assertBinding(result.job, workspaceId); return result; });
 };
 
 export const listAttachmentExports = (workspaceIdValue: string, options: { cursor?: string; limit?: number } = {}, signal?: AbortSignal): Promise<AttachmentExportPage> => {
   const workspaceId = requireUuid(workspaceIdValue, "workspaceId");
   if (options.cursor !== undefined && (options.cursor.trim() === "" || utf8Encoder.encode(options.cursor).byteLength > 4096) || options.limit !== undefined && (!Number.isSafeInteger(options.limit) || options.limit < 1 || options.limit > 100)) throw invalidRequest("list");
-  const query = new URLSearchParams();
-  if (options.limit !== undefined) query.set("limit", String(options.limit));
-  if (options.cursor !== undefined) query.set("cursor", options.cursor);
-  const suffix = query.size === 0 ? "" : `?${query.toString()}`;
-  return request(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/attachment-exports${suffix}`, signalInit(signal)).then(decodePage).then((page) => {
+  return request(generatedRawResponse(attachmentExportsApi.listAttachmentExportsRaw({
+    workspaceId,
+    ...(options.limit === undefined ? {} : { limit: options.limit }),
+    ...(options.cursor === undefined ? {} : { cursor: options.cursor }),
+  }, generatedRequestInit(signal))), [200]).then(decodePage).then((page) => {
     if (page.workspaceId !== workspaceId || page.items.some((job) => job.workspaceId !== workspaceId)) throw invalidResponse("page.binding");
     return page;
   });
@@ -237,7 +247,7 @@ export const listAttachmentExports = (workspaceIdValue: string, options: { curso
 export const getAttachmentExport = (workspaceIdValue: string, exportIdValue: string, signal?: AbortSignal): Promise<AttachmentExportJob> => {
   const workspaceId = requireUuid(workspaceIdValue, "workspaceId");
   const exportId = requireUuid(exportIdValue, "exportId");
-  return request(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/attachment-exports/${encodeURIComponent(exportId)}`, signalInit(signal)).then(decodeJob).then((job) => {
+  return request(generatedRawResponse(attachmentExportsApi.getAttachmentExportRaw({ workspaceId, exportId }, generatedRequestInit(signal))), [200]).then(decodeJob).then((job) => {
     if (job.id !== exportId) throw invalidResponse("job.id");
     return assertBinding(job, workspaceId);
   });
@@ -248,10 +258,10 @@ export const downloadAttachmentExport = async (workspaceIdValue: string, job: At
   assertBinding(job, workspaceId);
   if (job.status !== "SUCCEEDED" || job.downloadUrl === null || job.archiveSize === null) throw invalidRequest("download");
   let response: Response;
-  try { response = await authFetch(job.downloadUrl, signalInit(signal)); } catch (error: unknown) { if (isAbortError(error)) throw error; throw new AttachmentExportApiError("NETWORK_ERROR", "NETWORK_ERROR", "无法下载附件归档。", true, null, { cause: error }); }
+  try { response = await generatedRawResponse(attachmentExportsApi.downloadAttachmentExportRaw({ workspaceId, exportId: job.id }, generatedRequestInit(signal))); } catch (error: unknown) { if (isAbortError(error)) throw error; throw new AttachmentExportApiError("NETWORK_ERROR", "NETWORK_ERROR", "无法下载附件归档。", true, null, { cause: error }); }
   if (!response.ok) {
     let payload: unknown;
-    try { payload = strictJson(await response.text()); } catch { throw new AttachmentExportApiError("INVALID_RESPONSE", "INVALID_RESPONSE", "附件归档下载错误响应无效。", false, response.status); }
+    try { payload = strictJson(await response.text()); } catch (error: unknown) { if (isAbortError(error)) throw error; throw new AttachmentExportApiError("INVALID_RESPONSE", "INVALID_RESPONSE", "附件归档下载错误响应无效。", false, response.status); }
     throw decodeProblem(payload, response.status);
   }
   const filename = `workspace-attachments-${job.id}.zip`;

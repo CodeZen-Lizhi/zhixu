@@ -1,0 +1,10 @@
+{
+  "generator": "typescript-fetch",
+  "generatorVersion": "7.24.0",
+  "wrapperVersion": "2.40.1",
+  "authoritativeContractSha256": "5e677567d68358195e477b3ab519013f1034d9ea4271c492e12606402360979a",
+  "normalizerManifestSha256": "ee7864fd487068f075619fbd8539803ffe1127a64a3988259fe764677461d721",
+  "generatorConfigSha256": "3d27f932336445d6f33dc90a552cac810b3342f8f028d289a98cf6c1b859777f",
+  "runtimeTemplateSha256": "5ebcf3899eec151436805c81ae0c90872738270027bfa21425743c7f20d52281",
+  "oneOfTemplateSha256": "d7b61140e200ec0da7ab7633e5a14a5de88f8c28cc9002f83a44e285c86c20fb"
+}

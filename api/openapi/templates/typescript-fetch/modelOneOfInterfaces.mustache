@@ -1,0 +1,7 @@
+/**
+ * @type {{classname}}
+ * {{#lambda.indented_star_1}}{{{unescapedDescription}}}{{/lambda.indented_star_1}}
+ * @export
+ */
+// OpenAPI Generator 7.24.0 override: preserve the null branch of nullable oneOf aliases.
+export type {{classname}} = {{#discriminator}}{{#mappedModels}}{ {{discriminator.propertyName}}: '{{mappingName}}' } & {{modelName}}{{^-last}} | {{/-last}}{{/mappedModels}}{{/discriminator}}{{^discriminator}}{{#oneOf}}{{{.}}}{{^-last}} | {{/-last}}{{/oneOf}}{{#isNullable}} | null{{/isNullable}}{{/discriminator}};

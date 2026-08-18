@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "authoritativeOpenAPI": "openapi.json",
+  "generatorVersion": "7.24.0",
+  "transforms": {
+    "primitiveConst": "replace const with an equivalent typed single-value enum",
+    "uniqueItems": {
+      "strategy": "remove from generator-only input so JSON arrays are not emitted as unserializable TypeScript Set values",
+      "expectedCount": 43
+    },
+    "openJsonObjects": [
+      "#/components/schemas/StartWorkflowRequest/properties/graph",
+      "#/components/schemas/PendingWorkflowHumanTask/properties/expected_input_schema",
+      "#/components/schemas/HumanDecisionRequest/properties/decision",
+      "#/components/schemas/HumanTask/properties/decision",
+      "#/components/schemas/EvidenceSourceSpan/properties/selector",
+      "#/components/schemas/RAGConflictPosition/properties/applicability",
+      "#/components/schemas/Problem/properties/details",
+      "#/components/schemas/KnowledgeEventV1/properties/payload",
+      "#/components/schemas/KnowledgeEventV2/properties/payload",
+      "#/components/schemas/ReviewAnswer/properties/feedback",
+      "#/components/schemas/MemoryContent"
+    ],
+    "unconstrainedJsonSchemas": [
+      "#/components/schemas/StartWorkflowRequest/properties/input",
+      "#/components/schemas/WorkflowRun/properties/input",
+      "#/components/schemas/WorkflowRun/properties/output",
+      "#/components/schemas/WorkflowMergeComparisonReview/properties/categories/items"
+    ],
+    "namedUnion": "#/components/schemas/WorkflowTopicOutlineSection"
+  }
+}

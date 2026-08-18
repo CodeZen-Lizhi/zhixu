@@ -1,0 +1,300 @@
+{
+  "generatorTagContract": "2026-08-19",
+  "catalog": [
+    {
+      "name": "Auth",
+      "description": "Authentication sessions and API token lifecycle."
+    },
+    {
+      "name": "Workspaces",
+      "description": "Workspace activation, metadata, and workspace scans."
+    },
+    {
+      "name": "System",
+      "description": "Public system capability and runtime status."
+    },
+    {
+      "name": "Health",
+      "description": "Liveness, readiness, and knowledge health operations."
+    },
+    {
+      "name": "ModelSettings",
+      "description": "Managed model settings and activation operations."
+    },
+    {
+      "name": "Captures",
+      "description": "Capture creation, upload, retrieval, and retry operations."
+    },
+    {
+      "name": "Authoring",
+      "description": "Working drafts, authoring projections, and publication commands."
+    },
+    {
+      "name": "DocumentHistory",
+      "description": "Document history, comparison, and restore operations."
+    },
+    {
+      "name": "SourceSpans",
+      "description": "Source versions, ingestion, knowledge profiles, and evidence spans."
+    },
+    {
+      "name": "Organizing",
+      "description": "Material organizing drafts, templates, snapshots, and runs."
+    },
+    {
+      "name": "GitSync",
+      "description": "Git remote configuration and synchronization operations."
+    },
+    {
+      "name": "Business",
+      "description": "Workflow, proposal, approval, and change-control operations."
+    },
+    {
+      "name": "BusinessRevisions",
+      "description": "Proposal current-content and revision-history operations."
+    },
+    {
+      "name": "Conversation",
+      "description": "Conversation, question, answer, and feedback operations."
+    },
+    {
+      "name": "Timeline",
+      "description": "Knowledge timeline and impact-analysis operations."
+    },
+    {
+      "name": "Search",
+      "description": "Knowledge search operations."
+    },
+    {
+      "name": "Graph",
+      "description": "Canonical graph query and evidence operations."
+    },
+    {
+      "name": "Collections",
+      "description": "Collection definition, validation, and result operations."
+    },
+    {
+      "name": "SemanticLinks",
+      "description": "Semantic-link candidate and scan operations."
+    },
+    {
+      "name": "Review",
+      "description": "Review decks, cards, sessions, and learning-path operations."
+    },
+    {
+      "name": "Interview",
+      "description": "Interview sessions, turns, and interview learning-path operations."
+    },
+    {
+      "name": "Memory",
+      "description": "Memory candidate and lifecycle operations."
+    },
+    {
+      "name": "Artifacts",
+      "description": "Artifact planning, authoring, generation, and publication operations."
+    },
+    {
+      "name": "Exports",
+      "description": "Collection and artifact export job operations."
+    },
+    {
+      "name": "AttachmentExports",
+      "description": "Workspace attachment ZIP export operations."
+    },
+    {
+      "name": "Events",
+      "description": "Server event stream operations."
+    }
+  ],
+  "operations": {
+    "getLiveness": "Health",
+    "getReadiness": "Health",
+    "getSystemStatus": "System",
+    "getModelSettings": "ModelSettings",
+    "updateModelSettings": "ModelSettings",
+    "startModelSettingsActivation": "ModelSettings",
+    "testModelSettings": "ModelSettings",
+    "createWorkspace": "Workspaces",
+    "getActiveWorkspace": "Workspaces",
+    "getWorkspace": "Workspaces",
+    "scanWorkspace": "Workspaces",
+    "createCapture": "Captures",
+    "listCaptures": "Captures",
+    "uploadCapture": "Captures",
+    "getCapture": "Captures",
+    "retryCapture": "Captures",
+    "createWorkingDraft": "Authoring",
+    "listWorkingDrafts": "Authoring",
+    "getWorkingDraft": "Authoring",
+    "updateWorkingDraft": "Authoring",
+    "freezeWorkingDraft": "Authoring",
+    "publishArticleRevision": "Authoring",
+    "getDocumentDraft": "Authoring",
+    "listDocumentHistory": "DocumentHistory",
+    "compareDocumentHistory": "DocumentHistory",
+    "createDocumentRestorePreview": "DocumentHistory",
+    "createDocumentRestoreProposal": "DocumentHistory",
+    "getAuthoringOverview": "Authoring",
+    "listDocumentDrafts": "Authoring",
+    "getDocumentKnowledgeProfile": "SourceSpans",
+    "retryDocumentKnowledgeProfile": "SourceSpans",
+    "processSourceVersion": "SourceSpans",
+    "startWorkflow": "Business",
+    "listWorkflowRuns": "Business",
+    "getWorkflowRun": "Business",
+    "pauseWorkflow": "Business",
+    "resumeWorkflow": "Business",
+    "cancelWorkflow": "Business",
+    "submitHumanDecision": "Business",
+    "createProposal": "Business",
+    "listProposals": "Business",
+    "getProposal": "Business",
+    "decideProposal": "Business",
+    "checkProposalApplyPreflight": "Business",
+    "createConversation": "Conversation",
+    "listConversations": "Conversation",
+    "getConversation": "Conversation",
+    "submitQuestion": "Conversation",
+    "listConversationTurns": "Conversation",
+    "getAnswer": "Conversation",
+    "getWorkspaceAnalysisTimeline": "Timeline",
+    "submitAnswerFeedback": "Conversation",
+    "subscribeAnswerDraft": "Conversation",
+    "subscribeServerEvents": "Events",
+    "searchKnowledge": "Search",
+    "getGraphGlobalPage": "Graph",
+    "getGraphNeighborhoodPage": "Graph",
+    "findGraphPath": "Graph",
+    "searchGraphNodes": "Graph",
+    "getGraphNodeDetail": "Graph",
+    "getGraphRelationDetail": "Graph",
+    "getGraphRelationEvidencePage": "Graph",
+    "listSemanticLinkCandidates": "SemanticLinks",
+    "getSemanticLinkCandidate": "SemanticLinks",
+    "decideSemanticLinkCandidate": "SemanticLinks",
+    "startSemanticLinkCandidateScan": "SemanticLinks",
+    "getSemanticLinkCandidateScan": "SemanticLinks",
+    "getEvidenceSourceVersion": "SourceSpans",
+    "getEvidenceSourceSpan": "SourceSpans",
+    "listCollections": "Collections",
+    "createCollection": "Collections",
+    "validateCollection": "Collections",
+    "previewCollection": "Collections",
+    "getCollection": "Collections",
+    "updateCollection": "Collections",
+    "archiveCollection": "Collections",
+    "getCollectionResults": "Collections",
+    "getHealthSummary": "Health",
+    "listHealthIssues": "Health",
+    "getHealthIssue": "Health",
+    "listHealthIssueObservations": "Health",
+    "listHealthIssueDecisions": "Health",
+    "decideHealthIssue": "Health",
+    "createHealthRepairProposal": "Health",
+    "startHealthScan": "Health",
+    "getHealthScan": "Health",
+    "getHealthSchedule": "Health",
+    "updateHealthSchedule": "Health",
+    "getProposalCurrentContent": "BusinessRevisions",
+    "previewProposalRevisionMerge": "BusinessRevisions",
+    "listProposalRevisions": "BusinessRevisions",
+    "appendProposalRevision": "BusinessRevisions",
+    "getProposalRevision": "BusinessRevisions",
+    "listSourceVersions": "SourceSpans",
+    "exchangeBootstrapForSession": "Auth",
+    "getCurrentSession": "Auth",
+    "revokeCurrentSession": "Auth",
+    "rotateSession": "Auth",
+    "listApiTokens": "Auth",
+    "createApiToken": "Auth",
+    "revokeApiToken": "Auth",
+    "listKnowledgeTimeline": "Timeline",
+    "getKnowledgeTimelineEvent": "Timeline",
+    "analyzeKnowledgeImpact": "Timeline",
+    "createExport": "Exports",
+    "getExport": "Exports",
+    "downloadExport": "Exports",
+    "createAttachmentExport": "AttachmentExports",
+    "listAttachmentExports": "AttachmentExports",
+    "getAttachmentExport": "AttachmentExports",
+    "downloadAttachmentExport": "AttachmentExports",
+    "listCollectionExports": "Exports",
+    "listReviewDecks": "Review",
+    "createReviewDeck": "Review",
+    "getReviewDeck": "Review",
+    "listReviewCards": "Review",
+    "createReviewCard": "Review",
+    "editReviewCard": "Review",
+    "pauseReviewDeckSchedule": "Review",
+    "resumeReviewDeckSchedule": "Review",
+    "resetReviewDeckSchedule": "Review",
+    "listReviewDueCards": "Review",
+    "approveReviewCard": "Review",
+    "rejectReviewCard": "Review",
+    "invalidateReviewCard": "Review",
+    "invalidateReviewCards": "Review",
+    "startReviewSession": "Review",
+    "completeReviewSession": "Review",
+    "submitReviewAnswer": "Review",
+    "getReviewLearningPath": "Review",
+    "createReviewLearningPath": "Review",
+    "updateReviewLearningPathStatus": "Review",
+    "updateReviewLearningPathStep": "Review",
+    "listMemories": "Memory",
+    "createMemoryCandidate": "Memory",
+    "getMemory": "Memory",
+    "editMemory": "Memory",
+    "deleteMemory": "Memory",
+    "confirmMemory": "Memory",
+    "pauseMemory": "Memory",
+    "resumeMemory": "Memory",
+    "listInterviews": "Interview",
+    "startInterview": "Interview",
+    "getInterview": "Interview",
+    "submitInterviewTurn": "Interview",
+    "completeInterview": "Interview",
+    "suggestInterviewMemoryCandidate": "Interview",
+    "updateLearningPathStatus": "Review",
+    "updateLearningPathStep": "Review",
+    "listArtifacts": "Artifacts",
+    "planArtifact": "Artifacts",
+    "getArtifact": "Artifacts",
+    "submitArtifactOutline": "Artifacts",
+    "approveArtifactOutline": "Artifacts",
+    "startArtifactRevision": "Artifacts",
+    "recordArtifactSection": "Artifacts",
+    "generateArtifactSection": "Artifacts",
+    "listArtifactSectionGenerations": "Artifacts",
+    "approveArtifactDraft": "Artifacts",
+    "exportArtifactMarkdown": "Artifacts",
+    "getArtifactExport": "Exports",
+    "createArtifactPublishProposal": "Artifacts",
+    "getKnowledgeImpactReport": "Timeline",
+    "createImpactDownstreamUpdateProposal": "Timeline",
+    "createOrganizingDraft": "Organizing",
+    "getOrganizingDraft": "Organizing",
+    "updateOrganizingDraft": "Organizing",
+    "suggestOrganizingMaterials": "Organizing",
+    "addOrganizingMaterial": "Organizing",
+    "setOrganizingMaterialSelection": "Organizing",
+    "removeOrganizingMaterial": "Organizing",
+    "confirmOrganizingDraft": "Organizing",
+    "searchOrganizingMaterials": "Organizing",
+    "getOrganizingSnapshot": "Organizing",
+    "listOrganizingTemplates": "Organizing",
+    "createOrganizingTemplate": "Organizing",
+    "getOrganizingTemplate": "Organizing",
+    "cloneOrganizingTemplate": "Organizing",
+    "reviseOrganizingTemplate": "Organizing",
+    "getOrganizingRun": "Organizing",
+    "getGitRemoteConfig": "GitSync",
+    "saveGitRemoteConfig": "GitSync",
+    "removeGitRemoteConfig": "GitSync",
+    "testGitRemoteConfig": "GitSync",
+    "getGitSyncStatus": "GitSync",
+    "listGitSyncRuns": "GitSync",
+    "createGitSyncRun": "GitSync",
+    "getGitSyncRun": "GitSync",
+    "retryGitSyncRun": "GitSync"
+  }
+}

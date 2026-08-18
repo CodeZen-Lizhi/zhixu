@@ -1,0 +1,10 @@
+{
+  "supportsES6": true,
+  "modelPropertyNaming": "original",
+  "useSingleRequestParameter": true,
+  "stringEnums": false,
+  "withoutRuntimeChecks": true,
+  "typeMappings": {
+    "Null": "null"
+  }
+}

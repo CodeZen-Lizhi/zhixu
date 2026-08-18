@@ -1,7 +1,14 @@
 /** Quick Capture 的唯一网络边界：只向 Feature 暴露已验证的领域投影。 */
 
-import { authFetch } from "./auth";
 import { strictJson } from "./exports";
+import { CapturesApi } from "./generated/apis/CapturesApi";
+import { SourceSpansApi } from "./generated/apis/SourceSpansApi";
+import type { CreateCaptureRequest as CreateCaptureWireRequest } from "./generated/models";
+import {
+  generatedConfiguration,
+  generatedRawResponse,
+  generatedRequestInit,
+} from "./generated-client";
 import { canonicalUuidPattern as uuidPattern, hasExactKeys, isAbortError, isRecord } from "../shared/codec";
 
 export type CaptureKind = "TEXT" | "URL" | "FILE" | "IMAGE";
@@ -204,6 +211,8 @@ const textEncoder = new TextEncoder();
 const maxJSONBodyBytes = 2 * 1024 * 1024;
 const maxUploadBytes = 10 * 1024 * 1024;
 const defaultListLimit = 30;
+const capturesApi = new CapturesApi(generatedConfiguration);
+const sourceSpansApi = new SourceSpansApi(generatedConfiguration);
 
 const requiredCaptureKeys = [
   "id",
@@ -723,13 +732,12 @@ const decodeProblem = (payload: unknown, status: number): CaptureApiError => {
 };
 
 const requestJSON = async (
-  path: string,
-  init: RequestInit,
+  operation: Promise<Response>,
   successStatuses: readonly number[],
 ): Promise<unknown> => {
   let response: Response;
   try {
-    response = await authFetch(path, init);
+    response = await operation;
   } catch (error: unknown) {
     if (isAbortError(error)) throw error;
     throw new CaptureApiError("NETWORK_ERROR", "NETWORK_ERROR", "无法连接 Capture API。", {
@@ -853,20 +861,6 @@ const requireListParams = (params: CaptureListParams): Required<Pick<CaptureList
   return { ...params, limit };
 };
 
-const signalInit = (signal?: AbortSignal): RequestInit => signal === undefined ? {} : { signal };
-
-const encodeMultipart = (
-  kind: "FILE" | "IMAGE",
-  file: File,
-  displayName: string | undefined,
-): FormData => {
-  const formData = new FormData();
-  formData.set("kind", kind);
-  if (displayName !== undefined) formData.set("display_name", displayName);
-  formData.set("file", file, file.name);
-  return formData;
-};
-
 export const createCapture = async (
   input: CaptureCreateInput,
   signal?: AbortSignal,
@@ -874,47 +868,46 @@ export const createCapture = async (
   const workspaceId = requireUuid(input.workspaceId, "workspaceId");
   const idempotencyKey = requireIdempotencyKey(input.idempotencyKey);
   const displayName = requireOptionalDisplayName(input.displayName);
-  const path = `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/${input.kind === "FILE" || input.kind === "IMAGE" ? "capture-files" : "captures"}`;
 
   if (input.kind === "TEXT") {
-    const body = JSON.stringify({
+    const requestBody: CreateCaptureWireRequest = {
       kind: input.kind,
       ...(displayName === undefined ? {} : { display_name: displayName }),
       text: requireText(input.text),
-    });
-    if (textEncoder.encode(body).byteLength > maxJSONBodyBytes) throw invalidRequest("text");
-    const payload = await requestJSON(path, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey },
-      body,
-      ...signalInit(signal),
-    }, [200, 201]);
+    };
+    if (textEncoder.encode(JSON.stringify(requestBody)).byteLength > maxJSONBodyBytes) {
+      throw invalidRequest("text");
+    }
+    const payload = await requestJSON(generatedRawResponse(capturesApi.createCaptureRaw({
+      idempotencyKey,
+      workspaceId,
+      createCaptureRequest: requestBody,
+    }, generatedRequestInit(signal))), [200, 201]);
     return decodeCaptureCommandResult(payload, { workspaceId, kind: input.kind });
   }
 
   if (input.kind === "URL") {
-    const body = JSON.stringify({
+    const requestBody: CreateCaptureWireRequest = {
       kind: input.kind,
       ...(displayName === undefined ? {} : { display_name: displayName }),
       url: requireURL(input.url),
-    });
-    const payload = await requestJSON(path, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey },
-      body,
-      ...signalInit(signal),
-    }, [200, 201]);
+    };
+    const payload = await requestJSON(generatedRawResponse(capturesApi.createCaptureRaw({
+      idempotencyKey,
+      workspaceId,
+      createCaptureRequest: requestBody,
+    }, generatedRequestInit(signal))), [200, 201]);
     return decodeCaptureCommandResult(payload, { workspaceId, kind: input.kind });
   }
 
   const file = requireFile(input.file);
-  const body = encodeMultipart(input.kind, file, displayName);
-  const payload = await requestJSON(path, {
-    method: "POST",
-    headers: { "Idempotency-Key": idempotencyKey },
-    body,
-    ...signalInit(signal),
-  }, [200, 201]);
+  const payload = await requestJSON(generatedRawResponse(capturesApi.uploadCaptureRaw({
+    idempotencyKey,
+    workspaceId,
+    kind: input.kind,
+    file,
+    ...(displayName === undefined ? {} : { displayName }),
+  }, generatedRequestInit(signal))), [200, 201]);
   return decodeCaptureCommandResult(payload, { workspaceId, kind: input.kind });
 };
 
@@ -925,17 +918,13 @@ export const listCaptures = async (
 ): Promise<CapturePage> => {
   const workspaceId = requireUuid(workspaceIdValue, "workspaceId");
   const params = requireListParams(paramsValue);
-  const query = new URLSearchParams();
-  if (params.kind !== undefined) query.set("kind", params.kind);
-  if (params.status !== undefined) query.set("status", params.status);
-  if (params.limit !== defaultListLimit || paramsValue.limit !== undefined) query.set("limit", String(params.limit));
-  if (params.cursor !== undefined) query.set("cursor", params.cursor);
-  const suffix = query.size === 0 ? "" : `?${query.toString()}`;
-  const payload = await requestJSON(
-    `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/captures${suffix}`,
-    signalInit(signal),
-    [200],
-  );
+  const payload = await requestJSON(generatedRawResponse(capturesApi.listCapturesRaw({
+    workspaceId,
+    ...(params.kind === undefined ? {} : { kind: params.kind }),
+    ...(params.status === undefined ? {} : { status: params.status }),
+    ...(paramsValue.limit === undefined ? {} : { limit: params.limit }),
+    ...(params.cursor === undefined ? {} : { cursor: params.cursor }),
+  }, generatedRequestInit(signal))), [200]);
   return decodeCaptureList(payload, workspaceId, params);
 };
 
@@ -946,11 +935,10 @@ export const getCapture = async (
 ): Promise<Capture> => {
   const workspaceId = requireUuid(workspaceIdValue, "workspaceId");
   const captureId = requireUuid(captureIdValue, "captureId");
-  const payload = await requestJSON(
-    `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/captures/${encodeURIComponent(captureId)}`,
-    signalInit(signal),
-    [200],
-  );
+  const payload = await requestJSON(generatedRawResponse(capturesApi.getCaptureRaw({
+    workspaceId,
+    captureId,
+  }, generatedRequestInit(signal))), [200]);
   return decodeCapture(payload, { workspaceId, captureId });
 };
 
@@ -963,24 +951,14 @@ export const retryCapture = async (
   if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1) {
     throw invalidRequest("expectedVersion");
   }
-  const payload = await requestJSON(
-    `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/captures/${encodeURIComponent(captureId)}/retry`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Idempotency-Key": requireIdempotencyKey(input.idempotencyKey),
-      },
-      body: JSON.stringify({ expected_version: input.expectedVersion }),
-      ...signalInit(signal),
-    },
-    [200, 202],
-  );
+  const payload = await requestJSON(generatedRawResponse(capturesApi.retryCaptureRaw({
+    idempotencyKey: requireIdempotencyKey(input.idempotencyKey),
+    workspaceId,
+    captureId,
+    retryCaptureRequest: { expected_version: input.expectedVersion },
+  }, generatedRequestInit(signal))), [200, 202]);
   return decodeCaptureCommandResult(payload, { workspaceId, captureId });
 };
-
-const profilePath = (workspaceId: string, sourceVersionId: string): string =>
-  `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/source-versions/${encodeURIComponent(sourceVersionId)}/knowledge-profile`;
 
 export const getKnowledgeProfile = async (
   bindingValue: KnowledgeProfileBinding,
@@ -991,11 +969,10 @@ export const getKnowledgeProfile = async (
     sourceVersionId: requireUuid(bindingValue.sourceVersionId, "sourceVersionId"),
     ...(bindingValue.captureId === undefined ? {} : { captureId: requireUuid(bindingValue.captureId, "captureId") }),
   };
-  const payload = await requestJSON(
-    profilePath(binding.workspaceId, binding.sourceVersionId),
-    signalInit(signal),
-    [200],
-  );
+  const payload = await requestJSON(generatedRawResponse(sourceSpansApi.getDocumentKnowledgeProfileRaw({
+    workspaceId: binding.workspaceId,
+    sourceVersionId: binding.sourceVersionId,
+  }, generatedRequestInit(signal))), [200]);
   return decodeKnowledgeProfile(payload, binding);
 };
 
@@ -1011,18 +988,11 @@ export const retryKnowledgeProfile = async (
   if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1) {
     throw invalidRequest("expectedVersion");
   }
-  const payload = await requestJSON(
-    `${profilePath(binding.workspaceId, binding.sourceVersionId)}/retry`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Idempotency-Key": requireIdempotencyKey(input.idempotencyKey),
-      },
-      body: JSON.stringify({ expected_version: input.expectedVersion }),
-      ...signalInit(signal),
-    },
-    [200, 202],
-  );
+  const payload = await requestJSON(generatedRawResponse(sourceSpansApi.retryDocumentKnowledgeProfileRaw({
+    idempotencyKey: requireIdempotencyKey(input.idempotencyKey),
+    workspaceId: binding.workspaceId,
+    sourceVersionId: binding.sourceVersionId,
+    retryKnowledgeProfileRequest: { expected_version: input.expectedVersion },
+  }, generatedRequestInit(signal))), [200, 202]);
   return decodeKnowledgeProfileCommandResult(payload, binding);
 };

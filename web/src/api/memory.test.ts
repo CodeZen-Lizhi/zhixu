@@ -28,7 +28,7 @@ describe("memory API", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(listMemories({ workspaceId, types: ["PREFERENCE"], statuses: ["CANDIDATE"] })).resolves.toMatchObject({ workspaceId, items: [{ id: memoryId }] });
-    expect(fetchMock.mock.calls[0]?.[0]).toBe(`/api/v1/memories?workspace_id=${workspaceId}&limit=50&type=PREFERENCE&status=CANDIDATE`);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(`/api/v1/memories?workspace_id=${workspaceId}&type=PREFERENCE&status=CANDIDATE&limit=50`);
     expect(() => decodeMemory({ ...memory, owner: { id: workspaceId } })).toThrow(MemoryApiError);
     expect(() => decodeMemory({ ...memory, confirmed_by: { id: workspaceId } })).toThrow(MemoryApiError);
   });

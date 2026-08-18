@@ -270,7 +270,8 @@ Correct: mutation attempt 绑定 Workspace/key；切换时 abort/reset，只有�
 ### 2. Signatures
 
 ```ts
-authFetch(path, init?): Promise<Response>
+generatedConfiguration = new Configuration({ basePath, fetchApi: transportFetch })
+generatedBrowserSecurity(): { origin, xCSRFToken }
 <AuthProvider><AuthBoundary>{children}</AuthBoundary></AuthProvider>
 useAuth(): { state, signIn, signOut, refresh }
 ```
@@ -278,10 +279,15 @@ useAuth(): { state, signIn, signOut, refresh }
 ### 3. Contracts
 
 - HTTP Cookie 由浏览器保存且始终使用 `credentials: "include"`；客户端不读取或持久化 Session Cookie 与 Bootstrap Token。
-- `authFetch` 只对 Cookie 身份的 unsafe 请求补 `X-CSRF-Token`；带 Bearer 的自动化请求不伪造 CSRF。`401` 必须触发 Auth 失效而不是保留受保护 Query cache。
+- `transportFetch` 只对 Cookie 身份的 unsafe 请求补 `X-CSRF-Token`；带 Bearer 的自动化请求不伪造 CSRF。
+  生成方法需要显式 security 参数时，`generatedBrowserSecurity` 使用当前页面 Origin 满足签名并读取
+  CSRF owner；实际线路 Origin 由浏览器控制，空 CSRF 会在 Transport 删除。`401` 必须触发 Auth
+  失效而不是保留受保护 Query cache。
 - `AuthProvider` 以 `/api/v1/system/status` 判定 `disabled|required|unavailable`，并在匿名、失效或存储不可用时清理 Query cache。前端状态不证明 Capability 或 Approval。
 - 所有认证 success/error body 在 `web/src/api/auth.ts` 从 `unknown` 严格解码；`Problem` 必须只有允许字段，且 `error_code`、`message` 非空、`retryable` 为 boolean，optional `workflow_run_id` 为 UUID、`details` 为 object。可选 Session/API Token 时间字段存在时仍须是有效 RFC3339 日历时间。Token 创建响应只在调用点使用一次明文，后续列表只能消费元数据。
-- 所有受保护 REST 请求必须经过 `authFetch`；组件不得用原始 `/api/v1/...` 新标签链接绕过 `401` 失效通知、`VITE_API_BASE_URL` 和 Query cache 清理。
+- 所有普通受保护 REST 请求必须经过生成 `*ApiRaw` 与 `transportFetch`；`authFetch` 只为已登记的
+  Answer Draft 等专用流 Adapter 提供相对 URL 兼容。组件不得用原始 `/api/v1/...` 新标签链接绕过
+  `401` 失效通知、`VITE_API_BASE_URL` 和 Query cache 清理。
 
 ### 4. Validation & Error Matrix
 
@@ -300,7 +306,9 @@ useAuth(): { state, signIn, signOut, refresh }
 
 ### 6. Tests Required
 
-- API 单测覆盖严格 Session/API Token decoder、Problem（未知字段、非 boolean retryable、错误 UUID/时间/details）、401 失效、unsafe CSRF 注入与 Bearer 优先级；组件测试断言不保留原始受保护 API 跳转。
+- API 单测覆盖生成 Auth operation、严格 Session/API Token Zod decoder、Problem（未知字段、非 boolean
+  retryable、错误 UUID/时间/details）、401 失效、unsafe CSRF、generated Origin 参数与 Bearer 优先级；
+  浏览器 smoke 验证实际 Origin，组件测试断言不保留原始受保护 API 跳转。
 - Context/App/Shell 测试覆盖 required 匿名、登录、登出、disabled、storage 失败和受保护内容隔离。
 - 真实浏览器在桌面与 `390x844` 下验证 disabled 模式工作台/Settings 可用、无 console error、无文本重叠；required 模式由 Compose smoke 验证 Cookie、CSRF、Token 生命周期。
 
