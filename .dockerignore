@@ -8,6 +8,7 @@
 /.zhixu-launcher.lock*
 web/node_modules
 web/dist
+api/openapi/node_modules
 workspace
 /workspace
 poc

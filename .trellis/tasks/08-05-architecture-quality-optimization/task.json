@@ -20,7 +20,8 @@
   "subtasks": [],
   "children": [
     "08-05-health-bounded-history",
-    "08-05-architecture-quality-baseline"
+    "08-05-architecture-quality-baseline",
+    "08-18-openapi-contract-gates"
   ],
   "parent": null,
   "relatedFiles": [],

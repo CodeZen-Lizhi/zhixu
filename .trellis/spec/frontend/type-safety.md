@@ -14,6 +14,8 @@ M6-D Search 使用不新增依赖的手写严格 Decoder。Generated Client 与�
 - `docs/architecture/application-contracts.md` 要求生成 OpenAPI、检查 Breaking Change、Generated Client 仅位于前端边缘，并使用 Problem Details、Cursor Pagination、ETag/Version 和强类型 SSE Envelope。
 - `docs/architecture/application-contracts.md` 将 Generated/Typed API Client 与 Domain UI Model 分离。
 - 当前 Search Decoder 不依赖 Runtime Validation Library；不得在规范中虚构未安装包或 Generator。
+- TODO 8 之前，OpenAPI 质量与历史兼容性已由 `make openapi-check` 与带显式 40 位 SHA 的
+  `make openapi-breaking-check` 锁定；这不是生成客户端或 Zod 已接入的证据。
 
 ## 类型所有权
 
@@ -93,8 +95,11 @@ Hash/非有限分数、未知 mode/capability、缺失 href、空 `heading_path`
 ## 当前待统一项
 
 OpenAPI Generator、通用 Runtime Validator、Error Narrowing Helper 与跨 Feature Status Union 生成方式仍待
-后续任务统一；Manifest 和 Lockfile 证明前不得增加包名或版本。当前 Search 手写 Decoder 是明确边界，
-不是允许其他 Feature 复制 DTO/Decoder 的先例。
+TODO 8 统一；Manifest 和 Lockfile 证明前不得增加包名或版本。TODO 8 只能在已锁定的 OpenAPI 质量和
+breaking gate 上引入生成客户端，不能删除当前严格 Decoder 或把生成类型直接泄漏到 Feature/Component。
+当前 Search 手写 Decoder 是明确边界，不是允许其他 Feature 复制 DTO/Decoder 的先例。工具版本、base SHA、
+180 天弃用和批准 breaking 的边界见
+[`ADR-0028`](../../../docs/architecture/adr/0028-openapi-contract-gates.md)。
 
 ## M6-04 Conversation/RAG Wire Contract
 

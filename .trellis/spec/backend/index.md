@@ -89,7 +89,7 @@ Go race/vet/tidy、OpenAPI 与 Web lint/typecheck/test/build 门禁通过。
 | [目录与模块结构](./directory-structure.md) | 进程入口、领域模块、Adapter 和依赖方向 | M1 入口与依赖边界已验证；领域模块待后续任务补充 |
 | [认证与安全契约](./auth-security.md) | Session、API Token、CSRF、Capability、配置与 Compose 门禁 | M10-02 已锁定 API/DB/env 契约、失败矩阵与真实 PostgreSQL/Compose 验证 |
 | [进程配置加载契约](./config-loading.md) | 实例化 Viper、validator、YAML/env 严格边界、process profile、Secret 与 Rollout 归属 | defaults/YAML/env 迁移已锁定；[维护者总览](../../../docs/architecture/application-contracts.md) 已同步，无全局 Viper、热更新或数据库 Rollout 状态读取 |
-| [Gin HTTP 边界规范](./http-boundary.md) | 唯一 Engine、stdlib bridge、路由/OpenAPI 对等、Middleware、recovery 与 SSE flush | Gin v1.12.0 已迁移；当前 183 个 operation 精确对等，Chi 已移除 |
+| [Gin HTTP 边界规范](./http-boundary.md) | 唯一 Engine、stdlib bridge、路由/OpenAPI 对等、Middleware、recovery 与 SSE flush | Gin v1.12.0 已迁移；operation 集合由可执行 inventory 精确对等，Chi 已移除 |
 | [宿主机 Workspace 精确授权契约](./workspace-root-grant.md) | 一次性 Workspace Control、不可变 Root identity、单 Grant 状态机、exact bind 与 Docker 固定入口 | Root/Docker 控制由本机命令保护；运行时只允许 API/Worker 精确 source=target 授权，Web 以 Active Workspace API 为事实源 |
 | [模型设置与热运行时契约](./model-settings-runtime.md) | desired/active/applied revision、AEAD、generation lease、双进程热激活与 Docker 生命周期 | managed Settings 无重启生效、冻结任务绑定和真实容器身份门禁 |
 | [Eino Chat Adapter 契约](./eino-chat-adapter.md) | Eino Chat、wire/响应、安全传输、调用级 Callback telemetry、错误矩阵与升级门禁 | 生产固定 Eino，真实 Provider/发布验收独立记录 |

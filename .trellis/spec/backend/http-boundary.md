@@ -16,7 +16,8 @@ Gin 类型只能出现在 Composition/HTTP adapter 边界。Domain、Application
 - 既有标准库 Handler 通过 `httpapi.GinHandler(http.HandlerFunc)` 接入；业务 Handler 从
   `request.PathValue` 和 `request.Context()` 取路径参数、Principal、request ID 与 trace。
 - 公开 method/path 的事实源是 `api/openapi/openapi.json`；`internal/app/router_inventory_test.go` 必须精确比较
-  Gin runtime inventory 与 OpenAPI operation。当前集合为 183 条，只有依赖存在时的 `/metrics` 是额外可选运行时路由。
+  Gin runtime inventory 与 OpenAPI operation。operation 数量由该可执行 inventory 派生，不在本规范维护易漂移的
+  固定数字；只有依赖存在时的 `/metrics` 是额外可选运行时路由。
 - 路径参数名以 OpenAPI snake_case 为准；Gin `:workspace_id` 只在注册层出现，日志和 OpenAPI 使用
   `{workspace_id}` canonical 形式。
 
@@ -71,6 +72,7 @@ Gin 类型只能出现在 Composition/HTTP adapter 边界。Domain、Application
 GIN_MODE=test go test -count=1 -timeout 60s ./internal/app ./internal/httpapi ./internal/auth/http
 GIN_MODE=test go test -race -count=1 -timeout 60s ./internal/app ./internal/httpapi ./internal/auth/http
 make openapi-check
+OPENAPI_BASE_REVISION=<40-character-lowercase-commit-sha> make openapi-breaking-check
 go vet ./...
 go build ./cmd/api
 go mod tidy -diff
@@ -81,6 +83,11 @@ git diff --check
 涉及领域 HTTP、SSE、上传或下载时，追加对应 `internal/*/http` 包的普通测试和 race；涉及真实 PostgreSQL、Docker 或浏览器
 流程时按任务影响面运行 Integration/Compose/E2E。环境不具备时必须记录命令、失败原因与剩余风险，不能把 compile-only
 或定向测试描述为全仓通过。
+
+`make openapi-check` 固定组合 Spectral、项目 checker 与 inventory；它不替代历史兼容性判断。修改已提交公开
+wire 时必须另以显式完整 40 位小写 SHA 执行 `make openapi-breaking-check`，禁止分支名、短 SHA、自动 baseline、
+ignore 或降低 severity。PR/push base 由 CI 事件提供，受保护分支的 required check 和显式 breaking bypass 属于
+GitHub 外部保护配置，需由管理员核验。
 
 静态边界检查至少包括：
 

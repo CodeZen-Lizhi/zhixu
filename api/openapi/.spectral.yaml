@@ -1,0 +1,35 @@
+extends:
+  - spectral:oas
+
+rules:
+  # TODO 8 will revisit generator-driven tags and descriptions based on client value.
+  operation-tags: off
+  operation-description: off
+
+  # This self-hosted project has no truthful public maintenance contact to publish.
+  info-contact: off
+
+  # Components can be public schema entry points even when no operation references them.
+  oas3-unused-component: off
+
+  # createHealthRepairProposal is intentionally reserved without a success response.
+  # The project checker locks that operation's exact error matrix.
+  operation-success-response: off
+
+  # Inspect the unresolved Examples Object so domain properties named "examples" are not mistaken for it.
+  oas3-examples-value-or-externalValue:
+    description: Examples must have either "value" or "externalValue" field.
+    resolved: false
+    given:
+      - $.components.examples[*]
+      - $.paths[*][*]..content[*].examples[*]
+      - $.paths[*][*]..parameters[*].examples[*]
+      - $.components.parameters[*].examples[*]
+      - $.paths[*][*]..headers[*].examples[*]
+      - $.components.headers[*].examples[*]
+    then:
+      function: xor
+      functionOptions:
+        properties:
+          - externalValue
+          - value

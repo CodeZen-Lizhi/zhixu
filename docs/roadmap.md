@@ -75,12 +75,19 @@ flowchart LR
 - **保留边界**：项目继续唯一拥有持久 Workflow、权限、Approval、Evidence/Citation、Model Run/Call、Receipt、Fence 与 PostgreSQL/River 状态机；Eino 类型不进入领域对象、外部 API 或持久化合同。
 - **验收状态**：真实 Provider 六项 live gate 与 host-relay 桌面/移动浏览器闭环已通过；容器直连外部 HTTPS 网络路径及连续 7 天/100 个终态的稳定观察仍是独立发布质量证据，不得标记为已通过。
 
-### 4.4 TODO 7：使用 Spectral 和 oasdiff 建立 OpenAPI 契约门禁
+### 4.4 已交付 7：Spectral 和 oasdiff OpenAPI 契约门禁
 
-- **优先级/初估**：P1，3–5 人天。
-- **目标**：使用成熟标准工具检查 OpenAPI 规范质量与兼容性，只保留项目专属断言。
-- **边界**：锁定版本、规则、批准基线和升级方式；破坏性差异明确失败，基线变更必须审批，不能通过覆盖快照静默接受；当前生成、lint 和项目特有 Workspace/Auth/SSE 约束继续可验证；删除被成熟工具覆盖的重复脚本。
-- **验收门禁**：lint、Breaking Change 和后续生成漂移检查进入 Makefile/CI，并有本地可复现命令；开发机与 CI 对同一输入得到一致结果。
+- **结果**：`api/openapi` 已成为独立、锁定的工具目录：Spectral CLI `6.16.3` 与解析到
+  `1.22.7` 的 rulesets 检查 OpenAPI 3.1；项目 checker 和 Gin runtime inventory 继续锁定
+  Auth/Capability/Workspace/SSE/Router 不变量。oasdiff `v1.29.1` 以固定 Docker digest 对可信
+  Git base 检查 WARN/ERR 级 breaking change，并固定 180 天弃用宽限期和无外部引用策略。
+- **入口**：`make openapi-install`、`make openapi-check` 与带显式 40 位 SHA 的
+  `make openapi-breaking-check`；PR 使用 base SHA、受保护分支 push 使用 before SHA。普通 lint
+  不依赖历史 base，兼容性 gate 不允许可覆盖 snapshot、ignore 或自动接受。
+- **保留边界**：历史 base 的极窄 `items: false` bootstrap 适配仅用于一个已验证旧 Schema，候选永不
+  改写；批准 breaking change 仍需 API owner、弃用/迁移说明和受保护分支显式绕过。GitHub branch
+  protection、required checks、CODEOWNERS 与 bypass audit 属于仓库外管理员核验。细节见
+  [ADR-0028](architecture/adr/0028-openapi-contract-gates.md)。
 
 ### 4.5 TODO 8：生成前端 OpenAPI 客户端并接入 Zod
 

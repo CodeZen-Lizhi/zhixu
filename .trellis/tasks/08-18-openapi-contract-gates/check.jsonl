@@ -1,0 +1,12 @@
+{"file":".trellis/spec/backend/http-boundary.md","reason":"审查 runtime/OpenAPI route、Problem、SSE 和 405 对等。"}
+{"file":".trellis/spec/backend/auth-security.md","reason":"审查认证、Capability、CSRF/Origin 和 401/403 未被标准工具弱化。"}
+{"file":".trellis/spec/backend/export-contract.md","reason":"审查下载与缓存专属断言继续存在。"}
+{"file":".trellis/spec/backend/eino-runtime-adoption-gates.md","reason":"审查 Answer Draft SSE 项目检查完整性。"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"审查公共契约、依赖、测试、Review 与 breaking gate 质量。"}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"审查 TODO 8 前置门禁与 wire/domain 边界。"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"审查重复断言只在等价覆盖后删除。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"审查 Git base、CI、OpenAPI、runtime 和消费者契约一致。"}
+{"file":".trellis/tasks/08-18-openapi-contract-gates/research/tooling-evaluation.md","reason":"复核版本、license、exit、security、deprecation 和已知限制。"}
+{"file":".trellis/tasks/08-18-openapi-contract-gates/research/integration-baseline.md","reason":"复核 lock、Docker digest、CI base 与分支保护盲区。"}
+{"file":".trellis/tasks/08-18-openapi-contract-gates/research/checker-audit.md","reason":"复核删除范围、project-owned invariant 和故障夹具证据。"}
+{"file":".trellis/tasks/08-18-openapi-contract-gates/research/spec-readiness.md","reason":"复核当前 OAS 缺口全部处理且未引入伪 metadata。"}

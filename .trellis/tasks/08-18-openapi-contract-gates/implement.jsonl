@@ -1,0 +1,13 @@
+{"file":".trellis/spec/backend/index.md","reason":"后端目录、依赖和 canonical quality gate 总入口。"}
+{"file":".trellis/spec/backend/http-boundary.md","reason":"OpenAPI 事实源、Gin runtime inventory、Problem、SSE 与 404/405 契约。"}
+{"file":".trellis/spec/backend/auth-security.md","reason":"公开/Session/Bootstrap/Auth、CSRF、Origin、Capability 和 401/403 语义。"}
+{"file":".trellis/spec/backend/export-contract.md","reason":"oasdiff 无法完整覆盖的下载 header、media type 与缓存项目契约。"}
+{"file":".trellis/spec/backend/eino-runtime-adoption-gates.md","reason":"Answer Draft SSE generation/cursor/chunk/reset/end 项目契约。"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"公共 Schema、成熟工具、测试和 breaking gate 的质量要求。"}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"TODO 8 生成客户端依赖的 OpenAPI 与 breaking-check 边界。"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"成熟工具替代重复 checker 时的复用与删除证据。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"OpenAPI、runtime、CI 与未来生成客户端的跨层所有权。"}
+{"file":".trellis/tasks/08-18-openapi-contract-gates/research/tooling-evaluation.md","reason":"官方版本、CLI 语义、安全、deprecation 与 ADR-0019 覆盖证据。"}
+{"file":".trellis/tasks/08-18-openapi-contract-gates/research/integration-baseline.md","reason":"仓库包管理、CI、Docker、license、Git base 与固定 digest 集成事实。"}
+{"file":".trellis/tasks/08-18-openapi-contract-gates/research/checker-audit.md","reason":"现有 checker 分类、可删除边界、oasdiff blind spot 与 mutation matrix。"}
+{"file":".trellis/tasks/08-18-openapi-contract-gates/research/spec-readiness.md","reason":"Spectral 首轮 findings、当前结构/响应/discriminator 缺口与项目断言清单。"}

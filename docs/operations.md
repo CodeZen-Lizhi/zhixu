@@ -506,8 +506,10 @@ docker compose --project-name zhixu --profile workspace-runtime \
 常用 canonical target：
 
 ```bash
+make openapi-install
 make test
 make openapi-check
+OPENAPI_BASE_REVISION=<40-character-lowercase-commit-sha> make openapi-breaking-check
 make compose-check
 make compose-up
 make compose-rag-smoke
@@ -526,6 +528,31 @@ make benchmark-capacity
 ```
 
 `compose-model-runtime-hot-activation-smoke` 精确调用隔离的 `deploy/model-runtime-hot-activation-smoke.sh`，使用 disposable Compose 项目、Workspace、数据库和受控 loopback fake model 验证 Apply 前后容器身份不变；它不属于普通 `make test` 或快速检查。集成 target 使用 disposable database/Workspace，缺少 `ZHIXU_TEST_DATABASE_URL` 时必须失败或明确 skip，不能把未运行报为通过。Compose smoke、PostgreSQL integration、River fault、认证负测、容量、备份恢复、浏览器和真实模型评测证明不同边界，不能相互替代。
+
+### OpenAPI 契约门禁
+
+`api/openapi/` 是独立 npm 工具目录，使用 Apache-2.0 的 Spectral CLI `6.16.3`，其 lockfile
+固定 `@stoplight/spectral-rulesets` 为 `1.22.7`；安装必须使用 `make openapi-install`，不要全局安装或
+改用 Web 的依赖目录。`make openapi-check` 组合 Spectral、项目 checker 和现有 Gin route inventory；
+它不需要 Docker 或历史 base。
+
+对已提交 API 的兼容性判断使用固定 Apache-2.0 oasdiff `v1.29.1` 镜像
+`tufin/oasdiff@sha256:bdba99e5e56558002952aa9a8aa2b91ab5f8e850f5981b5bb9bec732544ff721`：
+
+```bash
+OPENAPI_BASE_REVISION=<40-character-lowercase-commit-sha> make openapi-breaking-check
+```
+
+该命令只接受完整、可读取、非全零的 Git commit SHA，从历史 blob 读取 base；不会接受分支、短 SHA、
+工作树 baseline、ignore 或自动更新。容器不使用网络或外部 refs，stable/beta 都以 180 天弃用宽限期
+阻断 WARN/ERR 级 breaking change。首次迁移用的历史 base bootstrap 适配仅处理一个已知、形状严格验证的
+`items: false` 旧 Schema；候选不变，其他 boolean `items` Schema 或形状漂移都失败。
+
+有意破坏兼容性时仍保留失败结果，随 API owner 审查和弃用/迁移说明走受保护分支的显式管理员批准；不要
+降低门禁、覆盖 baseline 或添加忽略规则。CI 的 PR base/push before 由事件 SHA 提供，GitHub required checks、
+CODEOWNERS、branch protection 与 bypass audit 是仓库外配置，发布管理员必须单独核验。离线环境需预置同一
+digest 的 oasdiff 镜像。升级工具时单独更新 manifest/lock 或 digest，并运行现有 OpenAPI 门禁和 audit；
+详情见 [ADR-0028](architecture/adr/0028-openapi-contract-gates.md)。
 
 Workspace Analysis 的本地兼容/回滚演练不能替代生产 canary 与 OTLP 观察。正式顺序、停止条件、
 Worker-only 回滚和含新事实 Workspace 的兼容 API 约束见

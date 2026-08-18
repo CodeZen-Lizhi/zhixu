@@ -5,6 +5,11 @@
     "version": "0.1.0",
     "description": "System health, Workspace, durable Workflow, Change Control and single-user authentication contracts. Authentication is required by default for business APIs; health and system status remain public."
   },
+  "servers": [
+    {
+      "url": "/"
+    }
+  ],
   "security": [
     {
       "sessionCookie": []
@@ -417,6 +422,12 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "405": {
             "description": "The method is not supported.",
             "content": {
@@ -564,6 +575,12 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "404": {
             "description": "Workspace not found.",
             "content": {
@@ -642,6 +659,12 @@
                 }
               }
             }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "404": {
             "description": "Workspace not found.",
@@ -1726,6 +1749,9 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "403": {
             "description": "The source was quarantined.",
             "content": {
@@ -1750,7 +1776,9 @@
             "description": "The method is not supported.",
             "content": {
               "application/json": {
-                "$ref": "#/components/schemas/Problem"
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
               }
             }
           },
@@ -1768,7 +1796,9 @@
             "description": "Filesystem, parser or database dependency unavailable.",
             "content": {
               "application/json": {
-                "$ref": "#/components/schemas/Problem"
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
               }
             }
           }
@@ -1819,6 +1849,12 @@
                 }
               }
             }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "405": {
             "description": "The method is not supported.",
@@ -1917,6 +1953,12 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "405": {
             "$ref": "#/components/responses/MethodNotAllowed"
           },
@@ -1963,6 +2005,12 @@
                 }
               }
             }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "404": {
             "description": "Workflow Run not found.",
@@ -2055,6 +2103,12 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "404": {
             "description": "Workflow Run not found.",
             "content": {
@@ -2064,6 +2118,9 @@
                 }
               }
             }
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
           },
           "409": {
             "description": "Workflow version or control conflict.",
@@ -2146,6 +2203,12 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "404": {
             "description": "Workflow Run not found.",
             "content": {
@@ -2155,6 +2218,9 @@
                 }
               }
             }
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
           },
           "409": {
             "description": "Workflow version or control conflict.",
@@ -2237,6 +2303,12 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "404": {
             "description": "Workflow Run not found.",
             "content": {
@@ -2246,6 +2318,9 @@
                 }
               }
             }
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
           },
           "409": {
             "description": "Workflow version or control conflict.",
@@ -2326,6 +2401,12 @@
                 }
               }
             }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "404": {
             "description": "Human Task not found.",
@@ -2431,6 +2512,12 @@
                 }
               }
             }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "405": {
             "description": "The method is not supported.",
@@ -2568,6 +2655,12 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "405": {
             "$ref": "#/components/responses/MethodNotAllowed"
           },
@@ -2617,6 +2710,12 @@
                 }
               }
             }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "404": {
             "description": "Proposal not found.",
@@ -2708,6 +2807,12 @@
                 }
               }
             }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "404": {
             "description": "Proposal or Revision not found.",
@@ -2801,6 +2906,9 @@
                 }
               }
             }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
           },
           "403": {
             "description": "Proposal has no valid approval.",
@@ -2897,6 +3005,12 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "405": {
             "$ref": "#/components/responses/MethodNotAllowed"
           },
@@ -2940,6 +3054,12 @@
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
@@ -2985,6 +3105,12 @@
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
@@ -3063,6 +3189,12 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
@@ -3125,6 +3257,12 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
@@ -3170,6 +3308,12 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
@@ -3209,6 +3353,12 @@
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
@@ -3269,6 +3419,12 @@
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
@@ -3344,6 +3500,12 @@
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "405": {
             "$ref": "#/components/responses/MethodNotAllowed"
@@ -3421,6 +3583,12 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
@@ -3473,6 +3641,12 @@
                 }
               }
             }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "404": {
             "description": "The Workspace has no Active Search Index.",
@@ -3563,6 +3737,12 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "405": {
             "description": "The method is not supported.",
             "content": {
@@ -3651,6 +3831,12 @@
                 }
               }
             }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "404": {
             "description": "The center node is absent or outside the current formal Graph projection.",
@@ -3750,6 +3936,12 @@
                 }
               }
             }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "404": {
             "description": "At least one endpoint node is absent or outside the current formal Graph projection.",
@@ -3878,6 +4070,12 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "405": {
             "description": "The method is not supported.",
             "content": {
@@ -3971,6 +4169,12 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "404": {
             "description": "The node is absent or outside the supplied Workspace.",
             "content": {
@@ -4061,6 +4265,12 @@
                 }
               }
             }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "404": {
             "description": "The relation is absent, not formal, or outside the supplied Workspace.",
@@ -4159,6 +4369,12 @@
                 }
               }
             }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "404": {
             "description": "The relation is absent, not formal, or outside the supplied Workspace.",
@@ -4316,6 +4532,12 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "405": {
             "$ref": "#/components/responses/MethodNotAllowed"
           },
@@ -4361,6 +4583,12 @@
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
@@ -4433,6 +4661,12 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
@@ -4488,6 +4722,12 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
@@ -4540,6 +4780,12 @@
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
@@ -4602,6 +4848,12 @@
                 }
               }
             }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "404": {
             "description": "The Source Version is absent or does not belong to this Workspace.",
@@ -4710,6 +4962,12 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "404": {
             "description": "The Source Version/Span is absent or not bound inside this Workspace.",
             "content": {
@@ -4815,6 +5073,15 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
@@ -4862,6 +5129,15 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
           "409": {
             "$ref": "#/components/responses/Conflict"
           },
@@ -4902,6 +5178,15 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
           "415": {
             "$ref": "#/components/responses/UnsupportedMediaType"
           }
@@ -4935,6 +5220,15 @@
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
@@ -4979,8 +5273,17 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
           },
           "503": {
             "$ref": "#/components/responses/Unavailable"
@@ -5028,8 +5331,17 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
@@ -5085,8 +5397,17 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
@@ -5137,8 +5458,17 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
@@ -5170,6 +5500,15 @@
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
           },
           "503": {
             "$ref": "#/components/responses/Unavailable"
@@ -5257,6 +5596,15 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
@@ -5294,8 +5642,17 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
           },
           "503": {
             "$ref": "#/components/responses/Unavailable"
@@ -5354,8 +5711,17 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
           },
           "503": {
             "$ref": "#/components/responses/Unavailable"
@@ -5414,8 +5780,17 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
           },
           "503": {
             "$ref": "#/components/responses/Unavailable"
@@ -5466,8 +5841,17 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
@@ -5505,6 +5889,15 @@
         "responses": {
           "400": {
             "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
           },
           "503": {
             "$ref": "#/components/responses/Unavailable"
@@ -5555,6 +5948,15 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
           "409": {
             "$ref": "#/components/responses/Conflict"
           },
@@ -5598,8 +6000,17 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
           },
           "503": {
             "$ref": "#/components/responses/Unavailable"
@@ -5638,8 +6049,17 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
           },
           "503": {
             "$ref": "#/components/responses/Unavailable"
@@ -5688,8 +6108,17 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
@@ -5739,6 +6168,12 @@
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
@@ -6095,6 +6530,12 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "405": {
             "$ref": "#/components/responses/MethodNotAllowed"
           },
@@ -6169,6 +6610,9 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "405": {
             "$ref": "#/components/responses/MethodNotAllowed"
@@ -15978,7 +16422,7 @@
                 ]
               }
             ],
-            "items": false
+            "items": {}
           },
           "comparison": {
             "type": "array",
@@ -16180,8 +16624,8 @@
               "PROPOSAL_REVISION_STALE",
               "PROPOSAL_REVISION_WORKFLOW_ACTIVE",
               "PROPOSAL_REVISION_SIDE_EFFECT_STARTED",
-			  "PROPOSAL_REVISION_INPUT_TOO_LARGE",
-			  "PROPOSAL_MERGE_ENGINE_UNAVAILABLE"
+              "PROPOSAL_REVISION_INPUT_TOO_LARGE",
+              "PROPOSAL_MERGE_ENGINE_UNAVAILABLE"
             ]
           }
         },
@@ -31283,7 +31727,15 @@
           { "$ref": "#/components/schemas/OrganizingAddClaimRequest" },
           { "$ref": "#/components/schemas/OrganizingAddSmartCollectionRequest" }
         ],
-        "discriminator": { "propertyName": "kind" }
+        "discriminator": {
+          "propertyName": "kind",
+          "mapping": {
+            "SOURCE_VERSION": "#/components/schemas/OrganizingAddSourceVersionRequest",
+            "DOCUMENT_REVISION": "#/components/schemas/OrganizingAddDocumentRevisionRequest",
+            "CLAIM": "#/components/schemas/OrganizingAddClaimRequest",
+            "SMART_COLLECTION": "#/components/schemas/OrganizingAddSmartCollectionRequest"
+          }
+        }
       },
       "OrganizingMaterialPolicy": {
         "type": "object",
@@ -31477,7 +31929,15 @@
           { "$ref": "#/components/schemas/OrganizingClaimSearchReference" },
           { "$ref": "#/components/schemas/OrganizingSmartCollectionSearchReference" }
         ],
-        "discriminator": { "propertyName": "kind" }
+        "discriminator": {
+          "propertyName": "kind",
+          "mapping": {
+            "SOURCE_VERSION": "#/components/schemas/OrganizingSourceVersionSearchReference",
+            "DOCUMENT_REVISION": "#/components/schemas/OrganizingDocumentRevisionSearchReference",
+            "CLAIM": "#/components/schemas/OrganizingClaimSearchReference",
+            "SMART_COLLECTION": "#/components/schemas/OrganizingSmartCollectionSearchReference"
+          }
+        }
       },
       "OrganizingMaterialSearchItem": {
         "type": "object",

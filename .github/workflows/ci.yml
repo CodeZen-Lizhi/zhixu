@@ -29,6 +29,8 @@ jobs:
           --health-retries 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
@@ -42,7 +44,15 @@ jobs:
         with:
           node-version: "24.18.0"
           cache: npm
-          cache-dependency-path: web/package-lock.json
+          cache-dependency-path: |
+            web/package-lock.json
+            api/openapi/package-lock.json
+
+      - name: Install OpenAPI tooling
+        run: make openapi-install
+
+      - name: Audit OpenAPI tooling
+        run: npm audit --prefix api/openapi --audit-level=high
 
       - name: Install web dependencies
         run: make web-install
@@ -53,6 +63,11 @@ jobs:
 
       - name: Run quality gates
         run: make test
+
+      - name: Run OpenAPI breaking-change gate
+        env:
+          OPENAPI_BASE_REVISION: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: make openapi-breaking-check
 
       - name: Run Collection and Health static delivery gates
         run: |

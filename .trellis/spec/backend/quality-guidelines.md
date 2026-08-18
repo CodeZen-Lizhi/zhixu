@@ -49,6 +49,9 @@
    行数计算。已有明确选型是硬约束，偏离前必须取得用户确认。确需自研时，必须记录候选、覆盖差距、未采用原因、
    自研边界、维护成本、测试与退出/迁移方式；核心领域规则仍由领域层拥有，只通过 Interface/Adapter 与框架隔离。
    完整判定与例外材料见 [`ADR-0019`](../../../docs/architecture/adr/0019-mature-framework-first.md)。
+10. 修改公开 OpenAPI 时，通用 OAS lint 由锁定 Spectral、兼容性 diff 由固定 digest 的 oasdiff 拥有；项目 checker
+    与 Gin route inventory 继续拥有 Auth/Capability/Workspace/SSE/Router 不变量。不得把任一单层绿色描述为完整
+    契约绿色，细节见 [`ADR-0028`](../../../docs/architecture/adr/0028-openapi-contract-gates.md)。
 
 ## 测试要求
 
@@ -93,6 +96,68 @@ M6-D 已通过真实 PostgreSQL HTTP、River fault 与 Compose API smoke 一轮�
   对照成熟候选？强制项是否全部满足，达到至少 80% 加权覆盖时是否默认采用，偏离明确选型是否已有用户确认？
 - 确需自研时，是否记录候选、覆盖差距、未采用原因、自研边界、维护成本、测试与退出/迁移方式，并保持核心领域规则
   由领域层拥有？
+
+## Scenario: OpenAPI Contract Gate
+
+### 1. Scope / Trigger
+
+- 修改 `api/openapi/openapi.json`、公开 HTTP/SSE wire、项目 OpenAPI checker、Router 注册或 API tooling 时应用。
+
+### 2. Signatures
+
+```bash
+make openapi-install
+make openapi-check
+OPENAPI_BASE_REVISION=<40-character-lowercase-commit-sha> make openapi-breaking-check
+```
+
+### 3. Contracts
+
+- `api/openapi` 是独立 npm 工具目录：Apache-2.0 Spectral CLI `6.16.3` 与 lockfile 中 `1.22.7` rulesets
+  只负责 OpenAPI 3.1 通用质量；本地 resolver 必须校验原始 `val.$ref` 以 `#/` 开头，不能校验可能已把
+  `openapi.json#/...` 归一化为 `#/...` 的解析结果；resolver 和 oasdiff 均禁止网络外部 refs。
+- Apache-2.0 oasdiff `v1.29.1` 固定为
+  `tufin/oasdiff@sha256:bdba99e5e56558002952aa9a8aa2b91ab5f8e850f5981b5bb9bec732544ff721`；WARN/ERR
+  都阻断，stable/beta 的弃用宽限期均为 180 天。
+- breaking base 必须是历史中的显式完整 40 位小写 SHA。PR 使用 base SHA，受保护分支 push 使用 before SHA；
+  基线、ignore、自动接受和降级 severity 不能由同一变更改写。
+
+### 4. Validation & Error Matrix
+
+| 条件 | 结果 |
+| --- | --- |
+| Spectral、项目 checker 或 Router inventory 失败 | `make openapi-check` 非零，先修复契约或实现漂移 |
+| 原始 `$ref` 是 HTTP、file、父目录或 `openapi.json#/...` | Spectral 在解析前非零；不得以归一化后的 ref 判定是否为文档内引用 |
+| SHA 缺失、短写、全零或 Git 对象不可读 | breaking gate 非零，不能按“没有差异”跳过 |
+| oasdiff 发现 WARN/ERR breaking | 默认阻断；只允许 API owner、迁移/弃用说明和受保护分支显式绕过批准 |
+| 旧 base 仅命中受控 boolean-schema 形状 | bootstrap adapter 删除冗余 `items: false` 后比较；候选永不改写 |
+| 其他 boolean `items` Schema 或 bootstrap 形状漂移 | 非零 fail closed |
+
+### 5. Good / Base / Bad Cases
+
+- Good：修改 response、parameter 或 Schema 后先运行 quality gate，再用可信历史 SHA 运行 breaking gate。
+- Base：普通 route/Schema 数量从执行中的 inventory 派生，不在规范文档复制固定计数。
+- Bad：将同一 PR 的 snapshot 当 baseline、传分支名、添加忽略规则、接受会被归一化的显式同文件 ref，
+  或用工具绿色推断 Capability/SSE 已覆盖。
+
+### 6. Tests Required
+
+- 本门禁不要求为验证新增 mutation fixture、测试文件、测试专用注入或临时代码；使用上述既有正式命令、
+  现有 Router inventory 和项目 checker。现有资产无法直接证明的合成 breaking、外部网络拒绝和过早删除
+  deprecated 元素必须在交付中列为验证盲区。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: OPENAPI_BASE_REVISION=dev make openapi-breaking-check，或让 CI 在 base 缺失时跳过。
+Correct: 只传完整可读取的 40 位 SHA；PR 取 base SHA、push 取 before SHA，缺失即失败。
+
+Wrong: 根据 resolver 归一化后的 `ref` 是否以 `#/` 开头判断本地引用。
+Correct: 根据原始 `val.$ref` 判断；只接受直接以 `#/` 开头的文档内 JSON Pointer。
+
+Wrong: 为合并破坏性 API 更新 snapshot 或加 ignore。
+Correct: 保持 gate 失败，提交 owner 审查与弃用/迁移说明，由受保护分支显式绕过并在仓库外审计。
+```
 
 ## 验证方式
 

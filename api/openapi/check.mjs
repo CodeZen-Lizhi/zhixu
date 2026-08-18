@@ -9,6 +9,9 @@ const canonicalGinRoute = (path) => path.replaceAll(/:([A-Za-z0-9_]+)/g, "{$1}")
 if (document.openapi !== "3.1.0") {
   throw new Error(`expected OpenAPI 3.1.0, got ${document.openapi}`);
 }
+if (JSON.stringify(document.servers) !== JSON.stringify([{ url: "/" }])) {
+  throw new Error("OpenAPI servers must use the relative same-origin root");
+}
 for (const marker of [
   '    "/api/v1/workspaces/active": {',
   '      "ActiveWorkspace": {',
@@ -438,7 +441,7 @@ for (const [path, method] of [
 }
 const authOperations = [
   ["/api/v1/auth/sessions", "post", "SessionCredential", ["400", "401", "403", "405", "503"]],
-  ["/api/v1/auth/session", "get", "SessionInfo", ["401", "405", "503"]],
+  ["/api/v1/auth/session", "get", "SessionInfo", ["401", "403", "405", "503"]],
   ["/api/v1/auth/session/rotate", "post", "SessionCredential", ["400", "401", "403", "405", "503"]],
   ["/api/v1/auth/api-tokens", "get", "APITokenPage", ["401", "403", "405", "503"]],
   ["/api/v1/auth/api-tokens", "post", "APITokenCredential", ["400", "401", "403", "405", "503"]],
@@ -1359,7 +1362,10 @@ if (schemas.WorkflowTopicOutlineReview.properties.outline.minItems !== 1 ||
 }
 const mergeReview = schemas.WorkflowMergeComparisonReview.properties;
 const mergeCategoryOrder = mergeReview.categories.prefixItems?.map((entry) => entry.allOf?.[1]?.properties?.category?.const) ?? [];
-if (mergeReview.categories.minItems !== 4 || mergeReview.categories.maxItems !== 4 || mergeReview.categories.items !== false ||
+const mergeCategoryItems = mergeReview.categories.items;
+if (mergeReview.categories.minItems !== 4 || mergeReview.categories.maxItems !== 4 ||
+    mergeCategoryItems === null || typeof mergeCategoryItems !== "object" || Array.isArray(mergeCategoryItems) ||
+    Object.keys(mergeCategoryItems).length !== 0 ||
     mergeCategoryOrder.join(",") !== "DUPLICATE,COMPLEMENTARY,CONFLICT,UNIQUE" ||
     mergeReview.comparison.maxItems !== 64 || mergeReview.document_count?.minimum !== 0 || mergeReview.diff_preview.minLength !== 1 ||
     mergeReview.diff_preview.maxLength !== 32768 || mergeReview.diff_preview["x-max-utf8-bytes"] !== 32768 ||
@@ -2089,6 +2095,31 @@ function resolveRef(value) {
   const prefix = "#/components/responses/";
   if (!value.$ref.startsWith(prefix)) throw new Error(`unsupported response ref ${value.$ref}`);
   return document.components.responses[value.$ref.slice(prefix.length)];
+}
+
+for (const [path, pathItem] of Object.entries(document.paths)) {
+  for (const method of ["get", "post", "put", "patch", "delete", "head", "options", "trace"]) {
+    const operation = pathItem[method];
+    if (!operation) continue;
+    const key = `${method.toUpperCase()} ${path}`;
+    const responseStatuses = Object.keys(operation.responses ?? {}).sort();
+    if (key === "POST /api/v1/health/issues/{issue_id}/repair-proposals") {
+      if (responseStatuses.join(",") !== "400,401,403,405,503") {
+        throw new Error(`${key} must remain the exact reserved no-success operation`);
+      }
+    } else if (!responseStatuses.some((status) => /^2\d{2}$/.test(status))) {
+      throw new Error(`${key} must declare a success response`);
+    }
+    const statuses = publicOperations.has(key) ? ["405"] : ["401", "403", "405"];
+    const expectedSchema = key === "POST /api/v1/settings/models/test"
+      ? "#/components/schemas/ModelSettingsTestProblem"
+      : "#/components/schemas/Problem";
+    for (const status of statuses) {
+      if (resolveRef(operation.responses?.[status])?.content?.["application/json"]?.schema?.$ref !== expectedSchema) {
+        throw new Error(`${key} ${status} must declare a Problem response`);
+      }
+    }
+  }
 }
 
 const modelSettingsOperations = [
@@ -3694,6 +3725,35 @@ if (document.paths["/api/v1/conversations/{conversation_id}/questions"].post.res
 }
 const latestTurn = document.paths["/api/v1/conversations/{conversation_id}/turns"].parameters.find((item) => item.name === "latest");
 if (latestTurn?.schema?.const !== true) throw new Error("Turn latest recovery query contract drifted");
+const answerDraftPath = document.paths["/api/v1/answers/{answer_id}/stream"];
+const answerDraftSSE = answerDraftPath?.get;
+const answerDraftParameters = answerDraftPath?.parameters ?? [];
+const answerDraftCursor = answerDraftParameters.find((item) => item.name === "Last-Event-ID" && item.in === "header");
+const answerDraftRefs = answerDraftSSE?.responses?.["200"]?.content?.["text/event-stream"]?.schema?.oneOf?.map((item) => item.$ref) ?? [];
+if (answerDraftSSE?.operationId !== "subscribeAnswerDraft" || answerDraftSSE.security !== undefined || answerDraftSSE.requestBody !== undefined ||
+    !answerDraftParameters.some((item) => item.$ref === "#/components/parameters/AnswerID") ||
+    !answerDraftParameters.some((item) => item.$ref === "#/components/parameters/WorkspaceIDQuery") ||
+    answerDraftCursor?.required !== false || answerDraftCursor?.schema?.pattern !== "^[1-9][0-9]*:[1-9][0-9]*$" ||
+    answerDraftCursor?.schema?.maxLength !== 39 ||
+    Object.keys(answerDraftSSE.responses?.["200"]?.content ?? {}).join(",") !== "text/event-stream" ||
+    answerDraftSSE.responses?.["200"]?.headers?.["Cache-Control"]?.schema?.const !== "no-store" ||
+    answerDraftRefs.join(",") !== "#/components/schemas/AnswerDraftChunk,#/components/schemas/AnswerDraftReset,#/components/schemas/AnswerDraftEnd" ||
+    answerDraftRefs.includes("#/components/schemas/ServerEventEnvelope")) {
+  throw new Error("Answer Draft SSE cursor, cache, recovery or event union contract drifted");
+}
+if (schemas.AnswerDraftChunk?.additionalProperties !== false || schemas.AnswerDraftChunk.required?.join(",") !== "generation,sequence,content" ||
+    schemas.AnswerDraftChunk.properties?.generation?.minimum !== 1 || schemas.AnswerDraftChunk.properties?.sequence?.minimum !== 1 ||
+    schemas.AnswerDraftChunk.properties?.content?.minLength !== 1 || schemas.AnswerDraftChunk.properties?.content?.maxLength !== 65536 ||
+    schemas.AnswerDraftChunk.properties?.content?.["x-max-utf8-bytes"] !== 65536 ||
+    schemas.AnswerDraftReset?.additionalProperties !== false || schemas.AnswerDraftReset.required?.join(",") !== "generation,reason,action" ||
+    schemas.AnswerDraftReset.properties?.generation?.minimum !== 0 ||
+    schemas.AnswerDraftReset.properties?.reason?.enum?.join(",") !== "generation_replaced,draft_unavailable,draft_stale,aborted,superseded" ||
+    schemas.AnswerDraftReset.properties?.action?.const !== "refetch" ||
+    schemas.AnswerDraftEnd?.additionalProperties !== false || schemas.AnswerDraftEnd.required?.join(",") !== "generation,status,action" ||
+    schemas.AnswerDraftEnd.properties?.generation?.minimum !== 0 || schemas.AnswerDraftEnd.properties?.status?.enum?.join(",") !== "PUBLISHED,RESET" ||
+    schemas.AnswerDraftEnd.properties?.action?.const !== "refetch") {
+  throw new Error("Answer Draft chunk, reset or end schema contract drifted");
+}
 const sse = document.paths["/api/v1/events"].get;
 if (sse.responses["200"].content?.["text/event-stream"]?.schema?.$ref !== "#/components/schemas/ServerEventEnvelope" ||
     !sse.parameters.some((item) => item.name === "Last-Event-ID" && item.in === "header")) {
@@ -4058,13 +4118,32 @@ for (const [path, method] of [
     throw new Error(`Organizing create/replay response schemas drifted for ${method.toUpperCase()} ${path}`);
   }
 }
+const hasExactDiscriminatorMapping = (schema, expected) => {
+  const mapping = schema?.discriminator?.mapping;
+  return schema?.discriminator?.propertyName === "kind" && mapping &&
+    Object.keys(mapping).length === Object.keys(expected).length &&
+    Object.entries(expected).every(([kind, ref]) => mapping[kind] === ref);
+};
+const organizingAddMapping = {
+  SOURCE_VERSION: "#/components/schemas/OrganizingAddSourceVersionRequest",
+  DOCUMENT_REVISION: "#/components/schemas/OrganizingAddDocumentRevisionRequest",
+  CLAIM: "#/components/schemas/OrganizingAddClaimRequest",
+  SMART_COLLECTION: "#/components/schemas/OrganizingAddSmartCollectionRequest",
+};
 const organizingAddBranches = schemas.OrganizingAddMaterialRequest?.oneOf?.map((item) => schemas[item.$ref?.replace("#/components/schemas/", "")]);
 if (organizingAddBranches?.length !== 4 || organizingAddBranches.some((branch) => branch?.additionalProperties !== false) ||
+    !hasExactDiscriminatorMapping(schemas.OrganizingAddMaterialRequest, organizingAddMapping) ||
     organizingAddBranches.some((branch) => ["availability", "evidence", "content_hash", "query_hash", "read_model_revision", "title", "score"].some((field) => branch.properties?.[field] !== undefined))) {
   throw new Error("Organizing Add Material must remain an identity-only four-kind discriminated union");
 }
 const organizingSearchOperation = document.paths["/api/v1/workspaces/{workspace_id}/organizing/materials/search"]?.get;
 const organizingSearchParameters = Object.fromEntries((organizingSearchOperation?.parameters ?? []).map((item) => [item.name, item]));
+const organizingSearchMapping = {
+  SOURCE_VERSION: "#/components/schemas/OrganizingSourceVersionSearchReference",
+  DOCUMENT_REVISION: "#/components/schemas/OrganizingDocumentRevisionSearchReference",
+  CLAIM: "#/components/schemas/OrganizingClaimSearchReference",
+  SMART_COLLECTION: "#/components/schemas/OrganizingSmartCollectionSearchReference",
+};
 const organizingSearchBranches = schemas.OrganizingMaterialSearchReference?.oneOf?.map((item) => schemas[item.$ref?.replace("#/components/schemas/", "")]);
 if (organizingSearchParameters.q?.required !== true || organizingSearchParameters.q?.schema?.["x-min-utf8-bytes"] !== 2 || organizingSearchParameters.q?.schema?.["x-max-utf8-bytes"] !== 256 ||
     organizingSearchParameters.kind?.required !== true || organizingSearchParameters.kind?.schema?.$ref !== "#/components/schemas/OrganizingMaterialKind" ||
@@ -4072,6 +4151,7 @@ if (organizingSearchParameters.q?.required !== true || organizingSearchParameter
     schemas.OrganizingMaterialSearchPage?.additionalProperties !== false || schemas.OrganizingMaterialSearchPage?.properties?.items?.maxItems !== 25 ||
     schemas.OrganizingMaterialSearchItem?.additionalProperties !== false || schemas.OrganizingMaterialSearchItem?.required?.join(",") !== "workspace_id,kind,title,availability,reference" ||
     schemas.OrganizingMaterialSearchItem?.properties?.evidence !== undefined || organizingSearchBranches?.length !== 4 ||
+    !hasExactDiscriminatorMapping(schemas.OrganizingMaterialSearchReference, organizingSearchMapping) ||
     organizingSearchBranches.some((branch) => branch?.additionalProperties !== false || ["version", "content_hash", "query_hash", "read_model_revision", "evidence"].some((field) => branch.properties?.[field] !== undefined))) {
   throw new Error("Organizing material search must remain bounded, Workspace-scoped, and identity-only");
 }

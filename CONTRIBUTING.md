@@ -31,12 +31,21 @@ make web-lint
 make web-typecheck
 make web-test
 make web-build
+make openapi-install
 make openapi-check
+OPENAPI_BASE_REVISION=<40-character-lowercase-commit-sha> make openapi-breaking-check
 make task-context-check
 make architecture-quality-baseline
 ```
 
 `make test` 会组合基础后端、前端、Eino、Agent Eval、OpenAPI 和 Compose 配置检查。数据库集成与浏览器 smoke 需要对应环境变量、Docker 和外部依赖，只在变更范围要求时执行；具体入口以 `Makefile` 为准。
+
+修改 `api/openapi/openapi.json` 时，先运行 `make openapi-install` 和 `make openapi-check`。涉及已提交
+API 的兼容性判断还必须用完整 40 位小写历史 SHA 运行 `make openapi-breaking-check`；不得使用分支名、
+短 SHA、可覆盖 baseline、ignore 或自动接受。确需破坏性变更时，提交 API owner 审查和弃用/迁移说明，
+由受保护分支的显式管理员绕过批准；required check、CODEOWNERS 和 branch protection/bypass audit 需要
+仓库管理员在 GitHub 核验，不能由仓库文件自证。详见
+[ADR-0028](docs/architecture/adr/0028-openapi-contract-gates.md)。
 
 `make task-context-check` 会用现有 Trellis 校验器检查全部活跃任务的 `implement.jsonl` 与 `check.jsonl`，路径缺失或 JSONL 非法时非零退出；该门禁已接入 `make test`。删除、移动或合并长期文档时，必须在同一变更更新相关活跃任务上下文。
 

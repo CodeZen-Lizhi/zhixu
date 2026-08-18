@@ -29,3 +29,4 @@
 | [0025](0025-eino-embedding-adoption.md) | Eino OpenAI-Compatible/Ollama Embedding 可回滚采用（对应生产结论已由 ADR-0027 取代） | superseded |
 | [0026](0026-eino-runtime-expansion-gates.md) | Eino RAG、Tool、Streaming、Checkpoint 扩展门禁结论（前三项已由 ADR-0027 取代） | superseded |
 | [0027](0027-eino-primary-ai-runtime.md) | Eino 正式生产 AI Runtime，接入 `/chat` RAG（当前） | accepted |
+| [0028](0028-openapi-contract-gates.md) | 锁定 Spectral/oasdiff 的 OpenAPI 质量与破坏性变更门禁 | accepted |

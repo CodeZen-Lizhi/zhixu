@@ -1,0 +1,19 @@
+{
+  "name": "zhixu-openapi-tooling",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "npm@11.7.0",
+  "engines": {
+    "node": ">=24.18.0"
+  },
+  "scripts": {
+    "lint": "spectral lint --ruleset .spectral.yaml --resolver ./local-only-resolver.cjs --fail-severity warn --display-only-failures --format text openapi.json"
+  },
+  "devDependencies": {
+    "@stoplight/spectral-cli": "6.16.3",
+    "@stoplight/spectral-ref-resolver": "1.0.5"
+  },
+  "scarfSettings": {
+    "enabled": false
+  }
+}
