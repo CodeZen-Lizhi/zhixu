@@ -1,0 +1,9 @@
+{"file":".trellis/tasks/08-19-gorm-workflow-migration/research/quality-gates.md","reason":"Review complete transaction ownership, context, error, resource, Tool lock-order and compatibility gates."}
+{"file":".trellis/spec/backend/workspace-analysis-contract.md","reason":"Verify execution fence ownership, lock order and error translation."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Verify application ports do not leak database types or bypass owner boundaries."}
+{"file":".trellis/tasks/08-19-gorm-workflow-migration/design.md","reason":"Check implementation against staged design, Workflow-owned Tool policy/recovery contract and explicit blockers."}
+{"file":".trellis/tasks/08-19-gorm-workflow-migration/implement.md","reason":"Verify completed checklist evidence and retained TODO 9 gates."}
+{"file":".trellis/tasks/08-19-gorm-workflow-migration/research/sql-schema.md","reason":"Review SQL parameterization, lock order, CAS and target indexes."}
+{"file":".trellis/tasks/08-19-gorm-workflow-migration/research/river-transaction.md","reason":"Verify River insert atomicity and pgx worker/listener compatibility."}
+{"file":".trellis/tasks/08-19-gorm-workflow-migration/research/test-wiring.md","reason":"Verify real PostgreSQL evidence and production wiring remain gated."}
+{"file":".trellis/tasks/08-19-gorm-workflow-migration/research/planning-review.md","reason":"Verify Go, SQL, Tool owner-boundary and Trellis planning findings were resolved before implementation."}

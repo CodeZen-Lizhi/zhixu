@@ -41,6 +41,7 @@ type Client struct {
 	lifecycle  clientLifecycle
 	queueCtl   queueControlClient
 	fence      EnqueueFence
+	logger     *slog.Logger
 	queue      string
 	schema     string
 	started    atomic.Bool
@@ -79,7 +80,7 @@ func NewClientWithOptions(pool *pgxpool.Pool, workers *Workers, options Options)
 	if err != nil {
 		return nil, jobError(foundation.ErrorDependencyUnavailable, "WORKFLOW_RIVER_CLIENT_INVALID", err)
 	}
-	return &Client{insert: inner, lifecycle: inner, queueCtl: inner, fence: options.EnqueueFence, queue: options.Queue, schema: WorkflowSchema}, nil
+	return &Client{insert: inner, lifecycle: inner, queueCtl: inner, fence: options.EnqueueFence, logger: options.Logger, queue: options.Queue, schema: WorkflowSchema}, nil
 }
 
 // Queue returns the queue shared by this client's producers and consumers.
@@ -228,12 +229,24 @@ func validateOptions(options Options) error {
 		return optionsError(err)
 	}
 	if options.EnqueueFence != nil {
-		value := reflect.ValueOf(options.EnqueueFence)
-		if value.Kind() == reflect.Pointer && value.IsNil() {
+		if isNilRiverDependency(options.EnqueueFence) {
 			return optionsError(errors.New("enqueue fence is nil"))
 		}
 	}
 	return nil
+}
+
+func isNilRiverDependency(value any) bool {
+	if value == nil {
+		return true
+	}
+	reflected := reflect.ValueOf(value)
+	switch reflected.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return reflected.IsNil()
+	default:
+		return false
+	}
 }
 
 func optionsError(cause error) error {

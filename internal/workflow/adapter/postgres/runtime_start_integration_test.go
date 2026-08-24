@@ -15,11 +15,13 @@ import (
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
 	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -272,6 +274,316 @@ func TestRuntimeRepositoryStartTxUsesCallerTransactionAndReportsReplay(t *testin
 	}
 }
 
+func TestGORMToolExecutionPolicyAndRecoveryFences(t *testing.T) {
+	ctx := context.Background()
+	platformPool, cleanup := newGORMRuntimeTestDatabase(t, ctx)
+	defer cleanup()
+	pool := platformPool.DB()
+	workspaceID := foundation.ID("f1000000-0000-4000-8000-000000000001")
+	otherWorkspaceID := foundation.ID("f2000000-0000-4000-8000-000000000001")
+	for _, workspace := range []struct {
+		id, name, path, status string
+	}{
+		{id: string(workspaceID), name: "gorm-tool-fence", path: "/tmp/gorm-tool-fence", status: "active"},
+		{id: string(otherWorkspaceID), name: "gorm-tool-fence-other", path: "/tmp/gorm-tool-fence-other", status: "inactive"},
+	} {
+		if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at)
+			VALUES($1,$2,$3,$3,CURRENT_TIMESTAMP,$4,1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, workspace.id, workspace.name, workspace.path, workspace.status); err != nil {
+			t.Fatal(err)
+		}
+	}
+	client, err := riveradapter.NewClient(pool, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inserter, err := riveradapter.NewJobInserter(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := NewRuntimeRepository(pool, inserter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	primary := seedGORMToolFenceExecution(t, ctx, runtime, workspaceID, "gorm-tool-fence-primary", "5")
+	other := seedGORMToolFenceExecution(t, ctx, runtime, workspaceID, "gorm-tool-fence-other", "6")
+	policy, err := NewGORMToolExecutionPolicySnapshot(platformPool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovery, err := NewGORMToolCallRecoveryFence(platformPool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unitOfWork, err := platformPool.UnitOfWork()
+	if err != nil {
+		t.Fatal(err)
+	}
+	policyRequest := application.ToolExecutionPolicySnapshotRequest{
+		WorkspaceID: workspaceID, WorkflowRunID: primary.started.Run.ID,
+		NodeRunID: primary.started.FirstNode.ID, NodeAttemptID: primary.claimed.Attempt.ID,
+	}
+	recoveryRequest := application.ToolCallRecoveryFenceRequest{
+		WorkspaceID: workspaceID, WorkflowRunID: primary.started.Run.ID,
+		NodeRunID: primary.started.FirstNode.ID, NodeAttemptID: primary.claimed.Attempt.ID,
+	}
+
+	t.Run("policy returns complete snapshot and holds shared locks", func(t *testing.T) {
+		err := unitOfWork.Within(ctx, foundation.TransactionOptions{}, func(callbackCtx context.Context, scope foundation.TransactionScope) error {
+			transaction, unwrapErr := platformpostgres.GORMTransaction(scope)
+			if unwrapErr != nil {
+				return unwrapErr
+			}
+			var databaseBefore, databaseAfter time.Time
+			if scanErr := transaction.Raw(`SELECT clock_timestamp()`).Row().Scan(&databaseBefore); scanErr != nil {
+				return scanErr
+			}
+			snapshot, found, lockErr := policy.LockToolExecutionPolicyScoped(callbackCtx, scope, policyRequest)
+			if lockErr != nil {
+				return lockErr
+			}
+			if scanErr := transaction.Raw(`SELECT clock_timestamp()`).Row().Scan(&databaseAfter); scanErr != nil {
+				return scanErr
+			}
+			if !found || snapshot.DefinitionID != primary.request.Definition.ID || snapshot.DefinitionKey != primary.request.Definition.Key ||
+				snapshot.DefinitionVersion != primary.request.Definition.Version || strings.TrimSpace(snapshot.DefinitionGraph) == "" ||
+				snapshot.WorkspaceID != workspaceID || snapshot.WorkflowRunID != primary.started.Run.ID || snapshot.WorkflowStatus != domain.RunStatusRunning ||
+				snapshot.PauseRequested || snapshot.CancelRequested || snapshot.NodeRunID != primary.started.FirstNode.ID ||
+				snapshot.NodeKey != primary.started.FirstNode.NodeKey || snapshot.NodeKind != primary.started.FirstNode.NodeType ||
+				snapshot.NodeStatus != domain.NodeStatusRunning || snapshot.NodeAttempt != primary.claimed.Attempt.AttemptNo ||
+				snapshot.NodeAttemptID != primary.claimed.Attempt.ID || snapshot.AttemptStatus != domain.AttemptStatusRunning ||
+				snapshot.AttemptNo != primary.claimed.Attempt.AttemptNo || !snapshot.NodeLeaseOwnerSet || !snapshot.AttemptLeaseOwnerSet ||
+				snapshot.NodeLeaseOwner != primary.claimed.Attempt.LeaseOwner || snapshot.AttemptLeaseOwner != primary.claimed.Attempt.LeaseOwner ||
+				!snapshot.NodeLeaseUntilSet || !snapshot.AttemptLeaseUntilSet || !snapshot.NodeLeaseUntil.Equal(snapshot.AttemptLeaseUntil) ||
+				!snapshot.NodeLeaseUntil.After(snapshot.DatabaseNow) {
+				t.Fatalf("policy snapshot found=%t snapshot=%+v", found, snapshot)
+			}
+			if snapshot.DatabaseNow.Before(databaseBefore) || snapshot.DatabaseNow.After(databaseAfter) {
+				t.Fatalf("database time before=%s snapshot=%s after=%s", databaseBefore, snapshot.DatabaseNow, databaseAfter)
+			}
+			for _, locked := range []struct {
+				name, query, id string
+			}{
+				{name: "definition", query: `SELECT 1 FROM workflow.definition WHERE id=$1 FOR UPDATE NOWAIT`, id: string(primary.request.Definition.ID)},
+				{name: "run", query: `SELECT 1 FROM workflow.run WHERE id=$1 FOR UPDATE NOWAIT`, id: string(primary.started.Run.ID)},
+				{name: "node", query: `SELECT 1 FROM workflow.node_run WHERE id=$1 FOR UPDATE NOWAIT`, id: string(primary.started.FirstNode.ID)},
+				{name: "attempt", query: `SELECT 1 FROM workflow.node_attempt WHERE id=$1 FOR UPDATE NOWAIT`, id: string(primary.claimed.Attempt.ID)},
+			} {
+				t.Run(locked.name, func(t *testing.T) {
+					assertPGXWorkflowRowLockUnavailable(t, callbackCtx, pool, locked.query, locked.id)
+				})
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("binding mismatches are absent", func(t *testing.T) {
+		mismatches := []struct {
+			name     string
+			policy   application.ToolExecutionPolicySnapshotRequest
+			recovery application.ToolCallRecoveryFenceRequest
+		}{
+			{name: "workspace", policy: policyRequest, recovery: recoveryRequest},
+			{name: "run", policy: policyRequest, recovery: recoveryRequest},
+			{name: "node", policy: policyRequest, recovery: recoveryRequest},
+			{name: "attempt", policy: policyRequest, recovery: recoveryRequest},
+		}
+		mismatches[0].policy.WorkspaceID, mismatches[0].recovery.WorkspaceID = otherWorkspaceID, otherWorkspaceID
+		mismatches[1].policy.WorkflowRunID, mismatches[1].recovery.WorkflowRunID = other.started.Run.ID, other.started.Run.ID
+		mismatches[2].policy.NodeRunID, mismatches[2].recovery.NodeRunID = other.started.FirstNode.ID, other.started.FirstNode.ID
+		mismatches[3].policy.NodeAttemptID, mismatches[3].recovery.NodeAttemptID = other.claimed.Attempt.ID, other.claimed.Attempt.ID
+		for _, mismatch := range mismatches {
+			mismatch := mismatch
+			t.Run(mismatch.name, func(t *testing.T) {
+				err := unitOfWork.Within(ctx, foundation.TransactionOptions{}, func(callbackCtx context.Context, scope foundation.TransactionScope) error {
+					if snapshot, found, policyErr := policy.LockToolExecutionPolicyScoped(callbackCtx, scope, mismatch.policy); policyErr != nil || found || snapshot != (application.ToolExecutionPolicySnapshot{}) {
+						t.Fatalf("policy mismatch snapshot=%+v found=%t err=%v", snapshot, found, policyErr)
+					}
+					if result, recoveryErr := recovery.LockToolCallRecoveryScoped(callbackCtx, scope, mismatch.recovery); recoveryErr != nil || result != (application.ToolCallRecoveryFenceResult{}) {
+						t.Fatalf("recovery mismatch result=%+v err=%v", result, recoveryErr)
+					}
+					return nil
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
+	})
+
+	t.Run("recovery returns healthy facts and locks only node and attempt", func(t *testing.T) {
+		err := unitOfWork.Within(ctx, foundation.TransactionOptions{}, func(callbackCtx context.Context, scope foundation.TransactionScope) error {
+			result, lockErr := recovery.LockToolCallRecoveryScoped(callbackCtx, scope, recoveryRequest)
+			if lockErr != nil {
+				return lockErr
+			}
+			if !result.Found || result.Skipped || result.Stale || result.DatabaseNow.IsZero() ||
+				result.WorkflowStatus != domain.RunStatusRunning || result.NodeStatus != domain.NodeStatusRunning ||
+				result.AttemptStatus != domain.AttemptStatusRunning || result.NodeAttempt != result.AttemptNo ||
+				!result.NodeLeaseUntil.After(result.DatabaseNow) {
+				t.Fatalf("healthy recovery result=%+v", result)
+			}
+			assertPGXWorkflowRowLockAvailable(t, callbackCtx, pool, `SELECT 1 FROM workflow.run WHERE id=$1 FOR UPDATE NOWAIT`, string(primary.started.Run.ID))
+			assertPGXWorkflowRowLockUnavailable(t, callbackCtx, pool, `SELECT 1 FROM workflow.node_run WHERE id=$1 FOR UPDATE NOWAIT`, string(primary.started.FirstNode.ID))
+			assertPGXWorkflowRowLockUnavailable(t, callbackCtx, pool, `SELECT 1 FROM workflow.node_attempt WHERE id=$1 FOR UPDATE NOWAIT`, string(primary.claimed.Attempt.ID))
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("recovery distinguishes skipped node and attempt", func(t *testing.T) {
+		for _, locked := range []struct {
+			name, query, id string
+		}{
+			{name: "node", query: `SELECT id::text FROM workflow.node_run WHERE id=$1 FOR UPDATE`, id: string(primary.started.FirstNode.ID)},
+			{name: "attempt", query: `SELECT id::text FROM workflow.node_attempt WHERE id=$1 FOR UPDATE`, id: string(primary.claimed.Attempt.ID)},
+		} {
+			locked := locked
+			t.Run(locked.name, func(t *testing.T) {
+				release := lockPGXWorkflowRow(t, ctx, pool, locked.query, locked.id)
+				defer release()
+				err := unitOfWork.Within(ctx, foundation.TransactionOptions{}, func(callbackCtx context.Context, scope foundation.TransactionScope) error {
+					result, recoveryErr := recovery.LockToolCallRecoveryScoped(callbackCtx, scope, recoveryRequest)
+					if recoveryErr != nil {
+						return recoveryErr
+					}
+					if !result.Found || !result.Skipped || result.Stale || !result.DatabaseNow.IsZero() {
+						t.Fatalf("skipped recovery result=%+v", result)
+					}
+					return nil
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
+	})
+
+	t.Run("recovery marks an expired matched lease stale", func(t *testing.T) {
+		tx, beginErr := pool.Begin(ctx)
+		if beginErr != nil {
+			t.Fatal(beginErr)
+		}
+		if _, updateErr := tx.Exec(ctx, `UPDATE workflow.node_run SET lease_until=clock_timestamp()-interval '1 second' WHERE id=$1`, string(primary.started.FirstNode.ID)); updateErr != nil {
+			_ = tx.Rollback(ctx)
+			t.Fatal(updateErr)
+		}
+		if _, updateErr := tx.Exec(ctx, `UPDATE workflow.node_attempt SET lease_until=(SELECT lease_until FROM workflow.node_run WHERE id=$2) WHERE id=$1`, string(primary.claimed.Attempt.ID), string(primary.started.FirstNode.ID)); updateErr != nil {
+			_ = tx.Rollback(ctx)
+			t.Fatal(updateErr)
+		}
+		if commitErr := tx.Commit(ctx); commitErr != nil {
+			t.Fatal(commitErr)
+		}
+		err := unitOfWork.Within(ctx, foundation.TransactionOptions{}, func(callbackCtx context.Context, scope foundation.TransactionScope) error {
+			result, recoveryErr := recovery.LockToolCallRecoveryScoped(callbackCtx, scope, recoveryRequest)
+			if recoveryErr != nil {
+				return recoveryErr
+			}
+			if !result.Found || result.Skipped || !result.Stale || result.NodeLeaseUntil.After(result.DatabaseNow) {
+				t.Fatalf("stale recovery result=%+v", result)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("scope context and SQLSTATE contracts", func(t *testing.T) {
+		if _, _, err := policy.LockToolExecutionPolicyScoped(nil, nil, policyRequest); !hasCode(err, "WORKFLOW_TOOL_EXECUTION_POLICY_INVALID") {
+			t.Fatalf("nil policy context error=%v", err)
+		}
+		if _, err := recovery.LockToolCallRecoveryScoped(nil, nil, recoveryRequest); !hasCode(err, "WORKFLOW_TOOL_CALL_RECOVERY_FENCE_INVALID") {
+			t.Fatalf("nil recovery context error=%v", err)
+		}
+		invalidPolicyRequest := policyRequest
+		invalidPolicyRequest.NodeRunID = foundation.ID("invalid")
+		if _, _, err := policy.LockToolExecutionPolicyScoped(ctx, nil, invalidPolicyRequest); !hasCode(err, "WORKFLOW_TOOL_EXECUTION_POLICY_INVALID") {
+			t.Fatalf("invalid policy request error=%v", err)
+		}
+		invalidRecoveryRequest := recoveryRequest
+		invalidRecoveryRequest.NodeAttemptID = foundation.ID("invalid")
+		if _, err := recovery.LockToolCallRecoveryScoped(ctx, nil, invalidRecoveryRequest); !hasCode(err, "WORKFLOW_TOOL_CALL_RECOVERY_FENCE_INVALID") {
+			t.Fatalf("invalid recovery request error=%v", err)
+		}
+		if _, _, err := policy.LockToolExecutionPolicyScoped(ctx, foreignWorkflowTransactionScope{}, policyRequest); err == nil {
+			t.Fatal("foreign policy scope was accepted")
+		} else {
+			assertGORMWorkflowError(t, err, foundation.ErrorDependencyUnavailable, "WORKFLOW_TOOL_EXECUTION_POLICY_UNAVAILABLE", true)
+		}
+		if _, err := recovery.LockToolCallRecoveryScoped(ctx, foreignWorkflowTransactionScope{}, recoveryRequest); err == nil {
+			t.Fatal("foreign recovery scope was accepted")
+		} else {
+			assertGORMWorkflowError(t, err, foundation.ErrorDependencyUnavailable, "WORKFLOW_TOOL_CALL_RECOVERY_FENCE_UNAVAILABLE", true)
+		}
+
+		var staleScope foundation.TransactionScope
+		if err := unitOfWork.Within(ctx, foundation.TransactionOptions{}, func(_ context.Context, scope foundation.TransactionScope) error {
+			staleScope = scope
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := policy.LockToolExecutionPolicyScoped(ctx, staleScope, policyRequest); err == nil {
+			t.Fatal("stale policy scope was accepted")
+		} else {
+			assertGORMWorkflowError(t, err, foundation.ErrorDependencyUnavailable, "WORKFLOW_TOOL_EXECUTION_POLICY_UNAVAILABLE", true)
+		}
+		if _, err := recovery.LockToolCallRecoveryScoped(ctx, staleScope, recoveryRequest); err == nil {
+			t.Fatal("stale recovery scope was accepted")
+		} else {
+			assertGORMWorkflowError(t, err, foundation.ErrorDependencyUnavailable, "WORKFLOW_TOOL_CALL_RECOVERY_FENCE_UNAVAILABLE", true)
+		}
+
+		cancelCause := errors.New("tool fence caller stopped")
+		canceledCtx, cancel := context.WithCancelCause(ctx)
+		cancel(cancelCause)
+		cancelErr := unitOfWork.Within(ctx, foundation.TransactionOptions{}, func(_ context.Context, scope foundation.TransactionScope) error {
+			_, _, policyErr := policy.LockToolExecutionPolicyScoped(canceledCtx, scope, policyRequest)
+			return policyErr
+		})
+		assertGORMWorkflowError(t, cancelErr, foundation.ErrorNonRetryableFailure, "WORKFLOW_TOOL_EXECUTION_POLICY_UNAVAILABLE", false)
+		if !errors.Is(cancelErr, context.Canceled) || !errors.Is(cancelErr, cancelCause) {
+			t.Fatalf("policy cancellation cause=%v", cancelErr)
+		}
+		recoveryCancelCause := errors.New("tool recovery caller stopped")
+		recoveryCanceledCtx, cancelRecovery := context.WithCancelCause(ctx)
+		cancelRecovery(recoveryCancelCause)
+		recoveryCancelErr := unitOfWork.Within(ctx, foundation.TransactionOptions{}, func(_ context.Context, scope foundation.TransactionScope) error {
+			_, recoveryErr := recovery.LockToolCallRecoveryScoped(recoveryCanceledCtx, scope, recoveryRequest)
+			return recoveryErr
+		})
+		assertGORMWorkflowError(t, recoveryCancelErr, foundation.ErrorNonRetryableFailure, "WORKFLOW_TOOL_CALL_RECOVERY_FENCE_UNAVAILABLE", false)
+		if !errors.Is(recoveryCancelErr, context.Canceled) || !errors.Is(recoveryCancelErr, recoveryCancelCause) {
+			t.Fatalf("recovery cancellation cause=%v", recoveryCancelErr)
+		}
+
+		release := lockPGXWorkflowRow(t, ctx, pool, `SELECT id::text FROM workflow.node_run WHERE id=$1 FOR UPDATE`, string(primary.started.FirstNode.ID))
+		defer release()
+		lockErr := unitOfWork.Within(ctx, foundation.TransactionOptions{}, func(callbackCtx context.Context, scope foundation.TransactionScope) error {
+			transaction, unwrapErr := platformpostgres.GORMTransaction(scope)
+			if unwrapErr != nil {
+				return unwrapErr
+			}
+			if execErr := transaction.Exec(`SET LOCAL lock_timeout = '100ms'`).Error; execErr != nil {
+				return execErr
+			}
+			_, _, policyErr := policy.LockToolExecutionPolicyScoped(callbackCtx, scope, policyRequest)
+			return policyErr
+		})
+		assertGORMWorkflowError(t, lockErr, foundation.ErrorDependencyUnavailable, "WORKFLOW_TOOL_EXECUTION_POLICY_UNAVAILABLE", true)
+		var postgresError *pgconn.PgError
+		if !errors.As(lockErr, &postgresError) || postgresError.Code != "55P03" {
+			t.Fatalf("lock SQLSTATE error=%v postgres=%+v", lockErr, postgresError)
+		}
+	})
+}
+
 type failingJobInserter struct{}
 
 type commitResponseLossDB struct{ pool *pgxpool.Pool }
@@ -334,6 +646,17 @@ func remapRuntimeStartIDs(request *application.RuntimeStartRequest, prefix strin
 
 func newRuntimeTestDatabase(t *testing.T, ctx context.Context) (*pgxpool.Pool, func()) {
 	t.Helper()
+	platformPool, cleanup := newRuntimeTestPlatformDatabase(t, ctx)
+	return platformPool.DB(), cleanup
+}
+
+func newGORMRuntimeTestDatabase(t *testing.T, ctx context.Context) (*platformpostgres.Pool, func()) {
+	t.Helper()
+	return newRuntimeTestPlatformDatabase(t, ctx)
+}
+
+func newRuntimeTestPlatformDatabase(t *testing.T, ctx context.Context) (*platformpostgres.Pool, func()) {
+	t.Helper()
 	baseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
 	if baseURL == "" {
 		t.Fatal("ZHIXU_TEST_DATABASE_URL is required for Runtime Start integration tests")
@@ -353,28 +676,120 @@ func newRuntimeTestDatabase(t *testing.T, ctx context.Context) (*pgxpool.Pool, f
 		t.Fatal(err)
 	}
 	parsed.Path = "/" + name
-	pool, err := pgxpool.New(ctx, parsed.String())
+	databaseURL := parsed.String()
+	migrationPool, err := platformpostgres.OpenMigration(ctx, databaseURL, 4, 0)
 	if err != nil {
 		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier)
 		admin.Close()
 		t.Fatal(err)
 	}
-	runner, err := platformmigration.NewRunner(pool, projectmigrations.FS)
+	runner, err := platformmigration.NewRunner(migrationPool.DB(), projectmigrations.FS)
 	if err != nil {
-		pool.Close()
+		migrationPool.Close()
 		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
 		admin.Close()
 		t.Fatal(err)
 	}
 	if err := runner.Up(ctx); err != nil {
-		pool.Close()
+		migrationPool.Close()
 		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
 		admin.Close()
 		t.Fatal(err)
 	}
-	return pool, func() {
-		pool.Close()
+	migrationPool.Close()
+	platformPool, err := platformpostgres.Open(ctx, databaseURL, 8, 0)
+	if err != nil {
+		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
+		admin.Close()
+		t.Fatal(err)
+	}
+	if err := platformPool.Ping(ctx); err != nil {
+		platformPool.Close()
+		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
+		admin.Close()
+		t.Fatal(err)
+	}
+	return platformPool, func() {
+		platformPool.Close()
 		_, _ = admin.Exec(context.Background(), "DROP DATABASE "+identifier+" WITH (FORCE)")
 		admin.Close()
+	}
+}
+
+type gormToolFenceExecution struct {
+	request application.RuntimeStartRequest
+	started application.RuntimeStartResult
+	claimed application.ClaimResult
+}
+
+func seedGORMToolFenceExecution(
+	t *testing.T,
+	ctx context.Context,
+	runtime *RuntimeRepository,
+	workspaceID foundation.ID,
+	key string,
+	idPrefix string,
+) gormToolFenceExecution {
+	t.Helper()
+	request := runtimeStateStartFixture(workspaceID, key, domain.RetryPolicy{MaxRetries: 0, BaseDelay: time.Millisecond, MaxDelay: time.Second})
+	remapRuntimeStartIDs(&request, idPrefix)
+	started, err := runtime.Start(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := runtime.Claim(ctx, application.ClaimCommand{
+		NodeRunID: started.FirstNode.ID, DispatchNo: 1,
+		DeliveryID: "tool-fence-" + key, RiverJobID: started.Job.JobID,
+		LeaseOwner: "tool-fence-worker", LeaseDuration: time.Minute,
+	})
+	if err != nil || claimed.Disposition != application.ClaimDispositionClaimed {
+		t.Fatalf("claim=%+v err=%v", claimed, err)
+	}
+	return gormToolFenceExecution{request: request, started: started, claimed: claimed}
+}
+
+type foreignWorkflowTransactionScope struct{}
+
+func (foreignWorkflowTransactionScope) TransactionScope() {}
+
+func lockPGXWorkflowRow(t *testing.T, ctx context.Context, pool *pgxpool.Pool, query string, arguments ...any) func() {
+	t.Helper()
+	transaction, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var id string
+	if err := transaction.QueryRow(ctx, query, arguments...).Scan(&id); err != nil {
+		_ = transaction.Rollback(ctx)
+		t.Fatal(err)
+	}
+	return func() { _ = transaction.Rollback(ctx) }
+}
+
+func assertPGXWorkflowRowLockUnavailable(t *testing.T, ctx context.Context, pool *pgxpool.Pool, query string, arguments ...any) {
+	t.Helper()
+	transaction, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = transaction.Rollback(ctx) }()
+	var marker int
+	err = transaction.QueryRow(ctx, query, arguments...).Scan(&marker)
+	var postgresError *pgconn.PgError
+	if !errors.As(err, &postgresError) || postgresError.Code != "55P03" {
+		t.Fatalf("row lock error=%v postgres=%+v", err, postgresError)
+	}
+}
+
+func assertPGXWorkflowRowLockAvailable(t *testing.T, ctx context.Context, pool *pgxpool.Pool, query string, arguments ...any) {
+	t.Helper()
+	transaction, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = transaction.Rollback(ctx) }()
+	var marker int
+	if err := transaction.QueryRow(ctx, query, arguments...).Scan(&marker); err != nil || marker != 1 {
+		t.Fatalf("available row lock marker=%d err=%v", marker, err)
 	}
 }

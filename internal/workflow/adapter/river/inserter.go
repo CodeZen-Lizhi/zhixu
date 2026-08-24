@@ -125,17 +125,9 @@ func insertValidatedJobTx[T riverlib.JobArgs](ctx context.Context, client riverI
 			return JobReceipt{}, err
 		}
 	}
-	metadata, err := encodeTraceMetadata(ctx)
+	opts, err := buildInsertOptions(ctx, queue, options)
 	if err != nil {
 		return JobReceipt{}, err
-	}
-	uniqueOpts := riverlib.UniqueOpts{ByArgs: true}
-	if len(options.UniqueStates) > 0 {
-		uniqueOpts.ByState = append([]rivertype.JobState(nil), options.UniqueStates...)
-	}
-	opts := &riverlib.InsertOpts{Metadata: metadata, Queue: queue, UniqueOpts: uniqueOpts}
-	if !options.ScheduledAt.IsZero() {
-		opts.ScheduledAt = options.ScheduledAt.UTC()
 	}
 	result, err := client.InsertTx(ctx, tx, args, opts)
 	if err != nil {
@@ -145,6 +137,22 @@ func insertValidatedJobTx[T riverlib.JobArgs](ctx context.Context, client riverI
 		return JobReceipt{}, jobError(foundation.ErrorConsistencyViolation, "WORKFLOW_RIVER_JOB_RESULT_INVALID", errors.New("River insert returned no persisted job"))
 	}
 	return JobReceipt{JobID: result.Job.ID, Duplicate: result.UniqueSkippedAsDuplicate}, nil
+}
+
+func buildInsertOptions(ctx context.Context, queue string, options InsertOptions) (*riverlib.InsertOpts, error) {
+	metadata, err := encodeTraceMetadata(ctx)
+	if err != nil {
+		return nil, err
+	}
+	uniqueOpts := riverlib.UniqueOpts{ByArgs: true}
+	if len(options.UniqueStates) > 0 {
+		uniqueOpts.ByState = append([]rivertype.JobState(nil), options.UniqueStates...)
+	}
+	opts := &riverlib.InsertOpts{Metadata: metadata, Queue: queue, UniqueOpts: uniqueOpts}
+	if !options.ScheduledAt.IsZero() {
+		opts.ScheduledAt = options.ScheduledAt.UTC()
+	}
+	return opts, nil
 }
 
 func encodeTraceMetadata(ctx context.Context) ([]byte, error) {
