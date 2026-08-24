@@ -83,9 +83,16 @@ ZHIXU_TEST_DATABASE_URL=<disposable migrated PostgreSQL URL> \\
 
 ## Review 结果
 
-- Go review：无 P0/P1。发现 scoped fence 的 typed-nil 判断只覆盖 pointer；已统一覆盖 Go 中所有可为 nil 的 Kind，并将集成清理/Worker 停止失败升级为测试失败；重新通过 test、race、vet 和编译检查。
+- Go review：发现 scoped fence 的 typed-nil 判断只覆盖 pointer；已统一覆盖 Go 中所有可为 nil 的 Kind，并将集成清理/Worker 停止失败升级为测试失败。2026-08-25 提交前复核又发现 `database/sql` 自动回滚可能让 Commit 返回 `sql.ErrTxDone`，原实现会丢失 caller cancellation/deadline 与自定义 cause；已补齐错误链、增加单元回归并提交为 `d611e7ec`。
 - SQL/DB review：生产路径无新增手写 SQL、migration 或 schema 变化；集成 fixture 仅使用常量 SQL 与参数绑定完成验收；同一个 `*sql.Tx` 静态传入 `riverdatabasesql.InsertTx`，未发现注入、动态 SQL、N+1 或跨事务代码路径。
 - 剩余 P2 均属于 TODO 9 的运行时证据缺口，不以静态检查冒充完成。
+
+## 2026-08-25 提交前独立快照复核
+
+- Foundation commit `78b63d0c` 的精确快照中，`internal/foundation`、`internal/platform/postgres`、`internal/workflow/adapter/river` 的 test、race、vet、integration compile-only、`go list` 和 `go mod verify` 均通过；`git diff 78b63d0c^ 78b63d0c --check` 通过。
+- `go mod tidy -diff` 只提示补充 GORM sqlite 测试依赖的 checksum；本次未改写共享 `go.sum`，`go mod verify` 与 vendor 模式编译仍通过。
+- 当前本地 `dev` 的纯 Git tip（不包含未跟踪文件）无法编译 `cmd/api`、`cmd/worker`：较早提交的 Artifact/Workflow GORM 文件引用了尚未提交的 `ScopedRuntimeStarter`、`ScopedWorkflowTerminalHook`、`ScopedModelRunStore` 及 Workflow GORM helper。完整脏工作树会遮蔽该问题，因此 push 前必须先由对应 owner 提交这些依赖并在新的纯 Git tip 复跑命令编译。
+- 上述提交序列问题不在 Foundation commit 的文件范围内，未通过修改其他模块规避；在纯 Git tip 恢复可编译前，不应把当前本地 `dev` push 视为通过发布门禁。
 
 ## TODO 9 未关闭门禁
 

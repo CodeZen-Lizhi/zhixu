@@ -96,7 +96,7 @@ Graph 和 Retrieval 不互相强制排序；各自的 child 重新盘点若发�
 
 依赖表示生产切换顺序，不阻止提前读取代码、冻结基线或完成未接 Composition 的实现。Capture Core 可在 Workspace scoped writer 就绪后 staged；Capture Profile 必须等待 Agent owner 提供 `foundation.TransactionScope` 版本的 Model Run reader/finalizer，不能复用 pgx-only `ModelRunTxFinalizer(any)` 或拆成两个事务。
 
-Artifact child 于 2026-08-24 完成 staged 实现、真实 PostgreSQL TODO 9、Go/SQL/Trellis review 和 Final handoff；生产仍为 legacy，工作提交与归档前保持 `in_progress`。它已消费 Workflow `ScopedRuntimeStarter`/`ScopedRuntimeBindingReader` 与 Agent `ScopedModelRunStore`，未新增 pgx allowlist；Final 的 API/Worker 构造、scoped terminal composite、legacy 清理和回滚清单见 [`../08-19-gorm-artifact-migration/final-handoff.md`](../08-19-gorm-artifact-migration/final-handoff.md)。
+Artifact child 于 2026-08-24 完成 staged 实现、真实 PostgreSQL TODO 9、Go/SQL/Trellis review 和 Final handoff，已归档为 `completed`；生产仍为 legacy。它已消费 Workflow `ScopedRuntimeStarter`/`ScopedRuntimeBindingReader` 与 Agent `ScopedModelRunStore`，未新增 pgx allowlist；Final 的 API/Worker 构造、scoped terminal composite、legacy 清理和回滚清单见 [`../archive/2026-08/08-19-gorm-artifact-migration/final-handoff.md`](../archive/2026-08/08-19-gorm-artifact-migration/final-handoff.md)。
 
 ## 5. 每个模块 child 的固定清单
 

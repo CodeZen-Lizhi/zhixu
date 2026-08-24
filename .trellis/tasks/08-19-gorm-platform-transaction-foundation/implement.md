@@ -34,3 +34,11 @@
 3. [x] 使用 sql-code-review 审查同事务 River 路径、参数化、安全日志、连接池与错误分类。
 4. [x] 使用 trellis-check 复核规范、任务边界、依赖与差异。
 5. [x] 运行真实 PostgreSQL/River 原子性、Worker 消费、取消、ACK 丢失重放和池生命周期验收；将网络层 COMMIT response loss、目标环境容量与业务 owner 错误矩阵记录为剩余门禁，保持任务 `in_progress`、不得归档。
+
+## Phase 6：提交与发布前复核
+
+1. [x] 在只包含 `78b63d0c` 的独立快照中复跑 Foundation 三个目标包的 test、race、vet、integration compile-only、`go list`、`go mod verify` 和 diff 检查。
+2. [x] 修复 `database/sql` 自动回滚先于 Commit 时返回 `sql.ErrTxDone`、导致 caller cancel/deadline cause 丢失的错误链竞态，并增加单元回归。
+3. [x] 将上述 Review 修复纳入 Foundation follow-up commit `d611e7ec`。
+4. [ ] 由 Workflow/Agent owner 补齐本地 `dev` 已有 Artifact/Workflow 提交引用但仍未提交的 scoped Application Port 与 Workflow GORM helper，确保纯 Git tip 的 API/Worker 编译通过后再 push。
+5. [ ] 保持 TODO 9 生产连接预算、网络层 COMMIT response loss 和业务 owner 错误矩阵未完成，任务继续为 `in_progress`。
