@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-2.md`
-- **Total Sessions**: 64
-- **Last Active**: 2026-08-19
+- **Total Sessions**: 65
+- **Last Active**: 2026-08-24
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-2.md` | ~397 | Active |
+| `journal-2.md` | ~421 | Active |
 | `journal-1.md` | ~2005 | Archived |
 <!-- @@@/auto:active-documents -->
 
@@ -30,6 +30,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 65 | 2026-08-24 | 完成 Artifact GORM 迁移 | `18cfb8f6`, `f803e51f`, `eb0c31fb`, `99970bfa` | `dev` |
 | 64 | 2026-08-19 | 完成 TODO 8 前端 OpenAPI 客户端与 Zod 接入 | `75e9c569`, `22dcd506` | `dev` |
 | 63 | 2026-08-18 | 交付 OpenAPI 契约门禁 | `54c24fce` | `dev` |
 | 62 | 2026-08-15 | 分离 Docker 初始化容器与稳态项目 | `2d04684` | `dev` |

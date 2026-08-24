@@ -395,3 +395,27 @@ Eino/eino-ext 已成为生产唯一 AI Runtime，旧 direct 实现已删除并�
 ### Status
 
 [OK] **Completed**
+
+
+## Session 65: 完成 Artifact GORM 迁移
+
+**Date**: 2026-08-24
+**Task**: 完成 Artifact GORM 迁移
+**Branch**: `dev`
+
+### Summary
+
+交付 Artifact staged GORM Repository、Citation Backfill、Section Generation 与 scoped terminal hook；真实 PostgreSQL TODO 9、Go/SQL/Trellis review 和 Final handoff 全部通过，生产 Composition 保持 legacy。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `18cfb8f6` | (see git log) |
+| `f803e51f` | (see git log) |
+| `eb0c31fb` | (see git log) |
+| `99970bfa` | (see git log) |
+
+### Status
+
+[OK] **Completed**
