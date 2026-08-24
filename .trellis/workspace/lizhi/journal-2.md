@@ -419,3 +419,38 @@ Eino/eino-ext 已成为生产唯一 AI Runtime，旧 direct 实现已删除并�
 ### Status
 
 [OK] **Completed**
+
+
+## Session 66: GORM 平台与事务基础验收
+
+**Date**: 2026-08-24
+**Task**: GORM 平台与事务基础验收
+**Branch**: `dev`
+
+### Summary
+
+完成 GORM 事务基础与真实 PostgreSQL/River 平台级验收；因网络级 COMMIT 响应丢失、目标环境连接预算及业务 owner 门禁未关闭，任务保持 in_progress。
+
+### Main Changes
+
+- 提交共享 GORM 根、opaque transaction scope、同事务 River database/sql producer 与资源生命周期控制。
+- 新增真实 PostgreSQL commit/rollback、SQLSTATE、取消 cause、Worker 消费、共享池压力和 ACK 丢失重放验收。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `78b63d0c` | (see git log) |
+
+### Testing
+
+- [OK] 默认测试、race、vet、命令包编译、go mod verify 与 git diff --check 通过。
+- [OK] 独立 HEAD + 暂存区快照的真实 PostgreSQL integration、integration race 与 River Worker smoke 通过。
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- 在专用数据库代理或目标部署环境补跑网络级 COMMIT response-loss、目标连接预算及业务 owner 错误矩阵门禁。
