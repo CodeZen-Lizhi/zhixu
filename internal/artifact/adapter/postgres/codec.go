@@ -148,6 +148,14 @@ func decodePersistedRevision(persisted persistedRevision) (domain.Revision, []do
 	if err := decodeJSON(persisted.sections, &revision.Sections); err != nil {
 		return domain.Revision{}, nil, inconsistent(fmt.Errorf("decode artifact sections: %w", err))
 	}
+	// The v1 JSON contract omits empty DocumentSources.  Domain validation
+	// treats nil and an explicit empty collection identically, but persisted
+	// state comparisons must be deterministic across a write/read round trip.
+	for index := range revision.Sections {
+		if revision.Sections[index].DocumentSources == nil {
+			revision.Sections[index].DocumentSources = []domain.DocumentSource{}
+		}
+	}
 	if len(persisted.metadata) > 0 && string(persisted.metadata) != "null" {
 		var value domain.GenerationMetadata
 		if err := decodeJSON(persisted.metadata, &value); err != nil {
