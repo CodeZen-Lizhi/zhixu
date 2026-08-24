@@ -98,6 +98,8 @@ Graph 和 Retrieval 不互相强制排序；各自的 child 重新盘点若发�
 
 Artifact child 于 2026-08-24 完成 staged 实现、真实 PostgreSQL TODO 9、Go/SQL/Trellis review 和 Final handoff，已归档为 `completed`；生产仍为 legacy。它已消费 Workflow `ScopedRuntimeStarter`/`ScopedRuntimeBindingReader` 与 Agent `ScopedModelRunStore`，未新增 pgx allowlist；Final 的 API/Worker 构造、scoped terminal composite、legacy 清理和回滚清单见 [`../archive/2026-08/08-19-gorm-artifact-migration/final-handoff.md`](../archive/2026-08/08-19-gorm-artifact-migration/final-handoff.md)。
 
+2026-08-25 统一发布闭包已落入 `dev`：Foundation、Authoring 与 Workflow 的 staged 实现均已提交；为补齐已提交 Artifact/Workflow 的编译依赖，本批次仅额外提交 Agent 的 `ScopedModelRunStore` Application 契约。Agent Repository、生产 Composition 与 TODO 9 验收仍不在本批次范围内，`08-19-gorm-agent-migration` 继续保持 `in_progress`，不得视为迁移完成或生产切换。
+
 ## 5. 每个模块 child 的固定清单
 
 1. 运行 Trellis planning，写清代码范围、直接调用方、跨模块事务、已有测试、SQL/EXPLAIN 和回滚点。
