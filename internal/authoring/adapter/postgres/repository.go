@@ -418,7 +418,7 @@ func scanDocument(row pgx.Row) (domain.Document, error) {
 	err := row.Scan(
 		&document.ID, &document.WorkspaceID, &document.CanonicalPath, &document.Title, &document.Lifecycle,
 		&document.CurrentPublishedRevisionID, &document.Version, &document.CreatedAt, &document.UpdatedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) || gormNoRows(err) {
 		return domain.Document{}, notFound(err)
 	}
 	if err != nil {
@@ -468,7 +468,7 @@ func scanRevision(row pgx.Row) (domain.ArticleRevision, error) {
 		&revision.ParentRevisionID, &revision.RevisionNo, &revision.Content, &revision.ContentHash,
 		&revision.Status, &revision.OptimizationMode, &revision.GitCommit, &revision.CreatedByType,
 		&revision.CreatedAt); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) || gormNoRows(err) {
 			return domain.ArticleRevision{}, err
 		}
 		return domain.ArticleRevision{}, classify(err, "AUTHORING_REVISION_QUERY_FAILED")

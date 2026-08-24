@@ -1,6 +1,8 @@
 package postgres
 
 import (
+	"context"
+	"database/sql"
 	"errors"
 
 	"github.com/jackc/pgx/v5"
@@ -9,6 +11,7 @@ import (
 	authoringapp "github.com/CodeZen-Lizhi/zhixu/internal/authoring/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/authoring/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	"gorm.io/gorm"
 )
 
 func classify(err error, fallbackCode string) error {
@@ -51,6 +54,50 @@ func classify(err error, fallbackCode string) error {
 		}
 	}
 	return foundation.NewError(foundation.ErrorDependencyUnavailable, fallbackCode, true, err)
+}
+
+func gormNoRows(err error) bool {
+	return errors.Is(err, sql.ErrNoRows) || errors.Is(err, gorm.ErrRecordNotFound)
+}
+
+func classifyGORM(ctx context.Context, err error, fallbackCode string) error {
+	if err == nil {
+		return nil
+	}
+	var classified *foundation.Error
+	if errors.As(err, &classified) && classified.Kind != foundation.ErrorDependencyUnavailable {
+		return err
+	}
+	if ctx != nil && ctx.Err() != nil {
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return foundation.NewError(foundation.ErrorNonRetryableFailure, authoringapp.ErrorCodeRepositoryUnavailable, false, gormContextCause(ctx))
+		}
+		return foundation.NewError(foundation.ErrorRetryableFailure, authoringapp.ErrorCodeRepositoryUnavailable, true, gormContextCause(ctx))
+	}
+	if errors.Is(err, context.Canceled) {
+		return foundation.NewError(foundation.ErrorNonRetryableFailure, authoringapp.ErrorCodeRepositoryUnavailable, false, err)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return foundation.NewError(foundation.ErrorRetryableFailure, authoringapp.ErrorCodeRepositoryUnavailable, true, err)
+	}
+	if classified != nil {
+		return err
+	}
+	if gormNoRows(err) {
+		return notFound(err)
+	}
+	return classify(err, fallbackCode)
+}
+
+func gormContextCause(ctx context.Context) error {
+	cause := context.Cause(ctx)
+	if cause == nil {
+		return ctx.Err()
+	}
+	if !errors.Is(cause, ctx.Err()) {
+		return errors.Join(ctx.Err(), cause)
+	}
+	return cause
 }
 
 func notFound(cause error) error {
