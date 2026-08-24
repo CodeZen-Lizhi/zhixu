@@ -544,3 +544,77 @@ Correct: detail 必需 nullable；summary optional non-null；HTTP、OpenAPI 与
 Wrong: unsafe entry 或未交付 kind 仍生成成功文件，再让前端解释 unavailable。
 Correct: 在边界返回稳定错误且不 Prepare；只有完全验证的持久 binding 才能进入下载和 Audit。
 ```
+
+## Scenario: Caller Context Through Unit Of Work
+
+### 1. Scope / Trigger
+
+- 适用于 Adapter 在 `foundation.UnitOfWork.Within`、数据库事务、SDK 或队列外层把原始错误映射成
+  模块 `foundation.Error` 的路径。
+- 目标是让调用方取消、Worker 停机和 deadline 在跨事务包装后仍保持 sentinel、自定义
+  `context.Cause`、稳定错误码和 retryability，避免把用户取消误报为可重试依赖故障。
+
+### 2. Signatures
+
+```go
+type UnitOfWork interface {
+    Within(context.Context, TransactionOptions, TransactionFunc) error
+}
+
+func NewError(kind ErrorKind, code string, retryable bool, cause error) *Error
+```
+
+Adapter 的外层分类函数必须同时接收原始 `ctx` 与 `err`；只接收 `err` 的 helper 无法可靠恢复
+`context.WithCancelCause` / `context.WithDeadlineCause` 的自定义原因。
+
+### 3. Contracts
+
+- `err == nil` 返回 `nil`；已经是 `*foundation.Error` 的领域/一致性错误保持原分类。
+- 未分类错误且 `ctx.Err() != nil` 时，以 `context.Cause(ctx)` 为权威原因；当自定义 Cause 不包装
+  `ctx.Err()` 时，使用 `errors.Join(ctx.Err(), context.Cause(ctx))` 同时保留 sentinel 与自定义原因。
+- `context.Canceled` 固定为 `NonRetryableFailure`、`retryable=false`，但继续使用当前模块稳定的
+  dependency/capability error code。
+- `context.DeadlineExceeded` 固定为 `RetryableFailure`、`retryable=true`，继续使用当前模块稳定错误码。
+- `ctx` 尚未结束但 `err` 包装 cancel/deadline sentinel 时，仍按同一矩阵分类；其他原始 UoW/DB 错误
+  才进入模块既有 dependency/SQLSTATE 映射。
+- 安全 `Error()` 文本不得包含自定义 Cause；Cause 只通过 `Unwrap` 和 `errors.Is/As` 提供给内部恢复逻辑。
+
+### 4. Validation & Error Matrix
+
+| 输入 | `foundation.Error.Kind` | retryable | 必须成立 |
+|---|---|---:|---|
+| 已分类业务/一致性错误 | 保持原值 | 保持原值 | `errors.As` 得到原分类 |
+| canceled + 自定义 Cause | `NonRetryableFailure` | false | `errors.Is(err, context.Canceled)` 且 `errors.Is(err, cause)` |
+| deadline + 自定义 Cause | `RetryableFailure` | true | `errors.Is(err, context.DeadlineExceeded)` 且 `errors.Is(err, cause)` |
+| raw UoW/DB 错误 | 模块既有 dependency/SQLSTATE 分类 | 按既有矩阵 | 原始错误仍在 Cause 链 |
+
+### 5. Good / Base / Bad Cases
+
+- Good：Worker 用 `WithCancelCause` 停止 Generation Load/Lookup/Finalize，外层 UoW 返回包装错误；最终仍是
+  non-retryable，且 sentinel 与停机原因都能由 `errors.Is` 找回。
+- Base：普通连接瞬断且 Context 未结束，沿用模块稳定 dependency code 和 retryable 分类。
+- Bad：外层只调用 `classify(err)`，把取消统一包装为 capability unavailable/retryable，导致 Worker 重试已取消任务。
+
+### 6. Tests Required
+
+- 对每个公开 UoW 入口至少覆盖一个预取消或执行中取消路径，断言稳定 code、Kind、retryable、
+  `errors.Is(context sentinel)` 和 `errors.Is(custom cause)`。
+- deadline 用例必须使用真实到期 Context，不能只传手工构造的字符串错误。
+- 数据库集成用例还要断言取消后无部分持久化，并能用正常 Context 继续执行相同业务路径。
+- response-loss / commit-unknown 用例单独验证，不得把 caller cancel 当作提交结果未知。
+
+### 7. Wrong vs Correct
+
+```go
+// Wrong: custom context cause is unavailable here, and cancellation may become retryable.
+return capabilityError(err)
+
+// Correct: inspect the original context before applying the generic fallback.
+if cause := operationContextCause(ctx, err); cause != nil {
+    if errors.Is(cause, context.Canceled) {
+        return foundation.NewError(foundation.ErrorNonRetryableFailure, code, false, cause)
+    }
+    return foundation.NewError(foundation.ErrorRetryableFailure, code, true, cause)
+}
+return capabilityError(err)
+```

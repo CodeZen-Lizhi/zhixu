@@ -1,0 +1,147 @@
+# TODO 10：GORM 数据访问迁移执行计划
+
+## 1. 执行原则
+
+- 父任务拥有规划、依赖图、跨模块验收和最终复核，不启动业务实现。
+- 每次只启动一个已完成独立 PRD/Design/Implement 收敛的 child；存在文件范围不重叠且共享契约已稳定时才并行。
+- Foundation child 是所有模块的前置；TODO 9 是模块完成门禁；TODO 9 与 TODO 3 共同阻断 Final 的生产切换与收口。
+- TODO 9 前允许模块实现，但不修改生产 Composition、不删除旧实现、不标记完成。
+- 未经用户明确要求，不新增测试文件或临时测试代码；现有测试不足时记录盲区并把“新增覆盖授权”作为 child 的阻断决策。
+
+## 2. 父任务规划状态
+
+- [x] 创建 `08-18-gorm-data-access-migration` 父任务。
+- [x] 盘点 29 个 PostgreSQL 持久化 owner 和平台级 pgx 能力。
+- [x] 创建 30 个 planning child：1 Foundation + 28 modules + 1 Final。
+- [x] 确认 Review Core/Interview/Learning Path 分为三个 child。
+- [x] 确认 TODO 9 前可开发但不可完成验收/生产切换，TODO 3 只阻断 Final。
+- [x] 调研 GORM/pgx/River 官方兼容路径，选定 `riverdatabasesql` 为首选 Spike。
+- [x] 用户审批本父任务最终规划摘要。
+
+## 3. Phase A：Foundation
+
+### `08-19-gorm-platform-transaction-foundation`
+
+1. 单独收敛 child PRD、Design、Implement；重新核对 GORM/River 当前版本、License、Go/pgx 兼容和 vendor 策略。
+2. 显式定义连接生命周期、GORM Config、Persistence Model 规范、错误翻译、日志脱敏、Unit of Work/opaque scope 和 pgx allowlist。
+3. 优先验证官方组合：`pgxpool -> stdlib.OpenDBFromPool -> GORM`，以及 GORM `*sql.Tx -> riverdatabasesql.InsertTx`；产出 JobInserter/EnqueueFence/CheckEnqueue/Begin/dispatcher 调用点矩阵和各 child 迁移 owner。
+4. 保留 `riverpgxv5` Worker/listener/migration，验证它能消费 database/sql Driver 原子插入的 Job。
+5. 建立共享 Adapter/静态检查，阻止 GORM 事务调用旧 pgx inserter；不创建第二物理 pool，不自研 River SQL 或 GORM pgx transaction Driver。
+6. TODO 9 尚未可用时，只能以现有隔离 PostgreSQL 环境和既有门禁形成阶段证据，不宣称完整 Testcontainers 验收。
+
+Foundation 阶段退出条件：共享接口和配置稳定、同事务方案有可复核证据、失败矩阵与回滚明确，父任务更新依赖图后才允许模块实现；生产切换仍只归 Final。
+
+## 4. Phase B：模块执行顺序
+
+### Wave 1：低耦合与共享追加器
+
+| Child | 直接依赖 |
+| --- | --- |
+| `08-19-gorm-auth-migration` | Foundation |
+| `08-19-gorm-documenthistory-migration` | Foundation |
+| `08-19-gorm-ingestion-migration` | Foundation |
+| `08-19-gorm-memory-migration` | Foundation |
+| `08-19-gorm-events-migration` | Foundation |
+| `08-19-gorm-audit-migration` | Foundation |
+
+Events/Audit 完成前，依赖它们参与同事务的模块只能做基线和未接 Composition 的实现。
+
+### Wave 2：共享依赖 owner
+
+| Child | 直接依赖 |
+| --- | --- |
+| `08-19-gorm-workspace-migration` | Foundation |
+| `08-19-gorm-workflow-migration` | Foundation |
+| `08-19-gorm-collection-migration` | Foundation |
+| `08-19-gorm-localmodelruntime-migration` | Foundation |
+
+Workflow child 同时拥有项目 River transaction port 的 GORM 就绪迁移；Export/Retrieval/Health/Graph/Agent/Tools/Conversation/Artifact/Organizing 不得越过该依赖宣称模块就绪，生产切换仍归 Final。
+
+### Wave 3：业务与高并发状态
+
+| Child | 直接依赖 |
+| --- | --- |
+| `08-19-gorm-review-core-migration` | Foundation |
+| `08-19-gorm-review-interview-migration` | Foundation；锁定与 Learning Path 的数据契约 |
+| `08-19-gorm-review-learningpath-migration` | Foundation；锁定 Review/Interview identity 契约 |
+| `08-19-gorm-authoring-migration` | Foundation |
+| `08-19-gorm-capture-migration` | Foundation、Workspace（Core）；Agent scoped Model Run Port（Profile closure） |
+| `08-19-gorm-export-migration` | Foundation、Workflow、Events、Audit |
+| `08-19-gorm-gitsync-migration` | Foundation |
+| `08-19-gorm-health-migration` | Foundation、Collection、Workflow、Events |
+| `08-19-gorm-modelsettings-migration` | Foundation、Local Model Runtime、Audit |
+| `08-19-gorm-changecontrol-migration` | Foundation、Workflow、Events、Audit |
+
+Review 三个 child 可分别迁移；第三个完成后执行一次已有 Review/Interview/Learning Path 跨模块集成门禁。
+
+### Wave 4：知识与查询链
+
+| Child | 直接依赖 |
+| --- | --- |
+| `08-19-gorm-knowledge-migration` | Foundation、Change Control、Events、Audit（Impact Report 同事务审计） |
+| `08-19-gorm-graph-migration` | Foundation、Collection、Knowledge、Change Control、Workflow |
+| `08-19-gorm-retrieval-migration` | Foundation、Workflow、Change Control |
+
+Graph 和 Retrieval 不互相强制排序；各自的 child 重新盘点若发现生产具体类型依赖，再回填父图。
+
+### Wave 5：跨 Repository 事务消费者
+
+| Child | 直接依赖 |
+| --- | --- |
+| `08-19-gorm-agent-migration` | Foundation、Workflow、Events、Audit |
+| `08-19-gorm-tools-migration` | Foundation、Workflow、Agent、Events、Audit |
+| `08-19-gorm-conversation-migration` | Foundation、Agent、Tools、Workflow |
+| `08-19-gorm-artifact-migration` | Foundation、Agent、Workflow、Change Control |
+| `08-19-gorm-organizing-migration` | Foundation、Knowledge、Retrieval、Workflow |
+
+依赖表示生产切换顺序，不阻止提前读取代码、冻结基线或完成未接 Composition 的实现。Capture Core 可在 Workspace scoped writer 就绪后 staged；Capture Profile 必须等待 Agent owner 提供 `foundation.TransactionScope` 版本的 Model Run reader/finalizer，不能复用 pgx-only `ModelRunTxFinalizer(any)` 或拆成两个事务。
+
+Artifact child 于 2026-08-24 完成 staged 实现、真实 PostgreSQL TODO 9、Go/SQL/Trellis review 和 Final handoff；生产仍为 legacy，工作提交与归档前保持 `in_progress`。它已消费 Workflow `ScopedRuntimeStarter`/`ScopedRuntimeBindingReader` 与 Agent `ScopedModelRunStore`，未新增 pgx allowlist；Final 的 API/Worker 构造、scoped terminal composite、legacy 清理和回滚清单见 [`../08-19-gorm-artifact-migration/final-handoff.md`](../08-19-gorm-artifact-migration/final-handoff.md)。
+
+## 5. 每个模块 child 的固定清单
+
+1. 运行 Trellis planning，写清代码范围、直接调用方、跨模块事务、已有测试、SQL/EXPLAIN 和回滚点。
+2. 读取父 PRD/Design、Repository inventory、GORM/River compatibility research 和模块对应 backend spec。
+3. 搜索该模块所有 pgx import、Repository constructor、Composition call、`transaction any`、Raw SQL、锁、COPY/pgvector 和错误映射。
+4. 实现显式 Persistence Model 与 GORM Repository；复杂 SQL 保留参数化 Raw/Clauses，底层例外必须已有 allowlist。
+5. 将跨模块具体 PostgreSQL 依赖替换为稳定 Port；不得把 GORM/pgx 类型移到 Application/Domain。
+6. 使用现有测试和检查做行为对等验证；测试盲区如实记录，未获授权不补测试文件。
+7. TODO 9 可用后跑真实 PostgreSQL 门禁，记录 Final 所需的生产构造、legacy 文件与非 allowlist pgx 删除清单；模块 child 不修改 `cmd/**`。
+8. 执行 Go Review + SQL Review，修复范围内缺陷，记录 Adapter 回滚边界并归档 child。
+9. 回填父任务 child 状态、allowlist、依赖图和 Final 删除清单；不在所有 child 完成前勾选父 AC3/AC7。
+
+## 6. Phase C：Final Composition 与 pgx 收口
+
+### `08-19-gorm-composition-pgx-convergence`
+
+前置：28 个模块 child 全部完成，TODO 9 门禁可用，TODO 3 已完成 Atlas 唯一 Schema 事实源。
+
+1. 统一修改 `cmd/api`、`cmd/worker`、`cmd/migrate`、`cmd/modelctl`、`cmd/workspacectl`、`cmd/workspaceprobe`、`cmd/local-model-runtime`、`cmd/local-model-runtime-credential-init` Composition。
+2. 确认唯一物理 pool、GORM/sql wrapper、River pgx Worker 和 database/sql transactional client 的构造/关闭顺序。
+3. 建立并执行 GORM/pgx import allowlist、`AutoMigrate/Migrator` 禁止检查和模块 owner 完整性检查；将 `cmd/local-model-runtime-credential-init` 作为 admin credential bootstrap security allowlist 做单独 SQL/security review。
+4. 运行已有全量 PostgreSQL/pgvector/River/Workflow/事务/锁/response-loss 与关键 EXPLAIN 门禁；预计超过 120 秒的全量命令在执行前取得用户明确授权。
+5. 运行 `go mod tidy -diff`、`go vet`、受影响构建、`git diff --check`，并使用 go-review 与 sql-code-review 做最终审查。
+6. 更新路线图、数据库规范、架构文档和父任务 AC；记录发布顺序、监控、回滚和 residual allowlist。
+
+## 7. 验证命令模板
+
+模块 child 在规划时用实际包路径替换 `<module>`，只运行与改动直接相关且预计 60 秒内完成的现有命令：
+
+```bash
+go test -timeout=60s ./internal/<module>/...
+go vet ./internal/<module>/...
+go mod tidy -diff
+rg -n 'gorm\.io/(gorm|driver/postgres)' internal --glob '*.go'
+rg -n 'github\.com/jackc/pgx/v5' internal/<module> --glob '*.go' --glob '!*_test.go'
+rg -n 'AutoMigrate|\.Migrator\(' cmd internal --glob '*.go'
+git diff --check
+```
+
+真实 PostgreSQL 测试继续使用仓库当时的正式入口；TODO 9 完成后改为其单一 Testcontainers 工厂。不得凭规划文档虚构尚未存在的 Make target。
+
+## 8. Review 与回滚
+
+- 所有 Go/Repository 改动使用 `go-review`；所有 SQL、分页、批量、权限、事务和一致性变更追加 `sql-code-review`。
+- Foundation/Workflow/Change Control/Model Settings/Retrieval/Final 额外检查并发、连接池、死锁、response-loss、安全与性能。
+- 模块回滚只 revert 自身 Adapter/Port；Final 单独拥有 Composition/legacy 删除回滚；均不回滚 Schema 或修改历史迁移。
+- Foundation 方案失败时停止所有依赖 child 的生产切换，保留调研和行为基线，回到父设计选择官方替代方案。
