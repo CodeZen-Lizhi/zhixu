@@ -66,4 +66,3 @@ Update existing integration helpers to retain the GORM fixture as the production
 ## Final Gate
 
 Final must rerun the real PostgreSQL Artifact package, API/Worker composition tests, scoped Workflow terminal chain, Model Settings enqueue policy, River worker consumption, pool shutdown, pgx allowlist, and full production constructor scan before deleting legacy code.
-

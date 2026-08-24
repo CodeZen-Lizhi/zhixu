@@ -77,4 +77,3 @@ Additional scans passed:
 - The Generation integration fixture uses a no-op `generationScopedEnqueueFence`; it proves the real scoped River insert and transaction boundary, not the Model Settings policy decision. That policy remains owned by Model Settings and Final cross-module composition tests.
 - `foundation.TransactionScope` does not identify a foreign active Pool. Constructors require one shared Pool, tests use one shared Pool, and Final must preserve this composition invariant.
 - Artifact file export and Change Control proposal creation remain outside the Artifact database transaction by design.
-
