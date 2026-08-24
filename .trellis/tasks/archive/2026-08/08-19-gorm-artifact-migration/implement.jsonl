@@ -1,0 +1,14 @@
+{"file":".trellis/spec/backend/index.md","reason":"Artifact分层、Application Port、Composition Root与模块依赖方向。"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Artifact事务、advisory/FOR UPDATE/SKIP LOCKED、数组、批量与数据库时间契约。"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"context cause、SQLSTATE、no-row、retry与commit response-loss错误契约。"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Artifact正文、Citation、Model输出、SQL与DSN脱敏。"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Artifact unit/race/vet、真实PostgreSQL、fault与资源释放门禁。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Artifact与Workflow、Agent、Change Control的opaque scoped数据流。"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"共享scanner、codec、domain validation，避免pgx/GORM双事实源。"}
+{"file":".trellis/tasks/08-18-gorm-data-access-migration/design.md","reason":"父任务single Pool、staged sibling、TODO9与Final边界。"}
+{"file":".trellis/tasks/08-19-gorm-platform-transaction-foundation/design.md","reason":"Pool.GORM、UnitOfWork、TransactionScope生命周期与pool identity限制。"}
+{"file":".trellis/tasks/08-19-gorm-workflow-migration/design.md","reason":"Workflow ScopedRuntimeStarter、terminal hook、River与owner边界。"}
+{"file":".trellis/tasks/08-19-gorm-agent-migration/design.md","reason":"Agent ScopedModelRunStore、ModelRun/Call锁与终结契约。"}
+{"file":".trellis/tasks/08-19-gorm-changecontrol-migration/design.md","reason":"Artifact PublicationCreator与Change Control owner/事务外副作用边界。"}
+{"file":".trellis/tasks/08-19-gorm-artifact-migration/design.md","reason":"Artifact staged GORM、事务锁序、Generation、Backfill、验证与回滚设计。"}
+{"file":".trellis/tasks/08-19-gorm-artifact-migration/implement.md","reason":"Artifact实现顺序、前置Port、静态门禁、TODO9与Final清单。"}
