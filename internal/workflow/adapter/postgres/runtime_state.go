@@ -963,11 +963,12 @@ func runtimeStateError(kind foundation.ErrorKind, code string) error {
 func scanRuntimeRun(row pgx.Row) (domain.Run, error) {
 	var run domain.Run
 	var id, workspace, definition string
+	var output []byte
 	var idempotencyKey, requestHash *string
-	if err := row.Scan(&id, &workspace, &definition, &run.Status, &run.Input, &run.Output, &idempotencyKey, &requestHash, &run.Version, &run.CreatedAt, &run.UpdatedAt, &run.CompletedAt, &run.PauseRequestedAt, &run.CancelRequestedAt); err != nil {
+	if err := row.Scan(&id, &workspace, &definition, &run.Status, &run.Input, &output, &idempotencyKey, &requestHash, &run.Version, &run.CreatedAt, &run.UpdatedAt, &run.CompletedAt, &run.PauseRequestedAt, &run.CancelRequestedAt); err != nil {
 		return run, err
 	}
-	run.ID, run.WorkspaceID, run.DefinitionID = foundation.ID(id), foundation.ID(workspace), foundation.ID(definition)
+	run.ID, run.WorkspaceID, run.DefinitionID, run.Output = foundation.ID(id), foundation.ID(workspace), foundation.ID(definition), output
 	if idempotencyKey != nil {
 		run.IdempotencyKey = *idempotencyKey
 	}
