@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"reflect"
 	"strings"
@@ -156,4 +157,21 @@ func TestConfigureAfterConnectRejectsNilDependencies(t *testing.T) {
 			t.Fatal("expected nil registrar error")
 		}
 	})
+}
+
+func TestPreserveTransactionCauseAfterAutomaticRollback(t *testing.T) {
+	cause := errors.New("caller canceled transaction")
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(cause)
+
+	err := preserveTransactionCause(ctx, sql.ErrTxDone)
+	if !errors.Is(err, sql.ErrTxDone) {
+		t.Fatalf("error = %v, want sql.ErrTxDone", err)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+	if !errors.Is(err, cause) {
+		t.Fatalf("error = %v, want cancel cause", err)
+	}
 }

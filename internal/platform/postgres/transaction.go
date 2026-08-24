@@ -68,17 +68,23 @@ func (u *gormUnitOfWork) Within(ctx context.Context, options foundation.Transact
 }
 
 // preserveTransactionCause keeps a caller's cancel cause attached when the
-// database driver can only return context.Canceled or context.DeadlineExceeded.
+// database layer returns only a context error or sql.ErrTxDone after rollback.
 // The original driver error remains the primary value for errors.Is/As checks.
 func preserveTransactionCause(ctx context.Context, err error) error {
 	if err == nil || ctx == nil || ctx.Err() == nil {
 		return err
 	}
+	contextErr := ctx.Err()
+	// database/sql may finish its automatic rollback before Commit observes the
+	// canceled transaction context, in which case Commit returns ErrTxDone.
+	if errors.Is(err, sql.ErrTxDone) && !errors.Is(err, contextErr) {
+		err = errors.Join(err, contextErr)
+	}
 	cause := context.Cause(ctx)
 	if cause == nil || errors.Is(err, cause) {
 		return err
 	}
-	if !errors.Is(err, ctx.Err()) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+	if !errors.Is(err, contextErr) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
 	return errors.Join(err, cause)
