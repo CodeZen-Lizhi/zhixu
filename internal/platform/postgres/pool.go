@@ -4,12 +4,16 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
+	"sync"
+	"sync/atomic"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	pgxvec "github.com/pgvector/pgvector-go/pgx"
+	"gorm.io/gorm"
 )
 
 type afterConnectFunc func(context.Context, *pgx.Conn) error
@@ -20,10 +24,15 @@ type Pinger interface {
 	Ping(context.Context) error
 }
 
-// Pool owns a pgx connection pool and exposes health plus composition-root
-// query boundaries; domain repositories still hide pgx from application code.
+// Pool owns the physical pgx pool, its database/sql facade, and the shared GORM
+// root. Domain repositories still hide concrete database types from application
+// code.
 type Pool struct {
-	pool *pgxpool.Pool
+	pool      *pgxpool.Pool
+	sqlDB     *sql.DB
+	gormDB    *gorm.DB
+	closeOnce sync.Once
+	closed    atomic.Bool
 }
 
 // DB exposes the pgx pool to composition-root adapters. Domain packages must
@@ -38,16 +47,16 @@ func (p *Pool) DB() *pgxpool.Pool {
 // Open parses the configured URL and creates a pool. It does not claim the DB
 // is ready; callers must call Ping with a bounded context.
 func Open(ctx context.Context, databaseURL string, maxConns, minConns int32) (*Pool, error) {
-	return open(ctx, databaseURL, maxConns, minConns, pgxvec.RegisterTypes)
+	return open(ctx, databaseURL, maxConns, minConns, pgxvec.RegisterTypes, true)
 }
 
 // OpenMigration creates a pool without extension-specific type registration so
 // an empty database can run the migration that installs those extensions.
 func OpenMigration(ctx context.Context, databaseURL string, maxConns, minConns int32) (*Pool, error) {
-	return open(ctx, databaseURL, maxConns, minConns, nil)
+	return open(ctx, databaseURL, maxConns, minConns, nil, false)
 }
 
-func open(ctx context.Context, databaseURL string, maxConns, minConns int32, registerTypes afterConnectFunc) (*Pool, error) {
+func open(ctx context.Context, databaseURL string, maxConns, minConns int32, registerTypes afterConnectFunc, initializeGORM bool) (*Pool, error) {
 	config, err := buildPoolConfig(databaseURL, maxConns, minConns, registerTypes)
 	if err != nil {
 		return nil, err
@@ -56,7 +65,16 @@ func open(ctx context.Context, databaseURL string, maxConns, minConns int32, reg
 	if err != nil {
 		return nil, fmt.Errorf("open database pool: %w", err)
 	}
-	return &Pool{pool: pool}, nil
+	database := &Pool{pool: pool}
+	if !initializeGORM {
+		return database, nil
+	}
+	database.sqlDB, database.gormDB, err = openGORMRoot(pool)
+	if err != nil {
+		pool.Close()
+		return nil, err
+	}
+	return database, nil
 }
 
 func buildPoolConfig(databaseURL string, maxConns, minConns int32, registerTypes afterConnectFunc) (*pgxpool.Config, error) {
@@ -138,11 +156,28 @@ func (p *Pool) Begin(ctx context.Context) (pgx.Tx, error) {
 	return p.pool.Begin(ctx)
 }
 
-// Close releases all pool resources.
-func (p *Pool) Close() {
-	if p != nil && p.pool != nil {
-		p.pool.Close()
+// GORM exposes the shared GORM root to PostgreSQL repository adapters.
+func (p *Pool) GORM() (*gorm.DB, error) {
+	if p == nil || p.gormDB == nil || p.closed.Load() {
+		return nil, errors.New("PostgreSQL GORM root is not initialized")
 	}
+	return p.gormDB, nil
+}
+
+// Close releases the database/sql facade before its underlying pgx pool.
+func (p *Pool) Close() {
+	if p == nil {
+		return
+	}
+	p.closeOnce.Do(func() {
+		p.closed.Store(true)
+		if p.sqlDB != nil {
+			_ = p.sqlDB.Close()
+		}
+		if p.pool != nil {
+			p.pool.Close()
+		}
+	})
 }
 
 type errorRow struct{ err error }

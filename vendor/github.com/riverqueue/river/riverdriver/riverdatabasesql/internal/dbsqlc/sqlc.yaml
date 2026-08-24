@@ -1,0 +1,64 @@
+version: "2"
+sql:
+  - engine: "postgresql"
+    queries:
+      - ../../../riverpgxv5/internal/dbsqlc/pg_misc.sql
+      - ../../../riverpgxv5/internal/dbsqlc/river_job.sql
+      - ../../../riverpgxv5/internal/dbsqlc/river_leader.sql
+      - ../../../riverpgxv5/internal/dbsqlc/river_migration.sql
+      - ../../../riverpgxv5/internal/dbsqlc/river_notification.sql
+      - ../../../riverpgxv5/internal/dbsqlc/river_queue.sql
+      - ../../../riverpgxv5/internal/dbsqlc/schema.sql
+    schema:
+      - ../../../riverpgxv5/internal/dbsqlc/pg_misc.sql
+      - ../../../riverpgxv5/internal/dbsqlc/river_job.sql
+      - ../../../riverpgxv5/internal/dbsqlc/river_leader.sql
+      - ../../../riverpgxv5/internal/dbsqlc/river_migration.sql
+      - ../../../riverpgxv5/internal/dbsqlc/river_notification.sql
+      - ../../../riverpgxv5/internal/dbsqlc/river_queue.sql
+      - ../../../riverpgxv5/internal/dbsqlc/schema.sql
+    gen:
+      go:
+        package: "dbsqlc"
+        sql_package: "database/sql"
+        out: "."
+        emit_exact_table_names: true
+        emit_methods_with_db_argument: true
+        emit_params_struct_pointers: true
+        emit_result_struct_pointers: true
+
+        rename:
+          ids: "IDs"
+          ttl: "TTL"
+
+        overrides:
+          # `database/sql` really does not play nicely with json/jsonb. If it's
+          # left as `[]byte` or `json.RawMessage`, `database/sql` will try to
+          # encode it as binary (with a \x) which Postgres won't accept as
+          # json/jsonb at all. Using a custom struct crashed and burned, even
+          # with a custom scanner implementation. This is the only way I could
+          # get it to work: strings are compatible with our use of bytes slices,
+          # but Postgres will also accept them as json/jsonb.
+          - db_type: "jsonb"
+            go_type: "string"
+
+          - db_type: "pg_catalog.bit"
+            go_type: int
+
+          - db_type: "pg_catalog.bit"
+            go_type:
+              type: int
+              pointer: true
+            nullable: true
+
+          - db_type: "pg_catalog.interval"
+            go_type: "time.Duration"
+
+          - db_type: "timestamptz"
+            go_type: "time.Time"
+
+          - db_type: "timestamptz"
+            go_type:
+              type: "time.Time"
+              pointer: true
+            nullable: true
