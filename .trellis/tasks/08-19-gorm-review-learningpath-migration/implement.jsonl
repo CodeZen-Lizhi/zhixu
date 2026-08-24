@@ -1,0 +1,7 @@
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"共享 Learning Path、Review reservation/receipt/hold、CAS、历史保护、DB time 与真实 PostgreSQL 契约"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"保持 no-row、context、SQLSTATE、幂等、CAS、retryability 与安全错误边界"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"约束 GORM logger、Review snapshot/receipt、SQL 参数、DSN 与敏感内容脱敏"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"应用 M8 Review/Interview/Learning Path 并发、恢复、真实数据库和独立审查门禁"}
+{"file":".trellis/tasks/08-18-gorm-data-access-migration/prd.md","reason":"父任务 staged 边界、TODO 9/TODO 3 门禁、Final wiring 与完成语义"}
+{"file":".trellis/tasks/08-19-gorm-platform-transaction-foundation/research/static-validation.md","reason":"共享 Pool.GORM、Unit of Work、依赖版本、日志配置与 TODO 9 剩余限制"}
+{"file":".trellis/tasks/08-19-gorm-review-learningpath-migration/research/baseline.md","reason":"本模块方法、锁序、Schema、调用点、测试和 dirty-worktree 边界证据"}
