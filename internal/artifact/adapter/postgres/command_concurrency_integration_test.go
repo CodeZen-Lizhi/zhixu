@@ -27,6 +27,101 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+func TestGORMArtifactExternalReservationSerializesAndClearsAtomically(t *testing.T) {
+	ctx := context.Background()
+	repository, platformPool := newArtifactIntegrationGORMRepository(t, ctx)
+	pool := platformPool.DB()
+	workspaceID := artifactIntegrationID(3951)
+	seedArtifactWorkspace(t, ctx, pool, workspaceID, "artifact-gorm-reservation-concurrency")
+	base := time.Date(2026, 7, 27, 9, 0, 0, 0, time.UTC)
+	approved := createApprovedArtifactForConcurrency(t, ctx, repository, workspaceID, base)
+	bindings := [2]artifactapp.CommandBinding{
+		artifactIntegrationBinding(workspaceID, approved.Artifact.ID, "gorm-reservation-one", '4', artifactapp.CommandExportMarkdown, approved.Artifact.Version),
+		artifactIntegrationBinding(workspaceID, approved.Artifact.ID, "gorm-reservation-two", '5', artifactapp.CommandExportMarkdown, approved.Artifact.Version),
+	}
+	type reserveOutcome struct {
+		binding artifactapp.CommandBinding
+		state   artifactapp.State
+		err     error
+	}
+	start := make(chan struct{})
+	results := make(chan reserveOutcome, len(bindings))
+	for _, binding := range bindings {
+		binding := binding
+		go func() {
+			<-start
+			state, err := repository.ReserveExternalTransition(ctx, binding)
+			results <- reserveOutcome{binding: binding, state: state, err: err}
+		}()
+	}
+	close(start)
+	outcomes := [2]reserveOutcome{<-results, <-results}
+	winning := -1
+	for index, outcome := range outcomes {
+		if outcome.err == nil {
+			if winning != -1 {
+				t.Fatalf("both GORM reservations succeeded: %#v", outcomes)
+			}
+			winning = index
+			if outcome.state.Artifact.ID != approved.Artifact.ID || outcome.state.Artifact.Version != approved.Artifact.Version {
+				t.Fatalf("GORM reservation state=%#v", outcome.state)
+			}
+			continue
+		}
+		if !artifactIntegrationErrorCode(outcome.err, artifactapp.ErrorCodeVersionConflict) {
+			t.Fatalf("GORM reservation failure=%v", outcome.err)
+		}
+	}
+	if winning == -1 {
+		t.Fatalf("no GORM reservation succeeded: %#v", outcomes)
+	}
+	winningBinding := outcomes[winning].binding
+	losingBinding := outcomes[1-winning].binding
+	if replayedState, err := repository.ReserveExternalTransition(ctx, winningBinding); err != nil || replayedState.Artifact.ID != approved.Artifact.ID {
+		t.Fatalf("GORM exact reservation replay=%#v err=%v", replayedState, err)
+	}
+	if probed, err := repository.ProbeExternalTransition(ctx, winningBinding); err != nil || probed.Artifact.Version != approved.Artifact.Version {
+		t.Fatalf("GORM exact reservation probe=%#v err=%v", probed, err)
+	}
+	if _, err := repository.ProbeExternalTransition(ctx, losingBinding); !artifactIntegrationErrorCode(err, artifactapp.ErrorCodeVersionConflict) {
+		t.Fatalf("GORM foreign reservation probe err=%v", err)
+	}
+
+	exportedArtifact, err := artifactdomain.MarkExported(approved.Artifact, approved.Revision, base.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	exported := artifactapp.State{Artifact: exportedArtifact, Revision: artifactdomain.CloneRevision(approved.Revision)}
+	exportRecord := artifactIntegrationExportRecord(exported, artifactIntegrationID(3990), exported.Artifact.UpdatedAt)
+	completed, err := repository.Transition(ctx, artifactapp.TransitionRecord{
+		Binding: winningBinding, CurrentRevisionID: approved.Revision.ID, State: exported,
+		NewRevision: false, Export: &exportRecord,
+	})
+	if err != nil || completed.Replayed || completed.Export == nil || completed.Export.ID != exportRecord.ID {
+		t.Fatalf("GORM reserved transition=%#v err=%v", completed, err)
+	}
+	assertReservationCount(t, ctx, pool, workspaceID, approved.Artifact.ID, 0)
+	if found, replayed, err := repository.FindCommand(ctx, winningBinding); err != nil || !replayed || !found.Replayed || found.Export == nil || found.Export.ID != exportRecord.ID {
+		t.Fatalf("GORM export receipt=%#v found=%t err=%v", found, replayed, err)
+	}
+	if persisted, err := repository.GetExport(ctx, workspaceID, approved.Artifact.ID, exportRecord.ID); err != nil || persisted != exportRecord {
+		t.Fatalf("GORM export binding=%#v err=%v", persisted, err)
+	}
+	if _, err := repository.ReserveExternalTransition(ctx, losingBinding); !artifactIntegrationErrorCode(err, artifactapp.ErrorCodeVersionConflict) {
+		t.Fatalf("GORM stale reservation err=%v", err)
+	}
+	var exports, receipts int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM learning.artifact_export WHERE workspace_id=$1 AND artifact_id=$2`, string(workspaceID), string(approved.Artifact.ID)).Scan(&exports); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM learning.artifact_command WHERE workspace_id=$1 AND artifact_id=$2 AND command_type='EXPORT_MARKDOWN'`, string(workspaceID), string(approved.Artifact.ID)).Scan(&receipts); err != nil {
+		t.Fatal(err)
+	}
+	if exports != 1 || receipts != 1 {
+		t.Fatalf("GORM export closure exports=%d receipts=%d", exports, receipts)
+	}
+}
+
 func TestArtifactCommandsConcurrentExportAndPublishKeepOneDurableBinding(t *testing.T) {
 	ctx := context.Background()
 	repository, pool := newArtifactIntegrationRepository(t, ctx)
@@ -499,7 +594,7 @@ func TestArtifactExternalReservationRecoversOnlyExactOwnerAndClearsAtomically(t 
 	}
 }
 
-func createApprovedArtifactForConcurrency(t *testing.T, ctx context.Context, repository *Repository, workspaceID foundation.ID, at time.Time) artifactapp.State {
+func createApprovedArtifactForConcurrency(t *testing.T, ctx context.Context, repository artifactapp.Repository, workspaceID foundation.ID, at time.Time) artifactapp.State {
 	t.Helper()
 	service := artifactCommandServiceForConcurrency(t, repository, nil, nil, at)
 	planned, err := service.Plan(ctx, artifactapp.PlanCommand{
@@ -540,7 +635,7 @@ func createApprovedArtifactForConcurrency(t *testing.T, ctx context.Context, rep
 	return approved.State
 }
 
-func artifactCommandServiceForConcurrency(t *testing.T, repository *Repository, exporter artifactapp.MarkdownExporter, publisher artifactapp.PublicationCreator, at time.Time) *artifactapp.CommandService {
+func artifactCommandServiceForConcurrency(t *testing.T, repository artifactapp.Repository, exporter artifactapp.MarkdownExporter, publisher artifactapp.PublicationCreator, at time.Time) *artifactapp.CommandService {
 	t.Helper()
 	service, err := artifactapp.NewCommandService(artifactapp.Dependencies{
 		Repository: repository, Exporter: exporter, Publisher: publisher, IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.FixedClock{Value: at},

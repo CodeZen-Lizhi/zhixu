@@ -103,6 +103,167 @@ func TestArtifactRevisionWritesCitationSelectorsInOwnerTransaction(t *testing.T)
 	}
 }
 
+func TestGORMCitationBackfillPostgreSQLResumesAndValidatesSelectors(t *testing.T) {
+	ctx := context.Background()
+	repository, platformPool := newArtifactIntegrationGORMRepository(t, ctx)
+	pool := platformPool.DB()
+	cancelCause := errors.New("artifact citation backfill canceled by caller")
+	canceledCtx, cancel := context.WithCancelCause(ctx)
+	cancel(cancelCause)
+	if canceled, found, err := repository.BackfillCitationSelectors(canceledCtx, 1); found || canceled != (artifactapp.CitationBackfillResult{}) ||
+		!errors.Is(err, context.Canceled) || !errors.Is(err, cancelCause) {
+		t.Fatalf("gorm canceled backfill result=%#v found=%t err=%v", canceled, found, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE core.schema_meta SET value='m7-04',updated_at=now() WHERE key='timeline_impact'`); err != nil {
+		t.Fatal(err)
+	}
+	gateRestored := false
+	t.Cleanup(func() {
+		if !gateRestored {
+			if _, cleanupErr := pool.Exec(context.Background(), `UPDATE core.schema_meta SET value='m7-v2',updated_at=now() WHERE key='timeline_impact'`); cleanupErr != nil {
+				t.Errorf("restore citation backfill feature gate: %v", cleanupErr)
+			}
+		}
+	})
+	blocked, found, err := repository.BackfillCitationSelectors(ctx, 1)
+	var classified *foundation.Error
+	if found || blocked != (artifactapp.CitationBackfillResult{}) || !errors.As(err, &classified) ||
+		classified.Kind != foundation.ErrorDependencyUnavailable || classified.Code != artifactapp.ErrorCodeDependencyUnavailable || !classified.Retryable {
+		t.Fatalf("gorm disabled gate result=%#v found=%t err=%v", blocked, found, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE core.schema_meta SET value='m7-v2',updated_at=now() WHERE key='timeline_impact'`); err != nil {
+		t.Fatal(err)
+	}
+	gateRestored = true
+
+	workspaceID := artifactIntegrationID(3901)
+	seedArtifactWorkspace(t, ctx, pool, workspaceID, "artifact-gorm-backfill")
+	provenance := seedArtifactCitationProvenance(t, ctx, pool, workspaceID, 3910)
+	revision := insertArtifactCitationRevision(t, ctx, pool, workspaceID, 3920, provenance, time.Now().UTC().Truncate(time.Microsecond))
+	if _, err := pool.Exec(ctx, `ALTER TABLE learning.artifact_revision_citation_selector DISABLE TRIGGER artifact_citation_selector_append_only`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM learning.artifact_revision_citation_selector WHERE workspace_id=$1 AND revision_id=$2`, string(workspaceID), string(revision.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `ALTER TABLE learning.artifact_revision_citation_selector ENABLE TRIGGER artifact_citation_selector_append_only`); err != nil {
+		t.Fatal(err)
+	}
+	resetArtifactCitationBackfillMarker(t, ctx, pool, workspaceID, revision)
+	progress, found, err := repository.BackfillCitationSelectors(ctx, 1)
+	if err != nil || !found || progress.WorkspaceID != workspaceID || progress.ProcessedRevisions != 1 || progress.ProcessedSelectors != 1 {
+		t.Fatalf("gorm backfill progress=%#v found=%t err=%v", progress, found, err)
+	}
+	validated, found, err := repository.BackfillCitationSelectors(ctx, 1)
+	if err != nil || !found || !validated.Completed || validated.ValidatedRevisions != 1 {
+		t.Fatalf("gorm backfill validation=%#v found=%t err=%v", validated, found, err)
+	}
+	var selectors int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM learning.artifact_revision_citation_selector WHERE workspace_id=$1 AND revision_id=$2`, string(workspaceID), string(revision.ID)).Scan(&selectors); err != nil || selectors != 1 {
+		t.Fatalf("gorm selector count=%d err=%v", selectors, err)
+	}
+}
+
+func TestGORMCitationBackfillPostgreSQLSkipsLockedMarkerAndResumesSavepointFailure(t *testing.T) {
+	ctx := context.Background()
+	repository, platformPool := newArtifactIntegrationGORMRepository(t, ctx)
+	pool := platformPool.DB()
+	damagedWorkspaceID := artifactIntegrationID(3951)
+	healthyWorkspaceID := artifactIntegrationID(3952)
+	seedArtifactWorkspace(t, ctx, pool, damagedWorkspaceID, "artifact-gorm-backfill-damaged")
+	seedArtifactWorkspace(t, ctx, pool, healthyWorkspaceID, "artifact-gorm-backfill-healthy")
+	damagedProvenance := seedArtifactCitationProvenance(t, ctx, pool, damagedWorkspaceID, 3960)
+	healthyProvenance := seedArtifactCitationProvenance(t, ctx, pool, healthyWorkspaceID, 3970)
+	if _, err := pool.Exec(ctx, `UPDATE core.schema_meta SET value='m7-04',updated_at=now() WHERE key='timeline_impact'`); err != nil {
+		t.Fatal(err)
+	}
+	setArtifactRevisionCitationProjection(t, ctx, pool, false)
+	firstRevision := insertArtifactCitationRevision(t, ctx, pool, damagedWorkspaceID, 3980, damagedProvenance, time.Date(2026, 7, 27, 14, 0, 0, 0, time.UTC))
+	damagedRevision := insertArtifactCitationRevision(t, ctx, pool, damagedWorkspaceID, 3990, damagedProvenance, time.Date(2026, 7, 27, 14, 1, 0, 0, time.UTC))
+	healthyRevision := insertArtifactCitationRevision(t, ctx, pool, healthyWorkspaceID, 4000, healthyProvenance, time.Date(2026, 7, 27, 15, 0, 0, 0, time.UTC))
+	setArtifactRevisionCitationProjection(t, ctx, pool, true)
+	if _, err := pool.Exec(ctx, `UPDATE core.schema_meta SET value='m7-v2',updated_at=now() WHERE key='timeline_impact'`); err != nil {
+		t.Fatal(err)
+	}
+	resetArtifactCitationBackfillMarker(t, ctx, pool, damagedWorkspaceID, firstRevision, damagedRevision)
+	resetArtifactCitationBackfillMarker(t, ctx, pool, healthyWorkspaceID, healthyRevision)
+
+	markerLock, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	locked := true
+	defer func() {
+		if locked {
+			_ = markerLock.Rollback(context.Background())
+		}
+	}()
+	if _, err := markerLock.Exec(ctx, `SELECT workspace_id FROM learning.artifact_citation_selector_backfill WHERE workspace_id=$1 FOR UPDATE`, string(damagedWorkspaceID)); err != nil {
+		t.Fatal(err)
+	}
+	healthyProcessed, found, err := repository.BackfillCitationSelectors(ctx, 1)
+	if err != nil || !found || healthyProcessed.WorkspaceID != healthyWorkspaceID || healthyProcessed.ProcessedRevisions != 1 {
+		t.Fatalf("GORM skip-locked process=%#v found=%t err=%v", healthyProcessed, found, err)
+	}
+	healthyCompleted, found, err := repository.BackfillCitationSelectors(ctx, 1)
+	if err != nil || !found || healthyCompleted.WorkspaceID != healthyWorkspaceID || !healthyCompleted.Completed || healthyCompleted.ValidatedRevisions != 1 {
+		t.Fatalf("GORM skip-locked validation=%#v found=%t err=%v", healthyCompleted, found, err)
+	}
+	if err := markerLock.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	locked = false
+
+	firstBatch, found, err := repository.BackfillCitationSelectors(ctx, 1)
+	if err != nil || !found || firstBatch.WorkspaceID != damagedWorkspaceID || firstBatch.ProcessedRevisions != 1 || firstBatch.ProcessedSelectors != 1 {
+		t.Fatalf("GORM damaged first batch=%#v found=%t err=%v", firstBatch, found, err)
+	}
+	var originalSections string
+	if err := pool.QueryRow(ctx, `SELECT sections::text FROM learning.artifact_revision WHERE workspace_id=$1 AND id=$2`, string(damagedWorkspaceID), string(damagedRevision.ID)).Scan(&originalSections); err != nil {
+		t.Fatal(err)
+	}
+	missingProvenance := artifactdomain.CloneRevision(damagedRevision)
+	missingProvenance.Sections[0].Citations[0].SourceVersionID = artifactIntegrationID(4010)
+	missingProvenance.Sections[0].Citations[0].SourceSpanID = artifactIntegrationID(4011)
+	missingHash, err := artifactdomain.ComputeRevisionContentHash(missingProvenance)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replaceArtifactRevisionPayload(t, ctx, pool, damagedWorkspaceID, damagedRevision.ID, string(marshalJSON(missingProvenance.Sections)), missingHash)
+	failed, found, err := repository.BackfillCitationSelectors(ctx, 1)
+	if !found || failed.WorkspaceID != damagedWorkspaceID || !artifactIntegrationErrorCode(err, artifactapp.ErrorCodeCitationBackfillFailed) {
+		t.Fatalf("GORM damaged failure=%#v found=%t err=%v", failed, found, err)
+	}
+	artifactIntegrationPostgresCode(t, err, "23514")
+	var status, errorCode, cursorRevisionID string
+	var cursorCreatedAt time.Time
+	if err := pool.QueryRow(ctx, `SELECT status,error_code,cursor_created_at,cursor_revision_id::text
+		FROM learning.artifact_citation_selector_backfill WHERE workspace_id=$1`, string(damagedWorkspaceID)).Scan(
+		&status, &errorCode, &cursorCreatedAt, &cursorRevisionID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if status != "FAILED" || errorCode != artifactapp.ErrorCodeCitationBackfillFailed ||
+		!cursorCreatedAt.Equal(firstRevision.CreatedAt) || cursorRevisionID != string(firstRevision.ID) {
+		t.Fatalf("GORM failed marker status=%s error=%s cursor=(%s,%s)", status, errorCode, cursorCreatedAt, cursorRevisionID)
+	}
+	replaceArtifactRevisionPayload(t, ctx, pool, damagedWorkspaceID, damagedRevision.ID, originalSections, damagedRevision.ContentHash)
+	resumed, found, err := repository.BackfillCitationSelectors(ctx, 1)
+	if err != nil || !found || resumed.WorkspaceID != damagedWorkspaceID || resumed.ProcessedRevisions != 1 || resumed.ProcessedSelectors != 1 {
+		t.Fatalf("GORM resumed batch=%#v found=%t err=%v", resumed, found, err)
+	}
+	completed, found, err := repository.BackfillCitationSelectors(ctx, 2)
+	if err != nil || !found || completed.WorkspaceID != damagedWorkspaceID || !completed.Completed || completed.ValidatedRevisions != 2 {
+		t.Fatalf("GORM completed damaged=%#v found=%t err=%v", completed, found, err)
+	}
+	if _, found, err := repository.BackfillCitationSelectors(ctx, 2); err != nil || found {
+		t.Fatalf("GORM completed queue found=%t err=%v", found, err)
+	}
+	if acquired := pool.Stat().AcquiredConns(); acquired != 0 {
+		t.Fatalf("GORM backfill retained %d PostgreSQL connections", acquired)
+	}
+}
+
 func TestArtifactCitationBackfillPersistsFailureAndResumesExactValidation(t *testing.T) {
 	ctx := context.Background()
 	repository, pool := newArtifactIntegrationRepository(t, ctx)
@@ -220,7 +381,7 @@ func TestArtifactCitationBackfillPersistsFailureAndResumesExactValidation(t *tes
 		string(damagedWorkspaceID), string(damagedRevision.ID)).Scan(&originalSections); err != nil {
 		t.Fatal(err)
 	}
-	replaceArtifactRevisionSections(t, ctx, pool, damagedWorkspaceID, damagedRevision.ID, `[{"invalid":"sections"}]`)
+	replaceArtifactRevisionPayload(t, ctx, pool, damagedWorkspaceID, damagedRevision.ID, `[{"invalid":"sections"}]`, damagedRevision.ContentHash)
 	failed, found, err = repository.BackfillCitationSelectors(ctx, 1)
 	if !found || failed.WorkspaceID != damagedWorkspaceID || !artifactIntegrationErrorCode(err, artifactapp.ErrorCodeCitationBackfillFailed) {
 		t.Fatalf("damaged revision failure=%+v found=%t err=%v", failed, found, err)
@@ -254,7 +415,7 @@ func TestArtifactCitationBackfillPersistsFailureAndResumesExactValidation(t *tes
 		t.Fatalf("healthy marker status=%s", status)
 	}
 
-	replaceArtifactRevisionSections(t, ctx, pool, damagedWorkspaceID, damagedRevision.ID, originalSections)
+	replaceArtifactRevisionPayload(t, ctx, pool, damagedWorkspaceID, damagedRevision.ID, originalSections, damagedRevision.ContentHash)
 	resumed, found, err := repository.BackfillCitationSelectors(ctx, 1)
 	if err != nil || !found || resumed.WorkspaceID != damagedWorkspaceID || resumed.ProcessedRevisions != 1 || resumed.ProcessedSelectors != 1 {
 		t.Fatalf("resumed damaged workspace=%+v found=%t err=%v", resumed, found, err)
@@ -397,14 +558,14 @@ func setArtifactRevisionCitationProjection(t *testing.T, ctx context.Context, po
 	}
 }
 
-func replaceArtifactRevisionSections(t *testing.T, ctx context.Context, pool *pgxpool.Pool, workspaceID, revisionID foundation.ID, sections string) {
+func replaceArtifactRevisionPayload(t *testing.T, ctx context.Context, pool *pgxpool.Pool, workspaceID, revisionID foundation.ID, sections, contentHash string) {
 	t.Helper()
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `ALTER TABLE learning.artifact_revision DISABLE TRIGGER trg_learning_artifact_revision_v1_immutable`); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `UPDATE learning.artifact_revision SET sections=$3::jsonb WHERE workspace_id=$1 AND id=$2`,
-			string(workspaceID), string(revisionID), sections); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE learning.artifact_revision SET sections=$3::jsonb,content_hash=$4 WHERE workspace_id=$1 AND id=$2`,
+			string(workspaceID), string(revisionID), sections, contentHash); err != nil {
 			return err
 		}
 		_, err := tx.Exec(ctx, `ALTER TABLE learning.artifact_revision ENABLE TRIGGER trg_learning_artifact_revision_v1_immutable`)

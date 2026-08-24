@@ -14,6 +14,77 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+func TestGORMRepositoryPostgreSQLVisibilityHoldFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	repository, platformPool := newArtifactIntegrationGORMRepository(t, ctx)
+	pool := platformPool.DB()
+	workspaceID := artifactIntegrationID(650)
+	sessionID := artifactIntegrationID(651)
+	attemptDigest := strings.Repeat("d", 64)
+	seedArtifactWorkspace(t, ctx, pool, workspaceID, "artifact-gorm-visibility-hold")
+	seedArtifactVisibilityInterviewSession(t, ctx, pool, workspaceID, sessionID, attemptDigest)
+	now := time.Date(2026, 7, 28, 11, 0, 0, 0, time.UTC)
+	service := artifactCommandServiceForConcurrency(t, repository, nil, nil, now)
+	heldCommand := artifactapp.PlanCommand{
+		WorkspaceID: workspaceID, Type: "INTERVIEW_DOC", Title: "Held GORM interview report",
+		ScopeDefinition: `{"schema_version":"interview-report/v1"}`,
+		IdempotencyKey:  "iv1:" + string(sessionID) + ":INTERVIEW_DOC:" + attemptDigest + ":p",
+		VisibilityHold: &artifactapp.VisibilityHold{
+			OwnerType: artifactapp.VisibilityHoldOwnerInterviewComplete, OwnerID: sessionID,
+			OwnerRole: artifactapp.VisibilityHoldRoleReport, AttemptDigest: attemptDigest,
+		},
+	}
+	held, err := service.Plan(ctx, heldCommand)
+	if err != nil || held.Replayed {
+		t.Fatalf("GORM held plan=%+v err=%v", held, err)
+	}
+	if _, err := repository.Get(ctx, workspaceID, held.State.Artifact.ID); !artifactIntegrationErrorCode(err, artifactapp.ErrorCodeNotFound) {
+		t.Fatalf("GORM public Get exposed held Artifact: %v", err)
+	}
+	if raw, err := repository.GetCommandState(ctx, workspaceID, held.State.Artifact.ID); err != nil || raw.Artifact.ID != held.State.Artifact.ID {
+		t.Fatalf("GORM raw held state=%+v err=%v", raw, err)
+	}
+	if page, err := repository.List(ctx, artifactapp.ListQuery{WorkspaceID: workspaceID, Limit: 10}); err != nil || len(page.Items) != 0 || page.Next != nil {
+		t.Fatalf("GORM held list=%+v err=%v", page, err)
+	}
+	replayed, err := service.Plan(ctx, heldCommand)
+	if err != nil || !replayed.Replayed || replayed.State.Artifact.ID != held.State.Artifact.ID {
+		t.Fatalf("GORM held replay=%+v err=%v", replayed, err)
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM learning.artifact_visibility_hold WHERE workspace_id=$1 AND artifact_id=$2`, string(workspaceID), string(held.State.Artifact.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if visible, err := repository.Get(ctx, workspaceID, held.State.Artifact.ID); err != nil || visible.Artifact.ID != held.State.Artifact.ID {
+		t.Fatalf("GORM released Artifact=%+v err=%v", visible, err)
+	}
+
+	failed := artifactIntegrationPlan(t, workspaceID, 660, 661, now.Add(time.Minute))
+	failed.Artifact.Type = "LEARNING_PATH"
+	missingOwnerID := artifactIntegrationID(699)
+	if _, err := repository.Create(ctx, artifactapp.CreateRecord{
+		Binding: artifactIntegrationBinding(workspaceID, failed.Artifact.ID, "iv1:"+string(missingOwnerID)+":LEARNING_PATH:"+attemptDigest+":p", 'f', artifactapp.CommandPlan, 0),
+		State:   failed,
+		VisibilityHold: &artifactapp.VisibilityHold{
+			OwnerType: artifactapp.VisibilityHoldOwnerInterviewComplete, OwnerID: missingOwnerID,
+			OwnerRole: artifactapp.VisibilityHoldRolePath, AttemptDigest: attemptDigest,
+		},
+	}); !artifactIntegrationErrorCode(err, artifactapp.ErrorCodeResultInconsistent) {
+		t.Fatalf("GORM missing hold owner err=%v", err)
+	}
+	var artifacts, revisions, receipts, holds int
+	if err := pool.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM learning.artifact WHERE workspace_id=$1 AND id=$2),
+		(SELECT count(*) FROM learning.artifact_revision WHERE workspace_id=$1 AND artifact_id=$2),
+		(SELECT count(*) FROM learning.artifact_command WHERE workspace_id=$1 AND artifact_id=$2),
+		(SELECT count(*) FROM learning.artifact_visibility_hold WHERE workspace_id=$1 AND artifact_id=$2)`,
+		string(workspaceID), string(failed.Artifact.ID)).Scan(&artifacts, &revisions, &receipts, &holds); err != nil {
+		t.Fatal(err)
+	}
+	if artifacts != 0 || revisions != 0 || receipts != 0 || holds != 0 {
+		t.Fatalf("GORM failed hold left artifacts=%d revisions=%d receipts=%d holds=%d", artifacts, revisions, receipts, holds)
+	}
+}
+
 func TestRepositoryPostgreSQLVisibilityHoldHidesPublicReadsAndKeepsCommandsRecoverable(t *testing.T) {
 	ctx := context.Background()
 	repository, pool := newArtifactIntegrationRepository(t, ctx)

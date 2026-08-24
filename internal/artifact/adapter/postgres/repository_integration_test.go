@@ -17,11 +17,241 @@ import (
 	artifactdomain "github.com/CodeZen-Lizhi/zhixu/internal/artifact/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+func TestGORMRepositoryPostgreSQLCreateTransitionReplayAndWorkspaceIsolation(t *testing.T) {
+	ctx := context.Background()
+	repository, platformPool := newArtifactIntegrationGORMRepository(t, ctx)
+	pool := platformPool.DB()
+	workspaceID := artifactIntegrationID(9001)
+	otherWorkspaceID := artifactIntegrationID(9002)
+	seedArtifactWorkspace(t, ctx, pool, workspaceID, "artifact-gorm-a")
+	seedArtifactWorkspace(t, ctx, pool, otherWorkspaceID, "artifact-gorm-b")
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	state := artifactIntegrationPlan(t, workspaceID, 9011, 9012, now)
+	binding := artifactIntegrationBinding(workspaceID, state.Artifact.ID, "gorm-plan", 'a', artifactapp.CommandPlan, 0)
+	created, err := repository.Create(ctx, artifactapp.CreateRecord{Binding: binding, State: state})
+	if err != nil || created.Replayed || created.State.Artifact.ID != state.Artifact.ID {
+		t.Fatalf("gorm create result=%#v err=%v", created, err)
+	}
+	replayed, err := repository.Create(ctx, artifactapp.CreateRecord{Binding: binding, State: state})
+	if err != nil || !replayed.Replayed || replayed.State.Artifact.ID != state.Artifact.ID {
+		t.Fatalf("gorm create replay=%#v err=%v", replayed, err)
+	}
+	if _, err := repository.Get(ctx, otherWorkspaceID, state.Artifact.ID); !artifactIntegrationErrorCode(err, artifactapp.ErrorCodeNotFound) {
+		t.Fatalf("gorm cross-workspace get err=%v", err)
+	}
+
+	outlinedArtifact, outlinedRevision, err := artifactdomain.SubmitOutline(state.Artifact, state.Revision, artifactIntegrationID(9013), []artifactdomain.OutlineSection{{Key: "scope", Title: "Scope"}}, now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	outlined := artifactapp.State{Artifact: outlinedArtifact, Revision: outlinedRevision}
+	transitionBinding := artifactIntegrationBinding(workspaceID, state.Artifact.ID, "gorm-outline", 'b', artifactapp.CommandSubmitOutline, state.Artifact.Version)
+	transitioned, err := repository.Transition(ctx, artifactapp.TransitionRecord{Binding: transitionBinding, CurrentRevisionID: state.Revision.ID, State: outlined, NewRevision: true})
+	if err != nil || transitioned.Replayed || transitioned.State.Revision.ID != outlined.Revision.ID {
+		t.Fatalf("gorm transition result=%#v err=%v", transitioned, err)
+	}
+	replayedTransition, err := repository.Transition(ctx, artifactapp.TransitionRecord{Binding: transitionBinding, CurrentRevisionID: state.Revision.ID, State: outlined, NewRevision: true})
+	if err != nil || !replayedTransition.Replayed || replayedTransition.State.Revision.ID != outlined.Revision.ID {
+		t.Fatalf("gorm transition replay=%#v err=%v", replayedTransition, err)
+	}
+	if _, err := repository.Transition(ctx, artifactapp.TransitionRecord{Binding: artifactIntegrationBinding(workspaceID, state.Artifact.ID, "gorm-stale", 'c', artifactapp.CommandSubmitOutline, state.Artifact.Version), CurrentRevisionID: state.Revision.ID, State: outlined, NewRevision: true}); !artifactIntegrationErrorCode(err, artifactapp.ErrorCodeVersionConflict) {
+		t.Fatalf("gorm stale transition err=%v", err)
+	}
+	loaded, err := repository.Get(ctx, workspaceID, state.Artifact.ID)
+	if err != nil || loaded.Artifact.Version != outlined.Artifact.Version || loaded.Revision.ID != outlined.Revision.ID {
+		t.Fatalf("gorm loaded=%#v err=%v", loaded, err)
+	}
+	page, err := repository.List(ctx, artifactapp.ListQuery{WorkspaceID: workspaceID, Limit: 10})
+	if err != nil || len(page.Items) != 1 || page.Items[0].Artifact.ID != state.Artifact.ID || page.Next != nil {
+		t.Fatalf("gorm list=%#v err=%v", page, err)
+	}
+}
+
+func TestGORMRepositoryPostgreSQLDocumentSourceProjectionFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	repository, platformPool := newArtifactIntegrationGORMRepository(t, ctx)
+	pool := platformPool.DB()
+	workspaceID := artifactIntegrationID(9201)
+	seedArtifactWorkspace(t, ctx, pool, workspaceID, "artifact-gorm-v2")
+	now := time.Now().UTC().Truncate(time.Microsecond)
+
+	documentID := artifactIntegrationID(9204)
+	articleRevisionID := artifactIntegrationID(9205)
+	articleHash := artifactIntegrationHash('d')
+	if _, err := pool.Exec(ctx, `INSERT INTO core.document(
+		id,workspace_id,canonical_path,title,lifecycle_status,version,created_at,updated_at
+	) VALUES($1,$2,'artifact-gorm-v2.md','Artifact GORM V2','DRAFT',1,$3,$3)`,
+		string(documentID), string(workspaceID), now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO core.article_revision(
+		id,workspace_id,document_id,parent_revision_id,revision_no,content,content_hash,status,
+		optimization_mode,created_by_type,created_at
+	) VALUES($1,$2,$3,NULL,1,'document-backed artifact content',$4,'DRAFT','NONE','USER',$5)`,
+		string(articleRevisionID), string(workspaceID), string(documentID), articleHash, now); err != nil {
+		t.Fatal(err)
+	}
+
+	planned := artifactIntegrationPlan(t, workspaceID, 9202, 9203, now)
+	if _, err := repository.Create(ctx, artifactapp.CreateRecord{
+		Binding: artifactIntegrationBinding(workspaceID, planned.Artifact.ID, "gorm-v2-plan", 'a', artifactapp.CommandPlan, 0),
+		State:   planned,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	outlinedArtifact, outlinedRevision, err := artifactdomain.SubmitOutline(
+		planned.Artifact,
+		planned.Revision,
+		artifactIntegrationID(9206),
+		[]artifactdomain.OutlineSection{{Key: "source", Title: "Verified source"}},
+		now.Add(time.Minute),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outlined := artifactapp.State{Artifact: outlinedArtifact, Revision: outlinedRevision}
+	artifactIntegrationTransition(t, repository,
+		artifactIntegrationBinding(workspaceID, planned.Artifact.ID, "gorm-v2-outline", 'b', artifactapp.CommandSubmitOutline, planned.Artifact.Version),
+		planned, outlined, true, nil, nil,
+	)
+	approvedArtifact, approvedRevision, err := artifactdomain.ApproveOutline(
+		outlined.Artifact,
+		outlined.Revision,
+		artifactIntegrationID(9207),
+		now.Add(2*time.Minute),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	approved := artifactapp.State{Artifact: approvedArtifact, Revision: approvedRevision}
+	artifactIntegrationTransition(t, repository,
+		artifactIntegrationBinding(workspaceID, planned.Artifact.ID, "gorm-v2-approve", 'c', artifactapp.CommandApproveOutline, outlined.Artifact.Version),
+		outlined, approved, true, nil, nil,
+	)
+	source := artifactdomain.DocumentSource{
+		DocumentID: documentID, ArticleRevisionID: articleRevisionID, RevisionNo: 1,
+		VerifiedContentHash: articleHash, Verified: true,
+	}
+	section := artifactdomain.Section{
+		Key: "source", Title: "Verified source", Content: "Content from an immutable document revision.",
+		Citations: []artifactdomain.Citation{}, DocumentSources: []artifactdomain.DocumentSource{source},
+		Coverage: artifactdomain.Coverage{SectionKey: "source", Status: artifactdomain.CoverageCovered, Gaps: []artifactdomain.Gap{}},
+	}
+	draftArtifact, draftRevision, err := artifactdomain.RecordSection(
+		approved.Artifact,
+		approved.Revision,
+		artifactIntegrationID(9208),
+		section,
+		artifactdomain.CreatorHuman,
+		nil,
+		now.Add(3*time.Minute),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	draft := artifactapp.State{Artifact: draftArtifact, Revision: draftRevision}
+	invalidSource := source
+	invalidSource.VerifiedContentHash = artifactIntegrationHash('f')
+	invalidSection := section
+	invalidSection.DocumentSources = []artifactdomain.DocumentSource{invalidSource}
+	invalidArtifact, invalidRevision, err := artifactdomain.RecordSection(
+		approved.Artifact,
+		approved.Revision,
+		artifactIntegrationID(9209),
+		invalidSection,
+		artifactdomain.CreatorHuman,
+		nil,
+		now.Add(3*time.Minute),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = repository.Transition(ctx, artifactapp.TransitionRecord{
+		Binding:           artifactIntegrationBinding(workspaceID, planned.Artifact.ID, "gorm-v2-invalid-source", 'd', artifactapp.CommandRecordSection, approved.Artifact.Version),
+		CurrentRevisionID: approved.Revision.ID,
+		State:             artifactapp.State{Artifact: invalidArtifact, Revision: invalidRevision},
+		NewRevision:       true,
+	})
+	if !artifactIntegrationErrorCode(err, artifactapp.ErrorCodeResultInconsistent) {
+		t.Fatalf("GORM mismatched document source err=%v", err)
+	}
+	artifactIntegrationPostgresCode(t, err, "23514")
+	var invalidRevisions, invalidReceipts int
+	if err := pool.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM learning.artifact_revision WHERE id=$1),
+		(SELECT count(*) FROM learning.artifact_command WHERE workspace_id=$2 AND idempotency_key='gorm-v2-invalid-source')`,
+		string(invalidRevision.ID), string(workspaceID)).Scan(&invalidRevisions, &invalidReceipts); err != nil {
+		t.Fatal(err)
+	}
+	if invalidRevisions != 0 || invalidReceipts != 0 {
+		t.Fatalf("GORM rejected v2 source left revisions=%d receipts=%d", invalidRevisions, invalidReceipts)
+	}
+	artifactIntegrationTransition(t, repository,
+		artifactIntegrationBinding(workspaceID, planned.Artifact.ID, "gorm-v2-record", 'e', artifactapp.CommandRecordSection, approved.Artifact.Version),
+		approved, draft, true, nil, nil,
+	)
+
+	loaded, err := repository.Get(ctx, workspaceID, planned.Artifact.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if schema, schemaErr := artifactdomain.RevisionSchemaVersion(loaded.Revision); schemaErr != nil || schema != artifactdomain.RevisionSchemaV2 {
+		t.Fatalf("loaded schema=%s err=%v", schema, schemaErr)
+	}
+	if len(loaded.Revision.Sections) != 1 || len(loaded.Revision.Sections[0].DocumentSources) != 1 ||
+		!reflect.DeepEqual(loaded.Revision.Sections[0].DocumentSources[0], source) {
+		t.Fatalf("loaded document sources=%#v", loaded.Revision.Sections)
+	}
+	var projectedDocumentID, projectedArticleRevisionID, projectedHash string
+	var projectedRevisionNo int64
+	if err := pool.QueryRow(ctx, `SELECT document_id::text,article_revision_id::text,revision_no,content_hash
+		FROM learning.artifact_revision_document_source
+		WHERE workspace_id=$1 AND revision_id=$2`, string(workspaceID), string(draft.Revision.ID)).Scan(
+		&projectedDocumentID, &projectedArticleRevisionID, &projectedRevisionNo, &projectedHash,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if projectedDocumentID != string(documentID) || projectedArticleRevisionID != string(articleRevisionID) ||
+		projectedRevisionNo != source.RevisionNo || projectedHash != source.VerifiedContentHash {
+		t.Fatalf("document source projection=%s/%s/%d/%s", projectedDocumentID, projectedArticleRevisionID, projectedRevisionNo, projectedHash)
+	}
+
+	triggerDisabled := true
+	if _, err := pool.Exec(ctx, `ALTER TABLE learning.artifact_revision_document_source DISABLE TRIGGER artifact_revision_document_source_append_only`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if triggerDisabled {
+			if _, cleanupErr := pool.Exec(context.Background(), `ALTER TABLE learning.artifact_revision_document_source ENABLE TRIGGER artifact_revision_document_source_append_only`); cleanupErr != nil {
+				t.Errorf("restore document source append-only trigger: %v", cleanupErr)
+			}
+		}
+	})
+	if _, err := pool.Exec(ctx, `DELETE FROM learning.artifact_revision_document_source WHERE workspace_id=$1 AND revision_id=$2`, string(workspaceID), string(draft.Revision.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `ALTER TABLE learning.artifact_revision_document_source ENABLE TRIGGER artifact_revision_document_source_append_only`); err != nil {
+		t.Fatal(err)
+	}
+	triggerDisabled = false
+
+	if _, err := repository.Get(ctx, workspaceID, planned.Artifact.ID); !artifactIntegrationErrorCode(err, artifactapp.ErrorCodeResultInconsistent) {
+		t.Fatalf("missing document source projection get err=%v", err)
+	}
+	if _, err := repository.List(ctx, artifactapp.ListQuery{WorkspaceID: workspaceID, Limit: 10}); !artifactIntegrationErrorCode(err, artifactapp.ErrorCodeResultInconsistent) {
+		t.Fatalf("missing document source projection list err=%v", err)
+	}
+	if acquired := pool.Stat().AcquiredConns(); acquired != 0 {
+		t.Fatalf("GORM projection validation retained %d PostgreSQL connections", acquired)
+	}
+}
 
 func TestRepositoryPostgreSQLWorkspaceCASReceiptsAndImmutableBindings(t *testing.T) {
 	ctx := context.Background()
@@ -315,12 +545,68 @@ func newArtifactIntegrationRepository(t *testing.T, ctx context.Context) (*Repos
 	return repository, pool
 }
 
+func newArtifactIntegrationGORMRepository(t *testing.T, ctx context.Context) (*GORMRepository, *platformpostgres.Pool) {
+	t.Helper()
+	baseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
+	if baseURL == "" {
+		t.Skip("set ZHIXU_TEST_DATABASE_URL to a disposable PostgreSQL instance")
+	}
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin, err := pgxpool.New(ctx, baseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	databaseName := fmt.Sprintf("zhixu_artifact_gorm_%d", time.Now().UnixNano())
+	identifier := pgx.Identifier{databaseName}.Sanitize()
+	if _, err := admin.Exec(ctx, "CREATE DATABASE "+identifier); err != nil {
+		admin.Close()
+		t.Fatal(err)
+	}
+	parsed.Path = "/" + databaseName
+	databaseURL := parsed.String()
+	migrationPool, err := platformpostgres.OpenMigration(ctx, databaseURL, 4, 1)
+	if err != nil {
+		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
+		admin.Close()
+		t.Fatal(err)
+	}
+	runner, err := platformmigration.NewRunner(migrationPool.DB(), projectmigrations.FS)
+	if err == nil {
+		err = runner.Up(ctx)
+	}
+	migrationPool.Close()
+	if err != nil {
+		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
+		admin.Close()
+		t.Fatal(err)
+	}
+	platformPool, err := platformpostgres.Open(ctx, databaseURL, 4, 1)
+	if err != nil {
+		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
+		admin.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		platformPool.Close()
+		_, _ = admin.Exec(context.Background(), "DROP DATABASE "+identifier+" WITH (FORCE)")
+		admin.Close()
+	})
+	repository, err := NewGORMRepository(platformPool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return repository, platformPool
+}
+
 func seedArtifactWorkspace(t *testing.T, ctx context.Context, pool *pgxpool.Pool, workspaceID foundation.ID, name string) {
 	t.Helper()
 	now := time.Date(2026, 7, 26, 9, 0, 0, 0, time.UTC)
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at)
-		VALUES($1,$2,$3,$3,$4,'test',1,$4,$4)`, string(workspaceID), name, "/tmp/"+name, now); err != nil {
+		VALUES($1,$2,$3,$3,$4,'inactive',1,$4,$4)`, string(workspaceID), name, "/tmp/"+name, now); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -337,7 +623,12 @@ func artifactIntegrationPlan(t *testing.T, workspaceID foundation.ID, artifactNu
 	return artifactapp.State{Artifact: artifact, Revision: revision}
 }
 
-func artifactIntegrationTransition(t *testing.T, repository *Repository, binding artifactapp.CommandBinding, current, next artifactapp.State, newRevision bool, export *artifactapp.ExportRecord, publication *artifactapp.PublicationRecord) {
+type artifactIntegrationTransitionRepository interface {
+	ReserveExternalTransition(context.Context, artifactapp.CommandBinding) (artifactapp.State, error)
+	Transition(context.Context, artifactapp.TransitionRecord) (artifactapp.CommandResult, error)
+}
+
+func artifactIntegrationTransition(t *testing.T, repository artifactIntegrationTransitionRepository, binding artifactapp.CommandBinding, current, next artifactapp.State, newRevision bool, export *artifactapp.ExportRecord, publication *artifactapp.PublicationRecord) {
 	t.Helper()
 	if binding.CommandType == artifactapp.CommandExportMarkdown || binding.CommandType == artifactapp.CommandPublish {
 		if _, err := repository.ReserveExternalTransition(context.Background(), binding); err != nil {

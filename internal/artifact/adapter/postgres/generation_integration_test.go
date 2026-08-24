@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	artifactdomain "github.com/CodeZen-Lizhi/zhixu/internal/artifact/domain"
 	artifactworkflow "github.com/CodeZen-Lizhi/zhixu/internal/artifact/workflow"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	workflowpostgres "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/postgres"
 	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
 	"github.com/jackc/pgx/v5"
@@ -332,6 +334,420 @@ func TestSectionGenerationPostgreSQLFinalizeReplayAndCrossAttemptLookup(t *testi
 	}
 }
 
+func TestGORMSectionGenerationPostgreSQLStartContextFinalizeAndLookup(t *testing.T) {
+	ctx := context.Background()
+	gormArtifact, platformPool := newArtifactIntegrationGORMRepository(t, ctx)
+	workspaceID := artifactIntegrationID(1151)
+	seedArtifactWorkspace(t, ctx, platformPool.DB(), workspaceID, "artifact-gorm-generation-finalize")
+	now := time.Date(2026, 7, 26, 18, 0, 0, 0, time.UTC)
+	source := seedGeneratingArtifact(t, gormArtifact, workspaceID, 1160, now)
+
+	gormCoordinator, agentRepository := newGORMGenerationIntegrationCoordinator(
+		t, platformPool, now.Add(10*time.Minute), &generationCitationVerifierFake{}, 1190,
+	)
+	startCommand := artifactapplication.StartSectionGenerationCommand{
+		WorkspaceID: workspaceID, ArtifactID: source.Artifact.ID, ExpectedVersion: source.Artifact.Version,
+		SectionKey: "second", IdempotencyKey: "gorm-generation-finalize",
+	}
+	started, err := gormCoordinator.StartSectionGeneration(ctx, startCommand)
+	if err != nil || started.Replayed || started.Generation.Status != artifactapplication.SectionGenerationPending {
+		t.Fatalf("gorm start=%#v err=%v", started, err)
+	}
+	replayedStart, err := gormCoordinator.StartSectionGeneration(nil, startCommand)
+	if err != nil || !replayedStart.Replayed || replayedStart.Generation.ID != started.Generation.ID {
+		t.Fatalf("gorm start replay=%#v err=%v", replayedStart, err)
+	}
+	rebased := recordGenerationGapSection(t, source, "first", artifactIntegrationID(1170), now.Add(3*time.Minute))
+	artifactIntegrationTransition(t, gormArtifact,
+		artifactIntegrationBinding(workspaceID, source.Artifact.ID, "gorm-generation-context-rebase", 'd', artifactapplication.CommandRecordSection, source.Artifact.Version),
+		source, rebased, true, nil, nil)
+	input := artifactworkflow.Input{
+		SchemaVersion: artifactworkflow.InputSchemaVersion, ArtifactID: source.Artifact.ID,
+		RevisionID: source.Revision.ID, RevisionNo: source.Revision.RevisionNo,
+		ArtifactVersion: source.Artifact.Version, SectionKey: startCommand.SectionKey,
+	}
+	contextQuery := artifactworkflow.GenerationContextQuery{
+		WorkspaceID: workspaceID, WorkflowRunID: started.Generation.WorkflowRunID,
+		NodeRunID: started.Generation.NodeRunID, Input: input,
+	}
+	loadCancelCause := errors.New("artifact generation context load canceled by caller")
+	loadCanceledCtx, cancelLoad := context.WithCancelCause(ctx)
+	cancelLoad(loadCancelCause)
+	_, loadErr := gormCoordinator.LoadGenerationContext(loadCanceledCtx, contextQuery)
+	requireGORMGenerationContextError(t, loadErr, context.Canceled, loadCancelCause, foundation.ErrorNonRetryableFailure, false)
+	loaded, err := gormCoordinator.LoadGenerationContext(nil, contextQuery)
+	if err != nil || loaded.SourceRevision.ID != source.Revision.ID || loaded.Current.Revision.ID != rebased.Revision.ID ||
+		loaded.Current.Artifact.Version != rebased.Artifact.Version || loaded.ProfileRef != generationIntegrationProfile() {
+		t.Fatalf("gorm generation context=%#v err=%v", loaded, err)
+	}
+
+	attemptID := artifactIntegrationID(1180)
+	seedGenerationAttempt(t, ctx, platformPool.DB(), started.Generation, attemptID, 1, now.Add(11*time.Minute))
+	run := seedGenerationModelRun(t, ctx, platformPool.DB(), agentRepository, started.Generation, attemptID, artifactIntegrationID(1181), artifactIntegrationID(1182), now.Add(12*time.Minute))
+	command := generationGapFinalizeCommand(source, started.Generation, attemptID, run, "second", "Second")
+	lookupDeadlineCause := errors.New("artifact generation lookup exceeded its caller deadline")
+	lookupDeadlineCtx, cancelLookup := context.WithDeadlineCause(ctx, time.Unix(0, 0), lookupDeadlineCause)
+	defer cancelLookup()
+	if deadlineReceipt, found, lookupErr := gormCoordinator.Lookup(lookupDeadlineCtx, command.FinalizationLookup); deadlineReceipt != (artifactworkflow.OutputReceipt{}) || found {
+		t.Fatalf("gorm deadline lookup receipt=%#v found=%t err=%v", deadlineReceipt, found, lookupErr)
+	} else {
+		requireGORMGenerationContextError(t, lookupErr, context.DeadlineExceeded, lookupDeadlineCause, foundation.ErrorRetryableFailure, true)
+	}
+	finalizeCancelCause := errors.New("artifact generation finalization canceled by caller")
+	finalizeCanceledCtx, cancelFinalize := context.WithCancelCause(ctx)
+	cancelFinalize(finalizeCancelCause)
+	if canceledReceipt, replayed, finalizeErr := gormCoordinator.Finalize(finalizeCanceledCtx, command); canceledReceipt != (artifactworkflow.OutputReceipt{}) || replayed {
+		t.Fatalf("gorm canceled finalize receipt=%#v replayed=%t err=%v", canceledReceipt, replayed, finalizeErr)
+	} else {
+		requireGORMGenerationContextError(t, finalizeErr, context.Canceled, finalizeCancelCause, foundation.ErrorNonRetryableFailure, false)
+	}
+	if pendingReceipt, found, lookupErr := gormCoordinator.Lookup(ctx, command.FinalizationLookup); lookupErr != nil || found || pendingReceipt != (artifactworkflow.OutputReceipt{}) {
+		t.Fatalf("gorm pending lookup receipt=%#v found=%t err=%v", pendingReceipt, found, lookupErr)
+	}
+	receipt, replayed, err := gormCoordinator.Finalize(ctx, command)
+	if err != nil || replayed {
+		t.Fatalf("gorm finalize receipt=%#v replayed=%t err=%v", receipt, replayed, err)
+	}
+	if receipt.ArtifactID != source.Artifact.ID || receipt.ModelRunID != run.ID || receipt.SectionKey != "second" || receipt.RevisionNo != rebased.Revision.RevisionNo+1 || receipt.BaseRevisionID != rebased.Revision.ID {
+		t.Fatalf("gorm finalize receipt=%#v", receipt)
+	}
+	replayedReceipt, replayed, err := gormCoordinator.Finalize(nil, command)
+	if err != nil || !replayed || replayedReceipt != receipt {
+		t.Fatalf("gorm finalize replay receipt=%#v replayed=%t err=%v", replayedReceipt, replayed, err)
+	}
+	lookedUp, found, err := gormCoordinator.Lookup(nil, command.FinalizationLookup)
+	if err != nil || !found || lookedUp != receipt {
+		t.Fatalf("gorm completed lookup receipt=%#v found=%t err=%v", lookedUp, found, err)
+	}
+	persisted, err := gormArtifact.Get(ctx, workspaceID, source.Artifact.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Revision.ID != receipt.RevisionID || persisted.Artifact.Version != receipt.ArtifactVersion || len(persisted.Revision.Sections) != 2 {
+		t.Fatalf("gorm persisted artifact=%#v", persisted)
+	}
+	var revisionCount int
+	if err := platformPool.DB().QueryRow(ctx, `SELECT count(*) FROM learning.artifact_revision WHERE workspace_id=$1 AND artifact_id=$2`, string(workspaceID), string(source.Artifact.ID)).Scan(&revisionCount); err != nil {
+		t.Fatal(err)
+	}
+	if revisionCount != 5 {
+		t.Fatalf("gorm revision count=%d", revisionCount)
+	}
+}
+
+func requireGORMGenerationContextError(
+	t *testing.T,
+	err error,
+	sentinel error,
+	cause error,
+	kind foundation.ErrorKind,
+	retryable bool,
+) {
+	t.Helper()
+	var classified *foundation.Error
+	if !errors.Is(err, sentinel) || !errors.Is(err, cause) || !errors.As(err, &classified) ||
+		classified.Kind != kind || classified.Code != artifactworkflow.ErrorCodeCapabilityUnavailable || classified.Retryable != retryable {
+		t.Fatalf("gorm generation context error=%v classified=%#v", err, classified)
+	}
+}
+
+func TestGORMSectionGenerationPostgreSQLRejectsDriftedWorkflowGraph(t *testing.T) {
+	ctx := context.Background()
+	gormArtifact, platformPool := newArtifactIntegrationGORMRepository(t, ctx)
+	pool := platformPool.DB()
+	workspaceID := artifactIntegrationID(1201)
+	seedArtifactWorkspace(t, ctx, pool, workspaceID, "artifact-gorm-generation-workflow-drift")
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	source := seedGeneratingArtifact(t, gormArtifact, workspaceID, 1210, now)
+	coordinator, _ := newGORMGenerationIntegrationCoordinator(
+		t, platformPool, now.Add(10*time.Minute), &generationCitationVerifierFake{}, 1240,
+	)
+	started, err := coordinator.StartSectionGeneration(ctx, artifactapplication.StartSectionGenerationCommand{
+		WorkspaceID: workspaceID, ArtifactID: source.Artifact.ID, ExpectedVersion: source.Artifact.Version,
+		SectionKey: "second", IdempotencyKey: "gorm-workflow-drift-second",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var definitionID string
+	if err := pool.QueryRow(ctx, `SELECT definition_id::text FROM workflow.run WHERE workspace_id=$1 AND id=$2`, string(workspaceID), string(started.Generation.WorkflowRunID)).Scan(&definitionID); err != nil {
+		t.Fatal(err)
+	}
+	triggerDisabled := true
+	if _, err := pool.Exec(ctx, `ALTER TABLE workflow.definition DISABLE TRIGGER workflow_definition_reject_update_delete`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if triggerDisabled {
+			if _, cleanupErr := pool.Exec(context.Background(), `ALTER TABLE workflow.definition ENABLE TRIGGER workflow_definition_reject_update_delete`); cleanupErr != nil {
+				t.Errorf("restore workflow definition immutable trigger: %v", cleanupErr)
+			}
+		}
+	})
+	if _, err := pool.Exec(ctx, `UPDATE workflow.definition SET graph=graph || '{"unexpected":true}'::jsonb WHERE id=$1`, definitionID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `ALTER TABLE workflow.definition ENABLE TRIGGER workflow_definition_reject_update_delete`); err != nil {
+		t.Fatal(err)
+	}
+	triggerDisabled = false
+	input := artifactworkflow.Input{
+		SchemaVersion: artifactworkflow.InputSchemaVersion, ArtifactID: source.Artifact.ID,
+		RevisionID: source.Revision.ID, RevisionNo: source.Revision.RevisionNo,
+		ArtifactVersion: source.Artifact.Version, SectionKey: "second",
+	}
+	_, err = coordinator.LoadGenerationContext(ctx, artifactworkflow.GenerationContextQuery{
+		WorkspaceID: workspaceID, WorkflowRunID: started.Generation.WorkflowRunID,
+		NodeRunID: started.Generation.NodeRunID, Input: input,
+	})
+	var classified *foundation.Error
+	if !errors.As(err, &classified) || classified.Kind != foundation.ErrorConsistencyViolation || classified.Code != artifactworkflow.ErrorCodeContextInvalid || classified.Retryable {
+		t.Fatalf("GORM drifted workflow graph err=%v", err)
+	}
+	if _, err := pool.Exec(ctx, `SELECT $1::jsonb`, `{"valid":true} {}`); err == nil {
+		t.Fatal("PostgreSQL accepted trailing workflow JSON")
+	} else {
+		artifactIntegrationPostgresCode(t, err, "22P02")
+	}
+	if acquired := pool.Stat().AcquiredConns(); acquired != 0 {
+		t.Fatalf("GORM workflow drift path retained %d PostgreSQL connections", acquired)
+	}
+}
+
+func TestGORMSectionGenerationPostgreSQLRecoversCommitResponseLoss(t *testing.T) {
+	ctx := context.Background()
+	gormArtifact, platformPool := newArtifactIntegrationGORMRepository(t, ctx)
+	workspaceID := artifactIntegrationID(1251)
+	seedArtifactWorkspace(t, ctx, platformPool.DB(), workspaceID, "artifact-gorm-generation-commit-loss")
+	now := time.Date(2026, 7, 26, 22, 0, 0, 0, time.UTC)
+	source := seedGeneratingArtifact(t, gormArtifact, workspaceID, 1260, now)
+	coordinator, agentRepository := newGORMGenerationIntegrationCoordinator(
+		t, platformPool, now.Add(10*time.Minute), &generationCitationVerifierFake{}, 1290,
+	)
+	committing := coordinator.uow
+	coordinator.uow = generationGORMCommitResponseLossUoW{inner: committing}
+	startCommand := artifactapplication.StartSectionGenerationCommand{
+		WorkspaceID: workspaceID, ArtifactID: source.Artifact.ID, ExpectedVersion: source.Artifact.Version,
+		SectionKey: "second", IdempotencyKey: "gorm-commit-loss-second",
+	}
+	started, err := coordinator.StartSectionGeneration(ctx, startCommand)
+	if err != nil || started.Replayed || started.Generation.Status != artifactapplication.SectionGenerationPending {
+		t.Fatalf("gorm recovered start=%#v err=%v", started, err)
+	}
+	recoveredReplay, err := coordinator.StartSectionGeneration(ctx, startCommand)
+	if err != nil || !recoveredReplay.Replayed || recoveredReplay.Generation.ID != started.Generation.ID {
+		t.Fatalf("gorm recovered replay=%#v err=%v", recoveredReplay, err)
+	}
+	coordinator.uow = committing
+	normalReplay, err := coordinator.StartSectionGeneration(ctx, startCommand)
+	if err != nil || !normalReplay.Replayed || normalReplay.Generation.ID != started.Generation.ID {
+		t.Fatalf("gorm normal replay=%#v err=%v", normalReplay, err)
+	}
+
+	attemptID := artifactIntegrationID(1280)
+	seedGenerationAttempt(t, ctx, platformPool.DB(), started.Generation, attemptID, 1, now.Add(11*time.Minute))
+	run := seedGenerationModelRun(t, ctx, platformPool.DB(), agentRepository, started.Generation, attemptID, artifactIntegrationID(1281), artifactIntegrationID(1282), now.Add(12*time.Minute))
+	command := generationGapFinalizeCommand(source, started.Generation, attemptID, run, "second", "Second")
+	coordinator.uow = generationGORMCommitResponseLossUoW{inner: committing}
+	if _, _, err := coordinator.Finalize(ctx, command); !artifactIntegrationErrorCode(err, artifactworkflow.ErrorCodeFinalizationUnknown) {
+		t.Fatalf("gorm finalize response-loss err=%v", err)
+	}
+	coordinator.uow = committing
+	receipt, found, err := coordinator.Lookup(ctx, command.FinalizationLookup)
+	if err != nil || !found || receipt.ModelRunID != run.ID || receipt.ArtifactID != source.Artifact.ID {
+		t.Fatalf("gorm response-loss lookup receipt=%#v found=%t err=%v", receipt, found, err)
+	}
+	if replayedReceipt, replayed, err := coordinator.Finalize(ctx, command); err != nil || !replayed || replayedReceipt != receipt {
+		t.Fatalf("gorm response-loss finalize replay=%#v replayed=%t err=%v", replayedReceipt, replayed, err)
+	}
+	coordinator.uow = generationGORMCommitResponseLossUoW{inner: committing}
+	if lostReceipt, replayed, err := coordinator.Finalize(ctx, command); lostReceipt != (artifactworkflow.OutputReceipt{}) || replayed ||
+		!artifactIntegrationErrorCode(err, artifactworkflow.ErrorCodeCapabilityUnavailable) {
+		t.Fatalf("gorm completed replay response-loss receipt=%#v replayed=%t err=%v", lostReceipt, replayed, err)
+	}
+	coordinator.uow = committing
+	if replayedReceipt, replayed, err := coordinator.Finalize(ctx, command); err != nil || !replayed || replayedReceipt != receipt {
+		t.Fatalf("gorm completed replay after response-loss receipt=%#v replayed=%t err=%v", replayedReceipt, replayed, err)
+	}
+	var workflowRuns, generations, revisions, calls int
+	if err := platformPool.DB().QueryRow(ctx, `SELECT count(*) FROM workflow.run WHERE workspace_id=$1`, string(workspaceID)).Scan(&workflowRuns); err != nil {
+		t.Fatal(err)
+	}
+	if err := platformPool.DB().QueryRow(ctx, `SELECT count(*) FROM learning.artifact_section_generation WHERE workspace_id=$1 AND artifact_id=$2`, string(workspaceID), string(source.Artifact.ID)).Scan(&generations); err != nil {
+		t.Fatal(err)
+	}
+	if err := platformPool.DB().QueryRow(ctx, `SELECT count(*) FROM learning.artifact_revision WHERE workspace_id=$1 AND artifact_id=$2`, string(workspaceID), string(source.Artifact.ID)).Scan(&revisions); err != nil {
+		t.Fatal(err)
+	}
+	if err := platformPool.DB().QueryRow(ctx, `SELECT count(*) FROM agent.model_call WHERE model_run_id=$1`, string(run.ID)).Scan(&calls); err != nil {
+		t.Fatal(err)
+	}
+	if workflowRuns != 1 || generations != 1 || revisions != 4 || calls != 1 {
+		t.Fatalf("gorm response-loss runs=%d generations=%d revisions=%d calls=%d", workflowRuns, generations, revisions, calls)
+	}
+}
+
+func TestGORMSectionGenerationPostgreSQLRebasesReverseOrder(t *testing.T) {
+	ctx := context.Background()
+	gormArtifact, platformPool := newArtifactIntegrationGORMRepository(t, ctx)
+	workspaceID := artifactIntegrationID(1351)
+	seedArtifactWorkspace(t, ctx, platformPool.DB(), workspaceID, "artifact-gorm-generation-rebase")
+	now := time.Date(2026, 7, 27, 10, 0, 0, 0, time.UTC)
+	source := seedGeneratingArtifact(t, gormArtifact, workspaceID, 1360, now)
+	coordinator, agentRepository := newGORMGenerationIntegrationCoordinator(
+		t, platformPool, now.Add(10*time.Minute), &generationCitationVerifierFake{}, 1390,
+	)
+	start := func(key string) artifactapplication.SectionGeneration {
+		t.Helper()
+		result, err := coordinator.StartSectionGeneration(ctx, artifactapplication.StartSectionGenerationCommand{
+			WorkspaceID: workspaceID, ArtifactID: source.Artifact.ID, ExpectedVersion: source.Artifact.Version,
+			SectionKey: key, IdempotencyKey: "gorm-rebase-" + key,
+		})
+		if err != nil || result.Replayed {
+			t.Fatalf("GORM start %s=%#v err=%v", key, result, err)
+		}
+		return result.Generation
+	}
+	firstGeneration := start("first")
+	secondGeneration := start("second")
+	firstAttempt, secondAttempt := artifactIntegrationID(1380), artifactIntegrationID(1381)
+	seedGenerationAttempt(t, ctx, platformPool.DB(), firstGeneration, firstAttempt, 1, now.Add(11*time.Minute))
+	seedGenerationAttempt(t, ctx, platformPool.DB(), secondGeneration, secondAttempt, 1, now.Add(12*time.Minute))
+	firstRun := seedGenerationModelRun(t, ctx, platformPool.DB(), agentRepository, firstGeneration, firstAttempt, artifactIntegrationID(1382), artifactIntegrationID(1383), now.Add(13*time.Minute))
+	secondRun := seedGenerationModelRun(t, ctx, platformPool.DB(), agentRepository, secondGeneration, secondAttempt, artifactIntegrationID(1384), artifactIntegrationID(1385), now.Add(14*time.Minute))
+	finalize := func(generation artifactapplication.SectionGeneration, attemptID foundation.ID, run agentdomain.ModelRun, key, title string) artifactworkflow.OutputReceipt {
+		t.Helper()
+		receipt, replayed, err := coordinator.Finalize(ctx, generationGapFinalizeCommand(source, generation, attemptID, run, key, title))
+		if err != nil || replayed {
+			t.Fatalf("GORM finalize %s receipt=%#v replayed=%t err=%v", key, receipt, replayed, err)
+		}
+		return receipt
+	}
+	secondReceipt := finalize(secondGeneration, secondAttempt, secondRun, "second", "Second")
+	firstReceipt := finalize(firstGeneration, firstAttempt, firstRun, "first", "First")
+	if secondReceipt.BaseRevisionID != source.Revision.ID || firstReceipt.BaseRevisionID != secondReceipt.RevisionID ||
+		firstReceipt.RevisionNo != secondReceipt.RevisionNo+1 || firstReceipt.ArtifactVersion != secondReceipt.ArtifactVersion+1 {
+		t.Fatalf("GORM reverse rebase second=%#v first=%#v", secondReceipt, firstReceipt)
+	}
+	finalState, err := gormArtifact.Get(ctx, workspaceID, source.Artifact.ID)
+	_, hasFirst := revisionSectionByKey(finalState.Revision, "first")
+	_, hasSecond := revisionSectionByKey(finalState.Revision, "second")
+	if err != nil || finalState.Artifact.Status != artifactdomain.StatusDraft || len(finalState.Revision.Sections) != 2 || !hasFirst || !hasSecond {
+		t.Fatalf("GORM rebased state=%#v err=%v", finalState, err)
+	}
+	snapshot, err := gormArtifact.ListSectionGenerations(ctx, workspaceID, source.Artifact.ID)
+	if err != nil || snapshot.State.Revision.ID != finalState.Revision.ID || len(snapshot.Items) != 0 {
+		t.Fatalf("GORM generation snapshot=%#v err=%v", snapshot, err)
+	}
+}
+
+func TestGORMSectionGenerationPostgreSQLEvidenceVerificationReleasesLocks(t *testing.T) {
+	ctx := context.Background()
+	gormArtifact, platformPool := newArtifactIntegrationGORMRepository(t, ctx)
+	pool := platformPool.DB()
+	workspaceID := artifactIntegrationID(1451)
+	seedArtifactWorkspace(t, ctx, pool, workspaceID, "artifact-gorm-generation-evidence-locks")
+	now := time.Date(2026, 7, 27, 11, 0, 0, 0, time.UTC)
+	source := seedGeneratingArtifact(t, gormArtifact, workspaceID, 1460, now)
+	provenance := seedArtifactCitationProvenance(t, ctx, pool, workspaceID, 1488)
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+	}()
+	verifier := &generationCitationVerifierFake{entered: entered, release: release}
+	coordinator, agentRepository := newGORMGenerationIntegrationCoordinator(t, platformPool, now.Add(10*time.Minute), verifier, 1490)
+	started, err := coordinator.StartSectionGeneration(ctx, artifactapplication.StartSectionGenerationCommand{
+		WorkspaceID: workspaceID, ArtifactID: source.Artifact.ID, ExpectedVersion: source.Artifact.Version,
+		SectionKey: "second", IdempotencyKey: "gorm-evidence-locks-second",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attemptID := artifactIntegrationID(1480)
+	seedGenerationAttempt(t, ctx, pool, started.Generation, attemptID, 1, now.Add(11*time.Minute))
+	run := seedGenerationModelRun(t, ctx, pool, agentRepository, started.Generation, attemptID, artifactIntegrationID(1481), artifactIntegrationID(1482), now.Add(12*time.Minute))
+	citation := agentdomain.Citation{
+		ID: "citation-gorm-001", WorkspaceID: workspaceID, IndexVersionID: run.Retrieval.IndexVersionID,
+		ChunkID: artifactIntegrationID(1483), SourceVersionID: provenance.sourceVersionID, SourceSpanID: provenance.sourceSpanID,
+	}
+	verifier.results = []artifactdomain.Citation{{
+		SourceVersionID: citation.SourceVersionID, SourceSpanID: citation.SourceSpanID,
+		VerifiedContentHash: provenance.contentHash, Excerpt: "approved GORM evidence", Verified: true,
+	}}
+	command := artifactworkflow.FinalizeSectionCommand{
+		FinalizationLookup: artifactworkflow.FinalizationLookup{
+			WorkspaceID: workspaceID, WorkflowRunID: started.Generation.WorkflowRunID,
+			NodeRunID: started.Generation.NodeRunID, NodeAttemptID: attemptID,
+			Input: artifactworkflow.Input{
+				SchemaVersion: artifactworkflow.InputSchemaVersion, ArtifactID: source.Artifact.ID,
+				RevisionID: source.Revision.ID, RevisionNo: source.Revision.RevisionNo,
+				ArtifactVersion: source.Artifact.Version, SectionKey: "second",
+			},
+		},
+		ModelRunID: run.ID, ExpectedModelRunVersion: run.Version,
+		Proposal: artifactworkflow.SectionProposal{
+			SectionKey: "second", Title: "Second", Content: "approved GORM content", Citations: []agentdomain.Citation{citation},
+			Coverage: artifactdomain.Coverage{SectionKey: "second", Status: artifactdomain.CoverageCovered, Gaps: []artifactdomain.Gap{}},
+			Metadata: artifactdomain.GenerationMetadata{
+				PromptVersion: run.Prompt.Version, ModelVersion: run.Model.ModelVersion,
+				WorkflowDefinitionVersion: "1", SchemaVersion: run.Schema.Version,
+			},
+		},
+	}
+	type finalizeResult struct {
+		receipt artifactworkflow.OutputReceipt
+		err     error
+	}
+	result := make(chan finalizeResult, 1)
+	go func() {
+		receipt, _, finalizeErr := coordinator.Finalize(ctx, command)
+		result <- finalizeResult{receipt: receipt, err: finalizeErr}
+	}()
+	select {
+	case <-entered:
+	case finalized := <-result:
+		t.Fatalf("GORM finalization returned before evidence verification receipt=%#v err=%v", finalized.receipt, finalized.err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("GORM citation verifier was not entered")
+	}
+	lockTx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []struct {
+		name  string
+		query string
+		id    foundation.ID
+	}{
+		{name: "generation", query: `SELECT id::text FROM learning.artifact_section_generation WHERE id=$1 FOR UPDATE NOWAIT`, id: started.Generation.ID},
+		{name: "artifact", query: `SELECT id::text FROM learning.artifact WHERE id=$1 FOR UPDATE NOWAIT`, id: source.Artifact.ID},
+		{name: "model run", query: `SELECT id::text FROM agent.model_run WHERE id=$1 FOR UPDATE NOWAIT`, id: run.ID},
+	} {
+		var lockedID string
+		if err := lockTx.QueryRow(ctx, target.query, string(target.id)).Scan(&lockedID); err != nil {
+			_ = lockTx.Rollback(ctx)
+			t.Fatalf("GORM %s row remained locked during evidence verification: %v", target.name, err)
+		}
+	}
+	if err := lockTx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	released = true
+	select {
+	case finalized := <-result:
+		if finalized.err != nil || finalized.receipt.ModelRunID != run.ID || verifier.calls != 1 {
+			t.Fatalf("GORM finalize after verifier release receipt=%#v calls=%d err=%v", finalized.receipt, verifier.calls, finalized.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("GORM finalization did not finish after evidence verification")
+	}
+}
+
 func TestSectionGenerationPostgreSQLRejectsForgedEvidenceWithoutSplitState(t *testing.T) {
 	ctx := context.Background()
 	artifactRepository, pool := newArtifactIntegrationRepository(t, ctx)
@@ -339,6 +755,7 @@ func TestSectionGenerationPostgreSQLRejectsForgedEvidenceWithoutSplitState(t *te
 	seedArtifactWorkspace(t, ctx, pool, workspaceID, "artifact-generation-evidence")
 	now := time.Date(2026, 7, 26, 17, 0, 0, 0, time.UTC)
 	source := seedGeneratingArtifact(t, artifactRepository, workspaceID, 610, now)
+	provenance := seedArtifactCitationProvenance(t, ctx, pool, workspaceID, 738)
 	verifier := &generationCitationVerifierFake{}
 	coordinator, agentRepository := newGenerationIntegrationCoordinator(t, pool, now.Add(10*time.Minute), verifier)
 	started, err := coordinator.StartSectionGeneration(ctx, artifactapplication.StartSectionGenerationCommand{
@@ -358,7 +775,7 @@ func TestSectionGenerationPostgreSQLRejectsForgedEvidenceWithoutSplitState(t *te
 	}
 	citation := agentdomain.Citation{
 		ID: "citation-001", WorkspaceID: artifactIntegrationID(699), IndexVersionID: run.Retrieval.IndexVersionID,
-		ChunkID: artifactIntegrationID(640), SourceVersionID: artifactIntegrationID(641), SourceSpanID: artifactIntegrationID(642),
+		ChunkID: artifactIntegrationID(640), SourceVersionID: provenance.sourceVersionID, SourceSpanID: provenance.sourceSpanID,
 	}
 	proposal := artifactworkflow.SectionProposal{
 		SectionKey: "second", Title: "Second", Content: "approved content", Citations: []agentdomain.Citation{citation},
@@ -385,7 +802,7 @@ func TestSectionGenerationPostgreSQLRejectsForgedEvidenceWithoutSplitState(t *te
 	command.Proposal.Citations[0].WorkspaceID = workspaceID
 	verifier.results = []artifactdomain.Citation{{
 		SourceVersionID: command.Proposal.Citations[0].SourceVersionID,
-		SourceSpanID:    artifactIntegrationID(643), VerifiedContentHash: artifactIntegrationHash('d'),
+		SourceSpanID:    artifactIntegrationID(643), VerifiedContentHash: provenance.contentHash,
 		Excerpt: "drifted span", Verified: true,
 	}}
 	if _, _, err := coordinator.Finalize(ctx, command); !artifactIntegrationErrorCode(err, artifactworkflow.ErrorCodeEvidenceInvalid) {
@@ -451,6 +868,7 @@ func TestSectionGenerationPostgreSQLEvidenceVerificationDoesNotHoldFinalizationR
 	seedArtifactWorkspace(t, ctx, pool, workspaceID, "artifact-generation-verifier-locks")
 	now := time.Date(2026, 7, 26, 17, 30, 0, 0, time.UTC)
 	source := seedGeneratingArtifact(t, artifactRepository, workspaceID, 660, now)
+	provenance := seedArtifactCitationProvenance(t, ctx, pool, workspaceID, 788)
 	entered := make(chan struct{}, 1)
 	release := make(chan struct{})
 	released := false
@@ -473,11 +891,11 @@ func TestSectionGenerationPostgreSQLEvidenceVerificationDoesNotHoldFinalizationR
 	run := seedGenerationModelRun(t, ctx, pool, agentRepository, started.Generation, attemptID, artifactIntegrationID(681), artifactIntegrationID(682), now.Add(12*time.Minute))
 	citation := agentdomain.Citation{
 		ID: "citation-001", WorkspaceID: workspaceID, IndexVersionID: run.Retrieval.IndexVersionID,
-		ChunkID: artifactIntegrationID(683), SourceVersionID: artifactIntegrationID(684), SourceSpanID: artifactIntegrationID(685),
+		ChunkID: artifactIntegrationID(683), SourceVersionID: provenance.sourceVersionID, SourceSpanID: provenance.sourceSpanID,
 	}
 	verifier.results = []artifactdomain.Citation{{
 		SourceVersionID: citation.SourceVersionID, SourceSpanID: citation.SourceSpanID,
-		VerifiedContentHash: artifactIntegrationHash('e'), Excerpt: "approved evidence", Verified: true,
+		VerifiedContentHash: provenance.contentHash, Excerpt: "approved evidence", Verified: true,
 	}}
 	command := artifactworkflow.FinalizeSectionCommand{
 		FinalizationLookup: artifactworkflow.FinalizationLookup{
@@ -510,6 +928,8 @@ func TestSectionGenerationPostgreSQLEvidenceVerificationDoesNotHoldFinalizationR
 	}()
 	select {
 	case <-entered:
+	case finalized := <-result:
+		t.Fatalf("finalization returned before evidence verification receipt=%#v err=%v", finalized.receipt, finalized.err)
 	case <-time.After(5 * time.Second):
 		t.Fatal("citation verifier was not entered")
 	}
@@ -772,6 +1192,75 @@ func newGenerationIntegrationCoordinatorWithDB(
 	return coordinator, agentRepository
 }
 
+func newGORMGenerationIntegrationCoordinator(
+	t *testing.T,
+	pool *platformpostgres.Pool,
+	now time.Time,
+	verifier artifactapplication.CitationVerifier,
+	nextID int,
+) (*GORMSectionGenerationRepository, *agentpostgres.Repository) {
+	t.Helper()
+	runtime, err := workflowpostgres.NewGORMRuntimeRepositoryWithHooks(
+		pool,
+		riveradapter.DefaultOptions(),
+		generationScopedEnqueueFence{},
+		workflowpostgres.GORMRuntimeRepositoryHooks{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, err := workflowpostgres.NewGORMRuntimeBindingReader(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gormAgent, err := agentpostgres.NewGORMRepository(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentRepository, err := agentpostgres.NewRepository(pool.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator, err := NewGORMSectionGenerationRepository(
+		pool,
+		runtime,
+		binding,
+		gormAgent,
+		verifier,
+		&generationIntegrationIDs{next: nextID},
+		foundation.FixedClock{Value: now},
+		generationIntegrationProfile(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return coordinator, agentRepository
+}
+
+type generationScopedEnqueueFence struct{}
+
+func (generationScopedEnqueueFence) CheckEnqueue(context.Context, foundation.TransactionScope) error {
+	return nil
+}
+
+type generationGORMCommitResponseLossUoW struct {
+	inner foundation.UnitOfWork
+}
+
+func (uow generationGORMCommitResponseLossUoW) Within(
+	ctx context.Context,
+	options foundation.TransactionOptions,
+	work foundation.TransactionFunc,
+) error {
+	if err := uow.inner.Within(ctx, options, work); err != nil {
+		return err
+	}
+	if options.ReadOnly {
+		return nil
+	}
+	return errors.New("simulated GORM commit response loss")
+}
+
 type generationCommitResponseLossDB struct{ Pool *pgxpool.Pool }
 
 type generationReadOptionsDB struct {
@@ -837,7 +1326,12 @@ func (tx generationCommitResponseLossTx) Commit(ctx context.Context) error {
 	return errors.New("simulated commit response loss")
 }
 
-func seedGeneratingArtifact(t *testing.T, repository *Repository, workspaceID foundation.ID, idBase int, now time.Time) artifactapplication.State {
+type generationArtifactRepository interface {
+	artifactIntegrationTransitionRepository
+	Create(context.Context, artifactapplication.CreateRecord) (artifactapplication.CommandResult, error)
+}
+
+func seedGeneratingArtifact(t *testing.T, repository generationArtifactRepository, workspaceID foundation.ID, idBase int, now time.Time) artifactapplication.State {
 	t.Helper()
 	planned := artifactIntegrationPlan(t, workspaceID, idBase, idBase+1, now)
 	if _, err := repository.Create(context.Background(), artifactapplication.CreateRecord{
@@ -951,6 +1445,7 @@ func transitionGenerationFailure(
 	at time.Time,
 ) {
 	t.Helper()
+	at = artifactGenerationFixtureAtLeast(t, ctx, pool, `SELECT GREATEST(created_at,updated_at) FROM learning.artifact_section_generation WHERE id=$1`, at, generation.ID)
 	tag, err := pool.Exec(ctx, `
 		UPDATE learning.artifact_section_generation
 		SET status=$2,failure_class=$3,error_code=$4,error_summary=$5,version=2,updated_at=$6,terminal_at=$6
@@ -1005,6 +1500,7 @@ func seedGenerationAttempt(
 	at time.Time,
 ) {
 	t.Helper()
+	at = artifactGenerationFixtureAtLeast(t, ctx, pool, `SELECT GREATEST(r.created_at,r.updated_at,n.created_at,n.updated_at) FROM workflow.run r JOIN workflow.node_run n ON n.run_id=r.id WHERE r.id=$1 AND n.id=$2`, at, generation.WorkflowRunID, generation.NodeRunID)
 	leaseUntil := at.Add(time.Minute)
 	if _, err := pool.Exec(ctx, `INSERT INTO workflow.node_attempt(
 		id,node_run_id,attempt_no,dispatch_no,retry_no,river_job_id,river_job_attempt,delivery_id,
@@ -1030,6 +1526,7 @@ func reclaimGenerationAttempt(
 	at time.Time,
 ) {
 	t.Helper()
+	at = artifactGenerationFixtureAtLeast(t, ctx, pool, `SELECT GREATEST(created_at,updated_at) FROM workflow.node_run WHERE id=$1`, at, nodeRunID)
 	if _, err := pool.Exec(ctx, `UPDATE workflow.node_attempt SET status='lease_lost',failure_class='lease_lost',error_kind=$2,error_code='WORKFLOW_LEASE_LOST',error_summary='lease lost after finalization',lease_owner=NULL,lease_until=NULL,ended_at=$3,heartbeat_at=$3 WHERE id=$1`,
 		string(previousAttemptID), string(foundation.ErrorVersionConflict), at); err != nil {
 		t.Fatal(err)
@@ -1058,6 +1555,7 @@ func seedGenerationModelRun(
 	at time.Time,
 ) agentdomain.ModelRun {
 	t.Helper()
+	at = artifactGenerationFixtureAtLeast(t, ctx, pool, `SELECT GREATEST(r.created_at,r.updated_at,n.created_at,n.updated_at) FROM workflow.run r JOIN workflow.node_run n ON n.run_id=r.id WHERE r.id=$1 AND n.id=$2`, at, generation.WorkflowRunID, generation.NodeRunID)
 	run := seedGenerationRunningModelRun(t, ctx, pool, repository, generation, attemptID, runID, at)
 	call := agentdomain.ModelCall{
 		ID: callID, ModelRunID: run.ID, CallNo: 1, Phase: agentdomain.ModelCallInitial,
@@ -1094,7 +1592,8 @@ func seedGenerationRunningModelRun(
 	at time.Time,
 ) agentdomain.ModelRun {
 	t.Helper()
-	indexVersionID := artifactIntegrationID(540)
+	at = artifactGenerationFixtureAtLeast(t, ctx, pool, `SELECT GREATEST(r.created_at,r.updated_at,n.created_at,n.updated_at) FROM workflow.run r JOIN workflow.node_run n ON n.run_id=r.id WHERE r.id=$1 AND n.id=$2`, at, generation.WorkflowRunID, generation.NodeRunID)
+	indexVersionID := foundation.ID(strings.Replace(string(generation.WorkspaceID), "93000000-", "94000000-", 1))
 	if _, err := pool.Exec(ctx, `INSERT INTO retrieval.index_version(
 		id,workspace_id,tokenizer_id,tokenizer_version,tokenizer_config_hash,fusion_config,
 		source_snapshot_ref,manifest_hash,expected_chunk_count,idempotency_key,status,degraded_capabilities,version,created_at,updated_at
@@ -1116,4 +1615,20 @@ func seedGenerationRunningModelRun(
 		t.Fatalf("create model run replayed=%t err=%v", replayed, err)
 	}
 	return run
+}
+
+func artifactGenerationFixtureAtLeast(t *testing.T, ctx context.Context, pool *pgxpool.Pool, query string, at time.Time, ids ...foundation.ID) time.Time {
+	t.Helper()
+	args := make([]any, 0, len(ids))
+	for _, id := range ids {
+		args = append(args, string(id))
+	}
+	var floor time.Time
+	if err := pool.QueryRow(ctx, query, args...).Scan(&floor); err != nil {
+		t.Fatal(err)
+	}
+	if !at.After(floor) {
+		return floor.UTC().Add(time.Microsecond)
+	}
+	return at.UTC()
 }
