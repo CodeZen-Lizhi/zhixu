@@ -33,3 +33,7 @@ Evidence/Citation、Tool 审批/写回、Attempt/lease/fence 和持久终态继�
 - 当时要求在默认切换和旧 direct 实现删除前保留一个完整发布观察周期并验证 selector 回滚；该要求已被 2026-08-11
   用户决定取代。当前生产不保留 direct selector/回滚入口，稳定观察作为独立质量证据继续执行，需要恢复旧实现时使用 Git 历史。
 - 本次没有真实 Docker stack 启动或外部 Provider 调用；这些是发布验证，不是本地实现完成度。
+
+## 2026-08-25 任务收口
+
+Eino-only 生产迁移、真实 Provider/live gate、浏览器闭环和既定 Go/Compose/数据库质量门禁已经完成；本任务已归档为 `completed`。按用户决定，不等待连续 7 天/100 个终态的稳定观察来阻塞任务完成或旧 direct 实现删除。稳定观察仍是独立发布质量证据，当前 trust/threshold policy 为 `unconfigured`，不得将其写成 `passed`。

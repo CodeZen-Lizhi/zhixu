@@ -560,7 +560,7 @@ Worker-only 回滚和含新事实 Workspace 的兼容 API 约束见
 
 `make eino-live-smoke` 覆盖受控真实 Provider 的即时门禁，不能替代稳定观察。六项 live gate 与 host-relay 外部
 Chat/本地 Ollama Embedding 的浏览器终态已通过；容器直连外部 HTTPS 路径以及连续 7 天、100 个非 replay RAG v2
-终态的观察仍未完成。正式观察必须按 [Eino Runtime 稳定发布观察 Runbook](architecture/runbooks/eino-stable-observation.md)
+终态的观察仍未完成，但该独立观察不阻塞 Eino 迁移任务归档。正式观察必须按 [Eino Runtime 稳定发布观察 Runbook](architecture/runbooks/eino-stable-observation.md)
 执行，先运行 preflight，再由受保护 Collector 归档证据。
 
 配置加载修改的局部门禁：

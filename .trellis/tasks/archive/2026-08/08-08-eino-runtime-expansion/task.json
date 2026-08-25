@@ -27,6 +27,6 @@
   ],
   "parent": null,
   "relatedFiles": [],
-  "notes": "",
+  "notes": "2026-08-25：按用户决定，本任务以 Eino-only 生产迁移与现有 live/browser/质量证据为完成依据，不等待稳定观察窗口；稳定观察仍是独立发布质量证据，当前不得标记为 passed。",
   "meta": {}
 }
