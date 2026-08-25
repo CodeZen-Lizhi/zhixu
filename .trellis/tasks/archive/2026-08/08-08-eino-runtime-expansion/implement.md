@@ -70,6 +70,8 @@
 2026-08-11 用户明确决定删除旧 direct Runtime，不等待稳定观察周期，也不保留 Eino→direct 回滚编排。稳定观察、真实
 Provider 和浏览器门禁仍然是发布质量证据；它们用于判断 Eino 版本是否可发布，不再授权保留第二套 AI 实现。
 
+任务收口决定（2026-08-25）：上述 Eino-only 迁移实现和既定 live/browser/质量门禁已足以将本任务归档为 `completed`，不等待稳定观察窗口。稳定观察仍须按 Runbook 独立采集，当前不能标记为 `passed`。
+
 1. 保留首 Token、完成延迟、错误、Agent iteration/Tool Call、Graph node、拒答和 stream degradation 等 Eino
    指标；删除 legacy direct activation metric。正式 OTLP/HTTP Metrics+Trace Provider 继续在 API/Worker Composition
    注入，稳定观察按 [`Eino Runtime 稳定发布观察 Runbook`](../../../docs/architecture/runbooks/eino-stable-observation.md)
@@ -95,7 +97,7 @@ Provider 和浏览器门禁仍然是发布质量证据；它们用于判断 Eino
    selector/direct rollback 专项测试，保留网络 transport `direct`、数据库/Workflow rollback_plan 等领域语义。
 8. 删除后执行受影响 Go、race/vet、SQL/真实 PostgreSQL/River、OpenAPI、前端、Compose、真实 Provider、浏览器门禁和
    `git diff --check`；代码搜索应证明非测试生产路径不存在 direct AI selector、direct Provider constructor、direct scheduler
-   或自动 fallback。外部 Provider live gate 和 metadata/REVIEW/browser 终态已完成；真实稳定观察仍按 PRD 记录为独立未完成项。
+   或自动 fallback。外部 Provider live gate 和 metadata/REVIEW/browser 终态已完成；真实稳定观察仍按 PRD 记录为独立未完成项，不阻塞本任务归档。
 
 ## 7. 验证门禁
 
