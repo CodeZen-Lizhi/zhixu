@@ -166,3 +166,33 @@ git diff --check
 Workflow JSONL 原先引用了未提交的 Tools task 文档，导致首次 clean `task validate` 报 4 个缺文件错误。Workflow 自身 `design.md` 已固定两个 Port 与锁序，现又在本任务 `research/planning-review.md`、`research/quality-gates.md` 固定 owner boundary 和验收门禁；JSONL 将外部原因合并到这些已存在的 Workflow-owned 唯一条目，不复制或提交 Tools 目录。复验 implement 11 条、check 9 条全部通过。
 
 精确命令 `go test -mod=vendor -run '^$' ./cmd/api ./cmd/worker ./cmd/migrate` 中，`cmd/migrate` 通过；`cmd/api` 与 `cmd/worker` 仅因已提交 Artifact 依赖后续 Agent owner 的 `agentapplication.ScopedModelRunStore` 而失败。错误中已无 Workflow 缺失符号，不能在 Workflow path-only 提交内越权补入 `internal/agent/application/scoped_model_run.go`。因此 consumer compile 继续作为发布阻塞，待 Agent owner 原子提交后在最终干净 tip 重跑；在此之前不得 push。
+
+## 2026-08-25 Tool policy / recovery scoped Port review
+
+本轮开发盘点确认 Workflow child 已提供以下未接生产的 staged API：
+
+- `internal/workflow/application/scoped_tool_execution.go` 暴露纯值 Request/Snapshot/Result 与两个 caller-owned Port；签名不含 Tools、GORM、`database/sql`、pgx 或 `any`。
+- `gorm_tool_execution_policy.go` 在 caller scope 内以一条参数化 join 执行 `FOR SHARE OF r,d,n,a`，返回 Definition/Run/Node/Attempt、显式 nullable 标志和同一查询的 `clock_timestamp()`；不执行 Tools admission。
+- `gorm_tool_call_recovery_fence.go` 先做无锁 Workspace/Run/Node/Attempt binding preflight，再按 Node Run -> Node Attempt 使用 `FOR UPDATE SKIP LOCKED`；锁竞争返回 `Found=true,Skipped=true` 且不读取 DB time，双锁成功后才计算 `Stale`，不锁 Run 或 `workflow.tool_call`。
+- Tools GORM 的 stale candidate 路径只在 live stale recovery 调用 recovery fence；receipt/operation commit-response-loss 路径通过 Agent durable closure 与 Tool-owned receipt 复核，不重新调用 live policy/recovery fence。
+
+Go/SQL/Trellis review finding ledger：
+
+1. Workflow execution-fence 构造器在 `pool.GORM()` 失败时曾用摘要错误覆盖底层依赖 cause；已改为保留原错误链，和两个 Tool Adapter 的 dependency unavailable 合同一致。
+2. Tool policy/recovery SQL 检查通过：所有外部 ID/limit 均参数化；无 AutoMigrate/Migrator/Preload/Association/Save；Workflow Adapter 不访问 Agent 或 `workflow.tool_call`；recovery 不锁 Run，且 DB time 查询位于两把锁之后。
+3. 资源与错误检查通过：单行使用 `Raw(...).Row().Scan`，未引入需关闭的 rows；无效/foreign/stale scope 映射 dependency unavailable 并保留 cause，cancel/deadline 保留 context sentinel 与 custom cause，SQLSTATE 保留 `pgconn.PgError` cause。
+
+本轮实际门禁：
+
+```text
+go test -mod=vendor ./internal/workflow/... -count=1 -timeout 60s
+go test -race -mod=vendor ./internal/workflow/... -count=1 -timeout 90s
+go vet -mod=vendor ./internal/workflow/... ./internal/platform/postgres
+go test -mod=vendor -tags=integration -run '^$' ./internal/workflow/... -count=1 -timeout 60s
+go list -mod=vendor ./internal/workflow/... ./internal/platform/postgres ./cmd/api ./cmd/worker
+gofmt -l internal/workflow internal/platform/postgres
+git diff --check
+python3 .trellis/scripts/task.py validate .trellis/tasks/08-19-gorm-workflow-migration
+```
+
+以上命令通过。当前 `ZHIXU_TEST_DATABASE_URL` 未配置，因此本轮没有真实 PostgreSQL 证据；Tool policy/recovery 的 `FOR SHARE`、`SKIP LOCKED`、锁等待、SQLSTATE、连接释放和并发 fairness 仍属于 TODO 9 门禁，不能据此勾选 PRD AC、切换生产 wiring、完成或归档 child。

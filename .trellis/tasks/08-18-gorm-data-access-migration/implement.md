@@ -147,3 +147,5 @@ git diff --check
 - Foundation/Workflow/Change Control/Model Settings/Retrieval/Final 额外检查并发、连接池、死锁、response-loss、安全与性能。
 - 模块回滚只 revert 自身 Adapter/Port；Final 单独拥有 Composition/legacy 删除回滚；均不回滚 Schema 或修改历史迁移。
 - Foundation 方案失败时停止所有依赖 child 的生产切换，保留调研和行为基线，回到父设计选择官方替代方案。
+
+2026-08-25 Workflow child 状态同步：`08-19-gorm-workflow-migration` 保持 `in_progress`。其 staged GORM Repository/Runtime/River、Workspace execution fence、Tool policy/recovery scoped Port/Adapter 与 Go/SQL/Trellis 同维度 Review 已完成，局部 unit/race/vet/integration compile-only 和 task validate 通过；`ZHIXU_TEST_DATABASE_URL` 未配置，TODO 9 真实 PostgreSQL 锁/并发/response-loss/River worker、Model Settings scoped enqueue fence、跨 owner scoped Start/Hook 和生产 Composition 仍是阻塞项。父任务不提前勾选 AC3/AC7，不归档 child 或切换 legacy wiring。

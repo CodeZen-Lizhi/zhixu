@@ -25,7 +25,10 @@ func NewGORMWorkspaceAnalysisExecutionFence(pool *platformpostgres.Pool) (*GORMW
 		return nil, gormWorkflowUnavailable("WORKFLOW_WORKSPACE_ANALYSIS_EXECUTION_FENCE_UNAVAILABLE", errors.New("workflow execution fence pool is unavailable"))
 	}
 	database, err := pool.GORM()
-	if err != nil || !validGORMWorkflowDatabase(database) {
+	if err != nil {
+		return nil, gormWorkflowUnavailable("WORKFLOW_WORKSPACE_ANALYSIS_EXECUTION_FENCE_UNAVAILABLE", err)
+	}
+	if !validGORMWorkflowDatabase(database) {
 		return nil, gormWorkflowUnavailable("WORKFLOW_WORKSPACE_ANALYSIS_EXECUTION_FENCE_UNAVAILABLE", errors.New("workflow execution fence database is unavailable"))
 	}
 	return &GORMWorkspaceAnalysisExecutionFence{database: database}, nil

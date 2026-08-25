@@ -21,6 +21,6 @@
   "children": [],
   "parent": "08-18-gorm-data-access-migration",
   "relatedFiles": [],
-  "notes": "",
+  "notes": "2026-08-25 状态同步：staged GORM Repository/Runtime/River、Workspace execution fence、Tool policy/recovery scoped Port/Adapter 与静态 Review 已完成；unit/race/vet/integration compile-only、consumer compile-only、task validate 通过。ZHIXU_TEST_DATABASE_URL 未配置，TODO 9 真实 PostgreSQL、并发/锁/response-loss/River worker 与跨 owner 原子性仍未验收；生产 wiring 保持 legacy，任务继续 in_progress，不归档。",
   "meta": {}
 }

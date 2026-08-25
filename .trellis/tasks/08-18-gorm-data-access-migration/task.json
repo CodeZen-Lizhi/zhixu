@@ -52,6 +52,6 @@
   ],
   "parent": null,
   "relatedFiles": [],
-  "notes": "",
+  "notes": "2026-08-25 子任务状态同步：08-19-gorm-workflow-migration 继续 in_progress。Workflow staged GORM Repository/Runtime/River、scoped execution fence、Tool policy/recovery Port/Adapter 及静态 Review 已完成；真实 PostgreSQL TODO 9、跨 owner scoped Start/Hook、Model Settings enqueue fence 和 Final production Composition 仍未完成。父任务继续 in_progress，不勾选全局完成 AC，不归档。",
   "meta": {}
 }
