@@ -1,0 +1,6 @@
+{"file":".trellis/spec/backend/index.md","reason":"确认后端实现边界、开发前检查项与平台依赖方向。"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"遵守 PostgreSQL、pgx、Goose、迁移、事务、参数化 SQL 与真实数据库验证规范。"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"落实数据库集成测试、Docker smoke、race/vet 与失败可诊断门禁。"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"将分散数据库 fixture 收敛为单一测试工厂，避免重复生命周期逻辑。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"核对 testdb 工厂、platformpostgres Pool、迁移入口和 TODO10 消费方的契约边界。"}
+{"file":".trellis/tasks/08-25-gorm-prerequisites/research/implementation-evidence.md","reason":"复用已确认的仓库盘点、Testcontainers 选型与真实 smoke 证据。"}

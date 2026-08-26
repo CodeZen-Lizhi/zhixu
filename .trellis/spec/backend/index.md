@@ -105,10 +105,10 @@ Go race/vet/tidy、OpenAPI 与 Web lint/typecheck/test/build 门禁通过。
 | [文档文件历史与受控恢复契约](./document-history-contract.md) | 当前 path Git 时间线、映射、cursor、compare、restore Proposal、Safe Writeback 与 Authoring closure | Domain/Application/Git/PostgreSQL/Change Control/Authoring、HTTP/OpenAPI、Web 构建、并发恢复及父任务桌面/移动浏览器门禁已验证 |
 | [Git 远端同步契约](./git-sync-contract.md) | HTTPS Remote、AEAD Token、SSRF/AskPass、Run/Attempt/Outbox、受控 Fetch/Fast-forward/Push、post-check、自动调度与索引分离 | Domain/Application/Git/PostgreSQL/API/Worker、安全与 migration 门禁已验证；真实浏览器已覆盖桌面/390x844 配置、持久运行恢复、分叉冲突、有界预览和重试 |
 | [可恢复异步 Export 契约](./export-contract.md) | Tagged Job、Collection scan、附件 ZIP、prepared result、流式下载、Audit 与清理 | Collection Markdown/Metadata JSON 和 Workspace Attachments ZIP 已交付并关闭 AC-33；Evaluation/Audit 内容导出保持 deferred |
-| [数据库开发规范](./database-guidelines.md) | pgx/Goose/River、参数化查询、事务、迁移和约束 | 已记录 M7-03 Collection/Health、M8 Review/Interview/Shared Path/Memory、M9 Workspace 列表的持久化、receipt、可见性与 PG/EXPLAIN 门禁 |
+| [数据库开发规范](./database-guidelines.md) | pgx/Goose/River、参数化查询、事务、迁移和约束 | 已记录 Testcontainers PostgreSQL 工厂、外部 admin 隔离、清理与 TODO10 接入契约，以及 M7-03 Collection/Health、M8 Review/Interview/Shared Path/Memory、M9 Workspace 列表的持久化、receipt、可见性与 PG/EXPLAIN 门禁 |
 | [错误处理规范](./error-handling.md) | 领域错误、Retry 分类、Problem Details、SSE 错误 | 已记录 Tool 稳定错误、M9 Proposal detail/summary Approval 空值契约与 M10 Auth 的稳定 Problem Details 边界 |
 | [日志与审计规范](./logging-guidelines.md) | slog JSON、OTel/OTLP Trace/Metrics、Prometheus、脱敏和 Audit | 显式 Provider、双 signal 启动探针、API 本地 `/metrics`、API/Worker OTLP Metrics、River consumer span 与环境隔离合同已验证；目标环境后端观察仍需发布授权 |
-| [质量与交付规范](./quality-guidelines.md) | 禁止模式、测试金字塔、安全、Review 和门禁 | 已记录 M7 Graph/Collection/Health、M8 Review/Interview/Shared Path/Memory 和 M9 Export 的跨层、fault、浏览器与独立审查门禁 |
+| [质量与交付规范](./quality-guidelines.md) | 禁止模式、测试金字塔、安全、Review 和门禁 | 已记录 Testcontainers 工厂的真实 PG、Docker smoke、资源清理与 TODO10 分批接入门禁，以及 M7 Graph/Collection/Health、M8 Review/Interview/Shared Path/Memory 和 M9 Export 的跨层、fault、浏览器与独立审查门禁 |
 
 ## 开发前检查清单
 

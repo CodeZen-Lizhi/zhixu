@@ -9,6 +9,9 @@ test: trellis-script-test task-context-check go-test go-vet web-lint web-typeche
 migrate:
 	go run ./cmd/migrate
 
+testcontainers-integration:
+	go test -count=1 -timeout=5m -tags='integration testcontainers' ./internal/platform/testdb
+
 go-test:
 	go test ./cmd/... ./internal/...
 

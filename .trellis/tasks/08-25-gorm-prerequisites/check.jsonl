@@ -1,0 +1,5 @@
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"审查外部管理库 SQL、迁移一致性、隔离和清理路径。"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"审查工厂自身测试、Docker smoke、race/vet 和剩余验证盲区。"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"检查是否仍存在重复 provision/cleanup 逻辑或无必要抽象。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"检查 testing helper、底层 Open、Pool 能力与 TODO10 接入契约是否一致。"}
+{"file":".trellis/tasks/08-25-gorm-prerequisites/research/implementation-evidence.md","reason":"以已确认范围和证据核验 TODO9 AC，不把 TODO10 业务测试算入关闭条件。"}

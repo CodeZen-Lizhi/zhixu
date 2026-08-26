@@ -10,7 +10,7 @@
 - 模块必须是深模块：小 Interface、明确输入/输出、不变量、错误和性能约束，复杂度隐藏在实现中（依据 [`system-design.md`](../../../docs/architecture/system-design.md)）。
 - 核心领域逻辑不能绑定框架；外部工具通过 Adapter，Composition Root 负责配置、构造和注入（依据 [`system-design.md`](../../../docs/architecture/system-design.md)）。
 - 必须覆盖主路径和异常路径、审计、可观测、自动测试、AI Eval、文档和无未说明降级（依据 [`quality.md`](../../../docs/architecture/quality.md)）。
-- 测试层级包括 Unit、Adapter Contract、PostgreSQL/Filesystem/Git/Workflow Integration、AI Evaluation、Playwright E2E、Docker Smoke 与恢复演练；Go 单元使用 `testing`/`httptest`。数据库集成当前通过显式 `ZHIXU_TEST_DATABASE_URL` 连接隔离的 PostgreSQL/pgvector；Testcontainers-Go 尚未采用，只是路线图候选。
+- 测试层级包括 Unit、Adapter Contract、PostgreSQL/Filesystem/Git/Workflow Integration、AI Evaluation、Playwright E2E、Docker Smoke 与恢复演练；Go 单元使用 `testing`/`httptest`。新接入的数据库集成测试统一使用 `internal/platform/testdb` 管理 PostgreSQL/pgvector 生命周期；现有显式读取 `ZHIXU_TEST_DATABASE_URL` 的测试按模块迁移，不在工厂任务中批量改写。
 - 安全门禁覆盖路径穿越、Symlink、SSRF、Prompt Injection、XSS、CSRF、SQL Injection、未授权 Tool 和 Secret Redaction。
 
 ## 目标代码落点（M1 起）
@@ -20,7 +20,7 @@
 - Worker/Workflow：`internal/workflow/`、`cmd/worker/`，通过租约、崩溃恢复、幂等和补偿集成测试。
 - Adapter：`internal/platform/*`，每个正式实现与 Fake/Fixture 共享 Contract Test。
 - 数据库和迁移：`migrations/`、`internal/platform/postgres/`，通过空库升级、约束故障和 EXPLAIN 测试。
-- 测试 Fixture、Gold Set、AI Eval、E2E 和部署验证路径由 M1 manifest/构建文件确定；不提前伪造目录或命令文件。
+- PostgreSQL 测试 Fixture 位于 `internal/platform/testdb`；Gold Set、AI Eval、E2E 和部署验证路径以各自 manifest/构建文件为准。
 
 ## 禁止模式
 

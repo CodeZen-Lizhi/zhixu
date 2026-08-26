@@ -20,9 +20,9 @@
 
 - `migrations/`：Goose 前向迁移、约束、索引和必要的数据回填。
 - `internal/platform/postgres/`：pgx 连接池、sqlc 生成代码入口、Repository/Projection Adapter、事务辅助函数。
+- `internal/platform/testdb/`：Testcontainers-Go `v0.40.0` 测试数据库工厂。容器模式独占 pgvector 容器；外部模式只接受 admin URL，并由工厂创建、迁移和删除唯一临时数据库。两种模式都只暴露同一个 `platformpostgres.Pool`。
 - 各领域模块（如 `internal/changecontrol/`、`internal/workflow/`、`internal/review/`）：定义 Repository/Store Interface 和事务不变量；不得暴露 sqlc 类型。
 - `internal/workflow/`：River Job 与 Workflow Node 的映射、租约和 Outbox 协作。
-- 数据库集成测试与 Testcontainers Fixture 的实际路径由 M1 测试布局确认；本规范不虚构文件名。
 
 ## 查询模式
 
@@ -82,8 +82,62 @@ git diff --check
 
 - sqlc、Goose、River 和 pgvector 的具体版本及配置文件位置；当前仓库没有 manifest 或 lockfile。
 - 最终数据库 Schema 组织方式、字段长度、时间类型和所有索引名称。
-- 连接池参数、迁移执行入口和 Testcontainers 版本。
+- 生产连接池参数和后续 Atlas 迁移入口切换。
 - 中文 FTS 配置、向量维度、HNSW 参数以及 50 万数据容量结果。
+
+## Scenario: Testcontainers PostgreSQL 集成测试工厂
+
+### 1. Scope / Trigger
+
+- 修改 `internal/platform/testdb`、真实 PostgreSQL 测试 fixture、Testcontainers 依赖或 TODO10 child 接入时应用本场景。
+- TODO9 只拥有数据库环境生命周期；Repository、GORM 等价、事务、River 和业务约束回归由各 TODO10 child 拥有。
+
+### 2. Signatures
+
+- `testdb.Open(ctx, Config) (*Fixture, error)`：低层、可注入迁移失败且永不静默跳过。
+- `testdb.Require(t, Config) *Fixture`：统一 provider 检查和 `t.Cleanup`。
+- `Config.ExternalAdminURL`：具备 `CREATE/DROP DATABASE` 权限的管理库 URL，不是可直接迁移的共享目标库。
+- `Fixture.Pool() *platformpostgres.Pool` 与 `Fixture.Diagnostics() Diagnostics`；不公开完整数据库 DSN。
+
+### 3. Contracts
+
+- 容器模式固定 `pgvector/pgvector:pg16`，使用随机映射端口、SQL `SELECT 1` readiness、无固定容器名、无 reuse；迁移只通过当前 Goose/River callback 执行，再打开一个共享 platform Pool。
+- 外部模式使用 cryptographically-random `zhixu_test_*` 名称，通过 `pgx.Identifier` 执行 `CREATE DATABASE`；成功、失败和 close 均先关闭临时库连接，再以 `DROP DATABASE <generated> WITH (FORCE)` 删除生成库，最后关闭 admin Pool。admin 库永不迁移或删除。
+- `Availability` 默认 `FailWhenUnavailable`；只有调用方显式指定 `SkipWhenUnavailable` 才能跳过 Docker 不可用测试。
+- Close 幂等且有独立有限 cleanup context；错误保留可匹配的主因，但错误文本和 Diagnostics 不包含密码、完整 DSN、绝对路径或高敏 SQL 参数。
+
+### 4. Validation & Error Matrix
+
+| 条件 | 必须结果 |
+|---|---|
+| Docker 不可用 + 默认策略 | `Require` 明确失败，不回退共享库 |
+| Docker 不可用 + 显式 Skip | `Require` 跳过测试 |
+| 外部 URL 非 PostgreSQL、缺 host 或缺 admin database | `Open` 返回稳定错误，不泄露输入 secret |
+| 迁移 callback 失败 | 返回可用 sentinel/error match，已创建的容器或临时库完成清理 |
+| 两个并行 fixture | 容器、URL、写入数据互相隔离 |
+| 重复 Close | 无额外 DROP/Terminate，返回相同结果 |
+
+### 5. Good/Base/Bad Cases
+
+- Good：TODO10 child 用 `Require` 取得 Pool，再从同一 Pool 取得 GORM、pgx、River 和 UoW 能力，并只断言自己的业务行为。
+- Base：本地没有 Docker 时显式选择 Skip；CI 保持 Ryuk 默认开启并将 provider 故障作为可操作失败。
+- Bad：把 `ZHIXU_TEST_DATABASE_URL` 当作直接迁移目标、固定容器名/端口、启用 reuse、拼接未约束数据库名，或打印完整 DSN。
+
+### 6. Tests Required
+
+- 单测覆盖 Config 校验、admin URL、随机命名、脱敏、Fail/Skip policy 和 Close 幂等。
+- `integration && testcontainers` 覆盖空库 Goose/River/vector、GORM/UoW/pgx 能力、两个并行 fixture、external admin 生成库生命周期、admin 库未迁移、迁移失败后的容器/数据库清理。
+- 必须运行定向 `go test`、`-race`、`go vet`、`go mod tidy -diff`、vendor 编译测试、`git diff --check` 和显式容器 smoke。
+
+### 7. Wrong vs Correct
+
+```text
+Wrong: Open(ctx, Config{ExternalAdminURL: sharedURL}) 直接对 sharedURL 执行 Goose，Close 再删除 sharedURL。
+Correct: 先用 sharedURL 连接 admin 库，生成 zhixu_test_*，只对生成库迁移并在 Close 时 FORCE drop 生成库。
+
+Wrong: Close 使用已经取消的业务 ctx，导致失败路径遗留容器或临时库。
+Correct: Close 使用独立、有限的 cleanup context，并通过 sync.Once 保证幂等资源释放。
+```
 
 ## Scenario: Model Runtime Hot Activation Persistence
 
