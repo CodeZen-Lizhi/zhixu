@@ -444,8 +444,35 @@ Eino/eino-ext 已成为生产唯一 AI Runtime，旧 direct 实现已删除并�
 
 ### Testing
 
-- [OK] 默认测试、race、vet、命令包编译、go mod verify 与 git diff --check 通过。
+- [OK] 干净 `78b63d0c` 快照下 Foundation focused unit/race/vet、integration 编译、go mod verify 与 git diff --check 通过。
 - [OK] 独立 HEAD + 暂存区快照的真实 PostgreSQL integration、integration race 与 River Worker smoke 通过。
+- [BLOCKED] 干净 `78b63d0c` 快照执行 `go test -mod=vendor -run '^$' ./cmd/api ./cmd/worker ./cmd/migrate` 失败；缺失的 Artifact/Workflow 最小依赖定义仍在主工作树未提交改动中。
+
+### Status
+
+[OK] **Session recorded; task remains in_progress**
+
+### Next Steps
+
+- 在专用数据库代理或目标部署环境补跑网络级 COMMIT response-loss、目标连接预算及业务 owner 错误矩阵门禁。
+
+
+## Session 67: 完成 TODO9 Testcontainers 数据库集成测试工厂
+
+**Date**: 2026-08-26
+**Task**: 完成 TODO9 Testcontainers 数据库集成测试工厂
+**Branch**: `dev`
+
+### Summary
+
+交付统一 PostgreSQL/pgvector Testcontainers 工厂，支持 ExternalAdminURL 临时库隔离、Goose/River 迁移、GORM/pgx/River/UoW 共享 Pool、并行隔离、失败清理、脱敏和显式 Fail/Skip 策略；完成定向单测、race、vet、tidy、vendor 与默认/禁用 Ryuk smoke。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `109d2cb4` | (see git log) |
+| `39f8c768` | (see git log) |
 
 ### Status
 
@@ -453,4 +480,4 @@ Eino/eino-ext 已成为生产唯一 AI Runtime，旧 direct 实现已删除并�
 
 ### Next Steps
 
-- 在专用数据库代理或目标部署环境补跑网络级 COMMIT response-loss、目标连接预算及业务 owner 错误矩阵门禁。
+- TODO10 各模块 child 按需迁移现有 ZHIXU_TEST_DATABASE_URL fixture，继续保持业务回归归属不变。
