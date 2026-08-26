@@ -481,3 +481,26 @@ Eino/eino-ext 已成为生产唯一 AI Runtime，旧 direct 实现已删除并�
 ### Next Steps
 
 - TODO10 各模块 child 按需迁移现有 ZHIXU_TEST_DATABASE_URL fixture，继续保持业务回归归属不变。
+
+
+## Session 68: Trellis 收口检查：TODO9 已推送
+
+**Date**: 2026-08-26
+**Task**: Trellis 收口检查：TODO9 已推送
+**Branch**: `dev`
+
+### Summary
+
+按 trellis-finish-work 核对当前状态：无 active task；TODO9 已完成提交、归档并推送到 origin/dev。其余工作区脏改属于其他 GORM/Atlas/Trellis 任务，未在本轮处理、提交或归档。
+
+### Git Commits
+
+(No commits - planning session)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- 继续由各自 GORM child 任务推进迁移；归档其他任务前先逐项确认其验收状态。
