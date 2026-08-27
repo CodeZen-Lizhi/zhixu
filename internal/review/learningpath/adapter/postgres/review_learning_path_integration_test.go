@@ -16,7 +16,65 @@ import (
 	pathdomain "github.com/CodeZen-Lizhi/zhixu/internal/review/learningpath/domain"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+func TestReviewLearningPathPostgreSQLLegacyAndGORMCreateReadParity(t *testing.T) {
+	runReviewPathIntegrationVariants(t, func(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fixture reviewPathFixture, store pathapp.Store) {
+		bridge, _ := newReviewPathProductionBridge(t, pool, fixture.contentHash)
+		service := newReviewPathService(t, store, bridge)
+		command := pathapp.CreateReviewCommand{
+			WorkspaceID: fixture.workspaceID, ReviewAnswerID: fixture.answerID,
+			IdempotencyKey: "review-path-parity-create",
+		}
+		created, err := service.CreateForReview(ctx, command)
+		if err != nil || created.Replayed || created.Path.ID == "" || len(created.Steps) == 0 {
+			t.Fatalf("create result=%+v err=%v", created, err)
+		}
+		read, err := store.GetByReviewAnswer(ctx, fixture.workspaceID, fixture.answerID)
+		if err != nil || read.Path.ID != created.Path.ID || len(read.Steps) != len(created.Steps) {
+			t.Fatalf("read result=%+v err=%v created=%+v", read, err, created)
+		}
+		readByID, err := store.Get(ctx, fixture.workspaceID, created.Path.ID)
+		if err != nil || readByID.Path.ID != created.Path.ID || len(readByID.Steps) != len(created.Steps) {
+			t.Fatalf("read by id result=%+v err=%v created=%+v", readByID, err, created)
+		}
+		replay, err := service.CreateForReview(ctx, command)
+		if err != nil || !replay.Replayed || replay.Path.ID != created.Path.ID {
+			t.Fatalf("replay result=%+v err=%v", replay, err)
+		}
+
+		step := created.Steps[0]
+		stepCommand := pathapp.UpdateStepCommand{
+			WorkspaceID: fixture.workspaceID, PathID: created.Path.ID, StepID: step.ID,
+			ExpectedVersion: 1, Status: pathdomain.StepStatusInProgress,
+			IdempotencyKey: "review-path-parity-step",
+		}
+		stepResult, err := service.UpdateStep(ctx, stepCommand)
+		if err != nil || stepResult.Replayed || stepResult.Step.Status != pathdomain.StepStatusInProgress ||
+			stepResult.Step.Version != 2 || stepResult.Path.Version != 2 {
+			t.Fatalf("step result=%+v err=%v", stepResult, err)
+		}
+		stepReplay, err := service.UpdateStep(ctx, stepCommand)
+		if err != nil || !stepReplay.Replayed || stepReplay.Step.ID != step.ID || stepReplay.Path.Version != 2 {
+			t.Fatalf("step replay=%+v err=%v", stepReplay, err)
+		}
+
+		statusCommand := pathapp.UpdatePathStatusCommand{
+			WorkspaceID: fixture.workspaceID, PathID: created.Path.ID,
+			ExpectedVersion: 2, Status: pathdomain.StatusPaused,
+			IdempotencyKey: "review-path-parity-status",
+		}
+		paused, err := service.UpdateStatus(ctx, statusCommand)
+		if err != nil || paused.Replayed || paused.Path.Status != pathdomain.StatusPaused || paused.Path.Version != 3 {
+			t.Fatalf("status result=%+v err=%v", paused, err)
+		}
+		statusReplay, err := service.UpdateStatus(ctx, statusCommand)
+		if err != nil || !statusReplay.Replayed || statusReplay.Path.ID != created.Path.ID || statusReplay.Path.Version != 3 {
+			t.Fatalf("status replay=%+v err=%v", statusReplay, err)
+		}
+	})
+}
 
 func TestReviewLearningPathPostgreSQLConcurrentSameAndDifferentKeys(t *testing.T) {
 	for _, testCase := range []struct {

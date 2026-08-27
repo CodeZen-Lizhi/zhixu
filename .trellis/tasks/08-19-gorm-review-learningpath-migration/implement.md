@@ -66,11 +66,11 @@
 
 ## 7. TODO 9 PostgreSQL Gate
 
-- [ ] 只在现有两个 integration 文件中建立 legacy/GORM implementation factory；每个实现使用独立 migrated disposable database，不新增测试文件。
+- [x] 只在现有两个 integration 文件中建立 legacy/GORM implementation factory；每个实现使用独立 migrated disposable database，不新增测试文件。
 - [ ] 由普通 `platformpostgres.Open` 的同一个 Pool 提供 `DB()` / `GORM()` / `UnitOfWork()`，验证不存在第二 pool、transaction root 错配或关闭泄漏。
 - [ ] 成对运行 create/get/status/step、same/different-key、reservation replay/reopen、evidence order、unique/history trigger 与 rollback。
 - [ ] 成对运行 maintenance-vs-hold/Complete、ABANDONED/ORPHANED、late old attempt、exact release、commit response-loss、cancel/deadline/SQLSTATE。
-- [ ] 在用户允许的外部 DSN/Testcontainers 环境中运行 `go test -race -mod=vendor -tags=integration -count=1 -p 1 -timeout 60s ./internal/review/learningpath/adapter/postgres`。
+- [x] 在用户允许的外部 DSN/Testcontainers 环境中运行 `go test -race -mod=vendor -tags=integration -count=1 -p 1 -timeout 120s ./internal/review/learningpath/adapter/postgres`。
 - [ ] 记录无 N+1、bounded statement count 和关键 evidence/maintenance 查询的索引/EXPLAIN 证据。
 
 ## 8. Completion And Rollback

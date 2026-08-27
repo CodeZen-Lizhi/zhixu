@@ -8,8 +8,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"net/url"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -20,11 +18,10 @@ import (
 	artifactapp "github.com/CodeZen-Lizhi/zhixu/internal/artifact/application"
 	artifactdomain "github.com/CodeZen-Lizhi/zhixu/internal/artifact/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	reviewdomain "github.com/CodeZen-Lizhi/zhixu/internal/review/domain"
 	pathartifact "github.com/CodeZen-Lizhi/zhixu/internal/review/learningpath/adapter/artifact"
 	pathapp "github.com/CodeZen-Lizhi/zhixu/internal/review/learningpath/application"
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -43,44 +40,45 @@ type reviewPathFixture struct {
 
 func newReviewPathTestDatabase(t *testing.T, ctx context.Context) *pgxpool.Pool {
 	t.Helper()
-	baseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
-	if baseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL for Review Learning Path PostgreSQL integration tests")
+	fixture := testdb.Require(t, testdb.Config{MaxConns: 16, Availability: testdb.FailWhenUnavailable})
+	platform := fixture.Pool()
+	if platform == nil || platform.DB() == nil {
+		t.Fatal("shared PostgreSQL fixture did not provide a platform pool")
 	}
-	parsed, err := url.Parse(baseURL)
-	if err != nil {
-		t.Fatal(err)
+	return platform.DB()
+}
+
+// runReviewPathIntegrationVariants exercises legacy and staged stores against
+// isolated migrated databases supplied by the shared platform Pool factory.
+func runReviewPathIntegrationVariants(t *testing.T, scenario func(*testing.T, context.Context, *pgxpool.Pool, reviewPathFixture, pathapp.Store)) {
+	t.Helper()
+	for _, name := range []string{"legacy-pgx", "gorm"} {
+		name := name
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+			defer cancel()
+			fixture := testdb.Require(t, testdb.Config{MaxConns: 16, Availability: testdb.FailWhenUnavailable})
+			platform := fixture.Pool()
+			if platform == nil || platform.DB() == nil {
+				t.Fatal("shared PostgreSQL fixture did not provide a platform pool")
+			}
+			var store pathapp.Store
+			if name == "legacy-pgx" {
+				legacy, err := NewRepository(platform.DB())
+				if err != nil {
+					t.Fatal(err)
+				}
+				store = legacy
+			} else {
+				gormStore, err := NewGORMRepository(platform)
+				if err != nil {
+					t.Fatal(err)
+				}
+				store = gormStore
+			}
+			scenario(t, ctx, platform.DB(), seedReviewPathFixture(t, ctx, platform.DB()), store)
+		})
 	}
-	admin, err := pgxpool.New(ctx, baseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	databaseName := fmt.Sprintf("zhixu_review_path_%d", time.Now().UnixNano())
-	identifier := pgx.Identifier{databaseName}.Sanitize()
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+identifier); err != nil {
-		admin.Close()
-		t.Fatal(err)
-	}
-	parsed.Path = "/" + databaseName
-	pool, err := pgxpool.New(ctx, parsed.String())
-	if err != nil {
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		pool.Close()
-		_, _ = admin.Exec(context.Background(), "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-	})
-	runner, err := platformmigration.NewRunner(pool, projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := runner.Up(ctx); err != nil {
-		t.Fatal(err)
-	}
-	return pool
 }
 
 func seedReviewPathFixture(t *testing.T, ctx context.Context, pool *pgxpool.Pool) reviewPathFixture {
@@ -137,7 +135,7 @@ func seedReviewPathFixture(t *testing.T, ctx context.Context, pool *pgxpool.Pool
 	}{
 		{`INSERT INTO core.workspace(
 			id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at
-		) VALUES($1,'review-path-integration','/tmp/review-path-integration','/tmp/review-path-integration',$2,'test',1,$2,$2)`, []any{string(fixture.workspaceID), now}},
+		) VALUES($1,'review-path-integration','/tmp/review-path-integration','/tmp/review-path-integration',$2,'active',1,$2,$2)`, []any{string(fixture.workspaceID), now}},
 		{`INSERT INTO core.content_artifact(
 			id,workspace_id,content_hash,byte_size,managed_location,created_at
 		) VALUES($1,$2,$3,$4,$5,$6)`, []any{string(reviewPathIntegrationID(2)), string(fixture.workspaceID), fixture.contentHash, len([]byte(content)), ".knowledge/sources/" + fixture.contentHash, now}},

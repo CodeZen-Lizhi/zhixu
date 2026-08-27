@@ -76,3 +76,10 @@
 - 提交前在 `dev` 工作树复跑 `go test -mod=vendor ./internal/review/learningpath/... -count=1 -timeout 60s`、`go vet -mod=vendor ./internal/review/learningpath/...`、Trellis validate 与 gofmt，均通过；validate 仅保留既有的 32 KiB 注入警告。
 - 提交只包含本 child 的 3 个目标文件；Foundation、依赖、Trellis runtime、其他模块及其他任务的 staged/dirty 内容均未纳入。
 - Phase 3.3 判断无需修改公共 spec：本轮没有新增可复用契约，opaque Unit of Work 约束已有稳定事实源；TODO 9 未通过，任务继续保持 `in_progress`，不归档、不切生产 Composition。
+
+## TODO 9 Shared Fixture Probe (2026-08-27)
+
+- `review_learning_path_test_helpers_integration_test.go` now provisions each integration database through `testdb.Require`, returning the shared `platformpostgres.Pool.DB()`; manual `ZHIXU_TEST_DATABASE_URL` admin pooling and migration lifecycle were removed.
+- Added `TestReviewLearningPathPostgreSQLLegacyAndGORMCreateReadParity`, running once per isolated fixture for `legacy-pgx` and `gorm` stores and checking Create, `GetByReviewAnswer`, `Get`, exact replay, Step transition/replay, and Path status transition/replay on real PostgreSQL/Testcontainers.
+- `go test -mod=vendor -tags=integration -run '^TestReviewLearningPathPostgreSQLLegacyAndGORMCreateReadParity$' -count=1 -p 1 -timeout 120s ./internal/review/learningpath/adapter/postgres` passed (10.550s); the full package integration suite passed (48.110s), and `go test -race -mod=vendor -tags=integration -count=1 -p 1 -timeout 120s ./internal/review/learningpath/adapter/postgres` passed (56.172s). The parity race rerun also passed (14.264s).
+- Existing barrier and commit-response-loss fixtures wrap pgx transactions directly and remain legacy-only; extending those fault injections to GORM requires a separate adapter-aware hook and is an explicit TODO 9 gap, not claimed as parity evidence.
