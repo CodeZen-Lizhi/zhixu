@@ -6,15 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
-	"github.com/riverqueue/river/riverdriver/riverpgxv5"
-	"github.com/riverqueue/river/rivermigrate"
 )
 
 const (
@@ -88,22 +85,7 @@ func (r *Runner) Up(ctx context.Context) (retErr error) {
 	if _, err := provider.Up(ctx); err != nil {
 		return fmt.Errorf("apply project migrations: %w", err)
 	}
-
-	riverMigrator, err := rivermigrate.New(riverpgxv5.New(r.pool), &rivermigrate.Config{Schema: r.riverSchema})
-	if err != nil {
-		return fmt.Errorf("create River migrator: %w", err)
-	}
-	if _, err := riverMigrator.Migrate(ctx, rivermigrate.DirectionUp, nil); err != nil {
-		return fmt.Errorf("apply River migrations: %w", err)
-	}
-	validation, err := riverMigrator.Validate(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("validate River migrations: %w", err)
-	}
-	if validation == nil || !validation.OK {
-		return fmt.Errorf("validate River migrations: %s", validationMessage(validation))
-	}
-	return nil
+	return migrateRiver(ctx, r.pool, r.riverSchema)
 }
 
 // acquireMigrationAdvisoryLock polls on the dedicated session so every failed
@@ -131,9 +113,15 @@ func acquireMigrationAdvisoryLock(ctx context.Context, connection *pgx.Conn) err
 
 // openLockConnection creates a dedicated session outside the application pool.
 // The advisory lock must not consume one of the pool's only connections while
-// Goose and River acquire connections for their own work.
+// the migration engine and River acquire connections for their own work.
 func (r *Runner) openLockConnection(ctx context.Context) (*pgx.Conn, error) {
-	config := r.pool.Config()
+	return openMigrationLockConnection(ctx, r.pool)
+}
+
+// openMigrationLockConnection creates a dedicated session outside the
+// application pool for the process-wide migration advisory lock.
+func openMigrationLockConnection(ctx context.Context, pool *pgxpool.Pool) (*pgx.Conn, error) {
+	config := pool.Config()
 	if config == nil || config.ConnConfig == nil {
 		return nil, errors.New("migration pool connection config is nil")
 	}
@@ -235,14 +223,4 @@ func legacyMetaKeys(values map[string]string) []string {
 		keys = append(keys, key)
 	}
 	return keys
-}
-
-func validationMessage(result *rivermigrate.ValidateResult) string {
-	if result == nil {
-		return "empty validation result"
-	}
-	if len(result.Messages) == 0 {
-		return "validation failed without details"
-	}
-	return strings.Join(result.Messages, "; ")
 }
