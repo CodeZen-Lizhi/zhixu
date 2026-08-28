@@ -3,6 +3,7 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"gorm.io/gorm"
 )
 
 // DB 是认证 Repository 所需的最小 PostgreSQL 边界。
@@ -42,9 +44,7 @@ func (repository *Repository) Check(ctx context.Context) error {
 		return err
 	}
 	var sessionsExist, tokensExist bool
-	if err := repository.db.QueryRow(ctx, `SELECT
-		EXISTS (SELECT 1 FROM auth.session),
-		EXISTS (SELECT 1 FROM auth.api_token)`).Scan(&sessionsExist, &tokensExist); err != nil {
+	if err := repository.db.QueryRow(ctx, authCheckSQL).Scan(&sessionsExist, &tokensExist); err != nil {
 		return unavailable(fmt.Errorf("check authentication tables: %w", err))
 	}
 	return nil
@@ -65,11 +65,7 @@ func (repository *Repository) CreateSession(ctx context.Context, issue domain.Se
 	if err != nil {
 		return domain.Session{}, invalid(err)
 	}
-	return scanSession(repository.db.QueryRow(ctx, `INSERT INTO auth.session(
-		id,token_hash,csrf_hash,user_label,scopes,created_at,last_seen_at,expires_at,revoked_at
-	) VALUES($1,$2,$3,$4,$5::jsonb,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,
-		CURRENT_TIMESTAMP + ($6::bigint * INTERVAL '1 microsecond'),NULL)
-	RETURNING id::text,token_hash,csrf_hash,user_label,scopes::text,created_at,last_seen_at,expires_at,revoked_at`,
+	return scanSession(repository.db.QueryRow(ctx, createSessionSQL,
 		string(issue.ID), issue.TokenHash, issue.CSRFHash, issue.UserLabel, scopes, ttl.Microseconds()))
 }
 
@@ -91,16 +87,7 @@ func (repository *Repository) RotateSession(ctx context.Context, previousID foun
 	if err != nil {
 		return domain.Session{}, invalid(err)
 	}
-	return scanSession(repository.db.QueryRow(ctx, `WITH revoked AS (
-		UPDATE auth.session SET revoked_at=CURRENT_TIMESTAMP
-		WHERE id=$1 AND revoked_at IS NULL AND expires_at>CURRENT_TIMESTAMP
-		RETURNING id
-	)
-	INSERT INTO auth.session(
-		id,token_hash,csrf_hash,user_label,scopes,created_at,last_seen_at,expires_at,revoked_at
-	) SELECT $2,$3,$4,$5,$6::jsonb,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,
-		CURRENT_TIMESTAMP + ($7::bigint * INTERVAL '1 microsecond'),NULL FROM revoked
-	RETURNING id::text,token_hash,csrf_hash,user_label,scopes::text,created_at,last_seen_at,expires_at,revoked_at`,
+	return scanSession(repository.db.QueryRow(ctx, rotateSessionSQL,
 		string(previousID), string(issue.ID), issue.TokenHash, issue.CSRFHash, issue.UserLabel, scopes, ttl.Microseconds()))
 }
 
@@ -109,10 +96,7 @@ func (repository *Repository) AuthenticateSession(ctx context.Context, tokenHash
 	if err := repository.ready(ctx); err != nil {
 		return domain.Session{}, err
 	}
-	return scanSession(repository.db.QueryRow(ctx, `UPDATE auth.session
-		SET last_seen_at=GREATEST(last_seen_at,CURRENT_TIMESTAMP)
-		WHERE token_hash=$1 AND revoked_at IS NULL AND expires_at>CURRENT_TIMESTAMP
-		RETURNING id::text,token_hash,csrf_hash,user_label,scopes::text,created_at,last_seen_at,expires_at,revoked_at`, tokenHash))
+	return scanSession(repository.db.QueryRow(ctx, authenticateSessionSQL, tokenHash))
 }
 
 // RevokeSession 立即撤销活动 Session；重复撤销是幂等成功。
@@ -150,11 +134,7 @@ func (repository *Repository) CreateAPIToken(ctx context.Context, issue domain.A
 	if err != nil {
 		return domain.APIToken{}, invalid(err)
 	}
-	return scanAPIToken(repository.db.QueryRow(ctx, `INSERT INTO auth.api_token(
-		id,token_hash,name,scopes,created_at,last_used_at,expires_at,revoked_at
-	) VALUES($1,$2,$3,$4::jsonb,CURRENT_TIMESTAMP,NULL,
-		CURRENT_TIMESTAMP + ($5::bigint * INTERVAL '1 microsecond'),NULL)
-	RETURNING id::text,token_hash,name,scopes::text,created_at,last_used_at,expires_at,revoked_at`,
+	return scanAPIToken(repository.db.QueryRow(ctx, createAPITokenSQL,
 		string(issue.ID), issue.TokenHash, issue.Name, scopes, ttl.Microseconds()))
 }
 
@@ -166,9 +146,7 @@ func (repository *Repository) ListAPITokens(ctx context.Context, request domain.
 	if err := domain.ValidateAPITokenListQuery(request); err != nil {
 		return nil, false, invalid(err)
 	}
-	query := `SELECT token.id::text,token.token_hash,token.name,token.scopes::text,
-			token.created_at,token.last_used_at,token.expires_at,token.revoked_at
-		FROM auth.api_token AS token`
+	query := `SELECT ` + apiTokenListProjection + ` FROM auth.api_token AS token`
 	args := make([]any, 0, 3)
 	if request.CursorTime != nil {
 		query += ` WHERE (token.created_at,token.id)<($1,$2::uuid)`
@@ -204,10 +182,7 @@ func (repository *Repository) AuthenticateAPIToken(ctx context.Context, tokenHas
 	if err := repository.ready(ctx); err != nil {
 		return domain.APIToken{}, err
 	}
-	return scanAPIToken(repository.db.QueryRow(ctx, `UPDATE auth.api_token
-		SET last_used_at=GREATEST(COALESCE(last_used_at,CURRENT_TIMESTAMP),CURRENT_TIMESTAMP)
-		WHERE token_hash=$1 AND revoked_at IS NULL AND expires_at>CURRENT_TIMESTAMP
-		RETURNING id::text,token_hash,name,scopes::text,created_at,last_used_at,expires_at,revoked_at`, tokenHash))
+	return scanAPIToken(repository.db.QueryRow(ctx, authenticateAPITokenSQL, tokenHash))
 }
 
 // RevokeAPIToken 立即撤销自动化 Token；重复撤销是幂等成功。
@@ -228,43 +203,6 @@ func (repository *Repository) RevokeAPIToken(ctx context.Context, id foundation.
 		return notFound(errors.New("api token does not exist"))
 	}
 	return nil
-}
-
-func scanSession(row pgx.Row) (domain.Session, error) {
-	var session domain.Session
-	var idText, scopesText string
-	if err := row.Scan(&idText, &session.TokenHash, &session.CSRFHash, &session.UserLabel, &scopesText,
-		&session.CreatedAt, &session.LastSeenAt, &session.ExpiresAt, &session.RevokedAt); err != nil {
-		return domain.Session{}, readError(err)
-	}
-	id, err := foundation.ParseID(idText)
-	if err != nil || string(id) != idText {
-		return domain.Session{}, corrupt(errors.New("session id is corrupt"))
-	}
-	session.ID = id
-	session.Scopes, err = decodeScopes(scopesText)
-	if err != nil || domain.ValidateSession(session) != nil {
-		return domain.Session{}, corrupt(errors.New("session row is corrupt"))
-	}
-	return session, nil
-}
-
-func scanAPIToken(row pgx.Row) (domain.APIToken, error) {
-	var token domain.APIToken
-	var idText, scopesText string
-	if err := row.Scan(&idText, &token.TokenHash, &token.Name, &scopesText, &token.CreatedAt, &token.LastUsedAt, &token.ExpiresAt, &token.RevokedAt); err != nil {
-		return domain.APIToken{}, readError(err)
-	}
-	id, err := foundation.ParseID(idText)
-	if err != nil || string(id) != idText {
-		return domain.APIToken{}, corrupt(errors.New("api token id is corrupt"))
-	}
-	token.ID = id
-	token.Scopes, err = decodeScopes(scopesText)
-	if err != nil || domain.ValidateAPIToken(token) != nil {
-		return domain.APIToken{}, corrupt(errors.New("api token row is corrupt"))
-	}
-	return token, nil
 }
 
 func decodeScopes(raw string) ([]capability.Capability, error) {
@@ -290,7 +228,7 @@ func (repository *Repository) ready(ctx context.Context) error {
 }
 
 func readError(err error) error {
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows) || errors.Is(err, gorm.ErrRecordNotFound) {
 		return unauthorized(errors.New("credential is missing, expired, or revoked"))
 	}
 	var postgresError *pgconn.PgError
