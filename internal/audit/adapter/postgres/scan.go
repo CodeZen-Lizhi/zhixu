@@ -8,7 +8,6 @@ import (
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/audit/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	"github.com/jackc/pgx/v5"
 )
 
 const auditSelect = `
@@ -19,6 +18,14 @@ const auditSelect = `
 type scanner interface{ Scan(...any) error }
 
 func scanEvent(row scanner) (domain.Event, error) {
+	event, err := scanEventRaw(row)
+	if err == nil || auditNoRows(err) {
+		return event, err
+	}
+	return domain.Event{}, classifyStoreError(err)
+}
+
+func scanEventRaw(row scanner) (domain.Event, error) {
 	var (
 		event                                            domain.Event
 		id, actorType                                    string
@@ -30,10 +37,7 @@ func scanEvent(row scanner) (domain.Event, error) {
 		&id, &workspaceID, &actorType, &actorRef, &event.Action, &resourceType, &resourceRef,
 		&idempotencyKey, &correlationJSON, &payloadJSON, &event.OccurredAt,
 	); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return domain.Event{}, pgx.ErrNoRows
-		}
-		return domain.Event{}, classifyStoreError(err)
+		return domain.Event{}, err
 	}
 	parsedID, err := foundation.ParseID(id)
 	if err != nil || string(parsedID) != id {

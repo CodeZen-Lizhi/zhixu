@@ -50,12 +50,7 @@ func (store *Store) AppendTx(ctx context.Context, transaction any, event domain.
 
 	// PostgreSQL UNIQUE 对 NULL workspace 不去重，因此所有幂等键先取得
 	// transaction-scoped advisory lock，再用 IS NOT DISTINCT FROM 精确查询。
-	lockScope := redacted.IdempotencyKey
-	if redacted.WorkspaceID != nil {
-		// Workspace IDs are canonical fixed-width UUIDs, so the printable separator
-		// is unambiguous and remains valid PostgreSQL text input.
-		lockScope = string(*redacted.WorkspaceID) + ":" + lockScope
-	}
+	lockScope := auditLockScope(redacted)
 	if _, lockErr := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, lockScope); lockErr != nil {
 		return domain.Event{}, false, classifyStoreError(lockErr)
 	}
@@ -83,7 +78,7 @@ func (store *Store) AppendTx(ctx context.Context, transaction any, event domain.
 		}
 		return created, false, nil
 	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+	if !auditNoRows(err) {
 		return domain.Event{}, false, classifyAppendFailure(err)
 	}
 	existing, found, lookupErr := loadByIdempotency(ctx, tx, redacted.WorkspaceID, redacted.IdempotencyKey)
@@ -183,6 +178,15 @@ func optionalText(value string) any {
 		return nil
 	}
 	return value
+}
+
+func auditLockScope(event domain.Event) string {
+	if event.WorkspaceID == nil {
+		return event.IdempotencyKey
+	}
+	// Workspace IDs are canonical fixed-width UUIDs, so the printable separator
+	// is unambiguous and remains valid PostgreSQL text input.
+	return string(*event.WorkspaceID) + ":" + event.IdempotencyKey
 }
 
 func isNilTx(tx pgx.Tx) bool {

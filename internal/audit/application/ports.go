@@ -25,3 +25,25 @@ type Appender interface {
 	// AppendTx 在已有事务中追加或精确重放一个 Audit 事件。
 	AppendTx(context.Context, any, domain.Event) (domain.Event, bool, error)
 }
+
+// ScopedAppender 是 GORM 迁移路径使用的 opaque transaction 追加边界。
+// legacy pgx 调用方继续使用 Appender，直到各自模块完成迁移。
+type ScopedAppender interface {
+	// AppendScoped 在已有 opaque transaction 中追加或精确重放一个 Audit 事件。
+	AppendScoped(context.Context, foundation.TransactionScope, domain.Event) (domain.Event, bool, error)
+}
+
+// ScopedReader 在 opaque caller-owned transaction 中读取不可变 Audit 事实。
+// 它只用于跨 owner 的 durable closure 验证，不执行访问控制或拥有事务。
+type ScopedReader interface {
+	// GetScoped 按 ID 读取事件，不提交或回滚调用方事务。
+	GetScoped(context.Context, foundation.TransactionScope, foundation.ID) (domain.Event, error)
+}
+
+// ScopedStore 提供不暴露具体数据库事务类型的完整 Audit Store 契约。
+type ScopedStore interface {
+	Repository
+	ScopedAppender
+	Get(context.Context, foundation.ID) (domain.Event, error)
+	List(context.Context, domain.ListQuery) ([]domain.Event, error)
+}

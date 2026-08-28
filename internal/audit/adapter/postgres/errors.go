@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 
@@ -8,6 +9,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"gorm.io/gorm"
 )
 
 func domainErrorInvalid(code string, cause error) error {
@@ -30,7 +32,7 @@ func classifyStoreError(err error) error {
 	if errors.As(err, &classified) {
 		return err
 	}
-	if errors.Is(err, pgx.ErrNoRows) {
+	if auditNoRows(err) {
 		return foundation.NewError(foundation.ErrorNotFound, domain.ErrorCodeEventNotFound, false, errors.New("audit event was not found"))
 	}
 	var postgresError *pgconn.PgError
@@ -47,4 +49,8 @@ func classifyStoreError(err error) error {
 	// Do not wrap or expose a driver error string: it may contain SQL values,
 	// DSNs, Cookie/Token data, or absolute paths supplied by a caller.
 	return foundation.NewError(foundation.ErrorDependencyUnavailable, domain.ErrorCodeStoreUnavailable, true, fmt.Errorf("audit database operation failed: %T", err))
+}
+
+func auditNoRows(err error) bool {
+	return errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows) || errors.Is(err, gorm.ErrRecordNotFound)
 }

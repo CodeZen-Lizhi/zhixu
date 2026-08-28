@@ -76,7 +76,7 @@ func (store *Store) Get(ctx context.Context, id foundation.ID) (domain.Event, er
 		return domain.Event{}, domainErrorInvalid(domain.ErrorCodeInvalid, errors.New("audit id is invalid"))
 	}
 	event, err := scanEvent(store.db.QueryRow(ctx, auditSelect+` WHERE id=$1`, string(id)))
-	if errors.Is(err, pgx.ErrNoRows) {
+	if auditNoRows(err) {
 		return domain.Event{}, foundation.NewError(foundation.ErrorNotFound, domain.ErrorCodeNotFound, false, errors.New("audit event was not found"))
 	}
 	return event, err
@@ -88,27 +88,9 @@ func (store *Store) List(ctx context.Context, query domain.ListQuery) ([]domain.
 	if err := store.validateQuery(ctx); err != nil {
 		return nil, err
 	}
-	if query.Limit <= 0 || query.Limit > domain.MaxListLimit {
-		return nil, domainErrorInvalid(domain.ErrorCodeInvalid, errors.New("audit list limit is invalid"))
-	}
-	if query.Before.IsZero() != (query.BeforeID == "") {
-		return nil, domainErrorInvalid(domain.ErrorCodeInvalid, errors.New("audit list cursor is incomplete"))
-	}
-	var workspace any
-	if query.WorkspaceID != nil {
-		parsed, err := foundation.ParseID(string(*query.WorkspaceID))
-		if err != nil || parsed != *query.WorkspaceID {
-			return nil, domainErrorInvalid(domain.ErrorCodeInvalid, errors.New("audit workspace id is invalid"))
-		}
-		workspace = string(*query.WorkspaceID)
-	}
-	var beforeID any
-	if query.BeforeID != "" {
-		parsed, err := foundation.ParseID(string(query.BeforeID))
-		if err != nil || parsed != query.BeforeID {
-			return nil, domainErrorInvalid(domain.ErrorCodeInvalid, errors.New("audit list cursor id is invalid"))
-		}
-		beforeID = string(query.BeforeID)
+	workspace, beforeID, err := auditListArguments(query)
+	if err != nil {
+		return nil, err
 	}
 	rows, err := store.db.Query(ctx, auditSelect+`
 		WHERE workspace_id IS NOT DISTINCT FROM $1::uuid
@@ -148,6 +130,32 @@ func nullableTime(value time.Time) any {
 		return nil
 	}
 	return value.UTC().Truncate(time.Microsecond)
+}
+
+func auditListArguments(query domain.ListQuery) (any, any, error) {
+	if query.Limit <= 0 || query.Limit > domain.MaxListLimit {
+		return nil, nil, domainErrorInvalid(domain.ErrorCodeInvalid, errors.New("audit list limit is invalid"))
+	}
+	if query.Before.IsZero() != (query.BeforeID == "") {
+		return nil, nil, domainErrorInvalid(domain.ErrorCodeInvalid, errors.New("audit list cursor is incomplete"))
+	}
+	var workspace any
+	if query.WorkspaceID != nil {
+		parsed, err := foundation.ParseID(string(*query.WorkspaceID))
+		if err != nil || parsed != *query.WorkspaceID {
+			return nil, nil, domainErrorInvalid(domain.ErrorCodeInvalid, errors.New("audit workspace id is invalid"))
+		}
+		workspace = string(*query.WorkspaceID)
+	}
+	var beforeID any
+	if query.BeforeID != "" {
+		parsed, err := foundation.ParseID(string(query.BeforeID))
+		if err != nil || parsed != query.BeforeID {
+			return nil, nil, domainErrorInvalid(domain.ErrorCodeInvalid, errors.New("audit list cursor id is invalid"))
+		}
+		beforeID = string(query.BeforeID)
+	}
+	return workspace, beforeID, nil
 }
 
 func isNilDB(value DB) bool {
