@@ -8,7 +8,6 @@ import (
 	"sort"
 	"time"
 
-	authdomain "github.com/CodeZen-Lizhi/zhixu/internal/auth/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	memoryapp "github.com/CodeZen-Lizhi/zhixu/internal/memory/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/memory/domain"
@@ -516,28 +515,19 @@ func replayInterviewCandidate(ctx context.Context, tx pgx.Tx, record memoryapp.C
 }
 
 func loadInterviewCandidateCommand(ctx context.Context, tx pgx.Tx, memory domain.Memory) (persistedCommand, bool, error) {
-	var command persistedCommand
-	var ownerKind string
-	command.workspaceID = memory.WorkspaceID
-	err := tx.QueryRow(ctx, `SELECT c.owner_principal_kind,c.owner_principal_id::text,c.request_hash,c.command_type,c.memory_id::text,c.expected_version,c.memory_version,c.response::text
+	command, err := scanPersistedCommand(tx.QueryRow(ctx, `SELECT c.owner_principal_kind,c.owner_principal_id::text,c.request_hash,c.command_type,c.memory_id::text,c.expected_version,c.memory_version,c.response::text
 		FROM learning.memory AS m
 		JOIN learning.memory_command AS c ON c.workspace_id=m.workspace_id AND c.memory_id=m.id
 		WHERE m.workspace_id=$1 AND m.owner_principal_kind=$2 AND m.owner_principal_id=$3
 		  AND m.source_type='INTERVIEW' AND m.source_ref=$4 AND c.command_type='CREATE_CANDIDATE'
 		ORDER BY c.created_at ASC,c.idempotency_key ASC LIMIT 1 FOR UPDATE OF m,c`,
-		string(memory.WorkspaceID), string(memory.Owner.Kind), string(memory.Owner.ID), memory.Source.Ref).Scan(
-		&ownerKind, &command.owner.ID, &command.requestHash, &command.commandType, &command.memoryID, &command.expected, &command.version, &command.response,
-	)
+		string(memory.WorkspaceID), string(memory.Owner.Kind), string(memory.Owner.ID), memory.Source.Ref),
+		memory.WorkspaceID, "interview candidate command row is invalid")
 	if errors.Is(err, pgx.ErrNoRows) {
 		return persistedCommand{}, false, nil
 	}
 	if err != nil {
 		return persistedCommand{}, false, classify(err)
-	}
-	command.owner.Kind = authdomain.PrincipalKind(ownerKind)
-	if err := domain.ValidatePrincipal(command.owner); err != nil || !validHash(command.requestHash) || !validCommandType(command.commandType) ||
-		!validID(command.memoryID) || !validCommandVersion(command.commandType, command.expected, command.version) {
-		return persistedCommand{}, false, inconsistent(errors.New("interview candidate command row is invalid"))
 	}
 	return command, true, nil
 }

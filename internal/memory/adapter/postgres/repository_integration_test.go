@@ -7,8 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -17,31 +15,34 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	memoryapp "github.com/CodeZen-Lizhi/zhixu/internal/memory/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/memory/domain"
-	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
-	"github.com/jackc/pgx/v5"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestRepositoryPostgreSQLLifecycleReceiptScopeAndAudit(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	repository, pool := newMemoryIntegrationRepository(t, ctx)
-	workspaceA := memoryIntegrationID(1)
-	workspaceB := memoryIntegrationID(2)
+	runMemoryIntegrationVariants(t, testRepositoryPostgreSQLLifecycleReceiptScopeAndAudit)
+}
+
+func testRepositoryPostgreSQLLifecycleReceiptScopeAndAudit(t *testing.T, ctx context.Context, repository memoryapp.Repository, testCase memoryIntegrationCase) {
+	resources := testCase.repositories
+	id := testCase.id
+	pool := resources.pool
+	workspaceA := id(1)
+	workspaceB := id(2)
 	seedMemoryWorkspace(t, ctx, pool, workspaceA, "memory-integration-a")
 	seedMemoryWorkspace(t, ctx, pool, workspaceB, "memory-integration-b")
 	now := time.Date(2026, 7, 27, 13, 0, 0, 0, time.UTC)
 	service, err := memoryapp.NewService(memoryapp.Dependencies{
-		Repository: repository, IDs: &memoryIntegrationIDs{next: 10}, Clock: foundation.FixedClock{Value: now},
+		Repository: repository, IDs: &memoryIntegrationIDs{base: testCase.offset, next: 10}, Clock: foundation.FixedClock{Value: now},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	owner := domain.Principal{Kind: domain.PrincipalUser, ID: memoryIntegrationID(3)}
-	other := domain.Principal{Kind: domain.PrincipalUser, ID: memoryIntegrationID(4)}
-	task := memoryIntegrationID(5)
+	owner := domain.Principal{Kind: domain.PrincipalUser, ID: id(3)}
+	other := domain.Principal{Kind: domain.PrincipalUser, ID: id(4)}
+	task := id(5)
 	created, err := service.CreateCandidate(ctx, memoryapp.CreateCandidateCommand{
 		WorkspaceID: workspaceA, Owner: owner, Type: domain.TypePreference,
 		Content: json.RawMessage(`{"language":"zh"}`), Source: domain.Source{Type: domain.SourceAgent, Ref: "agent:proposal-1"},
@@ -91,6 +92,25 @@ func TestRepositoryPostgreSQLLifecycleReceiptScopeAndAudit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create owner-bound candidate err=%v", err)
 	}
+	firstPage, err := service.List(ctx, memoryapp.ListQuery{
+		Scope:    memoryapp.Scope{WorkspaceID: workspaceA, Owner: owner},
+		Types:    []domain.Type{domain.TypeGoal, domain.TypePreference},
+		Statuses: []domain.Status{domain.StatusCandidate, domain.StatusActive},
+		Limit:    1,
+	})
+	if err != nil || len(firstPage.Items) != 1 || firstPage.Next == nil {
+		t.Fatalf("first keyset page=%#v err=%v", firstPage, err)
+	}
+	secondPage, err := service.List(ctx, memoryapp.ListQuery{
+		Scope:    memoryapp.Scope{WorkspaceID: workspaceA, Owner: owner},
+		Types:    []domain.Type{domain.TypeGoal, domain.TypePreference},
+		Statuses: []domain.Status{domain.StatusCandidate, domain.StatusActive},
+		Limit:    1,
+		After:    firstPage.Next,
+	})
+	if err != nil || len(secondPage.Items) != 1 || secondPage.Items[0].ID == firstPage.Items[0].ID {
+		t.Fatalf("second keyset page=%#v err=%v", secondPage, err)
+	}
 	if _, err := pool.Exec(ctx, `UPDATE learning.memory
 		SET status='ACTIVE',confirmed_at=$3,confirmed_by_principal_kind=$4,confirmed_by_principal_id=$5,version=version+1,updated_at=$3
 		WHERE workspace_id=$1 AND id=$2`, string(workspaceA), string(ownerBoundCandidate.Memory.ID), now.Add(time.Minute), string(other.Kind), string(other.ID)); err == nil {
@@ -113,22 +133,34 @@ func TestRepositoryPostgreSQLLifecycleReceiptScopeAndAudit(t *testing.T) {
 	} else {
 		memoryIntegrationPostgresCode(t, err, "55000")
 	}
+	if _, err := pool.Exec(ctx, `UPDATE learning.memory_command SET request_hash=request_hash WHERE workspace_id=$1 AND memory_id=$2`, string(workspaceA), string(created.Memory.ID)); err == nil {
+		t.Fatal("memory command mutation unexpectedly succeeded")
+	} else {
+		memoryIntegrationPostgresCode(t, err, "55000")
+	}
+	memoryIntegrationAssertContextClassification(t, ctx, repository, memoryapp.Scope{WorkspaceID: workspaceA, Owner: owner}, created.Memory.ID, id(999))
+	memoryIntegrationAssertHistoryWriteRollback(t, ctx, service, pool, workspaceA, owner)
+	memoryIntegrationAssertSharedPoolVisibility(t, ctx, resources, id(900))
 }
 
 func TestRepositoryPostgreSQLConcurrentConfirmReplaysExactlyOnce(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	repository, pool := newMemoryIntegrationRepository(t, ctx)
-	workspaceID := memoryIntegrationID(30)
+	runMemoryIntegrationVariants(t, testRepositoryPostgreSQLConcurrentConfirmReplaysExactlyOnce)
+}
+
+func testRepositoryPostgreSQLConcurrentConfirmReplaysExactlyOnce(t *testing.T, ctx context.Context, repository memoryapp.Repository, testCase memoryIntegrationCase) {
+	resources := testCase.repositories
+	id := testCase.id
+	pool := resources.pool
+	workspaceID := id(30)
 	seedMemoryWorkspace(t, ctx, pool, workspaceID, "memory-concurrent-confirm")
 	now := time.Date(2026, 7, 27, 14, 0, 0, 0, time.UTC)
 	service, err := memoryapp.NewService(memoryapp.Dependencies{
-		Repository: repository, IDs: &memoryIntegrationIDs{next: 40}, Clock: foundation.FixedClock{Value: now},
+		Repository: repository, IDs: &memoryIntegrationIDs{base: testCase.offset, next: 40}, Clock: foundation.FixedClock{Value: now},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	owner := domain.Principal{Kind: domain.PrincipalUser, ID: memoryIntegrationID(31)}
+	owner := domain.Principal{Kind: domain.PrincipalUser, ID: id(31)}
 	created, err := service.CreateCandidate(ctx, memoryapp.CreateCandidateCommand{
 		WorkspaceID: workspaceID, Owner: owner, Type: domain.TypePreference,
 		Content: json.RawMessage(`{"mode":"focused"}`), Source: domain.Source{Type: domain.SourceAgent, Ref: "agent:concurrent"},
@@ -181,19 +213,25 @@ func TestRepositoryPostgreSQLConcurrentConfirmReplaysExactlyOnce(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM learning.memory_audit WHERE workspace_id=$1 AND memory_id=$2`, string(workspaceID), string(created.Memory.ID)).Scan(&audits); err != nil || audits != 2 {
 		t.Fatalf("audit count=%d err=%v", audits, err)
 	}
+	memoryIntegrationAssertStaleCAS(t, ctx, repository, service, workspaceID, owner, now)
+	memoryIntegrationAssertConcurrentExpiry(t, ctx, service, pool, workspaceID, owner, now)
 }
 
 func TestRepositoryPostgreSQLInterviewCandidateDualIdempotency(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	repository, pool := newMemoryIntegrationRepository(t, ctx)
-	workspaceID := memoryIntegrationID(50)
+	runMemoryIntegrationVariants(t, testRepositoryPostgreSQLInterviewCandidateDualIdempotency)
+}
+
+func testRepositoryPostgreSQLInterviewCandidateDualIdempotency(t *testing.T, ctx context.Context, repository memoryapp.Repository, testCase memoryIntegrationCase) {
+	resources := testCase.repositories
+	id := testCase.id
+	pool := resources.pool
+	workspaceID := id(50)
 	seedMemoryWorkspace(t, ctx, pool, workspaceID, "memory-interview-candidate-idempotency")
-	fixture := seedMemoryInterviewPath(t, ctx, pool, workspaceID)
+	fixture := seedMemoryInterviewPath(t, ctx, pool, workspaceID, id)
 	owner := domain.SingleUserOwner()
 	now := time.Date(2026, 7, 28, 13, 0, 0, 0, time.UTC)
 	service, err := memoryapp.NewService(memoryapp.Dependencies{
-		Repository: repository, IDs: &concurrentMemoryIntegrationIDs{next: 60}, Clock: foundation.FixedClock{Value: now},
+		Repository: repository, IDs: &concurrentMemoryIntegrationIDs{base: testCase.offset, next: 60}, Clock: foundation.FixedClock{Value: now},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -316,28 +354,28 @@ type memoryInterviewPathFixture struct {
 	concurrentStepID foundation.ID
 }
 
-func seedMemoryInterviewPath(t *testing.T, ctx context.Context, pool *pgxpool.Pool, workspaceID foundation.ID) memoryInterviewPathFixture {
+func seedMemoryInterviewPath(t *testing.T, ctx context.Context, pool *pgxpool.Pool, workspaceID foundation.ID, id func(int) foundation.ID) memoryInterviewPathFixture {
 	t.Helper()
 	fixture := memoryInterviewPathFixture{
-		sessionID:        memoryIntegrationID(51),
-		pathID:           memoryIntegrationID(52),
-		primaryStepID:    memoryIntegrationID(53),
-		otherStepID:      memoryIntegrationID(54),
-		concurrentStepID: memoryIntegrationID(55),
+		sessionID:        id(51),
+		pathID:           id(52),
+		primaryStepID:    id(53),
+		otherStepID:      id(54),
+		concurrentStepID: id(55),
 	}
 	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
-	contentArtifactID := memoryIntegrationID(80)
-	sourceID := memoryIntegrationID(81)
-	sourceVersionID := memoryIntegrationID(82)
-	parseProjectionID := memoryIntegrationID(83)
-	sourceSpanID := memoryIntegrationID(84)
-	claimID := memoryIntegrationID(85)
-	claimSourceID := memoryIntegrationID(86)
-	reportArtifactID := memoryIntegrationID(87)
-	reportRevisionID := memoryIntegrationID(88)
-	pathArtifactID := memoryIntegrationID(89)
-	pathRevisionID := memoryIntegrationID(90)
-	reportID := memoryIntegrationID(91)
+	contentArtifactID := id(80)
+	sourceID := id(81)
+	sourceVersionID := id(82)
+	parseProjectionID := id(83)
+	sourceSpanID := id(84)
+	claimID := id(85)
+	claimSourceID := id(86)
+	reportArtifactID := id(87)
+	reportRevisionID := id(88)
+	pathArtifactID := id(89)
+	pathRevisionID := id(90)
+	reportID := id(91)
 	contentHash := strings.Repeat("c", 64)
 
 	tx, err := pool.Begin(ctx)
@@ -387,70 +425,291 @@ func memoryInterviewSourceRef(sessionID, pathID, stepID foundation.ID) string {
 	return fmt.Sprintf("interview:%s:learning-path:%s:step:%s", sessionID, pathID, stepID)
 }
 
-func newMemoryIntegrationRepository(t *testing.T, ctx context.Context) (*Repository, *pgxpool.Pool) {
+type memoryIntegrationRepositories struct {
+	pool       *pgxpool.Pool
+	legacy     *Repository
+	gorm       *GORMRepository
+	unitOfWork foundation.UnitOfWork
+}
+
+type memoryIntegrationCase struct {
+	repositories memoryIntegrationRepositories
+	offset       int
+}
+
+func (testCase memoryIntegrationCase) id(value int) foundation.ID {
+	return memoryIntegrationID(testCase.offset + value)
+}
+
+type memoryIntegrationVariant struct {
+	name       string
+	repository func(memoryIntegrationRepositories) memoryapp.Repository
+}
+
+func runMemoryIntegrationVariants(t *testing.T, scenario func(*testing.T, context.Context, memoryapp.Repository, memoryIntegrationCase)) {
 	t.Helper()
-	baseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
-	if baseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a disposable PostgreSQL instance")
+	fixtureCtx, cancelFixture := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancelFixture()
+	resources := newMemoryIntegrationRepositories(t)
+	variants := []memoryIntegrationVariant{
+		{name: "legacy-pgx", repository: func(resources memoryIntegrationRepositories) memoryapp.Repository { return resources.legacy }},
+		{name: "gorm", repository: func(resources memoryIntegrationRepositories) memoryapp.Repository { return resources.gorm }},
 	}
-	parsed, err := url.Parse(baseURL)
+	for index, variant := range variants {
+		index := index
+		variant := variant
+		t.Run(variant.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(fixtureCtx, 45*time.Second)
+			defer cancel()
+			scenario(t, ctx, variant.repository(resources), memoryIntegrationCase{repositories: resources, offset: (index + 1) * 1000})
+		})
+	}
+}
+
+func newMemoryIntegrationRepositories(t *testing.T) memoryIntegrationRepositories {
+	t.Helper()
+	fixture := testdb.Require(t, testdb.Config{MaxConns: 8, Availability: testdb.FailWhenUnavailable})
+	platform := fixture.Pool()
+	if platform == nil || platform.DB() == nil {
+		t.Fatal("test database fixture did not expose a shared platform pool")
+	}
+	legacy, err := NewRepository(platform.DB())
 	if err != nil {
 		t.Fatal(err)
 	}
-	admin, err := pgxpool.New(ctx, baseURL)
+	root, err := platform.GORM()
 	if err != nil {
 		t.Fatal(err)
 	}
-	name := fmt.Sprintf("zhixu_memory_%d", time.Now().UnixNano())
-	identifier := pgx.Identifier{name}.Sanitize()
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+identifier); err != nil {
-		admin.Close()
-		t.Fatal(err)
-	}
-	parsed.Path = "/" + name
-	pool, err := pgxpool.New(ctx, parsed.String())
+	unitOfWork, err := platform.UnitOfWork()
 	if err != nil {
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		pool.Close()
-		_, _ = admin.Exec(context.Background(), "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
+	gorm, err := NewGORMRepository(root, unitOfWork)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return memoryIntegrationRepositories{pool: platform.DB(), legacy: legacy, gorm: gorm, unitOfWork: unitOfWork}
+}
+
+func memoryIntegrationAssertContextClassification(t *testing.T, ctx context.Context, repository memoryapp.Repository, scope memoryapp.Scope, memoryID, missingID foundation.ID) {
+	t.Helper()
+	if _, err := repository.Get(ctx, scope, missingID); !memoryIntegrationErrorCode(err, domain.ErrorCodeNotFound) {
+		t.Fatalf("no-row get error=%v", err)
+	}
+	cancelledCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := repository.Get(cancelledCtx, scope, memoryID); !errors.Is(err, context.Canceled) || !memoryIntegrationErrorCode(err, domain.ErrorCodeUnavailable) {
+		t.Fatalf("cancelled get error=%v", err)
+	}
+	deadlineCtx, cancelDeadline := context.WithDeadline(ctx, time.Now().Add(-time.Second))
+	defer cancelDeadline()
+	if _, err := repository.Get(deadlineCtx, scope, memoryID); !errors.Is(err, context.DeadlineExceeded) || !memoryIntegrationErrorCode(err, domain.ErrorCodeUnavailable) {
+		t.Fatalf("deadline get error=%v", err)
+	}
+}
+
+func memoryIntegrationAssertHistoryWriteRollback(t *testing.T, ctx context.Context, service *memoryapp.Service, pool *pgxpool.Pool, workspaceID foundation.ID, owner domain.Principal) {
+	t.Helper()
+	for _, history := range []struct {
+		name  string
+		table string
+	}{
+		{name: "audit", table: "learning.memory_audit"},
+		{name: "receipt", table: "learning.memory_command"},
+	} {
+		t.Run(history.name, func(t *testing.T) {
+			created, err := service.CreateCandidate(ctx, memoryapp.CreateCandidateCommand{
+				WorkspaceID: workspaceID, Owner: owner, Type: domain.TypePreference,
+				Content: json.RawMessage(`{"mode":"rollback"}`), Source: domain.Source{Type: domain.SourceAgent, Ref: "agent:rollback-" + history.name},
+				IdempotencyKey: "rollback-" + history.name + "-candidate",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			lock, err := pool.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := lock.Exec(ctx, "LOCK TABLE "+history.table+" IN SHARE ROW EXCLUSIVE MODE"); err != nil {
+				_ = lock.Rollback(context.Background())
+				t.Fatal(err)
+			}
+			blockedCtx, cancel := context.WithTimeout(ctx, 750*time.Millisecond)
+			_, err = service.Confirm(blockedCtx, memoryapp.TransitionCommand{
+				Scope: memoryapp.Scope{WorkspaceID: workspaceID, Owner: owner}, MemoryID: created.Memory.ID, ExpectedVersion: 1,
+				IdempotencyKey: "rollback-" + history.name + "-confirm",
+			})
+			cancel()
+			if rollbackErr := lock.Rollback(context.Background()); rollbackErr != nil {
+				t.Fatalf("release %s lock: %v", history.name, rollbackErr)
+			}
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("blocked %s write error=%v", history.name, err)
+			}
+			var status string
+			var version int64
+			if err := pool.QueryRow(ctx, `SELECT status,version FROM learning.memory WHERE workspace_id=$1 AND id=$2`, string(workspaceID), string(created.Memory.ID)).Scan(&status, &version); err != nil || status != string(domain.StatusCandidate) || version != 1 {
+				t.Fatalf("blocked %s aggregate status=%s version=%d err=%v", history.name, status, version, err)
+			}
+			var commands, audits int
+			if err := pool.QueryRow(ctx, `SELECT count(*) FROM learning.memory_command WHERE workspace_id=$1 AND memory_id=$2`, string(workspaceID), string(created.Memory.ID)).Scan(&commands); err != nil || commands != 1 {
+				t.Fatalf("blocked %s receipt count=%d err=%v", history.name, commands, err)
+			}
+			if err := pool.QueryRow(ctx, `SELECT count(*) FROM learning.memory_audit WHERE workspace_id=$1 AND memory_id=$2`, string(workspaceID), string(created.Memory.ID)).Scan(&audits); err != nil || audits != 1 {
+				t.Fatalf("blocked %s audit count=%d err=%v", history.name, audits, err)
+			}
+		})
+	}
+}
+
+func memoryIntegrationAssertSharedPoolVisibility(t *testing.T, ctx context.Context, resources memoryIntegrationRepositories, visibilityID foundation.ID) {
+	t.Helper()
+	now := time.Date(2026, 7, 27, 16, 0, 0, 0, time.UTC)
+	if err := resources.unitOfWork.Within(ctx, foundation.TransactionOptions{}, func(callbackCtx context.Context, scope foundation.TransactionScope) error {
+		transaction, err := platformpostgres.GORMTransaction(scope)
+		if err != nil {
+			return err
+		}
+		name := "memory-shared-pool-" + string(visibilityID)
+		path := "/tmp/" + name
+		if result := transaction.WithContext(callbackCtx).Exec(`INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at)
+			VALUES(?,?,?,?,?,'inactive',1,?,?)`, string(visibilityID), name, path, path, now, now, now); result.Error != nil {
+			return result.Error
+		}
+		var visible int
+		if err := resources.pool.QueryRow(callbackCtx, `SELECT count(*) FROM core.workspace WHERE id=$1`, string(visibilityID)).Scan(&visible); err != nil {
+			return err
+		}
+		if visible != 0 {
+			return fmt.Errorf("uncommitted GORM write was visible through pgx pool: %d", visible)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("shared pool transaction visibility: %v", err)
+	}
+	var committed int
+	if err := resources.pool.QueryRow(ctx, `SELECT count(*) FROM core.workspace WHERE id=$1`, string(visibilityID)).Scan(&committed); err != nil || committed != 1 {
+		t.Fatalf("committed GORM write count=%d err=%v", committed, err)
+	}
+}
+
+func memoryIntegrationAssertStaleCAS(t *testing.T, ctx context.Context, repository memoryapp.Repository, service *memoryapp.Service, workspaceID foundation.ID, owner domain.Principal, now time.Time) {
+	t.Helper()
+	created, err := service.CreateCandidate(ctx, memoryapp.CreateCandidateCommand{
+		WorkspaceID: workspaceID, Owner: owner, Type: domain.TypePreference,
+		Content: json.RawMessage(`{"mode":"stale-cas"}`), Source: domain.Source{Type: domain.SourceAgent, Ref: "agent:stale-cas"},
+		IdempotencyKey: "stale-cas-candidate",
 	})
-	runner, err := platformmigration.NewRunner(pool, projectmigrations.FS)
-	if err == nil {
-		err = runner.Up(ctx)
-	}
 	if err != nil {
 		t.Fatal(err)
 	}
-	repository, err := NewRepository(pool)
+	current, err := repository.Get(ctx, memoryapp.Scope{WorkspaceID: workspaceID, Owner: owner}, created.Memory.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return repository, pool
+	next, err := domain.Confirm(current, owner, now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor := owner
+	record := memoryapp.MutationRecord{
+		Binding: memoryapp.CommandBinding{
+			WorkspaceID: workspaceID, Owner: owner, MemoryID: current.ID, IdempotencyKey: "stale-cas-first",
+			RequestHash: strings.Repeat("a", 64), CommandType: memoryapp.CommandConfirm, ExpectedVersion: current.Version,
+		},
+		Current: current, Next: next, Action: domain.AuditConfirmed, Actor: &actor,
+	}
+	if _, err := repository.Mutate(ctx, record); err != nil {
+		t.Fatalf("initial CAS mutation: %v", err)
+	}
+	record.Binding.IdempotencyKey = "stale-cas-second"
+	record.Binding.RequestHash = strings.Repeat("b", 64)
+	if _, err := repository.Mutate(ctx, record); !memoryIntegrationErrorCode(err, domain.ErrorCodeVersionConflict) {
+		t.Fatalf("stale CAS error=%v", err)
+	}
+}
+
+func memoryIntegrationAssertConcurrentExpiry(t *testing.T, ctx context.Context, service *memoryapp.Service, pool *pgxpool.Pool, workspaceID foundation.ID, owner domain.Principal, now time.Time) {
+	t.Helper()
+	dueAt := now.Add(time.Minute)
+	ids := make([]foundation.ID, 0, 4)
+	for index := 0; index < cap(ids); index++ {
+		created, err := service.CreateCandidate(ctx, memoryapp.CreateCandidateCommand{
+			WorkspaceID: workspaceID, Owner: owner, Type: domain.TypeEpisodic,
+			Content: json.RawMessage(fmt.Sprintf(`{"event":"due-%d"}`, index)), Source: domain.Source{Type: domain.SourceAgent, Ref: fmt.Sprintf("agent:due-%d", index)},
+			ExpiresAt: &dueAt, IdempotencyKey: fmt.Sprintf("due-candidate-%d", index),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, created.Memory.ID)
+	}
+	type expiryResult struct {
+		count int
+		err   error
+	}
+	results := make(chan expiryResult, 2)
+	var group sync.WaitGroup
+	group.Add(2)
+	for range 2 {
+		go func() {
+			defer group.Done()
+			count, err := service.ExpireDue(ctx, 2)
+			results <- expiryResult{count: count, err: err}
+		}()
+	}
+	group.Wait()
+	close(results)
+	total := 0
+	for result := range results {
+		if result.err != nil {
+			t.Fatalf("concurrent expiry: %v", result.err)
+		}
+		total += result.count
+	}
+	if total != len(ids) {
+		t.Fatalf("concurrent expiry count=%d, want %d", total, len(ids))
+	}
+	for _, id := range ids {
+		var status string
+		var version int64
+		if err := pool.QueryRow(ctx, `SELECT status,version FROM learning.memory WHERE workspace_id=$1 AND id=$2`, string(workspaceID), string(id)).Scan(&status, &version); err != nil || status != string(domain.StatusExpired) || version != 2 {
+			t.Fatalf("expired memory id=%s status=%s version=%d err=%v", id, status, version, err)
+		}
+	}
+	var audits int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM learning.memory_audit WHERE workspace_id=$1 AND action='EXPIRED'`, string(workspaceID)).Scan(&audits); err != nil || audits != len(ids) {
+		t.Fatalf("expiry audit count=%d err=%v", audits, err)
+	}
+	if count, err := service.ExpireDue(ctx, domain.MaxListLimit); err != nil || count != 0 {
+		t.Fatalf("repeated expiry count=%d err=%v", count, err)
+	}
 }
 
 func seedMemoryWorkspace(t *testing.T, ctx context.Context, pool *pgxpool.Pool, id foundation.ID, name string) {
 	t.Helper()
 	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	name += "-" + string(id)
 	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at)
-		VALUES($1,$2,$3,$3,$4,'test',1,$4,$4)`, string(id), name, "/tmp/"+name, now); err != nil {
+		VALUES($1,$2,$3,$3,$4,'inactive',1,$4,$4)`, string(id), name, "/tmp/"+name, now); err != nil {
 		t.Fatal(err)
 	}
 }
 
-type memoryIntegrationIDs struct{ next int }
+type memoryIntegrationIDs struct {
+	base int
+	next int
+}
 
 func (ids *memoryIntegrationIDs) New() (foundation.ID, error) {
 	ids.next++
-	return memoryIntegrationID(ids.next), nil
+	return memoryIntegrationID(ids.base + ids.next), nil
 }
 
 type concurrentMemoryIntegrationIDs struct {
 	mu   sync.Mutex
+	base int
 	next int
 }
 
@@ -458,7 +717,7 @@ func (ids *concurrentMemoryIntegrationIDs) New() (foundation.ID, error) {
 	ids.mu.Lock()
 	defer ids.mu.Unlock()
 	ids.next++
-	return memoryIntegrationID(ids.next), nil
+	return memoryIntegrationID(ids.base + ids.next), nil
 }
 
 func memoryIntegrationID(value int) foundation.ID {

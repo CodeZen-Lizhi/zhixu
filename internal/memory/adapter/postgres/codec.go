@@ -89,25 +89,39 @@ type persistedCommand struct {
 	response    []byte
 }
 
-func loadCommand(ctx context.Context, db interface {
-	QueryRow(context.Context, string, ...any) pgx.Row
-}, workspaceID foundation.ID, key string) (persistedCommand, bool, error) {
+func scanPersistedCommand(row scanner, workspaceID foundation.ID, invalidMessage string) (persistedCommand, error) {
 	var command persistedCommand
 	var ownerKind string
 	command.workspaceID = workspaceID
-	err := db.QueryRow(ctx, `SELECT owner_principal_kind,owner_principal_id::text,request_hash,command_type,memory_id::text,expected_version,memory_version,response::text
-		FROM learning.memory_command WHERE workspace_id=$1 AND idempotency_key=$2 FOR UPDATE`, string(workspaceID), key).Scan(
-		&ownerKind, &command.owner.ID, &command.requestHash, &command.commandType, &command.memoryID, &command.expected, &command.version, &command.response,
+	if err := row.Scan(
+		&ownerKind, &command.owner.ID, &command.requestHash, &command.commandType,
+		&command.memoryID, &command.expected, &command.version, &command.response,
+	); err != nil {
+		return persistedCommand{}, err
+	}
+	command.owner.Kind = authdomain.PrincipalKind(ownerKind)
+	if err := domain.ValidatePrincipal(command.owner); err != nil || !validHash(command.requestHash) ||
+		!validCommandType(command.commandType) || !validID(command.memoryID) ||
+		!validCommandVersion(command.commandType, command.expected, command.version) {
+		return persistedCommand{}, inconsistent(errors.New(invalidMessage))
+	}
+	return command, nil
+}
+
+func loadCommand(ctx context.Context, db interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, workspaceID foundation.ID, key string) (persistedCommand, bool, error) {
+	command, err := scanPersistedCommand(
+		db.QueryRow(ctx, `SELECT owner_principal_kind,owner_principal_id::text,request_hash,command_type,memory_id::text,expected_version,memory_version,response::text
+			FROM learning.memory_command WHERE workspace_id=$1 AND idempotency_key=$2 FOR UPDATE`, string(workspaceID), key),
+		workspaceID,
+		"memory command row is invalid",
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return persistedCommand{}, false, nil
 	}
 	if err != nil {
 		return persistedCommand{}, false, classify(err)
-	}
-	command.owner.Kind = authdomain.PrincipalKind(ownerKind)
-	if err := domain.ValidatePrincipal(command.owner); err != nil || !validHash(command.requestHash) || !validCommandType(command.commandType) || !validID(command.memoryID) || !validCommandVersion(command.commandType, command.expected, command.version) {
-		return persistedCommand{}, false, inconsistent(errors.New("memory command row is invalid"))
 	}
 	return command, true, nil
 }
