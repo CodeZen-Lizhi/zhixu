@@ -1,4 +1,4 @@
-//go:build legacy_integration
+//go:build integration
 
 package workflowpostgres
 
@@ -6,26 +6,19 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5"
 )
 
 func TestRepositoryLeaseCompletionAndHumanSubmission(t *testing.T) {
-	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
-	}
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
+	fixture := testdb.Require(t, testdb.Config{Availability: testdb.FailWhenUnavailable, MaxConns: 8})
+	pool := fixture.Pool().DB()
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -42,7 +35,7 @@ func TestRepositoryLeaseCompletionAndHumanSubmission(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	run, node := startFixture(t, ctx, repository, workspaceID, now, 1)
+	run, node := startFixture(t, ctx, tx, workspaceID, now, 1)
 	claimed, err := repository.ClaimNode(ctx, node.ID, "worker-a", now, now.Add(time.Minute))
 	if err != nil || claimed.Attempt != 1 {
 		t.Fatalf("claim=%#v err=%v cause=%v", claimed, err, errors.Unwrap(err))
@@ -73,7 +66,7 @@ func TestRepositoryLeaseCompletionAndHumanSubmission(t *testing.T) {
 		t.Fatalf("different completion err=%v", err)
 	}
 
-	run2, node2 := startFixture(t, ctx, repository, workspaceID, now.Add(time.Hour), 20)
+	run2, node2 := startFixture(t, ctx, tx, workspaceID, now.Add(time.Hour), 20)
 	if _, err = repository.ClaimNode(ctx, node2.ID, "worker-a", now.Add(time.Hour), now.Add(2*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +88,7 @@ func TestRepositoryLeaseCompletionAndHumanSubmission(t *testing.T) {
 		t.Fatalf("duplicate submit err=%v", err)
 	}
 
-	run3, node3 := startFixture(t, ctx, repository, workspaceID, now.Add(4*time.Hour), 40)
+	run3, node3 := startFixture(t, ctx, tx, workspaceID, now.Add(4*time.Hour), 40)
 	if _, err = repository.ClaimNode(ctx, node3.ID, "worker-a", now.Add(4*time.Hour), now.Add(5*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
@@ -110,13 +103,26 @@ func TestRepositoryLeaseCompletionAndHumanSubmission(t *testing.T) {
 	}
 }
 
-func startFixture(t *testing.T, ctx context.Context, r *Repository, workspaceID foundation.ID, now time.Time, offset byte) (domain.Run, domain.NodeRun) {
+// startFixture 直接以 SQL 播种 definition/run/node/outbox。legacy Start 不写入
+// runtime identity 列，而 M4-B 起的 workflow_node_guard_runtime_identity 触发器
+// 拒绝 NULL identity 节点的后续 UPDATE，因此这里写入完整 identity。
+func startFixture(t *testing.T, ctx context.Context, tx pgx.Tx, workspaceID foundation.ID, now time.Time, offset byte) (domain.Run, domain.NodeRun) {
 	t.Helper()
+	definitionID := testID(offset + 1)
 	runID := testID(offset + 2)
-	node := domain.NodeRun{ID: testID(offset + 3), RunID: runID, NodeKey: "first", NodeType: "deterministic", Status: domain.StatusPending, Input: json.RawMessage(`{}`), Version: 1, CreatedAt: now, UpdatedAt: now}
-	request := domain.StartRequest{Definition: domain.Definition{ID: testID(offset + 1), WorkspaceID: workspaceID, Key: "flow-" + string(testID(offset)), Version: 1, Graph: json.RawMessage(`{"nodes":[]}`), CreatedAt: now}, Run: domain.Run{ID: runID, WorkspaceID: workspaceID, Status: domain.StatusPending, Input: json.RawMessage(`{}`), Version: 1, CreatedAt: now, UpdatedAt: now}, FirstNode: node, Event: domain.OutboxEvent{ID: testID(offset + 4), WorkspaceID: workspaceID, RunID: &runID, Type: "workflow.run.started", IdempotencyKey: "start-" + string(runID), Payload: json.RawMessage(`{}`), OccurredAt: now}}
-	run, err := r.Start(ctx, request)
-	if err != nil {
+	node := domain.NodeRun{ID: testID(offset + 3), RunID: runID, NodeKey: "first", NodeType: "deterministic", Status: domain.StatusPending, Input: json.RawMessage(`{}`), IdempotencyKey: "node-start-" + string(testID(offset)), InputSchemaVersion: 1, OutputSchemaVersion: 1, DispatchNo: 1, Version: 1, CreatedAt: now, UpdatedAt: now}
+	if _, err := tx.Exec(ctx, `INSERT INTO workflow.definition(id,workspace_id,key,version,graph,created_at) VALUES($1,$2,$3,$4,$5,$6)`, string(definitionID), string(workspaceID), "flow-"+string(testID(offset)), 1, json.RawMessage(`{"nodes":[]}`), now.UTC()); err != nil {
+		t.Fatal(err)
+	}
+	run := domain.Run{ID: runID, WorkspaceID: workspaceID, DefinitionID: definitionID, Status: domain.StatusPending, Input: json.RawMessage(`{}`), Version: 1, CreatedAt: now, UpdatedAt: now}
+	if _, err := tx.Exec(ctx, `INSERT INTO workflow.run(id,workspace_id,definition_id,status,input,version,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, string(run.ID), string(run.WorkspaceID), string(run.DefinitionID), string(run.Status), run.Input, run.Version, run.CreatedAt.UTC(), run.UpdatedAt.UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO workflow.node_run(id,run_id,node_key,node_type,status,attempt,input,version,created_at,updated_at,idempotency_key,input_schema_version,output_schema_version,dispatch_no) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`, string(node.ID), string(run.ID), node.NodeKey, node.NodeType, string(node.Status), 0, node.Input, node.Version, node.CreatedAt.UTC(), node.UpdatedAt.UTC(), node.IdempotencyKey, node.InputSchemaVersion, node.OutputSchemaVersion, node.DispatchNo); err != nil {
+		t.Fatal(err)
+	}
+	eventID := testID(offset + 4)
+	if _, err := tx.Exec(ctx, `INSERT INTO workflow.outbox_event(id,workspace_id,run_id,event_type,idempotency_key,payload,occurred_at) VALUES($1,$2,$3,$4,$5,$6,$7)`, string(eventID), string(workspaceID), string(runID), "workflow.run.started", "start-"+string(runID), json.RawMessage(`{}`), now.UTC()); err != nil {
 		t.Fatal(err)
 	}
 	return run, node
@@ -130,8 +136,4 @@ func hex(n byte) byte {
 		return '0' + n
 	}
 	return 'a' + n - 10
-}
-func hasCode(err error, code string) bool {
-	var classified *foundation.Error
-	return errors.As(err, &classified) && classified.Code == code
 }

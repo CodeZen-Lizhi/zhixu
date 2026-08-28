@@ -219,6 +219,8 @@ clock_timestamp(),clock_timestamp(),clock_timestamp())`, "a1200000-0000-4000-800
 	}
 	assertRuntimeRetryableCode(t, claimError(fixture.repository.Claim(fixture.ctx, blockedCommand)), "WORKFLOW_MODEL_RUNTIME_CLAIM_BLOCKED")
 
+	armHotActivationWorkerParticipant(t, fixture.ctx, fixture.pool, fixture.rolloutID, fixture.workerInstanceID, targetRevision)
+	armHotActivationAPIRole(t, fixture.ctx, fixture.pool, fixture.rolloutID, targetRevision)
 	setHotActivationPhase(t, fixture.ctx, fixture.pool, "activating")
 	replayed, err = fixture.repository.Claim(fixture.ctx, command)
 	if err != nil || replayed.Attempt.ID != claimed.Attempt.ID {
@@ -317,8 +319,13 @@ func TestRuntimeStateExpiredAttemptHigherDeliveryUsesCurrentBinding(t *testing.T
 
 	beginHotActivation(t, fixture.ctx, fixture.pool, fixture.rolloutID, targetRevision)
 	setHotActivationPhase(t, fixture.ctx, fixture.pool, "arming")
+	armHotActivationWorkerParticipant(t, fixture.ctx, fixture.pool, fixture.rolloutID, fixture.workerInstanceID, targetRevision)
+	armHotActivationAPIRole(t, fixture.ctx, fixture.pool, fixture.rolloutID, targetRevision)
 	setHotActivationPhase(t, fixture.ctx, fixture.pool, "activating")
 	replacementInstanceID := foundation.ID("a1200000-0000-4000-8000-000000000003")
+	// runtime takeover 守卫要求现任 owner 心跳沉默超过 20 秒；守卫禁止心跳回拨，
+	// 因此只能真实等待。这是接管合法性的固有语义。
+	time.Sleep(21 * time.Second)
 	if _, err := fixture.pool.Exec(fixture.ctx, `UPDATE ops.model_settings_runtime
 SET instance_id=$1::uuid,applied_revision=$2,rollout_id=NULL,phase='active',
     applied_at=clock_timestamp(),heartbeat_at=clock_timestamp()
@@ -359,6 +366,7 @@ func TestRuntimeStateClaimAndActivationCommitSerializeCompleteBinding(t *testing
 	insertDisabledModelSettingsRevision(t, fixture.ctx, fixture.pool, targetRevision)
 	beginHotActivation(t, fixture.ctx, fixture.pool, fixture.rolloutID, targetRevision)
 	prepareWorkerParticipant(t, fixture.ctx, fixture.pool, fixture.rolloutID, fixture.workerInstanceID, targetRevision)
+	armHotActivationAPIRole(t, fixture.ctx, fixture.pool, fixture.rolloutID, targetRevision)
 	started := fixture.start(t, "managed-race", "a")
 	command := application.ClaimCommand{
 		NodeRunID: started.FirstNode.ID, DispatchNo: 1, DeliveryID: "managed-race-delivery",
@@ -496,6 +504,55 @@ SET rollout_id=$1::uuid,target_revision=$2,previous_active_revision=active_revis
     phase='preparing',lease_expires_at=clock_timestamp()+interval '5 minutes',
     version=version+1,updated_at=clock_timestamp()
 WHERE singleton=true AND desired_revision=$2 AND phase='idle'`, string(rolloutID), targetRevision); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// armHotActivationAPIRole 补齐 00079 both-roles 触发器要求的 API 角色：新鲜
+// active runtime（applied_revision 等于 previous_active_revision=0）与
+// preparing->prepared->armed 的 participant。必须在 state 处于 preparing/arming
+// 时调用，即 setHotActivationPhase("activating") 或 commitHotActivation* 之前。
+func armHotActivationAPIRole(t *testing.T, ctx context.Context, pool *pgxpool.Pool, rolloutID foundation.ID, targetRevision int64) {
+	t.Helper()
+	apiInstanceID := foundation.ID("a1200000-0000-4000-8000-000000000006")
+	if _, err := pool.Exec(ctx, `INSERT INTO ops.model_settings_runtime(role,instance_id,applied_revision,rollout_id,phase,applied_at,heartbeat_at)
+VALUES('api',$1::uuid,0,NULL,'active',clock_timestamp(),clock_timestamp())`, string(apiInstanceID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO ops.model_settings_rollout_participant(
+rollout_id,role,instance_id,target_revision,phase,heartbeat_at,last_error_retryable,version,prepared_at,activated_at,retired_at)
+VALUES($1::uuid,'api',$2::uuid,$3,'preparing',clock_timestamp(),false,1,NULL,NULL,NULL)`, string(rolloutID), string(apiInstanceID), targetRevision); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE ops.model_settings_rollout_participant
+SET phase='prepared',prepared_at=clock_timestamp(),heartbeat_at=clock_timestamp(),version=version+1
+WHERE rollout_id=$1::uuid AND role='api' AND phase='preparing'`, string(rolloutID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE ops.model_settings_rollout_participant
+SET phase='armed',heartbeat_at=clock_timestamp(),version=version+1
+WHERE rollout_id=$1::uuid AND role='api' AND phase='prepared'`, string(rolloutID)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// armHotActivationWorkerParticipant 把 worker participant 从 preparing 推进到
+// armed，满足 both-roles 触发器对 worker 角色的要求。
+func armHotActivationWorkerParticipant(t *testing.T, ctx context.Context, pool *pgxpool.Pool, rolloutID foundation.ID, workerInstanceID foundation.ID, targetRevision int64) {
+	t.Helper()
+	if _, err := pool.Exec(ctx, `INSERT INTO ops.model_settings_rollout_participant(
+rollout_id,role,instance_id,target_revision,phase,heartbeat_at,last_error_retryable,version,prepared_at,activated_at,retired_at)
+VALUES($1::uuid,'worker',$2::uuid,$3,'preparing',clock_timestamp(),false,1,NULL,NULL,NULL)`, string(rolloutID), string(workerInstanceID), targetRevision); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE ops.model_settings_rollout_participant
+SET phase='prepared',prepared_at=clock_timestamp(),heartbeat_at=clock_timestamp(),version=version+1
+WHERE rollout_id=$1::uuid AND role='worker' AND phase='preparing'`, string(rolloutID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE ops.model_settings_rollout_participant
+SET phase='armed',heartbeat_at=clock_timestamp(),version=version+1
+WHERE rollout_id=$1::uuid AND role='worker' AND phase='prepared'`, string(rolloutID)); err != nil {
 		t.Fatal(err)
 	}
 }

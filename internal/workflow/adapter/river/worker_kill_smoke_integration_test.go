@@ -7,19 +7,15 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net/url"
 	"os"
 	"os/exec"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -30,14 +26,13 @@ func TestRiverSIGKILLRescueSmoke(t *testing.T) {
 		runRiverKillHelper(t)
 		return
 	}
-	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Fatal("ZHIXU_TEST_DATABASE_URL is required for River integration tests")
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	pool, isolatedDatabaseURL, cleanup := newRiverKillSmokeDatabase(t, ctx, databaseURL)
-	defer cleanup()
+	// 共享 Testcontainers 工厂提供已迁移的独立数据库；DatabaseURL 仅用于传给
+	// SIGKILL 子进程，不写入日志。
+	fixture := testdb.Require(t, testdb.Config{Availability: testdb.FailWhenUnavailable, MaxConns: 8})
+	pool := fixture.Pool().DB()
+	isolatedDatabaseURL := fixture.DatabaseURL()
 
 	queue := "kill_smoke_" + strconv.FormatInt(time.Now().UnixNano(), 10)
 	options := killSmokeOptions(queue)
@@ -150,50 +145,6 @@ recovered:
 		case <-ctx.Done():
 			t.Fatal(ctx.Err())
 		}
-	}
-}
-
-func newRiverKillSmokeDatabase(t *testing.T, ctx context.Context, baseURL string) (*pgxpool.Pool, string, func()) {
-	t.Helper()
-	parsed, err := url.Parse(strings.TrimSpace(baseURL))
-	if err != nil {
-		t.Fatal(err)
-	}
-	admin, err := pgxpool.New(ctx, baseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	name := fmt.Sprintf("zhixu_river_kill_%d", time.Now().UnixNano())
-	identifier := pgx.Identifier{name}.Sanitize()
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+identifier); err != nil {
-		admin.Close()
-		t.Fatal(err)
-	}
-	parsed.Path = "/" + name
-	isolatedURL := parsed.String()
-	pool, err := pgxpool.New(ctx, isolatedURL)
-	if err != nil {
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-		t.Fatal(err)
-	}
-	runner, err := platformmigration.NewRunner(pool, projectmigrations.FS)
-	if err != nil {
-		pool.Close()
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-		t.Fatal(err)
-	}
-	if err := runner.Up(ctx); err != nil {
-		pool.Close()
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-		t.Fatal(err)
-	}
-	return pool, isolatedURL, func() {
-		pool.Close()
-		_, _ = admin.Exec(context.Background(), "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
 	}
 }
 

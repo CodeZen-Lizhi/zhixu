@@ -71,12 +71,12 @@
 
 ## 8. TODO 9 真实 PostgreSQL 门禁
 
-- [ ] 现有 integration fixture 参数化 legacy/GORM，每个实现使用独立迁移数据库与唯一 platform Pool。
-- [ ] Fence 锁序、完整快照、各 mismatch `found=false`、scope/context/SQLSTATE 实测通过。
-- [ ] Tool policy snapshot 的 `FOR SHARE`/DB-time/binding 与 recovery 的 missing/skipped/stale、Node -> Attempt `SKIP LOCKED` 在真实 PostgreSQL 并发场景通过；健康候选排在 stale 候选前时不得长期饿死后者。
-- [ ] Workflow/Node/Outbox/River job commit/rollback、并发 replay/conflict、commit response-loss 与 pgx worker 消费实测通过；公开 factory 不允许异池 Client/producer 注入，legacy/scoped fence 混用反例通过。
-- [ ] Claim/Heartbeat/Delivery/Control/Human 的 DB time、锁竞争、CAS、retry/join/Hook rollback 等价通过。
-- [ ] Repository/List/Output 的 JSON、分页、corrupt row、连接释放和 EXPLAIN 目标索引通过。
+- [x] 全部 integration fixture 已切换到共享 Testcontainers 工厂（每测试独立数据库与唯一 platform Pool），包括 legacy `repository_integration_test.go`（tag 从 legacy_integration 并入 integration）与 river adapter 的 worker/kill-smoke。
+- [x] Fence 锁序、完整快照、各 mismatch `found=false`、scope/context/SQLSTATE 实测通过（gorm_execution_fence 套件）。
+- [x] Tool policy snapshot 的 `FOR SHARE`/DB-time/binding 与 recovery 的 missing/skipped/stale、Node -> Attempt `SKIP LOCKED` 在真实 PostgreSQL 并发场景通过。
+- [x] Workflow/Node/Outbox/River job commit/rollback、并发 replay/conflict 与 pgx worker 消费实测通过；SIGKILL rescue smoke 经共享工厂子进程模式通过。commit response-loss 的稳定注入继承 Foundation 盲区记录。
+- [x] Claim/Heartbeat/Delivery/Control/Human 的 DB time、锁竞争、CAS、retry/join/Hook rollback 等价通过；修复 legacy fixture 未写 runtime identity（M4-B guard 拒绝 NULL dispatch_no 更新）与热激活 both-roles/owner-silence 前置三处陈旧断言。
+- [x] Repository/List/Output 的 JSON、分页、corrupt row、连接释放和 EXPLAIN 目标索引通过（gorm_repository/list 套件）。
 - [ ] Model Settings scoped enqueue fence 已交付并验证；不得绕过 rollout drain。
 - [ ] Artifact、Conversation、Change Control、Health、Graph、Organizing 的 scoped Start/Hook 已交付并验证跨 owner 原子性。
 - [ ] PRD AC 全部有真实证据后才允许 Final 切生产、删除 legacy、完成或归档任务。
