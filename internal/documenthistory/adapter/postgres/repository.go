@@ -7,6 +7,7 @@ import (
 	"errors"
 
 	"github.com/jackc/pgx/v5"
+	"gorm.io/gorm"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/documenthistory/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/documenthistory/domain"
@@ -35,31 +36,46 @@ func (repository *Repository) GetDocument(ctx context.Context, workspaceID, docu
 	if !domain.ValidID(workspaceID) || !domain.ValidID(documentID) {
 		return application.DocumentSnapshot{}, invalid("document identity is invalid")
 	}
-	var snapshot application.DocumentSnapshot
-	err := repository.db.QueryRow(ctx, `SELECT
-		id::text,workspace_id::text,canonical_path,title,lifecycle_status,
-		COALESCE(current_published_revision_id::text,''),version
-		FROM core.document
-		WHERE workspace_id=$1 AND id=$2`, string(workspaceID), string(documentID)).Scan(
-		&snapshot.ID, &snapshot.WorkspaceID, &snapshot.CanonicalPath, &snapshot.Title,
-		&snapshot.Lifecycle, &snapshot.CurrentPublishedRevisionID, &snapshot.Version,
-	)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return application.DocumentSnapshot{}, foundation.NewError(foundation.ErrorNotFound, application.ErrorCodeNotFound, false, errors.New("document was not found"))
-	}
+	snapshot, err := scanDocument(repository.db.QueryRow(ctx, getDocumentSQL, string(workspaceID), string(documentID)))
 	if err != nil {
-		return application.DocumentSnapshot{}, classify(err, "DOCUMENT_HISTORY_DOCUMENT_QUERY_FAILED")
+		return application.DocumentSnapshot{}, documentQueryError(err)
 	}
 	return snapshot, nil
 }
 
 // MapCommits batch-enriches only the requested current-page commits.
 func (repository *Repository) MapCommits(ctx context.Context, workspaceID, documentID foundation.ID, targetPath string, commits []string) ([]domain.CommitMapping, error) {
+	values, err := validateCommitMappingRequest(workspaceID, documentID, targetPath, commits)
+	if err != nil {
+		return nil, err
+	}
+	if len(values) == 0 {
+		return []domain.CommitMapping{}, nil
+	}
+	rows, err := repository.db.Query(ctx, commitMappingSQL, string(workspaceID), string(documentID), targetPath, values)
+	if err != nil {
+		return nil, classify(err, "DOCUMENT_HISTORY_COMMIT_MAPPING_QUERY_FAILED")
+	}
+	defer rows.Close()
+	mappings := make([]domain.CommitMapping, 0, len(commits))
+	for rows.Next() {
+		mapping, managed, scanErr := scanCommitMapping(rows)
+		if scanErr != nil {
+			return nil, classify(scanErr, "DOCUMENT_HISTORY_COMMIT_MAPPING_SCAN_FAILED")
+		}
+		if managed {
+			mappings = append(mappings, mapping)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, classify(err, "DOCUMENT_HISTORY_COMMIT_MAPPING_QUERY_FAILED")
+	}
+	return mappings, nil
+}
+
+func validateCommitMappingRequest(workspaceID, documentID foundation.ID, targetPath string, commits []string) ([]string, error) {
 	if !domain.ValidID(workspaceID) || !domain.ValidID(documentID) || !domain.ValidPath(targetPath) || len(commits) > domain.MaxHistoryLimit {
 		return nil, invalid("commit mapping request is invalid")
-	}
-	if len(commits) == 0 {
-		return []domain.CommitMapping{}, nil
 	}
 	values := make([]string, len(commits))
 	seen := make(map[string]struct{}, len(commits))
@@ -73,93 +89,18 @@ func (repository *Repository) MapCommits(ctx context.Context, workspaceID, docum
 		seen[commit] = struct{}{}
 		values[index] = commit
 	}
-	rows, err := repository.db.Query(ctx, `WITH requested(git_commit,ordinality) AS (
-		SELECT git_commit,ordinality
-		FROM unnest($4::text[]) WITH ORDINALITY AS input(git_commit,ordinality)
-	), revision_mapping AS (
-		SELECT requested.ordinality,requested.git_commit,revision.id,revision.revision_no
-		FROM requested
-		JOIN core.article_revision AS revision
-		  ON revision.workspace_id=$1 AND revision.document_id=$2
-		 AND revision.git_commit=requested.git_commit
-		UNION
-		SELECT requested.ordinality,requested.git_commit,revision.id,revision.revision_no
-		FROM requested
-		JOIN authoring.document_publication_binding AS binding
-		  ON binding.workspace_id=$1 AND binding.document_id=$2
-		 AND binding.target_path=$3 AND binding.git_commit=requested.git_commit
-		JOIN core.article_revision AS revision
-		  ON revision.workspace_id=binding.workspace_id
-		 AND revision.document_id=binding.document_id
-		 AND revision.id=binding.article_revision_id
-	), proposal_mapping AS (
-		SELECT requested.ordinality,requested.git_commit,
-		       proposal_commit.proposal_id,proposal_commit.revision_id,
-		       proposal_commit.approval_id,proposal.workflow_run_id,
-		       proposal_commit.writeback_execution_id,proposal.proposal_type,
-		       approval.decided_at
-		FROM requested
-		JOIN change_control.proposal_commit AS proposal_commit
-		  ON proposal_commit.workspace_id=$1
-		 AND proposal_commit.target_path=$3
-		 AND proposal_commit.git_commit=requested.git_commit
-		JOIN change_control.proposal AS proposal
-		  ON proposal.id=proposal_commit.proposal_id
-		 AND proposal.workspace_id=proposal_commit.workspace_id
-		JOIN change_control.approval AS approval
-		  ON approval.id=proposal_commit.approval_id
-		 AND approval.proposal_id=proposal_commit.proposal_id
-		 AND approval.revision_id=proposal_commit.revision_id
-	)
-	SELECT requested.git_commit,
-	       COALESCE(revision_mapping.id::text,''),COALESCE(revision_mapping.revision_no,0),
-	       COALESCE(proposal_mapping.proposal_id::text,''),COALESCE(proposal_mapping.revision_id::text,''),
-	       COALESCE(proposal_mapping.approval_id::text,''),COALESCE(proposal_mapping.workflow_run_id::text,''),
-	       COALESCE(proposal_mapping.writeback_execution_id::text,''),COALESCE(proposal_mapping.proposal_type,''),
-	       proposal_mapping.decided_at
-	FROM requested
-	LEFT JOIN revision_mapping USING(ordinality,git_commit)
-	LEFT JOIN proposal_mapping USING(ordinality,git_commit)
-	ORDER BY requested.ordinality`, string(workspaceID), string(documentID), targetPath, values)
-	if err != nil {
-		return nil, classify(err, "DOCUMENT_HISTORY_COMMIT_MAPPING_QUERY_FAILED")
+	return values, nil
+}
+
+func documentQueryError(err error) error {
+	if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows) || errors.Is(err, gorm.ErrRecordNotFound) {
+		return foundation.NewError(foundation.ErrorNotFound, application.ErrorCodeNotFound, false, errors.New("document was not found"))
 	}
-	defer rows.Close()
-	mappings := make([]domain.CommitMapping, 0, len(commits))
-	for rows.Next() {
-		var mapping domain.CommitMapping
-		var articleRevisionID, proposalID, proposalRevisionID, approvalID string
-		var workflowRunID, writebackID, proposalType string
-		var articleRevisionNo int
-		var decidedAt sql.NullTime
-		if err := rows.Scan(
-			&mapping.GitCommit, &articleRevisionID, &articleRevisionNo,
-			&proposalID, &proposalRevisionID, &approvalID, &workflowRunID,
-			&writebackID, &proposalType, &decidedAt,
-		); err != nil {
-			return nil, classify(err, "DOCUMENT_HISTORY_COMMIT_MAPPING_SCAN_FAILED")
-		}
-		if articleRevisionID == "" && proposalID == "" {
-			continue
-		}
-		mapping.ArticleRevisionID = foundation.ID(articleRevisionID)
-		mapping.ArticleRevisionNo = articleRevisionNo
-		mapping.ProposalID = foundation.ID(proposalID)
-		mapping.ProposalRevisionID = foundation.ID(proposalRevisionID)
-		mapping.ApprovalID = foundation.ID(approvalID)
-		mapping.WorkflowRunID = foundation.ID(workflowRunID)
-		mapping.WritebackID = foundation.ID(writebackID)
-		mapping.ProposalType = proposalType
-		if decidedAt.Valid {
-			value := decidedAt.Time.UTC()
-			mapping.ApprovalDecidedAt = &value
-		}
-		mappings = append(mappings, mapping)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, classify(err, "DOCUMENT_HISTORY_COMMIT_MAPPING_QUERY_FAILED")
-	}
-	return mappings, nil
+	return classify(err, "DOCUMENT_HISTORY_DOCUMENT_QUERY_FAILED")
+}
+
+func dependencyUnavailable(err error) error {
+	return foundation.NewError(foundation.ErrorDependencyUnavailable, application.ErrorCodeGitUnavailable, true, err)
 }
 
 func invalid(message string) error {
