@@ -1,0 +1,8 @@
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"复核参数化、锁序、租约、分页、Outbox 和性能"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"复核 no-row、SQLSTATE、取消和 result-unknown"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"复核 Token、envelope、URL 和错误脱敏"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"复核测试、vet、diff 和验证盲区"}
+{"file":".trellis/spec/backend/git-sync-contract.md","reason":"检查配置、Credential、Run/Attempt/Outbox 行为对等"}
+{"file":".trellis/tasks/08-18-gorm-data-access-migration/prd.md","reason":"复核 staged migration 与 TODO 9 门禁"}
+{"file":".trellis/tasks/08-18-gorm-data-access-migration/design.md","reason":"复核 GORM/Domain 边界、模型和回滚"}
+{"file":"docs/architecture/adr/0019-mature-framework-first.md","reason":"复核官方框架复用边界"}

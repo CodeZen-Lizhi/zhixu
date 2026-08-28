@@ -1,0 +1,7 @@
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Memory lifecycle, stable owner, Interview provenance, append-only audit/receipt, effective query and SQL gate contracts"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"Preserve context, no-row, SQLSTATE, idempotency, CAS and retryability behavior"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Keep GORM logger, Memory JSON, receipt payload, SQL parameters and DSN fail-closed"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Apply focused test/race/vet/integration/Trellis evidence and residual-risk rules"}
+{"file":".trellis/tasks/08-18-gorm-data-access-migration/prd.md","reason":"Parent staged-boundary, TODO 9 gate, Final wiring and schema constraints"}
+{"file":".trellis/tasks/08-19-gorm-platform-transaction-foundation/research/static-validation.md","reason":"Shared Pool.GORM root, transaction behavior, vendor versions and TODO 9 limitations"}
+{"file":".trellis/tasks/08-19-gorm-memory-migration/research/baseline.md","reason":"Method, lock, schema, caller, test and blind-spot inventory for implementation"}

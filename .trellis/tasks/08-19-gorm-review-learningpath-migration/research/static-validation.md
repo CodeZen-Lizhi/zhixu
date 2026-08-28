@@ -5,7 +5,7 @@
 - 已在 `internal/review/learningpath/adapter/postgres` 新增 staged `GORMRepository`，完整实现现有 11 个 `application.Store` 方法。
 - legacy `Repository` / `NewRepository` 与 API、Worker 生产构造保持不变；未新增 selector、双写、fallback 或第二连接池。
 - 所有多语句写事务和 Path+Steps 聚合读取均通过 `Pool.UnitOfWork()` / `UnitOfWork.Within`，callback 内只使用 `platformpostgres.GORMTransaction(scope)`。单 SQL receipt lookup 使用同一 Pool 的共享 GORM root。
-- 本次静态阶段未发现 P0/P1 Go 或 SQL 缺陷；真实 PostgreSQL TODO 9 尚未执行，因此任务保持 `in_progress`，PRD AC 全部未勾选。
+- 本次静态阶段未发现 P0/P1 Go 或 SQL 缺陷；真实 PostgreSQL TODO 9 已部分执行但尚未全量通过，因此任务保持 `in_progress`，PRD AC 全部未勾选。
 
 ## 修改文件
 
@@ -55,10 +55,9 @@
 
 ## TODO 9 剩余门禁
 
-- 使用同一真实 `platformpostgres.Pool` 成对证明 legacy/GORM 的 array、JSONB、nullable、锁等待、SKIP LOCKED 与连接生命周期。
-- 成对验证创建/读取/Path/Step command、同 key/异 key、reservation reopen、old-attempt fence、exact hold release、rollback、unique/history trigger 和 SQLSTATE。
-- 验证 cancellation/deadline、commit response-loss、Rows/commit failure 与 pool 关闭行为。
-- 记录 evidence/maintenance 关键查询的真实 PostgreSQL statement count、索引与 EXPLAIN 证据。
+- 将 maintenance-vs-hold/Complete 的前两种确定性 winner 场景扩展为 legacy/GORM 成对断言；当前 GORM 已覆盖同/异 key 结果、reopen、late hold/Complete 与 terminal closure，但 Complete-wins-before-maintenance 的 `SKIP LOCKED` CTE barrier 仍只覆盖 legacy。
+- 补齐更多 SQLSTATE（尤其 FK）和 Rows/额外 commit failure 的 GORM 专项故障注入；当前已验证 no-row、`context.Canceled`、deadline、receipt unique `23505`、历史 trigger `23514` 和 commit-response-loss。
+- 记录 evidence/maintenance 关键查询的真实 PostgreSQL statement count、索引与 `EXPLAIN` 证据。
 - TODO 9 通过前不得切生产 Composition、删除 legacy、勾选 PRD AC、完成或归档任务。
 
 ## 独立 Trellis Check
@@ -68,7 +67,7 @@
 - 未发现当前静态范围内可证实的 Critical/Required 或 P0/P1 缺陷；未修改 legacy pgx、生产 wiring、Foundation、迁移、依赖或其他任务文件。
 - `go test -race -mod=vendor ./internal/review/learningpath/... -count=1 -timeout 60s`、`go vet -mod=vendor ./internal/review/learningpath/...`、integration compile-only、API/Worker compile-only、`go list -mod=vendor`、`go mod verify`、Trellis validate、gofmt、禁止模式扫描和 `git diff --check` 均通过。
 - `go mod tidy -diff` 仍报告共享 dirty worktree 的既有依赖/`go.sum` 漂移；未应用输出，未修改依赖文件。
-- 本轮没有产生值得更新 `.trellis/spec/` 的稳定新约定；真实 PostgreSQL 行为继续留给 TODO 9，任务保持 `in_progress`，PRD Acceptance Criteria 保持未勾选。
+- 本轮没有产生值得更新 `.trellis/spec/` 的稳定新约定；剩余真实 PostgreSQL 行为继续留给 TODO 9，任务保持 `in_progress`，PRD Acceptance Criteria 保持未勾选。
 
 ## Dev 分支同步
 
@@ -83,3 +82,16 @@
 - Added `TestReviewLearningPathPostgreSQLLegacyAndGORMCreateReadParity`, running once per isolated fixture for `legacy-pgx` and `gorm` stores and checking Create, `GetByReviewAnswer`, `Get`, exact replay, Step transition/replay, and Path status transition/replay on real PostgreSQL/Testcontainers.
 - `go test -mod=vendor -tags=integration -run '^TestReviewLearningPathPostgreSQLLegacyAndGORMCreateReadParity$' -count=1 -p 1 -timeout 120s ./internal/review/learningpath/adapter/postgres` passed (10.550s); the full package integration suite passed (48.110s), and `go test -race -mod=vendor -tags=integration -count=1 -p 1 -timeout 120s ./internal/review/learningpath/adapter/postgres` passed (56.172s). The parity race rerun also passed (14.264s).
 - Existing barrier and commit-response-loss fixtures wrap pgx transactions directly and remain legacy-only; extending those fault injections to GORM requires a separate adapter-aware hook and is an explicit TODO 9 gap, not claimed as parity evidence.
+
+## TODO 9 GORM Transaction And Fault Probe (2026-08-28)
+
+- `runReviewPathIntegrationVariant` continues to use only `testdb.Require`'s migrated `platformpostgres.Pool`. Its GORM branch obtains `Pool.GORM()` and `Pool.UnitOfWork()` before constructing `NewGORMRepository(platform)`; no test opens a second application pool. `internal/platform/testdb/fixture.go:286-309` confirms that fixture setup runs migration through a temporary migration pool, closes it, then calls one `platformpostgres.Open` for the exposed shared pool. The existing real-platform test `go test -mod=vendor -tags=integration -run '^TestRealGORMPoolUsesSingleFacadeAndClosesIdempotently$' -count=1 -p 1 -timeout 60s ./internal/platform/postgres` passed (0.740s), proving the shared facade closes idempotently and stops exposing GORM/UoW afterward.
+- `TestReviewLearningPathPostgreSQLAbandonedReopenAndAttemptFence` now runs both `legacy-pgx` and `gorm` against isolated databases. It proves PENDING -> ABANDONED maintenance, ORPHANED old Artifact hold, same-key reopen with incremented attempt, and old-attempt Prepare/Complete fences without altering the terminal closure. The targeted PostgreSQL run passed (13.151s) and its race run passed (22.763s).
+- `TestReviewLearningPathPostgreSQLGORMConcurrentSameAndDifferentKeys` proves real GORM same-key one-original/one-replay and different-key one-original plus one-replay-or-reservation-conflict behavior, with a single completed Path and exact current hold release. PostgreSQL passed (15.701s); race passed (13.984s).
+- `TestReviewLearningPathPostgreSQLGORMHistoryTriggerRollback` calls the GORM Store with a deliberately non-monotonic command timestamp. PostgreSQL's path/step history trigger returns SQLSTATE `23514`, classified as non-retryable `LEARNING_PATH_PERSISTENCE_INVALID`, and verifies rollback leaves Path/Step versions and receipt count unchanged. PostgreSQL passed with the lock probe (16.073s); race passed (22.980s).
+- `TestReviewLearningPathPostgreSQLGORMTransactionLockBarrierAndDeadline` acquires the real Workspace `FOR UPDATE` row through the same shared `Pool.DB()`, observes the staged GORM UoW in `pg_stat_activity` waiting on that lock, verifies it cannot return early, then confirms a deadline retains `errors.Is(err, context.DeadlineExceeded)`, releases the transaction, observes no lingering lock waiter, and successfully reuses the same GORM Store. This is transaction-visible evidence that callback SQL uses the opaque shared UoW scope rather than an independent root. The targeted race rerun passed (10.846s).
+- `TestReviewLearningPathPostgreSQLGORMCompleteResponseLossReplay` decorates the repository's already-created `foundation.UnitOfWork` only in test code. The decorator invokes the real inner UoW, returns a controlled error only after it successfully returns, and is armed at the blocked `CompleteReviewCreate` call so Begin/Prepare do not fault. It proves a committed GORM completion is reported as `LEARNING_PATH_DEPENDENCY_UNAVAILABLE` with the injected cause and then replays correctly with both the original and a different key. PostgreSQL passed (10.143s); race passed (11.257s). No `internal/platform` hook or alternative pool was introduced.
+- `TestReviewLearningPathPostgreSQLMaintenanceFencesLateHoldAndComplete` now runs its first two deterministic maintenance-winner scenarios for both implementations. They prove that a late Artifact hold cannot escape an ABANDONED reservation, and a late Complete leaves exactly the ORPHANED Artifact hidden. The direct Testcontainers rerun, together with `TestReviewLearningPathPostgreSQLGORMCancellationAndUniqueReceiptRollback`, passed in 37.891s and race passed in 35.146s.
+- `TestReviewLearningPathPostgreSQLGORMCancellationAndUniqueReceiptRollback` verifies that a canceled context retains both `context.Canceled` and its caller cause through the staged Store. It then inserts the same `learning_path_command` receipt twice through the real GORM transaction scope: PostgreSQL `23505` is classified as the stable idempotency conflict and the failed transaction leaves no receipt behind. The normal and race runs above cover this probe.
+- All targeted PostgreSQL commands used `-mod=vendor -tags=integration -p 1`; Testcontainers started `pgvector/pgvector:pg16` through the shared fixture. The final full package suite passed in 108.194s, and its final full `-race` rerun passed in 106.384s. The package static tests, race tests, vet, gofmt, scoped `git diff --check`, and `task.py validate` were also rerun on 2026-08-28. Task validation passed with only the pre-existing 32 KiB context-injection warnings.
+- These probes do not claim full TODO 9 completion: the existing legacy-only maintenance barrier remains unported to GORM, no explicit FK SQLSTATE or Rows/extra commit-failure injection was added, and no statement-count/EXPLAIN evidence exists. Therefore all PRD Acceptance Criteria remain unchecked, the task stays `in_progress`, production composition remains legacy, and the task is not archived.

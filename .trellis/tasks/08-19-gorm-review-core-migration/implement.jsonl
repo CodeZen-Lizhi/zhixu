@@ -1,0 +1,9 @@
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Review/transaction/SQL constraints"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "stable error and context contracts"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "redaction and logging boundary"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Review and delivery gates"}
+{"file": ".trellis/tasks/08-18-gorm-data-access-migration/research/gorm-river-compatibility.md", "reason": "shared GORM transaction baseline"}
+{"file": ".trellis/tasks/08-19-gorm-platform-transaction-foundation/research/static-validation.md", "reason": "foundation implementation evidence"}
+{"file": ".trellis/tasks/08-19-gorm-review-core-migration/research/baseline.md", "reason": "Review Core method and invariant baseline"}
+{"file": ".trellis/tasks/08-19-gorm-review-core-migration/research/implementation-contract.md", "reason": "compact child-specific transaction, error, and verification contract"}
+{"file": ".trellis/tasks/08-19-gorm-review-core-migration/research/todo9-screening-2026-08-27.md", "reason": "TODO 9 fixture-only screening decision and remaining real PostgreSQL gate gaps"}

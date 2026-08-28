@@ -1,0 +1,30 @@
+{
+  "id": "gorm-retrieval-migration",
+  "name": "gorm-retrieval-migration",
+  "title": "Retrieval Repository 迁移到 GORM",
+  "description": "迁移 Retrieval PostgreSQL Repository，保持 pgvector、COPY、临时表、会话锁、索引切换和 River。",
+  "status": "in_progress",
+  "dev_type": "backend",
+  "scope": "internal/retrieval",
+  "package": "internal/retrieval",
+  "priority": "P0",
+  "creator": "lizhi",
+  "assignee": "lizhi",
+  "createdAt": "2026-08-19",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": "08-18-gorm-data-access-migration",
+  "relatedFiles": [
+    "internal/retrieval/application",
+    "internal/retrieval/adapter/postgres",
+    "internal/retrieval/adapter/river"
+  ],
+  "notes": "TODO 9 前仅 staged GORM；生产保持 legacy pgx。",
+  "meta": {}
+}

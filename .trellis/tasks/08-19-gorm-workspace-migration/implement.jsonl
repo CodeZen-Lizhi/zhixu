@@ -1,0 +1,14 @@
+{"file":".trellis/spec/backend/index.md","reason":"后端模块边界、开发前检查和事实源索引"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Workspace 事务、锁、Raw SQL、分页和数据库验证规范"}
+{"file":".trellis/spec/backend/workspace-root-grant.md","reason":"Workspace root/control/runtime 的权威锁序、DB time 和 capability 契约"}
+{"file":".trellis/spec/backend/capture-profile-contract.md","reason":"Capture 与 Workspace Source writer 的跨 owner 原子事务契约"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"root path、SQL 参数、DSN、Secret 与错误脱敏"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Workspace/Capture/Audit/rootgrant/Composition 跨层数据流"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"复用 legacy validation/scanner/SQL，避免双事实源"}
+{"file":".trellis/tasks/08-18-gorm-data-access-migration/research/repository-inventory.md","reason":"Workspace owner 范围、Capture 依赖和 Final Composition 归属"}
+{"file":".trellis/tasks/08-18-gorm-data-access-migration/research/gorm-river-compatibility.md","reason":"共享 Pool、database/sql transaction 与 legacy pgx 边界背景"}
+{"file":".trellis/tasks/08-19-gorm-workspace-migration/research/baseline.md","reason":"Workspace API、代码、接线、测试和阶段边界基线"}
+{"file":".trellis/tasks/08-19-gorm-workspace-migration/research/sql-schema.md","reason":"Schema、锁序、SQL、carrier、错误和 TODO9 研究"}
+{"file":".trellis/tasks/08-19-gorm-workspace-migration/research/spec-contracts.md","reason":"实施规范路由和关键不变量摘要"}
+{"file":".trellis/tasks/08-19-gorm-workspace-migration/research/baseline-validation.md","reason":"规划阶段局部基线、接线扫描和真实数据库盲区证据"}
+{"file":".trellis/tasks/08-19-gorm-workspace-migration/research/planning-review.md","reason":"规划 Review 发现、修复和已接受 Foundation 限制"}

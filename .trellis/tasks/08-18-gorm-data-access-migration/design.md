@@ -9,7 +9,7 @@ TODO 10 是渐进式 Adapter 替换，不是 Schema 重写或领域模型重构�
 - 跨 Repository、Event/Audit、Workflow/River 写入保持同事务；
 - 模块可独立迁移、验收和回滚；
 - pgx 只保留在批准的底层能力；
-- TODO 9 前可开发但不切生产，TODO 3 后才最终收口。
+- TODO 9 Testcontainers 工厂已交付，模块须完成各自实库验收但不切生产；TODO 3 后才最终收口。
 
 ## 2. 目标数据访问结构
 
@@ -109,7 +109,7 @@ Composition Root
   - Agent + Tools + Workflow → Conversation。
 - `Review Core`、`Review Interview`、`Review Learning Path` 分别迁移；父级 Review 集成门禁验证共享 Learning Path/Session 契约。
 - 所有 `cmd/**` Composition 修改归 Final，模块任务只迁移自己的 Adapter 和内部端口，避免命令入口被多个任务重复编辑。
-- Capture 可在 Wave 3 先完成未接 Composition 的 Core Adapter；Profile Revision/Evidence 与 Agent Model Run 的同事务终结必须等待 Agent scoped Port，因此 Capture child 在该前置和 TODO 9 完成前保持 `in_progress`。
+- Capture 可在 Wave 3 先完成未接 Composition 的 Core Adapter；Profile Revision/Evidence 与 Agent Model Run 的同事务终结必须等待 Agent scoped Port，因此 Capture child 在该前置完成前保持 `in_progress`。
 
 ## 5. 单模块迁移模板
 
@@ -120,8 +120,8 @@ Composition Root
 3. 为现有表建立显式 Persistence Model；复杂 SQL 标注保留 Raw/Clauses 或 pgx allowlist 的证据。
 4. 使用共享 GORM root 和 Unit of Work 实现 Repository；跨模块依赖改为稳定 Port。
 5. 运行已有定向单元、集成、race/vet/SQL 门禁。若现有测试无法覆盖高风险契约，只报告盲区并请求用户授权；未经明确要求不新增测试文件或临时代码。
-6. 模块 child 只保留未接入生产 Composition 的实现，不得增加 runtime selector、双写或删除旧路径；TODO 9 未完成时也不得标记模块完成。
-7. TODO 9 可用后完成真实 PostgreSQL 等价验收，记录 Final 所需的 Composition 构造与 legacy pgx 删除清单；模块 child 不修改 `cmd/**`。
+6. 模块 child 只保留未接入生产 Composition 的实现，不得增加 runtime selector、双写或删除旧路径；只有其真实 PostgreSQL 门禁完成后才可标记模块完成。
+7. 使用已交付的 TODO 9 工厂完成真实 PostgreSQL 等价验收，记录 Final 所需的 Composition 构造与 legacy pgx 删除清单；模块 child 不修改 `cmd/**`。
 8. 独立 Review、回滚说明和任务归档；Final 在全部模块完成后统一替换 Composition 并删除模块内非 allowlist pgx，任何共享契约漂移回到父任务。
 
 ## 6. 兼容、发布与回滚
@@ -129,7 +129,7 @@ Composition Root
 - 本任务不改 Schema；GORM Model 只映射当前结构。TODO 3 完成后由 Atlas 验证唯一 Schema 事实源。
 - Final 的模块切换不改变 HTTP/OpenAPI/Event/Domain contract，不需要客户端协同发布。
 - 同一模块不增加 runtime selector 或双写；Final 切换失败通过明确 Composition/legacy 删除边界 revert 恢复旧 Adapter。
-- TODO 9 前合入但未接 Composition 的 GORM 实现不影响生产路径；它必须明确标记未完成且不得被 readiness 误判为已交付。
+- TODO 9 交付前合入、且仍未完成模块实库验收的 GORM 实现不影响生产路径；它必须明确标记未完成且不得被 readiness 误判为已交付。
 - Final 在所有模块完成、TODO 3 完成后统一切换 `cmd/**`、清理旧 Composition、启用 import/AutoMigrate allowlist 门禁并运行全量验证。
 
 ## 7. 风险与缓解

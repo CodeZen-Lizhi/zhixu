@@ -1,0 +1,9 @@
+{"file":".trellis/spec/backend/index.md","reason":"后端模块边界、开发前检查和事实源索引"}
+{"file":".trellis/spec/backend/directory-structure.md","reason":"Events Application/Adapter 与 Composition Root 依赖方向"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"SSE Schema、事务、DB time、JSONB、游标与真实 PostgreSQL 契约"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"稳定 SSE 错误、取消 cause 与安全 Adapter 错误边界"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Event 摘要、SQL/DSN/Secret/路径脱敏规范"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"owner transaction 到 Store/SSE consumer 的跨层数据流"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"复用既有 GORM/Raw/scanner 模式并避免第二套基础设施"}
+{"file":".trellis/tasks/08-19-gorm-events-migration/research/baseline.md","reason":"Events 代码、接线、测试与阶段边界基线"}
+{"file":".trellis/tasks/08-19-gorm-events-migration/research/sql-schema.md","reason":"Schema、trigger、SQL、retention 与 TODO9 研究"}

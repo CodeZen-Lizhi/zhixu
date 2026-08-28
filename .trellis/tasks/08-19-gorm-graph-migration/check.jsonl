@@ -1,0 +1,11 @@
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"复核Workspace、快照、锁、CAS、数组/JSONB、SQLSTATE与真实PostgreSQL证据。"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"复核no-row、cancel/deadline cause、retryability与commit未知结果。"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"复核SQL、Candidate/Evidence/Proposal与Workflow输入不泄漏。"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"复核测试、race/vet、integration、EXPLAIN、benchmark与Review门禁。"}
+{"file":".trellis/tasks/08-18-gorm-data-access-migration/design.md","reason":"复核staged/Final、单Pool、opaque scope与legacy删除边界。"}
+{"file":".trellis/tasks/08-19-gorm-platform-transaction-foundation/design.md","reason":"复核UoW options、scope生命周期、同Pool限制和response-loss。"}
+{"file":".trellis/tasks/08-19-gorm-graph-migration/design.md","reason":"本child逐项设计与已批准兼容差异。"}
+{"file":".trellis/tasks/08-19-gorm-graph-migration/research/query-wiring.md","reason":"查询/Composition/fixture/容量事实来源。"}
+{"file":".trellis/tasks/08-19-gorm-graph-migration/research/candidate-changecontrol.md","reason":"Candidate-first、scoped Proposal、v1/v2与回滚事实来源。"}
+{"file":".trellis/tasks/08-19-gorm-graph-migration/research/scan-workflow-collection.md","reason":"Scan scoped依赖、River原子性、分页和取消事实来源。"}
+{"file":".trellis/tasks/08-19-gorm-graph-migration/research/planning-review.md","reason":"复核任务owner边界和renderer静态测试修复。"}

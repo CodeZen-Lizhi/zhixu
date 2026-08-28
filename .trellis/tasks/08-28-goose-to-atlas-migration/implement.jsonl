@@ -1,0 +1,9 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "后端规范索引，定位迁移运行时适用规范"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "迁移、事务、锁与真实数据库验证的现行契约（含将被本任务改写的 Goose 条目）"}
+{"file": ".trellis/spec/backend/config-loading.md", "reason": "cmd/migrate 的 config.LoadMigration 配置边界"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "迁移失败与接管拒绝的稳定错误码语义"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "集成测试、Docker smoke 与质量门禁"}
+{"file": "docs/architecture/adr/0015-river-goose-runtime.md", "reason": "现有迁移运行时锁定决策与升级门禁，本任务部分 supersede"}
+{"file": "docs/architecture/adr/0019-mature-framework-first.md", "reason": "Atlas 依赖引入的选型记录义务"}
+{"file": "atlas/README.md", "reason": "现有 Atlas 基线契约与 TODO3 runtime contract 的预留接口"}
+{"file": ".trellis/tasks/08-28-goose-to-atlas-migration/design.md", "reason": "本任务技术设计：运行时拓扑、目录契约、接管映射、失败模型"}

@@ -1,0 +1,4 @@
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"GORM/SQL/事务/锁/分页/Schema 禁止项与验证门禁"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"取消、deadline、错误码和 retryability 约定"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"质量、测试、日志脱敏与性能门禁"}
+{"file":".trellis/spec/backend/export-contract.md","reason":"Export Job 生命周期、下载与清理领域契约"}

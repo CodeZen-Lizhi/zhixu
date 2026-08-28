@@ -1,0 +1,12 @@
+{"file":".trellis/spec/backend/index.md","reason":"后端质量门禁和模块边界"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"事务、锁、CAS、分页、SQLSTATE 与真实数据库审查"}
+{"file":".trellis/spec/backend/workspace-root-grant.md","reason":"root/control/runtime 状态机和 capability 防伪造审查"}
+{"file":".trellis/spec/backend/capture-profile-contract.md","reason":"Workspace writer 与 Capture 跨模块原子性审查"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"root identity、SQL 参数、DSN 与 Secret 脱敏审查"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Workspace/Capture/Audit/rootgrant/Composition 数据流一致性"}
+{"file":".trellis/tasks/08-18-gorm-data-access-migration/research/repository-inventory.md","reason":"owner、下游依赖、production wiring 和 Final 边界"}
+{"file":".trellis/tasks/08-19-gorm-workspace-migration/research/baseline.md","reason":"代码、接线和现有验证证据清单"}
+{"file":".trellis/tasks/08-19-gorm-workspace-migration/research/sql-schema.md","reason":"SQL/Schema/锁/事务/性能/TODO9 审查基线"}
+{"file":".trellis/tasks/08-19-gorm-workspace-migration/research/spec-contracts.md","reason":"Go/SQL/Trellis Review 不变量与完整规范路由"}
+{"file":".trellis/tasks/08-19-gorm-workspace-migration/research/baseline-validation.md","reason":"已执行命令、未应用 tidy diff 和 TODO9 盲区证据"}
+{"file":".trellis/tasks/08-19-gorm-workspace-migration/research/planning-review.md","reason":"最终 Review 修复、下游交接与残余限制"}

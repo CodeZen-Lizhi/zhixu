@@ -50,8 +50,8 @@
 
 ### R5. 外部依赖门禁
 
-- TODO 9 Testcontainers-Go 提供模块迁移完成所需的真实 PostgreSQL/pgvector、事务、锁、River 和约束验收环境。
-- TODO 9 完成前允许开展共享基础设计、可执行互操作 Spike、行为基线和模块实现，但模块不得标记验收完成，也不得切换生产 Composition 或删除原实现。
+- TODO 9 Testcontainers-Go 工厂已交付，提供模块迁移完成所需的真实 PostgreSQL/pgvector、事务、锁、River 和约束验收环境。
+- TODO 9 交付前允许开展共享基础设计、可执行互操作 Spike、行为基线和模块实现；当前各模块仍须完成自身真实 PostgreSQL 门禁，且不得切换生产 Composition 或删除原实现。
 - TODO 3 Atlas 完成前，不执行 TODO 10 的最终全仓切换和旧迁移路径清理。
 - TODO 9/TODO 3 是独立路线图任务，不作为 TODO 10 的模块子任务重复实现。
 
@@ -78,7 +78,7 @@
 ## Key Decisions
 
 - `Review Core`、`Review Interview`、`Review Learning Path` 各自拥有独立 Repository 和验收边界，分别建立三个模块子任务；另设 Review 集成验收，不把三者重新合并成一个实现任务。
-- TODO 9 完成前可以开发 TODO 10，但只能保留为未完成迁移：允许设计、Spike、基线和实现，不允许生产切换、旧实现删除或模块完成声明。
+- TODO 9 的 Testcontainers 工厂已由 `109d2cb4` 交付。它解除环境前置，但模块仍须在各自既有 integration fixture 中完成真实 PostgreSQL 门禁后才可声明完成；生产切换和旧实现删除仍只属于 Final。
 - TODO 3 是最终全仓收口门禁，而不是所有模块开始编码的门禁。
 - 父任务采用一个共享基础任务、每模块一个迁移任务、一个最终 Composition/pgx 收口任务的结构。
 

@@ -21,6 +21,6 @@
   "children": [],
   "parent": "08-18-gorm-data-access-migration",
   "relatedFiles": [],
-  "notes": "Staged Health GORM adapters are implemented; review fixed RowsAffected command-tag and typed-nil dependency boundaries. Local go test/race/vet/integration compile/task validate pass. Real PostgreSQL/TODO 9 gates remain blocked by missing ZHIXU_TEST_DATABASE_URL; production composition, schema and legacy deletion remain out of scope.",
+  "notes": "Health GORM adapters and the scoped Collection verifier bridge are implemented. Local test/race/vet, Testcontainers compile, and real Testcontainers Scan/Schedule/Issue/River/Event/Affected-change/cancellation/trend gates pass through internal/platform/testdb. The remaining Collection integration pair is blocked before Health assertions because internal/graph/testfixture writes obsolete workspace status 'test' (SQLSTATE 23514). Fixed-statement tracer tests need a shared testdb tracer design outside this child; production composition, schema, and legacy deletion remain out of scope. Keep in_progress.",
   "meta": {}
 }

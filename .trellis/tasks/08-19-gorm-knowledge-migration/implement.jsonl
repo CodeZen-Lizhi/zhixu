@@ -1,0 +1,14 @@
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Knowledge locks/CAS/deferred constraint、Timeline projection、Impact与跨owner事务"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"保持Knowledge稳定code、SQLSTATE、context和response-loss分类"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"约束Evidence/JSON/Actor/SQL参数与GORM logger脱敏"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"应用Knowledge并发、trigger、真实PostgreSQL与review门禁"}
+{"file":".trellis/tasks/08-18-gorm-data-access-migration/prd.md","reason":"父任务staged/TODO 9/Final范围与完成语义"}
+{"file":".trellis/tasks/08-19-gorm-platform-transaction-foundation/research/static-validation.md","reason":"共享Pool/GORM/UoW与scope affinity限制"}
+{"file":".trellis/tasks/08-19-gorm-changecontrol-migration/design.md","reason":"Relation Apply读取和推进Change Control事实的staged边界"}
+{"file":".trellis/tasks/08-19-gorm-events-migration/design.md","reason":"ScopedAppender与同事务Event append契约"}
+{"file":".trellis/tasks/08-19-gorm-audit-migration/design.md","reason":"Scoped Audit append与同事务记录契约"}
+{"file":".trellis/tasks/08-19-gorm-knowledge-migration/research/baseline.md","reason":"本模块方法、Schema、锁序、生产构造和测试基线"}
+{"file":".trellis/tasks/08-19-gorm-knowledge-migration/research/implementation-contract.md","reason":"冻结staged边界、事务/安全不变量和完成门禁"}
+{"file":".trellis/tasks/08-19-gorm-knowledge-migration/research/planning-review.md","reason":"落实独立规划审查发现与修复"}
+{"file":".trellis/tasks/08-19-gorm-knowledge-migration/prd.md","reason":"核对范围、需求、验收与依赖"}
+{"file":".trellis/tasks/08-19-gorm-knowledge-migration/design.md","reason":"实现前复核GORM/UoW、SQL、锁序、测试和回滚设计"}

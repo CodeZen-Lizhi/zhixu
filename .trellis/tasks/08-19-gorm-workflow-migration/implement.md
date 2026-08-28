@@ -63,7 +63,7 @@
 - [x] `go vet -mod=vendor ./internal/workflow/... ./internal/platform/postgres`。
 - [x] `go test -mod=vendor -tags=integration -run '^$' ./internal/workflow/... -count=1 -timeout 60s`。
 - [x] Scoped Runtime Binding Reader 已通过 Workflow unit/race/vet 与 integration compile；真实 PostgreSQL binding/锁/SQLSTATE 证据留在 TODO 9。
-- [ ] 干净 Foundation + Workflow 快照的 consumer compile；当前 `cmd/api`/`cmd/worker` 仅因后续 Agent owner 尚未提交 `ScopedModelRunStore` 失败，`cmd/migrate` 与 Workflow 自身均通过，不得用脏联合快照冒充闭包证据。
+- [x] `go test -mod=vendor -run '^$' ./cmd/api ./cmd/worker ./internal/artifact/... ./internal/conversation/... ./internal/changecontrol/... ./internal/health/... ./internal/graph/... ./internal/organizing/... -count=1 -timeout 60s`。
 - [x] `go list -mod=vendor`、`go mod verify`、task validate、gofmt 与 `git diff --check`。
 - [x] 静态确认无 AutoMigrate/Migrator/Preload/Association/Save，无 GORM production wiring，无 Workflow fence 访问 Agent 表，无 GORM Runtime 调 legacy Hook/JobInserter。
 - [x] 独立 Go Review、SQL/事务 Review 与 Trellis Check 无剩余 P0/P1/P2；证据写入 `research/static-validation.md`。
@@ -71,8 +71,8 @@
 
 ## 8. TODO 9 真实 PostgreSQL 门禁
 
-- [x] 现有 integration fixture 参数化 legacy/GORM，每个实现使用独立迁移数据库与唯一 platform Pool。
-- [x] Fence 锁序、完整快照、各 mismatch `found=false`、scope/context/SQLSTATE 实测通过。
+- [ ] 现有 integration fixture 参数化 legacy/GORM，每个实现使用独立迁移数据库与唯一 platform Pool。
+- [ ] Fence 锁序、完整快照、各 mismatch `found=false`、scope/context/SQLSTATE 实测通过。
 - [ ] Tool policy snapshot 的 `FOR SHARE`/DB-time/binding 与 recovery 的 missing/skipped/stale、Node -> Attempt `SKIP LOCKED` 在真实 PostgreSQL 并发场景通过；健康候选排在 stale 候选前时不得长期饿死后者。
 - [ ] Workflow/Node/Outbox/River job commit/rollback、并发 replay/conflict、commit response-loss 与 pgx worker 消费实测通过；公开 factory 不允许异池 Client/producer 注入，legacy/scoped fence 混用反例通过。
 - [ ] Claim/Heartbeat/Delivery/Control/Human 的 DB time、锁竞争、CAS、retry/join/Hook rollback 等价通过。

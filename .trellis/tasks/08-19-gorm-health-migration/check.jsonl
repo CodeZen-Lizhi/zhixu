@@ -5,3 +5,5 @@
 {"file":".trellis/spec/backend/database-guidelines.md","reason":"SQL/锁/事务/分页审查依据"}
 {"file":".trellis/spec/backend/error-handling.md","reason":"错误链和取消语义审查依据"}
 {"file":".trellis/spec/backend/quality-guidelines.md","reason":"质量门禁和残余风险记录依据"}
+{"file":".trellis/tasks/08-19-gorm-health-migration/research/testcontainers-evidence.md","reason":"真实 PostgreSQL/Testcontainers 验证命令、覆盖范围和跨 owner fixture 阻断证据"}
+{"file":".trellis/tasks/08-19-gorm-health-migration/final-handoff.md","reason":"当前 child 的完成范围、保留阻断与 Final 边界"}

@@ -1,0 +1,11 @@
+{"file":".trellis/spec/backend/index.md","reason":"后端模块边界与 Git Remote Sync 事实入口"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"参数化 SQL、事务、锁、租约、分页与 Outbox 规范"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"稳定错误、取消、response-loss 与底层隔离"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Credential、URL、错误和数据库日志脱敏"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Go 质量门禁、并发验证和性能要求"}
+{"file":".trellis/spec/backend/git-sync-contract.md","reason":"配置、凭据、Run/Attempt/Outbox 和恢复不变量"}
+{"file":".trellis/tasks/08-18-gorm-data-access-migration/prd.md","reason":"TODO 10 共享需求、模块验收与门禁"}
+{"file":".trellis/tasks/08-18-gorm-data-access-migration/design.md","reason":"共享 GORM Root、事务和 staged migration 设计"}
+{"file":".trellis/tasks/08-18-gorm-data-access-migration/research/repository-inventory.md","reason":"Git Sync owner、范围和依赖盘点"}
+{"file":".trellis/tasks/08-18-gorm-data-access-migration/research/gorm-river-compatibility.md","reason":"官方 GORM/pgx 边界；确认本模块不需 River bridge"}
+{"file":"docs/architecture/adr/0019-mature-framework-first.md","reason":"GORM 选型、Adapter 隔离和禁止重复自研"}

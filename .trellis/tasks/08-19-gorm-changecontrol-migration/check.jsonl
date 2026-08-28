@@ -1,0 +1,11 @@
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"审查 Authorization、Writeback、Approval Dispatch 的锁、时间和原子性"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"审查 no-row、context cause、SQLSTATE、stable code/retryability"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"审查 Credential/正文/路径/JSON/SQL/DSN 日志脱敏"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"审查并发/deadlock/response-loss/真实数据库门禁"}
+{"file":".trellis/tasks/08-18-gorm-data-access-migration/research/repository-inventory.md","reason":"确认范围只含 Change Control 与 Approval Dispatch owner"}
+{"file":".trellis/tasks/08-19-gorm-changecontrol-migration/research/baseline.md","reason":"按冻结代码、Schema、调用方和测试基线审查"}
+{"file":".trellis/tasks/08-19-gorm-changecontrol-migration/research/implementation-contract.md","reason":"检查 hard boundary、锁序、数据安全和完成门禁"}
+{"file":".trellis/tasks/08-19-gorm-changecontrol-migration/research/planning-review.md","reason":"复核规划审查发现已闭环且未在实现中回归"}
+{"file":".trellis/tasks/08-19-gorm-changecontrol-migration/prd.md","reason":"检查需求、Acceptance 与 TODO 9/Final 状态"}
+{"file":".trellis/tasks/08-19-gorm-changecontrol-migration/design.md","reason":"检查实现是否符合单 Pool/scoped Port/Raw SQL/rollback 设计"}
+{"file":".trellis/tasks/08-19-gorm-graph-migration/research/candidate-changecontrol.md","reason":"审查 scoped create/initial-read 是否保持 Candidate-before-Proposal、Revision 1 replay与owner边界"}

@@ -1,0 +1,6 @@
+{"file":".trellis/tasks/08-19-gorm-modelsettings-migration/prd.md","reason":"Check implementation against staged requirements and TODO 9 gate."}
+{"file":".trellis/tasks/08-19-gorm-modelsettings-migration/design.md","reason":"Check scoped dependencies, lock order, transaction and Bootstrap design."}
+{"file":".trellis/tasks/08-19-gorm-modelsettings-migration/implement.md","reason":"Check implementation evidence, production wiring and unresolved gates."}
+{"file":".trellis/tasks/08-19-gorm-modelsettings-migration/research/planning-review.md","reason":"Check that planning findings were resolved before implementation."}
+{"file":".trellis/tasks/08-19-gorm-modelsettings-migration/research/sql-schema.md","reason":"Check SQL/schema/transaction equivalence during review."}
+{"file":".trellis/tasks/08-19-gorm-modelsettings-migration/research/test-wiring.md","reason":"Check fixture and real PostgreSQL evidence boundaries."}

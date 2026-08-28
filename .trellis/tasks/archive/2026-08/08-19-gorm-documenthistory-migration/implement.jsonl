@@ -1,0 +1,10 @@
+{"file":".trellis/spec/backend/document-history-contract.md","reason":"Document History Workspace/path、批量映射、外部 Commit、cursor 与恢复边界的权威契约"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Repository 参数化、稳定分页、事务、迁移和 PostgreSQL 验证规范"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"稳定错误分类、取消、deadline、NotFound 与依赖错误规范"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"SQL、路径、Commit 与数据库错误的日志脱敏边界"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Go、数据库、race、integration 与交付门禁"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Repository 到 Application 的数据映射和依赖泄漏检查"}
+{"file":".trellis/tasks/08-18-gorm-data-access-migration/research/repository-inventory.md","reason":"父任务 owner、模块范围与执行顺序"}
+{"file":".trellis/tasks/08-18-gorm-data-access-migration/research/gorm-river-compatibility.md","reason":"共享 GORM/pgx 兼容与生产切换门禁"}
+{"file":".trellis/tasks/08-19-gorm-platform-transaction-foundation/research/static-validation.md","reason":"已交付 GORM root、配置和 TODO 9 运行时缺口"}
+{"file":".trellis/tasks/08-19-gorm-documenthistory-migration/research/baseline.md","reason":"本模块查询、调用点、测试与行为基线"}

@@ -1,0 +1,4 @@
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"SQL/事务/并发/分页审查"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"错误、取消和 deadline 审查"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"定向质量门禁与残余风险审查"}
+{"file":".trellis/spec/backend/export-contract.md","reason":"Export 行为等价审查"}

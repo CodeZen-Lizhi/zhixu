@@ -1,0 +1,8 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "后端规范索引"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "迁移与数据库检查依据"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "质量门禁与验证检查依据"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "失败语义与错误码检查依据"}
+{"file": "docs/operations.md", "reason": "迁移运维契约与 bootstrap 门禁一致性检查依据"}
+{"file": "docs/architecture/adr/0015-river-goose-runtime.md", "reason": "不可回归的锁、River 顺序与部署门禁不变量"}
+{"file": ".trellis/tasks/08-28-goose-to-atlas-migration/prd.md", "reason": "验收标准核对依据"}
+{"file": ".trellis/tasks/08-28-goose-to-atlas-migration/design.md", "reason": "设计一致性核对依据"}

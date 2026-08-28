@@ -5,7 +5,7 @@
 - 父任务拥有规划、依赖图、跨模块验收和最终复核，不启动业务实现。
 - 每次只启动一个已完成独立 PRD/Design/Implement 收敛的 child；存在文件范围不重叠且共享契约已稳定时才并行。
 - Foundation child 是所有模块的前置；TODO 9 是模块完成门禁；TODO 9 与 TODO 3 共同阻断 Final 的生产切换与收口。
-- TODO 9 前允许模块实现，但不修改生产 Composition、不删除旧实现、不标记完成。
+- TODO 9 交付前曾仅允许模块实现；`109d2cb4` 现已解除该环境门禁。模块仍不得修改生产 Composition、删除旧实现，且只能在各自真实 PostgreSQL 门禁完成后标记完成。
 - 未经用户明确要求，不新增测试文件或临时测试代码；现有测试不足时记录盲区并把“新增覆盖授权”作为 child 的阻断决策。
 
 ## 2. 父任务规划状态
@@ -27,7 +27,7 @@
 3. 优先验证官方组合：`pgxpool -> stdlib.OpenDBFromPool -> GORM`，以及 GORM `*sql.Tx -> riverdatabasesql.InsertTx`；产出 JobInserter/EnqueueFence/CheckEnqueue/Begin/dispatcher 调用点矩阵和各 child 迁移 owner。
 4. 保留 `riverpgxv5` Worker/listener/migration，验证它能消费 database/sql Driver 原子插入的 Job。
 5. 建立共享 Adapter/静态检查，阻止 GORM 事务调用旧 pgx inserter；不创建第二物理 pool，不自研 River SQL 或 GORM pgx transaction Driver。
-6. TODO 9 尚未可用时，只能以现有隔离 PostgreSQL 环境和既有门禁形成阶段证据，不宣称完整 Testcontainers 验收。
+6. 在 TODO 9 工厂交付前，只能以现有隔离 PostgreSQL 环境和既有门禁形成阶段证据；该历史限制已由 `109d2cb4` 解除，后续 child 必须改用单一 Testcontainers 工厂完成各自验收。
 
 Foundation 阶段退出条件：共享接口和配置稳定、同事务方案有可复核证据、失败矩阵与回滚明确，父任务更新依赖图后才允许模块实现；生产切换仍只归 Final。
 
@@ -100,6 +100,8 @@ Artifact child 于 2026-08-24 完成 staged 实现、真实 PostgreSQL TODO 9、
 
 2026-08-25 统一发布闭包已落入 `dev`：Foundation、Authoring 与 Workflow 的 staged 实现均已提交；为补齐已提交 Artifact/Workflow 的编译依赖，本批次仅额外提交 Agent 的 `ScopedModelRunStore` Application 契约。Agent Repository、生产 Composition 与 TODO 9 验收仍不在本批次范围内，`08-19-gorm-agent-migration` 继续保持 `in_progress`，不得视为迁移完成或生产切换。
 
+2026-08-25 Workflow child 状态同步：`08-19-gorm-workflow-migration` 保持 `in_progress`。其 staged GORM Repository/Runtime/River、Workspace execution fence、Tool policy/recovery scoped Port/Adapter 与 Go/SQL/Trellis 同维度 Review 已完成，局部 unit/race/vet/integration compile-only 和 task validate 通过；当时外部 `ZHIXU_TEST_DATABASE_URL` 未配置。自 `109d2cb4` 起，TODO 9 Testcontainers 工厂已可替代该历史环境前置；Workflow 仍欠其自身真实 PostgreSQL 锁/并发/response-loss/River worker、Model Settings scoped enqueue fence、跨 owner scoped Start/Hook 和生产 Composition。父任务不提前勾选 AC3/AC7，不归档 child 或切换 legacy wiring。
+
 ## 5. 每个模块 child 的固定清单
 
 1. 运行 Trellis planning，写清代码范围、直接调用方、跨模块事务、已有测试、SQL/EXPLAIN 和回滚点。
@@ -139,7 +141,7 @@ rg -n 'AutoMigrate|\.Migrator\(' cmd internal --glob '*.go'
 git diff --check
 ```
 
-真实 PostgreSQL 测试继续使用仓库当时的正式入口；TODO 9 完成后改为其单一 Testcontainers 工厂。不得凭规划文档虚构尚未存在的 Make target。
+真实 PostgreSQL 测试现在使用 TODO 9 的单一 Testcontainers 工厂；不得凭规划文档虚构尚未存在的 Make target。
 
 ## 8. Review 与回滚
 
@@ -148,4 +150,16 @@ git diff --check
 - 模块回滚只 revert 自身 Adapter/Port；Final 单独拥有 Composition/legacy 删除回滚；均不回滚 Schema 或修改历史迁移。
 - Foundation 方案失败时停止所有依赖 child 的生产切换，保留调研和行为基线，回到父设计选择官方替代方案。
 
-2026-08-25 Workflow child 状态同步：`08-19-gorm-workflow-migration` 保持 `in_progress`。其 staged GORM Repository/Runtime/River、Workspace execution fence、Tool policy/recovery scoped Port/Adapter 与 Go/SQL/Trellis 同维度 Review 已完成，局部 unit/race/vet/integration compile-only 和 task validate 通过；`ZHIXU_TEST_DATABASE_URL` 未配置，TODO 9 真实 PostgreSQL 锁/并发/response-loss/River worker、Model Settings scoped enqueue fence、跨 owner scoped Start/Hook 和生产 Composition 仍是阻塞项。父任务不提前勾选 AC3/AC7，不归档 child 或切换 legacy wiring。
+## 9. 2026-08-25：`dev` 与 5c89 迁移工作树核对
+
+- 以 `dev` 为基线审计 5c89 自共同基线 `0d5d2325` 以来的 665 个候选文件：0 个文件仅存在于 5c89，653 个与 `dev` 内容一致，12 个存在内容差异；完整相关路径集合也无 5c89 独有文件。
+- 差异只涉及 Platform、Workflow 和任务记录。Platform 保留 `dev` 已提交的 `d611e7ec`：它保留 `database/sql` 自动回滚导致 `sql.ErrTxDone` 时的 cancel/deadline sentinel 及 caller cause；5c89 的旧实现会丢失这条错误链。
+- Workflow Adapter、Repository、River、Application Port 与真实 PostgreSQL 测试文件均已与 5c89 一致，无需重复拷贝或覆盖用户改动。
+- 5c89 的其余 11 份任务记录不覆盖 `dev`：其中包含父任务 `planning` 状态、较早复核记录，或当前环境无法重新证明的 PostgreSQL 通过声明。父任务和各 child 继续以 `dev` 的 `in_progress`/未关闭模块实库门禁为准；TODO 9 工厂本身已完成。
+
+## 10. 2026-08-27：TODO 9 同步与 TODO 10 实库筛选
+
+- TODO 9 的 Testcontainers 工厂已由提交 `109d2cb4` 和归档任务 `archive/2026-08/08-25-gorm-prerequisites/` 证实完成；不得再将它作为 TODO 10 child 的“不可用”或“未完成”阻断理由。
+- TODO 10 的模块验收仍各自拥有真实 PostgreSQL legacy/GORM 等价、事务、锁、失败与性能门禁；工厂可用不表示任何模块或 Final Composition 已完成。
+- 30 个 child 的逐项筛选结论、证据来源、执行顺序和保留阻断见 [`research/todo9-screening-2026-08-27.md`](research/todo9-screening-2026-08-27.md)。在该清单完成前，任何 child 均不改 `cmd/**`、不删 legacy pgx，也不把 TODO 3/Final 收口提前完成。
+- 本轮已在同一共享 Pool 上完成并归档 Auth、Audit、DocumentHistory、Memory 与 Git Sync；Events、Collection 仅完成部分实库场景，因性能或 fixture 边界证据不足保持 `in_progress`；Workspace 在 Audit 完成后重新筛选，仍因多个手工/外部 DSN fixture 和大范围门禁缺口保持 `in_progress`；LocalModelRuntime、Review Core、Review Interview 因 import cycle、缺少既有门禁或仍依赖手工/外部 DSN fixture 保持 `in_progress`。其余 child 继续按筛选文档保留，父任务不据此提前关闭 AC3/AC7。

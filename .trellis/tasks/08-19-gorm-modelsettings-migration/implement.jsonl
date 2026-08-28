@@ -1,0 +1,14 @@
+{"file":".trellis/spec/backend/index.md","reason":"Model Settings persistence must follow repository, transaction and no-AutoMigrate rules."}
+{"file":".trellis/spec/backend/model-settings-runtime.md","reason":"Canonical hot activation, credential, runtime and workflow admission contracts."}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Defines DB-time, locking, CAS, raw SQL and PostgreSQL verification requirements."}
+{"file":".trellis/spec/backend/error-handling.md","reason":"Defines cancellation, SQLSTATE, error-chain and sanitized error behavior."}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Defines credential, endpoint, instance and Audit redaction boundaries."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Defines model runtime hot activation quality and TODO 9 evidence gates."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Required for Audit, Local Runtime and Workflow scoped transaction boundaries."}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"Required to reuse scanners, secret AAD and state validation instead of duplicating rules."}
+{"file":".trellis/tasks/08-19-gorm-modelsettings-migration/design.md","reason":"Approved staged design, transaction contracts and production boundary."}
+{"file":".trellis/tasks/08-19-gorm-modelsettings-migration/research/baseline.md","reason":"Public surface, callers and production wiring baseline."}
+{"file":".trellis/tasks/08-19-gorm-modelsettings-migration/research/sql-schema.md","reason":"Schema, lock, SQL and transaction facts."}
+{"file":".trellis/tasks/08-19-gorm-modelsettings-migration/research/test-wiring.md","reason":"Fixture and TODO 9 test matrix."}
+{"file":".trellis/tasks/08-19-gorm-modelsettings-migration/research/planning-review.md","reason":"Resolved planning findings and activation boundary."}
+{"file":".trellis/tasks/08-19-gorm-modelsettings-migration/research/quality-gates.md","reason":"Review dimensions and verification limits."}

@@ -1,0 +1,15 @@
+{"file":".trellis/spec/backend/index.md","reason":"后端 owner、Composition 与实施前质量门禁"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"事务、锁、CAS、分页、SQLSTATE 与真实 PostgreSQL 规范"}
+{"file":".trellis/spec/backend/capture-profile-contract.md","reason":"Capture/Workspace/Profile/Agent 原子性、状态、边界与验证契约"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"正文、URL、stage locator、SQL 参数、DSN 与 Secret 脱敏"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Capture/Workspace/Agent/Workflow/Filesystem 跨层数据流"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"复用 legacy validation/scanner/codec/SQL 事实源"}
+{"file":".trellis/tasks/08-18-gorm-data-access-migration/research/repository-inventory.md","reason":"Capture owner、波次、依赖和 Final Composition 边界"}
+{"file":".trellis/tasks/08-18-gorm-data-access-migration/research/gorm-river-compatibility.md","reason":"共享 Pool、database/sql transaction 与 legacy pgx 边界"}
+{"file":".trellis/tasks/08-19-gorm-workspace-migration/research/baseline.md","reason":"Workspace ScopedSourceWriter 与 Capture caller-owned transaction 基线"}
+{"file":".trellis/tasks/08-19-gorm-workspace-migration/research/sql-schema.md","reason":"Workspace Source/Artifact/Version SQL、锁与 scoped writer 契约"}
+{"file":".trellis/tasks/08-19-gorm-capture-migration/research/baseline.md","reason":"Capture API、跨模块依赖、生产接线与现有测试基线"}
+{"file":".trellis/tasks/08-19-gorm-capture-migration/research/sql-schema.md","reason":"Capture/Profile Schema、锁序、Raw SQL、carrier、错误与 TODO9"}
+{"file":".trellis/tasks/08-19-gorm-capture-migration/research/spec-contracts.md","reason":"实施规范路由与 Review 必查不变量"}
+{"file":".trellis/tasks/08-19-gorm-capture-migration/research/planning-review.md","reason":"最终规划审查、依赖修正与已接受限制"}
+{"file":".trellis/tasks/08-19-gorm-capture-migration/research/baseline-validation.md","reason":"规划阶段命令结果、接线扫描与真实数据库盲区"}

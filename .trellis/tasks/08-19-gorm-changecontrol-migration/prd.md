@@ -1,0 +1,49 @@
+# Change Control Repository 迁移到 GORM
+
+## Goal
+
+为 Change Control 主 Repository 与 Approval Dispatch 增加未接生产 Composition 的 GORM sibling，保持 Proposal、Revision、Approval、Authorization、Safe Writeback、Workflow/River 与 Server Event 的现有 PostgreSQL 原子性。
+
+## Scope
+
+- `internal/changecontrol/adapter/postgres`：Proposal/typed Proposal、Revision/history/fence、Approval、Authorization、Safe Writeback、Workflow cancellation safety。
+- `internal/changecontrol/adapter/postgres` 额外提供 owner-owned scoped Knowledge Proposal 能力，供 Graph Candidate Confirm 在调用方同一 `foundation.TransactionScope` 内创建或精确读取 immutable Revision 1；Graph 只定义 consumer Port，不复制 `change_control.*` SQL。
+- `internal/changecontrol/adapter/approvaldispatchpostgres`：Approval decision、Proposal-to-Run binding、Workflow Start/Outbox、River Job 与 rejected Server Event 的跨 Schema UoW。
+- 只新增 staged GORM 构造与必要的本 owner 私有 persistence helper；保留 legacy pgx API、测试基线和所有 `cmd/**` wiring。
+- Schema、migration、文件/Git side effect、Tools writeback audit、Knowledge/Graph/Retrieval/Artifact 等下游 owner 不在本 child 修改范围。
+
+## Requirements
+
+- 主 GORM Repository 与 Approval Dispatch 均从一个 `*platformpostgres.Pool` 获取 GORM root 和 `foundation.UnitOfWork`，不得单独 `gorm.Open`、创建第二连接池或接受可错配的 root/UoW。
+- 多语句写入只经 `UnitOfWork.Within`；跨 owner 事务只调用已有 `foundation.TransactionScope` Port：Events `AppendScoped`、Workflow `StartScoped`。不得把 `*gorm.DB`、`*sql.Tx`、`pgx.Tx` 或 `any` 暴露到 Domain/Application 新接口。
+- scoped Knowledge Proposal 方法只解包调用方 live scope，不自行开启、提交、回滚事务，也不回退 root；新建行写入 canonical `current_revision_id=revision.id`，历史 `current_revision_id IS NULL` 仍按 immutable Revision 1 精确读取。
+- 保持 Proposal/Approval/Revision、双 Authorization、Writeback Execution/Commit/Outbox、Workflow/Server Event 的锁序、数据库时间、CAS、幂等、response-loss 和失败回滚语义。
+- `Approve`、`AppendRevision` 和 rejected dispatch 的 Server Event 必须与所属业务事实同一事务提交；事件依赖可选语义与 legacy 一致。
+- Approval Dispatch 的 Workflow scoped runtime 必须已绑定同 Pool 的 scoped River producer 与非 no-op enqueue fence；本 child 不构造或绕过 Workflow/Model Settings 的 admission policy。
+- Audit 已有 scoped Port，但当前两个 PostgreSQL Adapter 没有直接 Audit 调用；Tools Safe Writeback audit 继续留在 Application/Tools owner，禁止为了满足依赖表而制造第二套审计写入。
+- 保留 migration/trigger、Workspace 条件、严格 JSON、Credential 只哈希、错误分类、context cause、取消、回滚和敏感日志策略；禁止 AutoMigrate、association、Preload、Save 和隐式时间。
+- 使用现有测试文件和局部编译验证；TODO 9 前不得切换生产实现、删除 legacy、勾选完成或归档。
+
+## Acceptance Criteria
+
+- [ ] GORM sibling 覆盖 Change Control 主 Repository 的现有 Proposal/Revision/Approval/Authorization/Writeback 端口，状态机与锁序不变。
+- [ ] GORM Approval Dispatch 通过同一 opaque scope 原子维护 Approval、Proposal binding、Workflow facts、River Job 和可选 rejected Event。
+- [ ] 双授权消费、Revision supersede fence、幂等/response-loss、事件原子写和所有失败回滚在真实 PostgreSQL 上与 legacy 等价。
+- [ ] Domain/Application 不新增底层数据库类型，生产 Composition 仍只构造 legacy pgx，实现可独立回滚。
+- [ ] Change Control scoped Knowledge Proposal 能力可在调用方同一 UoW 中 create-or-exact-load typed Proposal/Revision 1，并拒绝 nil、foreign type 与 stale scope；Graph 不再直接拥有 Change Control 表写入。
+- [ ] Go Review、SQL Review、Trellis Check、`git diff --check`、受影响包 test/race/vet、integration compile 和 cmd compile 通过。
+
+- [ ] TODO 9 不可用时仅保留行为基线或未接入 Composition 的实现，不得勾选完成或归档；TODO 3 仅阻断 Final。
+
+## Notes
+
+- Keep `prd.md` focused on requirements, constraints, and acceptance criteria.
+- Lightweight tasks can remain PRD-only.
+- For complex tasks, add `design.md` for technical design and `implement.md` for execution planning before `task.py start`.
+
+## Dependencies
+
+- 直接实现依赖：`gorm-platform-transaction-foundation`、`gorm-workflow-migration`、`gorm-events-migration`；TODO 9 fully fenced Workflow fixture 还依赖 `gorm-modelsettings-migration` 提供 scoped enqueue fence。
+- `gorm-audit-migration` 是父依赖图中的应用审计前置，但当前 Change Control PostgreSQL Adapter 没有直接 Audit import；本 child 只验证不破坏现有 Tools audit 边界。
+- Knowledge、Graph、Retrieval 与 Artifact 依赖本 owner 的 staged 事实/Port；本 child 不提前修改这些消费者。
+- Graph Candidate Confirm 的 staged GORM 实现以前置方式依赖本 child 的 scoped Knowledge Proposal create/initial-read；本 child 不修改 Graph 代码或生产接线。

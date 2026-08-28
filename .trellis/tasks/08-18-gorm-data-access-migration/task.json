@@ -52,6 +52,6 @@
   ],
   "parent": null,
   "relatedFiles": [],
-  "notes": "2026-08-25 子任务状态同步：08-19-gorm-workflow-migration 继续 in_progress。Workflow staged GORM Repository/Runtime/River、scoped execution fence、Tool policy/recovery Port/Adapter 及静态 Review 已完成；真实 PostgreSQL TODO 9、跨 owner scoped Start/Hook、Model Settings enqueue fence 和 Final production Composition 仍未完成。父任务继续 in_progress，不勾选全局完成 AC，不归档。",
+  "notes": "2026-08-27 TODO9/TODO10 状态同步：Testcontainers 工厂已由 109d2cb4 与 archive/2026-08/08-25-gorm-prerequisites 证实完成；本轮按 fixture-only 条件审计 30 个 child。Auth、Audit、DocumentHistory、Memory、Git Sync 已完成 shared Pool legacy/GORM 实库门禁并归档；Events、Collection 因性能/fixture 证据缺口保持 in_progress；Workspace 在 Audit 完成后重新筛选仍有多个手工/外部 DSN fixture 和大范围门禁缺口；LocalModelRuntime、Review Core、Review Interview 因 import cycle、缺少既有门禁或手工/外部 DSN fixture 保持 in_progress。其余 child 仍受产品实现、跨模块前置或 planning 状态约束。Workflow staged GORM/Runtime/River 与 scoped fence 仍未完成真实 PostgreSQL、Model Settings enqueue fence、跨 owner scoped Start/Hook 和 Final production Composition；父任务继续 in_progress，不勾选全局完成 AC，不切生产、不删 legacy。详见 research/todo9-screening-2026-08-27.md。",
   "meta": {}
 }
