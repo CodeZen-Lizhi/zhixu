@@ -1,0 +1,8 @@
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"复核 Projection/Provenance/Span/Chunk 原子性、不可变性、策略过滤与 SQLSTATE"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"复核幂等/CAS、no-row、取消、deadline 与 retryable 对等"}
+{"file":".trellis/spec/backend/capture-profile-contract.md","reason":"复核 Source Span evidence 现行字段和 Capture checkpoint 兼容"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"复核 GORM logger、内容、JSON、SQL 参数和 DSN 不泄漏"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"复核 test/race/vet/integration/Trellis/残余风险证据"}
+{"file":".trellis/tasks/08-18-gorm-data-access-migration/research/repository-inventory.md","reason":"确认修改范围未越过 Ingestion owner 和 Final Composition 边界"}
+{"file":".trellis/tasks/08-19-gorm-platform-transaction-foundation/research/static-validation.md","reason":"确认共享 GORM root、SkipDefaultTransaction 和 TODO 9 门禁"}
+{"file":".trellis/tasks/08-19-gorm-ingestion-migration/research/baseline.md","reason":"逐项对照迁移前端口、Schema、查询、并发、批量和测试盲区"}
