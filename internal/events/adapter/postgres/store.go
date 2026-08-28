@@ -113,6 +113,10 @@ func (store *Store) validateQuery(ctx context.Context, workspaceID foundation.ID
 	if store == nil || isNilDB(store.db) {
 		return foundation.NewError(foundation.ErrorDependencyUnavailable, domain.ErrorCodeStoreUnavailable, true, errors.New("SSE database is unavailable"))
 	}
+	return validateReplayQuery(ctx, workspaceID)
+}
+
+func validateReplayQuery(ctx context.Context, workspaceID foundation.ID) error {
 	if ctx == nil {
 		return foundation.NewError(foundation.ErrorInvalidInput, domain.ErrorCodeReplayQueryInvalid, false, errors.New("SSE query context is nil"))
 	}
@@ -128,6 +132,18 @@ type scanner interface {
 }
 
 func scanEvent(row scanner) (domain.ServerEvent, error) {
+	event, err := scanEventRaw(row)
+	if err == nil {
+		return event, nil
+	}
+	var classified *foundation.Error
+	if errors.As(err, &classified) {
+		return domain.ServerEvent{}, err
+	}
+	return domain.ServerEvent{}, queryFailure(err)
+}
+
+func scanEventRaw(row scanner) (domain.ServerEvent, error) {
 	var (
 		event                          domain.ServerEvent
 		workspaceText                  string
@@ -139,7 +155,7 @@ func scanEvent(row scanner) (domain.ServerEvent, error) {
 		&event.Type, &event.ResourceRef, &event.ResourceVersion, &summaryText,
 		&event.SchemaVersion, &event.SourceEventRef, &event.OccurredAt, &event.ExpiresAt,
 	); err != nil {
-		return domain.ServerEvent{}, queryFailure(err)
+		return domain.ServerEvent{}, err
 	}
 	workspaceID, err := foundation.ParseID(workspaceText)
 	if err != nil || string(workspaceID) != workspaceText {

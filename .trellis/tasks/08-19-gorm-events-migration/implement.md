@@ -56,8 +56,8 @@ integration `-run '^$'` 只验证测试编译，不作为真实 PostgreSQL 证�
 - [x] 验证 owner 行与 Event 同事务 commit/rollback，nil/非平台实现/stale scope、cancel/deadline、response-loss replay 和连接释放；生产 Composition 仍保持 legacy，后续 owner/Final 从同一平台 Pool 组装。
 - [x] 比较 JSONB/optional UUID、UTC 微秒、24 小时 expiry、exact replay、binding conflict 与两个独立事务的并发 claim。
 - [x] 验证真实 FK/CHECK/SQLSTATE、trigger producer 回放和 SSE Handler cursor/retention 竞态；Serializable retry 的平台事务行为由 Foundation 实库门禁拥有。
-- [ ] 对 watermark、earliest、ListAfter 以目标数据量和默认 planner 执行 EXPLAIN，确认现有索引和结果/statement 数有界。当前 fixture 数据量很小，且测试显式关闭顺扫，只能证明索引可用，不能作为该性能门禁的完成证据。
-- [ ] TODO 9 的功能、事务、锁与失败门禁已通过；等待上述默认 planner 性能证据后才勾选 PRD AC、标记完成和归档。Composition 切换、owner 调用点迁移与 legacy 删除仍由对应 child/Final 执行。
+- [x] 新增 `TestEventReplayPlansAtVolumeUseDefaultPlanner`：目标 2,000 事件（低 seq 冷布局）+ 50 噪声 Workspace 各 2,000 事件（共 102,000 行），VACUUM ANALYZE 后默认 planner 下 watermark/earliest/replay 均使用 idx_ops_server_event_workspace_seq（无 Seq Scan），replay 单页结果以 MaxReplayPageSize=100 有界。小数据量强制关顺扫的旧断言保留为索引存在性检查。
+- [x] TODO 9 功能、事务、锁、失败与默认 planner 性能门禁全部通过；另修复 `eventAppendRequest` 硬编码 2026-08-27 occurred_at 导致 24h 保留窗口随墙钟过期的定时炸弹。PRD AC 已勾选。Composition 切换、owner 调用点迁移与 legacy 删除仍由对应 child/Final 执行。
 
 ## 7. 回滚点
 

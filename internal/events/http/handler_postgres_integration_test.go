@@ -1,4 +1,4 @@
-//go:build integration
+//go:build integration && testcontainers
 
 package eventshttp
 
@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -20,10 +19,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/events/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/httpapi"
-	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
-	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
-	"github.com/jackc/pgx/v5"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -165,62 +161,21 @@ func seedEventHTTPWorkspace(t *testing.T, ctx context.Context, pool *pgxpool.Poo
 	root := fmt.Sprintf("/tmp/events-http-%d", suffix)
 	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(
 		id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at
-	) VALUES($1,$2,$3,$3,now(),'test',1,now(),now())`, string(workspaceID), fmt.Sprintf("events-http-%d", suffix), root); err != nil {
+	) VALUES($1,$2,$3,$3,now(),'inactive',1,now(),now())`, string(workspaceID), fmt.Sprintf("events-http-%d", suffix), root); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func newEventHTTPIntegration(t *testing.T) (*eventspostgres.Store, *pgxpool.Pool, context.Context) {
+func newEventHTTPIntegration(t *testing.T) (*eventspostgres.GORMStore, *pgxpool.Pool, context.Context) {
 	t.Helper()
-	baseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
-	if baseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL for Server Event HTTP integration tests")
+	fixture := testdb.Require(t, testdb.Config{Availability: testdb.FailWhenUnavailable, MaxConns: 16})
+	platform := fixture.Pool()
+	if platform == nil || platform.DB() == nil {
+		t.Fatal("test database fixture did not provide a shared platform pool")
 	}
-	ctx := context.Background()
-	parsed, err := url.Parse(baseURL)
+	store, err := eventspostgres.NewGORMStore(platform)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("NewGORMStore from shared platform pool: %v", err)
 	}
-	admin, err := pgxpool.New(ctx, baseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	name := fmt.Sprintf("zhixu_events_http_%d", time.Now().UnixNano())
-	identifier := pgx.Identifier{name}.Sanitize()
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+identifier); err != nil {
-		admin.Close()
-		t.Fatal(err)
-	}
-	parsed.Path = "/" + name
-	databaseURL := parsed.String()
-	migrationPool, err := platformpostgres.OpenMigration(ctx, databaseURL, 2, 0)
-	if err == nil {
-		var runner *platformmigration.Runner
-		runner, err = platformmigration.NewRunner(migrationPool.DB(), projectmigrations.FS)
-		if err == nil {
-			err = runner.Up(ctx)
-		}
-		migrationPool.Close()
-	}
-	if err != nil {
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-		t.Fatal(err)
-	}
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		pool.Close()
-		_, _ = admin.Exec(context.Background(), "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-	})
-	store, err := eventspostgres.NewStore(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return store, pool, ctx
+	return store, platform.DB(), context.Background()
 }

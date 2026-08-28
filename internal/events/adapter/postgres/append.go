@@ -32,8 +32,8 @@ func (store *Store) AppendTx(ctx context.Context, transaction any, request domai
 	if ctx == nil {
 		return domain.ServerEvent{}, false, foundation.NewError(foundation.ErrorInvalidInput, domain.ErrorCodeAppendInvalid, false, errors.New("SSE append context is nil"))
 	}
-	request.OccurredAt = request.OccurredAt.UTC().Truncate(time.Microsecond)
-	if err := request.Validate(); err != nil {
+	request, err := normalizeAppendRequest(request)
+	if err != nil {
 		return domain.ServerEvent{}, false, err
 	}
 	tx, ok := transaction.(pgx.Tx)
@@ -71,6 +71,14 @@ func (store *Store) AppendTx(ctx context.Context, transaction any, request domai
 		return domain.ServerEvent{}, false, appendConflict()
 	}
 	return existing, true, nil
+}
+
+func normalizeAppendRequest(request domain.AppendRequest) (domain.AppendRequest, error) {
+	request.OccurredAt = request.OccurredAt.UTC().Truncate(time.Microsecond)
+	if err := request.Validate(); err != nil {
+		return domain.AppendRequest{}, err
+	}
+	return request, nil
 }
 
 func sameAppendBinding(event domain.ServerEvent, request domain.AppendRequest) bool {

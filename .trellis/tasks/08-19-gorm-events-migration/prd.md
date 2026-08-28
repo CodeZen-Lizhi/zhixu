@@ -35,7 +35,7 @@
 - [x] exact replay、binding conflict、并发 claim、JSONB、24 小时 expiry、SQLSTATE、取消和资源释放在真实 PostgreSQL 上通过 legacy/GORM 等价检查。
 - [x] 生产 `cmd/**` 与跨模块调用仍使用 legacy Store/Port；无物理 cleanup、Schema 变更、自动迁移、双写或 fallback。
 - [x] `git diff --check`、受影响包 test/race/vet、integration 编译、生产入口编译、vendor/module 校验通过。
-- [ ] TODO 9 共享工厂可用，且 Events 的全部实库门禁（包括目标数据量、默认 planner 的索引证据）已通过；在此之前 staged 实现保持未接入 Composition，TODO 3 仅阻断 Final。
+- [x] TODO 9 共享工厂可用，Events 全部实库门禁（含目标数据量、默认 planner 索引证据）已于 2026-08-28 通过；staged 实现未接入 Composition，TODO 3 仅阻断 Final。
 
 ## Dependencies
 

@@ -23,3 +23,16 @@ type Appender interface {
 	// AppendTx 不提交或回滚 transaction；返回值中的 bool 表示 exact replay。
 	AppendTx(context.Context, any, domain.AppendRequest) (domain.ServerEvent, bool, error)
 }
+
+// ScopedAppender 是 GORM 迁移路径使用的 opaque transaction 追加边界。
+// legacy pgx 调用方继续使用 Appender，直到各自模块完成迁移。
+type ScopedAppender interface {
+	// AppendScoped 不提交或回滚 scope；返回值中的 bool 表示 exact replay。
+	AppendScoped(context.Context, foundation.TransactionScope, domain.AppendRequest) (domain.ServerEvent, bool, error)
+}
+
+// ScopedStore 提供不暴露具体数据库事务类型的完整 Server Event Store。
+type ScopedStore interface {
+	Store
+	ScopedAppender
+}
