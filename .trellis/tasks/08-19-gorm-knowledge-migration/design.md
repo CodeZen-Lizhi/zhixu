@@ -136,4 +136,4 @@ GORM response-loss测试在同包现有integration文件中包装被测Repositor
 - TODO 9前回滚只删除staged GORM文件、scoped Impact capability和本task实现证据；legacy production/Schema不变。
 - TODO 9后、Final前仍保留pgx wiring作回退；Final统一构造同Pool Audit、Events、Knowledge core/Timeline/Relation Apply并删除legacy。
 - Organizing caller-owned pgx transaction由Organizing child迁移到opaque scope；本child不拆其原子事务。
-- TODO 3 Atlas未完成只阻断Final schema/composition收口，不阻断本staged static implementation。
+- TODO 3 Atlas 前置已于 2026-08-30 交付，不再阻断 Final schema/composition 收口；本 child 的真实 PostgreSQL、生产 Composition 与其他父任务门禁保持不变。

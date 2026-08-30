@@ -157,4 +157,4 @@ GORM response-loss 测试在各 owner 的同包现有 integration 文件中替�
 - TODO 9 后、Final 前仍保留 pgx wiring作为回退；Final统一构造同 Pool Events、Model Settings fence、Workflow runtime、Change Control与Approval Dispatch，并删除 legacy。
 - Knowledge/Graph/Retrieval/Artifact 等消费者在各自 child迁移 scoped contract；本 child不跨 owner改生产调用方。
 - Graph child只消费本 owner能力并自行拥有 Candidate UoW；本 child不导入 Graph 包、不修改 Graph adapter或生产构造。
-- TODO 3 Atlas 未完成只阻断 Final schema/composition 收口，不阻断本 staged static implementation。
+- TODO 3 Atlas 前置已于 2026-08-30 交付，不再阻断 Final schema/composition 收口；本 child 的真实 PostgreSQL、生产 Composition 与其他父任务门禁保持不变。

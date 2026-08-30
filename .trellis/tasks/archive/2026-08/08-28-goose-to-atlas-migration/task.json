@@ -7,7 +7,7 @@
   "dev_type": null,
   "scope": null,
   "package": null,
-  "priority": "P2",
+  "priority": "P0",
   "creator": "lizhi",
   "assignee": "lizhi",
   "createdAt": "2026-08-28",
@@ -15,12 +15,12 @@
   "branch": null,
   "base_branch": "main",
   "worktree_path": null,
-  "commit": null,
+  "commit": "2a581f99e93a4387cb45d43e4ec1e234e6b953d3",
   "pr_url": null,
   "subtasks": [],
   "children": [],
   "parent": null,
   "relatedFiles": [],
-  "notes": "",
+  "notes": "实现提交 2a581f99；归档提交 c7558f0a。R1-R6 与 AC1-AC6 已完成并通过 PG16/PG18、接管矩阵、testdb、Atlas/Compose 和全仓 Go 门禁验证。",
   "meta": {}
 }

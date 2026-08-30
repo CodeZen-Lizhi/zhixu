@@ -1,25 +1,25 @@
 # 2026-08-01 需求优化清单
 
-> 状态同步（2026-08-19）：TODO 7、TODO 8 已依据对应 Trellis 任务、路线图和自动化验收结果收口；本文件继续保留原始需求与验收边界，详细实现证据以任务产物和 `docs/roadmap.md` 为准。
+> 状态同步（2026-08-30）：TODO 1、TODO 3、TODO 5、TODO 6、TODO 7、TODO 8、TODO 9、TODO 12 已收口；TODO 2、TODO 10 进行中，TODO 4 待规划，TODO 11 规划中但延后至 TODO 10 收口后。本文件继续保留原始需求与验收边界，详细实现证据以任务产物和 `docs/roadmap.md` 为准。
 
 ## TODO 概览
 
 > 人天为单名熟悉项目的工程师完成实现与重点验证的初步预估，不含需求澄清、外部协调和发布观察。
 
 - [x] TODO 1. 固定 Docker 页面入口并取消一次性控制凭证（P0，已完成，10-15 人天）：固定 `8080` 页面入口，并让 Workspace 选择与浏览器会话解耦。
-- [ ] TODO 2. 打通受限 Workspace Agent 的真实用户链路（P1，下一阶段，20-30 人天）：在保留安全边界和 Proposal 审批的前提下，支持可审计的只读工具循环。
-- [ ] TODO 3. 全量从 Goose 迁移到 Atlas（P0，数据库迁移前置，5-8 人天）：统一数据库 Schema 迁移与管理能力，并在 GORM 最终切换前建立唯一 Schema 事实源。
+- [ ] TODO 2. 打通受限 Workspace Agent 的真实用户链路（P1，进行中，20-30 人天）：在保留安全边界和 Proposal 审批的前提下，支持可审计的只读工具循环。
+- [x] TODO 3. 全量从 Goose 迁移到 Atlas（P0，已完成，5-8 人天）：统一数据库 Schema 迁移与管理能力，并在 GORM 最终切换前建立唯一 Schema 事实源。
 - [ ] TODO 4. 自动合成可持续演进的知识笔记（P0，高优先级，25-35 人天）：持续整合多篇资料，去重补全、保留冲突和缺口，并附可核验来源。
 - [x] TODO 5. 将后端 HTTP 层从 Chi 迁移到 Gin（P0，已完成，15-25 人天）：采用国内使用广泛的 Gin 和 validator，保持现有 HTTP、安全与 SSE 契约兼容。
 - [x] TODO 6. 使用 Eino 收敛 AI 通用基础设施（P0，已完成，20-30 人天）：以 Eino/eino-ext 承担模型、Tool Calling、流式输出和 Agent 通用编排，并作为 TODO 2 的基础设施前置。
 - [x] TODO 7. 使用 Spectral 和 oasdiff 建立 OpenAPI 契约门禁（P1，已完成，3-5 人天）：用成熟标准工具替换通用手写校验，只保留项目专属断言。
 - [x] TODO 8. 生成前端 OpenAPI 客户端并接入 Zod（P1，已完成，8-12 人天）：生成类型和请求代码，逐步删除重复的手写 Transport 与 DTO 解析。
-- [ ] TODO 9. 使用 Testcontainers-Go 管理数据库集成测试（P0，GORM 迁移前置，5-8 人天）：自动创建、迁移和销毁 PostgreSQL/pgvector 测试环境，并作为 Atlas、GORM 与 River 数据库门禁。
-- [ ] TODO 10. 将应用数据访问层全面迁移到 GORM（P0，高优先级、高风险，80-120 人天）：用 GORM 统一 Repository 和事务入口，复杂 PostgreSQL 查询继续通过 GORM Raw/Exec 执行。
-- [ ] TODO 11. 评估并接入 gin-contrib/sessions（P2，低优先级，5-8 人天）：在 Gin 和 GORM 迁移完成后，仅替换框架能够完整覆盖的 Session 通用机制。
+- [x] TODO 9. 使用 Testcontainers-Go 管理数据库集成测试（P0，已完成，5-8 人天）：自动创建、迁移和销毁 PostgreSQL/pgvector 测试环境，并作为 Atlas、GORM 与 River 数据库门禁。
+- [ ] TODO 10. 将应用数据访问层全面迁移到 GORM（P0，进行中、高风险，80-120 人天）：用 GORM 统一 Repository 和事务入口，复杂 PostgreSQL 查询继续通过 GORM Raw/Exec 执行。
+- [ ] TODO 11. 评估并接入 gin-contrib/sessions（P2，规划中并延期，5-8 人天）：在 Gin 和 GORM 迁移完成后，仅替换框架能够完整覆盖的 Session 通用机制。
 - [x] TODO 12. 优先使用浏览器原生 EventSource（P2，已完成，3-5 人天）：替换可由 Web 标准覆盖的 SSE 解析与重连代码，保留必要的最小 Fetch 适配器。
 
-依赖顺序：TODO 6 支撑 TODO 2；TODO 7 → TODO 8 已按依赖顺序完成；数据库方向按 TODO 9 → TODO 3 → TODO 10 推进，TODO 3 的 Atlas 是唯一 Schema 迁移事实源；TODO 5 和 TODO 10 完成后再执行 TODO 11。
+依赖顺序：TODO 6 支撑正在推进的 TODO 2；TODO 7 → TODO 8 已按依赖顺序完成；数据库方向的 TODO 9 → TODO 3 已交付，TODO 10 正在其上分批推进，Atlas 是唯一 Schema 迁移事实源；TODO 5 已完成，TODO 11 继续等待 TODO 10 收口。
 
 ## TODO 1. 固定 Docker 页面入口并取消一次性控制凭证
 
@@ -55,7 +55,7 @@
 
 ## TODO 2. 打通受限 Workspace Agent 的真实用户链路
 
-- [ ] 状态：待规划（2026-08-08 记录，当前不实施）
+- [ ] 状态：进行中（Trellis 任务 `08-15-workspace-agent-user-flow`；尚未达到路线图交付标准）
 - 优先级：P1（下一阶段）
 - 预估工期：20-30 人天
 
@@ -108,7 +108,7 @@
 
 ## TODO 3. 全量从 Goose 迁移到 Atlas
 
-- [ ] 状态：待规划（TODO 10 最终切换前置）
+- [x] 状态：已收口（2026-08-30；Atlas 已成为唯一 Schema 迁移事实源，Trellis 任务已归档）
 - 优先级：P0（数据库迁移前置）
 - 预估工期：5-8 人天
 
@@ -289,7 +289,7 @@
 
 ## TODO 9. 使用 Testcontainers-Go 管理数据库集成测试
 
-- [ ] 状态：待规划（TODO 3、TODO 10 的数据库测试前置）
+- [x] 状态：已收口（2026-08-26；统一 Testcontainers-Go 工厂已交付并归档）
 - 优先级：P0（GORM 迁移门禁）
 - 预估工期：5-8 人天
 
@@ -319,7 +319,7 @@
 
 ## TODO 10. 将应用数据访问层全面迁移到 GORM
 
-- [ ] 状态：待规划（依赖 TODO 9，最终切换前依赖 TODO 3）
+- [ ] 状态：进行中（TODO 9、TODO 3 前置均已交付；最终 Composition/pgx 收口尚未完成）
 - 优先级：P0（高优先级、高风险，必须分阶段）
 - 预估工期：80-120 人天
 
@@ -356,7 +356,7 @@
 
 ## TODO 11. 评估并接入 gin-contrib/sessions
 
-- [ ] 状态：待规划（依赖 TODO 5、TODO 10）
+- [ ] 状态：规划中并延期（TODO 5 已交付，等待 TODO 10 收口）
 - 优先级：P2（低优先级）
 - 预估工期：5-8 人天
 

@@ -112,16 +112,16 @@ flowchart LR
 
 ## 5. 数据访问与测试迁移
 
-### 5.1 TODO 9：使用 Testcontainers-Go 管理数据库集成测试
+### 5.1 已交付 TODO 9：使用 Testcontainers-Go 管理数据库集成测试（2026-08-26）
 
-- **优先级/初估**：P0，5–8 人天；是 Atlas/GORM 的前置。
-- **目标**：自动创建、迁移和销毁与生产兼容的 PostgreSQL/pgvector 环境，验证 GORM、pgvector、River、事务和约束。
+- **结果**：提交 `109d2cb4` 已交付 `internal/platform/testdb` 的 Testcontainers-Go 工厂，归档任务 [`08-25-gorm-prerequisites`](../.trellis/tasks/archive/2026-08/08-25-gorm-prerequisites/) 记录了真实 PostgreSQL/pgvector、迁移、共享 `platformpostgres.Pool`、并行隔离和清理证据。
+- **后续边界**：工厂只提供环境生命周期。每个 TODO 10 child 仍须在既有 integration fixture 中自行证明 legacy/GORM 等价、事务、锁、失败和性能门禁；TODO 9 的完成不等同于任何业务模块的 GORM 回归完成。
 - **边界**：单一工厂负责健康等待、正式迁移、数据库/端口/容器命名、并行隔离、日志摘要和失败销毁；业务测试不得复制容器管理。保留显式外部 DSN 用于性能、故障注入和远程 CI，但两种模式不能竞争同一数据库，并应执行同一迁移和核心断言。
 - **失败语义**：Docker 不可用时由开发者选择的集成测试明确 skip 或报可操作错误，不得伪装数据库测试通过；日志不得包含密码或完整 DSN。
 
 ### 5.2 TODO 10：将应用数据访问层全面迁移到 GORM
 
-- **优先级/初估**：P0、高风险，80–120 人天；依赖 Testcontainers，最终切换依赖 Atlas。
+- **优先级/初估**：P0、高风险，80–120 人天；Testcontainers 与 Atlas 前置均已交付。
 - **目标**：让应用 PostgreSQL Repository 与事务统一经过 GORM 边界，消除普通业务代码对 pgx Pool/Tx 的直接耦合。
 - **模型边界**：Persistence Model 与领域实体分离，显式表/列/nullable 映射；禁止 `gorm.Model`、隐式复数表名、软删除、自动时间戳、关联级联或 Hook 改变现有语义。
 - **SQL 边界**：常规 CRUD/分页/批量使用 GORM；复杂 CTE、窗口、图、pgvector、`FOR UPDATE SKIP LOCKED`、advisory lock 和性能 SQL 使用受控 Raw/Exec/Clauses，但仍由 Repository 管理。

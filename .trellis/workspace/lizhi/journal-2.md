@@ -504,3 +504,72 @@ Eino/eino-ext 已成为生产唯一 AI Runtime，旧 direct 实现已删除并�
 ### Next Steps
 
 - 继续由各自 GORM child 任务推进迁移；归档其他任务前先逐项确认其验收状态。
+
+
+## Session 69: TODO10 模块真实 PostgreSQL 门禁筛选与归档
+
+**Date**: 2026-08-27
+**Task**: TODO10 模块真实 PostgreSQL 门禁筛选与归档
+**Branch**: `dev`
+
+### Summary
+
+同步 TODO9 工厂完成事实，按 fixture-only 条件审计 30 个 TODO10 child，并完成可验证模块的 shared Testcontainers legacy/GORM 回归。父任务保持 in_progress。
+
+### Main Changes
+
+- 更新 docs/roadmap.md 与 TODO10 父任务文档，明确 TODO9 工厂已完成但不等同模块回归或生产切换。
+- Auth、Audit、DocumentHistory、Memory、Git Sync 已完成各自真实 PostgreSQL 门禁并归档；Events、Collection、LocalModelRuntime、Review Core、Review Interview 因实证缺口或前置阻断保持 in_progress。
+- Audit 完成后重新筛选 Workspace，确认其多个外部 DSN/手工建库 fixture 与大范围真实门禁缺口仍不满足 fixture-only。
+
+### Git Commits
+
+(No commits - planning session)
+
+### Testing
+
+- [OK] shared Testcontainers integration/race、局部 go test/go vet、Trellis task validate 与 git diff --check 均按模块执行；未执行全仓测试。
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- 继续处理仍有产品实现、跨模块前置或性能证据缺口的 child；TODO3/Final Composition 仍待后续任务。
+
+
+## Session 70: 完成 TODO3 Atlas 迁移与文档状态同步
+
+**Date**: 2026-08-30
+**Task**: 完成 TODO3 Atlas 迁移与文档状态同步
+**Branch**: `dev`
+
+### Summary
+
+完成 Goose 到 Atlas 全量迁移、验证与归档，并同步 Roadmap、需求优化清单、架构/运维文档、Trellis 任务状态和开发者会话记录。
+
+### Main Changes
+
+- Atlas 成为唯一 Schema 迁移事实源，91 个历史迁移转换并追加 00092，Goose 运行时和依赖删除。
+- 需求优化清单同步 TODO 2/3/9/10/11 的当前状态；TODO3 归档任务补齐 P0 与交付提交元数据。
+- 修正 Change Control 与 Knowledge GORM 设计中的旧 TODO3 阻断表述，同时保留各模块自身交付门禁。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `2a581f99` | (see git log) |
+| `c7558f0a` | (see git log) |
+
+### Testing
+
+- [OK] PG16/PG18 空库迁移和声明式 drift、9 项接管/续跑矩阵、3 项 advisory-lock、testdb Testcontainers、全仓 build/vet/test/integration compile 均通过。
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- TODO10 可在已交付 Testcontainers 与 Atlas 前置上继续模块迁移和最终 Composition/pgx 收口。

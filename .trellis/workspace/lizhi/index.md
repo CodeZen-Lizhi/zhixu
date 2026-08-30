@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-2.md`
-- **Total Sessions**: 68
-- **Last Active**: 2026-08-26
+- **Total Sessions**: 70
+- **Last Active**: 2026-08-30
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-2.md` | ~506 | Active |
+| `journal-2.md` | ~574 | Active |
 | `journal-1.md` | ~2005 | Archived |
 <!-- @@@/auto:active-documents -->
 
@@ -30,6 +30,8 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 70 | 2026-08-30 | 完成 TODO3 Atlas 迁移与文档状态同步 | `2a581f99`, `c7558f0a` | `dev` |
+| 69 | 2026-08-27 | TODO10 模块真实 PostgreSQL 门禁筛选与归档 | - | `dev` |
 | 68 | 2026-08-26 | Trellis 收口检查：TODO9 已推送 | - | `dev` |
 | 67 | 2026-08-26 | 完成 TODO9 Testcontainers 数据库集成测试工厂 | `109d2cb4`, `39f8c768` | `dev` |
 | 66 | 2026-08-24 | GORM 平台与事务基础验收 | `78b63d0c` | `dev` |
