@@ -9,18 +9,14 @@ import (
 	"testing"
 	"time"
 
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func TestSmartCollectionHealthMigrationSchemaAndEmptyDownUp(t *testing.T) {
+func TestSmartCollectionHealthMigrationSchema(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
-	runner, err := NewRunner(pool, projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runner := newAtlasRunnerForPool(t, pool)
 	if err := runner.Up(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -31,54 +27,10 @@ func TestSmartCollectionHealthMigrationSchemaAndEmptyDownUp(t *testing.T) {
 	assertSmartCollectionHealthMigrationShape(t, ctx, pool)
 
 	provider := migrationProvider(t, pool)
-	if _, err := provider.DownTo(ctx, 24); err != nil {
-		t.Fatalf("00025 empty Down failed: %v", err)
-	}
-
-	var tables, schemaMeta int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.tables
-		WHERE (table_schema='learning' AND table_name IN ('smart_collection','smart_collection_command'))
-		   OR (table_schema='ops' AND table_name IN (
-				'health_scan','health_issue','health_issue_observation','health_issue_evidence',
-				'health_issue_decision','health_scan_detector','health_scan_seen_identity','health_schedule','health_schedule_command'
-		   ))`).Scan(&tables); err != nil {
-		t.Fatal(err)
-	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM core.schema_meta
-		WHERE key='smart_collection_health'`).Scan(&schemaMeta); err != nil {
-		t.Fatal(err)
-	}
-	if tables != 0 || schemaMeta != 0 {
-		t.Fatalf("00025 Down tables=%d schema_meta=%d", tables, schemaMeta)
-	}
-
-	if _, err := provider.Up(ctx); err != nil {
-		t.Fatalf("00025 Up after Down failed: %v", err)
+	if err := provider.Up(ctx); err != nil {
+		t.Fatalf("00025 repeat Up failed: %v", err)
 	}
 	assertSmartCollectionHealthMigrationShape(t, ctx, pool)
-}
-
-func TestSmartCollectionHealthMigrationGuardedDown(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := newMigrationTestDatabase(t, ctx)
-	defer cleanup()
-	migrateSmartCollectionHealthTestDatabase(t, ctx, pool)
-
-	insertSemanticLinkWorkspace(t, ctx, pool, "f1000000-0000-4000-8000-000000000001", "smart-collection-guard")
-	insertSmartCollection(t, ctx, pool,
-		"f2000000-0000-4000-8000-000000000001",
-		"f1000000-0000-4000-8000-000000000001",
-		"Guarded Collection",
-		"guarded collection",
-		`{"root":{"kind":"group","operator":"AND","clauses":[]},"sort":[]}`,
-		"LIST",
-		`{"density":"comfortable"}`,
-		1,
-		1,
-	)
-
-	_, err := migrationProvider(t, pool).DownTo(ctx, 24)
-	assertPostgresCode(t, err, "55000")
 }
 
 func TestCollectionReadModelRevisionTracksWorkspaceMovesHealthAndRollback(t *testing.T) {
@@ -931,10 +883,7 @@ func assertSmartCollectionHealthMigrationShape(t *testing.T, ctx context.Context
 
 func migrateSmartCollectionHealthTestDatabase(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	t.Helper()
-	runner, err := NewRunner(pool, projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runner := newAtlasRunnerForPool(t, pool)
 	if err := runner.Up(ctx); err != nil {
 		t.Fatal(err)
 	}

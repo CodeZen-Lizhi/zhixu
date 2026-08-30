@@ -12,26 +12,22 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func TestM8InterviewCompletionReservationMigrationSupportsEmptyDownUp(t *testing.T) {
+func TestM8InterviewCompletionReservationMigrationSupportsRepeatedUp(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
 
-	if _, err := provider.UpTo(ctx, 57); err != nil {
+	if err := provider.UpTo(ctx, 57); err != nil {
 		t.Fatalf("00057 Up: %v", err)
 	}
-	if _, err := provider.UpTo(ctx, 57); err != nil {
+	if err := provider.UpTo(ctx, 57); err != nil {
 		t.Fatalf("00057 repeated Up: %v", err)
 	}
 	assertMigrationVersion(t, ctx, pool, 57)
 	assertM8InterviewCompletionReservationShape(t, ctx, pool)
 
-	if _, err := provider.DownTo(ctx, 56); err != nil {
-		t.Fatalf("00057 empty Down: %v", err)
-	}
-	assertMigrationVersion(t, ctx, pool, 56)
-	if _, err := provider.UpTo(ctx, 57); err != nil {
+	if err := provider.UpTo(ctx, 57); err != nil {
 		t.Fatalf("00057 re-Up: %v", err)
 	}
 	assertM8InterviewCompletionReservationShape(t, ctx, pool)
@@ -42,7 +38,7 @@ func TestM8InterviewCompletionReservationMigrationBackfillsGuardsAndSerializesLa
 	pool, cleanup := newMigrationTestDatabaseWithMaxConns(t, ctx, 4)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 56); err != nil {
+	if err := provider.UpTo(ctx, 56); err != nil {
 		t.Fatalf("migrate through 00056: %v", err)
 	}
 
@@ -68,7 +64,7 @@ func TestM8InterviewCompletionReservationMigrationBackfillsGuardsAndSerializesLa
 		t.Fatalf("seed legacy visibility hold: %v", err)
 	}
 
-	if _, err := provider.UpTo(ctx, 57); err != nil {
+	if err := provider.UpTo(ctx, 57); err != nil {
 		t.Fatalf("00057 legacy Up: %v", err)
 	}
 	var legacyDigest, legacyDisposition string
@@ -149,13 +145,6 @@ func TestM8InterviewCompletionReservationMigrationBackfillsGuardsAndSerializesLa
 	case <-time.After(3 * time.Second):
 		t.Fatal("late hold remained blocked after maintenance commit")
 	}
-
-	if _, err := provider.DownTo(ctx, 56); err == nil {
-		t.Fatal("00057 Down accepted reservation and hold recovery state")
-	} else {
-		assertPostgresCode(t, err, "55000")
-	}
-	assertMigrationVersion(t, ctx, pool, 57)
 }
 
 func assertM8InterviewCompletionReservationShape(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {

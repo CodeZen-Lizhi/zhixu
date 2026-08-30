@@ -8,12 +8,12 @@
 
 路线图定义见 `docs/roadmap.md` 4.1（P0，初估 5–8 人天）。
 
-## Confirmed Facts（仓库证据）
+## 启动时 Confirmed Facts（仓库证据）
 
 - 当前迁移运行时：`cmd/migrate` 加载配置后调用 `internal/platform/migration.Runner.Up`，
   顺序为 项目 Goose Up → River Up → River Validate，全程由池外专用 session 持有
   单一 advisory lock（`zhixu:migrate`）。依据 ADR-0015 与 `runner.go`。
-- 迁移源：`migrations/` 下 92 个 Goose SQL 文件，经 `migrations/embed.go` 的
+- 迁移源：`migrations/` 下 91 个 Goose SQL 文件，经 `migrations/embed.go` 的
   `embed.FS` 嵌入；history 表为 `public.goose_db_version`。
 - 兼容层 1：`legacyfs.go` 在内存中为 `00001`–`00010` 的 dollar-quoted body 注入
   Goose StatementBegin/End，不改写仓库 SQL。
@@ -44,8 +44,9 @@
 
 ## Requirements
 
-- R1：Atlas 版本化迁移目录成为项目 Schema 变更的唯一写入路径；现有 92 个迁移的
-  结果在新空库上与 Goose 全量执行逐对象一致。
+- R1：Atlas 版本化迁移目录成为项目 Schema 变更的唯一写入路径；现有 91 个 Goose
+  迁移的结果在新空库上与 Atlas 转换结果逐对象一致，并追加 Atlas 专属 00092 清理
+  遗留 history。
 - R2：已有数据库（含 Goose history 正常库、旧 shell-runner 库、Eino 冲突历史库）
   能被安全接管：不重放已应用变更、不破坏数据，无法识别时明确拒绝而非猜测。
 - R3：迁移入口拓扑保持"Migrate 成功才启动 API/Worker"的门禁语义；River
@@ -56,16 +57,16 @@
 
 ## Acceptance Criteria
 
-- [ ] AC1：空库经 Atlas 入口完成全量迁移后，与 Goose 基线 `atlas/schema.sql`
+- [x] AC1：空库经 Atlas 入口完成全量迁移后，与声明式 `atlas/schema.sql`
       漂移检查为空；`make atlas-schema-drift` dry-run 通过。
-- [ ] AC2：模拟三类存量库（Goose history 正常库、shell-runner 旧库、Eino 冲突
+- [x] AC2：模拟存量库（Goose history 正常/部分、shell-runner 旧库、Eino 冲突
       历史库）接管成功且终态 Schema 一致；无法识别的库以稳定错误码拒绝。
-- [ ] AC3：重复执行迁移幂等；迁移失败后可恢复续跑；Compose `up --wait` 门禁
+- [x] AC3：重复执行迁移幂等；迁移失败后可恢复续跑；Compose `up --wait` 门禁
       与 Worker readiness 语义不回归。
-- [ ] AC4：River Up/Validate 仍在项目迁移之后、同一锁范围内执行。
-- [ ] AC5：CI 中迁移 lint/漂移/哈希完整性检查通过；`go.mod`/vendor 中不再有
+- [x] AC4：River Up/Validate 仍在项目迁移之后、同一锁范围内执行。
+- [x] AC5：CI 中迁移 lint/漂移/哈希完整性检查通过；`go.mod`/vendor 中不再有
       `pressly/goose`。
-- [ ] AC6：testdb fixture 默认迁移回调切换为 Atlas，`MigrationFunc` API 不变，
+- [x] AC6：testdb fixture 默认迁移回调切换为 Atlas，`MigrationFunc` API 不变，
       `internal/platform/migration` 相关集成测试改写后通过。
 
 ## Out of Scope

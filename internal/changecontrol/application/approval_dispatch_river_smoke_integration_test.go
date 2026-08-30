@@ -40,7 +40,6 @@ import (
 	workflowdomain "github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
 	workspacepostgres "github.com/CodeZen-Lizhi/zhixu/internal/workspace/adapter/postgres"
 	workspacedomain "github.com/CodeZen-Lizhi/zhixu/internal/workspace/domain"
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -404,7 +403,7 @@ func newApprovalRiverSmokeDatabase(t *testing.T, ctx context.Context) (*pgxpool.
 		admin.Close()
 		t.Fatal(err)
 	}
-	runner, err := platformmigration.NewRunner(pool, projectmigrations.FS)
+	runner, err := platformmigration.NewAtlasEmbeddedRunner(pool)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -317,7 +317,7 @@ func applyWorkspaceAnalysisPublicationMigration(t *testing.T, ctx context.Contex
 	t.Helper()
 	provider := workspaceAnalysisMigrationProvider(t, pool)
 	insertWorkspaceAnalysisLegacyQuestion(t, ctx, pool)
-	if _, err := provider.ApplyVersion(ctx, 85, true); err != nil {
+	if err := provider.UpTo(ctx, 85); err != nil {
 		t.Fatalf("apply 00085: %v", err)
 	}
 	insertWorkspaceAnalysisRunFixture(t, ctx, pool)

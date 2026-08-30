@@ -9,7 +9,7 @@
 /internal/auth/                @CodeZen-Lizhi
 /internal/changecontrol/       @CodeZen-Lizhi
 /internal/gitsync/             @CodeZen-Lizhi
-/migrations/                   @CodeZen-Lizhi
+/atlas/                        @CodeZen-Lizhi
 /internal/platform/migration/  @CodeZen-Lizhi
 /api/                          @CodeZen-Lizhi
 

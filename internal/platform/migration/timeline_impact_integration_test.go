@@ -15,24 +15,18 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func TestTimelineImpactMigrationReplayAppendOnlyAndGuardedDown(t *testing.T) {
+func TestTimelineImpactMigrationReplayAppendOnly(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 37); err != nil {
+	if err := provider.UpTo(ctx, 37); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := provider.UpTo(ctx, 37); err != nil {
+	if err := provider.UpTo(ctx, 37); err != nil {
 		t.Fatalf("repeated migration UpTo(37) failed: %v", err)
 	}
-	var version int64
-	if err := pool.QueryRow(ctx, `SELECT max(version_id) FROM public.goose_db_version WHERE is_applied`).Scan(&version); err != nil {
-		t.Fatal(err)
-	}
-	if version != 37 {
-		t.Fatalf("migration version=%d want 37", version)
-	}
+	assertMigrationVersion(t, ctx, pool, 37)
 
 	workspaceID := "37000000-0000-4000-8000-000000000001"
 	eventID := "37000000-0000-4000-8000-000000000002"
@@ -72,46 +66,10 @@ VALUES($1,$2,$3,'READY','[]','{}',now(),'impact-report/v1',1,repeat('a',64),1,no
 		t.Fatalf("Timeline outbox append-only delete error=%v", err)
 	}
 
-	if _, err := migrationProvider(t, pool).DownTo(ctx, 36); !isPostgresCode(err, "55000") {
-		t.Fatalf("guarded 00037 Down error=%v", err)
-	}
-	if _, err := pool.Exec(ctx, `DROP TRIGGER impact_report_append_only ON ops.impact_report`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `DELETE FROM ops.impact_report WHERE id=$1`, reportID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `DROP TRIGGER timeline_projection_outbox_guard ON ops.timeline_projection_outbox`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `DELETE FROM ops.timeline_projection_outbox WHERE workspace_id=$1`, workspaceID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `DROP TRIGGER knowledge_event_append_only ON ops.knowledge_event`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `DELETE FROM ops.knowledge_event WHERE id=$1`, eventID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `CREATE TRIGGER knowledge_event_append_only BEFORE UPDATE OR DELETE ON ops.knowledge_event FOR EACH ROW EXECUTE FUNCTION ops.reject_append_only_mutation()`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := migrationProvider(t, pool).DownTo(ctx, 36); err != nil {
-		t.Fatalf("empty 00037 Down failed: %v", err)
+	if err := provider.UpTo(ctx, 37); err != nil {
+		t.Fatalf("repeated 00037 Up failed: %v", err)
 	}
 	var healthTriggerCount int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_trigger
-WHERE tgrelid='ops.health_issue'::regclass
-  AND tgname='timeline_project_health_issue_source'
-  AND NOT tgisinternal`).Scan(&healthTriggerCount); err != nil {
-		t.Fatal(err)
-	}
-	if healthTriggerCount != 0 {
-		t.Fatalf("health Timeline trigger survived 00037 Down: %d", healthTriggerCount)
-	}
-	if _, err := migrationProvider(t, pool).UpTo(ctx, 37); err != nil {
-		t.Fatalf("00037 Up after Down failed: %v", err)
-	}
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_trigger
 WHERE tgrelid='ops.health_issue'::regclass
   AND tgname='timeline_project_health_issue_source'
@@ -149,7 +107,7 @@ func TestTimelineImpactMigrationBackfillsAndProjectsHealthLifecycle(t *testing.T
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 36); err != nil {
+	if err := provider.UpTo(ctx, 36); err != nil {
 		t.Fatal(err)
 	}
 
@@ -170,7 +128,7 @@ WHERE workspace_id=$1 AND id=$2`, workspaceID, backfillIssueID, backfillResolved
 		t.Fatal(err)
 	}
 
-	if _, err := provider.UpTo(ctx, 37); err != nil {
+	if err := provider.UpTo(ctx, 37); err != nil {
 		t.Fatal(err)
 	}
 	backfillDetectedRef := "health-issue.detected:" + backfillIssueID + ":v1"
@@ -196,7 +154,7 @@ WHERE workspace_id=$1 AND aggregate_type='HEALTH_ISSUE' AND aggregate_id=$2`, wo
 	if backfillSources != 2 {
 		t.Fatalf("Health backfill source count=%d want 2", backfillSources)
 	}
-	if _, err := provider.UpTo(ctx, 62); err != nil {
+	if err := provider.UpTo(ctx, 62); err != nil {
 		t.Fatalf("upgrade Timeline projector schema to 00062: %v", err)
 	}
 
@@ -320,7 +278,7 @@ func TestTimelineImpactMigrationBackfillsAndProjectsSourceDirectory(t *testing.T
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 36); err != nil {
+	if err := provider.UpTo(ctx, 36); err != nil {
 		t.Fatal(err)
 	}
 
@@ -333,7 +291,7 @@ func TestTimelineImpactMigrationBackfillsAndProjectsSourceDirectory(t *testing.T
 	)
 	createdAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
 	insertTimelineSourceDirectoryFixtures(t, ctx, pool, workspaceID, proposalID, revisionID, approvalID, commitID, createdAt)
-	if _, err := provider.UpTo(ctx, 37); err != nil {
+	if err := provider.UpTo(ctx, 37); err != nil {
 		t.Fatal(err)
 	}
 
@@ -341,7 +299,7 @@ func TestTimelineImpactMigrationBackfillsAndProjectsSourceDirectory(t *testing.T
 	assertTimelineSourceBinding(t, ctx, pool, workspaceID, "approval:"+approvalID+":v1", "APPROVAL_GRANTED", "APPROVAL", approvalID, "approval:"+approvalID, 1, map[string]string{"proposal_id": proposalID, "approval_id": approvalID})
 	assertTimelineSourceBinding(t, ctx, pool, workspaceID, "proposal-commit:"+commitID+":v1", "GIT_COMMITTED", "GIT_COMMIT", commitID, "git_commit:"+strings.Repeat("c", 40), 1, map[string]string{"proposal_id": proposalID, "approval_id": approvalID, "git_commit_ref": strings.Repeat("c", 40)})
 	assertTimelineSourceBinding(t, ctx, pool, workspaceID, "proposal-revision-published:"+commitID+":v1", "VERSION_PUBLISHED", "ARTICLE_REVISION", revisionID, "article_revision:"+revisionID, 1, map[string]string{"proposal_id": proposalID, "approval_id": approvalID, "git_commit_ref": strings.Repeat("c", 40)})
-	if _, err := provider.UpTo(ctx, 62); err != nil {
+	if err := provider.UpTo(ctx, 62); err != nil {
 		t.Fatalf("upgrade Timeline projector schema to 00062: %v", err)
 	}
 

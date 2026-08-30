@@ -14,12 +14,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func TestM8LearningSSEMigrationProjectsMinimalEventsAndSupportsDownUp(t *testing.T) {
+func TestM8LearningSSEMigrationProjectsMinimalEvents(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 47); err != nil {
+	if err := provider.UpTo(ctx, 47); err != nil {
 		t.Fatalf("migrate through 00047: %v", err)
 	}
 	assertMigrationVersion(t, ctx, pool, 47)
@@ -97,31 +97,6 @@ func TestM8LearningSSEMigrationProjectsMinimalEventsAndSupportsDownUp(t *testing
 	}
 	if !events[1].OccurredAt.Equal(startedAt) || !events[4].OccurredAt.Equal(endedAt) {
 		t.Fatalf("review session event times created=%s updated=%s want=%s/%s", events[1].OccurredAt, events[4].OccurredAt, startedAt, endedAt)
-	}
-
-	if _, err := provider.DownTo(ctx, 46); err != nil {
-		t.Fatalf("00047 down: %v", err)
-	}
-	assertMigrationVersion(t, ctx, pool, 46)
-	pausedAt := confirmedAt.Add(time.Second)
-	if _, err := pool.Exec(ctx, `UPDATE learning.memory SET status='PAUSED',version=3,updated_at=$3
-		WHERE workspace_id=$1 AND id=$2`, workspaceID, memoryID, pausedAt); err != nil {
-		t.Fatal(err)
-	}
-	if count := m8LearningEventCount(t, ctx, pool, workspaceID); count != 5 {
-		t.Fatalf("00047 down still projected events: %d", count)
-	}
-
-	if _, err := provider.UpTo(ctx, 47); err != nil {
-		t.Fatalf("00047 re-up: %v", err)
-	}
-	resumedAt := pausedAt.Add(time.Second)
-	if _, err := pool.Exec(ctx, `UPDATE learning.memory SET status='ACTIVE',version=4,updated_at=$3
-		WHERE workspace_id=$1 AND id=$2`, workspaceID, memoryID, resumedAt); err != nil {
-		t.Fatal(err)
-	}
-	if count := m8LearningEventCount(t, ctx, pool, workspaceID); count != 6 {
-		t.Fatalf("00047 re-up event count=%d", count)
 	}
 }
 

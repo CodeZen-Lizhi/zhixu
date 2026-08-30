@@ -7,18 +7,13 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
 )
 
 func TestRAGStageProjectionIndexSupportsScopedLatestEventLookup(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
-	runner, err := NewRunner(pool, projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runner := newAtlasRunnerForPool(t, pool)
 	if err := runner.Up(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -91,18 +86,7 @@ func TestRAGStageProjectionIndexSupportsScopedLatestEventLookup(t *testing.T) {
 		t.Fatal(err)
 	}
 	provider := migrationProvider(t, pool)
-	if _, err := provider.DownTo(ctx, 22); err != nil {
-		t.Fatal(err)
-	}
-	var count int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_indexes
-		WHERE schemaname='ops' AND indexname='idx_ops_server_event_rag_stage_lookup'`).Scan(&count); err != nil {
-		t.Fatal(err)
-	}
-	if count != 0 {
-		t.Fatalf("index remains after 00023 Down: %d", count)
-	}
-	if _, err := provider.Up(ctx); err != nil {
+	if err := provider.Up(ctx); err != nil {
 		t.Fatal(err)
 	}
 }

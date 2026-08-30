@@ -8,64 +8,34 @@ import (
 	"testing"
 	"time"
 
-	changecontrolpostgres "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/postgres"
-	changecontroldomain "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/domain"
-	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func TestArtifactMigrationsUpRepeatAndGuardedDown(t *testing.T) {
+func TestArtifactMigrationsUpRepeat(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 41); err != nil {
+	if err := provider.UpTo(ctx, 41); err != nil {
 		t.Fatalf("empty artifact migration Up failed: %v", err)
 	}
-	if _, err := provider.UpTo(ctx, 41); err != nil {
+	if err := provider.UpTo(ctx, 41); err != nil {
 		t.Fatalf("repeated artifact migration Up failed: %v", err)
-	}
-	assertArtifactMigrationVersion(t, ctx, pool, 41)
-
-	seedArtifactMigrationHistory(t, ctx, pool)
-	if _, err := provider.DownTo(ctx, 38); err == nil {
-		t.Fatal("artifact migration Down accepted immutable history")
-	} else {
-		assertPostgresCode(t, err, "55000")
-		if !strings.Contains(err.Error(), "artifact v1 history exists") {
-			t.Fatalf("artifact migration guard error=%v", err)
-		}
-	}
-	// 00041/00040 have no generation or publish proposal fixture, so Goose has
-	// removed them before 00039 rejects the destructive downgrade. Re-applying
-	// proves that the guarded partial downgrade is recoverable without touching
-	// Artifact facts.
-	assertArtifactMigrationVersion(t, ctx, pool, 39)
-	if _, err := provider.UpTo(ctx, 41); err != nil {
-		t.Fatalf("artifact migration Up after guarded Down failed: %v", err)
 	}
 	assertArtifactMigrationVersion(t, ctx, pool, 41)
 }
 
-func TestArtifactExternalTransitionReservationMigrationUpDownAndGuards(t *testing.T) {
+func TestArtifactExternalTransitionReservationMigrationGuards(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 43); err != nil {
+	if err := provider.UpTo(ctx, 43); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := provider.UpTo(ctx, 43); err != nil {
+	if err := provider.UpTo(ctx, 43); err != nil {
 		t.Fatal(err)
-	}
-	assertArtifactMigrationVersion(t, ctx, pool, 43)
-	if _, err := provider.DownTo(ctx, 42); err != nil {
-		t.Fatalf("empty 00043 Down failed: %v", err)
-	}
-	assertArtifactMigrationVersion(t, ctx, pool, 42)
-	if _, err := provider.UpTo(ctx, 43); err != nil {
-		t.Fatalf("00043 Up after empty Down failed: %v", err)
 	}
 	assertArtifactMigrationVersion(t, ctx, pool, 43)
 
@@ -124,21 +94,9 @@ func TestArtifactExternalTransitionReservationMigrationUpDownAndGuards(t *testin
 	}
 	assertPostgresCode(t, insertReservation(1, "EXPORT_MARKDOWN", "reservation-cross-revision", strings.Repeat("c", 64), artifactMigrationWorkspaceID, otherArtifactID, artifactMigrationRevisionID), "23503")
 
-	if _, err := provider.DownTo(ctx, 42); err == nil {
-		t.Fatal("00043 Down accepted Artifact data")
-	} else {
-		assertPostgresCode(t, err, "55000")
-	}
-	assertArtifactMigrationVersion(t, ctx, pool, 43)
 	if err := insertReservation(1, "EXPORT_MARKDOWN", "reservation-migration", strings.Repeat("c", 64), artifactMigrationWorkspaceID, artifactMigrationArtifactID, artifactMigrationRevisionID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := provider.DownTo(ctx, 42); err == nil {
-		t.Fatal("00043 Down accepted a pending external transition reservation")
-	} else {
-		assertPostgresCode(t, err, "55000")
-	}
-	assertArtifactMigrationVersion(t, ctx, pool, 43)
 	var reservationCount int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM learning.artifact_external_transition_reservation WHERE workspace_id=$1 AND artifact_id=$2`, artifactMigrationWorkspaceID, artifactMigrationArtifactID).Scan(&reservationCount); err != nil {
 		t.Fatal(err)
@@ -176,140 +134,15 @@ func TestArtifactGenerationMigrationPreservesExistingAgentResultTypes(t *testing
 	defer cleanup()
 
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 41); err != nil {
+	if err := provider.UpTo(ctx, 41); err != nil {
 		t.Fatal(err)
 	}
 	assertAgentModelRunResultTypes(t, ctx, pool, true)
 
-	if _, err := provider.DownTo(ctx, 40); err != nil {
-		t.Fatal(err)
-	}
-	assertAgentModelRunResultTypes(t, ctx, pool, false)
-
-	if _, err := provider.UpTo(ctx, 41); err != nil {
+	if err := provider.UpTo(ctx, 41); err != nil {
 		t.Fatal(err)
 	}
 	assertAgentModelRunResultTypes(t, ctx, pool, true)
-}
-
-func TestPublishArtifactMigrationGuardsDownWithFrozenProposal(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := newMigrationTestDatabase(t, ctx)
-	defer cleanup()
-	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 41); err != nil {
-		t.Fatal(err)
-	}
-
-	workspaceID := foundation.ID("93000000-0000-4000-8000-000000000021")
-	now := time.Date(2026, 7, 26, 9, 0, 0, 0, time.UTC)
-	if _, err := pool.Exec(ctx, `
-		INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at)
-		VALUES($1,'artifact-proposal-migration','/tmp/artifact-proposal-migration','/tmp/artifact-proposal-migration',$2,'test',1,$2,$2)`, string(workspaceID), now); err != nil {
-		t.Fatal(err)
-	}
-	publication, err := changecontroldomain.ValidatePublishArtifact(changecontroldomain.PublishArtifact{
-		WorkspaceID: workspaceID, ArtifactID: "93000000-0000-4000-8000-000000000022", RevisionID: "93000000-0000-4000-8000-000000000023",
-		RevisionNo: 1, ArtifactVersion: 1, ContentHash: strings.Repeat("a", 64), SchemaVersion: changecontroldomain.PublishArtifactSchemaVersion,
-		SourceCoverage: []changecontroldomain.ArtifactSourceCoverage{{
-			SectionKey: "gap", Status: changecontroldomain.ArtifactCoverageStatusGap,
-			Gaps: []changecontroldomain.ArtifactCoverageGap{{Code: "NO_SOURCE", Description: "verified knowledge unavailable"}},
-		}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	changeHash, err := changecontroldomain.ComputePublishArtifactHash(publication, "frozen migration proposal", "retain isolated artifact")
-	if err != nil {
-		t.Fatal(err)
-	}
-	requestHash, err := changecontroldomain.ComputePublishArtifactRequestHash(workspaceID, publication, changecontroldomain.ProposalRiskLevelHigh, "frozen migration proposal", "retain isolated artifact")
-	if err != nil {
-		t.Fatal(err)
-	}
-	repository, err := changecontrolpostgres.NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
-	proposal := changecontroldomain.Proposal{
-		ID: "93000000-0000-4000-8000-000000000024", WorkspaceID: workspaceID, Type: changecontroldomain.ProposalTypePublishArtifact,
-		RiskLevel: changecontroldomain.ProposalRiskLevelHigh, IdempotencyKey: "artifact-migration-publish", RequestHash: requestHash,
-		Status: changecontroldomain.StatusReady, Version: 1, CreatedAt: now, UpdatedAt: now,
-		Revision: changecontroldomain.Revision{
-			ID: "93000000-0000-4000-8000-000000000025", ProposalID: "93000000-0000-4000-8000-000000000024", RevisionNo: 1,
-			Risk: "frozen migration proposal", RollbackPlan: "retain isolated artifact", ChangeHash: changeHash, PublishArtifact: &publication, CreatedAt: now,
-		},
-	}
-	if _, err := repository.CreatePublishArtifactProposal(ctx, proposal); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := provider.DownTo(ctx, 39); err == nil {
-		t.Fatal("00040 Down accepted publish_artifact Proposal")
-	} else {
-		assertPostgresCode(t, err, "55000")
-	}
-	assertArtifactMigrationVersion(t, ctx, pool, 40)
-	if _, err := provider.UpTo(ctx, 41); err != nil {
-		t.Fatalf("artifact generation migration reapply failed: %v", err)
-	}
-	assertArtifactMigrationVersion(t, ctx, pool, 41)
-}
-
-func TestArtifactGenerationMigrationGuardsDownWithPendingBinding(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := newMigrationTestDatabase(t, ctx)
-	defer cleanup()
-	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 41); err != nil {
-		t.Fatal(err)
-	}
-
-	seedArtifactMigrationHistory(t, ctx, pool)
-	now := time.Date(2026, 7, 26, 9, 30, 0, 0, time.UTC)
-	if _, err := pool.Exec(ctx, `
-		INSERT INTO workflow.definition(id,workspace_id,key,version,graph,created_at)
-		VALUES('93000000-0000-4000-8000-000000000031','93000000-0000-4000-8000-000000000001',
-			'artifact-section-generation',1,'{"nodes":[]}'::jsonb,$1)`, now); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `
-		INSERT INTO workflow.run(
-			id,workspace_id,definition_id,status,input,version,created_at,updated_at
-		) VALUES(
-			'93000000-0000-4000-8000-000000000032','93000000-0000-4000-8000-000000000001',
-			'93000000-0000-4000-8000-000000000031','pending','{}'::jsonb,1,$1,$1
-		)`, now); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `
-		INSERT INTO workflow.node_run(
-			id,run_id,node_key,node_type,status,attempt,input,version,created_at,updated_at
-		) VALUES(
-			'93000000-0000-4000-8000-000000000033','93000000-0000-4000-8000-000000000032',
-			'generate-section','artifact.generate-section','pending',0,'{}'::jsonb,1,$1,$1
-		)`, now); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `
-		INSERT INTO learning.artifact_section_generation(
-			id,workspace_id,artifact_id,source_revision_id,source_revision_no,source_artifact_version,
-			section_key,idempotency_key,request_hash,workflow_run_id,node_run_id,status,version,created_at,updated_at
-		) VALUES(
-			'93000000-0000-4000-8000-000000000034','93000000-0000-4000-8000-000000000001',
-			'93000000-0000-4000-8000-000000000002','93000000-0000-4000-8000-000000000003',1,1,
-			'overview','artifact-generation-migration',repeat('d',64),
-			'93000000-0000-4000-8000-000000000032','93000000-0000-4000-8000-000000000033',
-			'PENDING',1,$1,$1
-		)`, now); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := provider.DownTo(ctx, 40); err == nil {
-		t.Fatal("00041 Down accepted a pending Artifact generation binding")
-	} else {
-		assertPostgresCode(t, err, "55000")
-	}
-	assertArtifactMigrationVersion(t, ctx, pool, 41)
 }
 
 func TestArtifactGenerationRecoveryMigrationUpRepeatAndLifecycle(t *testing.T) {
@@ -317,10 +150,10 @@ func TestArtifactGenerationRecoveryMigrationUpRepeatAndLifecycle(t *testing.T) {
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 42); err != nil {
+	if err := provider.UpTo(ctx, 42); err != nil {
 		t.Fatalf("empty 00042 Up failed: %v", err)
 	}
-	if _, err := provider.UpTo(ctx, 42); err != nil {
+	if err := provider.UpTo(ctx, 42); err != nil {
 		t.Fatalf("repeated 00042 Up failed: %v", err)
 	}
 	assertArtifactMigrationVersion(t, ctx, pool, 42)
@@ -441,7 +274,7 @@ func TestArtifactGenerationRecoveryMigrationCompletedReceiptIsImmutable(t *testi
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 42); err != nil {
+	if err := provider.UpTo(ctx, 42); err != nil {
 		t.Fatal(err)
 	}
 	seedArtifactMigrationHistory(t, ctx, pool)
@@ -512,7 +345,7 @@ func TestArtifactGenerationRecoveryMigrationBackfillsExistingCompletedTerminalTi
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 41); err != nil {
+	if err := provider.UpTo(ctx, 41); err != nil {
 		t.Fatal(err)
 	}
 	seedArtifactMigrationHistory(t, ctx, pool)
@@ -549,7 +382,7 @@ func TestArtifactGenerationRecoveryMigrationBackfillsExistingCompletedTerminalTi
 		WHERE id=$1`, generationID, modelRunID, revisionID, completedAt); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := provider.UpTo(ctx, 42); err != nil {
+	if err := provider.UpTo(ctx, 42); err != nil {
 		t.Fatalf("00042 Up rejected an existing completed generation: %v", err)
 	}
 	var storedCompletedAt, storedTerminalAt time.Time
@@ -560,14 +393,7 @@ func TestArtifactGenerationRecoveryMigrationBackfillsExistingCompletedTerminalTi
 	if !storedTerminalAt.Equal(storedCompletedAt) || !storedTerminalAt.Equal(completedAt) {
 		t.Fatalf("completed terminal backfill completed_at=%s terminal_at=%s want=%s", storedCompletedAt, storedTerminalAt, completedAt)
 	}
-	if _, err := provider.DownTo(ctx, 41); err != nil {
-		t.Fatalf("00042 Down rejected losslessly representable completed history: %v", err)
-	}
-	assertArtifactMigrationVersion(t, ctx, pool, 41)
-	if _, err := provider.UpTo(ctx, 42); err != nil {
-		t.Fatalf("00042 reapply after completed history Down failed: %v", err)
-	}
-	if _, err := provider.UpTo(ctx, 42); err != nil {
+	if err := provider.UpTo(ctx, 42); err != nil {
 		t.Fatalf("repeated 00042 Up after completed backfill failed: %v", err)
 	}
 	seedArtifactGenerationWorkflow(t, ctx, pool, definitionID,
@@ -577,87 +403,6 @@ func TestArtifactGenerationRecoveryMigrationBackfillsExistingCompletedTerminalTi
 		"93000000-0000-4000-8000-0000000000b2", "overview", "generation-after-completed", completedAt); err != nil {
 		t.Fatalf("COMPLETED retained the active source-section slot: %v", err)
 	}
-}
-
-func TestArtifactGenerationRecoveryMigrationDownOnlyWhenLegacyUniqueIsRestorable(t *testing.T) {
-	t.Run("restorable pending history", func(t *testing.T) {
-		ctx := context.Background()
-		pool, cleanup := newMigrationTestDatabase(t, ctx)
-		defer cleanup()
-		provider := migrationProvider(t, pool)
-		if _, err := provider.UpTo(ctx, 42); err != nil {
-			t.Fatal(err)
-		}
-		seedArtifactMigrationHistory(t, ctx, pool)
-		now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
-		definitionID := "93000000-0000-4000-8000-000000000080"
-		seedArtifactGenerationDefinition(t, ctx, pool, definitionID, now)
-		seedArtifactGenerationWorkflow(t, ctx, pool, definitionID, "93000000-0000-4000-8000-000000000081", "93000000-0000-4000-8000-000000000082", now, false)
-		seedArtifactGenerationWorkflow(t, ctx, pool, definitionID, "93000000-0000-4000-8000-000000000083", "93000000-0000-4000-8000-000000000084", now, false)
-		if err := insertArtifactGenerationFixture(ctx, pool, "93000000-0000-4000-8000-000000000085", "93000000-0000-4000-8000-000000000081", "93000000-0000-4000-8000-000000000082", "overview", "generation-down-safe-1", now); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := provider.DownTo(ctx, 41); err != nil {
-			t.Fatalf("00042 Down rejected restorable pending history: %v", err)
-		}
-		assertArtifactMigrationVersion(t, ctx, pool, 41)
-		var recoveryColumns int
-		if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.columns
-			WHERE table_schema='learning' AND table_name='artifact_section_generation'
-			  AND column_name IN ('failure_class','error_code','error_summary','terminal_at')`).Scan(&recoveryColumns); err != nil {
-			t.Fatal(err)
-		}
-		if recoveryColumns != 0 {
-			t.Fatalf("00042 Down retained %d recovery columns", recoveryColumns)
-		}
-		if err := insertArtifactGenerationFixture(ctx, pool, "93000000-0000-4000-8000-000000000086", "93000000-0000-4000-8000-000000000083", "93000000-0000-4000-8000-000000000084", "overview", "generation-down-safe-2", now); err == nil {
-			t.Fatal("00042 Down did not restore the legacy source-section uniqueness constraint")
-		} else {
-			assertPostgresCode(t, err, "23505")
-		}
-		if _, err := provider.UpTo(ctx, 42); err != nil {
-			t.Fatalf("00042 reapply after safe Down failed: %v", err)
-		}
-		assertArtifactMigrationVersion(t, ctx, pool, 42)
-	})
-
-	t.Run("released source slot history", func(t *testing.T) {
-		ctx := context.Background()
-		pool, cleanup := newMigrationTestDatabase(t, ctx)
-		defer cleanup()
-		provider := migrationProvider(t, pool)
-		if _, err := provider.UpTo(ctx, 42); err != nil {
-			t.Fatal(err)
-		}
-		seedArtifactMigrationHistory(t, ctx, pool)
-		now := time.Date(2026, 7, 26, 12, 30, 0, 0, time.UTC)
-		definitionID := "93000000-0000-4000-8000-000000000090"
-		seedArtifactGenerationDefinition(t, ctx, pool, definitionID, now)
-		seedArtifactGenerationWorkflow(t, ctx, pool, definitionID, "93000000-0000-4000-8000-000000000091", "93000000-0000-4000-8000-000000000092", now, false)
-		seedArtifactGenerationWorkflow(t, ctx, pool, definitionID, "93000000-0000-4000-8000-000000000093", "93000000-0000-4000-8000-000000000094", now, false)
-		const failedGenerationID = "93000000-0000-4000-8000-000000000095"
-		if err := insertArtifactGenerationFixture(ctx, pool, failedGenerationID, "93000000-0000-4000-8000-000000000091", "93000000-0000-4000-8000-000000000092", "overview", "generation-down-guard-1", now); err != nil {
-			t.Fatal(err)
-		}
-		terminalAt := now.Add(time.Minute)
-		if _, err := pool.Exec(ctx, `UPDATE learning.artifact_section_generation SET
-			status='FAILED',failure_class='non_retryable',error_code='ARTIFACT_GENERATION_FAILED',
-			error_summary='generation failed safely',terminal_at=$2,version=2,updated_at=$2 WHERE id=$1`, failedGenerationID, terminalAt); err != nil {
-			t.Fatal(err)
-		}
-		if err := insertArtifactGenerationFixture(ctx, pool, "93000000-0000-4000-8000-000000000096", "93000000-0000-4000-8000-000000000093", "93000000-0000-4000-8000-000000000094", "overview", "generation-down-guard-2", terminalAt); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := provider.DownTo(ctx, 41); err == nil {
-			t.Fatal("00042 Down discarded terminal recovery history")
-		} else {
-			assertPostgresCode(t, err, "55000")
-			if !strings.Contains(err.Error(), "cannot restore artifact generation source uniqueness") {
-				t.Fatalf("00042 guarded Down error=%v", err)
-			}
-		}
-		assertArtifactMigrationVersion(t, ctx, pool, 42)
-	})
 }
 
 const (

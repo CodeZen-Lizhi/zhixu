@@ -6,18 +6,14 @@ import (
 	"context"
 	"testing"
 
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func TestHealthAffectedChangeMigrationSchemaAndEmptyDownUp(t *testing.T) {
+func TestHealthAffectedChangeMigrationSchemaAndUpRepeat(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
-	runner, err := NewRunner(pool, projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runner := newAtlasRunnerForPool(t, pool)
 	if err := runner.Up(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -27,24 +23,17 @@ func TestHealthAffectedChangeMigrationSchemaAndEmptyDownUp(t *testing.T) {
 	assertHealthAffectedChangeMigrationShape(t, ctx, pool)
 
 	provider := migrationProvider(t, pool)
-	if _, err := provider.DownTo(ctx, 27); err != nil {
-		t.Fatalf("00028 empty Down failed: %v", err)
-	}
-	assertHealthAffectedChangeMigrationAbsent(t, ctx, pool)
-	if _, err := provider.Up(ctx); err != nil {
-		t.Fatalf("00028 Up after Down failed: %v", err)
+	if err := provider.Up(ctx); err != nil {
+		t.Fatalf("00028 repeated up: %v", err)
 	}
 	assertHealthAffectedChangeMigrationShape(t, ctx, pool)
 }
 
-func TestHealthAffectedChangeMigrationProducersRollbackAndGuardedDown(t *testing.T) {
+func TestHealthAffectedChangeMigrationProducersRollback(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
-	runner, err := NewRunner(pool, projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runner := newAtlasRunnerForPool(t, pool)
 	if err := runner.Up(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -119,8 +108,6 @@ func TestHealthAffectedChangeMigrationProducersRollbackAndGuardedDown(t *testing
 	assertPostgresCode(t, err, "23514")
 	_, err = pool.Exec(ctx, `DELETE FROM ops.health_affected_change_outbox WHERE workspace_id=$1`, workspaceID)
 	assertPostgresCode(t, err, "55000")
-	_, err = migrationProvider(t, pool).DownTo(ctx, 27)
-	assertPostgresCode(t, err, "55000")
 }
 
 func assertHealthAffectedChangeMigrationShape(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
@@ -160,27 +147,6 @@ func assertHealthAffectedChangeMigrationShape(t *testing.T, ctx context.Context,
 	}
 	if tableCount != 1 || columns != 18 || constraints != 5 || triggers != 5 || indexes != 2 || schemaMeta != 1 {
 		t.Fatalf("00028 shape table=%d columns=%d constraints=%d triggers=%d indexes=%d meta=%d", tableCount, columns, constraints, triggers, indexes, schemaMeta)
-	}
-}
-
-func assertHealthAffectedChangeMigrationAbsent(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
-	t.Helper()
-	var tableCount, producerTriggers, schemaMeta int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.tables
-		WHERE table_schema='ops' AND table_name='health_affected_change_outbox'`).Scan(&tableCount); err != nil {
-		t.Fatal(err)
-	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.triggers
-		WHERE trigger_name IN ('health_affected_knowledge_change_enqueue','health_affected_index_failure_enqueue',
-			'health_affected_vector_degradation_enqueue','health_affected_lexical_degradation_enqueue')`).Scan(&producerTriggers); err != nil {
-		t.Fatal(err)
-	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM core.schema_meta
-		WHERE key='health_affected_change_outbox'`).Scan(&schemaMeta); err != nil {
-		t.Fatal(err)
-	}
-	if tableCount != 0 || producerTriggers != 0 || schemaMeta != 0 {
-		t.Fatalf("00028 Down table=%d producer_triggers=%d meta=%d", tableCount, producerTriggers, schemaMeta)
 	}
 }
 

@@ -6,29 +6,23 @@ import (
 	"context"
 	"testing"
 	"time"
-
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func TestM8InterviewMemoryCandidateIdempotencyMigrationUpDownAndConstraint(t *testing.T) {
+func TestM8InterviewMemoryCandidateIdempotencyMigrationRepeatUpAndConstraint(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
 
-	if _, err := provider.UpTo(ctx, 54); err != nil {
+	if err := provider.UpTo(ctx, 54); err != nil {
 		t.Fatalf("empty 00054 Up failed: %v", err)
 	}
-	if _, err := provider.UpTo(ctx, 54); err != nil {
+	if err := provider.UpTo(ctx, 54); err != nil {
 		t.Fatalf("repeated 00054 Up failed: %v", err)
 	}
-	assertM8MemoryCandidateMigrationVersion(t, ctx, pool, 54)
-	if _, err := provider.DownTo(ctx, 53); err != nil {
-		t.Fatalf("empty 00054 Down failed: %v", err)
-	}
-	assertM8MemoryCandidateMigrationVersion(t, ctx, pool, 53)
-	if _, err := provider.UpTo(ctx, 54); err != nil {
-		t.Fatalf("00054 Up after empty Down failed: %v", err)
+	assertMigrationVersion(t, ctx, pool, 54)
+	if err := provider.UpTo(ctx, 54); err != nil {
+		t.Fatalf("third 00054 Up failed: %v", err)
 	}
 
 	now := time.Date(2026, 7, 28, 14, 0, 0, 0, time.UTC)
@@ -56,16 +50,5 @@ func TestM8InterviewMemoryCandidateIdempotencyMigrationUpDownAndConstraint(t *te
 	assertPostgresCode(t, insert(secondID, "INTERVIEW", "interview:session:path:step"), "23505")
 	if err := insert(secondID, "USER", "user:manual"); err != nil {
 		t.Fatalf("user candidate should not use Interview provenance uniqueness: %v", err)
-	}
-}
-
-func assertM8MemoryCandidateMigrationVersion(t *testing.T, ctx context.Context, pool *pgxpool.Pool, want int64) {
-	t.Helper()
-	var got int64
-	if err := pool.QueryRow(ctx, `SELECT COALESCE(max(version_id), 0) FROM goose_db_version WHERE is_applied`).Scan(&got); err != nil {
-		t.Fatal(err)
-	}
-	if got != want {
-		t.Fatalf("migration version=%d want=%d", got, want)
 	}
 }

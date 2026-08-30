@@ -21,7 +21,6 @@ import (
 	modelcrypto "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/crypto"
 	"github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -742,14 +741,7 @@ func newModelSettingsTestDatabase(t *testing.T, ctx context.Context) (*pgxpool.P
 		admin.Close()
 		t.Fatal(err)
 	}
-	runner, err := migration.NewRunner(pool, projectmigrations.FS)
-	if err != nil {
-		pool.Close()
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier)
-		admin.Close()
-		t.Fatal(err)
-	}
-	if err := runner.Up(ctx); err != nil {
+	if err := migration.MigrateAtlas(ctx, pool); err != nil {
 		pool.Close()
 		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier)
 		admin.Close()

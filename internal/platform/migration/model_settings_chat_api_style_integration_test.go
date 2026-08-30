@@ -4,23 +4,22 @@ package migration
 
 import (
 	"context"
-	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-func TestModelSettingsChatAPIStyleMigrationBackfillsConstrainsAndGuardsDown(t *testing.T) {
+func TestModelSettingsChatAPIStyleMigrationBackfillsConstrains(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
 
-	if _, err := provider.UpTo(ctx, 77); err != nil {
+	if err := provider.UpTo(ctx, 77); err != nil {
 		t.Fatalf("prepare migrations through 00077: %v", err)
 	}
 	insertModelSettingsMigrationRevision(t, ctx, pool)
-	if _, err := provider.UpTo(ctx, 78); err != nil {
+	if err := provider.UpTo(ctx, 78); err != nil {
 		t.Fatalf("00078 legacy upgrade: %v", err)
 	}
 	assertModelSettingsMigrationVersion(t, ctx, provider, 78)
@@ -34,37 +33,11 @@ func TestModelSettingsChatAPIStyleMigrationBackfillsConstrainsAndGuardsDown(t *t
 	}
 	assertModelSettingsPostgresCode(t, insertModelSettingsChatAPIStyleRevision(ctx, pool, 2, "automatic"), "23514")
 
-	if _, err := provider.DownTo(ctx, 77); err != nil {
-		t.Fatalf("chat_completions-only 00078 Down: %v", err)
-	}
-	var columnCount int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.columns
-		WHERE table_schema='ops' AND table_name='model_settings_revisions' AND column_name='chat_api_style'`).Scan(&columnCount); err != nil {
-		t.Fatal(err)
-	}
-	if columnCount != 0 {
-		t.Fatalf("chat_api_style remains after compatible Down: %d", columnCount)
-	}
-
-	if _, err := provider.UpTo(ctx, 78); err != nil {
-		t.Fatalf("00078 Up after compatible Down: %v", err)
+	if err := provider.UpTo(ctx, 78); err != nil {
+		t.Fatalf("00078 re-up: %v", err)
 	}
 	if err := insertModelSettingsChatAPIStyleRevision(ctx, pool, 2, "responses"); err != nil {
 		t.Fatalf("responses revision rejected: %v", err)
-	}
-	_, err := provider.DownTo(ctx, 77)
-	if err == nil || !strings.Contains(err.Error(), "responses model settings revisions exist") {
-		t.Fatalf("00078 guarded Down error=%v", err)
-	}
-	assertModelSettingsPostgresCode(t, err, "55000")
-	assertModelSettingsMigrationVersion(t, ctx, provider, 78)
-	var columnCountAfterGuard int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.columns
-		WHERE table_schema='ops' AND table_name='model_settings_revisions' AND column_name='chat_api_style'`).Scan(&columnCountAfterGuard); err != nil {
-		t.Fatal(err)
-	}
-	if columnCountAfterGuard != 1 {
-		t.Fatalf("chat_api_style column count after guarded Down=%d want 1", columnCountAfterGuard)
 	}
 }
 

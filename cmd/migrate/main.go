@@ -8,11 +8,11 @@ import (
 	"os/signal"
 	"syscall"
 
+	atlasmigrations "github.com/CodeZen-Lizhi/zhixu/atlas"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
 	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
 )
 
 func main() {
@@ -51,7 +51,11 @@ func run(ctx context.Context, configPath string) error {
 	if err := database.Ping(ctx); err != nil {
 		return err
 	}
-	runner, err := platformmigration.NewRunner(database.DB(), projectmigrations.FS)
+	dir, err := platformmigration.LoadAtlasDir(atlasmigrations.MigrationDir())
+	if err != nil {
+		return err
+	}
+	runner, err := platformmigration.NewAtlasRunner(database.DB(), dir)
 	if err != nil {
 		return err
 	}

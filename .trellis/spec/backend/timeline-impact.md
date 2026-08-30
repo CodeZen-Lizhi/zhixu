@@ -70,7 +70,7 @@ type ImpactAuditPort interface {
 - `downstream_update` 的批准/驳回只持久化 decision，不 dispatch、不创建 Workflow、不授予 Write Authorization、不修改目标。Preflight、Apply、bootstrap、resume、dispatch、writeback 和数据库绑定入口均以 `409 DOWNSTREAM_UPDATE_APPLY_UNAVAILABLE` fail closed。
 - v1 Proposal Draft 仍是兼容输出而不是正式 Proposal；没有正式 owner 的对象必须 `requires_proposal=false`，生产不得暴露不可落地的假操作。
 - API、Worker、Router、System Status、OpenAPI checker 与 Web strict decoder 共享 `knowledge_timeline` capability 事实。依赖无法组装时显示 `unavailable`，不得用空结果或 disabled 假装 ready。
-- `00037` 与 `00062` 为 forward-safe additive migration。`00062` Down 仅忽略 migration 自动创建、零历史且未推进的 `COMPLETED` selector marker；任何 selector/report/v2 event/downstream Proposal 或已推进、失败、修改过的 marker 都以 SQLSTATE `55000` 拒绝。生产回滚保留事实并使用 forward fix。
+- `00037` 与 `00062` 为 forward-safe additive migration。任何 selector/report/v2 event/downstream Proposal 或已推进、失败、修改过的 marker 都是保留事实；生产回滚使用 forward fix。
 
 ## 4. Validation & Error Matrix
 
@@ -89,7 +89,7 @@ type ImpactAuditPort interface {
 | Timeline/Impact 依赖不可用 | `503 KNOWLEDGE_TIMELINE_UNAVAILABLE` 或 `503 KNOWLEDGE_IMPACT_UNAVAILABLE` |
 | 匿名、Capability 不足、Cookie POST 缺 Origin/CSRF | 分别为稳定 `401`/`403` Auth Problem；不得到达业务 Service |
 | Outbox source binding 漂移或终态回退 | 漂移持久化 `POISONED`，Worker Adapter 返回非重试的人工恢复错误 `KNOWLEDGE_TIMELINE_PROJECTION_POISONED`；非法 SQL 变更以 `55000` 拒绝 |
-| UPDATE/DELETE Event、Report、Audit，或存在 v2 事实/非 pristine marker 执行 `00062` Down | SQLSTATE `55000`，事实保持不变 |
+| UPDATE/DELETE Event、Report、Audit，或后续迁移试图删除 v2 事实/非 pristine marker | SQLSTATE `55000`，事实保持不变 |
 
 ## 5. Good / Base / Bad Cases
 
@@ -100,7 +100,7 @@ type ImpactAuditPort interface {
 ## 6. Tests Required
 
 - 领域/Application/HTTP/Auth/Audit 必须使用 `-race` 覆盖非法事件、Workspace 隔离、cursor binding/TTL、稳定排序、对象 canonicalization、报告 replay/conflict、四端点真实 `ctx.Done()` timeout、Capability、Origin/CSRF、actor 与递归脱敏。
-- PostgreSQL integration 必须覆盖 fresh/upgrade/repeat/guarded Down、零历史 marker 可 Down、selector 高水位/seek/backfill/crash recovery、Event/Report/Audit append-only、v1->v2 supersession、owner event replay/rollback、Outbox 单向状态机、POISONED、报告与 Audit 原子回滚，以及 Proposal approval/apply 零副作用。
+- PostgreSQL integration 必须覆盖 fresh/upgrade/repeat、零历史与历史 marker 前向升级、selector 高水位/seek/backfill/crash recovery、Event/Report/Audit append-only、v1->v2 supersession、owner event replay/rollback、Outbox 单向状态机、POISONED、报告与 Audit 原子回滚，以及 Proposal approval/apply 零副作用。
 - Domain/Application/HTTP/Auth 必须覆盖 Artifact/Review binding、当前报告校验、Proposal create/replay/conflict、approval-only、所有 Apply/dispatch/resume/writeback guard、strict request、Capability 与 deadline。
 - Worker process smoke 必须预置 PENDING source，启动真实 `cmd/worker` 并证明首个 ticker 前处理；重启后复用同一 Event 且不重复写入。
 - 发布前运行：

@@ -11,26 +11,22 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func TestM8InterviewProvenanceShellGuardMigrationSupportsEmptyDownUp(t *testing.T) {
+func TestM8InterviewProvenanceShellGuardMigrationSupportsRepeatedUp(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
 
-	if _, err := provider.UpTo(ctx, 56); err != nil {
+	if err := provider.UpTo(ctx, 56); err != nil {
 		t.Fatalf("00056 Up: %v", err)
 	}
-	if _, err := provider.UpTo(ctx, 56); err != nil {
+	if err := provider.UpTo(ctx, 56); err != nil {
 		t.Fatalf("00056 repeated Up: %v", err)
 	}
 	assertMigrationVersion(t, ctx, pool, 56)
 	assertM8InterviewProvenanceShellGuardShape(t, ctx, pool)
 
-	if _, err := provider.DownTo(ctx, 55); err != nil {
-		t.Fatalf("00056 Down: %v", err)
-	}
-	assertMigrationVersion(t, ctx, pool, 55)
-	if _, err := provider.UpTo(ctx, 56); err != nil {
+	if err := provider.UpTo(ctx, 56); err != nil {
 		t.Fatalf("00056 re-Up: %v", err)
 	}
 	assertM8InterviewProvenanceShellGuardShape(t, ctx, pool)
@@ -42,7 +38,7 @@ func TestM8InterviewQuestionEvidenceRejectsMalformedJSONWithoutEvaluationErrors(
 	defer cleanup()
 	provider := migrationProvider(t, pool)
 
-	if _, err := provider.UpTo(ctx, 56); err != nil {
+	if err := provider.UpTo(ctx, 56); err != nil {
 		t.Fatalf("00056 Up: %v", err)
 	}
 	workspaceID, sessionID, claimID := seedM8InterviewQuestionShell(t, ctx, pool)
@@ -56,22 +52,6 @@ func TestM8InterviewQuestionEvidenceRejectsMalformedJSONWithoutEvaluationErrors(
 			time.Date(2026, 7, 28, 9, 0, 0, 0, time.UTC))
 		assertPostgresCode(t, err, "23514")
 	}
-}
-
-func TestM8InterviewProvenanceShellGuardRejectsDownWithLearningHistory(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := newMigrationTestDatabase(t, ctx)
-	defer cleanup()
-	provider := migrationProvider(t, pool)
-
-	if _, err := provider.UpTo(ctx, 56); err != nil {
-		t.Fatalf("00056 Up: %v", err)
-	}
-	seedM8InterviewQuestionShell(t, ctx, pool)
-	_, err := provider.DownTo(ctx, 55)
-	assertPostgresCode(t, err, "55000")
-	assertMigrationVersion(t, ctx, pool, 56)
-	assertM8InterviewProvenanceShellGuardShape(t, ctx, pool)
 }
 
 func seedM8InterviewQuestionShell(t *testing.T, ctx context.Context, pool *pgxpool.Pool) (string, string, string) {

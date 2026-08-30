@@ -14,10 +14,10 @@ func TestM8ReviewAnswerDailyIndexSupportsDueQuotaLookup(t *testing.T) {
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 51); err != nil {
+	if err := provider.UpTo(ctx, 51); err != nil {
 		t.Fatalf("00051 up: %v", err)
 	}
-	if _, err := provider.UpTo(ctx, 51); err != nil {
+	if err := provider.UpTo(ctx, 51); err != nil {
 		t.Fatalf("00051 repeated up: %v", err)
 	}
 
@@ -69,20 +69,5 @@ func TestM8ReviewAnswerDailyIndexSupportsDueQuotaLookup(t *testing.T) {
 	}
 	if err := tx.Rollback(ctx); err != nil {
 		t.Fatal(err)
-	}
-
-	if _, err := provider.DownTo(ctx, 50); err != nil {
-		t.Fatalf("00051 down: %v", err)
-	}
-	var count int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_indexes
-		WHERE schemaname='learning' AND indexname='idx_learning_review_answer_workspace_created'`).Scan(&count); err != nil {
-		t.Fatal(err)
-	}
-	if count != 0 {
-		t.Fatalf("00051 index remains after down: %d", count)
-	}
-	if _, err := provider.UpTo(ctx, 51); err != nil {
-		t.Fatalf("00051 re-up: %v", err)
 	}
 }

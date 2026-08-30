@@ -11,21 +11,21 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func TestM8ReviewScorerVersionMigrationBackfillsConstraintsAndGuardsDown(t *testing.T) {
+func TestM8ReviewScorerVersionMigrationBackfillsConstraints(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
 
-	if _, err := provider.UpTo(ctx, 34); err != nil {
+	if err := provider.UpTo(ctx, 34); err != nil {
 		t.Fatalf("prepare migrations through 00034: %v", err)
 	}
 	claimID := "95000000-0000-4000-8000-000000000003"
 	seedLegacyReviewRows(t, ctx, pool, &claimID)
-	if _, err := provider.UpTo(ctx, 55); err != nil {
+	if err := provider.UpTo(ctx, 55); err != nil {
 		t.Fatalf("00055 legacy upgrade: %v", err)
 	}
-	if _, err := provider.UpTo(ctx, 55); err != nil {
+	if err := provider.UpTo(ctx, 55); err != nil {
 		t.Fatalf("00055 repeated Up: %v", err)
 	}
 	assertMigrationVersion(t, ctx, pool, 55)
@@ -72,40 +72,20 @@ func TestM8ReviewScorerVersionMigrationBackfillsConstraintsAndGuardsDown(t *test
 			assertPostgresCode(t, insertAnswer(testCase.id, testCase.key, testCase.version), testCase.code)
 		})
 	}
-
-	_, err := provider.DownTo(ctx, 54)
-	if err == nil || !strings.Contains(err.Error(), "review Answer scorer history exists") {
-		t.Fatalf("00055 guarded Down error=%v", err)
-	}
-	assertPostgresCode(t, err, "55000")
-	assertMigrationVersion(t, ctx, pool, 55)
-	assertM8ReviewScorerVersionShape(t, ctx, pool)
 }
 
-func TestM8ReviewScorerVersionMigrationSupportsEmptyDownUp(t *testing.T) {
+func TestM8ReviewScorerVersionMigrationSupportsRepeatedUp(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
 
-	if _, err := provider.UpTo(ctx, 55); err != nil {
+	if err := provider.UpTo(ctx, 55); err != nil {
 		t.Fatalf("empty 00055 Up: %v", err)
 	}
 	assertM8ReviewScorerVersionShape(t, ctx, pool)
-	if _, err := provider.DownTo(ctx, 54); err != nil {
-		t.Fatalf("empty 00055 Down: %v", err)
-	}
-	assertMigrationVersion(t, ctx, pool, 54)
-	var columnCount int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.columns
-		WHERE table_schema='learning' AND table_name='review_answer' AND column_name='scorer_version'`).Scan(&columnCount); err != nil {
-		t.Fatal(err)
-	}
-	if columnCount != 0 {
-		t.Fatalf("scorer_version remains after empty Down: %d", columnCount)
-	}
-	if _, err := provider.UpTo(ctx, 55); err != nil {
-		t.Fatalf("00055 Up after empty Down: %v", err)
+	if err := provider.UpTo(ctx, 55); err != nil {
+		t.Fatalf("00055 repeated Up: %v", err)
 	}
 	assertM8ReviewScorerVersionShape(t, ctx, pool)
 }

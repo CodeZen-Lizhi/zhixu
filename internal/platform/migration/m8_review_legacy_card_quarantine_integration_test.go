@@ -16,24 +16,16 @@ func TestM8ReviewLegacyCardQuarantineMigration(t *testing.T) {
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 51); err != nil {
+	if err := provider.UpTo(ctx, 51); err != nil {
 		t.Fatalf("prepare through 00051: %v", err)
 	}
 
-	if _, err := provider.UpTo(ctx, 52); err != nil {
-		t.Fatalf("00052 empty up: %v", err)
-	}
-	if _, err := provider.UpTo(ctx, 52); err != nil {
-		t.Fatalf("00052 repeated up: %v", err)
-	}
-	if _, err := provider.DownTo(ctx, 51); err != nil {
-		t.Fatalf("00052 empty down: %v", err)
-	}
-	assertMigrationVersion(t, ctx, pool, 51)
-
 	fixture := seedM8ReviewLegacyQuarantineFixture(t, ctx, pool)
-	if _, err := provider.UpTo(ctx, 52); err != nil {
+	if err := provider.UpTo(ctx, 52); err != nil {
 		t.Fatalf("00052 legacy quarantine up: %v", err)
+	}
+	if err := provider.UpTo(ctx, 52); err != nil {
+		t.Fatalf("00052 repeated up: %v", err)
 	}
 	assertMigrationVersion(t, ctx, pool, 52)
 
@@ -45,13 +37,6 @@ func TestM8ReviewLegacyCardQuarantineMigration(t *testing.T) {
 	openM8ReviewLowConflict(t, ctx, pool, fixture.workspaceID, fixture.futureClaimID, fixture.futurePeerClaimID, "7c000000-0000-4000-8000-000000000030", "future-low-conflict", fixture.now.Add(5*time.Minute))
 	assertM8ReviewQuarantinedCard(t, ctx, pool, fixture.workspaceID, fixture.futureCardID, "CLAIM_DISPUTED")
 	assertM8ReviewQuarantineProjection(t, ctx, pool, fixture.workspaceID, fixture.futureCardID, fixture.futureClaimID)
-
-	if _, err := provider.DownTo(ctx, 51); err == nil {
-		t.Fatal("00052 down discarded explicit Review quarantine history")
-	} else {
-		assertPostgresCode(t, err, "55000")
-	}
-	assertMigrationVersion(t, ctx, pool, 52)
 }
 
 type m8ReviewLegacyQuarantineFixture struct {

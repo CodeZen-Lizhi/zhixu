@@ -27,7 +27,7 @@ func TestUnavailableProfileGeneratorPersistsStateAndAttemptWithoutDerivedContent
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
-	if _, err := migrationProvider(t, pool).UpTo(ctx, 68); err != nil {
+	if err := migrationProvider(t, pool).UpTo(ctx, 68); err != nil {
 		t.Fatal(err)
 	}
 
@@ -291,7 +291,7 @@ func TestReadyProfileGeneratorPersistsEvidenceAndReplaysWithoutCallingModelAgain
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
-	if _, err := migrationProvider(t, pool).UpTo(ctx, 68); err != nil {
+	if err := migrationProvider(t, pool).UpTo(ctx, 68); err != nil {
 		t.Fatal(err)
 	}
 

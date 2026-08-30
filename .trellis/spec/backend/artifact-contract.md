@@ -82,7 +82,7 @@ List(context.Context, ListQuery) (ArtifactPage, error)
 | generation dependency disabled | 503 capability unavailable；人工 GAP/section 路径仍按领域规则工作 |
 | Model Run replay 的 model settings revision 与 Attempt 不同 | `ARTIFACT_WORKFLOW_MODEL_RUN_REPLAY_UNSAFE`，Provider 与 finalizer 调用数为 0 |
 | Export/Publish 外部成功但响应丢失 | 相同完整 binding 恢复并只产生一个外部事实 |
-| 00039-00043 存在受保护业务数据时 Down | SQLSTATE `55000`，迁移版本和数据保持不变 |
+| 00039-00043 旧库存在受保护业务数据 | 前向升级保持迁移版本语义和数据不变 |
 
 ### 5. Good / Base / Bad Cases
 
@@ -98,7 +98,7 @@ List(context.Context, ListQuery) (ArtifactPage, error)
   以及 PostgreSQL Model Run 持久化/恢复与 Attempt revision 一致。
 - PostgreSQL：Workspace 隔离、CAS、同 key replay、同 key/hash PLAN 不同候选 ID、不同 key race、六类非法 side-fact 组合、reservation owner/recovery/
   terminal close，使用 `-race -tags=integration -count=3 -p 1`。
-- Migration：00039-00043 空库 Up、重复 Up、Down-Up、CHECK/FK/trigger、guarded Down；只运行 Artifact 专属测试，
+- Migration：00039-00043 空库 Up、重复 Up、旧版本数据前向升级、CHECK/FK/trigger 与历史事实保留；只运行 Artifact 专属测试，
   不以其他里程碑的迁移测试替代。
 - HTTP/OpenAPI/Auth/Composition：strict JSON/body/query、Problem Details、Capability、API/Worker wiring 与契约 drift。
 - E2E：真实 PostgreSQL、API、River Worker、受控 fake model 与 Vite 完成 outline -> COVERED/GAP -> Draft -> export ->

@@ -32,7 +32,6 @@ import (
 	retrievaldomain "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
 	retrievalhttp "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/http"
 	workspacepostgres "github.com/CodeZen-Lizhi/zhixu/internal/workspace/adapter/postgres"
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgvector/pgvector-go"
@@ -826,7 +825,7 @@ func newHTTPIntegrationDatabase(t *testing.T) (*platformpostgres.Pool, context.C
 		admin.Close()
 		t.Fatal(err)
 	}
-	runner, err := platformmigration.NewRunner(migrationPool.DB(), projectmigrations.FS)
+	runner, err := platformmigration.NewAtlasEmbeddedRunner(migrationPool.DB())
 	if err == nil {
 		err = runner.Up(ctx)
 	}

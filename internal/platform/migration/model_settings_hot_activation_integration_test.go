@@ -11,13 +11,13 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/application"
 )
 
-func TestModelSettingsHotActivationMigrationCompatibleUpgradeAndDown(t *testing.T) {
+func TestModelSettingsHotActivationMigrationCompatibleUpgradeAndReUp(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
 
-	if _, err := provider.UpTo(ctx, 78); err != nil {
+	if err := provider.UpTo(ctx, 78); err != nil {
 		t.Fatalf("prepare migrations through 00078: %v", err)
 	}
 	insertModelSettingsMigrationRevision(t, ctx, pool)
@@ -37,10 +37,10 @@ SET phase='failed',lease_expires_at=NULL,last_error_code='MODEL_SETTINGS_TEST_FA
     version=version+1,updated_at=clock_timestamp() WHERE singleton=true`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := provider.UpTo(ctx, 79); err != nil {
+	if err := provider.UpTo(ctx, 79); err != nil {
 		t.Fatalf("00079 compatible failed-state upgrade: %v", err)
 	}
-	if _, err := provider.UpTo(ctx, 79); err != nil {
+	if err := provider.UpTo(ctx, 79); err != nil {
 		t.Fatalf("00079 repeat Up: %v", err)
 	}
 	var phase string
@@ -55,11 +55,8 @@ previous_active_revision,rollout_id::text,version FROM ops.model_settings_state 
 		t.Fatalf("preserved state phase=%q desired=%d active=%d target=%d previous=%d rollout=%q version=%d",
 			phase, desired, active, target, previous, preservedRollout, version)
 	}
-	if _, err := provider.DownTo(ctx, 78); err != nil {
-		t.Fatalf("00079 compatible Down: %v", err)
-	}
-	if _, err := provider.UpTo(ctx, 79); err != nil {
-		t.Fatalf("00079 Up after Down: %v", err)
+	if err := provider.UpTo(ctx, 79); err != nil {
+		t.Fatalf("00079 re-up: %v", err)
 	}
 }
 
@@ -69,7 +66,7 @@ func TestModelSettingsHotActivationMigrationRejectsLegacyLiveState(t *testing.T)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
 
-	if _, err := provider.UpTo(ctx, 78); err != nil {
+	if err := provider.UpTo(ctx, 78); err != nil {
 		t.Fatalf("prepare migrations through 00078: %v", err)
 	}
 	insertModelSettingsMigrationRevision(t, ctx, pool)
@@ -83,7 +80,7 @@ SET rollout_id='79000000-0000-4000-8000-000000000002'::uuid,target_revision=1,
     version=version+1,updated_at=clock_timestamp() WHERE singleton=true`); err != nil {
 		t.Fatal(err)
 	}
-	_, err := provider.UpTo(ctx, 79)
+	err := provider.UpTo(ctx, 79)
 	if err == nil || !strings.Contains(err.Error(), "legacy model settings rollout") {
 		t.Fatalf("00079 legacy live error=%v", err)
 	}
@@ -91,12 +88,12 @@ SET rollout_id='79000000-0000-4000-8000-000000000002'::uuid,target_revision=1,
 	assertModelSettingsMigrationVersion(t, ctx, provider, 78)
 }
 
-func TestModelSettingsHotActivationMigrationCommitEdgeAndGuardedDown(t *testing.T) {
+func TestModelSettingsHotActivationMigrationCommitEdge(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 79); err != nil {
+	if err := provider.UpTo(ctx, 79); err != nil {
 		t.Fatalf("migrate through 00079: %v", err)
 	}
 	insertModelSettingsMigrationRevision(t, ctx, pool)
@@ -209,12 +206,6 @@ SET phase='unavailable',heartbeat_at=clock_timestamp() WHERE role='api'`); err !
 SET phase='active',heartbeat_at=clock_timestamp() WHERE role='api'`); err != nil {
 		t.Fatalf("legal same-revision runtime availability restore: %v", err)
 	}
-	_, err = provider.DownTo(ctx, 78)
-	if err == nil || !strings.Contains(err.Error(), "hot activation history") {
-		t.Fatalf("00079 guarded Down error=%v", err)
-	}
-	assertModelSettingsPostgresCode(t, err, "55000")
-	assertModelSettingsMigrationVersion(t, ctx, provider, 79)
 }
 
 func TestModelSettingsHotActivationMigrationRejectsRawCommitWithoutReadyRoles(t *testing.T) {
@@ -222,7 +213,7 @@ func TestModelSettingsHotActivationMigrationRejectsRawCommitWithoutReadyRoles(t 
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 79); err != nil {
+	if err := provider.UpTo(ctx, 79); err != nil {
 		t.Fatalf("migrate through 00079: %v", err)
 	}
 	insertModelSettingsMigrationRevision(t, ctx, pool)
@@ -296,7 +287,7 @@ func TestModelSettingsHotActivationMigrationRejectsRawCommitOwnerMismatch(t *tes
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 79); err != nil {
+	if err := provider.UpTo(ctx, 79); err != nil {
 		t.Fatalf("migrate through 00079: %v", err)
 	}
 	insertModelSettingsMigrationRevision(t, ctx, pool)
@@ -354,7 +345,7 @@ func TestModelSettingsHotActivationMigrationRejectsRawRuntimeOwnershipBypass(t *
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 79); err != nil {
+	if err := provider.UpTo(ctx, 79); err != nil {
 		t.Fatalf("migrate through 00079: %v", err)
 	}
 	insertModelSettingsMigrationRevision(t, ctx, pool)
@@ -385,7 +376,7 @@ func TestModelSettingsHotActivationMigrationRejectsRawParticipantOwnershipBypass
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 79); err != nil {
+	if err := provider.UpTo(ctx, 79); err != nil {
 		t.Fatalf("migrate through 00079: %v", err)
 	}
 	insertModelSettingsMigrationRevision(t, ctx, pool)

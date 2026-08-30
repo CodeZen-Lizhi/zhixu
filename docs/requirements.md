@@ -316,4 +316,4 @@
 | AC-41 | Git Remote Sync | 单 HTTPS Remote、加密只写 Token、受控 Fetch/Fast-forward/non-force Push、post-check、并发栅栏、自动调度、恢复及 Git/索引分列状态可验证 |
 | AC-42 | Model Runtime Hot Activation | Save/Apply 在 API/Worker 容器 ID 与 `StartedAt` 不变时收敛为 desired=active=两 role applied/fresh；在途操作保持旧 generation，commit 后新操作使用 target，pre-commit失败保留旧 active，历史 Attempt/Index provenance不被当前默认模型覆盖 |
 
-精确 HTTP、事件和错误契约以 [OpenAPI](../api/openapi/openapi.json) 为准；精确数据库约束以 [迁移](../migrations/) 为准；当前交付状态不在本文件维护。
+精确 HTTP、事件和错误契约以 [OpenAPI](../api/openapi/openapi.json) 为准；精确数据库约束以 [Atlas 迁移](../atlas/migrations/) 为准；当前交付状态不在本文件维护。

@@ -1,5 +1,5 @@
-# ariga.io/atlas v1.3.0
-## explicit; go 1.26.4
+# ariga.io/atlas v1.2.2
+## explicit; go 1.25.0
 ariga.io/atlas/schemahcl
 ariga.io/atlas/sql/internal/specutil
 ariga.io/atlas/sql/internal/sqlx
@@ -403,9 +403,6 @@ github.com/mattn/go-isatty
 github.com/meguminnnnnnnnn/go-openai
 github.com/meguminnnnnnnnn/go-openai/internal
 github.com/meguminnnnnnnnn/go-openai/jsonschema
-# github.com/mfridman/interpolate v0.0.2
-## explicit; go 1.19
-github.com/mfridman/interpolate
 # github.com/mitchellh/go-wordwrap v0.0.0-20150314170334-ad45545899c7
 ## explicit
 github.com/mitchellh/go-wordwrap
@@ -496,19 +493,6 @@ github.com/pmezard/go-difflib/difflib
 # github.com/power-devops/perfstat v0.0.0-20210106213030-5aafc221ea8c
 ## explicit; go 1.14
 github.com/power-devops/perfstat
-# github.com/pressly/goose/v3 v3.27.0
-## explicit; go 1.25.0
-github.com/pressly/goose/v3
-github.com/pressly/goose/v3/database
-github.com/pressly/goose/v3/database/dialect
-github.com/pressly/goose/v3/internal/controller
-github.com/pressly/goose/v3/internal/dialects
-github.com/pressly/goose/v3/internal/gooseutil
-github.com/pressly/goose/v3/internal/legacystore
-github.com/pressly/goose/v3/internal/sqlparser
-github.com/pressly/goose/v3/lock
-github.com/pressly/goose/v3/lock/internal/store
-github.com/pressly/goose/v3/lock/internal/table
 # github.com/prometheus/client_golang v1.24.1
 ## explicit; go 1.25.0
 github.com/prometheus/client_golang/internal/github.com/golang/gddo/httputil
@@ -613,9 +597,6 @@ github.com/riverqueue/river/rivertype
 # github.com/sagikazarmark/locafero v0.11.0
 ## explicit; go 1.23.0
 github.com/sagikazarmark/locafero
-# github.com/sethvargo/go-retry v0.3.0
-## explicit; go 1.21
-github.com/sethvargo/go-retry
 # github.com/shirou/gopsutil/v4 v4.25.6
 ## explicit; go 1.23
 github.com/shirou/gopsutil/v4/common
@@ -855,9 +836,6 @@ go.opentelemetry.io/proto/otlp/trace/v1
 ## explicit; go 1.20
 go.uber.org/goleak
 go.uber.org/goleak/internal/stack
-# go.uber.org/multierr v1.11.0
-## explicit; go 1.19
-go.uber.org/multierr
 # go.yaml.in/yaml/v3 v3.0.4
 ## explicit; go 1.16
 go.yaml.in/yaml/v3

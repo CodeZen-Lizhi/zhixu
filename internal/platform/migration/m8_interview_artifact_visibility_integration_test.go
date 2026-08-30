@@ -4,33 +4,25 @@ package migration
 
 import (
 	"context"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func TestM8InterviewArtifactVisibilityMigrationUpDownConstraintsAndGuard(t *testing.T) {
+func TestM8InterviewArtifactVisibilityMigrationUpAndConstraints(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
 
-	if _, err := provider.UpTo(ctx, 53); err != nil {
+	if err := provider.UpTo(ctx, 53); err != nil {
 		t.Fatalf("empty 00053 Up failed: %v", err)
 	}
-	if _, err := provider.UpTo(ctx, 53); err != nil {
+	if err := provider.UpTo(ctx, 53); err != nil {
 		t.Fatalf("repeated 00053 Up failed: %v", err)
 	}
 	assertArtifactMigrationVersion(t, ctx, pool, 53)
-	if _, err := provider.DownTo(ctx, 52); err != nil {
-		t.Fatalf("empty 00053 Down failed: %v", err)
-	}
-	assertArtifactMigrationVersion(t, ctx, pool, 52)
-	if _, err := provider.UpTo(ctx, 53); err != nil {
-		t.Fatalf("00053 Up after empty Down failed: %v", err)
-	}
 
 	const (
 		workspaceID = "93000000-0000-4000-8000-000000000701"
@@ -70,23 +62,6 @@ func TestM8InterviewArtifactVisibilityMigrationUpDownConstraintsAndGuard(t *test
 		t.Run(test.name, func(t *testing.T) {
 			assertPostgresCode(t, insertHold(test.artifactID, test.ownerType, test.ownerID, test.ownerRole), test.code)
 		})
-	}
-
-	if _, err := provider.DownTo(ctx, 52); err == nil {
-		t.Fatal("00053 Down accepted a pending visibility hold")
-	} else {
-		assertPostgresCode(t, err, "55000")
-		if !strings.Contains(err.Error(), "visibility holds exist") {
-			t.Fatalf("00053 Down guard error=%v", err)
-		}
-	}
-	assertArtifactMigrationVersion(t, ctx, pool, 53)
-	var count int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM learning.artifact_visibility_hold`).Scan(&count); err != nil {
-		t.Fatal(err)
-	}
-	if count != 1 {
-		t.Fatalf("visibility hold count=%d want=1", count)
 	}
 }
 

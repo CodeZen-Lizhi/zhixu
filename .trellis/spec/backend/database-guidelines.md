@@ -2,23 +2,23 @@
 
 ## 适用范围
 
-适用于 PostgreSQL、pgvector、Goose 迁移、pgx 参数化查询、River 任务表以及各领域模块的 Repository/Projection 实现。仓库当前尚未配置 sqlc，Repository 沿用显式列、参数化手写 SQL；若后续引入 sqlc，必须作为独立迁移任务验证生成与兼容性。
+适用于 PostgreSQL、pgvector、Atlas 迁移、pgx 参数化查询、River 任务表以及各领域模块的 Repository/Projection 实现。仓库当前尚未配置 sqlc，Repository 沿用显式列、参数化手写 SQL；若后续引入 sqlc，必须作为独立迁移任务验证生成与兼容性。
 
 ## 已确认事实
 
-- M4-A 已锁定 River/riverpgxv5 `v0.40.0` 与 Goose `v3.27.0`。`cmd/migrate` 通过嵌入 SQL 的 Goose Provider 执行项目迁移，再以 `Schema:"workflow"` 执行 River Up/Validate；两套 history 独立，单一 advisory lock 覆盖整个入口。
-- `migrations/00001`–`00010` 的 Goose 兼容只在内存 `fs.FS` 中注入 StatementBegin/End；不得改写历史 SQL。没有 Goose history 的旧 shell-runner 数据库只有在完整 `core.schema_meta` 事实匹配时才能 baseline 接管。
+- M4-A 已锁定 River/riverpgxv5 `v0.40.0`；迁移执行器已由 Goose 切换为 Atlas `v1.2.2`（ADR-0029）。`cmd/migrate` 通过 embed 的 `atlas/migrations/` 以 in-process Atlas Executor 执行项目迁移，再以 `Schema:"workflow"` 执行 River Up/Validate；两套 history 独立，单一 advisory lock（`zhixu:migrate`）覆盖整个入口。
+- Goose 时代的 `migrations/00001`–`00010` 内存注解兼容层已随 Goose 一并删除；历史 SQL 不作改写。存在遗留 `goose_db_version` history 的旧库由运行器按版本集合直写 Atlas revision 接管；没有 history 的旧 shell-runner 数据库只有在完整 `core.schema_meta` 事实匹配时才能 baseline 接管；未知版本以 `MIGRATION_ADOPTION_UNKNOWN_VERSION` fail closed。
 - `workflow.run`、`workflow.node_run`、`workflow.outbox_event` 的 M4-A Runtime identity 字段允许完整 NULL 的 legacy tuple 或完整非 NULL 的 Runtime tuple；active legacy 行由新 Runtime Application/UoW 返回 `WORKFLOW_LEGACY_RUNTIME_UNSUPPORTED`，数据库不猜测回填。
 
 - PostgreSQL 是领域数据、投影和运行数据的主数据库；pgvector 保存向量，PostgreSQL FTS 保存全文索引（依据 [`system-design.md`](../../../docs/architecture/system-design.md)）。
-- PostgreSQL 驱动为 pgx，当前 SQL 访问采用参数化手写查询，迁移采用 Goose，River 只负责可运行 Job 的投递和 Worker 获取，不是 Workflow 业务事实源（依据 [`system-design.md`](../../../docs/architecture/system-design.md) 与 [`ai-runtime.md`](../../../docs/architecture/ai-runtime.md)）。
+- PostgreSQL 驱动为 pgx，当前 SQL 访问采用参数化手写查询，迁移采用 Atlas，River 只负责可运行 Job 的投递和 Worker 获取，不是 Workflow 业务事实源（依据 [`system-design.md`](../../../docs/architecture/system-design.md) 与 [`ai-runtime.md`](../../../docs/architecture/ai-runtime.md)）。
 - 事务边界由维护不变量的领域模块控制：Proposal/Approval、Workflow Node、Review Answer、Relation Confirm 等在数据库内使用 ACID；文件和 Git 不放入数据库事务。
 - Source Version、Article Revision、Proposal Revision、Workflow Definition/Run、Embedding/Index Version 等必须有版本、哈希或状态约束；重复消息不得创建重复 Node、Tool Call、Answer 或 Health Issue。
 - 查询必须支持稳定排序和 cursor 分页；大集合、图谱邻居和 Collection 结果禁止无分页返回（依据 [`application-contracts.md`](../../../docs/architecture/application-contracts.md)）。
 
 ## 目标代码落点（M1 起）
 
-- `migrations/`：Goose 前向迁移、约束、索引和必要的数据回填。
+- `atlas/migrations/`：Atlas 前向迁移（无 Down，fix-forward）、约束、索引和必要的数据回填；改动后必须重跑 `make atlas-migrate-hash` 并同步 `atlas/schema.sql`。
 - `internal/platform/postgres/`：pgx 连接池、sqlc 生成代码入口、Repository/Projection Adapter、事务辅助函数。
 - `internal/platform/testdb/`：Testcontainers-Go `v0.40.0` 测试数据库工厂。容器模式独占 pgvector 容器；外部模式只接受 admin URL，并由工厂创建、迁移和删除唯一临时数据库。两种模式都只暴露同一个 `platformpostgres.Pool`。
 - 各领域模块（如 `internal/changecontrol/`、`internal/workflow/`、`internal/review/`）：定义 Repository/Store Interface 和事务不变量；不得暴露 sqlc 类型。
@@ -73,16 +73,16 @@ git diff --check
 
 ### M1 代码与迁移落地后
 
-- Goose 从空数据库执行全部迁移，再次执行不会产生未处理错误。
+- Atlas 从空数据库执行全部迁移，再次执行不会产生未处理错误。
 - PostgreSQL/Testcontainers 测试覆盖外键、唯一键、乐观锁、幂等、Outbox、租约、FTS、pgvector 和分页稳定性。
 - `EXPLAIN`/容量测试证明核心 Search、Collection、Graph、Workflow 查询使用预期索引；性能门槛以 [`quality.md`](../../../docs/architecture/quality.md) 和任务验收为准。
 - 重复消息、重复审批、重复 Tool Call、重复 Answer 和 Health Scan 不产生重复副作用。
 
-## 待 M1 代码验证
+## 后续仍需验证
 
-- sqlc、Goose、River 和 pgvector 的具体版本及配置文件位置；当前仓库没有 manifest 或 lockfile。
+- sqlc 尚未引入；Atlas、River 与 pgvector 的升级必须遵守各自 ADR 门禁，不得绕过 manifest、vendor 或镜像 digest 锁定。
 - 最终数据库 Schema 组织方式、字段长度、时间类型和所有索引名称。
-- 生产连接池参数和后续 Atlas 迁移入口切换。
+- 生产连接池参数和 Atlas 迁移在真实发布环境中的备份恢复演练。
 - 中文 FTS 配置、向量维度、HNSW 参数以及 50 万数据容量结果。
 
 ## Scenario: Testcontainers PostgreSQL 集成测试工厂
@@ -101,7 +101,7 @@ git diff --check
 
 ### 3. Contracts
 
-- 容器模式固定 `pgvector/pgvector:pg16`，使用随机映射端口、SQL `SELECT 1` readiness、无固定容器名、无 reuse；迁移只通过当前 Goose/River callback 执行，再打开一个共享 platform Pool。
+- 容器模式固定 `pgvector/pgvector:pg16`，使用随机映射端口、SQL `SELECT 1` readiness、无固定容器名、无 reuse；迁移只通过当前 Atlas/River callback 执行，再打开一个共享 platform Pool。
 - 外部模式使用 cryptographically-random `zhixu_test_*` 名称，通过 `pgx.Identifier` 执行 `CREATE DATABASE`；成功、失败和 close 均先关闭临时库连接，再以 `DROP DATABASE <generated> WITH (FORCE)` 删除生成库，最后关闭 admin Pool。admin 库永不迁移或删除。
 - `Availability` 默认 `FailWhenUnavailable`；只有调用方显式指定 `SkipWhenUnavailable` 才能跳过 Docker 不可用测试。
 - Close 幂等且有独立有限 cleanup context；错误保留可匹配的主因，但错误文本和 Diagnostics 不包含密码、完整 DSN、绝对路径或高敏 SQL 参数。
@@ -126,13 +126,13 @@ git diff --check
 ### 6. Tests Required
 
 - 单测覆盖 Config 校验、admin URL、随机命名、脱敏、Fail/Skip policy 和 Close 幂等。
-- `integration && testcontainers` 覆盖空库 Goose/River/vector、GORM/UoW/pgx 能力、两个并行 fixture、external admin 生成库生命周期、admin 库未迁移、迁移失败后的容器/数据库清理。
+- `integration && testcontainers` 覆盖空库 Atlas/River/vector、GORM/UoW/pgx 能力、两个并行 fixture、external admin 生成库生命周期、admin 库未迁移、迁移失败后的容器/数据库清理。
 - 必须运行定向 `go test`、`-race`、`go vet`、`go mod tidy -diff`、vendor 编译测试、`git diff --check` 和显式容器 smoke。
 
 ### 7. Wrong vs Correct
 
 ```text
-Wrong: Open(ctx, Config{ExternalAdminURL: sharedURL}) 直接对 sharedURL 执行 Goose，Close 再删除 sharedURL。
+Wrong: Open(ctx, Config{ExternalAdminURL: sharedURL}) 直接对 sharedURL 执行 Atlas 迁移，Close 再删除 sharedURL。
 Correct: 先用 sharedURL 连接 admin 库，生成 zhixu_test_*，只对生成库迁移并在 Close 时 FORCE drop 生成库。
 
 Wrong: Close 使用已经取消的业务 ctx，导致失败路径遗留容器或临时库。
@@ -169,8 +169,8 @@ Correct: Close 使用独立、有限的 cleanup context，并通过 sync.Once �
   exact delivery 先返回持久 binding。caller 不传 revision，激活时不得批量改写历史 Attempt。
 - revision `0` 是存在于状态/Attempt binding 中但没有 revision 行的 canonical disabled；正 revision 才能从历史设置重建。
   迁移、FK helper 与 Claim 必须显式保留该语义，不能把 0 当缺失值。
-- `00079` 是 forward-only mixed-binary boundary：存在 legacy live rollout 时 Up 返回 `55000`；存在受保护热激活历史时
-  Down 必须 fail closed。不得修改已发布迁移来假设旧环境会重跑。
+- `00079` 是 forward-only mixed-binary boundary：存在 legacy live rollout 时 Up 返回 `55000`；受保护热激活历史
+  不得由后续迁移删除。不得修改已发布迁移来假设旧环境会重跑。
 
 ### 4. Validation & Error Matrix
 
@@ -182,7 +182,7 @@ Correct: Close 使用独立、有限的 cleanup context，并通过 sync.Once �
 | activating 后尝试回到 previous/failed | 拒绝；只允许 acknowledge target 并 finalize idle |
 | 新 Claim 看见 stale/mismatch Worker runtime | 不创建新 Attempt，返回稳定 runtime unavailable/conflict |
 | exact delivery 重放 | 返回原 Attempt binding，不从当前 active 重新选择 |
-| legacy live rollout 升级或已有 participant 历史 Down | SQLSTATE `55000`，schema/data/version 保持可恢复 |
+| legacy live rollout 升级 | SQLSTATE `55000`，schema/data/version 保持可恢复 |
 
 ### 5. Good / Base / Bad Cases
 
@@ -214,7 +214,7 @@ Correct: trigger/Repository 都以数据库时间和 version/owner CAS fail clos
 
 ### 1. Scope / Trigger
 
-- 适用于 `migrations/00025`–`00029`、`internal/collection`、`internal/health`、SMART_COLLECTION Candidate scan、
+- 适用于 `atlas/migrations/00025`–`00029`、`internal/collection`、`internal/health`、SMART_COLLECTION Candidate scan、
   schedule delivery、affected-change outbox，以及 Collection result/preview revision 字段的任何修改。
 
 ### 2. Signatures
@@ -249,7 +249,7 @@ Correct: trigger/Repository 都以数据库时间和 version/owner CAS fail clos
 | Query 引用 `health_issue_type` 后 Health revision 改变 | 两个 hash 都改变，旧 scan binding 返回 stale |
 | partial/failed/cancelled detector | 保留 Issue，不执行 missing-set resolve |
 | pending schedule 或重复 key 不同 payload | conflict；相同 payload exact replay |
-| guarded Down 存在业务行 | SQLSTATE `55000`，不得静默删除 |
+| 旧版本业务行前向升级 | 保留业务事实并满足新约束，不得静默删除 |
 
 ### 5. Good / Base / Bad Cases
 
@@ -261,7 +261,7 @@ Correct: trigger/Repository 都以数据库时间和 version/owner CAS fail clos
 
 ### 6. Tests Required
 
-- 空库/重复 Up、空数据 Down→Up、业务数据 guarded Down；Workspace 复合约束和 append-only receipt trigger。
+- 空库/重复 Up、旧版本业务数据前向升级；Workspace 复合约束和 append-only receipt trigger。
 - Collection lifecycle exact replay/CAS、全字段 operator、cursor invalid/stale、统一结果 refs 和 EXPLAIN/index。
 - 回归必须证明：Health Issue 写入会使 `revision_hash` 变化；不依赖 Health membership 的 `scan_revision_hash` 与
   `PlanDurableScan().ReadModelRevision` 相等且保持稳定；依赖 `health_issue_type` 的旧 binding 明确 stale；query-count
@@ -298,11 +298,11 @@ Correct: cursor/page 使用 `revision_hash`；Health/Semantic durable binding �
 - Conflict 在提交时至少两个不同 Claim；OpenConflict 与 Member 插入、Claim→DISPUTED 在同一事务。
 - Applicability 是版本化 canonical JSON object；数据库验证 JSON 类型/hash 格式，语义比较由 Domain 负责。
 - 可变聚合 `version=expected+1`；命令 receipt 只保存 request hash 与 aggregate binding，不缓存第二份响应事实。
-- 有任一 Knowledge 业务数据时 `00017 Down` 必须返回 SQLSTATE `55000`；发布回滚保留数据并 forward fix。
+- Knowledge 业务事实不得由后续迁移删除；发布回滚保留数据并 forward fix。
 
 ### Required Tests
 
-- 空库/重复 Up、空数据 Down→Up、有数据 guarded Down、迁移版本和旧 Down 顺序。
+- 空库/重复 Up、旧版本数据前向升级、迁移版本顺序与约束保持。
 - Provenance 错绑/跨 Workspace、自环/非法端点组合、无 Evidence Confirm、Conflict 少成员。
 - 对称正反/并发去重、CAS、同幂等键不同请求、response-loss replay 和事务半失败回滚。
 - 批量 Claims/Relations/Evidence 查询使用显式列、固定上限和稳定排序，不逐 owner N+1。
@@ -469,7 +469,7 @@ FinalizeWritebackCleanup(context.Context, foundation.ID, int64, time.Time) (doma
 
 - Good：相同 Begin/Publish 请求重复执行，返回同一 Execution/Mapping/Outbox，不重复消费授权、不增加版本或第二副作用。
 - Base：历史 Approval 的 Git HEAD 为 NULL 时仍可查询 Proposal，但创建 Execution 被数据库拒绝，要求重新审批。
-- Base：旧 Execution 没有 M5-04D identity token 仍可查询；新 `file_prepared` 必须写齐三个 token，活动恢复记录禁止 Down 删除字段。
+- Base：旧 Execution 没有 M5-04D identity token 仍可查询；新 `file_prepared` 必须写齐三个 token，后续迁移不得删除活动恢复字段。
 - Bad：先通过旧 ConsumeAuthorization 消费两份授权，再用同凭据首次 Begin 并创建 Execution。
 - Bad：Commit 后分别提交 Mapping、Proposal 状态与 Outbox；中途失败会形成无法证明的完成状态。
 - Bad：Create 先锁 Proposal 再锁 Authorization，而 Consume 先锁 Authorization 再锁 Proposal；并发时可形成死锁环。
@@ -477,7 +477,7 @@ FinalizeWritebackCleanup(context.Context, foundation.ID, int64, time.Time) (doma
 ### 6. Tests Required
 
 - Domain：Proposal/Writeback 状态机、完整身份、Result Hash 不可变、Publish Payload 精确字段和 schema version。
-- PostgreSQL：空库全部 Up 两次、空数据 Down→Up、活动 checkpoint Down 返回 SQLSTATE `55000`；Atomic Begin 双消费/rollback/concurrent replay、consumed-without-execution 拒绝、lease 只接受 Execution ID、file identity token round-trip/不可变、checkpoint、publish/replay。
+- PostgreSQL：空库全部 Up 两次、旧版本活动 checkpoint 前向升级后字段与事实保留；Atomic Begin 双消费/rollback/concurrent replay、consumed-without-execution 拒绝、lease 只接受 Execution ID、file identity token round-trip/不可变、checkpoint、publish/replay。
 - SQL 负测：交叉 Workspace/Run/Node/Approval/Authorization 绑定、非法状态/version、Execution/Mapping/Outbox update/delete、敏感或额外 Payload 字段。
 - 并发：Create Execution 与 Consume Authorization 使用真实连接并发至少 20 轮，`-race` 下无 `40P01`、超时或重复副作用。
 
@@ -550,7 +550,7 @@ func (r *Repository) FindWritebackExecutionByKey(
 
 ### 6. Tests Required
 
-- PostgreSQL：并发唯一 binding、Rejected 无 Workflow、Runtime 失败全回滚、commit response-loss 后 exact replay、迁移 Up/Down/guard 和同 Workspace 约束。
+- PostgreSQL：并发唯一 binding、Rejected 无 Workflow、Runtime 失败全回滚、commit response-loss 后 exact replay、迁移重复 Up 与同 Workspace 约束。
 - Application/HTTP：首次 201、exact replay 200、Approved 返回同一 status URL、Rejected 省略 Workflow 字段、完整 replay 不访问 FS/Git。
 - Bootstrap：exact lookup、双授权、Begin response-loss、binding conflict Manual、授权 replay 无 Credential 时拒绝。
 - 真实 Smoke：HTTP Approval → River Claim → Bootstrap → Safe Writeback → Workflow Complete；双 Worker只产生一个 Execution/Commit/Mapping/Reindex Outbox。
@@ -594,7 +594,7 @@ func (r *Repository) CompleteReindexTx(
 ) (domain.CompleteReindexResult, error)
 ```
 
-数据库入口为 `migrations/00015_reindex_consumer.sql`；River Args 固定为
+数据库入口为 `atlas/migrations/00015_reindex_consumer.sql`；River Args 固定为
 `schema_version/delivery_id/dispatch_no`，Outbox Payload 固定为 Reindex v1 的 11 个字段。
 
 ### 3. Contracts
@@ -637,7 +637,7 @@ func (r *Repository) CompleteReindexTx(
 
 ### 6. Tests Required
 
-- 00015 空库/重复 Up、空数据 Down→Up、有业务数据 Down `55000`。
+- 00015 空库/重复 Up、旧版本业务数据前向升级且事实保持。
 - Dispatcher rollback/response-loss/并发，Delivery lease/fence/checkpoint，Snapshot capacity/
   incremental，Regression closure，Completion fault injection/replay。
 - 真实 PostgreSQL/River smoke 覆盖 committed blob 与工作树漂移、四 checkpoint、Ready/
@@ -735,7 +735,7 @@ CancellationSafetyGuard.SafeToCancelWorkflowNode(context.Context, any, foundatio
 - Process smoke：真实测试子进程 SIGKILL → River stuck rescue → 新 attempt completed。
 - River maintenance service 在同一 Schema 内通过 leader election 单实例运行；测试只换
   queue 不能隔离 rescuer/scheduler 配置。需要自定义短 rescue 周期的进程 smoke 必须为
-  每次运行创建独立临时数据库或独立 River Schema，并执行完整 Goose + River Up/Validate。
+  每次运行创建独立临时数据库或独立 River Schema，并执行完整 Atlas + River Up/Validate。
 - Compose：`up --wait`、Migrate→API/Worker 顺序、API/Worker readiness、UID 10001、SIGTERM exit 0、DB 短断 503→恢复 200。
 
 ### 7. Wrong vs Correct
@@ -783,12 +783,12 @@ Correct: 同一事务调用 CancellationSafetyGuard；不安全时保持可恢�
 - Projection 批次全有或全无；重复批次只允许向量、Token Count、状态和失败码完全一致，不覆盖全文投影。
 - Activate/Rollback 使用 Workspace advisory transaction lock、Index 行锁和单 Active 部分唯一索引；Activation Receipt 保存 `activate|rollback` 类型和切换后版本，响应丢失或后续状态变化后仍按 idempotency key 重建当次历史快照，不重复切换。
 - `GetActive` 没有 Active 时返回稳定 NotFound，不回退到 Building/Failed/Retiring。
-- Migration Down 在任意 Retrieval 业务数据存在时返回 SQLSTATE `55000`；空库迁移入口不能在 `CREATE EXTENSION vector` 前注册 pgvector 类型。
+- Retrieval 业务事实不得由后续迁移删除；空库迁移入口不能在 `CREATE EXTENSION vector` 前注册 pgvector 类型。
 
 ### 4. Tests Required
 
 - Domain/Application `-race -count=20`：状态矩阵、Manifest Hash、Fusion canonical JSON、vector-only batch、维度/NaN/Inf/零范数、Ready degraded、Activate/Rollback。
-- PostgreSQL：空库/重复 Up/Down→Up、跨 Workspace、不可变、Lexical Builder、批量 replay/conflict、首次/替换/回滚激活、并发双激活、response-loss replay。
+- PostgreSQL：空库/重复 Up、旧版本数据前向升级、跨 Workspace、不可变、Lexical Builder、批量 replay/conflict、首次/替换/回滚激活、并发双激活、response-loss replay。
 - EXPLAIN：FTS GIN、Canonical Chunk trigram GIN、Workspace/Index/Chunk B-tree；未评测 HNSW 不计入完成证据。
 
 ### 5. Wrong vs Correct
@@ -830,7 +830,7 @@ type SearchStore interface {
 }
 ```
 
-数据库入口为 `migrations/00016_embedding_hybrid_search.sql`。正式 Adapter 为
+数据库入口为 `atlas/migrations/00016_embedding_hybrid_search.sql`。正式 Adapter 为
 OpenAI-Compatible `/v1/embeddings` 与 Ollama `/api/embed`；Reranker 当前只冻结 Port，不提供未批准的
 生产协议空壳。
 
@@ -871,7 +871,7 @@ OpenAI-Compatible `/v1/embeddings` 与 Ollama `/api/embed`；Reranker 当前只�
 | 历史 Hybrid pending 且匹配 Provider 不可用 | `RETRIEVAL_VECTOR_EMBEDDER_VERSION_UNAVAILABLE` / DependencyUnavailable |
 | FTS-only Keyword/Hybrid/Semantic | 正常 / Keyword+vector/rerank degraded / `RETRIEVAL_SEMANTIC_UNAVAILABLE` |
 | Rerank nil/Retryable/损坏 output | RRF+degraded / RRF+degraded / fail closed |
-| 00016 已有 cache、V2 Delivery 或 Hybrid Index Down | SQLSTATE `55000` |
+| 00016 旧库已有 cache、V2 Delivery 或 Hybrid Index | 前向升级保留全部事实并满足新约束 |
 
 ### 5. Good / Base / Bad Cases
 
@@ -888,7 +888,7 @@ OpenAI-Compatible `/v1/embeddings` 与 Ollama `/api/embed`；Reranker 当前只�
 - Domain/Application：Embedding hash/limits、RRF overflow、filter/candidate/evidence、vector cache hit/miss、
   total input bytes、degraded derivation、历史 terminal recovery、Search/Rerank 正常/边界/失败路径。
 - Provider httptest：两协议 batch、状态码、非法/超大响应、redirect、timeout/cancel error chain、Secret canary。
-- PostgreSQL：00016 Up/重复 Up/Down→Up/guard、Workspace cache、set-based commit/replay/conflict、V2
+- PostgreSQL：00016 Up/重复 Up/旧版本数据前向升级、Workspace cache、set-based commit/replay/conflict、V2
   Regression/Completion、Active-only Search、filter 等集、bounded provenance、三 distance operator 与 EXPLAIN。
 - Fault smoke：真实 PostgreSQL/River/LocalFS/Git + HTTP Embedder，注入 Vector commit response-loss、四
   checkpoint、Ready/Completion response-loss；断言唯一 Activation/Active/Completion、最小 Hybrid Search
@@ -1062,7 +1062,7 @@ Agent 不创建第二套 Claim、Eligibility 或 Conflict 表。
 | Conflict disclosure 遗漏、增加、条件或时间漂移 | Structured result invalid |
 | 同 Node Attempt 第二个 Model Run、call_no gap 或 active predecessor | 数据库/Repository consistency violation |
 | Provider 结果未知或 crash 后仍为 STARTED | 恢复为 `UNKNOWN`，进入显式恢复路径 |
-| 有 Model Run/Call 时执行 Down | SQLSTATE `55000` |
+| 旧库已有 Model Run/Call | 前向升级保留完整调用审计事实 |
 
 ### 5. Good / Base / Bad Cases
 
@@ -1081,7 +1081,7 @@ Agent 不创建第二套 Claim、Eligibility 或 Conflict 表。
 - Workflow PG：真实 Retrieval + Knowledge production adapters 覆盖 Existing/Disputed disclosure，并反查 Model Run/Call。
 - REVIEW PG：generation 后从连续 call_no 记录 `phase=REVIEW`，断言 Hash/Token/latency/status 且 canary 不落库。
 - Version PG：INITIAL 与不同 REVIEW refs 均可由 `GetModelRun` 直接反查；replay 时任一 call ref 漂移都返回冲突。
-- Migration：空库/重复 Up、CAS/FK/Workspace/call sequence/crash→UNKNOWN、空数据 Down→Up、有数据 guarded Down。
+- Migration：空库/重复 Up、旧版本数据前向升级、CAS/FK/Workspace/call sequence/crash→UNKNOWN。
 - 全量门禁：Agent count/race、`go test -race ./...`、真实 PG integration、vet、Make、Eval、Docker/Compose smoke。
 
 ### 7. Wrong vs Correct
@@ -1105,16 +1105,16 @@ Correct: Knowledge Application 提供服务端事实；所有 generation/REVIEW 
 - `RecordRefused` 不占有副作用幂等键；Schema/Policy/Capability 失败不得创建 STARTED 或调用 Executor。
 - stale recovery 使用 Node→Attempt→Tool Call 锁序、`SKIP LOCKED` 和锁后数据库时间重检；与 Heartbeat 并发时不能误收回新 lease。
 - `writeback_execution` trusted Call 不由通用 recovery 归约 UNKNOWN。历史 Call 保留首次 STARTED Attempt；新 Attempt 在读取历史 receipt 前必须验证 Definition version/hash、Node key/run、Attempt/fence/owner/lease、Workflow binding 与 exact Capability。
-- 迁移 `00019_tool_registry_security.sql` 只前向新增；有 Tool Call 数据时 Down 返回 SQLSTATE `55000`。
+- 迁移 `00019_tool_registry_security.sql` 只前向新增；Tool Call 审计事实不得由后续迁移删除。
 
-Required real-PG tests：跨 Workspace/Run/Node/Attempt、RecordRefused、STARTED/CAS/replay/conflict、commit response-loss、两 Worker recovery、Heartbeat race、trusted write 新 Attempt 资格、guarded Down 和稳定 Timeline。
+Required real-PG tests：跨 Workspace/Run/Node/Attempt、RecordRefused、STARTED/CAS/replay/conflict、commit response-loss、两 Worker recovery、Heartbeat race、trusted write 新 Attempt 资格、旧版本数据前向升级和稳定 Timeline。
 
 ## M6-04 Conversation And SSE Persistence Contract
 
 ### 1. Scope / Trigger
 
 - Trigger：新增或修改 Conversation、Question、Answer、Answer Feedback、RAG v2/Clarification Model Run，或浏览器 SSE 重放投影。
-- Scope：`migrations/00020_rag_conversation_sse.sql`、`internal/conversation`、Agent PLAN/RAG v2 增量契约和
+- Scope：`atlas/migrations/00020_rag_conversation_sse.sql`、`internal/conversation`、Agent PLAN/RAG v2 增量契约和
   `ops.server_event`；Workflow retry/failure 仍由 `workflow.*` 拥有，正式 Auth/CSRF/Audit 仍归 M10。
 
 ### 2. Signatures
@@ -1180,8 +1180,8 @@ ops.server_event
   Conversation/Workflow/Audit 事实源；事件消费者必须回查权威资源。
 - Workflow Outbox 投影只复制 Workspace、Run、event type、source event ID 和受限资源摘要；不得复制
   `workflow.outbox_event.payload`、Question/Answer 正文、Evidence、Tool 输出、Credential 或绝对路径。
-- `00020` 只做前向 additive 变更；五张新表任一有数据、存在 PLAN Call 或 Clarification Model Run 时，Down
-  返回 SQLSTATE `55000`。发布回滚保留数据并 forward fix。
+- `00020` 只做前向 additive 变更；五张新表、PLAN Call 与 Clarification Model Run 都是保留事实，
+  发布回滚不得删除，统一采用 forward fix。
 - SQL JSON 字段必填判断使用 `IS DISTINCT FROM`，避免缺失字段产生 NULL 后绕过 PL/pgSQL `IF`；Model Call
   额外验证前驱 phase，禁止 `PLAN -> REPAIR/REDUCED/REVIEW` 跳过 INITIAL。
 
@@ -1199,7 +1199,7 @@ ops.server_event
 | Semantic→Keyword、Keyword degradation 或 PLAN→REPAIR 等非法模式/阶段序列 | 领域或 SQL consistency failure |
 | Clarification/pending 收到 Feedback，或 Citation 绑定不闭合 | `ANSWER_FEEDBACK_INVALID`，Answer/Knowledge 不变 |
 | Server Event 非法、未来或过期序号 | 稳定 `SSE_*` Problem；不得回放其他 Workspace 或全量历史 |
-| `00020` 含业务数据，或 `00021` Down 会恢复冲突的 pending 唯一索引 | SQLSTATE `55000` |
+| `00020`/`00021` 旧库含业务数据或冲突 pending 行 | 前向升级保留事实；冲突数据 fail closed |
 
 ### 5. Good / Base / Bad Cases
 
@@ -1216,9 +1216,9 @@ ops.server_event
   Feedback 的正常/边界/失败路径；固定 canonical hash 样例，覆盖 invalid UTF-8、NUL、大小、重复和 unknown field。
 - Agent：v1 decoder 继续拒绝 v2-only 字段；PLAN 为 call_no 1、随后 INITIAL 为 2；Clarification 为 additive
   Model Run 结果类型，不改变旧三阶段/REVIEW 行为；真实 PG 拒绝 PLAN 后跳入 REPAIR。
-- Migration real PostgreSQL：空库 Up、重复 Up、空数据 Down/Up、Workspace 复合 FK、单非终态 Answer Workflow、
-  failed/cancelled 后下一 pending slot、`00021` guarded Down、CAS、
-  append-only、缺失 Answer schema 字段、Feedback eligibility、24 小时 event expiry、安全 Outbox 投影和有数据 guarded Down。
+- Migration real PostgreSQL：空库 Up、重复 Up、旧版本数据前向升级、Workspace 复合 FK、单非终态 Answer Workflow、
+  failed/cancelled 后下一 pending slot、冲突 pending 数据 fail closed、CAS、append-only、缺失 Answer schema 字段、
+  Feedback eligibility、24 小时 event expiry与安全 Outbox 投影。
 - Repository/HTTP/SSE 后续门禁必须补并发 exact replay、response-loss、稳定 cursor、批量上下文/Turn 查询、
   future/expired Last-Event-ID、heartbeat/cancel 和正文 canary 扫描；单元 Fake 不替代真实 PostgreSQL 证据。
 
@@ -1283,7 +1283,7 @@ type RAGProgressRecorder interface {
 - Domain/Agent：空/完整 Retrieval 生命周期、PLAN=call 1、同一 Recorder 连续 generation/review、Reduced Refusal、Provider failure/UNKNOWN。
 - Progress PG：真实时间、started/completed 顺序、不同时间重放、payload canary 脱敏。
 - Finalizer PG：三终态、同/异 proposal 并发、event failure 回滚、commit response-loss、retention 后 replay、跨 Workspace/Attempt、pending+terminal split 检测。
-- Migration PG：Up/repeat Up/Down、guarded Down、零调用 Refusal、有调用但无成功 Call 的 Refusal 拒绝。
+- Migration PG：Up/repeat Up、旧版本数据前向升级、零调用 Refusal、有调用但无成功 Call 的 Refusal 拒绝。
 
 ### 7. Wrong vs Correct
 
@@ -1304,7 +1304,7 @@ Correct: 首次记录真实时钟；重放在 advisory lock 内恢复既有 occu
 - 列表必须在单条有界 Turn 查询内投影阶段，禁止逐 Answer 回查。`00023_rag_stage_projection_index.sql` 使用
   `(workspace_id, resource_ref, seq DESC)` 的 RAG 事件部分索引支撑最新事件读取。
 - Answer ETag 必须包含当前阶段；阶段事件不会修改 Answer/Workflow version，若 ETag 只含两者会错误返回 304。
-- 真实 PostgreSQL 测试必须覆盖最新阶段、无阶段、跨 Workspace 隔离、终态保留、索引执行计划和迁移 Down/Up。
+- 真实 PostgreSQL 测试必须覆盖最新阶段、无阶段、跨 Workspace 隔离、终态保留、索引执行计划和迁移重复 Up。
 
 ## M6-04 Model Binding And Published Empty-Collection Contract
 
@@ -1488,7 +1488,7 @@ type ApprovedKnowledgeChangeApplier interface {
   SQL 的 EXPLAIN。
 - `ZHIXU_TEST_DATABASE_URL='postgres://...' make semantic-link-integration`、
   `ZHIXU_TEST_DATABASE_URL='postgres://...' make semantic-link-fault-smoke`、`make semantic-link-eval`、
-  `ZHIXU_TEST_DATABASE_URL='postgres://...' make semantic-link-smoke`、迁移空库/重复/Down-Up/guarded Down、OpenAPI
+  `ZHIXU_TEST_DATABASE_URL='postgres://...' make semantic-link-smoke`、迁移空库/重复 Up/旧版本数据前向升级、OpenAPI
   与全仓 race/vet/tidy。
 - SQL 改动必须追加 `sql-code-review`；公共 API、Workflow、Proposal/Approval 和前端跨层变更必须有独立只读复验。
 
@@ -1564,7 +1564,7 @@ GET /api/v1/workspaces/{workspace_id}/workflows
 
 - HTTP：正常/空、未知与重复参数、全部枚举、limit 边界、cursor 超长/损坏/旧格式/跨 kind/Workspace/filter。
 - PostgreSQL：Workspace 隔离、同时间戳稳定顺序、Proposal 最新 Revision、Workflow waiting-human、Source included/excluded/无 Active Index/building 比 active 更新；v1/v2 Proposal replay、Candidate HIGH、Source Version 历史回填/旧写兼容/错绑拒绝和复合 FK。
-- 迁移：空库 Up、重复 Up、空数据 Down→Up、业务数据 guarded Down、脏数据回填原子失败、并发索引 valid/ready。
+- 迁移：空库 Up、重复 Up、旧版本业务数据前向升级、脏数据回填原子失败、并发索引 valid/ready。
 - 对三条生产 SQL执行 `EXPLAIN (ANALYZE, BUFFERS)`；Source Version 根路径必须命中
   `idx_source_version_workspace_captured_id`，latest Attempt 必须命中 `idx_ingestion_attempt_source_started_id`，
   两条访问路径都不得出现 Seq Scan 或全量 Sort。未配置 `ZHIXU_TEST_DATABASE_URL` 时必须标为未验证。
@@ -1615,8 +1615,8 @@ Correct: 先锁定 Workspace active index，再按 source_id 连接；included �
   不记录正文、Secret、绝对路径或“客户端已经收完”。
 - 每次 create/claim/prepare/complete/fail/expire/cleanup 的 `ops.server_event` 与 Job 转移同事务追加；
   `source_event_ref=export.<stage>:<id>:v<version>` 保证事务重试不会形成第二事件。
-- 迁移仅前向扩展；存在 Export Job 时 Down 必须以 SQLSTATE `55000` 拒绝。发布回滚保留 Job、Audit 和文件，采用
-  forward fix，不能删除事实恢复旧 schema。
+- 迁移仅前向扩展；Export Job、Audit 和文件事实不得由后续迁移删除。发布回滚采用 forward fix，
+  不能删除事实恢复旧 schema。
 
 ### 4. Validation & Error Matrix
 
@@ -1628,7 +1628,7 @@ Correct: 先锁定 Workspace active index，再按 source_id 连接；included �
 | 同 key不同 request hash | 稳定 idempotency conflict；不插入第二行 |
 | lease owner/version/数据库时间任一不匹配 | CAS 不更新；旧 Worker 不得提交终态 |
 | 下载统计或 Audit 任一步失败 | 同一 transaction 整体回滚 |
-| 存在 attachment Job 时 Down | SQLSTATE `55000`，保留所有事实 |
+| 旧库存在 attachment Job | 前向升级保留所有事实并满足新约束 |
 
 ### 5. Good / Base / Bad Cases
 
@@ -1638,7 +1638,7 @@ Correct: 先锁定 Workspace active index，再按 source_id 连接；included �
 
 ### 6. Tests Required
 
-- 空库/重复 Up、现有 `00036` 数据升级、空数据 Down→Up、有 attachment Job 的 guarded Down；真实 INSERT 负测必须覆盖
+- 空库/重复 Up、现有 `00036` 数据与 attachment Job 前向升级；真实 INSERT 负测必须覆盖
   scope、prepared/path 约束的 `NULL/UNKNOWN` 绕过。
 - 真实 PostgreSQL 覆盖两 scope 的同 key 并发/response-loss、gate 开关、跨 Workspace、cursor、数据库时间 lease/TTL、
   双 Worker fence、Prepare/Complete 崩溃窗口、过期/cleanup retry 与下载并发。
@@ -1700,7 +1700,7 @@ Correct: tagged scope 与 prepared/path 约束使用显式 NOT NULL，并把完�
 - Review Answer、Score、FSRS Schedule 与 receipt 用一个 PostgreSQL transaction/CAS 写入。Review Session 必须为 REVIEW
   并绑定 Deck；Repository 读取和写入都验证 Card/Deck/Session/Workspace，不允许 HTTP 或 Application 只校验其中一层。
 - `00055` 将既有 Answer 的未知评分实现显式回填为 `legacy/unknown`；新 `scorer_version` 必须去除首尾空白后非空且不超过
-  128 bytes。Answer 是不可变审计事实，存在任何 Answer 时 Down 必须以 SQLSTATE `55000` 拒绝删除该字段。
+  128 bytes。Answer 是不可变审计事实，后续迁移不得删除该字段或历史值。
 - `00052` 的 Claim lifecycle trigger 对任何从 CONFIRMED 离开的状态失效 APPROVED Card；legacy evidence quarantine 使用
   `try_review_evidence_uuid`，所有 due SQL 都不得直接将可变 JSON 文本 cast 为 UUID。失效 Card 不得保留 ACTIVE Schedule。
 - `00049` 的 `REVIEW_INVALIDATED` Health Issue 与 Timeline outbox 是由 `learning.review_card` 派生的最小兼容投影；
@@ -1728,8 +1728,8 @@ Correct: tagged scope 与 prepared/path 约束使用显式 NOT NULL，并把完�
   Review origin 由唯一 Review Answer 和 `review-gap/v1` 服务端快照驱动，客户端不得提交 gap、Score 或 Evidence。
 - `00056` 在数据库边界验证 `interview-evidence/v2` 的精确八字段 JSON、受限 UUID、Claim Source、active Index、Source/Chunk
   Manifest 与 canonical Chunk；follow-up 只能复制 parent Claim/Evidence。Interview Session 与 Review Answer child 写入必须锁同一
-  `review_session` parent，parent 改型 trigger 反查 child，封闭两个提交方向；已有 Interview/Question 或 Review Answer 时 Down
-  以 SQLSTATE `55000` 拒绝移除 provenance/shell guard。
+  `review_session` parent，parent 改型 trigger 反查 child，封闭两个提交方向；已有 Interview/Question 或 Review Answer 时，
+  后续迁移不得移除 provenance/shell guard。
 - Interview Completion 使用 Begin/Prepare/Complete reservation，而不跨 Artifact/Interview 模块共享物理 transaction。
   Begin 冻结 Session snapshot；PENDING reservation 阻止后续 Submit。Prepare 先持久化 digest；随后的 Artifact PLAN receipt 与
   hidden hold 在一个 Artifact 事务写入，数据库 fence 锁 reservation，并只接受 PENDING、匹配 digest/type/role/stage key 的绑定。
@@ -1769,7 +1769,7 @@ Correct: tagged scope 与 prepared/path 约束使用显式 NOT NULL，并把完�
 | Memory source/owner 试图变更、Candidate 未确认、PAUSED/EXPIRED/DELETED | 触发器/Repository 拒绝变更或 effective query 排除 |
 | 同一 Node Attempt 已有 `PREPARING|READY|FAILED` snapshot | 非 claimant 不加载 Memory、不调用 Provider；返回稳定 manual recovery/conflict |
 | Conversation RAG Model Run 缺 Memory tuple，或非 Conversation 节点绑定 snapshot | CHECK/trigger `23514` 或 consistency failure；不得落部分审计事实 |
-| `00061` 存在 snapshot/绑定 Model Run 时 Down | SQLSTATE `55000`，迁移版本与双向审计事实保持不变 |
+| `00061` 旧库存在 snapshot/绑定 Model Run | 前向升级保持迁移版本与双向审计事实不变 |
 | Interview Memory 的结构化 session/path/step 与 source_ref 或真实 Path chain 不一致 | `23514`；不允许靠猜测回填或留下悬空 Candidate |
 | Memory Audit version/owner/status 与 aggregate 不一致，或 action 不符合状态转换 | `23514`；aggregate 写入与唯一 Audit 必须一起成功或一起回滚 |
 | Shared Path origin/source shape、Review Answer/Artifact tuple 或 version transition 不一致 | CHECK/FK/trigger 拒绝；不得跨 origin 改型、编辑历史证据或重新打开终态 Path |
@@ -1787,14 +1787,14 @@ Correct: tagged scope 与 prepared/path 约束使用显式 NOT NULL，并把完�
 
 ### 6. Tests Required
 
-- 迁移：空库/重复 Up、业务数据 guarded Down、`00035` legacy receipt/Answer hardening、`00038` COMPLETE_SESSION receipt
-  forward/guarded Down、legacy APPROVED Card quarantine、DISPUTED invalidation、`00049` projection 的 fingerprint/reopen/resolve、
-  `00053` hold、`00054` INTERVIEW partial uniqueness/Down、`00055` legacy Scorer version 回填/约束/空数据 Down→Up/有 Answer
-  guarded Down、`00056` malformed provenance/parent-copy/shell 双向竞态/业务数据 guarded Down、`00057` legacy ORPHANED 回填、
-  PLAN receipt + digest fence、NULL digest 安全归一化、role/artifact mutation、late Create 与 maintenance 竞态、24h
-  ABANDONED→ORPHANED/guarded Down；`00059` 覆盖 malformed legacy source_ref、结构化 FK/每步唯一 Candidate、Audit aggregate/version/
+- 迁移：空库/重复 Up、旧版本业务数据前向升级、`00035` legacy receipt/Answer hardening、`00038` COMPLETE_SESSION receipt
+  forward 兼容、legacy APPROVED Card quarantine、DISPUTED invalidation、`00049` projection 的 fingerprint/reopen/resolve、
+  `00053` hold、`00054` INTERVIEW partial uniqueness、`00055` legacy Scorer version 回填/约束、`00056` malformed
+  provenance/parent-copy/shell 双向竞态与历史事实保留、`00057` legacy ORPHANED 回填、PLAN receipt + digest fence、
+  NULL digest 安全归一化、role/artifact mutation、late Create 与 maintenance 竞态、24h ABANDONED→ORPHANED；
+  `00059` 覆盖 malformed legacy source_ref、结构化 FK/每步唯一 Candidate、Audit aggregate/version/
   lifecycle、completion keepalive 与 Session immutable binding；`00060` 覆盖共享基表/兼容视图、origin shape、Review Answer 唯一绑定、
-  command/reservation/hold、Path/Step retained history、keepalive、Interview Memory provenance 重绑定与有数据 guarded Down。另验证
+  command/reservation/hold、Path/Step retained history、keepalive、Interview Memory provenance 重绑定与历史事实保留。另验证
   malformed JSON 不导致 due 查询失败。
 - Repository integration：Review Answer transaction/replay/CAS/Deck binding、question_ref key-change refresh/Answer exact replay，
   Review invalidation projection 回填/清理、Claim/Version/Span 全组合 Card 级 AND、201/200 续批、新 key 继续与原 key replay、
@@ -1803,8 +1803,8 @@ Correct: tagged scope 与 prepared/path 约束使用显式 NOT NULL，并把完�
   immutability、effective filter、expiry、双层幂等 exact/semantic replay、同 key 异请求冲突、并发每-key receipt/单 Candidate/Audit
   和跨 Workspace 拒绝；Review Answer→Path 的 frozen gap/citation、唯一 reservation、exact replay/CAS、Artifact hold/release、
   command type/expected version/response 字段及 24h maintenance。
-- `00061` / Agent PostgreSQL：Up/repeated Up、all-null/all-present tuple、Conversation node-type fence、唯一并发 claimant、
-  `PREPARING -> READY|FAILED`、Model Run 双向原子 binding、stale recovery scanner、业务数据 guarded Down 和 clean Down -> Up。
+- `00061` / Agent PostgreSQL：Up/repeated Up、旧版本业务数据前向升级、all-null/all-present tuple、Conversation node-type fence、
+  唯一并发 claimant、`PREPARING -> READY|FAILED`、Model Run 双向原子 binding 与 stale recovery scanner。
 - SQL review：所有 JSON 访问安全、无字符串拼接；检查 due/expiry/path 查询索引、无 N+1/逐条写入，以及 visibility release
   与 completion receipt 的失败顺序。
 

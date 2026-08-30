@@ -63,10 +63,10 @@
   应用容器不得挂 Docker Socket。
 - `00079_model_settings_hot_activation.sql` 是 forward-only 协议边界；它必须用约束/trigger 锁定状态迁移、DB-time freshness、
   owner takeover 与 revision 一致性。新协议 migration 与旧 mutating modelctl 二进制不支持混跑。
-- Goose 只记录迁移版本、不校验已执行文件内容。历史环境可能已经记录同版本的早期 schema；后续 forward migration
+- Atlas revision 记录版本与迁移哈希；历史 Goose 环境接管时仍可能存在同版本的早期 schema。后续 forward migration
   必须按实际列/约束检测旧形态，在单一事务内 repair 或 fail closed，不得改写已发布迁移并假设会重跑。
-- `chat_api_style` 的 Down 只有在全部 revision 均为 `chat_completions` 时才允许；存在 `responses` revision 时必须在
-  `ACCESS EXCLUSIVE` 锁内以 PostgreSQL `55000` 拒绝，禁止丢列后把历史协议静默改回默认值。
+- `chat_api_style` 只允许前向演进。存在 `responses` revision 时必须先用显式前向迁移和业务流程收敛为
+  `chat_completions`；禁止丢列后把历史协议静默改回默认值。
 - 当前 Eino-only 制品只允许新建、测试和激活 `chat_completions`。`responses` 仍是持久读模型的合法历史值，
   但生产 Validator/Build 必须 fail closed，设置页只允许查看并迁移到 Chat Completions；不得修改历史 revision，
   也不得把其请求改发 Chat Completions。发布前必须确认 active/target 和非终态 Attempt 未绑定 Responses revision。
@@ -105,7 +105,7 @@
 | 合法 Snapshot 返回 `restart_required=true` | 服务端、OpenAPI 与 strict client 均视为协议错误 |
 | 已记录旧迁移版本但 schema 缺列 | forward migration 按 shape 事务修复；非法旧行失败且 schema/数据完整回滚 |
 | 历史 Export 表数据量较大 | repair 前评估全表回填与 `ACCESS EXCLUSIVE` 锁窗口，并安排维护窗口；不得宣称在线零停机 |
-| 存在 `responses` revision 时降级移除 `chat_api_style` | PostgreSQL `55000`，迁移版本和列保持不变；先创建显式 `chat_completions` revision 并完成业务迁移 |
+| 存在 `responses` revision 时试图移除 `chat_api_style` | 拒绝破坏性变更；先创建显式 `chat_completions` revision 并完成业务迁移，再以新的 Atlas 前向迁移收敛 schema |
 | 新保存、测试或激活 `responses` | 非重试配置错误；不发 Provider 请求、不追加可激活 revision、不回退到 Chat Completions |
 | 任一 initializer 或 modelctl 失败 | launcher 保留退出码并停止，不运行后续 bootstrap、API 或 Worker |
 | 稳态模型出现 bootstrap service 或 completed-service 依赖 | Compose contract 失败；不允许继续启动 |
@@ -128,10 +128,10 @@
 - Crypto/Transport：通过 Model Settings 与 Git Sync 业务 wrapper 回归共享 `secretstore` primitive，覆盖 round trip、wrong key、
   nonce/AAD tamper、purpose/schema 隔离、replace/keep、safe String/GoString、redirect、mixed DNS、rebind、IPv4/IPv6 fallback、
   TLS hostname/SNI、精确 loopback relay。
-- PostgreSQL：fresh `00079` Up/guarded Down、append-only revision、同事务 Audit、并发 PUT/Start、state/runtime/participant
+- PostgreSQL：fresh `00079` Atlas Up、append-only revision、同事务 Audit、并发 PUT/Start、state/runtime/participant
   锁序和 CAS、DB-time stale takeover、commit/fail/recovery、Attempt Claim binding/replay；SQL 必须参数化并用真实 PostgreSQL 验证。
-- Chat API style 迁移测试必须从旧 schema 插入 revision 后升级，断言回填 `chat_completions`、非法枚举受 `23514` 拒绝、
-  仅默认值可 Down；插入 `responses` 后 Down 必须返回 `55000` 且 Goose 版本保持不变。
+- Chat API style 迁移测试必须从旧 schema 插入 revision 后向前升级，断言回填 `chat_completions`、非法枚举受 `23514`
+  拒绝；插入 `responses` 后应用层和后续前向迁移必须 fail closed，不得通过逆向 DDL 丢失协议事实。
 - HTTP/OpenAPI/Auth：activation exact body、202/409/503、Session-only、Origin/CSRF、`ManageSystemSettings` 路由映射、
   WriteKnowledge 拒绝、Snapshot strict projection 与 Secret 不回显。
 - Composition/CLI/Compose：稳态六服务精确集合、bootstrap 五服务精确集合、零 completed dependency、
@@ -165,7 +165,7 @@ Wrong: 把 bootstrap service 留在主 Compose 并用 compose up --wait 启动�
 Correct: 主 Compose 只包含六个稳态服务；postgres healthy 后 launcher 通过无 grant 的合并模型依次 run --rm one-shot。
 
 Wrong: 已存在 Responses revision 时直接 Drop `chat_api_style`，依赖再升级的默认值恢复。
-Correct: Down 持有排他锁并 fail closed；先显式迁移业务 revision，再执行降级。
+Correct: 拒绝破坏性 schema 降级；先显式迁移业务 revision，再追加 Atlas 前向修复。
 
 Wrong: Model Settings 与 Git Sync 各自复制 AES-GCM 实现，或共用一份没有业务 purpose/schema 的 AAD。
 Correct: `secretstore` 只拥有加密原语；两个业务 wrapper 分别拥有 envelope、purpose/schema、完整上下文和错误语义。
@@ -221,7 +221,7 @@ Correct: `secretstore` 只拥有加密原语；两个业务 wrapper 分别拥有
 ### 6. Tests Required
 
 - Adapter：401/400/429/5xx、OpenAI/DashScope shape、请求 ID Header 优先、非 JSON/超限/非法字段、Secret/Endpoint canary、DNS/TLS/EOF/timeout/cancel、响应读取 EOF 阶段。
-- Responses 历史兼容：读模型、迁移 Down guard、设置页历史显示继续保留；production Validator、三个 Eino 构造入口和新写入必须零网络 fail closed。
+- Responses 历史兼容：读模型、前向迁移保护、设置页历史显示继续保留；production Validator、三个 Eino 构造入口和新写入必须零网络 fail closed。
 - Handler/OpenAPI：target 绑定、502/504 映射、`no-store`、details 字段上限、普通错误无诊断、Secret/Endpoint/原始 body 不泄漏。
 - Frontend：严格 Problem decoder、target mismatch、未知/超长/Unicode control/format 字段、Secret/Endpoint 大小写变体、Provider 401 与 TLS/response-validation 展示。
 - 浏览器：用真实 Provider 或受控 fixture 点击 Chat/Embedding 测试，断言可扫描诊断和本地认证状态不受上游 401 影响。
@@ -236,7 +236,7 @@ Wrong: 所有 EOF 都标记为 TLS，或把底层 url.Error 原文返回页面�
 Correct: 发请求前 EOF 可归类 TLS；已收到 HTTP 响应后的 EOF 固定归类 response_read，只返回受限摘要。
 
 Wrong: 因当前 Eino extension 不支持 Responses，就删除或改写历史 revision，或把请求静默发到 Chat Completions。
-Correct: 保留历史协议身份和 Down guard；当前制品在构造前拒绝，用户显式创建并激活新的 Chat Completions revision。
+Correct: 保留历史协议身份与前向迁移保护；当前制品在构造前拒绝，用户显式创建并激活新的 Chat Completions revision。
 ```
 
 ## Scenario: Managed Local Ollama Lifecycle
@@ -244,7 +244,7 @@ Correct: 保留历史协议身份和 Down guard；当前制品在构造前拒绝
 ### 1. Scope / Trigger
 
 - 修改 `internal/localmodelruntime`、`cmd/local-model-runtime`、`cmd/local-model-runtime-credential-init`、
-  `migrations/00080_managed_ollama_runtime.sql`、`deploy/compose.yml`、`deploy/compose.bootstrap.yml`、
+  `atlas/migrations/00080_managed_ollama_runtime.sql`、`deploy/compose.yml`、`deploy/compose.bootstrap.yml`、
   `deploy/compose.static-models.yml`、launcher，
   或 `internal/modelsettings/runtime` 的 local demand/generation lifecycle 时，必须应用本场景。
 - 本场景区分 `managed` 与 `external-static`：前者由项目内 manager 通过 PostgreSQL 协调唯一 child，后者只代理宿主

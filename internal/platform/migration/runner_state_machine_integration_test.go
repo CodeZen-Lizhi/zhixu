@@ -7,20 +7,14 @@ import (
 	"errors"
 	"testing"
 
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/stdlib"
-	"github.com/pressly/goose/v3"
 )
 
 func TestWorkflowRuntimeStateMachineMigrationCompatibility(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
-	runner, err := NewRunner(pool, projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runner := newAtlasRunnerForPool(t, pool)
 	if err := runner.Up(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -68,36 +62,13 @@ func TestWorkflowRuntimeStateMachineMigrationCompatibility(t *testing.T) {
 		}
 	}
 
-	// 00021..00013 have no facts that block downgrade in this fixture; after removing these
-	// later migrations, 00012 must reject populated Attempt data.
-	db := stdlib.OpenDBFromPool(pool)
-	defer db.Close()
-	annotated, err := NewLegacyAnnotationFS(projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	provider, err := goose.NewProvider(goose.DialectPostgres, db, annotated, goose.WithTableName(projectMigrationTable))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := provider.DownTo(ctx, 11); err == nil {
-		t.Fatal("00012 Down accepted node_attempt data")
-	} else {
-		var pgErr *pgconn.PgError
-		if !errors.As(err, &pgErr) || pgErr.Code != "55000" {
-			t.Fatalf("guarded Down error=%v", err)
-		}
-	}
 }
 
 func TestWorkflowRuntimeStateMachineLegacyTerminalRowsRemainReadable(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
-	runner, err := NewRunner(pool, projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runner := newAtlasRunnerForPool(t, pool)
 	if err := runner.Up(ctx); err != nil {
 		t.Fatal(err)
 	}

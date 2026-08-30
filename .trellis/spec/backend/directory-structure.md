@@ -37,12 +37,12 @@ internal/
   memory/                      # 用户确认的长期/情景 Memory
   audit/                       # 独立审计写入与查询边界
   platform/
-    postgres/                  # pgx/sqlc/River/Goose 适配实现
+    postgres/                  # pgx/GORM/River/Atlas 适配实现
     filesystem/                # WorkspaceStore 本地文件实现
     gitcli/                    # Git CLI 适配实现
     models/                    # Chat/Embedding/Reranker 适配实现
     parser/                    # Markdown/PDF/HTML 解析适配实现
-migrations/                    # Goose 前向迁移
+atlas/migrations/              # Atlas 前向迁移与 atlas.sum
 web/                           # React 构建产物或嵌入边界；不放领域逻辑
 ```
 

@@ -17,9 +17,9 @@ import (
 	"testing"
 	"time"
 
+	atlasmigrations "github.com/CodeZen-Lizhi/zhixu/atlas"
 	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
 	"github.com/docker/go-connections/nat"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -55,8 +55,8 @@ const (
 )
 
 // MigrationFunc applies the project's complete schema and River migrations to
-// an already reachable PostgreSQL pool. Atlas can replace Goose through this
-// callback without changing fixture provisioning or cleanup.
+// an already reachable PostgreSQL pool. The Atlas runner replaced Goose
+// through this callback without changing fixture provisioning or cleanup.
 type MigrationFunc func(context.Context, *pgxpool.Pool) error
 
 // Config controls one isolated integration database. ExternalAdminURL must
@@ -98,7 +98,7 @@ type Fixture struct {
 }
 
 // Open creates an external-admin or Testcontainers-backed fixture and applies
-// the configured migration. The default migration is the current Goose runner.
+// the configured migration. The default migration is the Atlas runner.
 func Open(ctx context.Context, config Config) (*Fixture, error) {
 	if ctx == nil {
 		return nil, errors.New("test database context is nil")
@@ -107,7 +107,7 @@ func Open(ctx context.Context, config Config) (*Fixture, error) {
 		return nil, err
 	}
 	if config.Migrate == nil {
-		config.Migrate = GooseMigration
+		config.Migrate = AtlasMigration
 	}
 	if strings.TrimSpace(config.ExternalAdminURL) != "" {
 		return openExternalAdmin(ctx, config)
@@ -167,14 +167,17 @@ func Require(t testing.TB, config Config) *Fixture {
 	return fixture
 }
 
-// GooseMigration runs the current production migration entry point against a
-// migration-only pgx pool. It is the default until Atlas becomes the sole
-// migration callback.
-func GooseMigration(ctx context.Context, pool *pgxpool.Pool) error {
+// AtlasMigration runs the production migration entry point against a
+// migration-only pgx pool. It is the default fixture migration callback.
+func AtlasMigration(ctx context.Context, pool *pgxpool.Pool) error {
 	if pool == nil {
 		return errors.New("test database migration pool is nil")
 	}
-	runner, err := platformmigration.NewRunner(pool, projectmigrations.FS)
+	dir, err := platformmigration.LoadAtlasDir(atlasmigrations.MigrationDir())
+	if err != nil {
+		return err
+	}
+	runner, err := platformmigration.NewAtlasRunner(pool, dir)
 	if err != nil {
 		return err
 	}

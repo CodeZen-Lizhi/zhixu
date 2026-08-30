@@ -6,20 +6,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"strings"
 	"testing"
-	"testing/fstest"
 
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/jackc/pgx/v5/stdlib"
-	"github.com/pressly/goose/v3"
 )
-
-const workspaceAnalysisMigrationTable = "goose_workspace_analysis_dependency_version"
 
 const workspaceAnalysisRetrievalPlanDocument = `{"result_type":"workspace_analysis_plan","schema_id":"agent.workspace-analysis-plan","schema_version":"v1","model_run_ref":"83000000-0000-4000-8000-000000000034","payload":{"intent":"inspect","requires_clarification":false,"rewrites":["analyze workspace"],"clarification_reason":"","clarification_question":"","suggested_scopes":[]}}`
 
@@ -29,14 +22,14 @@ const workspaceAnalysisClarificationDocument = `{"result_type":"clarification","
 
 const workspaceAnalysisMismatchedClarificationDocument = `{"result_type":"clarification","schema_id":"conversation.clarification","schema_version":"v1","model_run_ref":"83000000-0000-4000-8000-000000000034","payload":{"reason":"Target environment is ambiguous.","question":"Which branch should be analyzed?","suggested_scopes":["production","staging"]}}`
 
-func TestWorkspaceAnalysisPersistenceMigrationBackfillEmptyDownAndGuard(t *testing.T) {
+func TestWorkspaceAnalysisPersistenceMigrationBackfill(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 
 	provider := workspaceAnalysisMigrationProvider(t, pool)
 	insertWorkspaceAnalysisLegacyQuestion(t, ctx, pool)
-	if _, err := provider.ApplyVersion(ctx, 85, true); err != nil {
+	if err := provider.UpTo(ctx, 85); err != nil {
 		t.Fatalf("apply 00085: %v", err)
 	}
 	assertWorkspaceAnalysisMigrationShape(t, ctx, pool)
@@ -60,45 +53,8 @@ func TestWorkspaceAnalysisPersistenceMigrationBackfillEmptyDownAndGuard(t *testi
 	if mode != "rag" {
 		t.Fatalf("old-binary-compatible question mode=%q", mode)
 	}
-	if results, err := provider.Up(ctx); err != nil || len(results) != 0 {
-		t.Fatalf("repeat Up results=%d error=%v", len(results), err)
-	}
-
-	if _, err := provider.ApplyVersion(ctx, 85, false); err != nil {
-		t.Fatalf("empty 00085 Down: %v", err)
-	}
-	var modeColumn int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.columns
-		WHERE table_schema='agent' AND table_name='question' AND column_name='mode'`).Scan(&modeColumn); err != nil {
-		t.Fatal(err)
-	}
-	if modeColumn != 0 {
-		t.Fatalf("question mode column survived empty Down: %d", modeColumn)
-	}
-	if _, err := provider.ApplyVersion(ctx, 85, true); err != nil {
-		t.Fatalf("00085 Up after empty Down: %v", err)
-	}
-	if err := pool.QueryRow(ctx, `SELECT mode FROM agent.question WHERE id='83000000-0000-4000-8000-000000000003'`).Scan(&mode); err != nil {
-		t.Fatal(err)
-	}
-	if mode != "rag" {
-		t.Fatalf("legacy question mode after reapply=%q", mode)
-	}
-
-	insertWorkspaceAnalysisRunFixture(t, ctx, pool)
-	_, err := provider.ApplyVersion(ctx, 85, false)
-	var pgErr *pgconn.PgError
-	if err == nil || !errors.As(err, &pgErr) || pgErr.Code != "55000" {
-		t.Fatalf("guarded Down error=%v", err)
-	}
-	assertWorkspaceAnalysisMigrationShape(t, ctx, pool)
-	var applied bool
-	if err := pool.QueryRow(ctx, `SELECT is_applied FROM `+workspaceAnalysisMigrationTable+`
-		WHERE version_id=85 ORDER BY id DESC LIMIT 1`).Scan(&applied); err != nil {
-		t.Fatal(err)
-	}
-	if !applied {
-		t.Fatal("guarded Down cleared the applied version")
+	if err := provider.UpTo(ctx, 85); err != nil {
+		t.Fatalf("repeat 00085 Up: %v", err)
 	}
 }
 
@@ -109,7 +65,7 @@ func TestWorkspaceAnalysisPersistenceMigrationReceiptAndBudgetTransaction(t *tes
 
 	provider := workspaceAnalysisMigrationProvider(t, pool)
 	insertWorkspaceAnalysisLegacyQuestion(t, ctx, pool)
-	if _, err := provider.ApplyVersion(ctx, 85, true); err != nil {
+	if err := provider.UpTo(ctx, 85); err != nil {
 		t.Fatalf("apply 00085: %v", err)
 	}
 	insertWorkspaceAnalysisRunFixture(t, ctx, pool)
@@ -219,7 +175,7 @@ func TestWorkspaceAnalysisPersistenceMigrationModelResultReplayReceipt(t *testin
 
 	provider := workspaceAnalysisMigrationProvider(t, pool)
 	insertWorkspaceAnalysisLegacyQuestion(t, ctx, pool)
-	if _, err := provider.ApplyVersion(ctx, 85, true); err != nil {
+	if err := provider.UpTo(ctx, 85); err != nil {
 		t.Fatalf("apply 00085: %v", err)
 	}
 	insertWorkspaceAnalysisRunFixture(t, ctx, pool)
@@ -259,7 +215,7 @@ func TestWorkspaceAnalysisPersistenceMigrationClarificationBindsPlannerReceipt(t
 
 	provider := workspaceAnalysisMigrationProvider(t, pool)
 	insertWorkspaceAnalysisLegacyQuestion(t, ctx, pool)
-	if _, err := provider.ApplyVersion(ctx, 85, true); err != nil {
+	if err := provider.UpTo(ctx, 85); err != nil {
 		t.Fatalf("apply 00085: %v", err)
 	}
 	insertWorkspaceAnalysisRunFixture(t, ctx, pool)
@@ -296,7 +252,7 @@ func TestWorkspaceAnalysisPersistenceMigrationRejectsOutOfOrderAuthorization(t *
 		defer cleanup()
 		provider := workspaceAnalysisMigrationProvider(t, pool)
 		insertWorkspaceAnalysisLegacyQuestion(t, ctx, pool)
-		if _, err := provider.ApplyVersion(ctx, 85, true); err != nil {
+		if err := provider.UpTo(ctx, 85); err != nil {
 			t.Fatalf("apply 00085: %v", err)
 		}
 		insertWorkspaceAnalysisRunFixture(t, ctx, pool)
@@ -314,7 +270,7 @@ func TestWorkspaceAnalysisPersistenceMigrationRejectsOutOfOrderAuthorization(t *
 		defer cleanup()
 		provider := workspaceAnalysisMigrationProvider(t, pool)
 		insertWorkspaceAnalysisLegacyQuestion(t, ctx, pool)
-		if _, err := provider.ApplyVersion(ctx, 85, true); err != nil {
+		if err := provider.UpTo(ctx, 85); err != nil {
 			t.Fatalf("apply 00085: %v", err)
 		}
 		insertWorkspaceAnalysisRunFixture(t, ctx, pool)
@@ -338,7 +294,7 @@ func TestWorkspaceAnalysisPersistenceMigrationRejectsPartialModelCompletion(t *t
 
 	provider := workspaceAnalysisMigrationProvider(t, pool)
 	insertWorkspaceAnalysisLegacyQuestion(t, ctx, pool)
-	if _, err := provider.ApplyVersion(ctx, 85, true); err != nil {
+	if err := provider.UpTo(ctx, 85); err != nil {
 		t.Fatalf("apply 00085: %v", err)
 	}
 	insertWorkspaceAnalysisRunFixture(t, ctx, pool)
@@ -369,7 +325,7 @@ func TestWorkspaceAnalysisPersistenceMigrationRejectsMismatchedModelReservation(
 
 	provider := workspaceAnalysisMigrationProvider(t, pool)
 	insertWorkspaceAnalysisLegacyQuestion(t, ctx, pool)
-	if _, err := provider.ApplyVersion(ctx, 85, true); err != nil {
+	if err := provider.UpTo(ctx, 85); err != nil {
 		t.Fatalf("apply 00085: %v", err)
 	}
 	insertWorkspaceAnalysisRunFixture(t, ctx, pool)
@@ -408,14 +364,14 @@ func TestWorkspaceAnalysisPersistenceMigrationRejectsMismatchedModelReservation(
 	}
 }
 
-func TestWorkspaceAnalysisPersistenceMigrationAllowsFirstReviewCallAndGuardsDown(t *testing.T) {
+func TestWorkspaceAnalysisPersistenceMigrationAllowsFirstReviewCall(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 
 	provider := workspaceAnalysisMigrationProvider(t, pool)
 	insertWorkspaceAnalysisLegacyQuestion(t, ctx, pool)
-	if _, err := provider.ApplyVersion(ctx, 85, true); err != nil {
+	if err := provider.UpTo(ctx, 85); err != nil {
 		t.Fatalf("apply 00085: %v", err)
 	}
 	insertIndependentReviewFirstCallFixture(t, ctx, pool)
@@ -428,8 +384,6 @@ func TestWorkspaceAnalysisPersistenceMigrationAllowsFirstReviewCallAndGuardsDown
 	if phase != "REVIEW" {
 		t.Fatalf("first review call phase=%q", phase)
 	}
-	_, err := provider.ApplyVersion(ctx, 85, false)
-	assertPostgresCode(t, err, "55000")
 }
 
 func TestWorkspaceAnalysisPersistenceMigrationBudgetExhaustionProofRequiresCausalFixedOverage(t *testing.T) {
@@ -439,7 +393,7 @@ func TestWorkspaceAnalysisPersistenceMigrationBudgetExhaustionProofRequiresCausa
 
 	provider := workspaceAnalysisMigrationProvider(t, pool)
 	insertWorkspaceAnalysisLegacyQuestion(t, ctx, pool)
-	if _, err := provider.ApplyVersion(ctx, 85, true); err != nil {
+	if err := provider.UpTo(ctx, 85); err != nil {
 		t.Fatalf("apply 00085: %v", err)
 	}
 	insertWorkspaceAnalysisRunFixtureWithLimits(t, ctx, pool, "now()", "now()+interval '13 minutes 50 seconds'", 4096)
@@ -472,7 +426,7 @@ func TestWorkspaceAnalysisPersistenceMigrationBudgetExhaustionProofRequiresCausa
 
 		provider := workspaceAnalysisMigrationProvider(t, pool)
 		insertWorkspaceAnalysisLegacyQuestion(t, ctx, pool)
-		if _, err := provider.ApplyVersion(ctx, 85, true); err != nil {
+		if err := provider.UpTo(ctx, 85); err != nil {
 			t.Fatalf("apply 00085: %v", err)
 		}
 		insertWorkspaceAnalysisRunFixtureWithLimits(t, ctx, pool, "now()", "now()+interval '13 minutes 50 seconds'", 4096)
@@ -496,7 +450,7 @@ func TestWorkspaceAnalysisPersistenceMigrationDeadlineAndReceiptProofsRejectInva
 		defer cleanup()
 		provider := workspaceAnalysisMigrationProvider(t, pool)
 		insertWorkspaceAnalysisLegacyQuestion(t, ctx, pool)
-		if _, err := provider.ApplyVersion(ctx, 85, true); err != nil {
+		if err := provider.UpTo(ctx, 85); err != nil {
 			t.Fatalf("apply 00085: %v", err)
 		}
 		insertWorkspaceAnalysisRunFixture(t, ctx, pool)
@@ -513,7 +467,7 @@ func TestWorkspaceAnalysisPersistenceMigrationDeadlineAndReceiptProofsRejectInva
 		defer cleanup()
 		provider := workspaceAnalysisMigrationProvider(t, pool)
 		insertWorkspaceAnalysisLegacyQuestion(t, ctx, pool)
-		if _, err := provider.ApplyVersion(ctx, 85, true); err != nil {
+		if err := provider.UpTo(ctx, 85); err != nil {
 			t.Fatalf("apply 00085: %v", err)
 		}
 		insertWorkspaceAnalysisRunFixtureWithLimits(t, ctx, pool, "now()-interval '15 minutes'", "now()-interval '70 seconds'", 5376)
@@ -539,7 +493,7 @@ func TestWorkspaceAnalysisPersistenceMigrationDeadlineAndReceiptProofsRejectInva
 		defer cleanup()
 		provider := workspaceAnalysisMigrationProvider(t, pool)
 		insertWorkspaceAnalysisLegacyQuestion(t, ctx, pool)
-		if _, err := provider.ApplyVersion(ctx, 85, true); err != nil {
+		if err := provider.UpTo(ctx, 85); err != nil {
 			t.Fatalf("apply 00085: %v", err)
 		}
 		insertWorkspaceAnalysisRunFixtureWithLimits(t, ctx, pool, "now()-interval '12 minutes'", "now()+interval '110 seconds'", 5376)
@@ -565,7 +519,7 @@ func TestWorkspaceAnalysisPersistenceMigrationDeadlineAndReceiptProofsRejectInva
 		defer cleanup()
 		provider := workspaceAnalysisMigrationProvider(t, pool)
 		insertWorkspaceAnalysisLegacyQuestion(t, ctx, pool)
-		if _, err := provider.ApplyVersion(ctx, 85, true); err != nil {
+		if err := provider.UpTo(ctx, 85); err != nil {
 			t.Fatalf("apply 00085: %v", err)
 		}
 		insertWorkspaceAnalysisRunFixtureWithLimits(t, ctx, pool, "now()-interval '12 minutes'", "now()+interval '110 seconds'", 5376)
@@ -594,7 +548,7 @@ func TestWorkspaceAnalysisPersistenceMigrationDeadlineAndReceiptProofsRejectInva
 		defer cleanup()
 		provider := workspaceAnalysisMigrationProvider(t, pool)
 		insertWorkspaceAnalysisLegacyQuestion(t, ctx, pool)
-		if _, err := provider.ApplyVersion(ctx, 85, true); err != nil {
+		if err := provider.UpTo(ctx, 85); err != nil {
 			t.Fatalf("apply 00085: %v", err)
 		}
 		insertWorkspaceAnalysisRunFixtureWithTimeouts(
@@ -635,7 +589,7 @@ func TestWorkspaceAnalysisPersistenceMigrationDeadlineAndReceiptProofsRejectInva
 		defer cleanup()
 		provider := workspaceAnalysisMigrationProvider(t, pool)
 		insertWorkspaceAnalysisLegacyQuestion(t, ctx, pool)
-		if _, err := provider.ApplyVersion(ctx, 85, true); err != nil {
+		if err := provider.UpTo(ctx, 85); err != nil {
 			t.Fatalf("apply 00085: %v", err)
 		}
 		insertWorkspaceAnalysisRunFixture(t, ctx, pool)
@@ -699,7 +653,7 @@ func TestWorkspaceAnalysisPersistenceMigrationDeterministicRefusalsUseExactUpstr
 
 		provider := workspaceAnalysisMigrationProvider(t, pool)
 		insertWorkspaceAnalysisLegacyQuestion(t, ctx, pool)
-		if _, err := provider.ApplyVersion(ctx, 85, true); err != nil {
+		if err := provider.UpTo(ctx, 85); err != nil {
 			t.Fatalf("apply 00085: %v", err)
 		}
 		insertWorkspaceAnalysisRunFixture(t, ctx, pool)
@@ -822,7 +776,7 @@ func TestWorkspaceAnalysisPersistenceMigrationTerminalOperationRecoveryAttemptRe
 	defer cleanup()
 	provider := workspaceAnalysisMigrationProvider(t, pool)
 	insertWorkspaceAnalysisLegacyQuestion(t, ctx, pool)
-	if _, err := provider.ApplyVersion(ctx, 85, true); err != nil {
+	if err := provider.UpTo(ctx, 85); err != nil {
 		t.Fatalf("apply 00085: %v", err)
 	}
 	insertWorkspaceAnalysisRunFixture(t, ctx, pool)
@@ -849,7 +803,7 @@ func TestWorkspaceAnalysisPersistenceMigrationClarificationProofUsesCurrentRecov
 	defer cleanup()
 	provider := workspaceAnalysisMigrationProvider(t, pool)
 	insertWorkspaceAnalysisLegacyQuestion(t, ctx, pool)
-	if _, err := provider.ApplyVersion(ctx, 85, true); err != nil {
+	if err := provider.UpTo(ctx, 85); err != nil {
 		t.Fatalf("apply 00085: %v", err)
 	}
 	insertWorkspaceAnalysisRunFixture(t, ctx, pool)
@@ -882,43 +836,14 @@ func TestWorkspaceAnalysisPersistenceMigrationClarificationProofUsesCurrentRecov
 	}
 }
 
-func workspaceAnalysisMigrationProvider(t *testing.T, pool *pgxpool.Pool) *goose.Provider {
+// workspaceAnalysisMigrationProvider returns the Atlas-backed migration test
+// provider after bringing the database to version 84, so callers can insert
+// pre-00085 fixtures and then apply 00085 via ApplyVersion.
+func workspaceAnalysisMigrationProvider(t *testing.T, pool *pgxpool.Pool) *migrationTestProvider {
 	t.Helper()
-	db := stdlib.OpenDBFromPool(pool)
-	t.Cleanup(func() { _ = db.Close() })
-	annotated, err := NewLegacyAnnotationFS(projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dependencies, err := goose.NewProvider(
-		goose.DialectPostgres,
-		db,
-		annotated,
-		goose.WithTableName(workspaceAnalysisMigrationTable),
-		goose.WithDisableGlobalRegistry(true),
-	)
-	if err != nil {
-		t.Fatalf("create workspace analysis dependency provider: %v", err)
-	}
-	if _, err := dependencies.UpTo(context.Background(), 84); err != nil {
+	provider := migrationProvider(t, pool)
+	if err := provider.UpTo(context.Background(), 84); err != nil {
 		t.Fatalf("apply workspace analysis migration dependencies: %v", err)
-	}
-
-	content, err := fs.ReadFile(projectmigrations.FS, "00085_workspace_analysis_persistence.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	provider, err := goose.NewProvider(
-		goose.DialectPostgres,
-		db,
-		fstest.MapFS{
-			"00085_workspace_analysis_persistence.sql": &fstest.MapFile{Data: content},
-		},
-		goose.WithTableName(workspaceAnalysisMigrationTable),
-		goose.WithDisableGlobalRegistry(true),
-	)
-	if err != nil {
-		t.Fatalf("create workspace analysis target provider: %v", err)
 	}
 	return provider
 }

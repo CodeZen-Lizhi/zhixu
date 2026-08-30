@@ -54,7 +54,7 @@
   Root/Git path、业务数据和 `grant_generation` 不变。旧 runtime 行保留旧 binding，旧进程的 heartbeat/re-register
   由 Registry binding fence 拒绝；紧随其后的普通 switch 再按既有规则递增 grant generation。
 - rebind 审计与 Registry 更新必须处于同一事务，且只允许 old inactive/migration-required → new
-  inactive/available 的一次连续变更。历史 INSERT 必须匹配当前锁定状态；UPDATE/DELETE/TRUNCATE 必须拒绝；存在历史时 migration Down 必须拒绝。
+  inactive/available 的一次连续变更。历史 INSERT 必须匹配当前锁定状态；UPDATE/DELETE/TRUNCATE 必须拒绝；后续迁移不得删除历史。
 - rebind 响应丢失时，只在 control/gate 重新证明空闲后，精确 old→new history 与当前 new binding 才允许
   `changed=false` 重放；不能再增加 binding generation。launcher 必须随后执行普通 switch，并要求 switch 返回的
   Workspace ID、Root、fingerprint 和 persisted binding generation 与 rebind 结果精确一致。
@@ -161,7 +161,7 @@
   immutable identity、父子目录作为两个独立精确 Workspace。
 - PostgreSQL 集成：唯一 active、Registry identity/availability、state/operation/gate CAS、lease takeover、stale heartbeat、
   并发切换和 terminal shape；rebind raw update rejection、审计 append-only、事务一致性、精确 replay、旧 runtime fence、
-  binding generation 连续递增和有历史时 Down 拒绝。
+  binding generation 连续递增和前向升级保留历史。
 - Coordinator fault：quiescence timeout、revoke/DB/prepare/probe/commit/apply/readiness 失败、pre/post commit rollback、
   revoke 持续失败不终态化、瞬时恢复失败、旧 runtime 已消失时恢复 previous grant、previous identity 变化时收敛为
   failed + zero Active 并释放 mutation gate。

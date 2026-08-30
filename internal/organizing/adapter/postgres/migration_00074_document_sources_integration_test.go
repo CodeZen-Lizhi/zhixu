@@ -248,10 +248,6 @@ func TestMigration00074ProjectsVerifiedDocumentSourcesAndGuardsDeferredRetrieval
 	err = insertOrganizingDeferredModelRun(ctx, pool, workspaceID, workflowRunID, unboundNodeRunID,
 		unboundNodeAttemptID, organizingIntegrationID(779), "organizing.outline-generation", now)
 	organizingIntegrationPostgresCode(t, err, "55000")
-
-	provider := organizingMigrationProvider(t, pool)
-	_, err = provider.DownTo(ctx, 73)
-	organizingIntegrationPostgresCode(t, err, "55000")
 }
 
 func organizingV2DocumentSourceSections(t *testing.T, documentID, articleRevisionID foundation.ID, contentHash string,

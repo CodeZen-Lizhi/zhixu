@@ -46,8 +46,7 @@ func TestFixtureStartsMigratesAndSharesPlatformPool(t *testing.T) {
 	var projectMigrations int
 	if err := fixture.Pool().QueryRow(ctx, `
 		SELECT count(*)
-		FROM public.goose_db_version
-		WHERE is_applied AND version_id > 0`).Scan(&projectMigrations); err != nil {
+		FROM atlas_schema_revisions.atlas_schema_revisions`).Scan(&projectMigrations); err != nil {
 		t.Fatalf("read project migration history: %v", err)
 	}
 	if projectMigrations == 0 {
@@ -149,7 +148,7 @@ func TestExternalAdminCreatesAndDropsOnlyGeneratedDatabase(t *testing.T) {
 		t.Fatalf("unexpected generated database name: %q", name)
 	}
 	assertDatabaseExists(t, adminURL, name, true)
-	assertRelationExists(t, adminURL, "public.goose_db_version", false)
+	assertRelationExists(t, adminURL, "atlas_schema_revisions.atlas_schema_revisions", false)
 	if err := fixture.Close(context.Background()); err != nil {
 		t.Fatalf("close external-admin fixture: %v", err)
 	}

@@ -12,7 +12,7 @@
 
 ## 变更范围（What）
 <!-- 改了哪些模块、是否破坏契约、是否含迁移/依赖升级。 -->
-- [ ] 含数据库迁移（migrations/*.sql，前向兼容与恢复路径已验证）
+- [ ] 含数据库迁移（atlas/migrations/*.sql，前向兼容与恢复路径已验证）
 - [ ] 含第三方依赖变更（已完成适用的漏洞与许可证检查，或已注明不适用）
 - [ ] 含公开 API 契约变更（已跑 openapi-check）
 - [ ] 含安全敏感模块（auth/changecontrol/migration/api/gitsync → 需双审）

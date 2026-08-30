@@ -7,18 +7,14 @@ import (
 	"strings"
 	"testing"
 
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func TestHealthScheduleDeliveryMigrationSchemaAndEmptyDownUp(t *testing.T) {
+func TestHealthScheduleDeliveryMigrationSchemaAndUpRepeat(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
-	runner, err := NewRunner(pool, projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runner := newAtlasRunnerForPool(t, pool)
 	if err := runner.Up(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -29,13 +25,8 @@ func TestHealthScheduleDeliveryMigrationSchemaAndEmptyDownUp(t *testing.T) {
 	assertHealthScheduleDeliveryMigrationShape(t, ctx, pool)
 
 	provider := migrationProvider(t, pool)
-	if _, err := provider.DownTo(ctx, 26); err != nil {
-		t.Fatalf("00027 empty Down failed: %v", err)
-	}
-	assertHealthScheduleDeliveryMigrationAbsent(t, ctx, pool)
-
-	if _, err := provider.Up(ctx); err != nil {
-		t.Fatalf("00027 Up after Down failed: %v", err)
+	if err := provider.Up(ctx); err != nil {
+		t.Fatalf("00027 repeated up: %v", err)
 	}
 	assertHealthScheduleDeliveryMigrationShape(t, ctx, pool)
 }
@@ -77,17 +68,12 @@ func TestHealthScheduleDeliveryMigrationGuardsPendingStateAndConfiguration(t *te
 		WHERE id=$1 AND workspace_id=$2`, scheduleID, workspaceID)
 	assertPostgresCode(t, err, "55000")
 
-	_, err = migrationProvider(t, pool).DownTo(ctx, 26)
-	assertPostgresCode(t, err, "55000")
-
 	if _, err := pool.Exec(ctx, `UPDATE ops.health_schedule
 		SET last_run_at=pending_due_at,pending_due_at=NULL,dispatch_lease_until=NULL,
 		    version=version+1,updated_at=clock_timestamp()
 		WHERE id=$1 AND workspace_id=$2`, scheduleID, workspaceID); err != nil {
 		t.Fatalf("acknowledge missed due: %v", err)
 	}
-	_, err = migrationProvider(t, pool).DownTo(ctx, 26)
-	assertPostgresCode(t, err, "55000")
 }
 
 func assertHealthScheduleDeliveryMigrationShape(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
@@ -130,31 +116,6 @@ func assertHealthScheduleDeliveryMigrationShape(t *testing.T, ctx context.Contex
 	}
 	if columns != 2 || constraint != 1 || timeConstraint != 1 || index != 1 || schemaMeta != 1 {
 		t.Fatalf("00027 shape columns=%d constraint=%d time_constraint=%d index=%d schema_meta=%d predicate=%q", columns, constraint, timeConstraint, index, schemaMeta, predicate)
-	}
-}
-
-func assertHealthScheduleDeliveryMigrationAbsent(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
-	t.Helper()
-	var columns, constraint, index, schemaMeta int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.columns
-		WHERE table_schema='ops' AND table_name='health_schedule'
-		  AND column_name IN ('pending_due_at','dispatch_lease_until')`).Scan(&columns); err != nil {
-		t.Fatal(err)
-	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_constraint
-		WHERE conname='ops_health_schedule_dispatch_binding'`).Scan(&constraint); err != nil {
-		t.Fatal(err)
-	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_indexes
-		WHERE schemaname='ops' AND indexname='idx_ops_health_schedule_pending_lease'`).Scan(&index); err != nil {
-		t.Fatal(err)
-	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM core.schema_meta
-		WHERE key='health_schedule_delivery'`).Scan(&schemaMeta); err != nil {
-		t.Fatal(err)
-	}
-	if columns != 0 || constraint != 0 || index != 0 || schemaMeta != 0 {
-		t.Fatalf("00027 Down columns=%d constraint=%d index=%d schema_meta=%d", columns, constraint, index, schemaMeta)
 	}
 }
 

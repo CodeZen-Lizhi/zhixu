@@ -11,43 +11,28 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func TestExportHardeningMigrationUpRepeatSchemaAndEmptyDownUp(t *testing.T) {
+func TestExportHardeningMigrationUpRepeatSchema(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
 
-	if _, err := provider.UpTo(ctx, 36); err != nil {
+	if err := provider.UpTo(ctx, 36); err != nil {
 		t.Fatalf("00036 empty Up failed: %v", err)
 	}
-	if _, err := provider.UpTo(ctx, 36); err != nil {
+	if err := provider.UpTo(ctx, 36); err != nil {
 		t.Fatalf("00036 repeated Up failed: %v", err)
-	}
-	assertExportHardeningMigrationVersion(t, ctx, pool, 36)
-	assertExportHardeningMigrationShape(t, ctx, pool)
-
-	if _, err := provider.DownTo(ctx, 35); err != nil {
-		t.Fatalf("00036 empty Down failed: %v", err)
-	}
-	assertExportHardeningMigrationVersion(t, ctx, pool, 35)
-	assertExportHardeningMigrationAbsent(t, ctx, pool)
-
-	if _, err := provider.UpTo(ctx, 36); err != nil {
-		t.Fatalf("00036 Up after empty Down failed: %v", err)
-	}
-	if _, err := provider.UpTo(ctx, 36); err != nil {
-		t.Fatalf("00036 repeated Up after empty Down failed: %v", err)
 	}
 	assertExportHardeningMigrationVersion(t, ctx, pool, 36)
 	assertExportHardeningMigrationShape(t, ctx, pool)
 }
 
-func TestExportHardeningMigrationConstraintsForeignKeyAndGuardedDown(t *testing.T) {
+func TestExportHardeningMigrationConstraintsForeignKey(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 36); err != nil {
+	if err := provider.UpTo(ctx, 36); err != nil {
 		t.Fatal(err)
 	}
 
@@ -308,18 +293,6 @@ func TestExportHardeningMigrationConstraintsForeignKeyAndGuardedDown(t *testing.
 	assertPostgresCode(t, err, "55000")
 	_, err = pool.Exec(ctx, `UPDATE ops.export_job SET version=version+2 WHERE id=$1`, exportID)
 	assertPostgresCode(t, err, "55000")
-
-	_, err = provider.DownTo(ctx, 35)
-	assertPostgresCode(t, err, "55000")
-	assertExportHardeningMigrationVersion(t, ctx, pool, 36)
-	assertExportHardeningMigrationShape(t, ctx, pool)
-	var rows int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM ops.export_job WHERE id=$1`, exportID).Scan(&rows); err != nil {
-		t.Fatal(err)
-	}
-	if rows != 1 {
-		t.Fatalf("00036 guarded Down preserved Export rows=%d want=1", rows)
-	}
 }
 
 func assertExportHardeningMigrationShape(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
@@ -444,65 +417,6 @@ func assertExportHardeningMigrationShape(t *testing.T, ctx context.Context, pool
 		!strings.Contains(functionDefinition, "export request binding is immutable") ||
 		!strings.Contains(functionDefinition, "export prepared result binding is immutable") {
 		t.Fatalf("00036 update trigger enabled=%q function=%q", triggerEnabled, functionDefinition)
-	}
-}
-
-func assertExportHardeningMigrationAbsent(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
-	t.Helper()
-	var columns, constraints, indexes, triggers, functions, baseConstraint int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.columns
-		WHERE table_schema='ops' AND table_name='export_job'
-		  AND column_name = ANY($1)`, []string{
-		"collection_id", "collection_version", "query_hash", "request_hash", "request_ttl_seconds",
-		"redaction_policy", "include_sensitive", "permission_scope", "requested_by", "file_size",
-		"error_message", "attempt_count", "lease_owner", "lease_expires_at", "started_at",
-		"download_count", "last_downloaded_at",
-		"version", "read_model_revision", "exact_count", "prepared_at", "prepared_staging_path",
-		"cleanup_status", "cleanup_attempt_count", "cleanup_error", "cleanup_updated_at", "file_deleted_at",
-	}).Scan(&columns); err != nil {
-		t.Fatal(err)
-	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_constraint
-		WHERE conrelid='ops.export_job'::regclass
-		  AND conname = ANY($1)`, []string{
-		"ops_export_job_redaction_policy", "ops_export_job_sensitive_policy", "ops_export_job_request_hash",
-		"ops_export_job_request_ttl", "ops_export_job_version", "ops_export_job_scope_binding",
-		"ops_export_job_collection_workspace", "ops_export_job_counters", "ops_export_job_prepared_binding",
-		"ops_export_job_prepared_path_binding", "ops_export_job_lifecycle_binding", "ops_export_job_cleanup_binding",
-		"ops_export_job_download_binding", "ops_export_job_time_order", "ops_export_job_text_bounds",
-	}).Scan(&constraints); err != nil {
-		t.Fatal(err)
-	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_indexes
-		WHERE schemaname='ops' AND indexname = ANY($1)`, []string{
-		"idx_ops_export_pending_recovery", "idx_ops_export_collection", "idx_ops_export_expiry_candidate",
-		"idx_ops_export_cleanup_candidate", "uq_ops_export_prepared_staging",
-	}).Scan(&indexes); err != nil {
-		t.Fatal(err)
-	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_trigger
-		WHERE tgrelid='ops.export_job'::regclass AND tgname='trg_ops_export_job_update' AND NOT tgisinternal`).Scan(&triggers); err != nil {
-		t.Fatal(err)
-	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_proc
-		WHERE pronamespace='ops'::regnamespace AND proname='enforce_export_job_update'`).Scan(&functions); err != nil {
-		t.Fatal(err)
-	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_constraint
-		WHERE conrelid='ops.export_job'::regclass AND conname='ops_export_job_success_binding' AND convalidated`).Scan(&baseConstraint); err != nil {
-		t.Fatal(err)
-	}
-	if columns != 0 || constraints != 0 || indexes != 0 || triggers != 0 || functions != 0 || baseConstraint != 1 {
-		t.Fatalf("00036 Down columns=%d constraints=%d indexes=%d triggers=%d functions=%d base_constraint=%d",
-			columns, constraints, indexes, triggers, functions, baseConstraint)
-	}
-	var expiresNullable string
-	if err := pool.QueryRow(ctx, `SELECT is_nullable FROM information_schema.columns
-		WHERE table_schema='ops' AND table_name='export_job' AND column_name='expires_at'`).Scan(&expiresNullable); err != nil {
-		t.Fatal(err)
-	}
-	if expiresNullable != "YES" {
-		t.Fatalf("00036 Down expires_at nullable=%s want=YES", expiresNullable)
 	}
 }
 

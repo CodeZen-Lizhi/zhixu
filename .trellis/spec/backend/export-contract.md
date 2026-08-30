@@ -117,7 +117,7 @@ type AttachmentArchiver interface {
   gate disabled/enabled、流关闭和下载 Audit actor/binding。
 - LocalFS：create-only 并发 winner、prepared replacement/quarantine、orphan namespace、empty/binary/nested/determinism、
   NFC order、symlink/hardlink/FIFO/socket、limits、源与祖先变化、最终目录 fingerprint、流式 hash/size 校验。
-- PostgreSQL/Migration：fresh/repeat/upgrade、NULL/UNKNOWN `23514`、scope/prepared/path 互斥、guarded Down、同 key
+- PostgreSQL/Migration：fresh/repeat/upgrade、NULL/UNKNOWN `23514`、scope/prepared/path 互斥、历史事实保留、同 key
   并发、DB-time Claim/Prepare/Complete/Fail、scope isolation、cleanup retry、download+Audit 原子性。
 - HTTP/OpenAPI/Auth：严格 body/header/query/cursor、`202/200/400/403/404/409/410/500/503`、ZIP headers、
   Collection 兼容与 Evaluation/Audit rejection。

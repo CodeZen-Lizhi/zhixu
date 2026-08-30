@@ -14,16 +14,11 @@ import (
 	conversationdomain "github.com/CodeZen-Lizhi/zhixu/internal/conversation/domain"
 	eventspostgres "github.com/CodeZen-Lizhi/zhixu/internal/events/adapter/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
 	workflowpostgres "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/postgres"
 	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
 	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
 	workflowdomain "github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/jackc/pgx/v5/stdlib"
-	"github.com/pressly/goose/v3"
 )
 
 func TestWorkspaceAnalysisCancellationTerminalHookDirectRuntimeCancelClosesPublicationAndReplays(t *testing.T) {
@@ -88,11 +83,6 @@ func TestWorkspaceAnalysisCancellationTerminalHookDirectRuntimeCancelClosesPubli
 		"citation_count": float64(0), "answer_version": float64(2),
 	})
 	requireWorkspaceAnalysisAuditSafeIntegration(t, auditEvent, "Inspect the current workspace.")
-	_, err = workspaceAnalysisCancellationMigrationProvider(t, pool).ApplyVersion(ctx, 87, false)
-	var postgresError *pgconn.PgError
-	if err == nil || !errors.As(err, &postgresError) || postgresError.Code != "55000" {
-		t.Fatalf("00087 Down with runtime cancellation proof error=%v", err)
-	}
 }
 
 func TestWorkspaceAnalysisRuntimeFailureHookClosesPendingAnswerWithoutFabricatingCall(t *testing.T) {
@@ -196,11 +186,6 @@ func TestWorkspaceAnalysisRuntimeFailureHookClosesPendingAnswerWithoutFabricatin
 		t.Fatalf("runtime failure replay proofs=%d answer_events=%d analysis_events=%d", proofCount, answerEvents, analysisEvents)
 	}
 
-	_, err = workspaceAnalysisCancellationMigrationProvider(t, pool).ApplyVersion(ctx, 91, false)
-	var postgresError *pgconn.PgError
-	if err == nil || !errors.As(err, &postgresError) || postgresError.Code != "55000" {
-		t.Fatalf("00091 Down with runtime failure proof error=%v", err)
-	}
 }
 
 func TestWorkspaceAnalysisCancellationTerminalHookAuditFailureRollsBackRuntimeAndPublication(t *testing.T) {
@@ -468,32 +453,6 @@ func TestWorkspaceAnalysisCancellationTerminalHookAcceptsExactActiveLeasePublica
 	assertWorkspaceAnalysisRuntimeCancellationBundle(t, ctx, pool, dispatched.AnswerID, true, false)
 }
 
-func TestWorkspaceAnalysisCancellationTerminalMigrationEmptyDownAndReapply(t *testing.T) {
-	_, pool, ctx := newConversationTestRepository(t)
-	provider := workspaceAnalysisCancellationMigrationProvider(t, pool)
-	if _, err := provider.ApplyVersion(ctx, 91, false); err != nil {
-		t.Fatalf("empty 00091 Down: %v", err)
-	}
-	if _, err := provider.ApplyVersion(ctx, 87, false); err != nil {
-		t.Fatalf("empty 00087 Down: %v", err)
-	}
-	var runtimeColumn int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.columns
-		WHERE table_schema='agent' AND table_name='workspace_analysis_termination_proof'
-		AND column_name='runtime_terminal_at'`).Scan(&runtimeColumn); err != nil {
-		t.Fatal(err)
-	}
-	if runtimeColumn != 0 {
-		t.Fatalf("runtime_terminal_at survived empty Down: %d", runtimeColumn)
-	}
-	if _, err := provider.ApplyVersion(ctx, 87, true); err != nil {
-		t.Fatalf("reapply 00087: %v", err)
-	}
-	if _, err := provider.ApplyVersion(ctx, 91, true); err != nil {
-		t.Fatalf("reapply 00091: %v", err)
-	}
-}
-
 func newWorkspaceAnalysisCancellationHookFixture(
 	t *testing.T,
 	suffix string,
@@ -677,25 +636,4 @@ func loadWorkspaceAnalysisCancellationTerminalEvent(
 		FailureClass: workflowdomain.FailureClassCancelled, FailureCode: "WORKFLOW_CANCELLED",
 		FailureSummary: "WORKFLOW_CANCELLED", TerminalAt: terminalAt,
 	}
-}
-
-func workspaceAnalysisCancellationMigrationProvider(t *testing.T, pool *pgxpool.Pool) *goose.Provider {
-	t.Helper()
-	database := stdlib.OpenDBFromPool(pool)
-	t.Cleanup(func() { _ = database.Close() })
-	annotated, err := platformmigration.NewLegacyAnnotationFS(projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	provider, err := goose.NewProvider(
-		goose.DialectPostgres,
-		database,
-		annotated,
-		goose.WithTableName("goose_db_version"),
-		goose.WithDisableGlobalRegistry(true),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return provider
 }

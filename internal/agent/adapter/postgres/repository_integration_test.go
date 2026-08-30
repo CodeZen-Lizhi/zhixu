@@ -17,7 +17,6 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -412,8 +411,8 @@ func newAgentRepositoryIntegrationPool(t *testing.T) (*pgxpool.Pool, context.Con
 	databaseURL := parsed.String()
 	migrationPool, err := platformpostgres.OpenMigration(ctx, databaseURL, 4, 0)
 	if err == nil {
-		var runner *platformmigration.Runner
-		runner, err = platformmigration.NewRunner(migrationPool.DB(), projectmigrations.FS)
+		var runner *platformmigration.AtlasRunner
+		runner, err = platformmigration.NewAtlasEmbeddedRunner(migrationPool.DB())
 		if err == nil {
 			err = runner.Up(ctx)
 		}

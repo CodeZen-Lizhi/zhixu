@@ -23,12 +23,9 @@ import (
 	changecontroldomain "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/jackc/pgx/v5/stdlib"
-	"github.com/pressly/goose/v3"
 )
 
 func TestRepositoryPostgreSQLWorkingDraftCASReplayFreezeAndWorkspaceScope(t *testing.T) {
@@ -616,11 +613,6 @@ func TestRepositoryPostgreSQLAbandonsDeterministicPreProposalFailure(t *testing.
 	if reservationStatus != string(authoringapp.PublicationReservationPending) {
 		t.Fatalf("retryable failure changed reservation to %s", reservationStatus)
 	}
-	if _, err := authoringMigrationProvider(t, pool).DownTo(ctx, 71); err == nil {
-		t.Fatal("00072 Down removed an abandoned publication reservation")
-	} else {
-		authoringIntegrationPostgresCode(t, err, "55000")
-	}
 }
 
 func TestRepositoryPostgreSQLPublishedDocumentPathCannotDrift(t *testing.T) {
@@ -712,21 +704,10 @@ func TestRepositoryPostgreSQLPublishedDocumentPathCannotDrift(t *testing.T) {
 	}
 }
 
-func TestDocumentDraftAuthoringMigrationEmptyDownUpAndGuardedDown(t *testing.T) {
+func TestDocumentDraftAuthoringMigrationConstraints(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	pool := newAuthoringIntegrationDatabase(t, ctx)
-	provider := authoringMigrationProvider(t, pool)
-	if _, err := provider.DownTo(ctx, 68); err != nil {
-		t.Fatalf("empty 00069 down: %v", err)
-	}
-	var exists bool
-	if err := pool.QueryRow(ctx, `SELECT to_regclass('authoring.working_draft') IS NOT NULL`).Scan(&exists); err != nil || exists {
-		t.Fatalf("working draft after Down exists=%v err=%v", exists, err)
-	}
-	if _, err := provider.UpTo(ctx, 69); err != nil {
-		t.Fatalf("00069 re-up: %v", err)
-	}
 	var bodyConstraint string
 	if err := pool.QueryRow(ctx, `SELECT pg_get_constraintdef(oid)
 		FROM pg_constraint
@@ -754,25 +735,6 @@ func TestDocumentDraftAuthoringMigrationEmptyDownUpAndGuardedDown(t *testing.T) 
 		!strings.Contains(publicationStateConstraint, "git_commit IS NULL") {
 		t.Fatalf("publication constraints mode=%q state=%q", reservationModeConstraint, publicationStateConstraint)
 	}
-	workspaceID := authoringIntegrationID(200)
-	seedAuthoringWorkspace(t, ctx, pool, workspaceID, "authoring-down")
-	repository, err := NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
-	service, err := authoringapp.NewService(authoringapp.Dependencies{
-		Repository: repository, IDs: &authoringIntegrationIDs{next: 210},
-		Clock:     foundation.FixedClock{Value: time.Date(2026, 8, 3, 10, 0, 0, 0, time.UTC)},
-		Proposals: authoringIntegrationProposalCreator{},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := service.CreateWorkingDraft(ctx, authoringapp.CreateCommand{WorkspaceID: workspaceID, IdempotencyKey: "guard-create"}); err != nil {
-		t.Fatal(err)
-	}
-	_, err = provider.DownTo(ctx, 68)
-	authoringIntegrationPostgresCode(t, err, "55000")
 }
 
 func newAuthoringIntegrationRepository(t *testing.T, ctx context.Context) (*Repository, *pgxpool.Pool) {
@@ -786,6 +748,13 @@ func newAuthoringIntegrationRepository(t *testing.T, ctx context.Context) (*Repo
 }
 
 func newAuthoringIntegrationDatabase(t *testing.T, ctx context.Context) *pgxpool.Pool {
+	t.Helper()
+	return newAuthoringIntegrationDatabaseToVersion(t, ctx, 0)
+}
+
+// newAuthoringIntegrationDatabaseToVersion creates a disposable database migrated
+// only up to the given Atlas version; version<=0 applies every pending migration.
+func newAuthoringIntegrationDatabaseToVersion(t *testing.T, ctx context.Context, version int64) *pgxpool.Pool {
 	t.Helper()
 	baseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
 	if baseURL == "" {
@@ -817,29 +786,10 @@ func newAuthoringIntegrationDatabase(t *testing.T, ctx context.Context) *pgxpool
 		_, _ = admin.Exec(context.Background(), "DROP DATABASE "+identifier+" WITH (FORCE)")
 		admin.Close()
 	})
-	runner, err := platformmigration.NewRunner(pool, projectmigrations.FS)
-	if err == nil {
-		err = runner.Up(ctx)
-	}
-	if err != nil {
+	if err := platformmigration.MigrateAtlasToVersion(ctx, pool, version); err != nil {
 		t.Fatal(err)
 	}
 	return pool
-}
-
-func authoringMigrationProvider(t *testing.T, pool *pgxpool.Pool) *goose.Provider {
-	t.Helper()
-	database := stdlib.OpenDBFromPool(pool)
-	t.Cleanup(func() { _ = database.Close() })
-	annotated, err := platformmigration.NewLegacyAnnotationFS(projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	provider, err := goose.NewProvider(goose.DialectPostgres, database, annotated, goose.WithTableName("goose_db_version"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return provider
 }
 
 func seedAuthoringWorkspace(t *testing.T, ctx context.Context, pool *pgxpool.Pool, id foundation.ID, name string) {

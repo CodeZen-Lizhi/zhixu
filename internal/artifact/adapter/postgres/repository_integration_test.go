@@ -18,7 +18,6 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -531,7 +530,7 @@ func newArtifactIntegrationRepository(t *testing.T, ctx context.Context) (*Repos
 		_, _ = admin.Exec(context.Background(), "DROP DATABASE "+identifier+" WITH (FORCE)")
 		admin.Close()
 	})
-	runner, err := platformmigration.NewRunner(pool, projectmigrations.FS)
+	runner, err := platformmigration.NewAtlasEmbeddedRunner(pool)
 	if err == nil {
 		err = runner.Up(ctx)
 	}
@@ -573,7 +572,7 @@ func newArtifactIntegrationGORMRepository(t *testing.T, ctx context.Context) (*G
 		admin.Close()
 		t.Fatal(err)
 	}
-	runner, err := platformmigration.NewRunner(migrationPool.DB(), projectmigrations.FS)
+	runner, err := platformmigration.NewAtlasEmbeddedRunner(migrationPool.DB())
 	if err == nil {
 		err = runner.Up(ctx)
 	}

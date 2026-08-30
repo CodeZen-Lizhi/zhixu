@@ -19,12 +19,12 @@ func TestTimelineImpactV2MigrationPreservesV1AndVersionsReports(t *testing.T) {
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 61); err != nil {
+	if err := provider.UpTo(ctx, 61); err != nil {
 		t.Fatalf("00061 up: %v", err)
 	}
 
 	fixture := seedTimelineImpactV2UpgradeFixture(t, ctx, pool)
-	if _, err := provider.UpTo(ctx, 62); err != nil {
+	if err := provider.UpTo(ctx, 62); err != nil {
 		t.Fatalf("00062 up: %v", err)
 	}
 	assertMigrationVersion(t, ctx, pool, 62)
@@ -76,65 +76,11 @@ func TestTimelineImpactV2MigrationPreservesV1AndVersionsReports(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE ops.impact_report SET fingerprint=repeat('e',64) WHERE id=$1`, fixture.v2ReportID); !isPostgresCode(err, "55000") {
 		t.Fatalf("v2 report append-only update error=%v", err)
 	}
-	if _, err := provider.DownTo(ctx, 61); !isPostgresCode(err, "55000") {
-		t.Fatalf("00062 guarded Down error=%v", err)
-	}
-	assertMigrationVersion(t, ctx, pool, 62)
-	assertTimelineImpactV1ReportUnchanged(t, ctx, pool, fixture)
-
-	cleanupTimelineImpactV2MigrationFacts(t, ctx, pool, fixture)
-	if _, err := provider.DownTo(ctx, 61); err != nil {
-		t.Fatalf("00062 clean Down: %v", err)
-	}
-	assertMigrationVersion(t, ctx, pool, 61)
-	assertTimelineImpactV1ReportUnchanged(t, ctx, pool, fixture)
-	assertTimelineImpactV2MigrationArtifactsRemoved(t, ctx, pool)
-
-	if _, err := provider.UpTo(ctx, 62); err != nil {
+	if err := provider.UpTo(ctx, 62); err != nil {
 		t.Fatalf("00062 re-up: %v", err)
 	}
 	assertMigrationVersion(t, ctx, pool, 62)
 	assertTimelineImpactV1ReportUnchanged(t, ctx, pool, fixture)
-}
-
-func TestTimelineImpactV2MigrationAllowsDownWithOnlyEmptyBackfillMarker(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := newMigrationTestDatabase(t, ctx)
-	defer cleanup()
-	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 61); err != nil {
-		t.Fatalf("prepare migrations through 00061: %v", err)
-	}
-
-	const workspaceID = "62000000-0000-4000-8000-000000000020"
-	now := time.Date(2026, 7, 29, 8, 30, 0, 0, time.UTC)
-	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(
-		id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at
-	) VALUES($1,'timeline-impact-v2-empty-down','/tmp/timeline-impact-v2-empty-down',
-		'/tmp/timeline-impact-v2-empty-down',$2,'test',1,$2,$2)`, workspaceID, now); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := provider.UpTo(ctx, 62); err != nil {
-		t.Fatalf("migrate through 00062: %v", err)
-	}
-
-	var status string
-	var expectedRevisions, expectedSelectors int64
-	if err := pool.QueryRow(ctx, `SELECT status,expected_revision_count,expected_selector_count
-		FROM learning.artifact_citation_selector_backfill WHERE workspace_id=$1`, workspaceID).Scan(
-		&status, &expectedRevisions, &expectedSelectors,
-	); err != nil {
-		t.Fatal(err)
-	}
-	if status != "COMPLETED" || expectedRevisions != 0 || expectedSelectors != 0 {
-		t.Fatalf("empty marker status=%s revisions=%d selectors=%d", status, expectedRevisions, expectedSelectors)
-	}
-
-	if _, err := provider.DownTo(ctx, 61); err != nil {
-		t.Fatalf("00062 empty-marker Down: %v", err)
-	}
-	assertMigrationVersion(t, ctx, pool, 61)
-	assertTimelineImpactV2MigrationArtifactsRemoved(t, ctx, pool)
 }
 
 type timelineImpactV2UpgradeFixture struct {
@@ -236,30 +182,6 @@ func assertTimelineImpactV1ReportUnchanged(t *testing.T, ctx context.Context, po
 	}
 }
 
-func cleanupTimelineImpactV2MigrationFacts(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fixture timelineImpactV2UpgradeFixture) {
-	t.Helper()
-	if _, err := pool.Exec(ctx, `ALTER TABLE ops.impact_report DISABLE TRIGGER impact_report_append_only`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `DELETE FROM ops.impact_report WHERE id=$1`, fixture.v2ReportID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `ALTER TABLE ops.impact_report ENABLE TRIGGER impact_report_append_only`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `ALTER TABLE learning.artifact_citation_selector_backfill
-		DISABLE TRIGGER artifact_citation_selector_backfill_guard`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `DELETE FROM learning.artifact_citation_selector_backfill WHERE workspace_id=$1`, fixture.workspaceID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `ALTER TABLE learning.artifact_citation_selector_backfill
-		ENABLE TRIGGER artifact_citation_selector_backfill_guard`); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func assertTimelineImpactV2SeekIndexes(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fixture timelineImpactV2UpgradeFixture) {
 	t.Helper()
 	definitions := map[string][]string{
@@ -352,31 +274,10 @@ func assertTimelineImpactV2SeekIndexes(t *testing.T, ctx context.Context, pool *
 	}
 }
 
-func assertTimelineImpactV2MigrationArtifactsRemoved(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
-	t.Helper()
-	var removed bool
-	if err := pool.QueryRow(ctx, `SELECT
-		to_regclass('learning.idx_learning_artifact_revision_backfill_seek') IS NULL
-		AND to_regclass('learning.idx_learning_artifact_citation_backfill_pending_seek') IS NULL
-		AND to_regclass('learning.idx_learning_review_card_claim_impact_seek') IS NULL
-		AND to_regprocedure('learning.project_artifact_revision_citation_selectors()') IS NULL
-		AND NOT EXISTS (
-			SELECT 1 FROM pg_trigger
-			WHERE tgrelid='learning.artifact_revision'::regclass
-			  AND tgname='artifact_revision_project_citation_selectors'
-			  AND NOT tgisinternal
-		)`).Scan(&removed); err != nil {
-		t.Fatal(err)
-	}
-	if !removed {
-		t.Fatal("00062 clean Down left selector bridge or seek indexes behind")
-	}
-}
-
 func migrationVersion(t *testing.T, ctx context.Context, pool *pgxpool.Pool) int64 {
 	t.Helper()
-	var version int64
-	if err := pool.QueryRow(ctx, `SELECT max(version_id) FROM public.goose_db_version WHERE is_applied`).Scan(&version); err != nil {
+	version, err := migrationProvider(t, pool).GetDBVersion(ctx)
+	if err != nil {
 		t.Fatal(err)
 	}
 	return version
@@ -387,11 +288,11 @@ func TestTimelineImpactV2MigrationRejectsIncompleteOwnerBindings(t *testing.T) {
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 61); err != nil {
+	if err := provider.UpTo(ctx, 61); err != nil {
 		t.Fatalf("prepare migrations through 00061: %v", err)
 	}
 	fixture := seedTimelineImpactV2UpgradeFixture(t, ctx, pool)
-	if _, err := provider.UpTo(ctx, 62); err != nil {
+	if err := provider.UpTo(ctx, 62); err != nil {
 		t.Fatalf("migrate through 00062: %v", err)
 	}
 
@@ -649,12 +550,12 @@ func TestTimelineImpactV2MigrationOwnerEventTriggersCommitOnceAndRollback(t *tes
 
 			var fixture timelineImpactV2OwnerEventFixture
 			if test.upgraded {
-				if _, err := provider.UpTo(ctx, 61); err != nil {
+				if err := provider.UpTo(ctx, 61); err != nil {
 					t.Fatalf("prepare migrations through 00061: %v", err)
 				}
 				fixture = seedTimelineImpactV2OwnerEventFixture(t, ctx, pool)
 			}
-			if _, err := provider.UpTo(ctx, 62); err != nil {
+			if err := provider.UpTo(ctx, 62); err != nil {
 				t.Fatalf("migrate through 00062: %v", err)
 			}
 			assertMigrationVersion(t, ctx, pool, 62)

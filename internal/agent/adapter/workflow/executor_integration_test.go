@@ -32,7 +32,6 @@ import (
 	retrievalapplication "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/application"
 	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
 	workspacepostgres "github.com/CodeZen-Lizhi/zhixu/internal/workspace/adapter/postgres"
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -669,11 +668,7 @@ func newAgentWorkflowIntegrationPool(t *testing.T) (*pgxpool.Pool, context.Conte
 	databaseURL := parsed.String()
 	migrationPool, err := platformpostgres.OpenMigration(ctx, databaseURL, 4, 0)
 	if err == nil {
-		var runner *platformmigration.Runner
-		runner, err = platformmigration.NewRunner(migrationPool.DB(), projectmigrations.FS)
-		if err == nil {
-			err = runner.Up(ctx)
-		}
+		err = platformmigration.MigrateAtlas(ctx, migrationPool.DB())
 		migrationPool.Close()
 	}
 	if err != nil {

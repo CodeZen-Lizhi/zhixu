@@ -4,7 +4,7 @@
 
 本路线图只维护未交付方向、优先级、依赖和不可破坏的迁移边界。实际拆分、负责人、状态、验收证据与发布时间在 `.trellis/tasks/` 管理；人天是熟悉项目的单人初估，不含需求澄清、外部协调和发布观察。
 
-当前架构事实以 [架构文档](architecture/README.md) 为准。Gin、Eino 与前端 OpenAPI 生成客户端已是当前 HTTP/AI Runtime 和 API 边界基线；路线图中的 Atlas、GORM、Testcontainers 以及 `gin-contrib/sessions` 评估仍是候选或未来迁移，不得提前写成当前技术基线。
+当前架构事实以 [架构文档](architecture/README.md) 为准。Gin、Eino、前端 OpenAPI 生成客户端、TODO 9 的 Testcontainers 测试工厂与 Atlas 唯一迁移事实源均已交付；GORM 生产切换以及 `gin-contrib/sessions` 评估仍是未来迁移，不得提前写成当前技术基线。
 
 ## 当前交付收口（未完成）
 
@@ -24,14 +24,14 @@
 flowchart LR
     Eino["Eino 通用 AI 能力（已交付）"] --> WorkspaceAgent["受限 Workspace Agent"]
     Spectral["Spectral + oasdiff（已交付）"] --> GeneratedClient["OpenAPI Generator + Zod（已交付）"]
-    Testcontainers["Testcontainers-Go"] --> Atlas["Atlas 唯一 Schema 迁移"]
+    Testcontainers["Testcontainers-Go（已交付）"] --> Atlas["Atlas 唯一 Schema 迁移（已交付）"]
     Atlas --> GORM["GORM 数据访问迁移"]
     Testcontainers --> GORM
     Gin["Gin HTTP 基线（已交付）"] --> Sessions["gin-contrib/sessions 评估（deferred）"]
     GORM --> Sessions
 ```
 
-数据库方向按 Testcontainers → Atlas → GORM 推进；最终切换前 Atlas 必须成为唯一 Schema 事实源。OpenAPI 门禁与生成客户端已按依赖顺序交付。受限 Workspace Agent 依赖已交付的 Eino AI Runtime 基线，并继续拥有自身产品与安全门禁。Gin 已交付；Session 框架评估仍晚于 GORM 收口。
+数据库方向的 Testcontainers 与 Atlas 前置均已交付，GORM 正在其上分批推进。OpenAPI 门禁与生成客户端已按依赖顺序交付。受限 Workspace Agent 依赖已交付的 Eino AI Runtime 基线，并继续拥有自身产品与安全门禁。Gin 已交付；Session 框架评估仍晚于 GORM 收口。
 
 ## 3. 产品方向
 
@@ -55,12 +55,12 @@ flowchart LR
 
 ## 4. 平台与契约迁移
 
-### 4.1 TODO 3：全量从 Goose 迁移到 Atlas
+### 4.1 已交付 TODO 3：全量从 Goose 迁移到 Atlas（2026-08-30）
 
-- **优先级/初估**：P0，5–8 人天。
-- **目标**：统一 Schema 定义、版本迁移和漂移检查，并在 GORM 切换前消除迁移双轨。
-- **不可破坏边界**：保持现有 Schema、迁移顺序和已部署兼容；新环境和已有数据库结果一致；失败有回滚/恢复路径。
-- **完成态**：应用、Docker/CI、测试与运维不再依赖 Goose；GORM `AutoMigrate`/`Migrator` 在生产、测试和命令入口均禁止，Persistence Model 只能映射 Atlas 已批准结构。
+- **结果**：91 个历史 Goose 文件已转换为 Atlas 前向迁移，并追加 00092 清理旧 history；`cmd/migrate`、Docker/CI、testdb fixture、Makefile 与运维入口统一使用 in-process Atlas，Goose 依赖和兼容层已删除。见 [ADR-0029](architecture/adr/0029-atlas-sole-schema-migration.md)。
+- **兼容与恢复**：Goose 全量/部分 history、shell-runner 与 Eino 版本冲突均以 fail-closed 接管；单一 advisory lock、River Up/Validate 和 Compose 启动门禁保持不变。Atlas 为 forward-only，恢复使用每文件事务、断点续跑、fix-forward 与升级前备份。
+- **验证**：92 文件 lint/hash/validate、PG16/PG18 空库迁移与声明基线 drift、接管矩阵、重复 Up、`txmode none` 失败续跑、testdb fixture、Compose/launcher 合约均通过。
+- **后续边界**：GORM `AutoMigrate`/`Migrator` 在生产、测试和命令入口均禁止，Persistence Model 只能映射 Atlas 已批准结构。
 
 ### 4.2 已交付 5：后端 HTTP 已从 Chi 迁移到 Gin（2026-08-11）
 

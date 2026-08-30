@@ -10,25 +10,17 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func TestGitRemoteSyncMigrationSupportsEmptyDownUpAndGuardsFacts(t *testing.T) {
+func TestGitRemoteSyncMigrationUpRepeatSchemaAndFacts(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
 
-	if _, err := provider.UpTo(ctx, 76); err != nil {
+	if err := provider.UpTo(ctx, 76); err != nil {
 		t.Fatalf("migrate through 00076: %v", err)
 	}
-	if _, err := provider.UpTo(ctx, 76); err != nil {
+	if err := provider.UpTo(ctx, 76); err != nil {
 		t.Fatalf("replay 00076: %v", err)
-	}
-	assertGitRemoteSyncMigrationObjects(t, ctx, pool, true)
-	if _, err := provider.DownTo(ctx, 75); err != nil {
-		t.Fatalf("empty 00076 down: %v", err)
-	}
-	assertGitRemoteSyncMigrationObjects(t, ctx, pool, false)
-	if _, err := provider.UpTo(ctx, 76); err != nil {
-		t.Fatalf("00076 re-up: %v", err)
 	}
 	assertGitRemoteSyncMigrationObjects(t, ctx, pool, true)
 
@@ -47,16 +39,13 @@ func TestGitRemoteSyncMigrationSupportsEmptyDownUpAndGuardsFacts(t *testing.T) {
 		VALUES($1,1,false,NULL,NULL,false,false,'test:migration',$2,$2)`, workspaceID, now); err != nil {
 		t.Fatal(err)
 	}
-	_, err := provider.DownTo(ctx, 75)
-	assertPostgresCode(t, err, "55000")
-	assertGitRemoteSyncMigrationObjects(t, ctx, pool, true)
 }
 
 func TestGitRemoteSyncMigrationEnforcesProjectionAndRunStates(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
-	if _, err := migrationProvider(t, pool).UpTo(ctx, 76); err != nil {
+	if err := migrationProvider(t, pool).UpTo(ctx, 76); err != nil {
 		t.Fatalf("migrate through 00076: %v", err)
 	}
 
@@ -102,25 +91,17 @@ func TestGitRemoteSyncMigrationEnforcesProjectionAndRunStates(t *testing.T) {
 	assertPostgresCode(t, err, "55000")
 }
 
-func TestWorkspaceGitCaptureMigrationSupportsEmptyDownUpAndGuardsFacts(t *testing.T) {
+func TestWorkspaceGitCaptureMigrationUpRepeatSchemaAndConstraints(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
 
-	if _, err := provider.UpTo(ctx, 77); err != nil {
+	if err := provider.UpTo(ctx, 77); err != nil {
 		t.Fatalf("migrate through 00077: %v", err)
 	}
-	if _, err := provider.UpTo(ctx, 77); err != nil {
+	if err := provider.UpTo(ctx, 77); err != nil {
 		t.Fatalf("replay 00077: %v", err)
-	}
-	assertGitCaptureMigrationObjects(t, ctx, pool, true)
-	if _, err := provider.DownTo(ctx, 76); err != nil {
-		t.Fatalf("empty 00077 down: %v", err)
-	}
-	assertGitCaptureMigrationObjects(t, ctx, pool, false)
-	if _, err := provider.UpTo(ctx, 77); err != nil {
-		t.Fatalf("00077 re-up: %v", err)
 	}
 	assertGitCaptureMigrationObjects(t, ctx, pool, true)
 
@@ -134,9 +115,6 @@ func TestWorkspaceGitCaptureMigrationSupportsEmptyDownUpAndGuardsFacts(t *testin
 	}
 	_, err := pool.Exec(ctx, `UPDATE core.workspace_git_capture_checkpoint
 		SET completed_head_oid=repeat('b',40),version=2,updated_at=$2 WHERE workspace_id=$1`, workspaceID, now.Add(time.Minute))
-	assertPostgresCode(t, err, "55000")
-
-	_, err = provider.DownTo(ctx, 76)
 	assertPostgresCode(t, err, "55000")
 }
 

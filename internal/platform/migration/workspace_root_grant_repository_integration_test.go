@@ -20,7 +20,7 @@ func TestWorkspaceRootGrantRepositorySerializesBeginAndTakesOverExpiredLease(t *
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 67); err != nil {
+	if err := provider.UpTo(ctx, 67); err != nil {
 		t.Fatal(err)
 	}
 	repository, err := workspacepostgres.NewRepository(pool)
@@ -132,7 +132,7 @@ func TestWorkspaceRootGrantRepositorySwitchAndRollback(t *testing.T) {
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 67); err != nil {
+	if err := provider.UpTo(ctx, 67); err != nil {
 		t.Fatal(err)
 	}
 	repository, err := workspacepostgres.NewRepository(pool)

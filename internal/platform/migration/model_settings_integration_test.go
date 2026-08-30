@@ -10,15 +10,15 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-func TestModelSettingsMigrationConstraintsAndGuardedDown(t *testing.T) {
+func TestModelSettingsMigrationConstraints(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 64); err != nil {
+	if err := provider.UpTo(ctx, 64); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := provider.UpTo(ctx, 64); err != nil {
+	if err := provider.UpTo(ctx, 64); err != nil {
 		t.Fatalf("repeat model settings migration: %v", err)
 	}
 
@@ -105,39 +105,24 @@ SET desired_revision=999,version=version+1,updated_at=clock_timestamp() WHERE si
 	'l2','cosine',128,65536,8388608,30000000,67108864,'migration-test')`)
 	assertModelSettingsPostgresCode(t, err, "23514")
 
-	_, err = provider.DownTo(ctx, 63)
-	assertModelSettingsPostgresCode(t, err, "55000")
-	var rows int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM ops.model_settings_revisions WHERE revision=1`).Scan(&rows); err != nil {
-		t.Fatal(err)
-	}
-	if rows != 1 {
-		t.Fatalf("guarded down preserved revisions=%d want=1", rows)
-	}
 }
 
-func TestModelSettingsMigrationEmptyDownUp(t *testing.T) {
+func TestModelSettingsMigrationRepeatedUp(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 64); err != nil {
+	if err := provider.UpTo(ctx, 64); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := provider.DownTo(ctx, 63); err != nil {
-		t.Fatalf("empty model settings down: %v", err)
+	if err := provider.UpTo(ctx, 64); err != nil {
+		t.Fatalf("repeat model settings 64 up: %v", err)
 	}
-	if _, err := provider.UpTo(ctx, 64); err != nil {
-		t.Fatalf("model settings up after down: %v", err)
+	if err := provider.UpTo(ctx, 66); err != nil {
+		t.Fatalf("model settings 66 up: %v", err)
 	}
-	if _, err := provider.UpTo(ctx, 66); err != nil {
-		t.Fatalf("empty model settings 66 up: %v", err)
-	}
-	if _, err := provider.DownTo(ctx, 64); err != nil {
-		t.Fatalf("empty 66 down to 64: %v", err)
-	}
-	if _, err := provider.UpTo(ctx, 66); err != nil {
-		t.Fatalf("66 up after empty down: %v", err)
+	if err := provider.UpTo(ctx, 66); err != nil {
+		t.Fatalf("repeat model settings 66 up: %v", err)
 	}
 	assertModelSettingsMigrationVersion(t, ctx, provider, 66)
 }
@@ -147,12 +132,12 @@ func TestModelSettingsWorkflowProvenanceMigrationPathsAndNullDistinct(t *testing
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 64); err != nil {
+	if err := provider.UpTo(ctx, 64); err != nil {
 		t.Fatal(err)
 	}
 	insertModelSettingsWorkflowFixture(t, ctx, pool)
 	insertLegacyModelSettingsWorkflowAttempt(t, ctx, pool, "65000000-0000-4000-8000-000000000004", "65000000-0000-4000-8000-000000000005")
-	if _, err := provider.UpTo(ctx, 66); err != nil {
+	if err := provider.UpTo(ctx, 66); err != nil {
 		t.Fatalf("legacy static 64 to 66: %v", err)
 	}
 	assertModelSettingsMigrationVersion(t, ctx, provider, 66)
@@ -183,12 +168,12 @@ func TestModelSettingsWorkflowProvenanceMigrationPathsAndNullDistinct(t *testing
 	}
 }
 
-func TestModelSettingsWorkflowProvenanceRuntimeBindingAndGuardedDown(t *testing.T) {
+func TestModelSettingsWorkflowProvenanceRuntimeBinding(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 66); err != nil {
+	if err := provider.UpTo(ctx, 66); err != nil {
 		t.Fatal(err)
 	}
 	insertModelSettingsMigrationRevision(t, ctx, pool)
@@ -232,8 +217,6 @@ func TestModelSettingsWorkflowProvenanceRuntimeBindingAndGuardedDown(t *testing.
 		'worker-mismatch','worker',now()+interval '5 minutes','running',0,'66000000-0000-4000-8000-000000000009',now())`)
 	assertModelSettingsPostgresCode(t, err, "23514")
 
-	_, err = provider.DownTo(ctx, 64)
-	assertModelSettingsPostgresCode(t, err, "55000")
 }
 
 func insertModelSettingsWorkflowFixture(t *testing.T, ctx context.Context, queryer interface {

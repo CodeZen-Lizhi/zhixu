@@ -4,6 +4,8 @@ status: accepted
 
 # 锁定 River v0.40.0 与 Goose v3.27.0 作为 Workflow Runtime 基础
 
+> 注：Goose 相关决策（项目迁移执行器、版本锁定、Down 门禁）已由 [ADR-0029](0029-atlas-sole-schema-migration.md) 取代——Atlas 成为唯一迁移事实源，Down 迁移整体移除。River 相关决策继续有效。
+
 ## Context
 
 项目需要在同一 PostgreSQL 事务中创建 Workflow 领域事实并投递可运行 Node，同时用正式迁移历史替换早期 `awk + psql` 的 Up-only 入口。当前 Go/Docker 工具链固定为 Go 1.25.4；Goose v3.27.2 要求 Go 1.25.7，不能在本任务中隐式升级工具链。历史 `00001`–`00010` 包含未标注 `StatementBegin/StatementEnd` 的 PL/pgSQL dollar-quoted body，直接交给 Goose v3.27.0 会在 `00002` 失败，但已应用迁移不得重写。

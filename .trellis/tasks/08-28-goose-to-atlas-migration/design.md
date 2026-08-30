@@ -23,13 +23,14 @@ Atlas Go 依赖：`ariga.io/atlas`（仅 `sql/migrate`、`sql/postgres` 等执�
 
 ## 2. 迁移目录与文件契约
 
-- 新目录 `atlas/migrations/`：92 个迁移 1:1 转换，保留原文件名
-  （`00001_extensions.sql` … `00092_*.sql`）。Atlas version 取文件名首个 `_`
+- 新目录 `atlas/migrations/`：91 个 Goose 迁移 1:1 转换，保留原文件名
+  （`00001_extensions.sql` … `00091_*.sql`），再追加 Atlas 专属
+  `00092_drop_goose_db_version.sql`。Atlas version 取文件名首个 `_`
   前缀，零填充数字按字典序排序正确；后续新迁移用 Atlas 默认时间戳版本
   （字典序天然排在 `00092` 之后），不强制定制格式。
 - `atlas/migrations/atlas.sum`：由 `atlas migrate hash` 生成的哈希链完整性文件，
   纳入嵌入与 CI 校验。
-- 转换规则（对 92 个文件机械执行，可用一次性工具完成）：
+- 转换规则（对 91 个 Goose 文件机械执行，可用一次性工具完成）：
   - 删除 `-- +goose Up`、`-- +goose StatementBegin/End` 行；Atlas 的 PostgreSQL
     scanner 原生识别 dollar-quoted body，`legacyfs.go` 的注入层随之废除。
   - `-- +goose NO TRANSACTION`（00031、00051）转换为文件级
@@ -48,8 +49,10 @@ Atlas Go 依赖：`ariga.io/atlas`（仅 `sql/migrate`、`sql/postgres` 等执�
    - `atlas_schema_revisions` 已存在 → 跳过接管。
    - 否则 `public.goose_db_version` 存在且有已应用记录 → 读取已应用 version 集合
      V；对 Eino 冲突形态（78/79 legacy 指纹 + 83/84 已应用 + 80–82 缺失）先执行
-     现有指纹校验（collision_bridge 的纯 SQL 检查全部保留），通过后 V 视为
-     1..79 ∪ 83..92；用 Atlas RevisionReadWriter 将 V 中每个版本写为已应用
+     现有指纹校验（collision_bridge 的纯 SQL 检查全部保留），通过后在已验证的
+     Goose 集合中补记 83/84，并保留 80–82 为 pending；只接受 Goose 历史版本
+     1..91，Atlas 专属 92 或更高版本一律拒绝。用 Atlas RevisionReadWriter 将 V
+     中每个版本写为已应用
      revision（哈希来自迁移文件本身，与 atlas.sum 一致）；executor 随后按序补跑
      pending（含 80–82 与任何更新文件），天然替代 Goose `AllowOutOfOrder`。
    - 否则 `core.schema_meta` 完整匹配旧 shell-runner 事实 → 写入版本 1..10 的
@@ -79,7 +82,7 @@ CI/运维门禁而非启动门禁（避免每次启动全量 introspection 的�
   旧 Goose runner 与新 Atlas runner 全量迁移，随后用 Atlas CLI
   `schema diff`（或 `migrate diff` dry-run 对 `atlas/schema.sql`）断言差异为空。
   该测试在 Goose 删除后改写为"Atlas 全新库 vs `atlas/schema.sql` 漂移为空"。
-- 接管矩阵测试：用旧 runner 构造四类库态（全量 Goose 92、部分 Goose 历史、
+- 接管矩阵测试：用旧 runner 构造四类库态（全量 Goose 91、部分 Goose 历史、
   shell-runner legacy、Eino 冲突形态），Atlas runner 接管后断言终态与全新库
   等价、`goose_db_version` 已删除、重复执行幂等。
 - 现有约 60 个迁移集成测试以"终态 Schema 事实"为主，引擎替换后应大体原样
@@ -87,8 +90,8 @@ CI/运维门禁而非启动门禁（避免每次启动全量 introspection 的�
 
 ## 6. CI / 构建 / 文档接入
 
-- Makefile：`migrate` 目标不变；新增 `atlas-migrate-diff`（开发期生成）、
-  `atlas-migrate-hash`、`atlas-migrate-lint`；保留 `atlas-schema-inspect`/
+- Makefile：`migrate` 目标不变；新增 `atlas-migrate-hash`、
+  `atlas-migrate-hash-check`、`atlas-migrate-lint`、`atlas-migrate-validate`；保留 `atlas-schema-inspect`/
   `atlas-schema-drift`。
 - CI：新增哈希完整性（hash 后工作树无 diff）、`migrate lint`（dev-url 指向
   pgvector/pgvector:pg16）、`migrate validate` 与空库漂移门禁。
@@ -102,10 +105,12 @@ CI/运维门禁而非启动门禁（避免每次启动全量 introspection 的�
 ## 7. 关键取舍
 
 - 接管用"Goose 已应用集合 → Atlas revision 直写"而非重放：避免对存量库重放
-  DDL 的风险；代价是接管代码需精确映射版本与哈希（用 Atlas 官方 rrw 写入，
-  不手写 SQL）。
+  DDL 的风险；代价是接管代码需精确映射版本与哈希。运行时使用实现
+  `migrate.RevisionReadWriter` 的 PostgreSQL store，表结构与 Atlas CLI 兼容，
+  adoption 批次在同一事务中写入。
 - 不在启动期做全量漂移 diff：启动时延与权限最小化；漂移门禁放 CI/运维。
-- 保留 `00001`–`00092` 原文件名：版本映射透明、接管逻辑是集合映射而非换算；
+- 保留 `00001`–`00091` 原文件名并追加 Atlas 专属 00092：版本映射透明、接管逻辑
+  是集合映射而非换算；
   新文件用 Atlas 默认时间戳版本，与历史文件排序兼容。
 - 转换工具为一次性脚手架（`cmd/goose2atlas`），等价性证据齐备后与 Goose
   代码同批删除，避免留下双轨。

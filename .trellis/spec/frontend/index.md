@@ -56,7 +56,7 @@ Review-derived Learning Path 的客户端代码也已落在 `web/src/api/review.
 binding，使用 `['review',workspaceId,'answers',answerId,'learning-path']` 精确缓存，并由 `learning_path.*` 事件定向失效。
 后端已在数据库依赖可用时组装真实 Learning Path Service/Handler，并将 Review readiness 与两者的可用性共同绑定；
 `00059/00060`、Repository 契约和 24 小时维护调用已用 fresh PostgreSQL、真实 API/Worker/Vite 及桌面/390x844
-浏览器主链路动态验证。该 UI 仍须把实际依赖不可用时的 503 显式展示为可恢复错误；有业务数据的 Down guard、
+浏览器主链路动态验证。该 UI 仍须把实际依赖不可用时的 503 显式展示为可恢复错误；历史业务数据的前向迁移保护、
 Review Path reservation/hold 专门并发与 ABANDONED 重开仍需独立覆盖。
 M8-03 已交付 `/interviews`、Interview-origin Learning Path 和 `/memories`：Interview/Path 的严格 decoder、逐题恢复、报告/步骤状态、
 难度策略提示、从 `started_at + duration_minutes` 派生的倒计时、连续追问和 SKIPPED gap/path，以及 Memory Candidate/Confirm、

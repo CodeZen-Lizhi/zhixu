@@ -72,8 +72,8 @@ ZHIXU_WORKSPACE_ANALYSIS_WORKER_ENABLED=false
 ZHIXU_WORKSPACE_ANALYSIS_CONFIG_REVISION=1
 ```
 
-- 迁移 `00085`–`00091` 互相扩展函数、trigger 和列。测试某个旧版本 Down 时必须先按版本逆序
-  回退全部后继迁移；不能只调用一次 `Down()` 后假设目标版本已回退。
+- 迁移 `00085`–`00091` 互相扩展函数、trigger 和列。旧版本边界测试只用
+  `MigrateAtlasToVersion` 构造前缀，再按顺序向前升级；不得执行逆向 DDL。
 
 ## 3. Contracts
 
@@ -170,7 +170,7 @@ ZHIXU_WORKSPACE_ANALYSIS_CONFIG_REVISION=1
 
 - Domain/contract：Question mode/hash、Definition/Graph/Tool hashes、预算公式、Operation/Attempt identity、
   receipt/private binding、Candidate、Answer terminal matrix、Timeline strict decoder。
-- PostgreSQL：migration Up/Down guard、Workspace/FK/immutability、固定锁序、授权/取消/预算竞态、
+- PostgreSQL：migration fresh/repeated Up 与旧版本数据前向升级、Workspace/FK/immutability、固定锁序、授权/取消/预算竞态、
   Call+receipt+settlement atomicity、response loss、stale fence、replacement Unknown、publication/termination
   proof、capability freshness、runtime failure 与 exact replay。
 - River/API：公开 Question 经真实 River 六节点完成；同 Idempotency-Key 终态 replay 不增加 Model/Tool Call
@@ -224,29 +224,24 @@ replacement      -> lock + fence -> Call/Operation/Reservation UNKNOWN atomicall
 finalizer        -> RESULT_UNKNOWN
 ```
 
-### Wrong: 单次 Down 假设已到目标版本
+### Wrong: 通过历史 Down 回退 Workspace Analysis schema
 
-```go
-provider.Down(ctx)
-provider.ApplyVersion(ctx, 87, false)
+```text
+应用旧版 Down SQL -> 删除 00088–00091 对象 -> 启动旧 Worker
 ```
 
-当 head 是 `00091` 时，第一次 Down 只回到 `00090`，后续对象仍可能依赖 `00087` 的列或函数。
+Atlas 迁移是 forward-only，历史 Down 已删除；逆向 DDL 会破坏后继对象与已持久化事实，且不会产生可信的 Atlas revision 状态。
 
-### Correct: 严格逆序回退后继版本
+### Correct: 兼容应用回退或新增 fix-forward
 
-```go
-for _, version := range []int64{91, 90, 89, 88} {
-    if _, err := provider.ApplyVersion(ctx, version, false); err != nil {
-        t.Fatal(err)
-    }
-}
-if _, err := provider.ApplyVersion(ctx, 87, false); err != nil {
-    t.Fatal(err)
-}
+```text
+兼容当前 schema 的旧应用 -> 停止新提交 -> 回退 Worker
+不兼容的 schema -> 新增 Atlas 前向迁移修复，或从升级前备份恢复
 ```
 
-每一步都断言实际版本与 SQLSTATE；有持久事实的 guarded Down 必须拒绝，不能通过删表绕过。
+测试旧版本边界时只在 disposable 数据库上用 `MigrateAtlasToVersion` 构造迁移前缀，再向前升级；不得执行 Down。
+
+每一步都断言实际版本与 SQLSTATE；测试前缀必须只向前升级，有持久事实时不得通过删表伪造回滚。
 
 ### Wrong: 按状态码无限或通用重试 Stop
 

@@ -104,7 +104,7 @@ Host 仅关闭该 generation 自建 Transport 的 idle connections，外部注�
 
 自研只包含项目特有的 durable activation state machine、participant/serving CAS、generation host 及
 Workflow/Retrieval acquisition Adapter。HTTP 和 strict decoder、PostgreSQL/pgx、Go 同步原语、
-Goose migration、River、模型协议 Adapter、Secret store、React Query 与 Docker Compose 均复用现有实现。
+Atlas migration、River、模型协议 Adapter、Secret store、React Query 与 Docker Compose 均复用现有实现。
 领域状态机不依赖第三方配置中心类型。
 
 ## Security And Resource Limits

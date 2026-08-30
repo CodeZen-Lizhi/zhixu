@@ -17,11 +17,11 @@ func TestReviewInvalidationObservabilityMigrationUsesHealthAndTimelineOwners(t *
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 43); err != nil {
+	if err := provider.UpTo(ctx, 43); err != nil {
 		t.Fatalf("prepare migrations through 00043: %v", err)
 	}
 	seedReviewFSRSBackfillFixture(t, ctx, pool)
-	if _, err := provider.UpTo(ctx, 49); err != nil {
+	if err := provider.UpTo(ctx, 49); err != nil {
 		t.Fatalf("migrate through 00049: %v", err)
 	}
 	assertMigrationVersion(t, ctx, pool, 49)
@@ -117,10 +117,6 @@ func TestReviewInvalidationObservabilityMigrationUsesHealthAndTimelineOwners(t *
 	}
 	if projectedCount != 3 {
 		t.Fatalf("projected review Health Timeline events=%d", projectedCount)
-	}
-
-	if _, err := provider.DownTo(ctx, 48); err == nil {
-		t.Fatal("00049 rollback discarded durable review invalidation history")
 	}
 }
 

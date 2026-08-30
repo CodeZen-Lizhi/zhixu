@@ -13,12 +13,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func TestM9AttachmentExportMigrationUpgradeRepeatAndCollectionOnlyDownUp(t *testing.T) {
+func TestM9AttachmentExportMigrationUpgradeRepeatAndReUp(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 62); err != nil {
+	if err := provider.UpTo(ctx, 62); err != nil {
 		t.Fatalf("migrate to 00062: %v", err)
 	}
 
@@ -40,10 +40,10 @@ func TestM9AttachmentExportMigrationUpgradeRepeatAndCollectionOnlyDownUp(t *test
 		t.Fatalf("insert pre-00063 Collection export: %v", err)
 	}
 
-	if _, err := provider.UpTo(ctx, 63); err != nil {
+	if err := provider.UpTo(ctx, 63); err != nil {
 		t.Fatalf("00063 upgrade: %v", err)
 	}
-	if _, err := provider.UpTo(ctx, 63); err != nil {
+	if err := provider.UpTo(ctx, 63); err != nil {
 		t.Fatalf("00063 repeated Up: %v", err)
 	}
 	assertM9AttachmentMigrationVersion(t, ctx, pool, 63)
@@ -63,13 +63,8 @@ func TestM9AttachmentExportMigrationUpgradeRepeatAndCollectionOnlyDownUp(t *test
 			scopeKind, rootVersion, storedRequestHash, requestTTL, version, status)
 	}
 
-	if _, err := provider.DownTo(ctx, 62); err != nil {
-		t.Fatalf("00063 Collection-only Down: %v", err)
-	}
-	assertM9AttachmentMigrationVersion(t, ctx, pool, 62)
-	assertM9AttachmentMigrationAbsent(t, ctx, pool)
-	if _, err := provider.UpTo(ctx, 63); err != nil {
-		t.Fatalf("00063 Up after Collection-only Down: %v", err)
+	if err := provider.UpTo(ctx, 63); err != nil {
+		t.Fatalf("00063 re-up: %v", err)
 	}
 	assertM9AttachmentMigrationShape(t, ctx, pool)
 }
@@ -79,7 +74,7 @@ func TestM9AttachmentExportMigrationRepairsLegacyRecordedVersion62Shape(t *testi
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 62); err != nil {
+	if err := provider.UpTo(ctx, 62); err != nil {
 		t.Fatalf("migrate to 00062: %v", err)
 	}
 
@@ -107,10 +102,10 @@ func TestM9AttachmentExportMigrationRepairsLegacyRecordedVersion62Shape(t *testi
 	completeM9CollectionExport(t, ctx, pool, completeExportID, now)
 	downgradeM9ExportJobToLegacyRecorded62(t, ctx, pool)
 
-	if _, err := provider.UpTo(ctx, 63); err != nil {
+	if err := provider.UpTo(ctx, 63); err != nil {
 		t.Fatalf("upgrade production-shaped 00062: %v", err)
 	}
-	if _, err := provider.UpTo(ctx, 63); err != nil {
+	if err := provider.UpTo(ctx, 63); err != nil {
 		t.Fatalf("repeat production-shaped 00062 upgrade: %v", err)
 	}
 	assertM9AttachmentMigrationVersion(t, ctx, pool, 63)
@@ -195,7 +190,7 @@ func TestM9AttachmentExportMigrationRejectsInvalidLegacyRecordedVersion62Rows(t 
 			pool, cleanup := newMigrationTestDatabase(t, ctx)
 			defer cleanup()
 			provider := migrationProvider(t, pool)
-			if _, err := provider.UpTo(ctx, 62); err != nil {
+			if err := provider.UpTo(ctx, 62); err != nil {
 				t.Fatalf("migrate to 00062: %v", err)
 			}
 			const (
@@ -223,7 +218,7 @@ func TestM9AttachmentExportMigrationRejectsInvalidLegacyRecordedVersion62Rows(t 
 				t.Fatalf("snapshot invalid legacy fixture: %v", err)
 			}
 
-			_, err := provider.UpTo(ctx, 63)
+			err := provider.UpTo(ctx, 63)
 			var postgresError *pgconn.PgError
 			if err == nil || !errors.As(err, &postgresError) || postgresError.Code != "55000" {
 				t.Fatalf("invalid legacy migration error=%v", err)
@@ -234,12 +229,12 @@ func TestM9AttachmentExportMigrationRejectsInvalidLegacyRecordedVersion62Rows(t 
 	}
 }
 
-func TestM9AttachmentExportMigrationConstraintsAndGuardedDown(t *testing.T) {
+func TestM9AttachmentExportMigrationConstraints(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 63); err != nil {
+	if err := provider.UpTo(ctx, 63); err != nil {
 		t.Fatal(err)
 	}
 
@@ -273,49 +268,6 @@ func TestM9AttachmentExportMigrationConstraintsAndGuardedDown(t *testing.T) {
 	}
 	if enabled {
 		t.Fatal("attachment export capability was not disabled by default")
-	}
-
-	_, err = provider.DownTo(ctx, 62)
-	var postgresError *pgconn.PgError
-	if err == nil || !errors.As(err, &postgresError) || postgresError.Code != "55000" {
-		t.Fatalf("00063 guarded Down error=%v", err)
-	}
-	assertM9AttachmentMigrationVersion(t, ctx, pool, 63)
-	var rows int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM ops.export_job WHERE id=$1 AND scope_kind='WORKSPACE_ATTACHMENTS'`, exportID).Scan(&rows); err != nil {
-		t.Fatal(err)
-	}
-	if rows != 1 {
-		t.Fatalf("guarded Down preserved attachment rows=%d want=1", rows)
-	}
-}
-
-func TestM9AttachmentExportMigrationGuardsEnabledCapabilityWithoutHistory(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := newMigrationTestDatabase(t, ctx)
-	defer cleanup()
-	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 63); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `UPDATE ops.export_capability SET enabled=true,updated_at=clock_timestamp()
-		WHERE capability_key='workspace-attachments'`); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := provider.DownTo(ctx, 62)
-	var postgresError *pgconn.PgError
-	if err == nil || !errors.As(err, &postgresError) || postgresError.Code != "55000" {
-		t.Fatalf("00063 enabled capability guarded Down error=%v", err)
-	}
-	assertM9AttachmentMigrationVersion(t, ctx, pool, 63)
-	var enabled bool
-	if err := pool.QueryRow(ctx, `SELECT enabled FROM ops.export_capability
-		WHERE capability_key='workspace-attachments'`).Scan(&enabled); err != nil {
-		t.Fatal(err)
-	}
-	if !enabled {
-		t.Fatal("guarded Down did not preserve enabled attachment export capability")
 	}
 }
 
@@ -618,31 +570,6 @@ func assertM9AttachmentMigrationShape(t *testing.T, ctx context.Context, pool *p
 	if legacyKindConstraint != 0 || legacyPathConstraint != 0 || capabilityRows != 1 || attachmentIndexes != 6 || triggerCount != 1 {
 		t.Fatalf("00063 shape legacy_kind=%d legacy_path=%d capability=%d indexes=%d trigger=%d",
 			legacyKindConstraint, legacyPathConstraint, capabilityRows, attachmentIndexes, triggerCount)
-	}
-}
-
-func assertM9AttachmentMigrationAbsent(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
-	t.Helper()
-	var columns, capabilityTables, attachmentIndexes, legacyKinds int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.columns
-		WHERE table_schema='ops' AND table_name='export_job'
-		  AND column_name IN ('scope_kind','attachment_root_contract_version','manifest_sha256','entry_count','total_uncompressed_bytes')`).Scan(&columns); err != nil {
-		t.Fatal(err)
-	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.tables
-		WHERE table_schema='ops' AND table_name='export_capability'`).Scan(&capabilityTables); err != nil {
-		t.Fatal(err)
-	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_indexes
-		WHERE schemaname='ops' AND indexname='idx_ops_export_attachment'`).Scan(&attachmentIndexes); err != nil {
-		t.Fatal(err)
-	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_constraint
-		WHERE conrelid='ops.export_job'::regclass AND conname='export_job_kind_check'`).Scan(&legacyKinds); err != nil {
-		t.Fatal(err)
-	}
-	if columns != 0 || capabilityTables != 0 || attachmentIndexes != 0 || legacyKinds != 1 {
-		t.Fatalf("00063 Down columns=%d capability=%d index=%d legacy_kind=%d", columns, capabilityTables, attachmentIndexes, legacyKinds)
 	}
 }
 

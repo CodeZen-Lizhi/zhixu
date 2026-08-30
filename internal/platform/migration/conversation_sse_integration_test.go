@@ -8,18 +8,14 @@ import (
 	"testing"
 	"time"
 
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func TestConversationSSEMigrationUpRepeatAndEmptyDownUp(t *testing.T) {
+func TestConversationSSEMigrationUpRepeat(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
-	runner, err := NewRunner(pool, projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runner := newAtlasRunnerForPool(t, pool)
 	if err := runner.Up(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -29,25 +25,13 @@ func TestConversationSSEMigrationUpRepeatAndEmptyDownUp(t *testing.T) {
 	assertConversationSSEMigrationShape(t, ctx, pool)
 
 	provider := migrationProvider(t, pool)
-	if _, err := provider.DownTo(ctx, 19); err != nil {
-		t.Fatalf("00021/00020 empty Down failed: %v", err)
-	}
-	var tables int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.tables
-		WHERE (table_schema='agent' AND table_name IN ('conversation','question','answer','answer_feedback'))
-		   OR (table_schema='ops' AND table_name='server_event')`).Scan(&tables); err != nil {
-		t.Fatal(err)
-	}
-	if tables != 0 {
-		t.Fatalf("conversation/sse tables survived empty Down: %d", tables)
-	}
-	if _, err := provider.Up(ctx); err != nil {
-		t.Fatalf("00020 Up after empty Down failed: %v", err)
+	if err := provider.Up(ctx); err != nil {
+		t.Fatalf("conversation SSE repeated up: %v", err)
 	}
 	assertConversationSSEMigrationShape(t, ctx, pool)
 }
 
-func TestConversationSSEMigrationContractsProjectionAndGuardedDown(t *testing.T) {
+func TestConversationSSEMigrationContractsProjection(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
@@ -297,41 +281,6 @@ func TestConversationSSEMigrationContractsProjectionAndGuardedDown(t *testing.T)
 	) VALUES($1,$2,'conversation.updated','conversation:$2',2,'{}'::jsonb,1,$3,$4,$5)`,
 		fixture.otherWorkspaceID, fixture.conversationID, "manual:cross-workspace", fixture.outboxOccurredAt, fixture.outboxOccurredAt.Add(24*time.Hour))
 	assertPostgresCode(t, err, "23503")
-
-	_, err = migrationProvider(t, pool).DownTo(ctx, 19)
-	assertPostgresCode(t, err, "55000")
-}
-
-func TestConversationSSEMigrationDownRejectsPlanAndClarificationFacts(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := newMigrationTestDatabase(t, ctx)
-	defer cleanup()
-	migrateConversationSSETestDatabase(t, ctx, pool)
-	fixture := insertConversationSSEFixture(t, ctx, pool)
-
-	if _, err := pool.Exec(ctx, `INSERT INTO agent.model_call(
-		id,model_run_id,call_no,phase,
-		adapter_name,adapter_version,model_id,model_version,profile_id,profile_version,
-		prompt_template_id,prompt_template_version,output_schema_id,output_schema_version,max_output_tokens,
-		request_hash,request_bytes,status,version,started_at
-	) VALUES($1,$2,1,'PLAN','openai-compatible','v1','model-test','2026-07-01','default','v1',
-		'rag-query-plan','v1','agent.rag-query-plan','v1',128,repeat('a',64),32,'STARTED',1,$3)`,
-		fixture.planCallID, fixture.modelRun1ID, fixture.planStartedAt); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `UPDATE agent.model_call SET
-		status='SUCCEEDED',response_hash=repeat('b',64),response_bytes=32,input_tokens=4,output_tokens=2,
-		latency_ms=5,version=2,completed_at=$2 WHERE id=$1`, fixture.planCallID, fixture.planStartedAt.Add(time.Millisecond)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `UPDATE agent.model_run SET
-		status='SUCCEEDED',final_result_type='clarification',version=2,updated_at=$2,completed_at=$2
-		WHERE id=$1`, fixture.modelRun1ID, fixture.planStartedAt.Add(2*time.Millisecond)); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := migrationProvider(t, pool).DownTo(ctx, 19)
-	assertPostgresCode(t, err, "55000")
 }
 
 type conversationSSEFixture struct {
@@ -391,10 +340,7 @@ type feedbackInsert struct {
 
 func migrateConversationSSETestDatabase(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	t.Helper()
-	runner, err := NewRunner(pool, projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runner := newAtlasRunnerForPool(t, pool)
 	if err := runner.Up(ctx); err != nil {
 		t.Fatal(err)
 	}

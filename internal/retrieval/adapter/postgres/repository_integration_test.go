@@ -17,7 +17,6 @@ import (
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/retrieval/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -546,7 +545,7 @@ func newRetrievalTestRepository(t *testing.T) (*Repository, *platformpostgres.Po
 		admin.Close()
 		t.Fatal(err)
 	}
-	runner, err := platformmigration.NewRunner(migrationPool.DB(), projectmigrations.FS)
+	runner, err := platformmigration.NewAtlasEmbeddedRunner(migrationPool.DB())
 	if err == nil {
 		err = runner.Up(ctx)
 	}

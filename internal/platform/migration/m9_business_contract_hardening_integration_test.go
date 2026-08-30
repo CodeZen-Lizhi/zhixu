@@ -5,7 +5,6 @@ package migration
 import (
 	"context"
 	"database/sql"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -17,92 +16,33 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func TestM9BusinessContractHardeningMigrationSchemaAndEmptyDownUp(t *testing.T) {
+func TestM9BusinessContractHardeningMigrationSchemaAndRepeatedUp(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 33); err != nil {
+	if err := provider.UpTo(ctx, 33); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := provider.UpTo(ctx, 33); err != nil {
+	if err := provider.UpTo(ctx, 33); err != nil {
 		t.Fatal(err)
 	}
 	assertM9MigrationVersion(t, ctx, pool, 33)
 	assertM9BusinessContractHardeningShape(t, ctx, pool)
 
-	if _, err := provider.DownTo(ctx, 29); err != nil {
-		t.Fatalf("00030-00033 empty Down failed: %v", err)
-	}
-	assertM9MigrationVersion(t, ctx, pool, 29)
-	assertM9BusinessContractHardeningAbsent(t, ctx, pool)
-	if _, err := provider.UpTo(ctx, 33); err != nil {
-		t.Fatalf("00030-00033 Up after Down failed: %v", err)
+	if err := provider.UpTo(ctx, 33); err != nil {
+		t.Fatalf("00030-00033 repeated Up failed: %v", err)
 	}
 	assertM9MigrationVersion(t, ctx, pool, 33)
 	assertM9BusinessContractHardeningShape(t, ctx, pool)
-
-	const (
-		workspaceID = "b8000000-0000-4000-8000-000000000001"
-		sourceID    = "b8010000-0000-4000-8000-000000000001"
-		artifactID  = "b8020000-0000-4000-8000-000000000001"
-		versionID   = "b8030000-0000-4000-8000-000000000001"
-	)
-	now := time.Date(2026, 7, 22, 6, 0, 0, 0, time.UTC)
-	insertM9BusinessWorkspace(t, ctx, pool, workspaceID, "m9-source-down-guard", now)
-	insertM9SourceFixture(t, ctx, pool, workspaceID, sourceID, artifactID, "source-down-guard.txt", strings.Repeat("1", 64), now)
-	insertM9SourceVersionWithoutWorkspace(t, ctx, pool, sourceID, artifactID, versionID, "source-down-guard.txt", strings.Repeat("1", 64), now)
-	assertM9SourceVersionWorkspace(t, ctx, pool, versionID, workspaceID)
-
-	_, err := provider.DownTo(ctx, 29)
-	assertPostgresCode(t, err, "55000")
-	if !strings.Contains(err.Error(), "cannot downgrade M9 business contract hardening while Proposal or Source Version data exists") {
-		t.Fatalf("00033 Source Version guarded Down returned unexpected error: %v", err)
-	}
-	assertM9MigrationVersion(t, ctx, pool, 33)
 }
 
-func TestM9BusinessContractIntermediateVersionsGuardedDown(t *testing.T) {
-	for _, targetVersion := range []int64{30, 31, 32} {
-		t.Run("version-"+strconv.FormatInt(targetVersion, 10), func(t *testing.T) {
-			ctx := context.Background()
-			pool, cleanup := newMigrationTestDatabase(t, ctx)
-			defer cleanup()
-			provider := migrationProvider(t, pool)
-			if _, err := provider.UpTo(ctx, 29); err != nil {
-				t.Fatal(err)
-			}
-
-			const (
-				workspaceID = "b7000000-0000-4000-8000-000000000001"
-				sourceID    = "b7010000-0000-4000-8000-000000000001"
-				artifactID  = "b7020000-0000-4000-8000-000000000001"
-				versionID   = "b7030000-0000-4000-8000-000000000001"
-			)
-			now := time.Date(2026, 7, 22, 5, 0, 0, 0, time.UTC)
-			insertM9BusinessWorkspace(t, ctx, pool, workspaceID, "m9-intermediate-down-guard", now)
-			insertM9SourceFixture(t, ctx, pool, workspaceID, sourceID, artifactID, "intermediate-down-guard.txt", strings.Repeat("0", 64), now)
-			insertM9SourceVersionWithoutWorkspace(t, ctx, pool, sourceID, artifactID, versionID, "intermediate-down-guard.txt", strings.Repeat("0", 64), now)
-
-			if _, err := provider.UpTo(ctx, targetVersion); err != nil {
-				t.Fatal(err)
-			}
-			_, err := provider.DownTo(ctx, 29)
-			assertPostgresCode(t, err, "55000")
-			if !strings.Contains(err.Error(), "cannot downgrade M9 business contract hardening while Proposal or Source Version data exists") {
-				t.Fatalf("version %d guarded Down returned unexpected error: %v", targetVersion, err)
-			}
-			assertM9MigrationVersion(t, ctx, pool, targetVersion)
-		})
-	}
-}
-
-func TestM9BusinessContractHardeningMigrationBackfillConstraintsAndGuardedDown(t *testing.T) {
+func TestM9BusinessContractHardeningMigrationBackfillConstraints(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 29); err != nil {
+	if err := provider.UpTo(ctx, 29); err != nil {
 		t.Fatal(err)
 	}
 
@@ -163,7 +103,7 @@ func TestM9BusinessContractHardeningMigrationBackfillConstraintsAndGuardedDown(t
 	insertM9WorkflowDefinition(t, ctx, pool, definitionID, workspaceID, "m9-definition", now)
 	insertM9WorkflowDefinition(t, ctx, pool, otherDefinitionID, otherWorkspaceID, "m9-other-definition", now)
 
-	if _, err := provider.UpTo(ctx, 33); err != nil {
+	if err := provider.UpTo(ctx, 33); err != nil {
 		t.Fatal(err)
 	}
 	assertM9MigrationVersion(t, ctx, pool, 33)
@@ -249,15 +189,8 @@ func TestM9BusinessContractHardeningMigrationBackfillConstraintsAndGuardedDown(t
 		workspaceID, otherDefinitionID, now)
 	assertPostgresCode(t, err, "23503")
 
-	_, err = provider.DownTo(ctx, 29)
-	assertPostgresCode(t, err, "55000")
-	if !strings.Contains(err.Error(), "cannot downgrade M9 business contract hardening while Proposal or Source Version data exists") {
-		t.Fatalf("00033 guarded Down returned unexpected error: %v", err)
-	}
-	assertM9MigrationVersion(t, ctx, pool, 33)
-
 	// The current repository reads fields added after the M9-only migration assertions above.
-	if _, err := provider.Up(ctx); err != nil {
+	if err := provider.Up(ctx); err != nil {
 		t.Fatal(err)
 	}
 	repository, err := changecontrolpostgres.NewRepository(pool)
@@ -296,7 +229,7 @@ func TestM9BusinessContractHardeningBackfillRejectsDirtySourceOwnershipAtomicall
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 29); err != nil {
+	if err := provider.UpTo(ctx, 29); err != nil {
 		t.Fatal(err)
 	}
 
@@ -321,7 +254,7 @@ func TestM9BusinessContractHardeningBackfillRejectsDirtySourceOwnershipAtomicall
 	insertM9SourceFixture(t, ctx, pool, workspaceID, dirtySourceID, dirtyArtifactID, "dirty-source.txt", strings.Repeat("c", 64), now)
 	insertM9SourceVersionWithoutWorkspace(t, ctx, pool, dirtySourceID, dirtyArtifactID, dirtyVersionID, "dirty-source.txt", strings.Repeat("c", 64), now)
 
-	if _, err := provider.UpTo(ctx, 31); err != nil {
+	if err := provider.UpTo(ctx, 31); err != nil {
 		t.Fatal(err)
 	}
 	insertM9SourceFixture(t, ctx, pool, workspaceID, writerSourceID, writerArtifactID, "expand-writer.txt", strings.Repeat("d", 64), now)
@@ -333,7 +266,7 @@ func TestM9BusinessContractHardeningBackfillRejectsDirtySourceOwnershipAtomicall
 	}
 	setM9SourceVersionMutationTrigger(t, ctx, pool, true)
 
-	_, err := provider.UpTo(ctx, 32)
+	err := provider.UpTo(ctx, 32)
 	assertPostgresCode(t, err, "23514")
 	if !strings.Contains(err.Error(), "source version workspace backfill found inconsistent ownership") {
 		t.Fatalf("00032 dirty Source Version error=%v", err)
@@ -355,7 +288,7 @@ func TestM9BusinessContractHardeningBackfillRejectsDirtySourceOwnershipAtomicall
 		t.Fatal(err)
 	}
 	setM9SourceVersionMutationTrigger(t, ctx, pool, true)
-	if _, err := provider.UpTo(ctx, 33); err != nil {
+	if err := provider.UpTo(ctx, 33); err != nil {
 		t.Fatalf("00032-00033 Up after repairing dirty Source Version failed: %v", err)
 	}
 	assertM9MigrationVersion(t, ctx, pool, 33)
@@ -369,7 +302,7 @@ func TestM9BusinessContractHardeningContractRejectsDirtyWorkflowAtomically(t *te
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 32); err != nil {
+	if err := provider.UpTo(ctx, 32); err != nil {
 		t.Fatal(err)
 	}
 
@@ -391,7 +324,7 @@ func TestM9BusinessContractHardeningContractRejectsDirtyWorkflowAtomically(t *te
 		t.Fatal(err)
 	}
 
-	_, err := provider.Up(ctx)
+	err := provider.Up(ctx)
 	assertPostgresCode(t, err, "23503")
 	assertM9MigrationVersion(t, ctx, pool, 32)
 	assertM9BusinessContractStillExpanded(t, ctx, pool)
@@ -399,7 +332,7 @@ func TestM9BusinessContractHardeningContractRejectsDirtyWorkflowAtomically(t *te
 	if _, err := pool.Exec(ctx, `DELETE FROM workflow.run WHERE id=$1`, dirtyRunID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := provider.UpTo(ctx, 33); err != nil {
+	if err := provider.UpTo(ctx, 33); err != nil {
 		t.Fatalf("00033 Up after removing dirty Workflow Run failed: %v", err)
 	}
 	assertM9MigrationVersion(t, ctx, pool, 33)
@@ -756,52 +689,6 @@ func assertM9BusinessContractStillExpanded(t *testing.T, ctx context.Context, po
 	if nullable != "YES" || !defaultExpression.Valid || !strings.Contains(defaultExpression.String, "HIGH") || fk != 0 || schemaMeta != 0 || immutableFunction != 0 {
 		t.Fatalf("failed contract rollback nullable=%s default=%v fk=%d schema_meta=%d immutable_function=%d",
 			nullable, defaultExpression, fk, schemaMeta, immutableFunction)
-	}
-}
-
-func assertM9BusinessContractHardeningAbsent(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
-	t.Helper()
-	var columns, constraints, indexes, riskFunctionReferences, sourceBindFunctions, schemaMeta int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.columns
-		WHERE (table_schema='change_control' AND table_name='proposal' AND column_name='risk_level')
-		   OR (table_schema='core' AND table_name='source_version' AND column_name='workspace_id')`).Scan(&columns); err != nil {
-		t.Fatal(err)
-	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_constraint
-		WHERE conname IN (
-			'ck_proposal_risk_level','ck_source_version_workspace_required',
-			'fk_workflow_run_definition_workspace','fk_source_version_source_workspace',
-			'fk_source_version_artifact_workspace','uq_workflow_definition_id_workspace'
-		)`).Scan(&constraints); err != nil {
-		t.Fatal(err)
-	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_indexes
-		WHERE indexname IN (
-			'idx_proposal_workspace_updated_id','idx_workflow_run_workspace_updated_id',
-			'idx_workflow_run_workspace_status_updated_id','idx_knowledge_topic_workspace_status_id',
-			'idx_knowledge_claim_workspace_status_id','idx_source_version_workspace_captured_id',
-			'idx_ingestion_attempt_source_started_id','uq_workflow_definition_id_workspace'
-		)`).Scan(&indexes); err != nil {
-		t.Fatal(err)
-	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_proc
-		WHERE pronamespace='change_control'::regnamespace
-		  AND proname='validate_proposal_transition'
-		  AND pg_get_functiondef(oid) LIKE '%risk_level%'`).Scan(&riskFunctionReferences); err != nil {
-		t.Fatal(err)
-	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_proc
-		WHERE pronamespace='core'::regnamespace
-		  AND proname='bind_source_version_workspace'`).Scan(&sourceBindFunctions); err != nil {
-		t.Fatal(err)
-	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM core.schema_meta
-		WHERE key='m9_business_contract_hardening'`).Scan(&schemaMeta); err != nil {
-		t.Fatal(err)
-	}
-	if columns != 0 || constraints != 0 || indexes != 0 || riskFunctionReferences != 0 || sourceBindFunctions != 0 || schemaMeta != 0 {
-		t.Fatalf("00030-00033 Down columns=%d constraints=%d indexes=%d risk_function_references=%d source_bind_functions=%d schema_meta=%d",
-			columns, constraints, indexes, riskFunctionReferences, sourceBindFunctions, schemaMeta)
 	}
 }
 

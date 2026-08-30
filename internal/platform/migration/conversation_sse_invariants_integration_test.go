@@ -56,8 +56,6 @@ func TestConversationSSEMigrationEnforcesActiveAnswerModelRunAndFeedbackBoundari
 	if err := insertAnswer(ctx, pool, secondPending); err != nil {
 		t.Fatalf("terminal failed workflow should allow the next answer slot: %v", err)
 	}
-	_, err = migrationProvider(t, pool).DownTo(ctx, 20)
-	assertPostgresCode(t, err, "55000")
 
 	publishedAt := time.Date(2026, 7, 19, 10, 1, 0, 0, time.UTC)
 	_, err = pool.Exec(ctx, `UPDATE agent.answer SET

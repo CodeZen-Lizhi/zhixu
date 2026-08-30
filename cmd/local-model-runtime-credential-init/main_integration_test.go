@@ -10,7 +10,6 @@ import (
 	"time"
 
 	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -45,11 +44,7 @@ func TestValidateRuntimeRoleAgainstPostgres(t *testing.T) {
 		_, _ = admin.Exec(context.Background(), `ALTER ROLE zhixu_local_model_runtime RESET ALL`)
 		_, _ = admin.Exec(context.Background(), "DROP DATABASE "+databaseIdentifier+" WITH (FORCE)")
 	}()
-	runner, err := platformmigration.NewRunner(pool, projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := runner.Up(ctx); err != nil {
+	if err := platformmigration.MigrateAtlas(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
 	if err := validateRuntimeRole(ctx, pool); err != nil {

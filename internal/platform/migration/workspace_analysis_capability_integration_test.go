@@ -12,21 +12,14 @@ import (
 	agentpostgres "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/postgres"
 	agentapplication "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/jackc/pgx/v5/stdlib"
-	"github.com/pressly/goose/v3"
 )
 
 func TestWorkspaceAnalysisWorkerCapabilityPersistenceContract(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
-	runner, err := NewRunner(pool, projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runner := newAtlasRunnerForPool(t, pool)
 	if err := runner.Up(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -132,28 +125,6 @@ FROM clock`)
 	}
 	_, err = pool.Exec(ctx, `TRUNCATE agent.workspace_analysis_worker_capability`)
 	assertPostgresCode(t, err, "55000")
-
-	// Capability history is a guarded forward-only boundary.
-	database := stdlib.OpenDBFromPool(pool)
-	defer database.Close()
-	annotated, err := NewLegacyAnnotationFS(projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	provider, err := goose.NewProvider(goose.DialectPostgres, database, annotated, goose.WithTableName(projectMigrationTable))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, version := range []int64{91, 90, 89} {
-		if _, err := provider.ApplyVersion(ctx, version, false); err != nil {
-			t.Fatalf("%05d Down before capability guard: %v", version, err)
-		}
-	}
-	_, err = provider.ApplyVersion(ctx, 88, false)
-	var pgErr *pgconn.PgError
-	if !errors.As(err, &pgErr) || pgErr.Code != "55000" {
-		t.Fatalf("00088 Down error=%v", err)
-	}
 }
 
 func workspaceAnalysisCapabilityRequireReady(

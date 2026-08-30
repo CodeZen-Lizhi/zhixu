@@ -65,8 +65,8 @@ type RestoreProposalCreator interface {
   preflight 和 lease fence。Document 已推进时转 `NEEDS_REVISION`，不得把陈旧 restore 提交到 Git。
 - restore Commit finalization 在 PostgreSQL 事务内精确绑定 Proposal Commit、Document version、current Revision 和目标内容，
   append 一条 Article Revision 并推进 Document；并发或响应丢失重放只能有一个 writer，其余返回无副作用 replay。
-- `00075` 为 additive migration，mapping 查询有 `(workspace_id, document_id, target_path, git_commit)` partial index；Down 在存在
-  restore publication 事实时以 `55000` 拒绝，并精确恢复被替换的 Authoring guard。
+- `00075` 为 additive migration，mapping 查询有 `(workspace_id, document_id, target_path, git_commit)` partial index；后续迁移必须
+  保留 restore publication 事实与 Authoring guard，不得用逆向 DDL 删除。
 
 ### 4. Validation & Error Matrix
 
@@ -98,7 +98,7 @@ type RestoreProposalCreator interface {
   dirty 与 path-dirty 区分、preview hash、exact replay/idempotency conflict。
 - Git：临时仓库 normal/external/dirty/detached、symlink/path traversal、root TOCTOU、grafts/replace/attributes、输出超限，
   并静态证明无 reset/checkout/history rewrite 命令路径。
-- PostgreSQL：批量映射无 N+1、Workspace/path/Document 绑定、fresh/repeat/guarded Down、partial index、restore publication
+- PostgreSQL：批量映射无 N+1、Workspace/path/Document 绑定、fresh/repeat/旧版本数据前向升级、partial index、restore publication
   exact-once/concurrent replay 和函数定义精确恢复。
 - Change Control/Authoring：typed Proposal、approval/writeback/reindex、`FILE_PREPARED` owner drift、Commit finalization、
   response loss 与并发 finalize。

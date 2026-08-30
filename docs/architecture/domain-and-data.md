@@ -1,6 +1,6 @@
 # 领域与数据设计
 
-本章是统一领域语言、领域不变量、数据所有权和物理数据库边界的唯一事实源。精确表、列、索引、枚举、触发器和迁移 SQL 以 [`migrations/`](../../migrations/) 为准；本章只保留能指导跨模块行为的概念约束。
+本章是统一领域语言、领域不变量、数据所有权和物理数据库边界的唯一事实源。精确表、列、索引、枚举、触发器和迁移 SQL 以 [`atlas/migrations/`](../../atlas/migrations/) 为准；本章只保留能指导跨模块行为的概念约束。
 
 ## 1. 领域上下文
 
@@ -224,7 +224,7 @@ DB 负责结构约束、唯一性、外键、事务和并发基础；Domain 负�
 
 ## 9. 数据库设计原则
 
-- 物理表、列、枚举、FK、Check、Trigger、索引、迁移编号和 SQL 只在 [`migrations/`](../../migrations/) 维护；当前迁移序列覆盖仓库实际文件，不在本文复制字段清单。
+- 物理表、列、枚举、FK、Check、Trigger、索引、迁移编号和 SQL 只在 [`atlas/migrations/`](../../atlas/migrations/) 维护；当前迁移序列覆盖仓库实际文件，不在本文复制字段清单。
 - SourceVersion、ContentArtifact、SourceSpan、Chunk、Artifact Revision 等内容证据不可变；跨 Workspace 的引用必须有明确 owner 绑定。
 - Workspace 内只有一个 Active Index；历史索引可保留、归档和回滚，不能与当前索引并行对外冒充事实。
 - Approval、Workflow Attempt、Tool Receipt、Outbox、Audit 和评测事实追加保存；Node Claim/Heartbeat 使用 lease、SKIP LOCKED 或等价并发边界。

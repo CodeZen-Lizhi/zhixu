@@ -10,8 +10,7 @@ import (
 	"github.com/riverqueue/river/rivermigrate"
 )
 
-// migrateRiver 应用并校验 River schema；Goose Runner 与后续 Atlas Runner 共用。
-// TODO 3 恢复暂存的 Atlas 文件时，须删除其中重复的 migrateRiver 副本。
+// migrateRiver 在项目 Atlas 迁移完成后应用并校验 River schema。
 func migrateRiver(ctx context.Context, pool *pgxpool.Pool, riverSchema string) error {
 	riverMigrator, err := rivermigrate.New(riverpgxv5.New(pool), &rivermigrate.Config{Schema: riverSchema})
 	if err != nil {

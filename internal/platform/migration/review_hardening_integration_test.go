@@ -11,17 +11,17 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func TestReviewHardeningMigrationBackfillsLegacyRowsAndGuardsDown(t *testing.T) {
+func TestReviewHardeningMigrationBackfillsLegacyRows(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 34); err != nil {
+	if err := provider.UpTo(ctx, 34); err != nil {
 		t.Fatal(err)
 	}
 	claimID := "72000000-0000-4000-8000-000000000003"
 	seedLegacyReviewRows(t, ctx, pool, &claimID)
-	if _, err := provider.UpTo(ctx, 35); err != nil {
+	if err := provider.UpTo(ctx, 35); err != nil {
 		t.Fatalf("00035 legacy upgrade failed: %v", err)
 	}
 	assertMigrationVersion(t, ctx, pool, 35)
@@ -38,11 +38,6 @@ func TestReviewHardeningMigrationBackfillsLegacyRowsAndGuardsDown(t *testing.T) 
 	if len(sessionHash) != 64 || len(answerHash) != 64 || rating != nil || snapshot != nil {
 		t.Fatalf("session_hash=%q answer_hash=%q rating=%v snapshot=%v", sessionHash, answerHash, rating, snapshot)
 	}
-
-	if _, err := provider.DownTo(ctx, 34); err == nil || !strings.Contains(err.Error(), "learning review history is non-empty") {
-		t.Fatalf("00035 guarded Down error=%v", err)
-	}
-	assertMigrationVersion(t, ctx, pool, 35)
 }
 
 func TestReviewHardeningMigrationPreservesLegacyNullClaim(t *testing.T) {
@@ -50,11 +45,11 @@ func TestReviewHardeningMigrationPreservesLegacyNullClaim(t *testing.T) {
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 34); err != nil {
+	if err := provider.UpTo(ctx, 34); err != nil {
 		t.Fatal(err)
 	}
 	seedLegacyReviewRows(t, ctx, pool, nil)
-	if _, err := provider.UpTo(ctx, 35); err != nil {
+	if err := provider.UpTo(ctx, 35); err != nil {
 		t.Fatalf("00035 rejected a valid 00034 legacy Review Card: %v", err)
 	}
 	assertMigrationVersion(t, ctx, pool, 35)
@@ -81,7 +76,7 @@ func TestReviewCompleteSessionReceiptMigrationAllowsOnlyForwardCommandType(t *te
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 37); err != nil {
+	if err := provider.UpTo(ctx, 37); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, 7, 25, 8, 0, 0, 0, time.UTC)
@@ -100,27 +95,19 @@ func TestReviewCompleteSessionReceiptMigrationAllowsOnlyForwardCommandType(t *te
 	if _, err := pool.Exec(ctx, legacyInsert, workspaceID, now); err != nil {
 		t.Fatalf("pre-00038 receipt insert failed: %v", err)
 	}
-	if _, err := provider.UpTo(ctx, 38); err != nil {
+	if err := provider.UpTo(ctx, 38); err != nil {
 		t.Fatalf("00038 upgrade failed: %v", err)
 	}
 	var legacyCount int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM learning.review_command WHERE workspace_id=$1 AND idempotency_key='legacy-review-command'`, workspaceID).Scan(&legacyCount); err != nil || legacyCount != 1 {
 		t.Fatalf("00038 lost legacy receipt: count=%d err=%v", legacyCount, err)
 	}
-	if _, err := provider.DownTo(ctx, 37); err != nil {
-		t.Fatalf("00038 empty rollback failed: %v", err)
-	}
-	assertMigrationVersion(t, ctx, pool, 37)
-	if _, err := provider.UpTo(ctx, 38); err != nil {
+	if err := provider.UpTo(ctx, 38); err != nil {
 		t.Fatalf("00038 re-upgrade failed: %v", err)
 	}
 	if _, err := pool.Exec(ctx, insert, workspaceID, now); err != nil {
 		t.Fatalf("00038 rejected COMPLETE_SESSION receipt: %v", err)
 	}
-	if _, err := provider.DownTo(ctx, 37); err == nil || !strings.Contains(err.Error(), "complete review session receipts exist") {
-		t.Fatalf("00038 receipt rollback error=%v", err)
-	}
-	assertMigrationVersion(t, ctx, pool, 38)
 }
 
 func seedLegacyReviewRows(t *testing.T, ctx context.Context, pool *pgxpool.Pool, claimID *string) {
@@ -152,16 +139,5 @@ func seedLegacyReviewRows(t *testing.T, ctx context.Context, pool *pgxpool.Pool,
 	if _, err := pool.Exec(ctx, `INSERT INTO learning.review_answer(id,workspace_id,session_id,card_id,question_ref,idempotency_key,user_answer,score,feedback,created_at)
 		VALUES('72000000-0000-4000-8000-000000000006',$1,'72000000-0000-4000-8000-000000000005','72000000-0000-4000-8000-000000000004','legacy:1','legacy-answer','legacy','{}','{}',$2)`, workspaceID, now); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func assertMigrationVersion(t *testing.T, ctx context.Context, pool *pgxpool.Pool, want int64) {
-	t.Helper()
-	version, err := migrationProvider(t, pool).GetDBVersion(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if version != want {
-		t.Fatalf("migration version=%d want=%d", version, want)
 	}
 }

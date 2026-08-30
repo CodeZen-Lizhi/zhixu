@@ -14,19 +14,15 @@ go 1.26.4，会破坏 ADR-0015 锁定的 Go 1.25.4 工具链（deploy/Dockerfile
 migrateRiver/validationMessage 已按注释约定合并，Atlas runner 内的重复
 定义已删除。请 TODO 10 会话不要再将这批文件移出构建路径；构建当前为绿。
 
-## 原因
+## 历史暂存原因（已解除）
 
 `atlasdir.go`、`atlasrrw.go`、`atlasrunner.go` 是 TODO 3（Goose 迁移到 Atlas）的在途实现，import `ariga.io/atlas`，但 go.mod/go.sum 尚未引入该模块，导致 `go build ./...` 整体失败。TODO 3 按路线图仍是未启动的独立任务，Atlas 不得提前成为当前技术基线，因此本轮 TODO 10 开发先将这三个文件移出构建路径，不删除、不修改内容。
 
-同目录的 `convert.go` / `convert_test.go` 不依赖 ariga.io/atlas，可独立编译，仍保留在 `internal/platform/migration/`。
+同目录的 `convert.go` / `convert_test.go` 当时曾暂留；转换完成后已与一次性
+`cmd/goose2atlas` 工具一并删除。
 
-## 恢复方式
+## 最终处理
 
-TODO 3 启动时，将三个文件移回 `internal/platform/migration/`，然后执行：
-
-```bash
-go get ariga.io/atlas@latest
-go mod tidy && go mod vendor
-```
-
-注意 `atlasrunner.go` 同时依赖 `rivermigrate` 与 `riverpgxv5`，恢复后需重新核对与 Foundation GORM pool 的兼容矩阵。
+TODO 3 已恢复并完成这些文件；Atlas 精确锁定 v1.2.2，禁止使用 `latest`。
+`atlasrunner.go` 与 `rivermigrate`/`riverpgxv5` 的共享 pool、单连接池和 advisory
+lock 路径均已通过集成验证。本段仅保留并行开发期间的协调背景。

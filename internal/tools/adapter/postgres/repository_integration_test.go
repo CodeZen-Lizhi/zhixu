@@ -23,7 +23,6 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/tools/domain"
 	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
 	workflowdomain "github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -1019,11 +1018,7 @@ func newToolRepositoryIntegrationPool(t *testing.T) (*pgxpool.Pool, context.Cont
 	databaseURL := parsed.String()
 	migrationPool, err := platformpostgres.OpenMigration(ctx, databaseURL, 4, 0)
 	if err == nil {
-		var runner *platformmigration.Runner
-		runner, err = platformmigration.NewRunner(migrationPool.DB(), projectmigrations.FS)
-		if err == nil {
-			err = runner.Up(ctx)
-		}
+		err = platformmigration.MigrateAtlas(ctx, migrationPool.DB())
 		migrationPool.Close()
 	}
 	if err != nil {

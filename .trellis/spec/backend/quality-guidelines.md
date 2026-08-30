@@ -19,7 +19,7 @@
 - Application/API：`internal/app/`、`cmd/api/`，通过 Handler/Contract/错误映射测试。
 - Worker/Workflow：`internal/workflow/`、`cmd/worker/`，通过租约、崩溃恢复、幂等和补偿集成测试。
 - Adapter：`internal/platform/*`，每个正式实现与 Fake/Fixture 共享 Contract Test。
-- 数据库和迁移：`migrations/`、`internal/platform/postgres/`，通过空库升级、约束故障和 EXPLAIN 测试。
+- 数据库和迁移：`atlas/migrations/`、`internal/platform/postgres/`，通过空库升级、约束故障和 EXPLAIN 测试。
 - PostgreSQL 测试 Fixture 位于 `internal/platform/testdb`；Gold Set、AI Eval、E2E 和部署验证路径以各自 manifest/构建文件为准。
 
 ## 禁止模式
@@ -338,7 +338,7 @@ make test
 
 ### 3. Contracts
 
-- 文件集合只来自 `git ls-files -z`。Go 范围固定为 `cmd/`、`internal/`、`eval/`、`migrations/`、`poc/eino/`；Web、E2E 和 SQL 分别使用 `web/src/`、`web/e2e/`、`migrations/*.sql`。
+- 文件集合只来自 `git ls-files -z`。Go 范围固定为 `cmd/`、`internal/`、`eval/`、`atlas/`、`poc/eino/`；Web、E2E 和 SQL 分别使用 `web/src/`、`web/e2e/`、`atlas/migrations/*.sql`。
 - JSON 不包含时间、绝对路径、用户名、主机名或 Git commit；所有路径、位置、edge、target 和 asset 显式稳定排序。
 - `parseID`、`decodeJSON`、`writeError`、`isRecord` 与 UUID helper 只是重复候选信号，必须保留匹配位置，禁止按名称直接合并实现。
 - `web/dist` 是可选且被 Git 忽略的输入。未先执行当前 Web build 时，其 Bundle 数字不得声称对应当前源码或 CI 工具链。
@@ -380,7 +380,7 @@ Correct: 使用同一确定性报告比较路径、位置和 edge；再逐项审
   对称规范化、Evidence hash 和 Conflict fingerprint，关键纯函数执行 `-race -count=20`。
 - Application/Repository 测试覆盖 Provenance/Confirmation fail-closed、Workspace 隔离、幂等重放、CAS、
   同事务 Confirm/OpenConflict、损坏对象 readback 和批量无 N+1。
-- PostgreSQL integration 覆盖 00017 Up/Down guard、复合约束、deferred constraints、对称并发去重和
+- PostgreSQL integration 覆盖 00017 fresh/repeated Up 与旧版本数据前向升级、复合约束、deferred constraints、对称并发去重和
   response-loss replay；模型评测、文档或 Fake 不能替代真实数据库证据。
 - 回归至少覆盖 Ingestion SourceSpan、Retrieval Search/Evidence、Change Control、Workflow；本任务不新增
   空壳 HTTP/OpenAPI，也不得把 Workspace 隔离误报为 M10 Auth 已完成。
@@ -682,7 +682,7 @@ Correct: 以真实 PostgreSQL/Workflow/HTTP/browser 分层证据证明动态结�
 
 ### 6. Tests Required
 
-- 任务 `implement.md` Checkpoint C/D 全部命令；迁移空库/重复/Down-Up/guarded Down。
+- 任务 `implement.md` Checkpoint C/D 全部命令；迁移空库/重复 Up/旧版本数据前向升级。
 - 主 Agent 使用 `go-review`、`code-review-and-quality`、`sql-code-review`；公共 API/DB/Workflow/前端由独立 reviewer 复验。
 
 ### 7. Wrong vs Correct
@@ -703,7 +703,7 @@ Correct: 提高复现率、锁定持久时间精度根因、加入真实 Postgre
 
 ### 2. Signatures
 
-- 后端门禁覆盖 `internal/export/...`、Auth/Router/API/Worker、`migrations/00036` 基线和前向 `00063`。
+- 后端门禁覆盖 `internal/export/...`、Auth/Router/API/Worker、`atlas/migrations/00036` 基线和前向 `00063`。
 - 动态门禁使用真实 `ZHIXU_TEST_DATABASE_URL`，并通过 `deploy/export-browser-smoke.sh` 启动 API、Worker、Vite。
 - `FileStore.Open` 必须返回同一已验证 FD 的 `io.ReadCloser`；HTTP 按 durable size 流式返回。
 
@@ -711,7 +711,7 @@ Correct: 提高复现率、锁定持久时间精度根因、加入真实 Postgre
 
 - PostgreSQL 是 tagged Job/gate/lease/prepared/cleanup/download Audit 的事实源；River 只投递，readiness/Fake 不替代闭环。
 - 故障注入覆盖 Stage/Prepare/Promote/Complete、租约接管、TTL、删除和 Audit；prepared 后不得重读可变源生成第二结果。
-- Migration 必须覆盖 fresh/repeat/upgrade/guarded Down，以及 `CHECK` 的 NULL/UNKNOWN `23514`；禁止修改 `00036`。
+- Migration 必须覆盖 fresh/repeat/upgrade/历史事实保留，以及 `CHECK` 的 NULL/UNKNOWN `23514`；禁止修改 `00036`。
 - LocalFS 安全测试覆盖 fd-relative no-follow、create-only、prepared replacement、orphan namespace、目录有界枚举、
   NFC 排序、unsafe entry、limit、源/祖先/final snapshot 变化和流式 hash/size 校验。
 - Auth/HTTP 覆盖 Workspace、Session/API Token、CSRF/Origin、`READ_LOCAL`、安全下载头和 anti-enumeration；
@@ -792,7 +792,7 @@ AC-33 才能标记完成，Evaluation/Audit 内容导出仍保持后续。
 - Review Scorer 输入只来自已验证 Card、答案和受控上下文；评分、Evidence 子集校验、Answer、Schedule、receipt 在一个
   PostgreSQL 事务中完成。`00052` 要求 Claim 离开 `CONFIRMED`（包括 `DISPUTED`）或 legacy evidence 不可验证时，Card
   与 Schedule 一起收敛到失效状态；due 查询的 legacy UUID 转换必须 fail closed。每条 Answer 必须冻结非空、无首尾空白、
-  不超过 128 bytes 的 Scorer version；`00055` 将旧数据标记为 `legacy/unknown`，有 Answer 时禁止 Down 丢失该审计字段。
+  不超过 128 bytes 的 Scorer version；`00055` 将旧数据标记为 `legacy/unknown`，后续迁移不得丢失该审计字段。
 - due 查询必须携带活动且 Deck-bound 的 Review Session；`question_ref` 使用 API-only HMAC key 绑定
   Workspace/Session/Deck/Card fingerprint 与 Card/Schedule version。显式配置必须为至少
   32 个 canonical bytes；`required` 模式缺省时从 Bootstrap Token 域隔离派生，local `disabled` 缺省时才使用进程随机 key。
@@ -810,7 +810,7 @@ AC-33 才能标记完成，Evaluation/Audit 内容导出仍保持后续。
 - `00056` 要求 root Interview Question 的 `interview-evidence/v2` 恰有八个字段，并通过安全 UUID、Claim Source、active Index、
   Source Manifest、canonical Chunk/Manifest Chunk 和 provenance 绑定校验；follow-up 必须原样冻结 parent Claim/Evidence。Interview
   child 与 Review Answer 写入先 `FOR UPDATE` 锁同一 `review_session` parent，parent 改型再反查 child，保证双向竞态最多一方提交。
-  已有 Interview/Question 或 Review Answer 时，Down 必须以 SQLSTATE `55000` 拒绝移除这些 guard。
+  已有 Interview/Question 或 Review Answer 时，后续迁移不得移除这些 guard。
 - Interview Completion 使用 Begin/Prepare/Complete reservation，不建立跨模块长事务。Begin 在 Session 行锁下冻结 snapshot，
   PENDING reservation 阻止 Submit；Prepare 冻结完整 Artifact digest。Artifact 创建事务写入 PLAN receipt 与带 digest 的 hidden
   hold，数据库 fence 以 `FOR UPDATE` 核对 reservation=PENDING、digest、Artifact type/role 和精确 stage key。Complete 最终
@@ -881,17 +881,17 @@ AC-33 才能标记完成，Evaluation/Audit 内容导出仍保持后续。
 - PostgreSQL：Answer/Score/Schedule 同事务、`00049` 投影与 `00052` guarded migration、安全 UUID due、Interview Artifact
   hidden hold/release/failure replay、`00053` visibility migration、`00054` Interview provenance unique index、Memory
   双层幂等的 exact-key/semantic replay、并发每-key receipt、单 Candidate/Audit、expiry/Workspace 隔离；`00055` 覆盖
-  Up/repeated Up、legacy `legacy/unknown` 回填、Scorer version 约束、空数据 Down→Up 与有 Answer guarded Down；同时覆盖
+  Up/repeated Up、legacy `legacy/unknown` 回填、Scorer version 约束与历史 Answer 保留；同时覆盖
   `00035` legacy receipt/Answer hardening、`00038` COMPLETE_SESSION receipt；`00056` 覆盖 malformed evidence、root/follow-up
-  provenance、Interview/Review shell 双向两连接竞态与有业务数据 guarded Down；`00057` 覆盖 legacy hold→ORPHANED、NULL digest
+  provenance、Interview/Review shell 双向两连接竞态与历史业务数据保留；`00057` 覆盖 legacy hold→ORPHANED、NULL digest
   仅凭匹配 PLAN receipt 安全归一化、role/artifact mutation、reservation exact replay/异 key 并发、maintenance 与 late Artifact
-  Create 竞态、24h ABANDONED→ORPHANED 及 forward/guarded Down。
+  Create 竞态、24h ABANDONED→ORPHANED 及 forward-only 升级。
 - `00059/00060`：结构化 Interview Memory provenance/FK/每步唯一 Candidate、Audit aggregate/version/action matrix、completion/path
   reservation no-keepalive、共享基表/兼容视图、origin shape、Review Answer/Artifact 唯一 binding、Path/Step retained history、
-  Review command/reservation/hold、真实 Repository SQL 列/枚举/必填字段与 guarded Down。
+  Review command/reservation/hold、真实 Repository SQL 列/枚举/必填字段与历史事实保留。
 - Conversation RAG / `00061`：effective Memory 正反例、canonical digest 绑定 scope/identity/version/type/content、loader failure 与
   empty 区分、same-attempt 唯一 claimant、多阶段单次输入、READY+Model Run 原子 binding、Relation/Artifact 零注入、migration/
-  Repository/recovery 真实 PostgreSQL 与 guarded Down。
+  Repository/recovery 真实 PostgreSQL 与旧版本数据前向升级。
 - HTTP/OpenAPI/Browser：Capability/CSRF/Origin、严格 decoder、脱敏 due、Interview/Path 恢复、用户 source 字段拒绝、
   Review Answer→Path 创建/恢复/状态与步骤命令、`review.*`/`learning_path.*`/`interview.*`/`memory.*` SSE invalidation；
   Composition 测试必须证明 Handler 持有真实 Service，Worker/maintenance 调用可达。最终门禁前还需独立 Go、SQL、通用审查和

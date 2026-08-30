@@ -95,7 +95,7 @@ ProfileGenerator.Generate(context.Context, ProfileGenerationRequest) (ProfileGen
 | Profile 输出缺 topic/knowledge point、Span、digest 或冻结契约 | `CAPTURE_PROFILE_OUTPUT_INVALID|CONTEXT_INVALID`，不追加 READY revision |
 | Profile Chunk 为空、超过 128 KiB 或总数超过 500 | `CAPTURE_PROFILE_CONTEXT_INVALID`；不返回超限正文，不调用 Provider |
 | Provider 成功但 Profile/Model Run 终结未知 | `CAPTURE_PROFILE_FINALIZATION_UNKNOWN`，不得重复调用 Provider 或假成功 |
-| `00068` 有受保护 Capture/Profile 事实时 Down | SQLSTATE `55000`，数据与迁移版本保持不变 |
+| `00068` 旧库有受保护 Capture/Profile 事实 | 前向升级保持数据与迁移版本语义不变 |
 
 ### 5. Good / Base / Bad Cases
 
@@ -112,7 +112,7 @@ ProfileGenerator.Generate(context.Context, ProfileGenerationRequest) (ProfileGen
   顺序、明确回滚/未知提交/publish response-loss、未知未提交后的稳定 locator 回收、同 hash 并发、独立降级和 Profile strict schema/evidence/digest。
 - Filesystem：首次目录链逐级 parent sync、stage directory/file symlink、权限、超大/篡改内容、并发 create-only publish、
   discard 不删除同 hash final，以及 DB 已绑定但 final 缺失时的 read-repair。
-- PostgreSQL/Migration：空库 Up、Down-Up、guarded Down、Workspace/FK/CAS、outbox claim/retry/poison、response-loss replay、
+- PostgreSQL/Migration：空库 Up、重复 Up、旧版本数据前向升级、Workspace/FK/CAS、outbox claim/retry/poison、response-loss replay、
   Profile old revision survival、Chunk 读取上限和 Model Run terminal closure；使用真实 PostgreSQL。
 - HTTP/Auth/OpenAPI/Composition：strict JSON/multipart、大小/MIME、Capability、System Status capture 字段、API/Worker wiring。
 - Network/Parser：SSRF、DNS pinning、redirect、timeout、status classification、HTML/PDF 边界和取消后的 terminal persistence。

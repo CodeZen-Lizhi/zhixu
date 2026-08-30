@@ -4,13 +4,13 @@ package postgres
 
 import (
 	"context"
-	"strings"
 	"testing"
 	"time"
 
 	authoringapp "github.com/CodeZen-Lizhi/zhixu/internal/authoring/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/authoring/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -339,74 +339,10 @@ func seedAuthoringPendingPublicationWithCommit(
 	return documentID, revisionID, preparation.Reservation.ID, gitCommit
 }
 
-func TestDocumentDraftAuthoringHardeningMigrationEmptyDownUp(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	pool := newAuthoringIntegrationDatabase(t, ctx)
-	provider := authoringMigrationProvider(t, pool)
-	if _, err := provider.DownTo(ctx, 70); err != nil {
-		t.Fatalf("empty 00071 down: %v", err)
-	}
-	workspaceID := authoringIntegrationID(940)
-	documentID := authoringIntegrationID(941)
-	revisionID := authoringIntegrationID(942)
-	seedAuthoringWorkspace(t, ctx, pool, workspaceID, "authoring-hardening-down")
-	now := time.Date(2026, 8, 3, 16, 0, 0, 0, time.UTC)
-	seedAuthoringDraftDocumentRevision(t, ctx, pool, workspaceID, documentID, revisionID, 1,
-		"notes/down-contract.md", "Down contract", "# Down contract", "", now)
-	var downDocumentGuard string
-	if err := pool.QueryRow(ctx, `SELECT pg_get_functiondef(
-		'authoring.guard_document_publication_path()'::regprocedure)`).Scan(&downDocumentGuard); err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(downDocumentGuard, "commit_mapping.target_mode") {
-		t.Fatal("00071 Down left the 00071 target-mode proof in the 00069 Document guard")
-	}
-	_, err := pool.Exec(ctx, `UPDATE core.article_revision SET git_commit=$1
-		WHERE id=$2 AND workspace_id=$3`, authoringIntegrationDigest("down-git-injection"),
-		string(revisionID), string(workspaceID))
-	if err == nil {
-		t.Fatal("00071 Down lost the 00069 Git commit immutability contract")
-	}
-	authoringIntegrationPostgresCode(t, err, "55000")
-	_, err = pool.Exec(ctx, `INSERT INTO core.article_revision(
-		id,workspace_id,document_id,parent_revision_id,revision_no,content,content_hash,status,
-		optimization_mode,git_commit,created_by_type,created_at
-	) VALUES($1,$2,$3,$4,2,$5,$6,'PUBLISHED','NONE',$7,'USER',$8)`,
-		string(authoringIntegrationID(943)), string(workspaceID), string(documentID), string(revisionID),
-		"# Down forged", domain.ComputeContentHash("# Down forged"), authoringIntegrationDigest("down-forged"), now.Add(time.Second))
-	if err == nil {
-		t.Fatal("00071 Down lost the 00069 Published insert guard")
-	}
-	authoringIntegrationPostgresCode(t, err, "23514")
-	if _, err := provider.UpTo(ctx, 71); err != nil {
-		t.Fatalf("00071 re-up: %v", err)
-	}
-	var definition string
-	if err := pool.QueryRow(ctx, `SELECT pg_get_functiondef('authoring.validate_publication_binding_write()'::regprocedure)`).Scan(&definition); err != nil {
-		t.Fatal(err)
-	}
-	if definition == "" {
-		t.Fatal("authoring publication hardening function is missing after re-up")
-	}
-	var upDocumentGuard string
-	if err := pool.QueryRow(ctx, `SELECT pg_get_functiondef(
-		'authoring.guard_document_publication_path()'::regprocedure)`).Scan(&upDocumentGuard); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(upDocumentGuard, "commit_mapping.target_mode") {
-		t.Fatal("00071 Up did not restore the target-mode proof in the Document guard")
-	}
-}
-
 func TestDocumentDraftAuthoringHardeningMigrationRejectsLegacyProposalKeyDrift(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	pool := newAuthoringIntegrationDatabase(t, ctx)
-	provider := authoringMigrationProvider(t, pool)
-	if _, err := provider.DownTo(ctx, 70); err != nil {
-		t.Fatalf("down to 00070: %v", err)
-	}
+	pool := newAuthoringIntegrationDatabaseToVersion(t, ctx, 70)
 	workspaceID := authoringIntegrationID(1300)
 	documentID := authoringIntegrationID(1301)
 	revisionID := authoringIntegrationID(1302)
@@ -451,10 +387,25 @@ func TestDocumentDraftAuthoringHardeningMigrationRejectsLegacyProposalKeyDrift(t
 		reservation.CreatedAt.UTC()); err != nil {
 		t.Fatal(err)
 	}
-	wrongKeyReservation := reservation
-	wrongKeyReservation.ProposalIdempotencyKey = "legacy-wrong-proposal-key"
-	proposal := seedAuthoringPublicationProposal(t, ctx, pool, wrongKeyReservation, content,
-		authoringIntegrationID(1304), authoringIntegrationID(1305), now.Add(2*time.Second))
+	// Seed the legacy drift with raw SQL: at version 00070 the current
+	// change-control repository cannot run against the older proposal shape.
+	proposalID := authoringIntegrationID(1304)
+	proposalRevisionID := authoringIntegrationID(1305)
+	if _, err := pool.Exec(ctx, `INSERT INTO change_control.proposal(
+		id,workspace_id,status,created_at,updated_at,idempotency_key,request_hash,version,proposal_type,risk_level
+	) VALUES($1,$2,'draft',$3,$3,'legacy-wrong-proposal-key',$4,1,'file_patch','MEDIUM')`,
+		string(proposalID), string(workspaceID), now.Add(2*time.Second),
+		authoringIntegrationDigest("legacy-key-request")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO change_control.proposal_revision(
+		id,proposal_id,revision_no,target_path,base_hash,content,evidence_summary,risk,rollback_plan,
+		change_hash,created_at,target_mode
+	) VALUES($1,$2,1,$3,$4,$5,'legacy evidence','legacy risk','legacy rollback',$6,$7,'CREATE_ONLY')`,
+		string(proposalRevisionID), string(proposalID), reservation.TargetPath, reservation.BaseVersion,
+		content, authoringIntegrationDigest("legacy-key-change"), now.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -465,7 +416,7 @@ func TestDocumentDraftAuthoringHardeningMigrationRejectsLegacyProposalKeyDrift(t
 		status,git_commit,error_code,version,created_at,updated_at,published_at
 	) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'PENDING',NULL,'',1,$12,$12,NULL)`,
 		string(authoringIntegrationID(1306)), string(reservation.ID), string(workspaceID),
-		string(documentID), string(revisionID), string(proposal.ID), string(proposal.Revision.ID),
+		string(documentID), string(revisionID), string(proposalID), string(proposalRevisionID),
 		reservation.TargetPath, reservation.ContentHash,
 		string(reservation.TargetMode), reservation.AbsenceToken,
 		now.Add(3*time.Second)); err != nil {
@@ -479,24 +430,18 @@ func TestDocumentDraftAuthoringHardeningMigrationRejectsLegacyProposalKeyDrift(t
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := provider.UpTo(ctx, 71); err == nil {
+	if err := platformmigration.MigrateAtlasToVersion(ctx, pool, 71); err == nil {
 		t.Fatal("00071 accepted an existing Proposal idempotency binding drift")
 	} else {
 		authoringIntegrationPostgresCode(t, err, "55000")
 	}
-	if version, err := provider.GetDBVersion(ctx); err != nil || version != 70 {
-		t.Fatalf("database version after rejected 00071 upgrade=%d err=%v", version, err)
-	}
+	assertAuthoringMigrationVersion(t, ctx, pool, "00070")
 }
 
 func TestDocumentDraftAuthoringTerminalMigrationRejectsLegacyNullableCommand(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	pool := newAuthoringIntegrationDatabase(t, ctx)
-	provider := authoringMigrationProvider(t, pool)
-	if _, err := provider.DownTo(ctx, 72); err != nil {
-		t.Fatalf("down to 00072: %v", err)
-	}
+	pool := newAuthoringIntegrationDatabaseToVersion(t, ctx, 72)
 	workspaceID := authoringIntegrationID(1400)
 	draftID := authoringIntegrationID(1401)
 	seedAuthoringWorkspace(t, ctx, pool, workspaceID, "authoring-legacy-command")
@@ -525,32 +470,23 @@ func TestDocumentDraftAuthoringTerminalMigrationRejectsLegacyNullableCommand(t *
 		string(workspaceID), authoringIntegrationDigest("legacy-nullable-create"), string(draftID), now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := provider.UpTo(ctx, 73); err == nil {
+	if err := platformmigration.MigrateAtlasToVersion(ctx, pool, 73); err == nil {
 		t.Fatal("00073 accepted a legacy nullable command receipt")
 	} else {
 		authoringIntegrationPostgresCode(t, err, "23514")
 	}
-	if version, err := provider.GetDBVersion(ctx); err != nil || version != 72 {
-		t.Fatalf("database version after rejected 00073 upgrade=%d err=%v", version, err)
-	}
+	assertAuthoringMigrationVersion(t, ctx, pool, "00072")
 }
 
-func TestDocumentDraftAuthoringHardeningDownTo69RestoresDocumentGuard(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	pool := newAuthoringIntegrationDatabase(t, ctx)
-	provider := authoringMigrationProvider(t, pool)
-	if _, err := provider.DownTo(ctx, 69); err != nil {
-		t.Fatalf("empty 00071/00070 down: %v", err)
-	}
-	var definition string
-	if err := pool.QueryRow(ctx, `SELECT pg_get_functiondef('authoring.guard_document_publication_path()'::regprocedure)`).Scan(&definition); err != nil {
+// assertAuthoringMigrationVersion asserts the highest applied Atlas revision.
+func assertAuthoringMigrationVersion(t *testing.T, ctx context.Context, pool *pgxpool.Pool, version string) {
+	t.Helper()
+	var applied string
+	if err := pool.QueryRow(ctx,
+		`SELECT COALESCE(max(version), '0') FROM atlas_schema_revisions.atlas_schema_revisions`).Scan(&applied); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(definition, "commit_mapping.target_mode") {
-		t.Fatal("00071 Down left the Document guard dependent on the 00070 target_mode column")
-	}
-	if _, err := provider.UpTo(ctx, 72); err != nil {
-		t.Fatalf("authoring migrations re-up: %v", err)
+	if applied != version {
+		t.Fatalf("database version after rejected upgrade=%s want=%s", applied, version)
 	}
 }

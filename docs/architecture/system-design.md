@@ -136,7 +136,7 @@ Safe Writeback 的 WorkspaceStore 与 GitRepository 不是通用文件/Git 工�
 |---|---|---|
 | 后端 | Go；Gin v1.12.0 + `net/http` 兼容边界 | Gin 负责 API、Middleware、REST 与 SSE；标准库 `http.Handler` 仅在框架边界适配，Domain/Application 不依赖 Gin |
 | 数据访问 | pgx 参数化手写 SQL | sqlc 尚未配置；Repository 通过模块 Interface 隔离 |
-| Migration/Job | Goose + River/riverpgxv5 | 前向迁移、PostgreSQL Job 与 Worker；选择理由见 [ADR-0015](adr/0015-river-goose-runtime.md) |
+| Migration/Job | Atlas + River/riverpgxv5 | Atlas 是唯一前向迁移事实源（无 Down，fix-forward），PostgreSQL Job 与 Worker；选择理由见 [ADR-0015](adr/0015-river-goose-runtime.md) 与 [ADR-0029](adr/0029-atlas-sole-schema-migration.md) |
 | 数据 | PostgreSQL + pgvector + FTS | exact vector scan 为基线；固定维度容量证据后才使用部分 HNSW |
 | 图谱 | canonical Relation + PostgreSQL 查询投影 | v1 不引入图数据库，见 [ADR-0005](adr/0005-no-graph-database-v1.md) |
 | 内容 | goldmark、go-readability Adapter、pdftotext/Poppler Adapter、SHA-256 | 外部 Parser 只经 Adapter；HTML 安全文本使用标准 parser，不用正则清洗 |
@@ -231,7 +231,7 @@ all steps use run --rm --no-deps; no Workspace grant
 - PostgreSQL 不可用：拒绝新命令和写入；Worker readiness 失败，不手工完成 Job。
 - 文件/Git/DB 无法证明一致：进入 READ_ONLY_RECOVERY，保留 temp、backup、index 与 Commit 证据。
 - Worker 崩溃：River rescue 与 Workflow lease reclaim 从持久 checkpoint 继续，不创建第二领域执行。
-- Schema 采用向前 Expand → backfill → Contract；默认不使用 destructive down migration。模型热应用 migration 已产生 participant history 后 Down fail closed，不支持旧/新 binary 混跑。
+- Schema 采用向前 Expand → backfill → Contract；Atlas 不提供 Down，回滚使用 fix-forward 或升级前备份恢复。模型热应用 migration 必须保留 participant history，不支持旧/新 binary 混跑。
 - 模块在证据支持时可拆进程，但必须保持当前 Interface、事务所有权、幂等和审计语义；拆服务不是产品里程碑。
 
 运行命令、配置事实源、升级和恢复步骤见 [运行与恢复手册](../operations.md)。

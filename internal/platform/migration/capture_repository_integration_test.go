@@ -22,7 +22,7 @@ func TestCaptureRepositoryConcurrentCreateExactReplayAndAtomicFacts(t *testing.T
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabaseWithMaxConns(t, ctx, 12)
 	defer cleanup()
-	if _, err := migrationProvider(t, pool).UpTo(ctx, 68); err != nil {
+	if err := migrationProvider(t, pool).UpTo(ctx, 68); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, 8, 2, 13, 0, 0, 0, time.UTC)
@@ -119,7 +119,7 @@ func TestCaptureRepositoryRetryExactReplayAndAtomicOutbox(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabaseWithMaxConns(t, ctx, 8)
 	defer cleanup()
-	if _, err := migrationProvider(t, pool).UpTo(ctx, 68); err != nil {
+	if err := migrationProvider(t, pool).UpTo(ctx, 68); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, 8, 2, 14, 0, 0, 0, time.UTC)
@@ -206,7 +206,7 @@ func TestCaptureRepositoryAllowsAttemptOneInSuccessiveWorkflowRuns(t *testing.T)
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabaseWithMaxConns(t, ctx, 8)
 	defer cleanup()
-	if _, err := migrationProvider(t, pool).UpTo(ctx, 68); err != nil {
+	if err := migrationProvider(t, pool).UpTo(ctx, 68); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, 8, 2, 16, 0, 0, 0, time.UTC)

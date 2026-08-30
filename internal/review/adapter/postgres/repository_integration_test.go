@@ -18,7 +18,6 @@ import (
 	platformscheduler "github.com/CodeZen-Lizhi/zhixu/internal/platform/scheduler"
 	reviewapp "github.com/CodeZen-Lizhi/zhixu/internal/review/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/review/domain"
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -1181,11 +1180,7 @@ func newReviewTestDatabase(t *testing.T, ctx context.Context) (*pgxpool.Pool, fu
 		admin.Close()
 		t.Fatal(err)
 	}
-	runner, err := platformmigration.NewRunner(pool, projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := runner.Up(ctx); err != nil {
+	if err := platformmigration.MigrateAtlas(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
 	return pool, func() {

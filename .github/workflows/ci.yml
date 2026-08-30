@@ -78,6 +78,14 @@ jobs:
           make collection-health-secret-scan
           npm audit --prefix web --audit-level=high
 
+      - name: Validate Atlas migration directory
+        env:
+          ATLAS_IMAGE: arigaio/atlas@sha256:dce85fd3f83c9c28f343c73236c8917f802d526f1fe921e150b720077a83c5ae
+        run: |
+          make atlas-migrate-lint
+          make atlas-migrate-hash-check
+          make atlas-migrate-validate
+
       - name: Run Collection and Health PostgreSQL gates
         env:
           ZHIXU_DATABASE_HOST: 127.0.0.1
@@ -86,9 +94,19 @@ jobs:
           ZHIXU_DATABASE_USER: zhixu_test
           ZHIXU_DATABASE_PASSWORD: ci_only_change_me
           ZHIXU_DATABASE_SSLMODE: disable
+          ATLAS_IMAGE: arigaio/atlas@sha256:dce85fd3f83c9c28f343c73236c8917f802d526f1fe921e150b720077a83c5ae
+          POSTGRES_CLIENT_IMAGE: pgvector/pgvector@sha256:1d533553fefe4f12e5d80c7b80622ba0c382abb5758856f52983d8789179f0fb
         run: |
+          export ZHIXU_DATABASE_URL="$(python3 -c 'import os; print("postgres" + "://" + os.environ["ZHIXU_DATABASE_USER"] + ":" + os.environ["ZHIXU_DATABASE_PASSWORD"] + "@" + os.environ["ZHIXU_DATABASE_HOST"] + ":" + os.environ["ZHIXU_DATABASE_PORT"] + "/" + os.environ["ZHIXU_DATABASE_NAME"] + "?sslmode=" + os.environ["ZHIXU_DATABASE_SSLMODE"])')"
           export ZHIXU_TEST_DATABASE_URL="$(python3 -c 'import os; print("postgres" + "://" + os.environ["ZHIXU_DATABASE_USER"] + ":" + os.environ["ZHIXU_DATABASE_PASSWORD"] + "@" + os.environ["ZHIXU_DATABASE_HOST"] + ":" + os.environ["ZHIXU_DATABASE_PORT"] + "/" + os.environ["ZHIXU_DATABASE_NAME"] + "?sslmode=" + os.environ["ZHIXU_DATABASE_SSLMODE"])')"
+          export ZHIXU_ATLAS_DEV_URL="$(python3 -c 'import os; print("postgres" + "://" + os.environ["ZHIXU_DATABASE_USER"] + ":" + os.environ["ZHIXU_DATABASE_PASSWORD"] + "@" + os.environ["ZHIXU_DATABASE_HOST"] + ":" + os.environ["ZHIXU_DATABASE_PORT"] + "/zhixu_atlas_dev?sslmode=" + os.environ["ZHIXU_DATABASE_SSLMODE"])')"
+          docker run --rm --network host \
+            -e PGPASSWORD="$ZHIXU_DATABASE_PASSWORD" \
+            "$POSTGRES_CLIENT_IMAGE" createdb \
+            --host "$ZHIXU_DATABASE_HOST" --port "$ZHIXU_DATABASE_PORT" \
+            --username "$ZHIXU_DATABASE_USER" zhixu_atlas_dev
           go run ./cmd/migrate
+          make atlas-schema-drift
           make collection-health-integration
           make collection-health-fault-smoke
           make collection-health-benchmark

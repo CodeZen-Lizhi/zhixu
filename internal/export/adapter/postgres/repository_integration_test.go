@@ -22,7 +22,6 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/export/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -693,7 +692,7 @@ func newExportIntegrationRepository(t *testing.T, ctx context.Context) (*Reposit
 		_, _ = admin.Exec(context.Background(), "DROP DATABASE "+identifier+" WITH (FORCE)")
 		admin.Close()
 	})
-	runner, err := platformmigration.NewRunner(pool, projectmigrations.FS)
+	runner, err := platformmigration.NewAtlasEmbeddedRunner(pool)
 	if err == nil {
 		err = runner.Up(ctx)
 	}

@@ -13,7 +13,7 @@ func TestWorkspaceRootGrantMigrationPreservesLegacyAndGuardsIdentity(t *testing.
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 66); err != nil {
+	if err := provider.UpTo(ctx, 66); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, 7, 31, 8, 0, 0, 0, time.UTC)
@@ -32,7 +32,7 @@ VALUES
 		legacyActiveID, legacyTestID, now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := provider.UpTo(ctx, 67); err != nil {
+	if err := provider.UpTo(ctx, 67); err != nil {
 		t.Fatal(err)
 	}
 	for _, fixture := range []struct {
@@ -90,42 +90,6 @@ VALUES($1,'verified',$2,$3,1,$2,$4,'inactive','available',NULL,$4,1,$4,$4)`,
 SET root_path='/tmp/rebound',git_repository_path='/tmp/rebound',version=version+1,updated_at=now()
 WHERE id=$1`, parentID)
 	assertPostgresCode(t, err, "55000")
-
-	_, err = provider.DownTo(ctx, 66)
-	assertPostgresCode(t, err, "55000")
-	if _, err := pool.Exec(ctx, `ALTER TABLE core.workspace DISABLE TRIGGER workspace_registry_guard`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `ALTER TABLE learning.artifact_citation_selector_backfill
-DISABLE TRIGGER artifact_citation_selector_backfill_guard`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `DELETE FROM learning.artifact_citation_selector_backfill
-WHERE workspace_id IN ($1,$2)`, parentID, childID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `ALTER TABLE learning.artifact_citation_selector_backfill
-ENABLE TRIGGER artifact_citation_selector_backfill_guard`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `DELETE FROM core.workspace WHERE id IN ($1,$2)`, parentID, childID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `ALTER TABLE core.workspace ENABLE TRIGGER workspace_registry_guard`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := provider.DownTo(ctx, 66); err != nil {
-		t.Fatalf("guarded workspace migration down after cleanup: %v", err)
-	}
-	for id, want := range map[string]string{legacyActiveID: "active", legacyTestID: "test"} {
-		var status string
-		if err := pool.QueryRow(ctx, `SELECT status FROM core.workspace WHERE id=$1`, id).Scan(&status); err != nil {
-			t.Fatal(err)
-		}
-		if status != want {
-			t.Fatalf("restored legacy status id=%s got=%q want=%q", id, status, want)
-		}
-	}
 }
 
 func TestWorkspaceRootGrantMigrationSharesModelSettingsMutationGate(t *testing.T) {
@@ -133,7 +97,7 @@ func TestWorkspaceRootGrantMigrationSharesModelSettingsMutationGate(t *testing.T
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 67); err != nil {
+	if err := provider.UpTo(ctx, 67); err != nil {
 		t.Fatal(err)
 	}
 	const rolloutID = "67000000-0000-4000-8000-000000000010"

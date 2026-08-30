@@ -22,7 +22,6 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -321,11 +320,7 @@ func newTimelineWorkerTestDatabase(t *testing.T, ctx context.Context) (string, *
 		t.Fatal(err)
 	}
 	defer migrationPool.Close()
-	runner, err := platformmigration.NewRunner(migrationPool.DB(), projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := runner.Up(ctx); err != nil {
+	if err := platformmigration.MigrateAtlas(ctx, migrationPool.DB()); err != nil {
 		t.Fatal(err)
 	}
 	pool, err := pgxpool.New(ctx, databaseURL)

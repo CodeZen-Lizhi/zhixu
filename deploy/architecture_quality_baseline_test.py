@@ -68,7 +68,7 @@ class ArchitectureQualityBaselineTest(unittest.TestCase):
         )
         self.write("web/src/api/example.test.ts", "function isRecord() { return false }\n")
         self.write("web/e2e/example.spec.ts", "test('x', () => {})\n")
-        self.write("migrations/00001_init.sql", "SELECT 1;\n")
+        self.write("atlas/migrations/00001_init.sql", "SELECT 1;\n")
         self.write("internal/untracked/domain/no.go", "package domain\n", tracked=False)
 
         report = self.collect()

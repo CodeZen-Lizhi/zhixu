@@ -11,12 +11,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func TestCaptureProfileMigrationSupportsEmptyDownUpAndGuardsFacts(t *testing.T) {
+func TestCaptureProfileMigrationUpRepeatAndShape(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 68); err != nil {
+	if err := provider.UpTo(ctx, 68); err != nil {
 		t.Fatalf("migrate through 00068: %v", err)
 	}
 	assertCaptureProfileResultTypeConstraint(t, ctx, pool, true)
@@ -31,49 +31,17 @@ func TestCaptureProfileMigrationSupportsEmptyDownUpAndGuardsFacts(t *testing.T) 
 			t.Fatalf("table %s exists=%v error=%v", table, exists, err)
 		}
 	}
-	if _, err := provider.DownTo(ctx, 67); err != nil {
-		t.Fatalf("empty 00068 down: %v", err)
-	}
-	assertCaptureProfileResultTypeConstraint(t, ctx, pool, false)
-	assertSourceSpanDerivedEvidenceColumns(t, ctx, pool, false)
-	if _, err := provider.UpTo(ctx, 68); err != nil {
-		t.Fatalf("00068 re-up: %v", err)
+	if err := provider.UpTo(ctx, 68); err != nil {
+		t.Fatalf("00068 repeated up: %v", err)
 	}
 	assertCaptureProfileResultTypeConstraint(t, ctx, pool, true)
-
-	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
-	const (
-		workspaceID = "68000000-0000-4000-8000-000000000001"
-		sourceID    = "68000000-0000-4000-8000-000000000002"
-		captureID   = "68000000-0000-4000-8000-000000000003"
-	)
-	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(
-id,name,root_path,root_fingerprint,binding_version,git_repository_path,git_checked_at,
-status,availability,availability_reason,availability_checked_at,version,created_at,updated_at)
-VALUES($1,'capture-test','/tmp/capture-test',$2,1,'/tmp/capture-test',$3,
-'inactive','available',NULL,$3,1,$3,$3)`, workspaceID, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", now); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `INSERT INTO core.source(id,workspace_id,type,logical_name,original_location,created_at)
-VALUES($1,$2,'quick_capture_url','example.com',$3,$4)`, sourceID, workspaceID, "captures/"+captureID+"/input", now); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `INSERT INTO core.capture(
-id,workspace_id,kind,display_name,original_location,original_url,source_id,status,
-fetch_status,ingestion_status,index_status,profile_status,version,captured_at,updated_at)
-VALUES($1,$2,'URL','example.com',$3,'https://example.com',$4,'RECEIVED',
-'PENDING','PENDING','PENDING','PENDING',1,$5,$5)`, captureID, workspaceID, "captures/"+captureID+"/input", sourceID, now); err != nil {
-		t.Fatal(err)
-	}
-	_, err := provider.DownTo(ctx, 67)
-	assertPostgresCode(t, err, "55000")
 }
 
 func TestCaptureProfileCompositeSourceVersionBindingsRejectCrossWorkspaceWrites(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
-	if _, err := migrationProvider(t, pool).UpTo(ctx, 68); err != nil {
+	if err := migrationProvider(t, pool).UpTo(ctx, 68); err != nil {
 		t.Fatal(err)
 	}
 
@@ -161,86 +129,6 @@ func TestCaptureProfileCompositeSourceVersionBindingsRejectCrossWorkspaceWrites(
 	) VALUES('68100000-0000-4000-8000-000000000013',$1,$2,$3,$4,1,'INGESTION','RUNNING','',false,$5,1)`,
 		workspaceA, captureA, versionB, workflow, now)
 	assertPostgresCode(t, err, "23503")
-}
-
-func TestCaptureProfileDownGuardsOnlyProfileModelRunFacts(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := newMigrationTestDatabase(t, ctx)
-	defer cleanup()
-	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 68); err != nil {
-		t.Fatal(err)
-	}
-
-	now := time.Date(2026, 8, 2, 14, 0, 0, 0, time.UTC)
-	const (
-		workspaceID  = "68200000-0000-4000-8000-000000000001"
-		definitionID = "68200000-0000-4000-8000-000000000002"
-		workflowID   = "68200000-0000-4000-8000-000000000003"
-		nodeID       = "68200000-0000-4000-8000-000000000004"
-		nodeAttempt  = "68200000-0000-4000-8000-000000000005"
-		indexID      = "68200000-0000-4000-8000-000000000006"
-		modelRunID   = "68200000-0000-4000-8000-000000000007"
-		modelCallID  = "68200000-0000-4000-8000-000000000008"
-	)
-	for _, statement := range []struct {
-		query string
-		args  []any
-	}{
-		{`INSERT INTO core.workspace(
-			id,name,root_path,root_fingerprint,binding_version,git_repository_path,git_checked_at,
-			status,availability,availability_reason,availability_checked_at,version,created_at,updated_at)
-		VALUES($1,'capture-down-model','/tmp/capture-down-model',repeat('3',64),1,'/tmp/capture-down-model',$2,
-			'inactive','available',NULL,$2,1,$2,$2)`, []any{workspaceID, now}},
-		{`INSERT INTO workflow.definition(id,workspace_id,key,version,graph,created_at)
-			VALUES($1,$2,'capture-down-model',1,'{"nodes":[]}',$3)`, []any{definitionID, workspaceID, now}},
-		{`INSERT INTO workflow.run(id,workspace_id,definition_id,status,input,version,created_at,updated_at)
-			VALUES($1,$2,$3,'running','{}',1,$4,$4)`, []any{workflowID, workspaceID, definitionID, now}},
-		{`INSERT INTO workflow.node_run(
-			id,run_id,node_key,node_type,status,input,lease_owner,lease_until,version,created_at,updated_at
-		) VALUES($1,$2,'capture.profile','capture.profile','running','{}','capture-down',$3,1,$4,$4)`,
-			[]any{nodeID, workflowID, now.Add(time.Minute), now}},
-		{`INSERT INTO workflow.node_attempt(
-			id,node_run_id,attempt_no,dispatch_no,retry_no,delivery_id,lease_owner,lease_until,status,started_at
-		) VALUES($1,$2,1,1,0,'capture-down-delivery','capture-down',$3,'running',$4)`,
-			[]any{nodeAttempt, nodeID, now.Add(time.Minute), now}},
-		{`INSERT INTO retrieval.index_version(
-			id,workspace_id,tokenizer_id,tokenizer_version,tokenizer_config_hash,fusion_config,
-			source_snapshot_ref,manifest_hash,expected_chunk_count,idempotency_key,status,degraded_capabilities,
-			version,created_at,updated_at
-		) VALUES($1,$2,'simple','v1',repeat('4',64),'{}','capture-down:index',repeat('5',64),0,
-			'capture-down-index','building','["vector"]',1,$3,$3)`, []any{indexID, workspaceID, now}},
-		{`INSERT INTO agent.model_run(
-			id,workspace_id,workflow_run_id,node_run_id,node_attempt_id,adapter_name,adapter_version,
-			model_id,model_version,profile_id,profile_version,prompt_template_id,prompt_template_version,
-			output_schema_id,output_schema_version,reduced_schema_id,reduced_schema_version,
-			retrieval_index_version_id,status,version,started_at,updated_at
-		) VALUES($1,$2,$3,$4,$5,'openai-compatible','v1','capture-profile','v1','capture.profile','v1',
-			'capture.profile','v1','document-knowledge-profile','v1','document-knowledge-profile-reduced','v1',
-			$6,'RUNNING',1,$7,$7)`, []any{modelRunID, workspaceID, workflowID, nodeID, nodeAttempt, indexID, now}},
-		{`INSERT INTO agent.model_call(
-			id,model_run_id,call_no,phase,adapter_name,adapter_version,model_id,model_version,profile_id,
-			profile_version,prompt_template_id,prompt_template_version,output_schema_id,output_schema_version,
-			max_output_tokens,request_hash,request_bytes,status,version,started_at
-		) VALUES($1,$2,1,'INITIAL','openai-compatible','v1','capture-profile','v1','capture.profile','v1',
-			'capture.profile','v1','document-knowledge-profile','v1',128,repeat('6',64),128,'STARTED',1,$3)`,
-			[]any{modelCallID, modelRunID, now}},
-		{`UPDATE agent.model_call SET status='SUCCEEDED',response_hash=repeat('7',64),response_bytes=64,
-			input_tokens=10,output_tokens=5,latency_ms=20,version=2,completed_at=$2 WHERE id=$1`,
-			[]any{modelCallID, now.Add(time.Second)}},
-		{`UPDATE agent.model_run SET status='SUCCEEDED',final_result_type='document_knowledge_profile',
-			version=2,updated_at=$2,completed_at=$2 WHERE id=$1`, []any{modelRunID, now.Add(2 * time.Second)}},
-	} {
-		if _, err := pool.Exec(ctx, statement.query, statement.args...); err != nil {
-			t.Fatal(err)
-		}
-	}
-	var captureFacts int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM core.capture`).Scan(&captureFacts); err != nil || captureFacts != 0 {
-		t.Fatalf("capture facts=%d error=%v", captureFacts, err)
-	}
-	_, err := provider.DownTo(ctx, 67)
-	assertPostgresCode(t, err, "55000")
 }
 
 func assertSourceSpanDerivedEvidenceColumns(t *testing.T, ctx context.Context, pool *pgxpool.Pool, expected bool) {

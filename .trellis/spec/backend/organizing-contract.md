@@ -92,7 +92,7 @@ type HumanTaskReviewProjector interface {
 | owner/fence/Workflow/Artifact 依赖不可用 | 503/retryable 按分类返回；不得部分成功 |
 | Article Revision batch 缺失、乱序、跨 Workspace 或 content hash 漂移 | consistency failure；不调用模型、不产生 Artifact |
 | required Human Task review 缺失、Definition/receipt/Evidence 漂移 | 409 consistency violation；decision service 不被调用 |
-| `00074` 存在受保护业务事实时 Down | SQLSTATE `55000`；历史事实不删除 |
+| `00074` 旧库存在受保护业务事实 | 前向升级保留历史事实 |
 
 ### 5. Good / Base / Bad Cases
 
@@ -106,7 +106,7 @@ type HumanTaskReviewProjector interface {
 
 - Domain/Application：四类 Material union、Draft CAS、建议不授权、模板 allowlist/canonical hash、四模板输出、
   exact replay/conflict、并发 repository replay disposition 和 typed-nil fence。
-- PostgreSQL：fresh/repeat/guarded Down、append-only、Workspace FK、confirm 半失败回滚、owner drift、active Index drift、
+- PostgreSQL：fresh/repeat/旧版本数据前向升级、append-only、Workspace FK、confirm 半失败回滚、owner drift、active Index drift、
   serializable concurrency/response loss、Collection revision 交叉验证、outbox claim/retry/poison 和 Run binding。
 - Workflow/HTTP/Auth/OpenAPI：四 Definition/Worker restart、全局 Run Workspace header、Human Task GET/POST fail closed、
   Artifact/Proposal owner、Capability、严格 Problem 和 production composition。

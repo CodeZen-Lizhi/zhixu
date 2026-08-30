@@ -68,14 +68,14 @@ Repository.ReconcilePublications(context.Context, ReconcileQuery) (int, error)
 | 发布目标漂移、Proposal binding 漂移、Revision 非最新 | 稳定 409 错误码并回查，不重建 Proposal |
 | CREATE_ONLY 目标已存在或 REPLACE base 已变化 | 拒绝写回；不覆盖目标 |
 | Commit/Document/Revision 终态不闭合 | `RECOVERY_REQUIRED` 或 consistency violation，不伪造 Published |
-| 00069-00073 存在受保护 Authoring 事实时 Down | SQLSTATE `55000`，迁移版本和业务事实保持不变 |
+| 00069-00073 旧库存在受保护 Authoring 事实 | 前向升级保持迁移版本语义和业务事实不变 |
 
 ### 5. Tests Required
 
 - Domain/Application：路径、请求哈希、CAS、每次 Freeze 新 Revision、exact replay/conflict、
   ABANDONED 重放、CREATE_ONLY/REPLACE 派生和 publication recovery。
 - PostgreSQL：Workspace/FK、command shape、append-only、并发 Freeze/Publish、Binding/Reservation/Commit proof、
-  direct-SQL forge rejection、fresh Up、Down-Up 和 guarded Down。
+  direct-SQL forge rejection、fresh/repeated Up 和旧版本事实保留。
 - Change Control/Git：CREATE_ONLY absence replay、目标竞争、private index、commit/reverse/recovery 与 REPLACE 兼容。
 - HTTP/Auth/OpenAPI/Composition：严格 JSON/query/cursor、Capability、列表/detail、稳定错误码与依赖不可用。
 - Web：strict decoder、Workspace Query key、autosave conflict、Freeze 后 stale query、发布状态恢复、XSS preview；

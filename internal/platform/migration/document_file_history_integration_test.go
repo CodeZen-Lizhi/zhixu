@@ -13,16 +13,15 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func TestDocumentFileHistoryMigrationFiltersRestoreTimelineAndRestoresProjectors(t *testing.T) {
+func TestDocumentFileHistoryMigrationFiltersRestoreTimeline(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 74); err != nil {
+	if err := provider.UpTo(ctx, 74); err != nil {
 		t.Fatal(err)
 	}
-	before := documentHistoryProjectorDefinitions(t, ctx, pool)
-	if _, err := provider.UpTo(ctx, 75); err != nil {
+	if err := provider.UpTo(ctx, 75); err != nil {
 		t.Fatal(err)
 	}
 	var restorePublicationTable *string
@@ -115,26 +114,6 @@ func TestDocumentFileHistoryMigrationFiltersRestoreTimelineAndRestoresProjectors
 	if strings.Join(refs, "\n") != strings.Join(wantRefs, "\n") {
 		t.Fatalf("file patch Timeline refs=%v want=%v", refs, wantRefs)
 	}
-
-	if _, err := provider.DownTo(ctx, 74); err == nil || !strings.Contains(err.Error(), "cannot downgrade document file history while restore proposals exist") {
-		t.Fatalf("00075 guarded Down error=%v", err)
-	}
-	deleteDocumentHistoryRestoreFixture(t, ctx, pool, restoreProposalID)
-	if _, err := provider.DownTo(ctx, 74); err != nil {
-		t.Fatalf("00075 Down failed: %v", err)
-	}
-	after := documentHistoryProjectorDefinitions(t, ctx, pool)
-	for name, definition := range before {
-		if after[name] != definition {
-			t.Fatalf("Document History dependency %s was not exactly restored by Down", name)
-		}
-	}
-	if err := pool.QueryRow(ctx, `SELECT to_regclass('authoring.document_restore_publication')::text`).Scan(&restorePublicationTable); err != nil || restorePublicationTable != nil {
-		t.Fatalf("restore publication table after Down=%v err=%v", restorePublicationTable, err)
-	}
-	if err := pool.QueryRow(ctx, `SELECT to_regclass('authoring.idx_authoring_publication_history_git')::text`).Scan(&historyIndex); err != nil || historyIndex != nil {
-		t.Fatalf("history mapping index after Down=%v err=%v", historyIndex, err)
-	}
 }
 
 type documentHistoryFixture struct {
@@ -216,47 +195,6 @@ func installDocumentHistoryProjectorFixtures(t *testing.T, ctx context.Context, 
 		FOR EACH ROW EXECUTE FUNCTION ops.project_proposal_commit_timeline_source();`); err != nil {
 		t.Fatal(err)
 	}
-}
-
-func deleteDocumentHistoryRestoreFixture(t *testing.T, ctx context.Context, pool *pgxpool.Pool, proposalID string) {
-	t.Helper()
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := tx.Exec(ctx, `SET LOCAL session_replication_role=replica`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tx.Exec(ctx, `DELETE FROM change_control.proposal_revision WHERE proposal_id=$1`, proposalID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tx.Exec(ctx, `DELETE FROM change_control.proposal WHERE id=$1`, proposalID); err != nil {
-		t.Fatal(err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func documentHistoryProjectorDefinitions(t *testing.T, ctx context.Context, pool *pgxpool.Pool) map[string]string {
-	t.Helper()
-	result := make(map[string]string, 6)
-	for _, name := range []string{
-		"ops.project_proposal_timeline_source()",
-		"ops.project_approval_timeline_source()",
-		"ops.project_proposal_commit_timeline_source()",
-		"authoring.validate_article_revision_mutation()",
-		"authoring.guard_document_publication_path()",
-		"authoring.verify_publication_terminal_state()",
-	} {
-		var definition string
-		if err := pool.QueryRow(ctx, `SELECT pg_get_functiondef($1::regprocedure)`, name).Scan(&definition); err != nil {
-			t.Fatal(err)
-		}
-		result[name] = definition
-	}
-	return result
 }
 
 func documentHistoryAssertTimelineCount(t *testing.T, ctx context.Context, pool *pgxpool.Pool, workspaceID string, want int) {

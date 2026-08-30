@@ -1,7 +1,9 @@
 SHELL := /bin/sh
 DOCKER_COMPOSE ?= docker compose
+ATLAS_IMAGE ?= arigaio/atlas@sha256:dce85fd3f83c9c28f343c73236c8917f802d526f1fe921e150b720077a83c5ae
+POSTGRES_CLIENT_IMAGE ?= pgvector/pgvector@sha256:1d533553fefe4f12e5d80c7b80622ba0c382abb5758856f52983d8789179f0fb
 
-.PHONY: test migrate go-test go-vet web-install web-lint web-typecheck web-test web-build eino-test eino-vet eino-live-smoke eino-live-smoke-env eino-live-smoke-contract eino-live-chat-smoke eino-live-query-plan-smoke eino-live-rag-metadata-smoke eino-live-openai-embedding-smoke eino-live-ollama-embedding-smoke eino-stable-observation-test eino-stable-observation-preflight eino-stable-observation-start eino-stable-observation-day eino-stable-observation-attest eino-stable-observation-verify agent-eval semantic-link-eval openapi-check trellis-script-test task-context-check auth-integration tool-integration rag-integration workspace-analysis-integration workspace-analysis-terminal-matrix workspace-analysis-fault-smoke graph-integration graph-smoke graph-benchmark benchmark-capacity semantic-link-integration semantic-link-fault-smoke semantic-link-browser-smoke semantic-link-smoke collection-health-integration collection-health-fault-smoke collection-health-benchmark collection-health-browser-smoke collection-health-secret-scan collection-health-smoke artifact-browser-smoke m8-learning-browser-smoke export-browser-smoke timeline-impact-integration timeline-impact-fault-smoke timeline-impact-worker-smoke compose-auth-check compose-runtime-check compose-bootstrap-check compose-runtime-contract compose-netns-check compose-netns-contract compose-workspace-check compose-workspace-contract compose-static-models-check compose-smoke-cleanup-contract smoke-image-cleanup-contract compose-rag-real-provider-contract compose-workspace-analysis-compat-contract compose-workspace-analysis-worker-restart-contract compose-workspace-analysis-otlp-contract compose-auth-smoke compose-check launcher-contract model-secrets-init-contract architecture-quality-baseline docker-build compose-up compose-down compose-reset compose-search-smoke compose-tool-smoke compose-rag-smoke compose-rag-browser-smoke compose-workspace-analysis-smoke compose-workspace-analysis-otlp-smoke compose-workspace-analysis-compat-smoke compose-workspace-analysis-worker-restart-smoke compose-rag-real-provider-preflight compose-rag-real-provider-smoke compose-model-runtime-hot-activation-smoke
+.PHONY: test migrate go-test go-vet testcontainers-integration atlas-schema-inspect atlas-schema-drift atlas-migrate-hash atlas-migrate-hash-check atlas-migrate-lint atlas-migrate-lint-pro atlas-migrate-validate web-install web-lint web-typecheck web-test web-build eino-test eino-vet eino-live-smoke eino-live-smoke-env eino-live-smoke-contract eino-live-chat-smoke eino-live-query-plan-smoke eino-live-rag-metadata-smoke eino-live-openai-embedding-smoke eino-live-ollama-embedding-smoke eino-stable-observation-test eino-stable-observation-preflight eino-stable-observation-start eino-stable-observation-day eino-stable-observation-attest eino-stable-observation-verify agent-eval semantic-link-eval openapi-check trellis-script-test task-context-check auth-integration tool-integration rag-integration workspace-analysis-integration workspace-analysis-terminal-matrix workspace-analysis-fault-smoke graph-integration graph-smoke graph-benchmark benchmark-capacity semantic-link-integration semantic-link-fault-smoke semantic-link-browser-smoke semantic-link-smoke collection-health-integration collection-health-fault-smoke collection-health-benchmark collection-health-browser-smoke collection-health-secret-scan collection-health-smoke artifact-browser-smoke m8-learning-browser-smoke export-browser-smoke timeline-impact-integration timeline-impact-fault-smoke timeline-impact-worker-smoke compose-auth-check compose-runtime-check compose-bootstrap-check compose-runtime-contract compose-netns-check compose-netns-contract compose-workspace-check compose-workspace-contract compose-static-models-check compose-smoke-cleanup-contract smoke-image-cleanup-contract compose-rag-real-provider-contract compose-workspace-analysis-compat-contract compose-workspace-analysis-worker-restart-contract compose-workspace-analysis-otlp-contract compose-auth-smoke compose-check launcher-contract model-secrets-init-contract architecture-quality-baseline docker-build compose-up compose-down compose-reset compose-search-smoke compose-tool-smoke compose-rag-smoke compose-rag-browser-smoke compose-workspace-analysis-smoke compose-workspace-analysis-otlp-smoke compose-workspace-analysis-compat-smoke compose-workspace-analysis-worker-restart-smoke compose-rag-real-provider-preflight compose-rag-real-provider-smoke compose-model-runtime-hot-activation-smoke
 .PHONY: openapi-install openapi-lint openapi-project-check openapi-route-check openapi-tags-check openapi-generated-typecheck openapi-generate openapi-generate-check openapi-breaking-check
 
 test: trellis-script-test task-context-check go-test go-vet web-lint web-typecheck web-test web-build eino-test eino-vet eino-live-smoke-contract eino-stable-observation-test agent-eval openapi-check compose-check
@@ -11,6 +13,44 @@ migrate:
 
 testcontainers-integration:
 	go test -count=1 -timeout=5m -tags='integration testcontainers' ./internal/platform/testdb
+
+atlas-schema-inspect:
+	@test -n "$${ZHIXU_DATABASE_URL:-}" || (echo "ZHIXU_DATABASE_URL is required" >&2; exit 1)
+	docker run --rm --network host -e ATLAS_NO_UPDATE_NOTIFIER=1 -e ZHIXU_DATABASE_URL \
+		-v "$$(pwd):/workspace" -w /workspace \
+		$(ATLAS_IMAGE) schema inspect --env local
+
+atlas-schema-drift:
+	ATLAS_IMAGE="$(ATLAS_IMAGE)" POSTGRES_CLIENT_IMAGE="$(POSTGRES_CLIENT_IMAGE)" \
+		deploy/atlas-schema-drift.sh
+
+atlas-migrate-hash:
+	docker run --rm -e ATLAS_NO_UPDATE_NOTIFIER=1 -v "$$(pwd):/workspace" -w /workspace \
+		$(ATLAS_IMAGE) migrate hash --dir file://atlas/migrations
+
+atlas-migrate-hash-check:
+	@set -e; \
+	before=$$(git hash-object atlas/migrations/atlas.sum); \
+	$(MAKE) --no-print-directory atlas-migrate-hash >/dev/null; \
+	after=$$(git hash-object atlas/migrations/atlas.sum); \
+	if test "$$before" != "$$after"; then \
+		echo "atlas.sum is out of date; run make atlas-migrate-hash and review the result" >&2; \
+		exit 1; \
+	fi
+
+atlas-migrate-lint:
+	deploy/atlas-migration-lint.sh
+
+atlas-migrate-lint-pro:
+	@test -n "$${ATLAS_TOKEN:-}" || (echo "ATLAS_TOKEN is required for Atlas Pro migration lint" >&2; exit 1)
+	@test -n "$${ZHIXU_ATLAS_LINT_DEV_URL:-}" || (echo "ZHIXU_ATLAS_LINT_DEV_URL is required for Atlas Pro migration lint" >&2; exit 1)
+	docker run --rm --network host -e ATLAS_NO_UPDATE_NOTIFIER=1 -e ATLAS_TOKEN \
+		-v "$$(pwd):/workspace" -w /workspace \
+		$(ATLAS_IMAGE) migrate lint --dir file://atlas/migrations --dev-url "$${ZHIXU_ATLAS_LINT_DEV_URL}"
+
+atlas-migrate-validate:
+	docker run --rm -e ATLAS_NO_UPDATE_NOTIFIER=1 -v "$$(pwd):/workspace" -w /workspace \
+		$(ATLAS_IMAGE) migrate validate --dir file://atlas/migrations
 
 go-test:
 	go test ./cmd/... ./internal/...

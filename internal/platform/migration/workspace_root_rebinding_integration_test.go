@@ -25,7 +25,7 @@ func TestWorkspaceRootRebindingIsAuditedIdempotentAndFailClosed(t *testing.T) {
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 81); err != nil {
+	if err := provider.UpTo(ctx, 81); err != nil {
 		t.Fatal(err)
 	}
 	auditStore, err := auditpostgres.NewStore(pool)
@@ -267,25 +267,6 @@ old_workspace_version,new_workspace_version)
 		t.Fatalf("Git checkpoint rejection changed control state\nbefore=%s\nafter=%s", controlStateBeforeGitCheckpoint, after)
 	}
 	assertWorkspaceRootRebindCounts(t, ctx, pool, gitCheckpointWorkspaceID, 0, 0)
-
-	_, err = provider.DownTo(ctx, 80)
-	assertPostgresCode(t, err, "55000")
-}
-
-func TestWorkspaceRootRebindingMigrationEmptyDownUp(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := newMigrationTestDatabase(t, ctx)
-	defer cleanup()
-	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 81); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := provider.DownTo(ctx, 80); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := provider.UpTo(ctx, 81); err != nil {
-		t.Fatal(err)
-	}
 }
 
 type failAfterWorkspaceRootRebindAuditAppender struct {

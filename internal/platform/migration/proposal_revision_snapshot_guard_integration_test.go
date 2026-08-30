@@ -6,7 +6,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
-	"strings"
 	"testing"
 	"time"
 )
@@ -16,7 +15,7 @@ func TestProposalRevisionSnapshotGuardMigrationRepairsRuntimeAmbiguity(t *testin
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 89); err != nil {
+	if err := provider.UpTo(ctx, 89); err != nil {
 		t.Fatal(err)
 	}
 
@@ -67,7 +66,7 @@ INSERT INTO change_control.proposal_revision_base_snapshot(
 		proposalID, revisionID, baseHash, baseContent, now)
 	assertPostgresCode(t, err, "42702")
 
-	if _, err := provider.Up(ctx); err != nil {
+	if err := provider.Up(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `
@@ -84,15 +83,4 @@ INSERT INTO change_control.proposal_revision_base_snapshot(
 ) VALUES($1,$2,$3,'wrong',5,'proposal-base-snapshot/v1',$4)`,
 		proposalID, revisionID, baseHash, now)
 	assertPostgresCode(t, err, "23514")
-
-	if _, err := provider.Down(ctx); err != nil {
-		t.Fatal(err)
-	}
-	var functionDefinition string
-	if err := pool.QueryRow(ctx, `SELECT pg_get_functiondef('change_control.validate_revision_base_snapshot()'::regprocedure)`).Scan(&functionDefinition); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(functionDefinition, "proposal_type_value") {
-		t.Fatal("00090 Down restored the ambiguous proposal_type variable")
-	}
 }

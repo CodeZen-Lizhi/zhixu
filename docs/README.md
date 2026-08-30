@@ -16,7 +16,7 @@
 ## 契约事实源
 
 - 精确 HTTP 路径、请求响应 Schema、状态码和错误码：[OpenAPI 3.1](../api/openapi/openapi.json)。
-- 精确表、列、约束、索引和迁移顺序：[数据库迁移](../migrations/)。
+- 精确表、列、约束、索引和迁移顺序：[数据库迁移](../atlas/migrations/)。
 - 命令和配置默认值：[`zhixu`](../zhixu)、[`.env.example`](../.env.example)、[`internal/platform/config`](../internal/platform/config/) 与 [`deploy`](../deploy/)。
 - 当前任务与交付状态：[`.trellis/tasks/`](../.trellis/tasks/)。
 - 工程规范：根目录 `AGENTS.md`、`.trellis/spec/` 和 [`CONTRIBUTING.md`](../CONTRIBUTING.md)；`docs/` 不维护平行标准。

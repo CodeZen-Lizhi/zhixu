@@ -18,7 +18,7 @@ from typing import Any, Iterable
 
 
 SCHEMA_VERSION = "architecture-quality-baseline/v1"
-GO_ROOTS = ("cmd/", "internal/", "eval/", "migrations/", "poc/eino/")
+GO_ROOTS = ("cmd/", "internal/", "eval/", "atlas/", "poc/eino/")
 GO_HELPERS = ("decodeJSON", "parseID", "writeError")
 HOTSPOT_THRESHOLDS = (500, 1000)
 HOTSPOT_LIMIT = 20
@@ -574,7 +574,9 @@ def collect(repository: Path, web_dist: Path | None = None) -> dict[str, Any]:
     sql_paths = [
         path
         for path in paths
-        if path.startswith("migrations/") and "/" not in path.removeprefix("migrations/") and path.endswith(".sql")
+        if path.startswith("atlas/migrations/")
+        and "/" not in path.removeprefix("atlas/migrations/")
+        and path.endswith(".sql")
     ]
     e2e_paths = [path for path in paths if path.startswith("web/e2e/") and path.endswith(".spec.ts")]
     supported_paths = sorted(set(go_paths + web_paths + sql_paths + ["Makefile"]))

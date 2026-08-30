@@ -10,18 +10,14 @@ import (
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	localmodelruntime "github.com/CodeZen-Lizhi/zhixu/internal/localmodelruntime"
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
 	"github.com/jackc/pgx/v5"
 )
 
-func TestManagedOllamaMigrationConstraintsAndDownGuard(t *testing.T) {
+func TestManagedOllamaMigrationConstraints(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
-	runner, err := NewRunner(pool, projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runner := newAtlasRunnerForPool(t, pool)
 	if err := runner.Up(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +31,7 @@ func TestManagedOllamaMigrationConstraintsAndDownGuard(t *testing.T) {
 		t.Fatalf("runtime phase=%q mode=%q epoch=%d version=%d", phase, mode, ownerEpoch, version)
 	}
 
-	_, err = pool.Exec(ctx, `INSERT INTO ops.model_settings_revisions(
+	_, err := pool.Exec(ctx, `INSERT INTO ops.model_settings_revisions(
 		chat_provider,chat_api_style,chat_base_url,chat_model,chat_model_version,chat_adapter_version,
 		chat_timeout_microseconds,chat_max_request_bytes,chat_max_response_bytes,
 		embedding_provider,embedding_base_url,embedding_model,embedding_dimensions,
@@ -103,24 +99,17 @@ func TestManagedOllamaMigrationConstraintsAndDownGuard(t *testing.T) {
 		SET observed_phase='ready',version=version+1,updated_at=clock_timestamp()
 		WHERE singleton`)
 	assertPostgresCode(t, err, "55000")
-
-	provider := migrationProvider(t, pool)
-	_, err = provider.Down(ctx)
-	assertPostgresCode(t, err, "55000")
 }
 
-func TestManagedOllamaMigrationEmptyDownUp(t *testing.T) {
+func TestManagedOllamaMigrationRepeatedUp(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.Up(ctx); err != nil {
+	if err := provider.Up(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := provider.Down(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := provider.Up(ctx); err != nil {
+	if err := provider.Up(ctx); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -129,10 +118,7 @@ func TestManagedOllamaRuntimeRoleLeastPrivilege(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
-	runner, err := NewRunner(pool, projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runner := newAtlasRunnerForPool(t, pool)
 	if err := runner.Up(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -218,10 +204,7 @@ func TestManagedOllamaPersistentPullBudgetAndDeadline(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
-	runner, err := NewRunner(pool, projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runner := newAtlasRunnerForPool(t, pool)
 	if err := runner.Up(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -351,10 +334,7 @@ func TestManagedOllamaActiveRecoverySeed(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
-	runner, err := NewRunner(pool, projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runner := newAtlasRunnerForPool(t, pool)
 	if err := runner.Up(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -498,10 +478,7 @@ func TestManagedOllamaSupersedesStaleActiveRecovery(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
-	runner, err := NewRunner(pool, projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runner := newAtlasRunnerForPool(t, pool)
 	if err := runner.Up(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -581,10 +558,7 @@ func TestManagedOllamaLifecycleStoreCAS(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
-	runner, err := NewRunner(pool, projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runner := newAtlasRunnerForPool(t, pool)
 	if err := runner.Up(ctx); err != nil {
 		t.Fatal(err)
 	}

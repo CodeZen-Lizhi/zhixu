@@ -134,7 +134,7 @@ if len(changes) < domain.MaxChangedFiles { changes = append(changes, change) }
 ## 验证门禁
 
 - Domain/Application：状态转换、幂等重放、配置漂移、自动候选 revision、取消和 response loss。
-- PostgreSQL：真实事务、唯一活动 Run、CAS、keep binding、Outbox、lease/checkpoint、migration Up/Down guard 和并发。
+- PostgreSQL：真实事务、唯一活动 Run、CAS、keep binding、Outbox、lease/checkpoint、migration fresh/repeated Up、旧版本数据前向升级和并发。
 - Git：真实临时仓库覆盖 same、pull、push、dirty、detached、diverged、ref drift、post-check 和共享锁。
 - Git 取消：Unix 下覆盖父 Git、remote helper、pipe 与 common-dir `config.lock` 的共同收敛。
 - Security：SSRF、DNS re-resolution/pinning、redirect/proxy、argv/config/log/error redaction、key file 模式、共享

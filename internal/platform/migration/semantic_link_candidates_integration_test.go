@@ -8,18 +8,14 @@ import (
 	"testing"
 	"time"
 
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func TestSemanticLinkCandidatesMigrationUpRepeatAndEmptyDownUp(t *testing.T) {
+func TestSemanticLinkCandidatesMigrationUpRepeat(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
-	runner, err := NewRunner(pool, projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runner := newAtlasRunnerForPool(t, pool)
 	if err := runner.Up(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -30,48 +26,13 @@ func TestSemanticLinkCandidatesMigrationUpRepeatAndEmptyDownUp(t *testing.T) {
 	assertSemanticLinkCandidatesMigrationShape(t, ctx, pool)
 
 	provider := migrationProvider(t, pool)
-	if _, err := provider.DownTo(ctx, 23); err != nil {
-		t.Fatalf("00024 empty Down failed: %v", err)
-	}
-
-	var graphTables, proposalTypeCols, revisionTypedCols, schemaMeta int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.tables
-		WHERE table_schema='graph' AND table_name IN (
-			'semantic_link_candidate',
-			'semantic_link_candidate_evidence',
-			'semantic_link_candidate_decision',
-			'semantic_link_scan'
-		)`).Scan(&graphTables); err != nil {
-		t.Fatal(err)
-	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.columns
-		WHERE table_schema='change_control'
-		  AND table_name='proposal'
-		  AND column_name='proposal_type'`).Scan(&proposalTypeCols); err != nil {
-		t.Fatal(err)
-	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.columns
-		WHERE table_schema='change_control'
-		  AND table_name='proposal_revision'
-		  AND column_name IN ('target_refs','base_versions','change_set','evidence_refs','schema_version')`).Scan(&revisionTypedCols); err != nil {
-		t.Fatal(err)
-	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM core.schema_meta
-		WHERE key='semantic_link_candidates'`).Scan(&schemaMeta); err != nil {
-		t.Fatal(err)
-	}
-	if graphTables != 0 || proposalTypeCols != 0 || revisionTypedCols != 0 || schemaMeta != 0 {
-		t.Fatalf("00024 Down graph_tables=%d proposal_type_cols=%d revision_typed_cols=%d schema_meta=%d",
-			graphTables, proposalTypeCols, revisionTypedCols, schemaMeta)
-	}
-
-	if _, err := provider.Up(ctx); err != nil {
-		t.Fatalf("00024 Up after Down failed: %v", err)
+	if err := provider.Up(ctx); err != nil {
+		t.Fatalf("00024 repeat Up failed: %v", err)
 	}
 	assertSemanticLinkCandidatesMigrationShape(t, ctx, pool)
 }
 
-func TestSemanticLinkCandidatesMigrationTypedProposalCompatibilityAndGuardedDown(t *testing.T) {
+func TestSemanticLinkCandidatesMigrationTypedProposalCompatibility(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
@@ -198,20 +159,6 @@ func TestSemanticLinkCandidatesMigrationTypedProposalCompatibilityAndGuardedDown
 		SET proposal_type='file_patch',version=2,updated_at=now()
 		WHERE id=$1`, knowledgeProposalID)
 	assertPostgresCode(t, err, "23514")
-
-	provider := migrationProvider(t, pool)
-	_, err = provider.DownTo(ctx, 23)
-	assertPostgresCode(t, err, "55000")
-	if !strings.Contains(err.Error(), "cannot remove semantic link candidates with knowledge change proposals") {
-		t.Fatalf("00024 guarded Down returned unexpected error: %v", err)
-	}
-	version, versionErr := provider.GetDBVersion(ctx)
-	if versionErr != nil {
-		t.Fatal(versionErr)
-	}
-	if version != 24 {
-		t.Fatalf("00024 guarded Down left migration version=%d want=24", version)
-	}
 }
 
 func TestSemanticLinkCandidatesMigrationCandidateDecisionScanAndConcurrency(t *testing.T) {
@@ -377,20 +324,6 @@ func TestSemanticLinkCandidatesMigrationCandidateDecisionScanAndConcurrency(t *t
 	if duplicateCount != 1 {
 		t.Fatalf("concurrent fingerprint rows=%d", duplicateCount)
 	}
-
-	provider := migrationProvider(t, pool)
-	_, err = provider.DownTo(ctx, 23)
-	assertPostgresCode(t, err, "55000")
-	if !strings.Contains(err.Error(), "cannot remove semantic link candidates with candidate data") {
-		t.Fatalf("00024 guarded Down returned unexpected error: %v", err)
-	}
-	version, versionErr := provider.GetDBVersion(ctx)
-	if versionErr != nil {
-		t.Fatal(versionErr)
-	}
-	if version != 24 {
-		t.Fatalf("00024 guarded Down left migration version=%d want=24", version)
-	}
 }
 
 func assertSemanticLinkCandidatesMigrationShape(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
@@ -441,7 +374,7 @@ func assertSemanticLinkCandidatesMigrationShape(t *testing.T, ctx context.Contex
 
 func migrateSemanticLinkCandidatesTestDatabase(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	t.Helper()
-	if _, err := migrationProvider(t, pool).UpTo(ctx, 24); err != nil {
+	if err := migrationProvider(t, pool).UpTo(ctx, 24); err != nil {
 		t.Fatal(err)
 	}
 }

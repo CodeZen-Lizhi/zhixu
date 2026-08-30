@@ -1,7 +1,7 @@
 # PostgreSQL integration fixture
 
 `testdb` is the shared lifecycle owner for real PostgreSQL/pgvector tests. A
-fixture runs the current Goose/River migration against an isolated database and
+fixture runs the current Atlas/River migration against an isolated database and
 returns the existing `platformpostgres.Pool`; GORM, pgx, River and Unit of Work
 must all be obtained from that pool.
 
@@ -40,9 +40,9 @@ child fixtures must map their admin DSN to `ExternalAdminURL`; they must not
 pass a shared application database as a direct migration target.
 
 For migration-failure tests or non-`testing.TB` callers, use
-`testdb.Open(ctx, config)` and assert the returned error. Replace Goose later by
-injecting a different `MigrationFunc`; the fixture lifecycle and cleanup
-contract do not change.
+`testdb.Open(ctx, config)` and assert the returned error. Specialized tests may
+inject a different `MigrationFunc`; the fixture lifecycle and cleanup contract
+do not change.
 
 ## Verification
 

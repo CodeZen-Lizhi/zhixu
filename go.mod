@@ -1,9 +1,9 @@
 module github.com/CodeZen-Lizhi/zhixu
 
-go 1.26.4
+go 1.25.4
 
 require (
-	ariga.io/atlas v1.3.0
+	ariga.io/atlas v1.2.2
 	github.com/cloudwego/eino v0.9.13
 	github.com/cloudwego/eino-ext/components/embedding/ollama v0.0.0-20260803030130-90a15623ddb6
 	github.com/cloudwego/eino-ext/components/embedding/openai v0.0.0-20260803030130-90a15623ddb6
@@ -19,7 +19,6 @@ require (
 	github.com/ollama/ollama v0.9.6
 	github.com/pgvector/pgvector-go v0.4.0
 	github.com/pgvector/pgvector-go/pgx v0.4.0
-	github.com/pressly/goose/v3 v3.27.0
 	github.com/prometheus/client_golang v1.24.1
 	github.com/riverqueue/river v0.40.0
 	github.com/riverqueue/river/riverdriver/riverdatabasesql v0.40.0
@@ -109,7 +108,6 @@ require (
 	github.com/mailru/easyjson v0.9.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/meguminnnnnnnnn/go-openai v0.1.2 // indirect
-	github.com/mfridman/interpolate v0.0.2 // indirect
 	github.com/mitchellh/go-wordwrap v0.0.0-20150314170334-ad45545899c7 // indirect
 	github.com/moby/docker-image-spec v1.3.1 // indirect
 	github.com/moby/go-archive v0.1.0 // indirect
@@ -137,7 +135,6 @@ require (
 	github.com/riverqueue/river/riverdriver v0.40.0 // indirect
 	github.com/riverqueue/river/rivershared v0.40.0 // indirect
 	github.com/sagikazarmark/locafero v0.11.0 // indirect
-	github.com/sethvargo/go-retry v0.3.0 // indirect
 	github.com/shirou/gopsutil/v4 v4.25.6 // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
 	github.com/slongfield/pyfmt v0.0.0-20220222012616-ea85ff4c361f // indirect
@@ -166,7 +163,6 @@ require (
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.65.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.45.0 // indirect
 	go.uber.org/goleak v1.3.0 // indirect
-	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/arch v0.22.0 // indirect
 	golang.org/x/crypto v0.54.0 // indirect
 	golang.org/x/exp v0.0.0-20260218203240-3dfff04db8fa // indirect

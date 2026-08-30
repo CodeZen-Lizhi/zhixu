@@ -32,7 +32,6 @@ import (
 	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
 	workflowdomain "github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
 	workspacepostgres "github.com/CodeZen-Lizhi/zhixu/internal/workspace/adapter/postgres"
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
@@ -537,7 +536,7 @@ func newToolRiverDatabase(t *testing.T, ctx context.Context) (*pgxpool.Pool, fun
 		admin.Close()
 		t.Fatal(err)
 	}
-	runner, err := platformmigration.NewRunner(pool, projectmigrations.FS)
+	runner, err := platformmigration.NewAtlasEmbeddedRunner(pool)
 	if err != nil {
 		pool.Close()
 		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")

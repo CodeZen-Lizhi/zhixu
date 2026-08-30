@@ -17,7 +17,7 @@ func TestModelCallAgentAnswerPhaseMigration(t *testing.T) {
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 77); err != nil {
+	if err := provider.UpTo(ctx, 77); err != nil {
 		t.Fatalf("migrate to 00077: %v", err)
 	}
 	fixture := seedModelCallPhaseFixture(t, ctx, pool)
@@ -27,17 +27,12 @@ func TestModelCallAgentAnswerPhaseMigration(t *testing.T) {
 	legacyRAGRun := fixture.newModelRun(t, ctx, pool)
 	fixture.insertSequence(t, ctx, pool, legacyRAGRun, []string{"PLAN", "INITIAL", "REVIEW"})
 
-	if _, err := provider.ApplyVersion(ctx, 83, true); err != nil {
+	if err := provider.UpTo(ctx, 83); err != nil {
 		t.Fatalf("00083 up with legacy phase histories: %v", err)
 	}
-	assertModelCallPhaseMigrationShape(t, ctx, pool, true)
-	if _, err := provider.ApplyVersion(ctx, 83, false); err != nil {
-		t.Fatalf("00083 down with only legacy phase histories: %v", err)
-	}
-	assertMigrationVersion(t, ctx, pool, 77)
-	assertModelCallPhaseMigrationShape(t, ctx, pool, false)
-	if _, err := provider.ApplyVersion(ctx, 83, true); err != nil {
-		t.Fatalf("00083 up after clean down: %v", err)
+	assertModelCallPhaseMigrationShape(t, ctx, pool)
+	if err := provider.UpTo(ctx, 83); err != nil {
+		t.Fatalf("00083 re-up: %v", err)
 	}
 
 	fullAgentRun := fixture.newModelRun(t, ctx, pool)
@@ -112,12 +107,6 @@ func TestModelCallAgentAnswerPhaseMigration(t *testing.T) {
 		assertPostgresCode(t, err, "23514")
 	})
 
-	if _, err := provider.ApplyVersion(ctx, 83, false); err == nil {
-		t.Fatal("00083 down accepted retained AGENT/ANSWER facts")
-	} else {
-		assertPostgresCode(t, err, "55000")
-	}
-	assertMigrationVersion(t, ctx, pool, 83)
 }
 
 type modelCallPhaseFixture struct {
@@ -243,7 +232,7 @@ func (fixture *modelCallPhaseFixture) callTime(callNo int) time.Time {
 	return fixture.startedAt.Add(time.Duration(fixture.nextCall+callNo) * time.Millisecond)
 }
 
-func assertModelCallPhaseMigrationShape(t *testing.T, ctx context.Context, pool *pgxpool.Pool, expanded bool) {
+func assertModelCallPhaseMigrationShape(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	t.Helper()
 	var phaseCheck, phaseOrder, singletonIndex, guardFunction string
 	if err := pool.QueryRow(ctx, `SELECT pg_get_constraintdef(oid) FROM pg_constraint
@@ -260,15 +249,6 @@ func assertModelCallPhaseMigrationShape(t *testing.T, ctx context.Context, pool 
 	}
 	if err := pool.QueryRow(ctx, `SELECT pg_get_functiondef('agent.guard_model_call_phase_sequence()'::regprocedure)`).Scan(&guardFunction); err != nil {
 		t.Fatal(err)
-	}
-
-	if !expanded {
-		if strings.Contains(phaseCheck, "AGENT") || strings.Contains(phaseCheck, "ANSWER") ||
-			strings.Contains(phaseOrder, "AGENT") || strings.Contains(guardFunction, "AGENT") ||
-			strings.Contains(singletonIndex, "ANSWER") {
-			t.Fatalf("00077 phase contract was not restored: check=%q order=%q index=%q", phaseCheck, phaseOrder, singletonIndex)
-		}
-		return
 	}
 
 	for _, phase := range []string{"PLAN", "AGENT", "ANSWER", "INITIAL", "REPAIR", "REDUCED", "REVIEW"} {

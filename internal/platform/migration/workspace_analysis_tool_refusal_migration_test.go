@@ -6,11 +6,11 @@ import (
 	"strings"
 	"testing"
 
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
+	atlasmigrations "github.com/CodeZen-Lizhi/zhixu/atlas"
 )
 
 func TestWorkspaceAnalysisToolRefusalMigrationPrecedesSnapshotGuardFix(t *testing.T) {
-	entries, err := fs.ReadDir(projectmigrations.FS, ".")
+	entries, err := fs.ReadDir(atlasmigrations.MigrationDir(), ".")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +35,7 @@ func TestWorkspaceAnalysisToolRefusalMigrationPrecedesSnapshotGuardFix(t *testin
 			latest = version
 		}
 	}
-	if !found || latest != 91 {
+	if !found || latest != 92 {
 		t.Fatalf("workspace analysis tool refusal migration found=%t latest=%d", found, latest)
 	}
 }

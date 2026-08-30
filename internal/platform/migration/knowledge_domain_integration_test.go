@@ -7,19 +7,15 @@ import (
 	"testing"
 	"time"
 
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func TestKnowledgeDomainMigrationSchemaAndEmptyDownUp(t *testing.T) {
+func TestKnowledgeDomainMigrationSchemaAndRepeatedUp(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
-	runner, err := NewRunner(pool, projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runner := newAtlasRunnerForPool(t, pool)
 	if err := runner.Up(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -29,61 +25,10 @@ func TestKnowledgeDomainMigrationSchemaAndEmptyDownUp(t *testing.T) {
 
 	assertKnowledgeMigrationShape(t, ctx, pool)
 	provider := migrationProvider(t, pool)
-	if _, err := provider.DownTo(ctx, 16); err != nil {
-		t.Fatalf("00017 empty Down failed: %v", err)
-	}
-	var tables, schemaMeta int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.tables
-		WHERE table_schema='core' AND table_name IN (
-			'topic','topic_alias','claim','claim_source','relation','relation_evidence',
-			'conflict','conflict_member','knowledge_command_receipt'
-		)`).Scan(&tables); err != nil {
-		t.Fatal(err)
-	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM core.schema_meta
-		WHERE key='knowledge_domain'`).Scan(&schemaMeta); err != nil {
-		t.Fatal(err)
-	}
-	if tables != 0 || schemaMeta != 0 {
-		t.Fatalf("knowledge Down tables=%d schema_meta=%d", tables, schemaMeta)
-	}
-	if _, err := provider.Up(ctx); err != nil {
-		t.Fatalf("00017 Up after Down failed: %v", err)
+	if err := provider.Up(ctx); err != nil {
+		t.Fatalf("repeated Up failed: %v", err)
 	}
 	assertKnowledgeMigrationShape(t, ctx, pool)
-}
-
-func TestKnowledgeDomainMigrationGuardedDown(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := newMigrationTestDatabase(t, ctx)
-	defer cleanup()
-	runner, err := NewRunner(pool, projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := runner.Up(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `
-INSERT INTO core.workspace(
-    id,name,root_path,git_repository_path,git_checked_at,status,created_at,updated_at
-) VALUES(
-    'a1000000-0000-4000-8000-000000000001','knowledge-guard',
-    '/tmp/knowledge-guard','/tmp/knowledge-guard',CURRENT_TIMESTAMP,'active',
-    CURRENT_TIMESTAMP,CURRENT_TIMESTAMP
-);
-INSERT INTO core.topic(
-    id,workspace_id,name,normalized_name,description,status,version,created_at,updated_at
-) VALUES(
-    'a2000000-0000-4000-8000-000000000001',
-    'a1000000-0000-4000-8000-000000000001',
-    'Guard Topic','guard topic','', 'ACTIVE',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP
-);`); err != nil {
-		t.Fatal(err)
-	}
-	provider := migrationProvider(t, pool)
-	_, err = provider.DownTo(ctx, 16)
-	assertPostgresCode(t, err, "55000")
 }
 
 func TestKnowledgeDomainMigrationFailClosedConstraints(t *testing.T) {
@@ -657,10 +602,7 @@ func assertKnowledgeMigrationShape(t *testing.T, ctx context.Context, pool *pgxp
 
 func migrateKnowledgeTestDatabase(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	t.Helper()
-	runner, err := NewRunner(pool, projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runner := newAtlasRunnerForPool(t, pool)
 	if err := runner.Up(ctx); err != nil {
 		t.Fatal(err)
 	}

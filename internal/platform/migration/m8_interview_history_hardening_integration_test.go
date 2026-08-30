@@ -20,24 +20,20 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func TestM8InterviewHistoryHardeningMigrationSupportsEmptyDownUp(t *testing.T) {
+func TestM8InterviewHistoryHardeningMigrationSupportsRepeatedUp(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 50); err != nil {
+	if err := provider.UpTo(ctx, 50); err != nil {
 		t.Fatalf("00050 up: %v", err)
 	}
-	if _, err := provider.UpTo(ctx, 50); err != nil {
+	if err := provider.UpTo(ctx, 50); err != nil {
 		t.Fatalf("00050 repeated up: %v", err)
 	}
 	assertMigrationVersion(t, ctx, pool, 50)
 	assertM8HistoryHardeningShape(t, ctx, pool)
-	if _, err := provider.DownTo(ctx, 49); err != nil {
-		t.Fatalf("00050 empty down: %v", err)
-	}
-	assertMigrationVersion(t, ctx, pool, 49)
-	if _, err := provider.UpTo(ctx, 50); err != nil {
+	if err := provider.UpTo(ctx, 50); err != nil {
 		t.Fatalf("00050 re-up: %v", err)
 	}
 	assertM8HistoryHardeningShape(t, ctx, pool)
@@ -48,7 +44,7 @@ func TestM8InterviewHistoryHardeningRejectsMutationAndPreservesExactReplay(t *te
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 50); err != nil {
+	if err := provider.UpTo(ctx, 50); err != nil {
 		t.Fatalf("00050 up: %v", err)
 	}
 	fixture := seedM8RetainedHistory(t, ctx, pool)
@@ -122,13 +118,6 @@ func TestM8InterviewHistoryHardeningRejectsMutationAndPreservesExactReplay(t *te
 	if err != nil || !found || !interviewReplay.Replayed || interviewReplay.Session.ID != fixture.sessionID || len(interviewReplay.Questions) != 2 || interviewReplay.Questions[0].Status != interviewdomain.QuestionStatusPending {
 		t.Fatalf("interview exact replay=%+v found=%t err=%v", interviewReplay, found, err)
 	}
-
-	if _, err := provider.DownTo(ctx, 49); err == nil {
-		t.Fatal("00050 down accepted retained history")
-	} else {
-		assertPostgresCode(t, err, "55000")
-	}
-	assertMigrationVersion(t, ctx, pool, 50)
 }
 
 type m8RetainedHistoryFixture struct {

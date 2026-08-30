@@ -4,7 +4,6 @@ package migration
 
 import (
 	"context"
-	"strings"
 	"testing"
 	"time"
 )
@@ -14,7 +13,7 @@ func TestM8MemoryStableOwnerMigrationBackfillsReceiptsWithoutSyntheticEvents(t *
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 47); err != nil {
+	if err := provider.UpTo(ctx, 47); err != nil {
 		t.Fatalf("migrate through 00047: %v", err)
 	}
 
@@ -62,7 +61,7 @@ func TestM8MemoryStableOwnerMigrationBackfillsReceiptsWithoutSyntheticEvents(t *
 	}
 	beforeEvents := m8LearningEventCount(t, ctx, pool, workspaceID)
 
-	if _, err := provider.UpTo(ctx, 48); err != nil {
+	if err := provider.UpTo(ctx, 48); err != nil {
 		t.Fatalf("00048 up: %v", err)
 	}
 	assertMigrationVersion(t, ctx, pool, 48)
@@ -103,23 +102,17 @@ func TestM8MemoryStableOwnerMigrationBackfillsReceiptsWithoutSyntheticEvents(t *
 	if afterEvents := m8LearningEventCount(t, ctx, pool, workspaceID); afterEvents != beforeEvents {
 		t.Fatalf("owner backfill emitted synthetic SSE events: before=%d after=%d", beforeEvents, afterEvents)
 	}
-	if _, err := provider.DownTo(ctx, 47); err == nil || !strings.Contains(err.Error(), "stable memory ownership exists") {
-		t.Fatalf("00048 down did not guard stable ownership: %v", err)
-	}
 }
 
-func TestM8MemoryStableOwnerMigrationSupportsEmptyDownUp(t *testing.T) {
+func TestM8MemoryStableOwnerMigrationSupportsRepeatedUp(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 48); err != nil {
+	if err := provider.UpTo(ctx, 48); err != nil {
 		t.Fatalf("00048 up: %v", err)
 	}
-	if _, err := provider.DownTo(ctx, 47); err != nil {
-		t.Fatalf("00048 empty down: %v", err)
-	}
-	if _, err := provider.UpTo(ctx, 48); err != nil {
+	if err := provider.UpTo(ctx, 48); err != nil {
 		t.Fatalf("00048 re-up: %v", err)
 	}
 }

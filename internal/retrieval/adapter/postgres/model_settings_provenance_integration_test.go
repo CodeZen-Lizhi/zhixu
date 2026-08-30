@@ -9,12 +9,8 @@ import (
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
 	"github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/stdlib"
-	"github.com/pressly/goose/v3"
 )
 
 func TestRepositoryPersistsAndConstrainsEmbeddingModelSettingsProvenance(t *testing.T) {
@@ -66,19 +62,6 @@ func TestRepositoryPersistsAndConstrainsEmbeddingModelSettingsProvenance(t *test
 	if _, err := repository.BeginIndex(ctx, mismatch); !retrievalErrorKind(err, foundation.ErrorConsistencyViolation) {
 		t.Fatalf("mismatched index revision error=%#v", err)
 	}
-
-	annotated, err := platformmigration.NewLegacyAnnotationFS(projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sqlDB := stdlib.OpenDBFromPool(database.DB())
-	defer sqlDB.Close()
-	provider, err := goose.NewProvider(goose.DialectPostgres, sqlDB, annotated, goose.WithTableName("goose_db_version"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = provider.DownTo(ctx, 65)
-	assertExecutionProvenancePostgresCode(t, err, "55000")
 }
 
 func assertExecutionProvenancePostgresCode(t *testing.T, err error, code string) {

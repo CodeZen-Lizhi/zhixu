@@ -7,10 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"strings"
 	"testing"
-	"testing/fstest"
 
 	agentdomain "github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
 	conversationpostgres "github.com/CodeZen-Lizhi/zhixu/internal/conversation/adapter/postgres"
@@ -19,11 +17,8 @@ import (
 	eventspostgres "github.com/CodeZen-Lizhi/zhixu/internal/events/adapter/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	toolspostgres "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/postgres"
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/jackc/pgx/v5/stdlib"
-	"github.com/pressly/goose/v3"
 )
 
 const (
@@ -43,7 +38,7 @@ const (
 
 func TestWorkspaceAnalysisPreoperationDeadlineFinalizerInitialGitCommitsBundleAndReplays(t *testing.T) {
 	ctx := context.Background()
-	pool, provider := newWorkspaceAnalysisDeadlineFixture(
+	pool := newWorkspaceAnalysisDeadlineFixture(
 		t, ctx,
 		"now()-interval '13 minutes 49 seconds'",
 		"now()+interval '1 second'",
@@ -107,23 +102,11 @@ func TestWorkspaceAnalysisPreoperationDeadlineFinalizerInitialGitCommitsBundleAn
 			operationID, deadlineKind, deadlineOrdinal, answerStatus, runStatus, runReason,
 			draftStatus, proofCount, eventCount)
 	}
-
-	_, err = provider.ApplyVersion(ctx, 86, false)
-	assertPostgresCode(t, err, "55000")
-	var columnCount int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.columns
-		WHERE table_schema='agent' AND table_name='workspace_analysis_termination_proof'
-		  AND column_name='deadline_operation_kind'`).Scan(&columnCount); err != nil {
-		t.Fatal(err)
-	}
-	if columnCount != 1 {
-		t.Fatalf("guarded Down removed deadline audit columns: %d", columnCount)
-	}
 }
 
 func TestWorkspaceAnalysisPreoperationDeadlineFinalizerDerivesPlanAfterGit(t *testing.T) {
 	ctx := context.Background()
-	pool, _ := newWorkspaceAnalysisDeadlineFixture(
+	pool := newWorkspaceAnalysisDeadlineFixture(
 		t, ctx,
 		"now()-interval '12 minutes 50 seconds'",
 		"now()+interval '1 minute'",
@@ -165,7 +148,7 @@ func TestWorkspaceAnalysisPreoperationDeadlineFinalizerDerivesPlanAfterGit(t *te
 
 func TestWorkspaceAnalysisDeadlineMigrationPreservesOperationProof(t *testing.T) {
 	ctx := context.Background()
-	pool, _ := newWorkspaceAnalysisDeadlineFixture(
+	pool := newWorkspaceAnalysisDeadlineFixture(
 		t, ctx,
 		"now()-interval '12 minutes'",
 		"now()+interval '110 seconds'",
@@ -206,11 +189,10 @@ func TestWorkspaceAnalysisDeadlineMigrationUpgradesExistingOperationProof(t *tes
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	t.Cleanup(cleanup)
-	provider85 := workspaceAnalysisMigrationProvider(t, pool)
-	insertWorkspaceAnalysisLegacyQuestion(t, ctx, pool)
-	if _, err := provider85.ApplyVersion(ctx, 85, true); err != nil {
+	if err := MigrateAtlasToVersion(ctx, pool, 85); err != nil {
 		t.Fatalf("apply 00085: %v", err)
 	}
+	insertWorkspaceAnalysisLegacyQuestion(t, ctx, pool)
 	insertWorkspaceAnalysisRunFixtureWithLimits(
 		t, ctx, pool,
 		"now()-interval '12 minutes'",
@@ -234,8 +216,7 @@ func TestWorkspaceAnalysisDeadlineMigrationUpgradesExistingOperationProof(t *tes
 		t.Fatalf("close 00085 operation-backed deadline: %v", err)
 	}
 
-	provider86 := workspaceAnalysisDeadlineMigrationProvider(t, pool)
-	if _, err := provider86.ApplyVersion(ctx, 86, true); err != nil {
+	if err := MigrateAtlasToVersion(ctx, pool, 86); err != nil {
 		t.Fatalf("upgrade existing operation-backed proof to 00086: %v", err)
 	}
 	var deadlineKind *string
@@ -249,9 +230,6 @@ func TestWorkspaceAnalysisDeadlineMigrationUpgradesExistingOperationProof(t *tes
 	}
 	if deadlineKind != nil || deadlineOrdinal != nil {
 		t.Fatalf("upgrade rewrote operation-backed proof slot=%v/%v", deadlineKind, deadlineOrdinal)
-	}
-	if _, err := provider86.ApplyVersion(ctx, 86, false); err != nil {
-		t.Fatalf("00086 Down rejected operation-backed proof: %v", err)
 	}
 }
 
@@ -278,7 +256,7 @@ func TestWorkspaceAnalysisDeadlineNextSlotFollowsFrozenPlanBranch(t *testing.T) 
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			pool, _ := newWorkspaceAnalysisDeadlineFixture(
+			pool := newWorkspaceAnalysisDeadlineFixture(
 				t, ctx,
 				"now()",
 				"now()+interval '13 minutes 50 seconds'",
@@ -319,7 +297,7 @@ func TestWorkspaceAnalysisDeadlineNextSlotFollowsFrozenPlanBranch(t *testing.T) 
 
 func TestWorkspaceAnalysisDeadlineNextSlotDerivesFirstSourceFromSearchReceipt(t *testing.T) {
 	ctx := context.Background()
-	pool, _ := newWorkspaceAnalysisDeadlineFixture(
+	pool := newWorkspaceAnalysisDeadlineFixture(
 		t, ctx,
 		"now()",
 		"now()+interval '13 minutes 50 seconds'",
@@ -354,7 +332,7 @@ func TestWorkspaceAnalysisDeadlineNextSlotDerivesFirstSourceFromSearchReceipt(t 
 
 func TestWorkspaceAnalysisDeadlineNextSlotCoversRemainingSourceOrdinals(t *testing.T) {
 	ctx := context.Background()
-	pool, _ := newWorkspaceAnalysisDeadlineFixture(
+	pool := newWorkspaceAnalysisDeadlineFixture(
 		t, ctx,
 		"now()",
 		"now()+interval '13 minutes 50 seconds'",
@@ -415,7 +393,7 @@ func TestWorkspaceAnalysisDeadlineNextSlotCoversCitationAndReview(t *testing.T) 
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			pool, _ := newWorkspaceAnalysisDeadlineFixture(
+			pool := newWorkspaceAnalysisDeadlineFixture(
 				t, ctx,
 				"now()",
 				"now()+interval '13 minutes 50 seconds'",
@@ -442,7 +420,7 @@ func TestWorkspaceAnalysisDeadlineNextSlotRejectsSelectedRefAndPrefixDrift(t *te
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			pool, _ := newWorkspaceAnalysisDeadlineFixture(
+			pool := newWorkspaceAnalysisDeadlineFixture(
 				t, ctx,
 				"now()",
 				"now()+interval '13 minutes 50 seconds'",
@@ -791,7 +769,7 @@ func TestWorkspaceAnalysisPreoperationDeadlineFinalizerRejectsUnsafeAuthority(t 
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			pool, _ := newWorkspaceAnalysisDeadlineFixture(
+			pool := newWorkspaceAnalysisDeadlineFixture(
 				t, ctx,
 				"now()",
 				"now()+interval '13 minutes 50 seconds'",
@@ -882,33 +860,19 @@ func markWorkspaceAnalysisGitOperationUnknown(t *testing.T, ctx context.Context,
 	}
 }
 
-func TestWorkspaceAnalysisDeadlineMigrationEmptyDownAndReapply(t *testing.T) {
+func TestWorkspaceAnalysisDeadlineMigrationRepeatUp(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	t.Cleanup(cleanup)
-	provider85 := workspaceAnalysisMigrationProvider(t, pool)
-	insertWorkspaceAnalysisLegacyQuestion(t, ctx, pool)
-	if _, err := provider85.ApplyVersion(ctx, 85, true); err != nil {
+	if err := MigrateAtlasToVersion(ctx, pool, 85); err != nil {
 		t.Fatalf("apply 00085: %v", err)
 	}
-	provider86 := workspaceAnalysisDeadlineMigrationProvider(t, pool)
-	if _, err := provider86.ApplyVersion(ctx, 86, true); err != nil {
+	insertWorkspaceAnalysisLegacyQuestion(t, ctx, pool)
+	if err := MigrateAtlasToVersion(ctx, pool, 86); err != nil {
 		t.Fatalf("apply 00086: %v", err)
 	}
-	if _, err := provider86.ApplyVersion(ctx, 86, false); err != nil {
-		t.Fatalf("empty 00086 Down: %v", err)
-	}
-	var columnCount int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.columns
-		WHERE table_schema='agent' AND table_name='workspace_analysis_termination_proof'
-		  AND column_name IN ('deadline_operation_kind','deadline_operation_ordinal')`).Scan(&columnCount); err != nil {
-		t.Fatal(err)
-	}
-	if columnCount != 0 {
-		t.Fatalf("deadline audit columns survived Down: %d", columnCount)
-	}
-	if _, err := provider86.ApplyVersion(ctx, 86, true); err != nil {
-		t.Fatalf("00086 Up after empty Down: %v", err)
+	if err := MigrateAtlasToVersion(ctx, pool, 86); err != nil {
+		t.Fatalf("repeat 00086 Up: %v", err)
 	}
 }
 
@@ -917,46 +881,21 @@ func newWorkspaceAnalysisDeadlineFixture(
 	ctx context.Context,
 	runCreatedAtSQL string,
 	deadlineSQL string,
-) (*pgxpool.Pool, *goose.Provider) {
+) *pgxpool.Pool {
 	t.Helper()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	t.Cleanup(cleanup)
-	provider85 := workspaceAnalysisMigrationProvider(t, pool)
-	insertWorkspaceAnalysisLegacyQuestion(t, ctx, pool)
-	if _, err := provider85.ApplyVersion(ctx, 85, true); err != nil {
+	if err := MigrateAtlasToVersion(ctx, pool, 85); err != nil {
 		t.Fatalf("apply 00085: %v", err)
 	}
-	provider86 := workspaceAnalysisDeadlineMigrationProvider(t, pool)
-	if _, err := provider86.ApplyVersion(ctx, 86, true); err != nil {
+	insertWorkspaceAnalysisLegacyQuestion(t, ctx, pool)
+	if err := MigrateAtlasToVersion(ctx, pool, 86); err != nil {
 		t.Fatalf("apply 00086: %v", err)
 	}
 	insertWorkspaceAnalysisRunFixtureWithLimits(
 		t, ctx, pool, runCreatedAtSQL, deadlineSQL, 5376,
 	)
-	return pool, provider86
-}
-
-func workspaceAnalysisDeadlineMigrationProvider(t *testing.T, pool *pgxpool.Pool) *goose.Provider {
-	t.Helper()
-	db := stdlib.OpenDBFromPool(pool)
-	t.Cleanup(func() { _ = db.Close() })
-	content, err := fs.ReadFile(projectmigrations.FS, "00086_workspace_analysis_deadline_terminalization.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	provider, err := goose.NewProvider(
-		goose.DialectPostgres,
-		db,
-		fstest.MapFS{
-			"00086_workspace_analysis_deadline_terminalization.sql": &fstest.MapFile{Data: content},
-		},
-		goose.WithTableName(workspaceAnalysisMigrationTable),
-		goose.WithDisableGlobalRegistry(true),
-	)
-	if err != nil {
-		t.Fatalf("create workspace analysis deadline provider: %v", err)
-	}
-	return provider
+	return pool
 }
 
 func insertWorkspaceAnalysisDeadlineNode(

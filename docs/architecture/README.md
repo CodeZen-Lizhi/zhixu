@@ -48,7 +48,7 @@
 ## 4. 契约归属
 
 - 精确 HTTP wire：[OpenAPI](../../api/openapi/openapi.json)。
-- 精确数据库结构与迁移顺序：[migrations](../../migrations/)。
+- 精确数据库结构与迁移顺序：[Atlas migrations](../../atlas/migrations/)。
 - 当前依赖版本：`go.mod`、`go.sum`、`web/package.json`、`web/package-lock.json` 和部署镜像文件。
 - 当前任务和交付证据：`.trellis/tasks/`；架构正文不维护完成勾选或测试日期。
 - 关键决策保持在 [ADR](adr/README.md)，正文只表达当前有效结论。

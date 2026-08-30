@@ -29,7 +29,6 @@ import (
 	toolsapplication "github.com/CodeZen-Lizhi/zhixu/internal/tools/application"
 	toolsdomain "github.com/CodeZen-Lizhi/zhixu/internal/tools/domain"
 	workspacepostgres "github.com/CodeZen-Lizhi/zhixu/internal/workspace/adapter/postgres"
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -159,11 +158,7 @@ func newMigratedWorkerTestPool(t *testing.T, baseURL string) *pgxpool.Pool {
 	databaseURL := parsed.String()
 	migrationPool, err := platformpostgres.OpenMigration(ctx, databaseURL, 4, 0)
 	if err == nil {
-		var runner *platformmigration.Runner
-		runner, err = platformmigration.NewRunner(migrationPool.DB(), projectmigrations.FS)
-		if err == nil {
-			err = runner.Up(ctx)
-		}
+		err = platformmigration.MigrateAtlas(ctx, migrationPool.DB())
 		migrationPool.Close()
 	}
 	if err != nil {

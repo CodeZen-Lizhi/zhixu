@@ -16,12 +16,12 @@ func TestReviewFSRSCompleteMigrationBackfillsQuarantinedEvidenceAndRemovesSchedu
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 43); err != nil {
+	if err := provider.UpTo(ctx, 43); err != nil {
 		t.Fatalf("prepare migrations through 00043: %v", err)
 	}
 
 	seedReviewFSRSBackfillFixture(t, ctx, pool)
-	if _, err := provider.UpTo(ctx, 44); err != nil {
+	if err := provider.UpTo(ctx, 44); err != nil {
 		t.Fatalf("00044 migration failed: %v", err)
 	}
 	assertMigrationVersion(t, ctx, pool, 44)

@@ -13,7 +13,7 @@ func TestM8ReviewSharedLearningPathOriginColumnsFollowMigrationDirection(t *test
 	defer cleanup()
 	provider := migrationProvider(t, pool)
 
-	if _, err := provider.UpTo(ctx, 60); err != nil {
+	if err := provider.UpTo(ctx, 60); err != nil {
 		t.Fatalf("00060 up: %v", err)
 	}
 	assertPathColumnNullable := func(table, column, want string) {
@@ -30,13 +30,7 @@ func TestM8ReviewSharedLearningPathOriginColumnsFollowMigrationDirection(t *test
 	assertPathColumnNullable("learning_path", "interview_session_id", "YES")
 	assertPathColumnNullable("learning_path", "interview_report_id", "YES")
 
-	if _, err := provider.DownTo(ctx, 59); err != nil {
-		t.Fatalf("00060 down: %v", err)
-	}
-	assertPathColumnNullable("interview_learning_path", "session_id", "NO")
-	assertPathColumnNullable("interview_learning_path", "report_id", "NO")
-
-	if _, err := provider.UpTo(ctx, 60); err != nil {
+	if err := provider.UpTo(ctx, 60); err != nil {
 		t.Fatalf("00060 re-up: %v", err)
 	}
 	assertPathColumnNullable("learning_path", "interview_session_id", "YES")

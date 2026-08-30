@@ -23,7 +23,6 @@ import (
 	workflowpostgres "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/postgres"
 	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
 	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -382,7 +381,7 @@ func newApprovalDispatchTestDatabase(t *testing.T, ctx context.Context) (*pgxpoo
 		admin.Close()
 		t.Fatal(err)
 	}
-	runner, err := platformmigration.NewRunner(pool, projectmigrations.FS)
+	runner, err := platformmigration.NewAtlasEmbeddedRunner(pool)
 	if err != nil {
 		pool.Close()
 		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")

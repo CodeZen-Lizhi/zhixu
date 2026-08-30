@@ -6,7 +6,7 @@
 2. 项目规则：`AGENTS.md` 与相关 `.trellis/spec/`。
 3. 产品、架构和运维：[`docs/README.md`](docs/README.md)。
 4. 精确 API 契约：`api/openapi/openapi.json`。
-5. 精确数据库结构：`migrations/*.sql`。
+5. 精确数据库结构：`atlas/migrations/*.sql`。
 
 不要在 PR 描述、审查报告或临时任务中建立新的长期事实源。
 
@@ -95,7 +95,7 @@ git diff --check
 以下范围需要扩大影响面检查和验证：
 
 - `internal/auth/`、`internal/changecontrol/`、`internal/gitsync/`。
-- `migrations/`、Repository/DAO、事务和数据权限。
+- `atlas/migrations/`、Repository/DAO、事务和数据权限。
 - `api/openapi/`、公开路由、SSE 和前端解码边界。
 - Workflow、River Job、并发、租约、幂等和补偿。
 - 文件系统、Workspace Root、Git 写入、外部网络和模型工具。

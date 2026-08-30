@@ -19,7 +19,6 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -355,7 +354,7 @@ func newConversationTestRepository(t *testing.T) (*Repository, *pgxpool.Pool, co
 		admin.Close()
 		t.Fatal(err)
 	}
-	runner, err := platformmigration.NewRunner(migrationPool.DB(), projectmigrations.FS)
+	runner, err := platformmigration.NewAtlasEmbeddedRunner(migrationPool.DB())
 	if err == nil {
 		err = runner.Up(ctx)
 	}

@@ -8,18 +8,14 @@ import (
 	"testing"
 	"time"
 
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func TestToolRegistrySecurityMigrationUpRepeatAndEmptyDownUp(t *testing.T) {
+func TestToolRegistrySecurityMigrationUpRepeat(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
-	runner, err := NewRunner(pool, projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runner := newAtlasRunnerForPool(t, pool)
 	if err := runner.Up(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -29,24 +25,13 @@ func TestToolRegistrySecurityMigrationUpRepeatAndEmptyDownUp(t *testing.T) {
 	assertToolRegistryMigrationShape(t, ctx, pool)
 
 	provider := migrationProvider(t, pool)
-	if _, err := provider.DownTo(ctx, 18); err != nil {
-		t.Fatalf("00019 empty Down failed: %v", err)
-	}
-	var tables int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.tables
-		WHERE table_schema='workflow' AND table_name='tool_call'`).Scan(&tables); err != nil {
-		t.Fatal(err)
-	}
-	if tables != 0 {
-		t.Fatalf("tool_call table survived empty Down: %d", tables)
-	}
-	if _, err := provider.Up(ctx); err != nil {
-		t.Fatalf("00019 Up after empty Down failed: %v", err)
+	if err := provider.Up(ctx); err != nil {
+		t.Fatalf("00019 repeat Up failed: %v", err)
 	}
 	assertToolRegistryMigrationShape(t, ctx, pool)
 }
 
-func TestToolRegistrySecurityMigrationBindingsLifecycleAndGuardedDown(t *testing.T) {
+func TestToolRegistrySecurityMigrationBindingsLifecycle(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
@@ -170,9 +155,6 @@ func TestToolRegistrySecurityMigrationBindingsLifecycleAndGuardedDown(t *testing
 	invalidVersion := validResolvedToolCall(fixture.secondary, 1, "SearchKnowledge", "READ_LOCAL")
 	invalidVersion.version = 2
 	assertPostgresCode(t, insertToolCall(ctx, pool, invalidVersion), "23514")
-
-	_, err = migrationProvider(t, pool).DownTo(ctx, 18)
-	assertPostgresCode(t, err, "55000")
 }
 
 func TestToolRegistrySecurityMigrationConstraints(t *testing.T) {
@@ -459,9 +441,9 @@ func assertToolRegistryMigrationShape(t *testing.T, ctx context.Context, pool *p
 	}
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_indexes WHERE schemaname='workflow' AND tablename='tool_call'
 		AND indexname = ANY($1)`, []string{
-			"uq_workflow_tool_call_attempt_active", "uq_workflow_tool_call_side_effect_idempotency",
-			"idx_workflow_tool_call_run_node_timeline", "idx_workflow_tool_call_run_timeline", "idx_workflow_tool_call_workspace_status",
-			"idx_workflow_tool_call_side_effect_ref", "idx_workflow_tool_call_started_recovery",
+		"uq_workflow_tool_call_attempt_active", "uq_workflow_tool_call_side_effect_idempotency",
+		"idx_workflow_tool_call_run_node_timeline", "idx_workflow_tool_call_run_timeline", "idx_workflow_tool_call_workspace_status",
+		"idx_workflow_tool_call_side_effect_ref", "idx_workflow_tool_call_started_recovery",
 	}).Scan(&indexes); err != nil {
 		t.Fatal(err)
 	}
@@ -481,10 +463,7 @@ func assertToolRegistryMigrationShape(t *testing.T, ctx context.Context, pool *p
 
 func migrateToolRegistryTestDatabase(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	t.Helper()
-	runner, err := NewRunner(pool, projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runner := newAtlasRunnerForPool(t, pool)
 	if err := runner.Up(ctx); err != nil {
 		t.Fatal(err)
 	}

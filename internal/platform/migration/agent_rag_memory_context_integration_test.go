@@ -12,12 +12,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func TestAgentRAGMemoryContextMigrationLifecycleAndGuardedDown(t *testing.T) {
+func TestAgentRAGMemoryContextMigrationLifecycle(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
 	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, 60); err != nil {
+	if err := provider.UpTo(ctx, 60); err != nil {
 		t.Fatalf("00060 up: %v", err)
 	}
 	fixture := seedRAGMemoryContextFixture(t, ctx, pool)
@@ -26,19 +26,15 @@ func TestAgentRAGMemoryContextMigrationLifecycleAndGuardedDown(t *testing.T) {
 	if err := insertDeferredRetrievalModelRun(ctx, pool, fixture, legacy, legacyModelRunID, "agent.rag-answer", nil); err != nil {
 		t.Fatalf("insert pre-00061 conversation rag model run: %v", err)
 	}
-	if _, err := provider.UpTo(ctx, 61); err != nil {
+	if err := provider.UpTo(ctx, 61); err != nil {
 		t.Fatalf("00061 up: %v", err)
 	}
 	assertLegacyRAGMemoryTupleRemainsNull(t, ctx, pool, legacyModelRunID)
-	if _, err := provider.DownTo(ctx, 60); err != nil {
-		t.Fatalf("00061 down accepted legacy null tuple should not guard: %v", err)
-	}
-	assertMigrationVersion(t, ctx, pool, 60)
-	if _, err := provider.UpTo(ctx, 61); err != nil {
-		t.Fatalf("00061 up after legacy null down: %v", err)
+	if err := provider.UpTo(ctx, 61); err != nil {
+		t.Fatalf("00061 repeated up: %v", err)
 	}
 	assertLegacyRAGMemoryTupleRemainsNull(t, ctx, pool, legacyModelRunID)
-	if _, err := provider.UpTo(ctx, 61); err != nil {
+	if err := provider.UpTo(ctx, 61); err != nil {
 		t.Fatalf("00061 repeated up: %v", err)
 	}
 	assertMigrationVersion(t, ctx, pool, 61)
@@ -101,33 +97,8 @@ func TestAgentRAGMemoryContextMigrationLifecycleAndGuardedDown(t *testing.T) {
 		t.Fatalf("legal binding status=%s run=%s snapshot=%s", status, boundRunID, boundSnapshotID)
 	}
 
-	if _, err := provider.DownTo(ctx, 60); err == nil {
-		t.Fatal("00061 down accepted retained snapshot audit")
-	} else {
-		assertPostgresCode(t, err, "55000")
-	}
-	assertMigrationVersion(t, ctx, pool, 61)
-	var retainedStatus, retainedRunID, retainedSnapshotID string
-	if err := pool.QueryRow(ctx, `SELECT snapshot.status,snapshot.model_run_id::text,run.memory_snapshot_id::text
-		FROM agent.rag_memory_snapshot snapshot
-		JOIN agent.model_run run ON run.id=snapshot.model_run_id
-		WHERE snapshot.id=$1`, legalSnapshotID).Scan(&retainedStatus, &retainedRunID, &retainedSnapshotID); err != nil {
-		t.Fatal(err)
-	}
-	if retainedStatus != "READY" || retainedRunID != legalRunID || retainedSnapshotID != legalSnapshotID {
-		t.Fatalf("down guard lost retained facts status=%s run=%s snapshot=%s", retainedStatus, retainedRunID, retainedSnapshotID)
-	}
-
-	cleanupRAGMemoryContextAudit(t, ctx, pool, []string{partialSnapshotID, nonRAGSnapshotID, legalSnapshotID}, legalSnapshotID, legalRunID)
-	if _, err := provider.DownTo(ctx, 60); err != nil {
-		t.Fatalf("00061 clean down: %v", err)
-	}
-	assertMigrationVersion(t, ctx, pool, 60)
-	assertRAGMemoryContextMigrationAbsent(t, ctx, pool)
-	assertDeferredRetrievalTriggerRestored(t, ctx, pool, fixture)
-
-	if _, err := provider.UpTo(ctx, 61); err != nil {
-		t.Fatalf("00061 up after clean down: %v", err)
+	if err := provider.UpTo(ctx, 61); err != nil {
+		t.Fatalf("00061 final repeated up: %v", err)
 	}
 	assertMigrationVersion(t, ctx, pool, 61)
 	assertRAGMemoryContextMigrationShape(t, ctx, pool)
@@ -258,42 +229,6 @@ func insertDeferredRetrievalModelRun(ctx context.Context, executor ragMemoryCont
 	return err
 }
 
-func cleanupRAGMemoryContextAudit(t *testing.T, ctx context.Context, pool *pgxpool.Pool, snapshotIDs []string, readySnapshotID, modelRunID string) {
-	t.Helper()
-	defer func() {
-		for _, statement := range []string{
-			`ALTER TABLE agent.model_run ENABLE TRIGGER agent_model_run_guard_mutation`,
-			`ALTER TABLE agent.rag_memory_snapshot ENABLE TRIGGER agent_rag_memory_snapshot_guard_mutation`,
-		} {
-			if _, err := pool.Exec(context.Background(), statement); err != nil {
-				t.Error(err)
-			}
-		}
-	}()
-	for _, statement := range []string{
-		`ALTER TABLE agent.rag_memory_snapshot DISABLE TRIGGER agent_rag_memory_snapshot_guard_mutation`,
-		`ALTER TABLE agent.model_run DISABLE TRIGGER agent_model_run_guard_mutation`,
-	} {
-		if _, err := pool.Exec(ctx, statement); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := pool.Exec(ctx, `UPDATE agent.rag_memory_snapshot SET
-		status='FAILED',context_schema_version=NULL,context_digest=NULL,context_item_count=NULL,context_bytes=NULL,
-		model_run_id=NULL,error_code='TEST_CLEANUP',updated_at=now()
-		WHERE id=$1`, readySnapshotID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `DELETE FROM agent.model_run WHERE id=$1`, modelRunID); err != nil {
-		t.Fatal(err)
-	}
-	for _, snapshotID := range snapshotIDs {
-		if _, err := pool.Exec(ctx, `DELETE FROM agent.rag_memory_snapshot WHERE id=$1`, snapshotID); err != nil {
-			t.Fatal(err)
-		}
-	}
-}
-
 func assertRAGMemoryContextMigrationShape(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	t.Helper()
 	var tables, columns, triggers, constraints, meta int
@@ -337,48 +272,6 @@ func assertLegacyRAGMemoryTupleRemainsNull(t *testing.T, ctx context.Context, po
 	if !snapshotNull || !schemaNull || !digestNull || !itemCountNull || !bytesNull {
 		t.Fatalf("legacy rag memory tuple nulls snapshot=%t schema=%t digest=%t count=%t bytes=%t",
 			snapshotNull, schemaNull, digestNull, itemCountNull, bytesNull)
-	}
-}
-
-func assertRAGMemoryContextMigrationAbsent(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
-	t.Helper()
-	var tables, columns, meta int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.tables
-		WHERE table_schema='agent' AND table_name='rag_memory_snapshot'`).Scan(&tables); err != nil {
-		t.Fatal(err)
-	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.columns
-		WHERE table_schema='agent' AND table_name='model_run' AND column_name LIKE 'memory_%'`).Scan(&columns); err != nil {
-		t.Fatal(err)
-	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM core.schema_meta WHERE key='agent_rag_memory_context'`).Scan(&meta); err != nil {
-		t.Fatal(err)
-	}
-	if tables != 0 || columns != 0 || meta != 0 {
-		t.Fatalf("tables=%d columns=%d meta=%d", tables, columns, meta)
-	}
-}
-
-func assertDeferredRetrievalTriggerRestored(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fixture ragMemoryContextFixture) {
-	t.Helper()
-	var definition string
-	if err := pool.QueryRow(ctx, `SELECT pg_get_functiondef(proc.oid)
-		FROM pg_proc proc JOIN pg_namespace namespace ON namespace.oid=proc.pronamespace
-		WHERE namespace.nspname='agent' AND proc.proname='guard_model_run_mutation'`).Scan(&definition); err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(definition, "memory_snapshot_id") || !strings.Contains(definition, "only running rag model run may defer retrieval binding") {
-		t.Fatal("00022 deferred-retrieval model-run trigger was not restored")
-	}
-	rag := fixture.newAttempt(t, ctx, pool, "006")
-	if err := insertDeferredRetrievalModelRun(ctx, pool, fixture, rag, "61000000-0000-4000-8000-000000000306", "agent.rag-answer", nil); err != nil {
-		t.Fatalf("restored trigger rejected deferred rag retrieval: %v", err)
-	}
-	nonRAG := fixture.newAttempt(t, ctx, pool, "007")
-	if err := insertDeferredRetrievalModelRun(ctx, pool, fixture, nonRAG, "61000000-0000-4000-8000-000000000307", "agent.relation-assessment", nil); err == nil {
-		t.Fatal("restored trigger accepted deferred non-rag retrieval")
-	} else {
-		assertPostgresCode(t, err, "23514")
 	}
 }
 

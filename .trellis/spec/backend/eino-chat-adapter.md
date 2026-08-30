@@ -123,7 +123,7 @@ Composition Root/factory 构造，不能进入领域 DTO、HTTP API 或持久记
   Provider 回显与请求别名不同时用 `ZHIXU_EINO_LIVE_MODEL_VERSION` 冻结实际版本。
 - `internal/platform/models/chat_factory_test.go`：Eino 构造、依赖缺失与未知配置 fail closed。
 - Responses 必须覆盖 factory、结构化 Eino constructor 与 Runtime Eino constructor 三个入口的零网络拒绝；
-  managed settings 必须拒绝新写入，同时保留历史 revision 的读取和迁移 Down guard。
+  managed settings 必须拒绝新写入，同时保留历史 revision 的读取与前向迁移兼容。
 - `internal/platform/models/eino_callback_test.go`：start/end/error、Context correlation、并发隔离、取消、
   稳定错误码、敏感字段和 telemetry failure/noop 旁路语义。
 - `internal/platform/observability/metrics_test.go`：模型指标 registry、固定 component/phase/result/error labels，

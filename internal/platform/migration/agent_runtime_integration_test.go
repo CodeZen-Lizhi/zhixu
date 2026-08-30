@@ -5,18 +5,13 @@ package migration
 import (
 	"context"
 	"testing"
-
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
 )
 
-func TestAgentRuntimeMigrationStateMachineWorkspaceAndGuardedDown(t *testing.T) {
+func TestAgentRuntimeMigrationStateMachineWorkspace(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
-	runner, err := NewRunner(pool, projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runner := newAtlasRunnerForPool(t, pool)
 	if err := runner.Up(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +85,7 @@ func TestAgentRuntimeMigrationStateMachineWorkspaceAndGuardedDown(t *testing.T) 
 	if _, err := pool.Exec(ctx, insertRunSQL, modelRunID, workspaceID, runID, nodeID, attemptID, indexID); err != nil {
 		t.Fatal(err)
 	}
-	_, err = pool.Exec(ctx, insertRunSQL, "a8700000-0000-4000-8000-000000000002", workspaceID, runID, nodeID, attemptID, indexID)
+	_, err := pool.Exec(ctx, insertRunSQL, "a8700000-0000-4000-8000-000000000002", workspaceID, runID, nodeID, attemptID, indexID)
 	assertPostgresCode(t, err, "23505")
 	_, err = pool.Exec(ctx, insertRunSQL, "a8700000-0000-4000-8000-000000000003", otherSpace, runID, nodeID, "a8500000-0000-4000-8000-000000000003", indexID)
 	assertPostgresCode(t, err, "23503")
@@ -137,9 +132,5 @@ func TestAgentRuntimeMigrationStateMachineWorkspaceAndGuardedDown(t *testing.T) 
 	_, err = pool.Exec(ctx, `UPDATE agent.model_run SET final_result_type='refusal',version=3 WHERE id=$1`, modelRunID)
 	assertPostgresCode(t, err, "55000")
 	_, err = pool.Exec(ctx, `DELETE FROM agent.model_run WHERE id=$1`, modelRunID)
-	assertPostgresCode(t, err, "55000")
-
-	provider := migrationProvider(t, pool)
-	_, err = provider.DownTo(ctx, 17)
 	assertPostgresCode(t, err, "55000")
 }

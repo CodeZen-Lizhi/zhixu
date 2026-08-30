@@ -28,12 +28,9 @@ import (
 	organizingapp "github.com/CodeZen-Lizhi/zhixu/internal/organizing/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/organizing/domain"
 	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/jackc/pgx/v5/stdlib"
-	"github.com/pressly/goose/v3"
 )
 
 func TestRepositoryPostgreSQLDraftTemplateSnapshotAndRuntimeLifecycle(t *testing.T) {
@@ -903,57 +900,6 @@ func TestConfirmDraftPostgreSQLRevalidatesCollectionWithoutLeakingStatementTimeo
 		staleRecord.SnapshotID, staleRecord.OutboxID, staleRecord.Binding.IdempotencyKey)
 }
 
-func TestOrganizingMigrationEmptyDownUpAndGuardedDown(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	pool := newOrganizingIntegrationDatabase(t, ctx)
-	provider := organizingMigrationProvider(t, pool)
-	if _, err := provider.DownTo(ctx, 73); err != nil {
-		organizingIntegrationFatal(t, err)
-	}
-	var schemaRemoved bool
-	if err := pool.QueryRow(ctx, `SELECT to_regnamespace('organizing') IS NULL`).Scan(&schemaRemoved); err != nil || !schemaRemoved {
-		t.Fatalf("organizing schema removed=%v err=%v", schemaRemoved, err)
-	}
-	if _, err := provider.UpTo(ctx, 74); err != nil {
-		organizingIntegrationFatal(t, err)
-	}
-	workspaceID := organizingIntegrationID(60)
-	seedOrganizingWorkspace(t, ctx, pool, workspaceID, "organizing-down-guard")
-	var valid bool
-	if err := pool.QueryRow(ctx, `SELECT organizing.valid_material_shape(
-		'SOURCE_VERSION',$1::uuid,NULL,NULL,NULL,NULL,NULL,NULL,0,NULL,NULL,NULL,'[]'::jsonb,false
-	)`, string(organizingIntegrationID(62))).Scan(&valid); err != nil || valid {
-		t.Fatalf("nullable required material field accepted=%v err=%v", valid, err)
-	}
-	if err := pool.QueryRow(ctx, `SELECT organizing.valid_reason_codes(ARRAY[NULL]::text[])`).Scan(&valid); err != nil || valid {
-		t.Fatalf("nullable material reason accepted=%v err=%v", valid, err)
-	}
-	_, err := pool.Exec(ctx, `INSERT INTO organizing.command_receipt(
-		workspace_id,idempotency_key,request_hash,command_type,aggregate_id,expected_version,created_at
-	) VALUES($1,'missing-result',$2,'CREATE_DRAFT',$3,0,$4)`, string(workspaceID),
-		organizingIntegrationHash("missing-result"), string(organizingIntegrationID(63)), time.Now().UTC())
-	organizingIntegrationPostgresCode(t, err, "23514")
-	repository, err := NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now().UTC().Truncate(time.Microsecond)
-	draft, err := domain.NewDraft(organizingIntegrationID(61), workspaceID, "guarded down", now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := repository.CreateDraft(ctx, organizingapp.CreateDraftRecord{
-		Binding: organizingBinding(workspaceID, draft.ID, "guarded-down", "guarded-down",
-			organizingapp.CommandCreateDraft, 0),
-		Draft: draft,
-	}); err != nil {
-		organizingIntegrationFatal(t, err)
-	}
-	_, err = provider.DownTo(ctx, 73)
-	organizingIntegrationPostgresCode(t, err, "55000")
-}
-
 func TestRepositoryPostgreSQLPoisonsStartAtAttemptLimit(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -1140,7 +1086,7 @@ func newOrganizingIntegrationDatabase(t *testing.T, ctx context.Context) *pgxpoo
 		_, _ = admin.Exec(context.Background(), "DROP DATABASE "+identifier+" WITH (FORCE)")
 		admin.Close()
 	})
-	runner, err := platformmigration.NewRunner(pool, projectmigrations.FS)
+	runner, err := platformmigration.NewAtlasEmbeddedRunner(pool)
 	if err == nil {
 		err = runner.Up(ctx)
 	}
@@ -1148,21 +1094,6 @@ func newOrganizingIntegrationDatabase(t *testing.T, ctx context.Context) *pgxpoo
 		organizingIntegrationFatal(t, err)
 	}
 	return pool
-}
-
-func organizingMigrationProvider(t *testing.T, pool *pgxpool.Pool) *goose.Provider {
-	t.Helper()
-	database := stdlib.OpenDBFromPool(pool)
-	t.Cleanup(func() { _ = database.Close() })
-	annotated, err := platformmigration.NewLegacyAnnotationFS(projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	provider, err := goose.NewProvider(goose.DialectPostgres, database, annotated, goose.WithTableName("goose_db_version"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return provider
 }
 
 func seedOrganizingWorkspace(t *testing.T, ctx context.Context, pool *pgxpool.Pool, id foundation.ID, name string) {

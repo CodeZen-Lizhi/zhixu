@@ -4,307 +4,29 @@ package migration
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"io/fs"
 	"net/url"
 	"os"
-	"sort"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
-	projectmigrations "github.com/CodeZen-Lizhi/zhixu/migrations"
+	atlasmigrations "github.com/CodeZen-Lizhi/zhixu/atlas"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/jackc/pgx/v5/stdlib"
-	"github.com/pressly/goose/v3"
 )
 
-func TestRunnerRealPostgreSQLUpRepeatDownAndGuard(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := newMigrationTestDatabase(t, ctx)
-	defer cleanup()
-	runner, err := NewRunner(pool, projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := runner.Up(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err := runner.Up(ctx); err != nil {
-		t.Fatal(err)
-	}
-	var maxVersion, applied, wrongSchema int
-	if err := pool.QueryRow(ctx, `SELECT max(version_id), count(*) FILTER (WHERE is_applied AND version_id > 0) FROM public.goose_db_version`).Scan(&maxVersion, &applied); err != nil {
-		t.Fatal(err)
-	}
-	wantVersion, wantApplied := latestProjectMigration(t)
-	if maxVersion != wantVersion || applied != wantApplied {
-		t.Fatalf("project history max=%d applied=%d", maxVersion, applied)
-	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_tables WHERE tablename LIKE 'river_%' AND schemaname <> 'workflow'`).Scan(&wrongSchema); err != nil {
-		t.Fatal(err)
-	}
-	if wrongSchema != 0 {
-		t.Fatalf("River tables outside workflow schema=%d", wrongSchema)
-	}
-
-	db := stdlib.OpenDBFromPool(pool)
-	defer db.Close()
-	annotated, err := NewLegacyAnnotationFS(projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	provider, err := goose.NewProvider(goose.DialectPostgres, db, annotated, goose.WithTableName(projectMigrationTable))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := provider.Down(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := provider.Up(ctx); err != nil {
-		t.Fatal(err)
-	}
-
-	guardPool, guardCleanup := newMigrationTestDatabase(t, ctx)
-	defer guardCleanup()
-	guardProvider := migrationProvider(t, guardPool)
-	if _, err := guardProvider.UpTo(ctx, 17); err != nil {
-		t.Fatal(err)
-	}
-	insertRuntimeIdentityFixture(t, ctx, guardPool)
-	downEmptyKnowledgeMigration(t, ctx, guardProvider)
-	// 00016 has no cache, V2 Delivery, or Hybrid Index data in this fixture.
-	if _, err := guardProvider.Down(ctx); err != nil {
-		t.Fatalf("00016 Down rejected an empty Embedding Hybrid Search schema: %v", err)
-	}
-	// 00015 has no Source Manifest or Delivery data in this fixture.
-	if _, err := guardProvider.Down(ctx); err != nil {
-		t.Fatalf("00015 Down rejected an empty Reindex Consumer schema: %v", err)
-	}
-	// 00014 has no Retrieval data yet, so remove it before exercising the
-	// earlier M4-A runtime-identity downgrade guard.
-	if _, err := guardProvider.Down(ctx); err != nil {
-		t.Fatalf("00014 Down rejected an empty Retrieval schema: %v", err)
-	}
-	// 00013 has no Proposal→Run bindings yet, so it can be removed before
-	// removing 00012 and testing the M4-A runtime-identity guard.
-	if _, err := guardProvider.Down(ctx); err != nil {
-		t.Fatalf("00013 Down rejected an unbound Proposal schema: %v", err)
-	}
-	if _, err := guardProvider.Down(ctx); err != nil {
-		t.Fatalf("00012 Down rejected legacy-only runtime identity: %v", err)
-	}
-	if _, err := guardProvider.Down(ctx); err == nil {
-		t.Fatal("00011 Down accepted Runtime identity data")
-	} else {
-		var pgErr *pgconn.PgError
-		if !errors.As(err, &pgErr) || pgErr.Code != "55000" {
-			t.Fatalf("guarded Down error=%v", err)
-		}
-	}
-}
-
-func TestRunnerRetrievalMigrationDownRejectsBusinessData(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := newMigrationTestDatabase(t, ctx)
-	defer cleanup()
-	runner, err := NewRunner(pool, projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := runner.Up(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `
-INSERT INTO retrieval.embedding_version(
-    id, provider, adapter_name, adapter_version, model, dimensions,
-    normalization, distance_metric, config_hash, created_at
-) VALUES (
-    '60000000-0000-4000-8000-000000000001', 'test', 'test', 'v1', 'test-model', 3,
-    'l2', 'cosine', repeat('1', 64), now()
-)`); err != nil {
-		t.Fatal(err)
-	}
-	db := stdlib.OpenDBFromPool(pool)
-	defer db.Close()
-	annotated, err := NewLegacyAnnotationFS(projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	provider, err := goose.NewProvider(goose.DialectPostgres, db, annotated, goose.WithTableName(projectMigrationTable))
-	if err != nil {
-		t.Fatal(err)
-	}
-	downEmptyKnowledgeMigration(t, ctx, provider)
-	if _, err := provider.Down(ctx); err != nil {
-		t.Fatalf("00016 Down rejected empty Embedding Hybrid Search schema: %v", err)
-	}
-	if _, err := provider.Down(ctx); err != nil {
-		t.Fatalf("00015 Down rejected empty Reindex Consumer schema: %v", err)
-	}
-	_, err = provider.Down(ctx)
-	var pgErr *pgconn.PgError
-	if err == nil || !errors.As(err, &pgErr) || pgErr.Code != "55000" {
-		t.Fatalf("00014 Down with Retrieval data error=%v", err)
-	}
-}
-
-func TestEmbeddingHybridMigrationCacheAndDownGuards(t *testing.T) {
-	t.Run("cache schema vector constraints and immutability", func(t *testing.T) {
-		ctx := context.Background()
-		pool, cleanup := newMigrationTestDatabase(t, ctx)
-		defer cleanup()
-		runner, err := NewRunner(pool, projectmigrations.FS)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := runner.Up(ctx); err != nil {
-			t.Fatal(err)
-		}
-		var tableCount, triggerCount, schemaMetaCount, v2ConstraintCount int
-		if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.tables
-			WHERE table_schema='retrieval' AND table_name='embedding_cache'`).Scan(&tableCount); err != nil {
-			t.Fatal(err)
-		}
-		if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_trigger
-			WHERE tgname IN ('retrieval_embedding_cache_validate_insert','retrieval_embedding_cache_reject_mutation')`).Scan(&triggerCount); err != nil {
-			t.Fatal(err)
-		}
-		if err := pool.QueryRow(ctx, `SELECT count(*) FROM core.schema_meta
-			WHERE key='embedding_hybrid_search' AND value='m6-c'`).Scan(&schemaMetaCount); err != nil {
-			t.Fatal(err)
-		}
-		if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_constraint
-			WHERE conrelid='retrieval.reindex_delivery'::regclass
-			  AND conname='reindex_delivery_regression_code_check'
-			  AND pg_get_constraintdef(oid) LIKE '%SNAPSHOT_STRUCTURE_V2%'`).Scan(&v2ConstraintCount); err != nil {
-			t.Fatal(err)
-		}
-		if tableCount != 1 || triggerCount != 2 || schemaMetaCount != 1 || v2ConstraintCount != 1 {
-			t.Fatalf("table=%d triggers=%d meta=%d v2_constraint=%d", tableCount, triggerCount, schemaMetaCount, v2ConstraintCount)
-		}
-
-		if _, err := pool.Exec(ctx, `
-INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,created_at,updated_at) VALUES
-('91000000-0000-4000-8000-000000000001','cache-a','/tmp/cache-a','/tmp/cache-a',now(),'active',now(),now()),
-('91000000-0000-4000-8000-000000000002','cache-b','/tmp/cache-b','/tmp/cache-b',now(),'inactive',now(),now());
-INSERT INTO retrieval.embedding_version(
-    id,provider,adapter_name,adapter_version,model,dimensions,normalization,distance_metric,config_hash,created_at
-) VALUES
-('92000000-0000-4000-8000-000000000001','test','direct','v1','l2-model',3,'l2','cosine',repeat('1',64),now()),
-('92000000-0000-4000-8000-000000000002','test','direct','v1','none-model',3,'none','euclidean',repeat('2',64),now());
-INSERT INTO retrieval.embedding_cache(workspace_id,embedding_version_id,content_hash,embedding,created_at) VALUES
-('91000000-0000-4000-8000-000000000001','92000000-0000-4000-8000-000000000001',repeat('a',64),'[0.6,0.8,0]'::vector,now()),
-('91000000-0000-4000-8000-000000000002','92000000-0000-4000-8000-000000000001',repeat('a',64),'[0.6,0.8,0]'::vector,now()),
-('91000000-0000-4000-8000-000000000001','92000000-0000-4000-8000-000000000002',repeat('b',64),'[2,0,0]'::vector,now());`); err != nil {
-			t.Fatal(err)
-		}
-		_, err = pool.Exec(ctx, `INSERT INTO retrieval.embedding_cache(workspace_id,embedding_version_id,content_hash,embedding,created_at)
-			VALUES('91000000-0000-4000-8000-000000000001','92000000-0000-4000-8000-000000000001',repeat('a',64),'[0.6,0.8,0]'::vector,now())`)
-		assertPostgresCode(t, err, "23505")
-		for name, vectorValue := range map[string]string{
-			"wrong dimensions": "[1,0]",
-			"non unit l2":      "[1,1,0]",
-			"zero norm":        "[0,0,0]",
-		} {
-			t.Run(name, func(t *testing.T) {
-				_, err := pool.Exec(ctx, `INSERT INTO retrieval.embedding_cache(workspace_id,embedding_version_id,content_hash,embedding,created_at)
-					VALUES('91000000-0000-4000-8000-000000000001','92000000-0000-4000-8000-000000000001',repeat($1,64),$2::vector,now())`,
-					string(name[0]), vectorValue)
-				assertPostgresCode(t, err, "23514")
-			})
-		}
-		_, err = pool.Exec(ctx, `UPDATE retrieval.embedding_cache SET embedding='[1,0,0]'::vector
-			WHERE workspace_id='91000000-0000-4000-8000-000000000001' AND content_hash=repeat('a',64)`)
-		assertPostgresCode(t, err, "55000")
-		_, err = pool.Exec(ctx, `DELETE FROM retrieval.embedding_cache
-			WHERE workspace_id='91000000-0000-4000-8000-000000000001' AND content_hash=repeat('a',64)`)
-		assertPostgresCode(t, err, "55000")
-		provider := migrationProvider(t, pool)
-		downEmptyKnowledgeMigration(t, ctx, provider)
-		_, err = provider.Down(ctx)
-		assertPostgresCode(t, err, "55000")
-	})
-
-	t.Run("hybrid index blocks down", func(t *testing.T) {
-		ctx := context.Background()
-		pool, cleanup := newMigrationTestDatabase(t, ctx)
-		defer cleanup()
-		runner, err := NewRunner(pool, projectmigrations.FS)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := runner.Up(ctx); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := pool.Exec(ctx, `
-INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,created_at,updated_at)
-VALUES('93000000-0000-4000-8000-000000000001','hybrid','/tmp/hybrid','/tmp/hybrid',now(),'active',now(),now());
-INSERT INTO retrieval.embedding_version(
-    id,provider,adapter_name,adapter_version,model,dimensions,normalization,distance_metric,config_hash,created_at
-) VALUES('93000000-0000-4000-8000-000000000002','test','direct','v1','hybrid-model',3,'l2','cosine',repeat('1',64),now());
-INSERT INTO retrieval.index_version(
-    id,workspace_id,embedding_version_id,tokenizer_id,tokenizer_version,tokenizer_config_hash,fusion_config,
-    source_snapshot_ref,manifest_hash,expected_chunk_count,idempotency_key,status,degraded_capabilities,version,created_at,updated_at
-) VALUES(
-    '93000000-0000-4000-8000-000000000003','93000000-0000-4000-8000-000000000001','93000000-0000-4000-8000-000000000002',
-    'simple','v1',repeat('2',64),'{}','hybrid:test',repeat('3',64),0,'hybrid-test','building','[]',1,now(),now()
-);`); err != nil {
-			t.Fatal(err)
-		}
-		provider := migrationProvider(t, pool)
-		downEmptyKnowledgeMigration(t, ctx, provider)
-		_, err = provider.Down(ctx)
-		assertPostgresCode(t, err, "55000")
-	})
-
-	t.Run("v2 delivery blocks down", func(t *testing.T) {
-		ctx := context.Background()
-		pool, cleanup := newMigrationTestDatabase(t, ctx)
-		defer cleanup()
-		runner, err := NewRunner(pool, projectmigrations.FS)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := runner.Up(ctx); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := pool.Exec(ctx, `
-SET session_replication_role = replica;
-INSERT INTO retrieval.reindex_delivery(
-    id,consumer_name,outbox_event_id,workspace_id,writeback_execution_id,status,dispatch_no,attempt_no,version,
-    source_version_id,parse_projection_id,index_version_id,excluded_source_count,
-    regression_code,regression_hash,regression_passed_at,manual_recovery_required,created_at,updated_at
-) VALUES(
-    '94000000-0000-4000-8000-000000000001','test-consumer','94000000-0000-4000-8000-000000000002',
-    '94000000-0000-4000-8000-000000000003','94000000-0000-4000-8000-000000000004','processing',1,1,1,
-    '94000000-0000-4000-8000-000000000005','94000000-0000-4000-8000-000000000006',
-    '94000000-0000-4000-8000-000000000007',0,'SNAPSHOT_STRUCTURE_V2',repeat('a',64),now(),false,now(),now()
-);
-SET session_replication_role = origin;`); err != nil {
-			t.Fatal(err)
-		}
-		provider := migrationProvider(t, pool)
-		downEmptyKnowledgeMigration(t, ctx, provider)
-		_, err = provider.Down(ctx)
-		assertPostgresCode(t, err, "55000")
-	})
-}
-
+// TestRunnerReindexConsumerRejectsPartialProcessingContractTuple verifies the
+// processing-contract CHECK on retrieval.index_version.
 func TestRunnerReindexConsumerRejectsPartialProcessingContractTuple(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
-	runner, err := NewRunner(pool, projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := runner.Up(ctx); err != nil {
+	if err := newAtlasRunnerForPool(t, pool).Up(ctx); err != nil {
 		t.Fatal(err)
 	}
 	workspaceID := "71000000-0000-4000-8000-000000000001"
@@ -339,43 +61,111 @@ func assertPartialProcessingContractRejected(t *testing.T, ctx context.Context, 
 	assertPostgresCode(t, err, "23514")
 }
 
-func TestRunnerReindexConsumerMigrationSchemaAndDownGuards(t *testing.T) {
-	t.Run("source manifest", func(t *testing.T) {
-		ctx := context.Background()
-		pool, cleanup := newMigrationTestDatabase(t, ctx)
-		defer cleanup()
-		runner, err := NewRunner(pool, projectmigrations.FS)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := runner.Up(ctx); err != nil {
-			t.Fatal(err)
-		}
-		var tableCount, columnCount, constraintTriggerCount, writebackIndexCount, outboxIndexCount int
-		if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.tables WHERE table_schema='retrieval' AND table_name IN ('index_manifest_source','reindex_delivery','reindex_delivery_attempt')`).Scan(&tableCount); err != nil {
-			t.Fatal(err)
-		}
-		if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.columns WHERE table_schema='retrieval' AND table_name='index_version' AND column_name IN (
-			'source_manifest_hash','expected_source_count','source_parser_id','source_parser_version',
-			'source_parser_config_hash','source_chunk_strategy_version','source_schema_version'
-		)`).Scan(&columnCount); err != nil {
-			t.Fatal(err)
-		}
-		if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_trigger WHERE tgname IN ('reindex_delivery_verify_completion','writeback_execution_verify_reindex_completion','proposal_verify_reindex_completion') AND tgconstraint <> 0`).Scan(&constraintTriggerCount); err != nil {
-			t.Fatal(err)
-		}
-		if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_indexes WHERE schemaname='retrieval'
-			AND tablename='reindex_delivery' AND indexname='idx_reindex_delivery_writeback_execution'`).Scan(&writebackIndexCount); err != nil {
-			t.Fatal(err)
-		}
-		if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_indexes WHERE schemaname='workflow'
-			AND tablename='outbox_event' AND indexname='idx_workflow_outbox_reindex_unpublished'`).Scan(&outboxIndexCount); err != nil {
-			t.Fatal(err)
-		}
-		if tableCount != 3 || columnCount != 7 || constraintTriggerCount != 3 || writebackIndexCount != 1 || outboxIndexCount != 1 {
-			t.Fatalf("tables=%d columns=%d constraint_triggers=%d writeback_indexes=%d outbox_indexes=%d", tableCount, columnCount, constraintTriggerCount, writebackIndexCount, outboxIndexCount)
-		}
-		if _, err := pool.Exec(ctx, `
+// TestEmbeddingHybridMigrationCacheConstraints verifies the embedding cache
+// vector constraints and immutability triggers created by the hybrid search
+// migrations.
+func TestEmbeddingHybridMigrationCacheConstraints(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newMigrationTestDatabase(t, ctx)
+	defer cleanup()
+	if err := newAtlasRunnerForPool(t, pool).Up(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var tableCount, triggerCount, schemaMetaCount, v2ConstraintCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.tables
+		WHERE table_schema='retrieval' AND table_name='embedding_cache'`).Scan(&tableCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_trigger
+		WHERE tgname IN ('retrieval_embedding_cache_validate_insert','retrieval_embedding_cache_reject_mutation')`).Scan(&triggerCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM core.schema_meta
+		WHERE key='embedding_hybrid_search' AND value='m6-c'`).Scan(&schemaMetaCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_constraint
+		WHERE conrelid='retrieval.reindex_delivery'::regclass
+		  AND conname='reindex_delivery_regression_code_check'
+		  AND pg_get_constraintdef(oid) LIKE '%SNAPSHOT_STRUCTURE_V2%'`).Scan(&v2ConstraintCount); err != nil {
+		t.Fatal(err)
+	}
+	if tableCount != 1 || triggerCount != 2 || schemaMetaCount != 1 || v2ConstraintCount != 1 {
+		t.Fatalf("table=%d triggers=%d meta=%d v2_constraint=%d", tableCount, triggerCount, schemaMetaCount, v2ConstraintCount)
+	}
+
+	if _, err := pool.Exec(ctx, `
+INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,created_at,updated_at) VALUES
+('91000000-0000-4000-8000-000000000001','cache-a','/tmp/cache-a','/tmp/cache-a',now(),'active',now(),now()),
+('91000000-0000-4000-8000-000000000002','cache-b','/tmp/cache-b','/tmp/cache-b',now(),'inactive',now(),now());
+INSERT INTO retrieval.embedding_version(
+    id,provider,adapter_name,adapter_version,model,dimensions,normalization,distance_metric,config_hash,created_at
+) VALUES
+('92000000-0000-4000-8000-000000000001','test','direct','v1','l2-model',3,'l2','cosine',repeat('1',64),now()),
+('92000000-0000-4000-8000-000000000002','test','direct','v1','none-model',3,'none','euclidean',repeat('2',64),now());
+INSERT INTO retrieval.embedding_cache(workspace_id,embedding_version_id,content_hash,embedding,created_at) VALUES
+('91000000-0000-4000-8000-000000000001','92000000-0000-4000-8000-000000000001',repeat('a',64),'[0.6,0.8,0]'::vector,now()),
+('91000000-0000-4000-8000-000000000002','92000000-0000-4000-8000-000000000001',repeat('a',64),'[0.6,0.8,0]'::vector,now()),
+('91000000-0000-4000-8000-000000000001','92000000-0000-4000-8000-000000000002',repeat('b',64),'[2,0,0]'::vector,now());`); err != nil {
+		t.Fatal(err)
+	}
+	_, err := pool.Exec(ctx, `INSERT INTO retrieval.embedding_cache(workspace_id,embedding_version_id,content_hash,embedding,created_at)
+		VALUES('91000000-0000-4000-8000-000000000001','92000000-0000-4000-8000-000000000001',repeat('a',64),'[0.6,0.8,0]'::vector,now())`)
+	assertPostgresCode(t, err, "23505")
+	for name, vectorValue := range map[string]string{
+		"wrong dimensions": "[1,0]",
+		"non unit l2":      "[1,1,0]",
+		"zero norm":        "[0,0,0]",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := pool.Exec(ctx, `INSERT INTO retrieval.embedding_cache(workspace_id,embedding_version_id,content_hash,embedding,created_at)
+				VALUES('91000000-0000-4000-8000-000000000001','92000000-0000-4000-8000-000000000001',repeat($1,64),$2::vector,now())`,
+				string(name[0]), vectorValue)
+			assertPostgresCode(t, err, "23514")
+		})
+	}
+	_, err = pool.Exec(ctx, `UPDATE retrieval.embedding_cache SET embedding='[1,0,0]'::vector
+		WHERE workspace_id='91000000-0000-4000-8000-000000000001' AND content_hash=repeat('a',64)`)
+	assertPostgresCode(t, err, "55000")
+	_, err = pool.Exec(ctx, `DELETE FROM retrieval.embedding_cache
+		WHERE workspace_id='91000000-0000-4000-8000-000000000001' AND content_hash=repeat('a',64)`)
+	assertPostgresCode(t, err, "55000")
+}
+
+// TestRunnerReindexConsumerMigrationSchema verifies the reindex consumer
+// tables, columns, constraint triggers, and indexes.
+func TestRunnerReindexConsumerMigrationSchema(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newMigrationTestDatabase(t, ctx)
+	defer cleanup()
+	if err := newAtlasRunnerForPool(t, pool).Up(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var tableCount, columnCount, constraintTriggerCount, writebackIndexCount, outboxIndexCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.tables WHERE table_schema='retrieval' AND table_name IN ('index_manifest_source','reindex_delivery','reindex_delivery_attempt')`).Scan(&tableCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.columns WHERE table_schema='retrieval' AND table_name='index_version' AND column_name IN (
+		'source_manifest_hash','expected_source_count','source_parser_id','source_parser_version',
+		'source_parser_config_hash','source_chunk_strategy_version','source_schema_version'
+	)`).Scan(&columnCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_trigger WHERE tgname IN ('reindex_delivery_verify_completion','writeback_execution_verify_reindex_completion','proposal_verify_reindex_completion') AND tgconstraint <> 0`).Scan(&constraintTriggerCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_indexes WHERE schemaname='retrieval'
+		AND tablename='reindex_delivery' AND indexname='idx_reindex_delivery_writeback_execution'`).Scan(&writebackIndexCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_indexes WHERE schemaname='workflow'
+		AND tablename='outbox_event' AND indexname='idx_workflow_outbox_reindex_unpublished'`).Scan(&outboxIndexCount); err != nil {
+		t.Fatal(err)
+	}
+	if tableCount != 3 || columnCount != 7 || constraintTriggerCount != 3 || writebackIndexCount != 1 || outboxIndexCount != 1 {
+		t.Fatalf("tables=%d columns=%d constraint_triggers=%d writeback_indexes=%d outbox_indexes=%d", tableCount, columnCount, constraintTriggerCount, writebackIndexCount, outboxIndexCount)
+	}
+	if _, err := pool.Exec(ctx, `
 INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,created_at,updated_at)
 VALUES('10000000-0000-4000-8000-000000000001','reindex','/tmp/reindex','/tmp/reindex',now(),'active',now(),now());
 INSERT INTO core.source(id,workspace_id,type,logical_name,original_location,created_at)
@@ -397,102 +187,17 @@ INSERT INTO retrieval.index_manifest_source(
     '30000000-0000-4000-8000-000000000001','10000000-0000-4000-8000-000000000001',
     '20000000-0000-4000-8000-000000000001','excluded','NO_CURRENT_SUCCESSFUL_PROJECTION',now()
 );`); err != nil {
-			t.Fatal(err)
-		}
-		provider := migrationProvider(t, pool)
-		downEmptyKnowledgeMigration(t, ctx, provider)
-		if _, err := provider.Down(ctx); err != nil {
-			t.Fatalf("00016 Down rejected V1 source manifest data: %v", err)
-		}
-		_, err = provider.Down(ctx)
-		var pgErr *pgconn.PgError
-		if err == nil || !errors.As(err, &pgErr) || pgErr.Code != "55000" {
-			t.Fatalf("00015 Down with Source Manifest error=%v", err)
-		}
-	})
-
-	t.Run("delivery", func(t *testing.T) {
-		ctx := context.Background()
-		pool, cleanup := newMigrationTestDatabase(t, ctx)
-		defer cleanup()
-		runner, err := NewRunner(pool, projectmigrations.FS)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := runner.Up(ctx); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := pool.Exec(ctx, `
-SET session_replication_role = replica;
-INSERT INTO retrieval.reindex_delivery(
-    id,consumer_name,outbox_event_id,workspace_id,writeback_execution_id,status,
-    dispatch_no,attempt_no,version,manual_recovery_required,created_at,updated_at
-) VALUES(
-    '40000000-0000-4000-8000-000000000001','test-consumer',
-    '50000000-0000-4000-8000-000000000001','60000000-0000-4000-8000-000000000001',
-    '70000000-0000-4000-8000-000000000001','pending',0,0,1,false,now(),now()
-);
-SET session_replication_role = origin;`); err != nil {
-			t.Fatal(err)
-		}
-		provider := migrationProvider(t, pool)
-		downEmptyKnowledgeMigration(t, ctx, provider)
-		if _, err := provider.Down(ctx); err != nil {
-			t.Fatalf("00016 Down rejected V1 delivery data: %v", err)
-		}
-		_, err = provider.Down(ctx)
-		var pgErr *pgconn.PgError
-		if err == nil || !errors.As(err, &pgErr) || pgErr.Code != "55000" {
-			t.Fatalf("00015 Down with Delivery error=%v", err)
-		}
-	})
-
-	t.Run("orphan source-bound index", func(t *testing.T) {
-		ctx := context.Background()
-		pool, cleanup := newMigrationTestDatabase(t, ctx)
-		defer cleanup()
-		runner, err := NewRunner(pool, projectmigrations.FS)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := runner.Up(ctx); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := pool.Exec(ctx, `
-INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,created_at,updated_at)
-VALUES('81000000-0000-4000-8000-000000000001','orphan','/tmp/orphan','/tmp/orphan',now(),'active',now(),now());
-INSERT INTO retrieval.index_version(
-    id,workspace_id,tokenizer_id,tokenizer_version,tokenizer_config_hash,fusion_config,
-    source_snapshot_ref,manifest_hash,expected_chunk_count,source_manifest_hash,expected_source_count,
-    source_parser_id,source_parser_version,source_parser_config_hash,source_chunk_strategy_version,source_schema_version,
-    idempotency_key,status,degraded_capabilities,version,created_at,updated_at
-) VALUES(
-    '82000000-0000-4000-8000-000000000001','81000000-0000-4000-8000-000000000001',
-    'simple','v1',repeat('1',64),'{}','reindex-v1:orphan',repeat('2',64),0,repeat('3',64),1,
-    'goldmark','v1',repeat('4',64),'structure-v1','v1',
-    'orphan-index','building','["vector"]',1,now(),now()
-);`); err != nil {
-			t.Fatal(err)
-		}
-		provider := migrationProvider(t, pool)
-		downEmptyKnowledgeMigration(t, ctx, provider)
-		if _, err := provider.Down(ctx); err != nil {
-			t.Fatalf("00016 Down rejected V1 source-bound index: %v", err)
-		}
-		_, err = provider.Down(ctx)
-		assertPostgresCode(t, err, "55000")
-	})
+		t.Fatal(err)
+	}
 }
 
+// TestReindexConsumerMigrationRejectsDirectProposalCompletion keeps proposals
+// from completing without a verified reindex delivery.
 func TestReindexConsumerMigrationRejectsDirectProposalCompletion(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
-	runner, err := NewRunner(pool, projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := runner.Up(ctx); err != nil {
+	if err := newAtlasRunnerForPool(t, pool).Up(ctx); err != nil {
 		t.Fatal(err)
 	}
 	tx, err := pool.Begin(ctx)
@@ -514,15 +219,13 @@ INSERT INTO change_control.proposal(
 	assertPostgresCode(t, tx.Commit(ctx), "55000")
 }
 
+// TestReindexConsumerMigrationEnforcesLeaseRetryAndAppendOnlyAttempts verifies
+// the lease, retry, and append-only constraints on reindex delivery attempts.
 func TestReindexConsumerMigrationEnforcesLeaseRetryAndAppendOnlyAttempts(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
-	runner, err := NewRunner(pool, projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := runner.Up(ctx); err != nil {
+	if err := newAtlasRunnerForPool(t, pool).Up(ctx); err != nil {
 		t.Fatal(err)
 	}
 	deliveryID := "85000000-0000-4000-8000-000000000001"
@@ -537,7 +240,7 @@ func TestReindexConsumerMigrationEnforcesLeaseRetryAndAppendOnlyAttempts(t *test
 	if _, err := pool.Exec(ctx, `UPDATE retrieval.reindex_delivery SET status='processing',attempt_no=1,current_attempt_id=$2,version=2,updated_at=CURRENT_TIMESTAMP WHERE id=$1`, deliveryID, attemptID); err != nil {
 		t.Fatal(err)
 	}
-	_, err = pool.Exec(ctx, `UPDATE retrieval.reindex_delivery_attempt SET lease_until=lease_until + INTERVAL '1 minute' WHERE id=$1`, attemptID)
+	_, err := pool.Exec(ctx, `UPDATE retrieval.reindex_delivery_attempt SET lease_until=lease_until + INTERVAL '1 minute' WHERE id=$1`, attemptID)
 	assertPostgresCode(t, err, "23514")
 	_, err = pool.Exec(ctx, `UPDATE retrieval.reindex_delivery_attempt SET status='lease_lost',failure_class='retryable',error_kind='version_conflict',error_code='LEASE_LOST',error_summary='lease lost',ended_at=CURRENT_TIMESTAMP WHERE id=$1`, attemptID)
 	assertPostgresCode(t, err, "23514")
@@ -617,294 +320,15 @@ func assertPostgresCode(t *testing.T, err error, code string) {
 	}
 }
 
-func migrationProvider(t *testing.T, pool *pgxpool.Pool) *goose.Provider {
-	t.Helper()
-	db := stdlib.OpenDBFromPool(pool)
-	t.Cleanup(func() { _ = db.Close() })
-	annotated, err := NewLegacyAnnotationFS(projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	provider, err := goose.NewProvider(goose.DialectPostgres, db, annotated, goose.WithTableName(projectMigrationTable))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return provider
-}
-
-func downEmptyKnowledgeMigration(t *testing.T, ctx context.Context, provider *goose.Provider) {
-	t.Helper()
-	if _, err := provider.DownTo(ctx, 16); err != nil {
-		t.Fatalf("00017 Down rejected empty Knowledge Domain schema: %v", err)
-	}
-}
-
-func TestRunnerAdoptsLegacyShellHistory(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := newMigrationTestDatabase(t, ctx)
-	defer cleanup()
-	applyLegacyShellMigrations(t, ctx, pool)
-	runner, err := NewRunner(pool, projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := runner.Up(ctx); err != nil {
-		t.Fatal(err)
-	}
-	var maxVersion, applied int
-	if err := pool.QueryRow(ctx, `SELECT max(version_id), count(*) FILTER (WHERE is_applied AND version_id > 0) FROM public.goose_db_version`).Scan(&maxVersion, &applied); err != nil {
-		t.Fatal(err)
-	}
-	wantVersion, wantApplied := latestProjectMigration(t)
-	if maxVersion != wantVersion || applied != wantApplied {
-		t.Fatalf("adopted history max=%d applied=%d", maxVersion, applied)
-	}
-}
-
-func TestRunnerBridgesDeployedEinoMigrationVersionCollision(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := newMigrationTestDatabase(t, ctx)
-	defer cleanup()
-
-	db := stdlib.OpenDBFromPool(pool)
-	defer db.Close()
-	annotated := prepareDeployedEinoMigrationVersionCollision(t, ctx, pool, db)
-
-	runner, err := NewRunner(pool, projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := runner.Up(ctx); err != nil {
-		t.Fatalf("bridge deployed Eino collision: %v", err)
-	}
-	if err := runner.Up(ctx); err != nil {
-		t.Fatalf("repeat bridged migration Up: %v", err)
-	}
-
-	var canonicalSchema, legacySchema, adoptedHistory int
-	if err := pool.QueryRow(ctx, `
-SELECT
-    (SELECT count(*) FROM information_schema.columns
-     WHERE table_schema='ops' AND table_name='model_settings_revisions' AND column_name='chat_api_style')
-  + (SELECT count(*) FROM pg_tables
-     WHERE schemaname='ops' AND tablename='model_settings_rollout_participant'),
-    (SELECT count(*) FROM pg_tables
-     WHERE schemaname='agent' AND tablename IN ('answer_draft_session','answer_draft_chunk')),
-    (SELECT count(*) FROM public.goose_db_version
-     WHERE is_applied AND version_id IN (83,84))`).Scan(&canonicalSchema, &legacySchema, &adoptedHistory); err != nil {
-		t.Fatal(err)
-	}
-	if canonicalSchema != 2 || legacySchema != 2 || adoptedHistory != 2 {
-		t.Fatalf("bridge schema/history canonical=%d legacy=%d adopted=%d", canonicalSchema, legacySchema, adoptedHistory)
-	}
-	version, err := migrationProvider(t, pool).GetDBVersion(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if version != 91 {
-		t.Fatalf("bridged migration version=%d want=91", version)
-	}
-	needsOutOfOrder, err := bridgeMigrationVersionCollision(ctx, db, annotated)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if needsOutOfOrder {
-		t.Fatal("completed collision bridge still enables out-of-order migrations")
-	}
-}
-
-func TestRunnerResumesInterruptedEinoMigrationVersionCollisionBridge(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := newMigrationTestDatabase(t, ctx)
-	defer cleanup()
-
-	db := stdlib.OpenDBFromPool(pool)
-	defer db.Close()
-	annotated := prepareDeployedEinoMigrationVersionCollision(t, ctx, pool, db)
-	if err := applyUnversionedMigrationSubset(ctx, db, annotated, legacyCollisionFirstVersion); err != nil {
-		t.Fatalf("apply first canonical collision migration: %v", err)
-	}
-
-	runner, err := NewRunner(pool, projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := runner.Up(ctx); err != nil {
-		t.Fatalf("resume interrupted collision bridge: %v", err)
-	}
-	firstState, err := inspectSchemaFingerprint(ctx, db, canonicalModelSettings78Fingerprint)
-	if err != nil {
-		t.Fatal(err)
-	}
-	secondState, err := inspectSchemaFingerprint(ctx, db, canonicalModelSettings79Fingerprint)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var adoptedHistory int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM public.goose_db_version
-		WHERE is_applied AND version_id IN (83,84)`).Scan(&adoptedHistory); err != nil {
-		t.Fatal(err)
-	}
-	if firstState != fingerprintPresent || secondState != fingerprintPresent || adoptedHistory != 2 {
-		t.Fatalf("resumed bridge states canonical78=%s canonical79=%s adopted=%d", firstState, secondState, adoptedHistory)
-	}
-}
-
-func TestRunnerBridgesInterruptedDeployedEinoMigrationVersionCollision(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := newMigrationTestDatabase(t, ctx)
-	defer cleanup()
-
-	db := stdlib.OpenDBFromPool(pool)
-	defer db.Close()
-	annotated := preparePreCollisionMigrationHistory(t, ctx, db)
-	content, err := fs.ReadFile(projectmigrations.FS, "00083_model_call_agent_answer_phases.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, legacyUpSection(string(content))); err != nil {
-		t.Fatalf("apply interrupted historical Eino migration: %v", err)
-	}
-	if _, err := pool.Exec(ctx, `
-INSERT INTO public.goose_db_version(version_id,is_applied,tstamp)
-VALUES (78,true,now())`); err != nil {
-		t.Fatalf("record interrupted historical Eino version: %v", err)
-	}
-
-	runner, err := NewRunner(pool, projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := runner.Up(ctx); err != nil {
-		t.Fatalf("bridge interrupted deployed Eino collision: %v", err)
-	}
-	version, err := migrationProvider(t, pool).GetDBVersion(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if version != 91 {
-		t.Fatalf("interrupted deployed Eino migration version=%d want=91", version)
-	}
-	needsOutOfOrder, err := bridgeMigrationVersionCollision(ctx, db, annotated)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if needsOutOfOrder {
-		t.Fatal("repaired interrupted collision still enables out-of-order migrations")
-	}
-}
-
-func TestRunnerResumesCanonicalHistoryBetweenModelSettingsMigrations(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := newMigrationTestDatabase(t, ctx)
-	defer cleanup()
-
-	provider := migrationProvider(t, pool)
-	if _, err := provider.UpTo(ctx, legacyCollisionFirstVersion); err != nil {
-		t.Fatalf("apply canonical migrations through 78: %v", err)
-	}
-	runner, err := NewRunner(pool, projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := runner.Up(ctx); err != nil {
-		t.Fatalf("resume canonical history after 78: %v", err)
-	}
-	version, err := migrationProvider(t, pool).GetDBVersion(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if version != 91 {
-		t.Fatalf("resumed canonical migration version=%d want=91", version)
-	}
-}
-
-func TestRunnerResumesCanonicalHistoryBetweenEinoMigrations(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := newMigrationTestDatabase(t, ctx)
-	defer cleanup()
-
-	db := stdlib.OpenDBFromPool(pool)
-	defer db.Close()
-	annotated, err := NewLegacyAnnotationFS(projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	provider, err := goose.NewProvider(goose.DialectPostgres, db, annotated, goose.WithTableName(projectMigrationTable))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := provider.UpTo(ctx, adoptedEinoFirstVersion); err != nil {
-		t.Fatalf("apply canonical migrations through 83: %v", err)
-	}
-
-	runner, err := NewRunner(pool, projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := runner.Up(ctx); err != nil {
-		t.Fatalf("resume canonical history after 83: %v", err)
-	}
-	version, err := migrationProvider(t, pool).GetDBVersion(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if version != 91 {
-		t.Fatalf("resumed canonical migration version=%d want=91", version)
-	}
-}
-
-func prepareDeployedEinoMigrationVersionCollision(
-	t *testing.T,
-	ctx context.Context,
-	pool *pgxpool.Pool,
-	db *sql.DB,
-) fs.FS {
-	t.Helper()
-	annotated := preparePreCollisionMigrationHistory(t, ctx, db)
-	for _, name := range []string{
-		"00083_model_call_agent_answer_phases.sql",
-		"00084_answer_draft_stream.sql",
-	} {
-		content, err := fs.ReadFile(projectmigrations.FS, name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := pool.Exec(ctx, legacyUpSection(string(content))); err != nil {
-			t.Fatalf("apply historical Eino migration %s: %v", name, err)
-		}
-	}
-	if _, err := pool.Exec(ctx, `
-INSERT INTO public.goose_db_version(version_id,is_applied,tstamp)
-VALUES (78,true,now()),(79,true,now())`); err != nil {
-		t.Fatalf("record historical Eino versions: %v", err)
-	}
-	return annotated
-}
-
-func preparePreCollisionMigrationHistory(t *testing.T, ctx context.Context, db *sql.DB) fs.FS {
-	t.Helper()
-	annotated, err := NewLegacyAnnotationFS(projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	provider, err := goose.NewProvider(goose.DialectPostgres, db, annotated, goose.WithTableName(projectMigrationTable))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := provider.UpTo(ctx, 77); err != nil {
-		t.Fatalf("apply pre-collision migrations: %v", err)
-	}
-	return annotated
-}
-
+// TestProjectMigrationVersionsAreUnique guards the Atlas migration directory
+// against duplicate or malformed numeric versions.
 func TestProjectMigrationVersionsAreUnique(t *testing.T) {
 	latestProjectMigration(t)
 }
 
 func latestProjectMigration(t *testing.T) (int, int) {
 	t.Helper()
-	entries, err := fs.ReadDir(projectmigrations.FS, ".")
+	entries, err := fs.ReadDir(atlasmigrations.MigrationDir(), ".")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -938,14 +362,13 @@ func latestProjectMigration(t *testing.T) (int, int) {
 	return maxVersion, count
 }
 
+// TestRunnerSerializesConcurrentUp proves the shared advisory lock serializes
+// concurrent migration runs.
 func TestRunnerSerializesConcurrentUp(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
 	defer cleanup()
-	runner, err := NewRunner(pool, projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runner := newAtlasRunnerForPool(t, pool)
 	errorsCh := make(chan error, 2)
 	for range 2 {
 		go func() { errorsCh <- runner.Up(ctx) }()
@@ -957,6 +380,8 @@ func TestRunnerSerializesConcurrentUp(t *testing.T) {
 	}
 }
 
+// TestRunnerAdvisoryLockWaitRespectsContext proves a blocked lock acquisition
+// terminates with the caller's context deadline.
 func TestRunnerAdvisoryLockWaitRespectsContext(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabase(t, ctx)
@@ -973,10 +398,7 @@ func TestRunnerAdvisoryLockWaitRespectsContext(t *testing.T) {
 		_, _ = blockingConnection.Exec(context.Background(), "SELECT pg_advisory_unlock(hashtextextended($1, 0))", migrationLockName)
 	}()
 
-	runner, err := NewRunner(pool, projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runner := newAtlasRunnerForPool(t, pool)
 	deadline, cancel := context.WithTimeout(ctx, 150*time.Millisecond)
 	defer cancel()
 	err = runner.Up(deadline)
@@ -985,35 +407,20 @@ func TestRunnerAdvisoryLockWaitRespectsContext(t *testing.T) {
 	}
 }
 
+// TestRunnerWorksWithSingleConnectionPool proves migrations do not depend on
+// pool concurrency: the advisory lock lives on a dedicated session outside the
+// application pool. The deadline is calibrated for the Atlas per-file executor
+// overhead (~15s for the full directory on a local database); any pool
+// deadlock blows the deadline instead of hanging forever.
 func TestRunnerWorksWithSingleConnectionPool(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newMigrationTestDatabaseWithMaxConns(t, ctx, 1)
 	defer cleanup()
-	runner, err := NewRunner(pool, projectmigrations.FS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	deadline, cancel := context.WithTimeout(ctx, 10*time.Second)
+	runner := newAtlasRunnerForPool(t, pool)
+	deadline, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	if err := runner.Up(deadline); err != nil {
 		t.Fatalf("single-connection migration failed: %v", err)
-	}
-}
-
-func TestRawLegacyMigrationsFailGooseParsing(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := newMigrationTestDatabase(t, ctx)
-	defer cleanup()
-	db := stdlib.OpenDBFromPool(pool)
-	defer db.Close()
-	provider, err := goose.NewProvider(goose.DialectPostgres, db, projectmigrations.FS, goose.WithTableName(projectMigrationTable))
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = provider.Up(ctx)
-	var pgErr *pgconn.PgError
-	if err == nil || !errors.As(err, &pgErr) || pgErr.Code != "42601" || !strings.Contains(err.Error(), "version:2") {
-		t.Fatalf("raw legacy Goose error=%v", err)
 	}
 }
 
@@ -1061,53 +468,5 @@ func newMigrationTestDatabaseWithMaxConns(t *testing.T, ctx context.Context, max
 		pool.Close()
 		_, _ = admin.Exec(context.Background(), "DROP DATABASE "+identifier+" WITH (FORCE)")
 		admin.Close()
-	}
-}
-
-func applyLegacyShellMigrations(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
-	t.Helper()
-	names, err := fs.Glob(projectmigrations.FS, "*.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		if !isLegacyMigration(name) {
-			continue
-		}
-		content, err := fs.ReadFile(projectmigrations.FS, name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		up := legacyUpSection(string(content))
-		if _, err := pool.Exec(ctx, up); err != nil {
-			t.Fatalf("apply legacy %s: %v", name, err)
-		}
-	}
-}
-
-func legacyUpSection(content string) string {
-	start := strings.Index(content, "-- +goose Up")
-	if start < 0 {
-		return ""
-	}
-	content = content[start+len("-- +goose Up"):]
-	if end := strings.Index(content, "-- +goose Down"); end >= 0 {
-		content = content[:end]
-	}
-	return content
-}
-
-func insertRuntimeIdentityFixture(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
-	t.Helper()
-	_, err := pool.Exec(ctx, `
-INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,created_at,updated_at)
-VALUES('10000000-0000-4000-8000-000000000001','m4a','/tmp/m4a','/tmp/m4a',now(),'active',now(),now());
-INSERT INTO workflow.definition(id,workspace_id,key,version,graph,created_at)
-VALUES('20000000-0000-4000-8000-000000000001','10000000-0000-4000-8000-000000000001','m4a',1,'{}',now());
-INSERT INTO workflow.run(id,workspace_id,definition_id,status,input,version,created_at,updated_at,idempotency_key,request_hash)
-VALUES('30000000-0000-4000-8000-000000000001','10000000-0000-4000-8000-000000000001','20000000-0000-4000-8000-000000000001','pending','{}',1,now(),now(),'m4a-runtime',repeat('1',64));`)
-	if err != nil {
-		t.Fatal(err)
 	}
 }

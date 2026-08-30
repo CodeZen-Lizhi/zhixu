@@ -292,7 +292,7 @@ Launcher 启动顺序：
 
 1. `zhixu-netns` app/worker anchor ready。
 2. 主项目 PostgreSQL ready；稳态 `up --remove-orphans` 同时清理旧布局遗留的 one-shot 容器。
-3. Bootstrap Compose 依次执行 model key init、`/app/zhixu-migrate`、local-model credential init 和 volume init；migration 固定执行项目 Goose Up → River Up → River Validate，任一步非零都阻止后续服务。
+3. Bootstrap Compose 依次执行 model key init、`/app/zhixu-migrate`、local-model credential init 和 volume init；migration 固定执行项目 Atlas Up → River Up → River Validate，任一步非零都阻止后续服务。
 4. Managed local-model runtime ready 后，bootstrap `modelctl recover --stale` 成功退出。
 5. 一次性 Workspace Control 重建 exact grant。
 6. API/Worker 的 PID 1 使用各自配置等待 PostgreSQL 可 ping；等待期间容器保持 running，并与对应 model relay 使用 `zhixu-netns` 的稳定 network namespace。参数、配置或数据库 URL 无效时以稳定、无 Secret 的错误失败，不无限重试。
@@ -328,9 +328,9 @@ Liveness 只证明进程存活。Worker readiness 还要求 DB、River schema/cl
 回滚：
 
 - 仅回到兼容当前 Schema、River Job kind/args、Workflow context 和 Writeback checkpoint 的应用版本。
-- DB 采用 Expand → Backfill → Contract；不把 destructive down migration 当普通回滚。
+- DB 采用 Expand → Backfill → Contract；Atlas 不提供 Down，失败后使用 fix-forward 或升级前备份恢复。
 - Prompt/Workflow/Model/Index 可切回上一 Active/Ready version。
-- 模型热应用 migration `00079` 只支持从可证明的 legacy `idle|failed` Up；不支持旧/新 binary 混跑。已存在 participant history、新 live phase 或不满足 legacy shape 时 Down 以 SQLSTATE `55000` fail closed，必须采用 forward fix。
+- 模型热应用 migration `00079` 只支持从可证明的 legacy `idle|failed` 状态升级；不支持旧/新 binary 混跑。已存在 participant history、新 live phase 或不满足 legacy shape 时，迁移接管以稳定错误码 fail closed，必须采用 forward fix。
 - 模型 activation 在 commit 前可恢复 previous active；commit 后不得 schema/SQL 回滚 active。回到旧模型应保存旧值为新的 immutable revision并正常 Apply。
 - 回滚应用前停止全部 Worker，保留 River Job、Attempt、Writeback Execution、temp/backup 与 lease；不兼容时保持停止并进入恢复流程。
 
