@@ -4,6 +4,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -12,11 +13,15 @@ import (
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	pathapp "github.com/CodeZen-Lizhi/zhixu/internal/review/learningpath/application"
 	pathdomain "github.com/CodeZen-Lizhi/zhixu/internal/review/learningpath/domain"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/lib/pq"
+	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
 )
 
 func TestReviewLearningPathPostgreSQLLegacyAndGORMCreateReadParity(t *testing.T) {
@@ -42,6 +47,12 @@ func TestReviewLearningPathPostgreSQLLegacyAndGORMCreateReadParity(t *testing.T)
 		replay, err := service.CreateForReview(ctx, command)
 		if err != nil || !replay.Replayed || replay.Path.ID != created.Path.ID {
 			t.Fatalf("replay result=%+v err=%v", replay, err)
+		}
+		closure := loadReviewPathClosure(t, ctx, pool, fixture.workspaceID, fixture.answerID)
+		assertReviewPathTerminalClosure(t, closure, fixture.answerID)
+		if len(closure.paths) != 1 || len(closure.steps) != len(created.Steps) || len(closure.holds) != 0 ||
+			len(closure.pathCommands) != 1 {
+			t.Fatalf("create closure=%+v", closure)
 		}
 
 		step := created.Steps[0]
@@ -72,6 +83,407 @@ func TestReviewLearningPathPostgreSQLLegacyAndGORMCreateReadParity(t *testing.T)
 		statusReplay, err := service.UpdateStatus(ctx, statusCommand)
 		if err != nil || !statusReplay.Replayed || statusReplay.Path.ID != created.Path.ID || statusReplay.Path.Version != 3 {
 			t.Fatalf("status replay=%+v err=%v", statusReplay, err)
+		}
+	})
+}
+
+func TestReviewLearningPathPostgreSQLGORMConcurrentSameAndDifferentKeys(t *testing.T) {
+	for _, testCase := range []struct {
+		name      string
+		firstKey  string
+		secondKey string
+		sameKey   bool
+	}{
+		{name: "same key and hash", firstKey: "review-path-gorm-concurrent-same", secondKey: "review-path-gorm-concurrent-same", sameKey: true},
+		{name: "different keys", firstKey: "review-path-gorm-concurrent-first", secondKey: "review-path-gorm-concurrent-second"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			runReviewPathGORMIntegration(t, func(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fixture reviewPathFixture, store pathapp.Store) {
+				bridge, _ := newReviewPathProductionBridge(t, pool, fixture.contentHash)
+				firstService := newReviewPathService(t, store, bridge)
+				secondService := newReviewPathService(t, store, bridge)
+				start := make(chan struct{})
+				outcomes := make(chan reviewPathCreateOutcome, 2)
+				go func() {
+					<-start
+					runReviewPathCreate(ctx, outcomes, firstService, fixture, testCase.firstKey)
+				}()
+				go func() {
+					<-start
+					runReviewPathCreate(ctx, outcomes, secondService, fixture, testCase.secondKey)
+				}()
+				close(start)
+				first := waitReviewPathCreate(t, ctx, outcomes)
+				second := waitReviewPathCreate(t, ctx, outcomes)
+
+				originals, replays, conflicts := 0, 0, 0
+				for _, outcome := range []reviewPathCreateOutcome{first, second} {
+					if outcome.err != nil {
+						if reviewPathErrorCode(outcome.err) != pathdomain.ErrorCodeReservationPending {
+							t.Fatalf("unexpected concurrent GORM Create error: %v", outcome.err)
+						}
+						conflicts++
+						continue
+					}
+					if outcome.result.Replayed {
+						replays++
+					} else {
+						originals++
+					}
+				}
+				if originals != 1 {
+					t.Fatalf("GORM originals=%d replays=%d conflicts=%d", originals, replays, conflicts)
+				}
+				if testCase.sameKey && (replays != 1 || conflicts != 0) {
+					t.Fatalf("same-key GORM outcomes originals=%d replays=%d conflicts=%d", originals, replays, conflicts)
+				}
+				if !testCase.sameKey && replays+conflicts != 1 {
+					t.Fatalf("different-key GORM outcomes originals=%d replays=%d conflicts=%d", originals, replays, conflicts)
+				}
+				closure := loadReviewPathClosure(t, ctx, pool, fixture.workspaceID, fixture.answerID)
+				assertReviewPathTerminalClosure(t, closure, fixture.answerID)
+				expectedPathCommands := originals + replays
+				if testCase.sameKey {
+					expectedPathCommands = 1
+				}
+				if len(closure.paths) != 1 || len(closure.holds) != 0 || len(closure.pathCommands) != expectedPathCommands {
+					t.Fatalf("concurrent GORM closure=%+v", closure)
+				}
+			})
+		})
+	}
+}
+
+func TestReviewLearningPathPostgreSQLGORMHistoryTriggerRollback(t *testing.T) {
+	runReviewPathGORMIntegration(t, func(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fixture reviewPathFixture, store pathapp.Store) {
+		repository, ok := store.(*GORMRepository)
+		if !ok {
+			t.Fatalf("GORM variant returned %T", store)
+		}
+		bridge, _ := newReviewPathProductionBridge(t, pool, fixture.contentHash)
+		service := newReviewPathService(t, repository, bridge)
+		created, err := service.CreateForReview(ctx, pathapp.CreateReviewCommand{
+			WorkspaceID: fixture.workspaceID, ReviewAnswerID: fixture.answerID,
+			IdempotencyKey: "review-path-gorm-history",
+		})
+		if err != nil || created.Replayed || len(created.Steps) == 0 {
+			t.Fatalf("create GORM history fixture result=%+v err=%v", created, err)
+		}
+
+		_, err = repository.UpdateStep(ctx, pathapp.UpdateStepRecord{
+			WorkspaceID: fixture.workspaceID, PathID: created.Path.ID, StepID: created.Steps[0].ID,
+			ExpectedVersion: created.Path.Version, Status: pathdomain.StepStatusInProgress,
+			IdempotencyKey: "review-path-gorm-history-step", RequestHash: reviewPathHash("review-path-gorm-history-step"),
+			At: created.Path.UpdatedAt.Add(-time.Second),
+		})
+		var classified *foundation.Error
+		if reviewPathErrorCode(err) != pathdomain.ErrorCodePersistenceInvalid || !errors.As(err, &classified) ||
+			classified.Kind != foundation.ErrorConsistencyViolation || classified.Retryable {
+			t.Fatalf("history trigger error=%v classified=%+v", err, classified)
+		}
+
+		closure := loadReviewPathClosure(t, ctx, pool, fixture.workspaceID, fixture.answerID)
+		assertReviewPathTerminalClosure(t, closure, fixture.answerID)
+		if len(closure.paths) != 1 || closure.paths[0].version != 1 || len(closure.steps) != len(created.Steps) ||
+			closure.steps[0].status != string(pathdomain.StepStatusPending) || closure.steps[0].version != 1 ||
+			len(closure.pathCommands) != 1 {
+			t.Fatalf("history trigger rollback closure=%+v", closure)
+		}
+	})
+}
+
+func TestReviewLearningPathPostgreSQLGORMCompleteResponseLossReplay(t *testing.T) {
+	runReviewPathGORMIntegration(t, func(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fixture reviewPathFixture, store pathapp.Store) {
+		repository, ok := store.(*GORMRepository)
+		if !ok {
+			t.Fatalf("GORM variant returned %T", store)
+		}
+		commitLoss := errors.New("simulated GORM Review Path completion response loss")
+		lossUnitOfWork := &reviewPathPostCommitErrorUnitOfWork{inner: repository.unitOfWork, err: commitLoss}
+		lossRepository := *repository
+		lossRepository.unitOfWork = lossUnitOfWork
+		bridge, _ := newReviewPathProductionBridge(t, pool, fixture.contentHash)
+		entered := make(chan reviewPathCompleteCall, 1)
+		release := make(chan struct{})
+		lossService := newReviewPathService(t, &reviewPathBlockingCompleteStore{
+			Store: &lossRepository, entered: entered, release: release,
+		}, bridge)
+		command := pathapp.CreateReviewCommand{
+			WorkspaceID: fixture.workspaceID, ReviewAnswerID: fixture.answerID,
+			IdempotencyKey: "review-path-gorm-response-loss",
+		}
+		outcomes := make(chan reviewPathCreateOutcome, 1)
+		go runReviewPathCreate(ctx, outcomes, lossService, fixture, command.IdempotencyKey)
+		waitReviewPathCompleteCall(t, ctx, entered)
+		lossUnitOfWork.armed.Store(true)
+		close(release)
+		outcome := waitReviewPathCreate(t, ctx, outcomes)
+		if reviewPathErrorCode(outcome.err) != pathdomain.ErrorCodeDependencyUnavailable || !errors.Is(outcome.err, commitLoss) ||
+			!lossUnitOfWork.lost.Load() {
+			t.Fatalf("GORM Complete response-loss result=%+v err=%v", outcome.result, outcome.err)
+		}
+
+		service := newReviewPathService(t, repository, bridge)
+		replayed, err := service.CreateForReview(ctx, command)
+		if err != nil || !replayed.Replayed {
+			t.Fatalf("same-key GORM response-loss replay=%+v err=%v", replayed, err)
+		}
+		otherKey, err := service.CreateForReview(ctx, pathapp.CreateReviewCommand{
+			WorkspaceID: fixture.workspaceID, ReviewAnswerID: fixture.answerID,
+			IdempotencyKey: "review-path-gorm-response-loss-other-key",
+		})
+		if err != nil || !otherKey.Replayed || otherKey.Path.ID != replayed.Path.ID || otherKey.Path.Artifact != replayed.Path.Artifact {
+			t.Fatalf("other-key GORM response-loss replay=%+v err=%v original=%+v", otherKey, err, replayed)
+		}
+		closure := loadReviewPathClosure(t, ctx, pool, fixture.workspaceID, fixture.answerID)
+		assertReviewPathTerminalClosure(t, closure, fixture.answerID)
+		if len(closure.paths) != 1 || len(closure.artifacts) != 1 || len(closure.holds) != 0 || len(closure.pathCommands) != 2 {
+			t.Fatalf("GORM response-loss closure=%+v", closure)
+		}
+	})
+}
+
+func TestReviewLearningPathPostgreSQLGORMCancellationAndUniqueReceiptRollback(t *testing.T) {
+	runReviewPathGORMIntegration(t, func(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fixture reviewPathFixture, store pathapp.Store) {
+		repository, ok := store.(*GORMRepository)
+		if !ok {
+			t.Fatalf("GORM variant returned %T", store)
+		}
+
+		cancelled, cancel := context.WithCancelCause(ctx)
+		cancelCause := errors.New("Review Path GORM cancellation cause")
+		cancel(cancelCause)
+		if _, err := repository.GetByReviewAnswer(cancelled, fixture.workspaceID, fixture.answerID); reviewPathErrorCode(err) != pathdomain.ErrorCodeDependencyUnavailable ||
+			!errors.Is(err, context.Canceled) || !errors.Is(err, cancelCause) {
+			t.Fatalf("GORM cancellation error=%v", err)
+		}
+
+		bridge, _ := newReviewPathProductionBridge(t, pool, fixture.contentHash)
+		service := newReviewPathService(t, repository, bridge)
+		created, err := service.CreateForReview(ctx, pathapp.CreateReviewCommand{
+			WorkspaceID: fixture.workspaceID, ReviewAnswerID: fixture.answerID,
+			IdempotencyKey: "review-path-gorm-unique-receipt",
+		})
+		if err != nil || created.Replayed {
+			t.Fatalf("create GORM unique receipt fixture result=%+v err=%v", created, err)
+		}
+
+		key := "review-path-gorm-duplicate-receipt"
+		hash := reviewPathHash(key)
+		err = repository.unitOfWork.Within(ctx, foundation.TransactionOptions{}, func(callbackCtx context.Context, scope foundation.TransactionScope) error {
+			tx, transactionErr := platformpostgres.GORMTransaction(scope)
+			if transactionErr != nil {
+				return transactionErr
+			}
+			if insertErr := gormInsertResultReceipt(
+				callbackCtx, tx, fixture.workspaceID, key, hash,
+				pathapp.CommandTypePathStatus, created.Path.Version, created,
+			); insertErr != nil {
+				return insertErr
+			}
+			return gormInsertResultReceipt(
+				callbackCtx, tx, fixture.workspaceID, key, hash,
+				pathapp.CommandTypePathStatus, created.Path.Version, created,
+			)
+		})
+		if reviewPathErrorCode(err) != pathdomain.ErrorCodeIdempotencyConflict {
+			t.Fatalf("GORM duplicate receipt error=%v", err)
+		}
+		if _, found, lookupErr := repository.FindPathStatusReplay(ctx, fixture.workspaceID, key, hash, created.Path.Version); lookupErr != nil || found {
+			t.Fatalf("duplicate receipt rollback found=%t err=%v", found, lookupErr)
+		}
+		closure := loadReviewPathClosure(t, ctx, pool, fixture.workspaceID, fixture.answerID)
+		assertReviewPathTerminalClosure(t, closure, fixture.answerID)
+		if len(closure.pathCommands) != 1 || len(closure.holds) != 0 {
+			t.Fatalf("duplicate receipt rollback closure=%+v", closure)
+		}
+	})
+}
+
+func TestReviewLearningPathPostgreSQLGORMTransactionLockBarrierAndDeadline(t *testing.T) {
+	runReviewPathGORMIntegration(t, func(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fixture reviewPathFixture, store pathapp.Store) {
+		repository, ok := store.(*GORMRepository)
+		if !ok {
+			t.Fatalf("GORM variant returned %T", store)
+		}
+		if _, err := repository.Get(ctx, fixture.workspaceID, reviewPathIntegrationID(99)); reviewPathErrorCode(err) != pathdomain.ErrorCodePathNotFound {
+			t.Fatalf("GORM no-row error=%v", err)
+		}
+
+		lockWorkspace := func() pgx.Tx {
+			t.Helper()
+			transaction, err := pool.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var workspaceID string
+			if err := transaction.QueryRow(ctx, `SELECT id::text FROM core.workspace WHERE id=$1 FOR UPDATE`, string(fixture.workspaceID)).Scan(&workspaceID); err != nil {
+				_ = transaction.Rollback(context.Background())
+				t.Fatal(err)
+			}
+			return transaction
+		}
+
+		lockTransaction := lockWorkspace()
+		defer func() { _ = lockTransaction.Rollback(context.Background()) }()
+		type beginOutcome struct {
+			reservation pathapp.Reservation
+			err         error
+		}
+		outcomes := make(chan beginOutcome, 1)
+		key := "review-path-gorm-lock-barrier"
+		go func() {
+			reservation, _, _, beginErr := repository.BeginReviewCreate(
+				ctx, fixture.workspaceID, fixture.answerID, key, reviewPathHash(key),
+			)
+			outcomes <- beginOutcome{reservation: reservation, err: beginErr}
+		}()
+		waitReviewPathWorkspaceLock(t, ctx, pool)
+		select {
+		case outcome := <-outcomes:
+			t.Fatalf("GORM Begin escaped Workspace lock early: %+v", outcome)
+		default:
+		}
+		if err := lockTransaction.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+		var outcome beginOutcome
+		select {
+		case outcome = <-outcomes:
+		case <-ctx.Done():
+			t.Fatal("GORM Begin did not finish after Workspace lock release")
+		}
+		if outcome.err != nil || outcome.reservation.Status != pathapp.ReservationPending || outcome.reservation.AttemptNo != 1 {
+			t.Fatalf("GORM Begin after Workspace lock result=%+v err=%v", outcome.reservation, outcome.err)
+		}
+
+		deadlineLock := lockWorkspace()
+		deadlineCtx, cancel := context.WithTimeout(ctx, 150*time.Millisecond)
+		_, _, _, err := repository.BeginReviewCreate(
+			deadlineCtx, fixture.workspaceID, fixture.answerID, "review-path-gorm-lock-deadline", reviewPathHash("review-path-gorm-lock-deadline"),
+		)
+		cancel()
+		if reviewPathErrorCode(err) != pathdomain.ErrorCodeDependencyUnavailable || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("GORM lock deadline error=%v", err)
+		}
+		if err := deadlineLock.Rollback(ctx); err != nil {
+			t.Fatal(err)
+		}
+		waitReviewPathNoWorkspaceLock(t, ctx, pool)
+		reservation, _, _, err := repository.BeginReviewCreate(ctx, fixture.workspaceID, fixture.answerID, key, reviewPathHash(key))
+		if err != nil || reservation.Status != pathapp.ReservationPending || reservation.AttemptNo != 1 {
+			t.Fatalf("GORM reused Pool after deadline reservation=%+v err=%v", reservation, err)
+		}
+	})
+}
+
+func TestReviewLearningPathPostgreSQLGORMStatementBoundsForeignKeyAndPlans(t *testing.T) {
+	runReviewPathGORMIntegration(t, func(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fixture reviewPathFixture, store pathapp.Store) {
+		repository, ok := store.(*GORMRepository)
+		if !ok {
+			t.Fatalf("GORM variant returned %T", store)
+		}
+		counter := installReviewPathStatementCounter(t, repository)
+
+		var snapshot pathapp.ReviewSnapshot
+		counter.reset()
+		err := repository.within(ctx, false, func(callbackCtx context.Context, tx *gorm.DB) error {
+			var loadErr error
+			snapshot, loadErr = gormLoadReviewSnapshot(callbackCtx, tx, fixture.workspaceID, fixture.answerID)
+			return loadErr
+		})
+		if err != nil || len(snapshot.Gap.Citations) != 1 {
+			t.Fatalf("GORM review snapshot=%+v err=%v", snapshot, err)
+		}
+		if statements := counter.statements(); statements != 3 {
+			t.Fatalf("GORM review snapshot statements=%d, want 3", statements)
+		}
+
+		bridge, _ := newReviewPathProductionBridge(t, pool, fixture.contentHash)
+		service := newReviewPathService(t, repository, bridge)
+		created, err := service.CreateForReview(ctx, pathapp.CreateReviewCommand{
+			WorkspaceID: fixture.workspaceID, ReviewAnswerID: fixture.answerID,
+			IdempotencyKey: "review-path-gorm-statement-bounds",
+		})
+		if err != nil || created.Replayed {
+			t.Fatalf("create statement-bound fixture result=%+v err=%v", created, err)
+		}
+		counter.reset()
+		read, err := repository.Get(ctx, fixture.workspaceID, created.Path.ID)
+		if err != nil || read.Path.ID != created.Path.ID || len(read.Steps) != len(created.Steps) {
+			t.Fatalf("GORM bounded read result=%+v err=%v", read, err)
+		}
+		if statements := counter.statements(); statements != 2 {
+			t.Fatalf("GORM path read statements=%d, want 2", statements)
+		}
+		if acquired := pool.Stat().AcquiredConns(); acquired != 0 {
+			t.Fatalf("GORM path read retained %d PostgreSQL connections", acquired)
+		}
+
+		counter.reset()
+		maintained, err := repository.MaintainReservations(ctx, time.Now().UTC().Add(-48*time.Hour), pathapp.MaxMaintenanceBatch)
+		if err != nil || maintained != 0 {
+			t.Fatalf("GORM maintenance count=%d err=%v", maintained, err)
+		}
+		if statements := counter.statements(); statements != 1 {
+			t.Fatalf("GORM maintenance statements=%d, want 1", statements)
+		}
+
+		missingPathID := reviewPathIntegrationID(99)
+		foreignKeyKey := "review-path-gorm-foreign-key"
+		foreignKeyErr := repository.within(ctx, false, func(callbackCtx context.Context, tx *gorm.DB) error {
+			_, execErr := gormLearningPathExec(callbackCtx, tx, gormInsertResultReceiptSQL,
+				string(fixture.workspaceID), foreignKeyKey, reviewPathHash(foreignKeyKey),
+				pathapp.CommandTypePathStatus, string(missingPathID), 1, 1, learningPathJSONB([]byte(`{}`)))
+			return gormLearningPathClassify(callbackCtx, execErr)
+		})
+		var classified *foundation.Error
+		var postgresError *pgconn.PgError
+		if reviewPathErrorCode(foreignKeyErr) != pathdomain.ErrorCodePersistenceInvalid ||
+			!errors.As(foreignKeyErr, &classified) || classified.Kind != foundation.ErrorConsistencyViolation || classified.Retryable ||
+			!errors.As(foreignKeyErr, &postgresError) || postgresError.Code != "23503" {
+			t.Fatalf("GORM foreign-key error=%v classified=%+v PostgreSQL=%+v", foreignKeyErr, classified, postgresError)
+		}
+		var receiptCount int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM learning.learning_path_command
+			WHERE workspace_id=$1 AND idempotency_key=$2`, string(fixture.workspaceID), foreignKeyKey).Scan(&receiptCount); err != nil {
+			t.Fatal(err)
+		}
+		if receiptCount != 0 {
+			t.Fatalf("foreign-key failure retained %d receipts", receiptCount)
+		}
+
+		citation := snapshot.Gap.Citations[0]
+		workspace := string(fixture.workspaceID)
+		evidencePlan := explainReviewPathGORMQuery(t, ctx, repository, pool, gormReviewEvidenceSQL,
+			pq.Array([]string{string(citation.ClaimID)}),
+			pq.Array([]string{string(citation.SourceVersionID)}),
+			pq.Array([]string{string(citation.SourceSpanID)}),
+			pq.Array([]string{citation.EvidenceHash}),
+			workspace, string(fixture.cardID), workspace, workspace, workspace, workspace, workspace, workspace, workspace)
+		if evidencePlan.ActualRows != 1 || !reviewPathPlanContains(evidencePlan, func(node reviewPathExplainPlan) bool {
+			return node.NodeType == "Function Scan" && node.ActualRows == 1
+		}) {
+			t.Fatalf("evidence EXPLAIN is not a bounded one-row set projection: %+v", evidencePlan)
+		}
+
+		const capacityRows = 5_000
+		capacityAt := time.Now().UTC().Add(-25 * time.Hour)
+		seedReviewPathMaintenancePlanRows(t, ctx, pool, fixture, capacityRows, capacityAt)
+		transaction, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = transaction.Rollback(context.Background()) }()
+		maintenancePlan := explainReviewPathGORMQuery(t, ctx, repository, transaction,
+			gormMaintainReservationsSQL, time.Now().UTC().Add(-24*time.Hour), pathapp.MaxMaintenanceBatch)
+		if err := transaction.Rollback(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if !reviewPathPlanContains(maintenancePlan, func(node reviewPathExplainPlan) bool {
+			return node.IndexName == "idx_learning_path_creation_pending_maintenance"
+		}) {
+			t.Fatalf("maintenance EXPLAIN did not use pending index: %+v", maintenancePlan)
 		}
 	})
 }
@@ -199,101 +611,84 @@ func TestReviewLearningPathPostgreSQLConcurrentSameAndDifferentKeys(t *testing.T
 
 func TestReviewLearningPathPostgreSQLMaintenanceFencesLateHoldAndComplete(t *testing.T) {
 	t.Run("maintenance wins before late Artifact hold", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		pool := newReviewPathTestDatabase(t, ctx)
-		fixture := seedReviewPathFixture(t, ctx, pool)
-		repository, err := NewRepository(pool)
-		if err != nil {
-			t.Fatal(err)
-		}
-		productionBridge, _ := newReviewPathProductionBridge(t, pool, fixture.contentHash)
-		entered := make(chan pathapp.DraftRequest, 1)
-		release := make(chan struct{})
-		service := newReviewPathService(t, repository, &reviewPathBlockingBridge{
-			ArtifactBridge: productionBridge, entered: entered, release: release,
+		runReviewPathIntegrationVariants(t, func(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fixture reviewPathFixture, repository pathapp.Store) {
+			productionBridge, _ := newReviewPathProductionBridge(t, pool, fixture.contentHash)
+			entered := make(chan pathapp.DraftRequest, 1)
+			release := make(chan struct{})
+			service := newReviewPathService(t, repository, &reviewPathBlockingBridge{
+				ArtifactBridge: productionBridge, entered: entered, release: release,
+			})
+
+			outcomeChannel := make(chan reviewPathCreateOutcome, 1)
+			go runReviewPathCreate(ctx, outcomeChannel, service, fixture, "review-path-late-hold")
+			request := waitReviewPathDraftRequest(t, ctx, entered)
+			if request.ArtifactDigest == "" {
+				t.Fatal("late Artifact request has no attempt digest")
+			}
+			staleAt := time.Now().UTC().Add(-25 * time.Hour)
+			makeReviewPathReservationStale(t, ctx, pool, fixture, staleAt)
+			abandoned, err := repository.MaintainReservations(ctx, time.Now().UTC().Add(-24*time.Hour), pathapp.MaxMaintenanceBatch)
+			if err != nil || abandoned != 1 {
+				t.Fatalf("maintenance abandoned=%d err=%v", abandoned, err)
+			}
+			close(release)
+			outcome := waitReviewPathCreate(t, ctx, outcomeChannel)
+			if outcome.err == nil {
+				t.Fatal("late Artifact hold escaped an ABANDONED reservation")
+			}
+
+			closure := loadReviewPathClosure(t, ctx, pool, fixture.workspaceID, fixture.answerID)
+			assertReviewPathTerminalClosure(t, closure, fixture.answerID)
+			if closure.reservation.status != string(pathapp.ReservationAbandoned) ||
+				closure.reservation.artifactDigest != request.ArtifactDigest ||
+				len(closure.artifacts) != 0 || len(closure.artifactCommands) != 0 || len(closure.holds) != 0 {
+				t.Fatalf("late hold rollback closure=%+v", closure)
+			}
 		})
-
-		outcomeChannel := make(chan reviewPathCreateOutcome, 1)
-		go runReviewPathCreate(ctx, outcomeChannel, service, fixture, "review-path-late-hold")
-		request := waitReviewPathDraftRequest(t, ctx, entered)
-		if request.ArtifactDigest == "" {
-			t.Fatal("late Artifact request has no attempt digest")
-		}
-		staleAt := time.Now().UTC().Add(-25 * time.Hour)
-		makeReviewPathReservationStale(t, ctx, pool, fixture, staleAt)
-		abandoned, err := repository.MaintainReservations(ctx, time.Now().UTC().Add(-24*time.Hour), pathapp.MaxMaintenanceBatch)
-		if err != nil || abandoned != 1 {
-			t.Fatalf("maintenance abandoned=%d err=%v", abandoned, err)
-		}
-		close(release)
-		outcome := waitReviewPathCreate(t, ctx, outcomeChannel)
-		if outcome.err == nil {
-			t.Fatal("late Artifact hold escaped an ABANDONED reservation")
-		}
-
-		closure := loadReviewPathClosure(t, ctx, pool, fixture.workspaceID, fixture.answerID)
-		assertReviewPathTerminalClosure(t, closure, fixture.answerID)
-		if closure.reservation.status != string(pathapp.ReservationAbandoned) ||
-			closure.reservation.artifactDigest != request.ArtifactDigest ||
-			len(closure.artifacts) != 0 || len(closure.artifactCommands) != 0 || len(closure.holds) != 0 {
-			t.Fatalf("late hold rollback closure=%+v", closure)
-		}
 	})
 
 	t.Run("maintenance wins before Complete", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		pool := newReviewPathTestDatabase(t, ctx)
-		fixture := seedReviewPathFixture(t, ctx, pool)
-		repository, err := NewRepository(pool)
-		if err != nil {
-			t.Fatal(err)
-		}
-		bridge, artifactRepository := newReviewPathProductionBridge(t, pool, fixture.contentHash)
-		entered := make(chan reviewPathCompleteCall, 1)
-		release := make(chan struct{})
-		blockingStore := &reviewPathBlockingCompleteStore{
-			Store: repository, entered: entered, release: release,
-		}
-		service := newReviewPathService(t, blockingStore, bridge)
+		runReviewPathIntegrationVariants(t, func(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fixture reviewPathFixture, repository pathapp.Store) {
+			bridge, artifactRepository := newReviewPathProductionBridge(t, pool, fixture.contentHash)
+			entered := make(chan reviewPathCompleteCall, 1)
+			release := make(chan struct{})
+			blockingStore := &reviewPathBlockingCompleteStore{
+				Store: repository, entered: entered, release: release,
+			}
+			service := newReviewPathService(t, blockingStore, bridge)
 
-		outcomeChannel := make(chan reviewPathCreateOutcome, 1)
-		go runReviewPathCreate(ctx, outcomeChannel, service, fixture, "review-path-maintenance-wins")
-		complete := waitReviewPathCompleteCall(t, ctx, entered)
-		staleAt := time.Now().UTC().Add(-25 * time.Hour)
-		makeReviewPathReservationStale(t, ctx, pool, fixture, staleAt)
-		abandoned, err := repository.MaintainReservations(ctx, time.Now().UTC().Add(-24*time.Hour), pathapp.MaxMaintenanceBatch)
-		if err != nil || abandoned != 1 {
-			t.Fatalf("maintenance abandoned=%d err=%v", abandoned, err)
-		}
-		close(release)
-		outcome := waitReviewPathCreate(t, ctx, outcomeChannel)
-		if outcome.err == nil {
-			t.Fatal("late Complete escaped an ABANDONED reservation")
-		}
+			outcomeChannel := make(chan reviewPathCreateOutcome, 1)
+			go runReviewPathCreate(ctx, outcomeChannel, service, fixture, "review-path-maintenance-wins")
+			complete := waitReviewPathCompleteCall(t, ctx, entered)
+			staleAt := time.Now().UTC().Add(-25 * time.Hour)
+			makeReviewPathReservationStale(t, ctx, pool, fixture, staleAt)
+			abandoned, err := repository.MaintainReservations(ctx, time.Now().UTC().Add(-24*time.Hour), pathapp.MaxMaintenanceBatch)
+			if err != nil || abandoned != 1 {
+				t.Fatalf("maintenance abandoned=%d err=%v", abandoned, err)
+			}
+			close(release)
+			outcome := waitReviewPathCreate(t, ctx, outcomeChannel)
+			if outcome.err == nil {
+				t.Fatal("late Complete escaped an ABANDONED reservation")
+			}
 
-		closure := loadReviewPathClosure(t, ctx, pool, fixture.workspaceID, fixture.answerID)
-		assertReviewPathTerminalClosure(t, closure, fixture.answerID)
-		if closure.reservation.status != string(pathapp.ReservationAbandoned) ||
-			len(closure.artifacts) != 1 || len(closure.holds) != 1 ||
-			closure.holds[0].artifactID != string(complete.path.Artifact.ArtifactID) {
-			t.Fatalf("maintenance/Complete closure=%+v", closure)
-		}
-		if _, err := artifactRepository.Get(ctx, fixture.workspaceID, complete.path.Artifact.ArtifactID); err == nil {
-			t.Fatal("ORPHANED Artifact became publicly readable")
-		}
+			closure := loadReviewPathClosure(t, ctx, pool, fixture.workspaceID, fixture.answerID)
+			assertReviewPathTerminalClosure(t, closure, fixture.answerID)
+			if closure.reservation.status != string(pathapp.ReservationAbandoned) ||
+				len(closure.artifacts) != 1 || len(closure.holds) != 1 ||
+				closure.holds[0].artifactID != string(complete.path.Artifact.ArtifactID) {
+				t.Fatalf("maintenance/Complete closure=%+v", closure)
+			}
+			if _, err := artifactRepository.Get(ctx, fixture.workspaceID, complete.path.Artifact.ArtifactID); err == nil {
+				t.Fatal("ORPHANED Artifact became publicly readable")
+			}
+		})
 	})
 
-	t.Run("Complete wins before maintenance", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		pool := newReviewPathTestDatabase(t, ctx)
-		fixture := seedReviewPathFixture(t, ctx, pool)
-		repository, err := NewRepository(pool)
-		if err != nil {
-			t.Fatal(err)
-		}
+}
+
+func TestReviewLearningPathPostgreSQLCompleteWinsBeforeMaintenance(t *testing.T) {
+	runReviewPathIntegrationVariants(t, func(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fixture reviewPathFixture, repository pathapp.Store) {
 		bridge, artifactRepository := newReviewPathProductionBridge(t, pool, fixture.contentHash)
 		staleAt := time.Now().UTC().Add(-25 * time.Hour)
 		completeEntered := make(chan reviewPathCompleteCall, 1)
@@ -309,22 +704,11 @@ func TestReviewLearningPathPostgreSQLMaintenanceFencesLateHoldAndComplete(t *tes
 		waitReviewPathCompleteCall(t, ctx, completeEntered)
 		makeReviewPathReservationStale(t, ctx, pool, fixture, staleAt)
 
-		maintenanceConnection, err := pool.Acquire(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer maintenanceConnection.Release()
 		maintenanceArrived := make(chan struct{}, 1)
 		maintenanceRelease := make(chan struct{})
-		maintenanceRepository, err := NewRepository(&reviewPathBarrierDB{
-			DB: maintenanceConnection,
-			barrier: &reviewPathSQLBarrier{
-				match: "WITH candidates AS (", arrived: maintenanceArrived, release: maintenanceRelease,
-			},
+		maintenanceRepository := reviewPathMaintenanceBarrierStore(t, ctx, pool, repository, &reviewPathSQLBarrier{
+			match: "WITH candidates AS (", arrived: maintenanceArrived, release: maintenanceRelease,
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
 		type maintenanceOutcome struct {
 			count int
 			err   error
@@ -413,14 +797,16 @@ func TestReviewLearningPathPostgreSQLCompleteResponseLossReplay(t *testing.T) {
 }
 
 func TestReviewLearningPathPostgreSQLAbandonedReopenAndAttemptFence(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	pool := newReviewPathTestDatabase(t, ctx)
-	fixture := seedReviewPathFixture(t, ctx, pool)
-	repository, err := NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runReviewPathIntegrationVariants(t, testReviewPathAbandonedReopenAndAttemptFence)
+}
+
+func testReviewPathAbandonedReopenAndAttemptFence(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	fixture reviewPathFixture,
+	repository pathapp.Store,
+) {
 	bridge, artifactRepository := newReviewPathProductionBridge(t, pool, fixture.contentHash)
 	completeEntered := make(chan reviewPathCompleteCall, 1)
 	completeRelease := make(chan struct{})
@@ -553,6 +939,249 @@ func waitReviewPathSignal(t *testing.T, ctx context.Context, signals <-chan stru
 	case <-signals:
 	case <-ctx.Done():
 		t.Fatal(message)
+	}
+}
+
+func waitReviewPathWorkspaceLock(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+	t.Helper()
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var waiting bool
+		err := pool.QueryRow(ctx, `SELECT EXISTS (
+			SELECT 1
+			FROM pg_stat_activity
+			WHERE datname=current_database()
+			  AND wait_event_type='Lock'
+			  AND query LIKE $1
+		)`, "%core.workspace%").Scan(&waiting)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if waiting {
+			return
+		}
+		select {
+		case <-ticker.C:
+		case <-deadline.C:
+			t.Fatal("GORM transaction did not become visible waiting on the Workspace row lock")
+		case <-ctx.Done():
+			t.Fatal("GORM transaction context ended before reaching the Workspace row lock")
+		}
+	}
+}
+
+func waitReviewPathNoWorkspaceLock(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+	t.Helper()
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var waiting bool
+		err := pool.QueryRow(ctx, `SELECT EXISTS (
+			SELECT 1
+			FROM pg_stat_activity
+			WHERE datname=current_database()
+			  AND wait_event_type='Lock'
+			  AND query LIKE $1
+		)`, "%core.workspace%").Scan(&waiting)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !waiting {
+			return
+		}
+		select {
+		case <-ticker.C:
+		case <-deadline.C:
+			t.Fatal("GORM transaction still waits on the Workspace row lock after cancellation")
+		case <-ctx.Done():
+			t.Fatal("GORM transaction context ended while checking Workspace lock cleanup")
+		}
+	}
+}
+
+type reviewPathStatementCounter struct {
+	count atomic.Int64
+}
+
+func (counter *reviewPathStatementCounter) LogMode(gormlogger.LogLevel) gormlogger.Interface {
+	return counter
+}
+
+func (*reviewPathStatementCounter) Info(context.Context, string, ...any)  {}
+func (*reviewPathStatementCounter) Warn(context.Context, string, ...any)  {}
+func (*reviewPathStatementCounter) Error(context.Context, string, ...any) {}
+
+func (counter *reviewPathStatementCounter) Trace(context.Context, time.Time, func() (string, int64), error) {
+	counter.count.Add(1)
+}
+
+func (counter *reviewPathStatementCounter) reset() {
+	counter.count.Store(0)
+}
+
+func (counter *reviewPathStatementCounter) statements() int64 {
+	return counter.count.Load()
+}
+
+func installReviewPathStatementCounter(t *testing.T, repository *GORMRepository) *reviewPathStatementCounter {
+	t.Helper()
+	if repository == nil || repository.database == nil || repository.database.Config == nil {
+		t.Fatal("GORM repository has no shared database config")
+	}
+	counter := &reviewPathStatementCounter{}
+	original := repository.database.Config.Logger
+	repository.database.Config.Logger = counter
+	t.Cleanup(func() {
+		repository.database.Config.Logger = original
+	})
+	return counter
+}
+
+type reviewPathExplainQuerier interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+type reviewPathExplainPlan struct {
+	NodeType     string                  `json:"Node Type"`
+	RelationName string                  `json:"Relation Name"`
+	IndexName    string                  `json:"Index Name"`
+	ActualRows   float64                 `json:"Actual Rows"`
+	Plans        []reviewPathExplainPlan `json:"Plans"`
+}
+
+func explainReviewPathGORMQuery(
+	t *testing.T,
+	ctx context.Context,
+	repository *GORMRepository,
+	database reviewPathExplainQuerier,
+	query string,
+	arguments ...any,
+) reviewPathExplainPlan {
+	t.Helper()
+	statement := repository.database.Session(&gorm.Session{DryRun: true}).Raw(query, arguments...)
+	if statement.Error != nil || statement.Statement == nil || statement.Statement.SQL.Len() == 0 {
+		t.Fatalf("build Review Path EXPLAIN statement: %v", statement.Error)
+	}
+	var raw []byte
+	if err := database.QueryRow(ctx,
+		"EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, COSTS OFF) "+statement.Statement.SQL.String(),
+		statement.Statement.Vars...,
+	).Scan(&raw); err != nil {
+		t.Fatalf("execute Review Path EXPLAIN: %v", err)
+	}
+	var documents []struct {
+		Plan reviewPathExplainPlan `json:"Plan"`
+	}
+	if err := json.Unmarshal(raw, &documents); err != nil || len(documents) != 1 {
+		t.Fatalf("decode Review Path EXPLAIN: documents=%d err=%v", len(documents), err)
+	}
+	return documents[0].Plan
+}
+
+func reviewPathPlanContains(plan reviewPathExplainPlan, predicate func(reviewPathExplainPlan) bool) bool {
+	if predicate(plan) {
+		return true
+	}
+	for _, child := range plan.Plans {
+		if reviewPathPlanContains(child, predicate) {
+			return true
+		}
+	}
+	return false
+}
+
+func seedReviewPathMaintenancePlanRows(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	fixture reviewPathFixture,
+	count int,
+	updatedAt time.Time,
+) {
+	t.Helper()
+	tag, err := pool.Exec(ctx, `WITH source_answer AS (
+		SELECT workspace_id,session_id,card_id,user_answer,scorer_version,score,feedback,
+			rating,schedule_snapshot,request_hash,created_at
+		FROM learning.review_answer
+		WHERE workspace_id=$1 AND id=$2
+	), inserted_answers AS (
+		INSERT INTO learning.review_answer(
+			id,workspace_id,session_id,card_id,question_ref,idempotency_key,user_answer,
+			scorer_version,score,feedback,rating,schedule_snapshot,request_hash,created_at
+		)
+		SELECT md5('review-path-plan-answer-' || series.value::text)::uuid,
+			source_answer.workspace_id,source_answer.session_id,source_answer.card_id,
+			'review-path-plan-question-' || series.value::text,
+			'review-path-plan-answer-' || series.value::text,
+			source_answer.user_answer,source_answer.scorer_version,source_answer.score,
+			source_answer.feedback,source_answer.rating,source_answer.schedule_snapshot,
+			source_answer.request_hash,source_answer.created_at
+		FROM source_answer
+		CROSS JOIN generate_series(1,$3) AS series(value)
+		RETURNING id,workspace_id,idempotency_key
+	)
+	INSERT INTO learning.learning_path_creation_reservation(
+		workspace_id,review_answer_id,idempotency_key,request_hash,source_snapshot,
+		source_snapshot_digest,attempt_no,status,created_at,updated_at
+	)
+	SELECT workspace_id,id,idempotency_key,repeat('a',64),'{}'::jsonb,
+		repeat('b',64),1,'PENDING',$4,$4
+	FROM inserted_answers`, string(fixture.workspaceID), string(fixture.answerID), count, updatedAt.UTC())
+	if err != nil {
+		t.Fatalf("seed Review Path maintenance plan rows: %v", err)
+	}
+	if tag.RowsAffected() != int64(count) {
+		t.Fatalf("seeded maintenance rows=%d, want %d", tag.RowsAffected(), count)
+	}
+	if _, err := pool.Exec(ctx, `ANALYZE learning.learning_path_creation_reservation`); err != nil {
+		t.Fatalf("analyze Review Path maintenance fixture: %v", err)
+	}
+}
+
+func reviewPathMaintenanceBarrierStore(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	store pathapp.Store,
+	barrier *reviewPathSQLBarrier,
+) pathapp.Store {
+	t.Helper()
+	switch repository := store.(type) {
+	case *Repository:
+		connection, err := pool.Acquire(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(connection.Release)
+		wrapped, err := NewRepository(&reviewPathBarrierDB{DB: connection, barrier: barrier})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return wrapped
+	case *GORMRepository:
+		const callbackName = "review_path:maintenance_barrier"
+		rowCallbacks := repository.database.Callback().Row()
+		if err := rowCallbacks.Before("gorm:row").Register(callbackName, func(database *gorm.DB) {
+			if database != nil && database.Statement != nil {
+				barrier.wait(database.Statement.Context, database.Statement.SQL.String())
+			}
+		}); err != nil {
+			t.Fatalf("register GORM maintenance barrier: %v", err)
+		}
+		t.Cleanup(func() {
+			if err := rowCallbacks.Remove(callbackName); err != nil {
+				t.Errorf("remove GORM maintenance barrier: %v", err)
+			}
+		})
+		return repository
+	default:
+		t.Fatalf("unsupported Review Path store %T", store)
+		return nil
 	}
 }
 
@@ -712,6 +1341,29 @@ func makeReviewPathReservationStale(
 	if tag.RowsAffected() != 1 {
 		t.Fatalf("stale reservation update affected %d rows", tag.RowsAffected())
 	}
+}
+
+// reviewPathPostCommitErrorUnitOfWork preserves the real shared Pool/UoW and
+// returns a controlled error only after its inner transaction committed.
+type reviewPathPostCommitErrorUnitOfWork struct {
+	inner foundation.UnitOfWork
+	err   error
+	armed atomic.Bool
+	lost  atomic.Bool
+}
+
+func (unitOfWork *reviewPathPostCommitErrorUnitOfWork) Within(
+	ctx context.Context,
+	options foundation.TransactionOptions,
+	work foundation.TransactionFunc,
+) error {
+	if err := unitOfWork.inner.Within(ctx, options, work); err != nil {
+		return err
+	}
+	if unitOfWork.armed.Load() && unitOfWork.lost.CompareAndSwap(false, true) {
+		return unitOfWork.err
+	}
+	return nil
 }
 
 type reviewPathCommitLossDB struct {

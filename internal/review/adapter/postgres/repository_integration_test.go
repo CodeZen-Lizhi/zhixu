@@ -5,35 +5,39 @@ package postgres
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
-	"net/url"
+	"fmt"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	platformscheduler "github.com/CodeZen-Lizhi/zhixu/internal/platform/scheduler"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	reviewapp "github.com/CodeZen-Lizhi/zhixu/internal/review/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/review/domain"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	gormlogger "gorm.io/gorm/logger"
 )
 
 const reviewIntegrationQuestionRefKey = "review-question-ref-integration-key-2026"
 
 func TestReviewRepositoryAnswerScheduleAtomicAndIdempotent(t *testing.T) {
+	runReviewIntegrationVariants(t, testReviewRepositoryAnswerScheduleAtomicAndIdempotent)
+}
+
+func testReviewRepositoryAnswerScheduleAtomicAndIdempotent(t *testing.T, variant reviewIntegrationVariant) {
 	ctx := context.Background()
-	pool, cleanup := newReviewTestDatabase(t, ctx)
-	defer cleanup()
+	repository, platform, pool := variant.open(t)
 	seedReviewEvidence(t, ctx, pool)
-	repository, err := NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
 	fsrs, err := platformscheduler.NewFSRSAdapter()
 	if err != nil {
 		t.Fatal(err)
@@ -160,7 +164,7 @@ func TestReviewRepositoryAnswerScheduleAtomicAndIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	responseLossRepository, err := NewRepository(commitResponseLossDB{DB: pool})
+	responseLossRepository, err := reviewResponseLossRepository(t, variant, repository, platform, errors.New("simulated completion response loss"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,15 +224,15 @@ func TestReviewRepositoryAnswerScheduleAtomicAndIdempotent(t *testing.T) {
 }
 
 func TestReviewRepositoryRejectsInterviewSessionOperations(t *testing.T) {
+	runReviewIntegrationVariants(t, testReviewRepositoryRejectsInterviewSessionOperations)
+}
+
+func testReviewRepositoryRejectsInterviewSessionOperations(t *testing.T, variant reviewIntegrationVariant) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	pool, cleanup := newReviewTestDatabase(t, ctx)
-	defer cleanup()
-	fixture := createReviewDraftFixture(t, ctx, pool, "review-interview-boundary")
-	repository, err := NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
+	fixture := createReviewDraftFixtureForVariant(t, ctx, variant, "review-interview-boundary")
+	repository := fixture.repository
+	pool := fixture.pool
 	approved, err := fixture.service.ApproveCard(ctx, reviewapp.CardDecisionCommand{
 		WorkspaceID: fixture.workspaceID, CardID: fixture.card.ID, ExpectedVersion: fixture.card.Version,
 		IdempotencyKey: "review-interview-boundary-approve",
@@ -300,11 +304,14 @@ func TestReviewRepositoryRejectsInterviewSessionOperations(t *testing.T) {
 }
 
 func TestReviewRepositoryRejectsAnswerAfterCardEditReapproveABA(t *testing.T) {
+	runReviewIntegrationVariants(t, testReviewRepositoryRejectsAnswerAfterCardEditReapproveABA)
+}
+
+func testReviewRepositoryRejectsAnswerAfterCardEditReapproveABA(t *testing.T, variant reviewIntegrationVariant) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	pool, cleanup := newReviewTestDatabase(t, ctx)
-	defer cleanup()
-	fixture := createReviewDraftFixture(t, ctx, pool, "answer-card-aba")
+	fixture := createReviewDraftFixtureForVariant(t, ctx, variant, "answer-card-aba")
+	pool := fixture.pool
 
 	approved, err := fixture.service.ApproveCard(ctx, reviewapp.CardDecisionCommand{
 		WorkspaceID: fixture.workspaceID, CardID: fixture.card.ID, ExpectedVersion: fixture.card.Version,
@@ -320,10 +327,7 @@ func TestReviewRepositoryRejectsAnswerAfterCardEditReapproveABA(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	repository, err := NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
+	repository := fixture.repository
 	fsrs, err := platformscheduler.NewFSRSAdapter()
 	if err != nil {
 		t.Fatal(err)
@@ -336,7 +340,7 @@ func TestReviewRepositoryRejectsAnswerAfterCardEditReapproveABA(t *testing.T) {
 			close(release)
 		}
 	}()
-	blocking := &answerABABlockingRepository{Repository: repository, started: started, release: release}
+	blocking := &answerABABlockingRepository{reviewIntegrationRepository: repository, started: started, release: release}
 	answerService, err := reviewapp.NewService(blocking, repository, reviewapp.NewDeterministicScorer(), fsrs, reviewIntegrationQuestionRefKey, foundation.NewUUIDGenerator(nil), foundation.FixedClock{Value: fixture.now})
 	if err != nil {
 		t.Fatal(err)
@@ -402,15 +406,15 @@ func TestReviewRepositoryRejectsAnswerAfterCardEditReapproveABA(t *testing.T) {
 }
 
 func TestReviewRepositoryConcurrentScheduleCommandsRemainAtomic(t *testing.T) {
+	runReviewIntegrationVariants(t, testReviewRepositoryConcurrentScheduleCommandsRemainAtomic)
+}
+
+func testReviewRepositoryConcurrentScheduleCommandsRemainAtomic(t *testing.T, variant reviewIntegrationVariant) {
 	ctx := context.Background()
-	pool, cleanup := newReviewTestDatabase(t, ctx)
-	defer cleanup()
+	repository, _, pool := variant.open(t)
 	seedReviewEvidence(t, ctx, pool)
 
-	repository, err := NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
+	var err error
 	fsrs, err := platformscheduler.NewFSRSAdapter()
 	if err != nil {
 		t.Fatal(err)
@@ -532,11 +536,14 @@ func TestReviewRepositoryConcurrentScheduleCommandsRemainAtomic(t *testing.T) {
 }
 
 func TestReviewRepositoryApprovalAndQuarantineSerializeByWorkspace(t *testing.T) {
+	runReviewIntegrationVariants(t, testReviewRepositoryApprovalAndQuarantineSerializeByWorkspace)
+}
+
+func testReviewRepositoryApprovalAndQuarantineSerializeByWorkspace(t *testing.T, variant reviewIntegrationVariant) {
 	t.Run("approval commits before quarantine invalidates the card", func(t *testing.T) {
 		ctx := context.Background()
-		pool, cleanup := newReviewTestDatabase(t, ctx)
-		defer cleanup()
-		fixture := createReviewDraftFixture(t, ctx, pool, "approval-first")
+		fixture := createReviewDraftFixtureForVariant(t, ctx, variant, "approval-first")
+		pool := fixture.pool
 		if _, err := pool.Exec(ctx, `UPDATE core.source_version SET security_status='quarantined' WHERE workspace_id=$1 AND id='71000000-0000-4000-8000-000000000004'`, string(fixture.workspaceID)); reviewPostgresErrorCode(err) != "55000" {
 			t.Fatalf("source version mutation error=%v", err)
 		}
@@ -576,9 +583,8 @@ func TestReviewRepositoryApprovalAndQuarantineSerializeByWorkspace(t *testing.T)
 
 	t.Run("quarantine commits before approval is rechecked", func(t *testing.T) {
 		ctx := context.Background()
-		pool, cleanup := newReviewTestDatabase(t, ctx)
-		defer cleanup()
-		fixture := createReviewDraftFixture(t, ctx, pool, "quarantine-first")
+		fixture := createReviewDraftFixtureForVariant(t, ctx, variant, "quarantine-first")
+		pool := fixture.pool
 
 		quarantineTx, err := pool.Begin(ctx)
 		if err != nil {
@@ -622,11 +628,14 @@ func TestReviewRepositoryApprovalAndQuarantineSerializeByWorkspace(t *testing.T)
 }
 
 func TestReviewRepositoryHighConflictInvalidatesOrBlocksApproval(t *testing.T) {
+	runReviewIntegrationVariants(t, testReviewRepositoryHighConflictInvalidatesOrBlocksApproval)
+}
+
+func testReviewRepositoryHighConflictInvalidatesOrBlocksApproval(t *testing.T, variant reviewIntegrationVariant) {
 	t.Run("approved card is durably invalidated", func(t *testing.T) {
 		ctx := context.Background()
-		pool, cleanup := newReviewTestDatabase(t, ctx)
-		defer cleanup()
-		fixture := createReviewDraftFixture(t, ctx, pool, "conflict-after-approval")
+		fixture := createReviewDraftFixtureForVariant(t, ctx, variant, "conflict-after-approval")
+		pool := fixture.pool
 		if _, err := fixture.service.ApproveCard(ctx, reviewapp.CardDecisionCommand{
 			WorkspaceID: fixture.workspaceID, CardID: fixture.card.ID, ExpectedVersion: fixture.card.Version,
 			IdempotencyKey: "conflict-after-approval-approve",
@@ -646,9 +655,8 @@ func TestReviewRepositoryHighConflictInvalidatesOrBlocksApproval(t *testing.T) {
 
 	t.Run("existing conflict blocks later approval", func(t *testing.T) {
 		ctx := context.Background()
-		pool, cleanup := newReviewTestDatabase(t, ctx)
-		defer cleanup()
-		fixture := createReviewDraftFixture(t, ctx, pool, "conflict-before-approval")
+		fixture := createReviewDraftFixtureForVariant(t, ctx, variant, "conflict-before-approval")
+		pool := fixture.pool
 		createReviewHighConflict(t, ctx, pool, fixture.workspaceID, fixture.now, "conflict-before-approval")
 		if _, err := fixture.service.ApproveCard(ctx, reviewapp.CardDecisionCommand{
 			WorkspaceID: fixture.workspaceID, CardID: fixture.card.ID, ExpectedVersion: fixture.card.Version,
@@ -667,6 +675,462 @@ func TestReviewRepositoryHighConflictInvalidatesOrBlocksApproval(t *testing.T) {
 	})
 }
 
+func TestReviewRepositoryPostgreSQLTODO9Gate(t *testing.T) {
+	runReviewIntegrationVariants(t, testReviewRepositoryPostgreSQLTODO9Gate)
+}
+
+func testReviewRepositoryPostgreSQLTODO9Gate(t *testing.T, variant reviewIntegrationVariant) {
+	ctx, cancel := context.WithTimeout(context.Background(), 55*time.Second)
+	defer cancel()
+	repository, _, pool := variant.open(t)
+	seedReviewEvidence(t, ctx, pool)
+
+	workspaceID := foundation.ID("71000000-0000-4000-8000-000000000001")
+	claimID := foundation.ID("71000000-0000-4000-8000-000000000007")
+	sourceVersionID := foundation.ID("71000000-0000-4000-8000-000000000004")
+	sourceSpanID := foundation.ID("71000000-0000-4000-8000-000000000006")
+
+	fsrs, err := platformscheduler.NewFSRSAdapter()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 7, 23, 9, 0, 0, 0, time.UTC)
+	service, err := reviewapp.NewService(repository, repository, reviewapp.NewDeterministicScorer(), fsrs, reviewIntegrationQuestionRefKey, foundation.NewUUIDGenerator(nil), foundation.FixedClock{Value: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deck, err := service.CreateDeck(ctx, reviewapp.CreateDeckCommand{
+		WorkspaceID: workspaceID, Name: "TODO9 bounded review", DailyLimit: 1000, IdempotencyKey: "todo9-deck-create",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The first batch is also the cardinality used for the due and invalidation
+	// plans. Keeping it in one statement makes the N+1 assertion meaningful.
+	seedReviewApprovedBatch(t, ctx, pool, workspaceID, deck.Value.ID, claimID, sourceVersionID, sourceSpanID, "todo9-claim", 201, now)
+	counter := installReviewStatementCounter(t, repository)
+	counter.reset()
+	due, err := repository.ListDue(ctx, workspaceID, &deck.Value.ID, now, 200)
+	if err != nil || len(due) != 200 {
+		t.Fatalf("bounded due query count=%d err=%v", len(due), err)
+	}
+	if counter != nil && counter.statements() != 1 {
+		t.Fatalf("GORM due query statements=%d, want 1", counter.statements())
+	}
+	if counter != nil {
+		t.Logf("GORM due query statements=%d", counter.statements())
+	}
+
+	assertReviewDuePlan(t, ctx, pool, workspaceID, deck.Value.ID, now)
+	assertReviewInvalidationPlan(t, ctx, pool, workspaceID, claimID, sourceVersionID, sourceSpanID, now)
+
+	invalidationCases := []struct {
+		name          string
+		claimID       *foundation.ID
+		sourceVersion *foundation.ID
+		sourceSpan    *foundation.ID
+	}{
+		{name: "claim", claimID: &claimID},
+		{name: "source-version", sourceVersion: &sourceVersionID},
+		{name: "claim-source-version", claimID: &claimID, sourceVersion: &sourceVersionID},
+		{name: "source-span", sourceSpan: &sourceSpanID},
+		{name: "claim-source-span", claimID: &claimID, sourceSpan: &sourceSpanID},
+	}
+	for index, invalidationCase := range invalidationCases {
+		prefix := "todo9-" + invalidationCase.name
+		if index > 0 {
+			seedReviewApprovedBatch(t, ctx, pool, workspaceID, deck.Value.ID, claimID, sourceVersionID, sourceSpanID, prefix, 201, now)
+		}
+		counter.reset()
+		first := reviewapp.InvalidateCardsRecord{
+			WorkspaceID: workspaceID, ClaimID: invalidationCase.claimID, SourceVersionID: invalidationCase.sourceVersion,
+			SourceSpanID: invalidationCase.sourceSpan, Reason: "TODO9_" + strings.ToUpper(strings.ReplaceAll(invalidationCase.name, "-", "_")),
+			IdempotencyKey: prefix + "-1", RequestHash: reviewHash(prefix + "-request"), At: now.Add(time.Duration(index+1) * time.Second), BatchSize: reviewapp.MaxInvalidationBatchSize,
+		}
+		firstResult, err := repository.InvalidateCards(ctx, first)
+		if err != nil || firstResult.InvalidatedCount != 200 || !firstResult.HasMore || firstResult.Replayed {
+			t.Fatalf("%s first invalidation=%+v err=%v", invalidationCase.name, firstResult, err)
+		}
+		if counter != nil && counter.statements() > 5 {
+			t.Fatalf("GORM %s invalidation statements=%d, want <=5", invalidationCase.name, counter.statements())
+		}
+		if counter != nil {
+			t.Logf("GORM %s invalidation statements=%d", invalidationCase.name, counter.statements())
+		}
+		replay, err := repository.InvalidateCards(ctx, first)
+		if err != nil || !replay.Replayed || replay.InvalidatedCount != 200 || !replay.HasMore {
+			t.Fatalf("%s invalidation replay=%+v err=%v", invalidationCase.name, replay, err)
+		}
+		second := first
+		second.IdempotencyKey = prefix + "-2"
+		second.RequestHash = reviewHash(prefix + "-request-2")
+		second.At = second.At.Add(time.Second)
+		secondResult, err := repository.InvalidateCards(ctx, second)
+		if err != nil || secondResult.InvalidatedCount != 1 || secondResult.HasMore || secondResult.Replayed {
+			t.Fatalf("%s final invalidation=%+v err=%v", invalidationCase.name, secondResult, err)
+		}
+		assertReviewInvalidationBatchState(t, ctx, pool, workspaceID, prefix, 201)
+	}
+
+	assertReviewRowsCancellationAndPoolReuse(t, ctx, variant, repository, pool, workspaceID, deck.Value.ID)
+	assertReviewSQLTxDoneClassification(t, ctx, variant, repository, workspaceID, claimID)
+}
+
+func seedReviewApprovedBatch(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	workspaceID, deckID, claimID, sourceVersionID, sourceSpanID foundation.ID,
+	prefix string,
+	count int,
+	now time.Time,
+) {
+	t.Helper()
+	if count < 1 {
+		t.Fatalf("Review batch count=%d, want positive", count)
+	}
+	query := `
+WITH inserted AS (
+    INSERT INTO learning.review_card(
+        id,workspace_id,deck_id,claim_id,question,answer_points,evidence,card_type,difficulty,
+        status,fingerprint,model_version,version,created_at,updated_at
+    )
+    SELECT gen_random_uuid(),$1::uuid,$2::uuid,$3::uuid,
+           $4 || '-' || series::text,
+           '["batch answer"]'::jsonb,
+           jsonb_build_array(jsonb_build_object(
+               'schema_version','review-evidence/v1',
+               'claim_id',$3::text,
+               'source_version_id',$5::text,
+               'source_span_id',$6::text,
+               'evidence_hash',$7::text
+		   )),
+		   'SHORT_ANSWER',0.5,'APPROVED',encode(sha256(convert_to($4 || '-' || series::text,'UTF8')),'hex'),'todo9-batch',1,$8,$8
+    FROM generate_series(1,$9::integer) AS series
+    RETURNING id,workspace_id
+)
+INSERT INTO learning.review_schedule(
+    card_id,workspace_id,due_at,interval_days,stability,difficulty,last_reviewed_at,
+    scheduler_version,paused,version
+)
+SELECT id,workspace_id,$8,0,0,0.5,NULL,'fsrs/v1',false,1
+FROM inserted`
+	tag, err := pool.Exec(ctx, query,
+		string(workspaceID), string(deckID), string(claimID), prefix,
+		string(sourceVersionID), string(sourceSpanID), reviewHash("claim-source"), now.UTC(), count,
+	)
+	if err != nil {
+		t.Fatalf("seed Review approved batch prefix=%q count=%d: %v", prefix, count, err)
+	}
+	if tag.RowsAffected() != int64(count) {
+		t.Fatalf("seed Review approved batch prefix=%q rows=%d, want %d", prefix, tag.RowsAffected(), count)
+	}
+}
+
+func assertReviewDuePlan(t *testing.T, ctx context.Context, pool *pgxpool.Pool, workspaceID, deckID foundation.ID, now time.Time) {
+	t.Helper()
+	if _, err := pool.Exec(ctx, `ANALYZE learning.review_card, learning.review_schedule, learning.review_card_evidence_selector`); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	if _, err := tx.Exec(ctx, `SET LOCAL enable_seqscan=off`); err != nil {
+		t.Fatal(err)
+	}
+	plan := explainReviewQuery(t, ctx, tx, rankedDueCardsSQL+`
+SELECT card_id
+FROM due
+WHERE deck_position <= GREATEST(daily_limit-answered_today,0)
+ORDER BY due_at ASC,card_id ASC
+LIMIT $4`, string(workspaceID), now.UTC(), string(deckID), reviewapp.MaxInvalidationBatchSize)
+	if plan.ActualRows < float64(reviewapp.MaxInvalidationBatchSize) {
+		t.Fatalf("Review due EXPLAIN actual rows=%f, want at least %d", plan.ActualRows, reviewapp.MaxInvalidationBatchSize)
+	}
+	if !reviewPlanUsesAnyIndex(plan, "idx_learning_review_due", "idx_learning_review_card_active_deck") {
+		t.Fatalf("Review due EXPLAIN did not use a bounded due/card index: %+v", plan)
+	}
+	t.Logf("Review due EXPLAIN actual_rows=%.0f indexes=%v", plan.ActualRows, reviewPlanIndexNames(plan))
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertReviewInvalidationPlan(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	workspaceID, claimID, sourceVersionID, sourceSpanID foundation.ID,
+	now time.Time,
+) {
+	t.Helper()
+	if _, err := pool.Exec(ctx, `ANALYZE learning.review_card, learning.review_card_evidence_selector`); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	if _, err := tx.Exec(ctx, `SET LOCAL enable_seqscan=off; SET LOCAL enable_nestloop=off`); err != nil {
+		t.Fatal(err)
+	}
+	plan := explainReviewQuery(t, ctx, tx,
+		invalidationStatementPrefix+invalidationBySourceVersionTargets+invalidationStatementSuffix,
+		string(workspaceID), nil, string(sourceVersionID), nil,
+		reviewapp.MaxInvalidationBatchSize+1, reviewapp.MaxInvalidationBatchSize,
+		"TODO9_EXPLAIN", now.UTC(),
+	)
+	if !reviewPlanUsesAnyIndex(plan,
+		"idx_learning_review_card_evidence_selector_lookup",
+		"idx_learning_review_card_evidence_selector_claim_lookup",
+	) {
+		t.Fatalf("Review invalidation EXPLAIN did not use a selector lookup index: %+v", plan)
+	}
+	t.Logf("Review invalidation EXPLAIN actual_rows=%.0f indexes=%v", plan.ActualRows, reviewPlanIndexNames(plan))
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertReviewInvalidationBatchState(t *testing.T, ctx context.Context, pool *pgxpool.Pool, workspaceID foundation.ID, prefix string, want int) {
+	t.Helper()
+	pattern := prefix + "-%"
+	var total, invalidated, approved int
+	if err := pool.QueryRow(ctx, `SELECT count(*),count(*) FILTER (WHERE status='INVALIDATED'),count(*) FILTER (WHERE status='APPROVED')
+FROM learning.review_card
+WHERE workspace_id=$1 AND question LIKE $2`, string(workspaceID), pattern).Scan(&total, &invalidated, &approved); err != nil {
+		t.Fatal(err)
+	}
+	if total != want || invalidated != want || approved != 0 {
+		t.Fatalf("Review invalidation cards prefix=%q total=%d invalidated=%d approved=%d, want %d/ %d/0", prefix, total, invalidated, approved, want, want)
+	}
+
+	var schedules, selectors int
+	if err := pool.QueryRow(ctx, `SELECT
+    (SELECT count(*)
+       FROM learning.review_schedule schedule
+       JOIN learning.review_card card ON card.workspace_id=schedule.workspace_id AND card.id=schedule.card_id
+      WHERE card.workspace_id=$1 AND card.question LIKE $2),
+    (SELECT count(*)
+       FROM learning.review_card_evidence_selector selector
+       JOIN learning.review_card card ON card.workspace_id=selector.workspace_id AND card.id=selector.card_id
+      WHERE card.workspace_id=$1 AND card.question LIKE $2)`, string(workspaceID), pattern).Scan(&schedules, &selectors); err != nil {
+		t.Fatal(err)
+	}
+	if schedules != 0 || selectors != 0 {
+		t.Fatalf("Review invalidation projections prefix=%q schedules=%d selectors=%d, want 0/0", prefix, schedules, selectors)
+	}
+
+	var cardEvents, scheduleEvents, timelineEvents int
+	if err := pool.QueryRow(ctx, `SELECT
+    (SELECT count(*)
+       FROM ops.server_event event
+       JOIN learning.review_card card ON card.workspace_id=event.workspace_id AND event.resource_ref='review_card:'||card.id::text
+      WHERE card.workspace_id=$1 AND card.question LIKE $2 AND event.event_type='review.card.updated'),
+    (SELECT count(*)
+       FROM ops.server_event event
+       JOIN learning.review_card card ON card.workspace_id=event.workspace_id AND event.resource_ref='review_schedule:'||card.id::text
+      WHERE card.workspace_id=$1 AND card.question LIKE $2 AND event.event_type='review.schedule.deleted'),
+    (SELECT count(*)
+       FROM ops.timeline_projection_outbox outbox
+       JOIN learning.review_card card ON card.workspace_id=outbox.workspace_id AND outbox.aggregate_id=card.id
+      WHERE card.workspace_id=$1 AND card.question LIKE $2 AND outbox.event_type='REVIEW_CARD_INVALIDATED' AND outbox.aggregate_type='REVIEW_CARD')`, string(workspaceID), pattern).Scan(&cardEvents, &scheduleEvents, &timelineEvents); err != nil {
+		t.Fatal(err)
+	}
+	if cardEvents != want || scheduleEvents != want || timelineEvents != want {
+		t.Fatalf("Review invalidation trigger projections prefix=%q card_sse=%d schedule_sse=%d timeline=%d, want %d/%d/%d", prefix, cardEvents, scheduleEvents, timelineEvents, want, want, want)
+	}
+
+	var healthCount int
+	var healthStatus string
+	if err := pool.QueryRow(ctx, `SELECT count(*),COALESCE(max(status),'')
+FROM ops.health_issue
+WHERE workspace_id=$1 AND type='REVIEW_INVALIDATED' AND target_type='CLAIM'
+  AND target_id=(SELECT claim_id FROM learning.review_card WHERE workspace_id=$1 AND question LIKE $2 LIMIT 1)`, string(workspaceID), pattern).Scan(&healthCount, &healthStatus); err != nil {
+		t.Fatal(err)
+	}
+	if healthCount != 1 || (healthStatus != "OPEN" && healthStatus != "REOPENED") {
+		t.Fatalf("Review invalidation Health projection prefix=%q count=%d status=%q", prefix, healthCount, healthStatus)
+	}
+
+	var healthTimelineCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*)
+FROM ops.timeline_projection_outbox outbox
+JOIN ops.health_issue issue ON issue.workspace_id=outbox.workspace_id AND outbox.aggregate_id=issue.id
+WHERE issue.workspace_id=$1 AND issue.type='REVIEW_INVALIDATED' AND outbox.aggregate_type='HEALTH_ISSUE'
+  AND outbox.event_type='HEALTH_ISSUE_DETECTED'`, string(workspaceID)).Scan(&healthTimelineCount); err != nil {
+		t.Fatal(err)
+	}
+	if healthTimelineCount < 1 {
+		t.Fatalf("Review invalidation Health Timeline projection is missing")
+	}
+}
+
+func assertReviewRowsCancellationAndPoolReuse(
+	t *testing.T,
+	ctx context.Context,
+	variant reviewIntegrationVariant,
+	repository reviewIntegrationRepository,
+	pool *pgxpool.Pool,
+	workspaceID, deckID foundation.ID,
+) {
+	t.Helper()
+	blocker, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	released := false
+	defer func() {
+		if !released {
+			blocker.Release()
+		}
+	}()
+	blockerTx, err := blocker.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = blockerTx.Rollback(context.Background()) }()
+	if _, err := blockerTx.Exec(ctx, `LOCK TABLE learning.review_card IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatal(err)
+	}
+	baselineAcquired := pool.Stat().AcquiredConns()
+
+	cancelCause := errors.New("Review list canceled by caller")
+	queryCtx, cancelQuery := context.WithCancelCause(ctx)
+	cancelResult := make(chan error, 1)
+	go func() {
+		_, listErr := repository.ListCards(queryCtx, workspaceID, deckID, 2)
+		cancelResult <- listErr
+	}()
+	waitForBlockedReviewList(t, ctx, pool)
+	cancelQuery(cancelCause)
+	select {
+	case listErr := <-cancelResult:
+		if !errors.Is(listErr, context.Canceled) {
+			t.Fatalf("blocked Review list cancellation error=%v", listErr)
+		}
+		if variant.name == "gorm" && !errors.Is(listErr, cancelCause) {
+			t.Fatalf("blocked GORM Review list did not preserve cancellation cause: %v", listErr)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("blocked Review list did not return after cancellation")
+	}
+	waitForReviewAcquiredConnections(t, pool, baselineAcquired)
+
+	deadlineCtx, deadlineCancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer deadlineCancel()
+	deadlineResult := make(chan error, 1)
+	go func() {
+		_, listErr := repository.ListCards(deadlineCtx, workspaceID, deckID, 2)
+		deadlineResult <- listErr
+	}()
+	waitForBlockedReviewList(t, ctx, pool)
+	select {
+	case listErr := <-deadlineResult:
+		if !errors.Is(listErr, context.DeadlineExceeded) {
+			t.Fatalf("blocked Review list deadline error=%v", listErr)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("blocked Review list did not return after deadline")
+	}
+	waitForReviewAcquiredConnections(t, pool, baselineAcquired)
+
+	if err := blockerTx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	blocker.Release()
+	released = true
+	waitForReviewAcquiredConnections(t, pool, 0)
+	var one int
+	if err := pool.QueryRow(ctx, `SELECT 1`).Scan(&one); err != nil || one != 1 {
+		t.Fatalf("Review shared pool was not reusable: one=%d err=%v", one, err)
+	}
+}
+
+func waitForBlockedReviewList(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		var blocked bool
+		if err := pool.QueryRow(ctx, `SELECT EXISTS (
+    SELECT 1
+    FROM pg_stat_activity
+    WHERE datname=current_database() AND pid<>pg_backend_pid()
+      AND wait_event_type='Lock' AND state='active'
+      AND query LIKE '%learning.review_card%'
+)`).Scan(&blocked); err != nil {
+			t.Fatal(err)
+		}
+		if blocked {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("blocked Review list was not observed in pg_stat_activity")
+}
+
+func waitForReviewAcquiredConnections(t *testing.T, pool *pgxpool.Pool, want int32) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for pool.Stat().AcquiredConns() != want && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if acquired := pool.Stat().AcquiredConns(); acquired != want {
+		t.Fatalf("Review shared pool acquired connections=%d, want %d", acquired, want)
+	}
+}
+
+func assertReviewSQLTxDoneClassification(
+	t *testing.T,
+	ctx context.Context,
+	variant reviewIntegrationVariant,
+	repository reviewIntegrationRepository,
+	workspaceID, claimID foundation.ID,
+) {
+	t.Helper()
+	if variant.name != "gorm" {
+		return
+	}
+	gormRepository, ok := repository.(*GORMRepository)
+	if !ok || gormRepository == nil {
+		t.Fatal("Review GORM repository has unexpected type")
+	}
+	copyRepository := *gormRepository
+	copyRepository.unitOfWork = reviewErrTxDoneUnitOfWork{}
+	_, err := (&copyRepository).InvalidateCards(ctx, reviewapp.InvalidateCardsRecord{
+		WorkspaceID:    workspaceID,
+		ClaimID:        &claimID,
+		Reason:         "TODO9_TX_DONE",
+		IdempotencyKey: "todo9-tx-done",
+		RequestHash:    reviewHash("todo9-tx-done"),
+		At:             time.Date(2026, 7, 23, 9, 0, 0, 0, time.UTC),
+		BatchSize:      1,
+	})
+	if err == nil {
+		t.Fatal("GORM sql.ErrTxDone classification returned nil")
+	}
+	if !errors.Is(err, sql.ErrTxDone) {
+		t.Fatalf("GORM sql.ErrTxDone classification lost sentinel: %v", err)
+	}
+	var classified *foundation.Error
+	if !errors.As(err, &classified) {
+		t.Fatalf("GORM sql.ErrTxDone classification is not a foundation error: %v", err)
+	}
+	if classified.Kind != foundation.ErrorDependencyUnavailable || classified.Code != domain.ErrorCodeDependencyUnavailable || !classified.Retryable {
+		t.Fatalf("GORM sql.ErrTxDone classification=%+v", classified)
+	}
+}
+
+type reviewErrTxDoneUnitOfWork struct{}
+
+func (reviewErrTxDoneUnitOfWork) Within(context.Context, foundation.TransactionOptions, foundation.TransactionFunc) error {
+	return sql.ErrTxDone
+}
+
 const reviewQuarantineAttemptSQL = `INSERT INTO ingestion.attempt(
 	id,workspace_id,source_version_id,status,security_status,failure_stage,error_code,retryable,
 	parser_id,parser_version,parser_config_hash,chunk_strategy_version,schema_version,
@@ -676,6 +1140,8 @@ const reviewQuarantineAttemptSQL = `INSERT INTO ingestion.attempt(
 
 type reviewDraftFixture struct {
 	service     *reviewapp.Service
+	repository  reviewIntegrationRepository
+	pool        *pgxpool.Pool
 	workspaceID foundation.ID
 	card        domain.Card
 	now         time.Time
@@ -683,11 +1149,28 @@ type reviewDraftFixture struct {
 
 func createReviewDraftFixture(t *testing.T, ctx context.Context, pool *pgxpool.Pool, keyPrefix string) reviewDraftFixture {
 	t.Helper()
-	seedReviewEvidence(t, ctx, pool)
 	repository, err := NewRepository(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
+	return createReviewDraftFixtureWithRepository(t, ctx, pool, repository, keyPrefix)
+}
+
+func createReviewDraftFixtureForVariant(t *testing.T, ctx context.Context, variant reviewIntegrationVariant, keyPrefix string) reviewDraftFixture {
+	t.Helper()
+	repository, _, pool := variant.open(t)
+	return createReviewDraftFixtureWithRepository(t, ctx, pool, repository, keyPrefix)
+}
+
+func createReviewDraftFixtureWithRepository(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	repository reviewIntegrationRepository,
+	keyPrefix string,
+) reviewDraftFixture {
+	t.Helper()
+	seedReviewEvidence(t, ctx, pool)
 	fsrs, err := platformscheduler.NewFSRSAdapter()
 	if err != nil {
 		t.Fatal(err)
@@ -717,7 +1200,7 @@ func createReviewDraftFixture(t *testing.T, ctx context.Context, pool *pgxpool.P
 	if err != nil {
 		t.Fatal(err)
 	}
-	return reviewDraftFixture{service: service, workspaceID: workspaceID, card: card.Value, now: now}
+	return reviewDraftFixture{service: service, repository: repository, pool: pool, workspaceID: workspaceID, card: card.Value, now: now}
 }
 
 func createReviewHighConflict(t *testing.T, ctx context.Context, pool *pgxpool.Pool, workspaceID foundation.ID, now time.Time, keyPrefix string) string {
@@ -801,9 +1284,12 @@ func assertInvalidatedReviewCard(t *testing.T, ctx context.Context, pool *pgxpoo
 }
 
 func TestReviewRepositorySubmitAnswerRejectsCardsOutsideServerDueSet(t *testing.T) {
+	runReviewIntegrationVariants(t, testReviewRepositorySubmitAnswerRejectsCardsOutsideServerDueSet)
+}
+
+func testReviewRepositorySubmitAnswerRejectsCardsOutsideServerDueSet(t *testing.T, variant reviewIntegrationVariant) {
 	ctx := context.Background()
-	pool, cleanup := newReviewTestDatabase(t, ctx)
-	defer cleanup()
+	repository, _, pool := variant.open(t)
 	seedReviewEvidence(t, ctx, pool)
 
 	workspaceID := foundation.ID("71000000-0000-4000-8000-000000000001")
@@ -814,15 +1300,11 @@ func TestReviewRepositorySubmitAnswerRejectsCardsOutsideServerDueSet(t *testing.
 		SourceSpanID: foundation.ID("71000000-0000-4000-8000-000000000006"), EvidenceHash: reviewHash("claim-source"),
 	}}
 	now := time.Date(2026, 7, 23, 9, 0, 0, 0, time.UTC)
-	repository, err := NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
 	fsrs, err := platformscheduler.NewFSRSAdapter()
 	if err != nil {
 		t.Fatal(err)
 	}
-	bypass := &answerEligibilityBypassRepository{Repository: repository}
+	bypass := &answerEligibilityBypassRepository{reviewIntegrationRepository: repository}
 	service, err := reviewapp.NewService(bypass, repository, reviewapp.NewDeterministicScorer(), fsrs, reviewIntegrationQuestionRefKey, foundation.NewUUIDGenerator(nil), foundation.FixedClock{Value: now})
 	if err != nil {
 		t.Fatal(err)
@@ -932,18 +1414,17 @@ func TestReviewRepositorySubmitAnswerRejectsCardsOutsideServerDueSet(t *testing.
 }
 
 func TestReviewRepositoryIgnoresLegacyEvidenceQuote(t *testing.T) {
+	runReviewIntegrationVariants(t, testReviewRepositoryIgnoresLegacyEvidenceQuote)
+}
+
+func testReviewRepositoryIgnoresLegacyEvidenceQuote(t *testing.T, variant reviewIntegrationVariant) {
 	ctx := context.Background()
-	pool, cleanup := newReviewTestDatabase(t, ctx)
-	defer cleanup()
+	repository, _, pool := variant.open(t)
 	seedReviewEvidence(t, ctx, pool)
 
 	workspaceID := foundation.ID("71000000-0000-4000-8000-000000000001")
 	claimID := foundation.ID("71000000-0000-4000-8000-000000000007")
 	now := time.Date(2026, 7, 23, 9, 0, 0, 0, time.UTC)
-	repository, err := NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
 	fsrs, err := platformscheduler.NewFSRSAdapter()
 	if err != nil {
 		t.Fatal(err)
@@ -996,9 +1477,12 @@ func TestReviewRepositoryIgnoresLegacyEvidenceQuote(t *testing.T) {
 }
 
 func TestReviewRepositoryDueQueriesFailClosedForMalformedLegacyEvidence(t *testing.T) {
+	runReviewIntegrationVariants(t, testReviewRepositoryDueQueriesFailClosedForMalformedLegacyEvidence)
+}
+
+func testReviewRepositoryDueQueriesFailClosedForMalformedLegacyEvidence(t *testing.T, variant reviewIntegrationVariant) {
 	ctx := context.Background()
-	pool, cleanup := newReviewTestDatabase(t, ctx)
-	defer cleanup()
+	repository, _, pool := variant.open(t)
 	seedReviewEvidence(t, ctx, pool)
 
 	const (
@@ -1056,10 +1540,6 @@ func TestReviewRepositoryDueQueriesFailClosedForMalformedLegacyEvidence(t *testi
 		t.Fatal(err)
 	}
 
-	repository, err := NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
 	parsedWorkspaceID := foundation.ID(workspaceID)
 	parsedDeckID := foundation.ID(deckID)
 	due, err := repository.ListDue(ctx, parsedWorkspaceID, &parsedDeckID, now, 20)
@@ -1074,9 +1554,12 @@ func TestReviewRepositoryDueQueriesFailClosedForMalformedLegacyEvidence(t *testi
 }
 
 func TestReviewRepositoryRejectsRefutingEvidenceAndSupersededClaim(t *testing.T) {
+	runReviewIntegrationVariants(t, testReviewRepositoryRejectsRefutingEvidenceAndSupersededClaim)
+}
+
+func testReviewRepositoryRejectsRefutingEvidenceAndSupersededClaim(t *testing.T, variant reviewIntegrationVariant) {
 	ctx := context.Background()
-	pool, cleanup := newReviewTestDatabase(t, ctx)
-	defer cleanup()
+	repository, _, pool := variant.open(t)
 	seedReviewEvidence(t, ctx, pool)
 
 	workspaceID := foundation.ID("71000000-0000-4000-8000-000000000001")
@@ -1086,10 +1569,6 @@ func TestReviewRepositoryRejectsRefutingEvidenceAndSupersededClaim(t *testing.T)
 	now := time.Date(2026, 7, 23, 9, 0, 0, 0, time.UTC)
 	if _, err := pool.Exec(ctx, `INSERT INTO core.claim_source(id,workspace_id,claim_id,source_version_id,source_span_id,support_type,reason,evidence_hash,created_at)
 		VALUES('71000000-0000-4000-8000-000000000009',$1,$2,$3,$4,'REFUTES','counter evidence',$5,$6)`, string(workspaceID), string(claimID), string(refuting[0].SourceVersionID), string(refuting[0].SourceSpanID), refuting[0].EvidenceHash, now); err != nil {
-		t.Fatal(err)
-	}
-	repository, err := NewRepository(pool)
-	if err != nil {
 		t.Fatal(err)
 	}
 	if err := repository.VerifyCardEvidence(ctx, workspaceID, claimID, refuting); reviewPersistenceErrorCode(err) != domain.ErrorCodeEvidenceStale {
@@ -1155,38 +1634,17 @@ func TestReviewRepositoryRejectsRefutingEvidenceAndSupersededClaim(t *testing.T)
 
 func newReviewTestDatabase(t *testing.T, ctx context.Context) (*pgxpool.Pool, func()) {
 	t.Helper()
-	baseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
-	if baseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL for Review PostgreSQL integration test")
+	fixture := testdb.Require(t, testdb.Config{
+		ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
+		Availability:     testdb.FailWhenUnavailable,
+		MaxConns:         16,
+	})
+	platform := fixture.Pool()
+	if platform == nil || platform.DB() == nil {
+		t.Fatal("shared PostgreSQL fixture did not provide a platform pool")
 	}
-	parsed, err := url.Parse(baseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	admin, err := pgxpool.New(ctx, baseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	name := "zhixu_review_" + strings.ReplaceAll(time.Now().UTC().Format("150405.000000000"), ".", "")
-	identifier := pgx.Identifier{name}.Sanitize()
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+identifier); err != nil {
-		admin.Close()
-		t.Fatal(err)
-	}
-	parsed.Path = "/" + name
-	pool, err := pgxpool.New(ctx, parsed.String())
-	if err != nil {
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier)
-		admin.Close()
-		t.Fatal(err)
-	}
-	if err := platformmigration.MigrateAtlas(ctx, pool); err != nil {
-		t.Fatal(err)
-	}
-	return pool, func() {
-		pool.Close()
-		_, _ = admin.Exec(context.Background(), "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
+	return platform.DB(), func() {
+		_ = fixture.Close(context.Background())
 	}
 }
 
@@ -1199,7 +1657,10 @@ func seedReviewEvidence(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 		query string
 		args  []any
 	}{
-		{`INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'review','/tmp/review','/tmp/review',$2,'test',1,$2,$2)`, []any{workspaceID, now}},
+		{`INSERT INTO core.workspace(
+			id,name,root_path,root_fingerprint,binding_version,git_repository_path,git_checked_at,
+			status,availability,availability_reason,availability_checked_at,version,created_at,updated_at
+		) VALUES($1,'review','/tmp/review',$2,1,'/tmp/review',$3,'inactive','available',NULL,$3,1,$3,$3)`, []any{workspaceID, reviewHash("review-workspace-root"), now}},
 		{`INSERT INTO core.content_artifact(id,workspace_id,content_hash,byte_size,managed_location,created_at) VALUES('71000000-0000-4000-8000-000000000002',$1,$2,4,$3,$4)`, []any{workspaceID, contentHash, ".knowledge/sources/" + contentHash, now}},
 		{`INSERT INTO core.source(id,workspace_id,type,logical_name,original_location,created_at) VALUES('71000000-0000-4000-8000-000000000003',$1,'text','review.txt','review.txt',$2)`, []any{workspaceID, now}},
 		{`INSERT INTO core.source_version(id,source_id,workspace_id,content_artifact_id,content_hash,byte_size,mime_type,original_content_location,security_status,captured_at) VALUES('71000000-0000-4000-8000-000000000004','71000000-0000-4000-8000-000000000003',$1,'71000000-0000-4000-8000-000000000002',$2,4,'text/plain','review.txt','pending',$3)`, []any{workspaceID, contentHash, now}},
@@ -1253,12 +1714,202 @@ func reviewPostgresErrorCode(err error) string {
 	return ""
 }
 
+type reviewIntegrationRepository interface {
+	reviewapp.Repository
+	reviewapp.EvidenceVerifier
+}
+
+type reviewIntegrationVariant struct {
+	name string
+}
+
+func runReviewIntegrationVariants(t *testing.T, scenario func(*testing.T, reviewIntegrationVariant)) {
+	t.Helper()
+	for _, name := range []string{"legacy-pgx", "gorm"} {
+		variant := reviewIntegrationVariant{name: name}
+		t.Run(name, func(t *testing.T) {
+			scenario(t, variant)
+		})
+	}
+}
+
+func (variant reviewIntegrationVariant) open(t *testing.T) (reviewIntegrationRepository, *platformpostgres.Pool, *pgxpool.Pool) {
+	t.Helper()
+	fixture := testdb.Require(t, testdb.Config{
+		ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
+		Availability:     testdb.FailWhenUnavailable,
+		MaxConns:         16,
+	})
+	platform := fixture.Pool()
+	if platform == nil || platform.DB() == nil {
+		t.Fatal("shared PostgreSQL fixture did not provide a platform pool")
+	}
+	var (
+		repository reviewIntegrationRepository
+		err        error
+	)
+	switch variant.name {
+	case "legacy-pgx":
+		repository, err = NewRepository(platform.DB())
+	case "gorm":
+		repository, err = NewGORMRepository(platform)
+	default:
+		t.Fatalf("unknown Review integration variant %q", variant.name)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return repository, platform, platform.DB()
+}
+
+func reviewResponseLossRepository(
+	t *testing.T,
+	variant reviewIntegrationVariant,
+	repository reviewIntegrationRepository,
+	platform *platformpostgres.Pool,
+	cause error,
+) (reviewIntegrationRepository, error) {
+	t.Helper()
+	if platform == nil || platform.DB() == nil {
+		return nil, errors.New("review response-loss platform is unavailable")
+	}
+	switch variant.name {
+	case "legacy-pgx":
+		return NewRepository(commitResponseLossDB{DB: platform.DB()})
+	case "gorm":
+		gormRepository, ok := repository.(*GORMRepository)
+		if !ok || gormRepository == nil {
+			return nil, errors.New("review GORM response-loss repository has unexpected type")
+		}
+		lossy := *gormRepository
+		lossy.unitOfWork = reviewCommitResponseLossUnitOfWork{delegate: gormRepository.unitOfWork, cause: cause}
+		return &lossy, nil
+	default:
+		return nil, fmt.Errorf("unknown Review integration variant %q", variant.name)
+	}
+}
+
+type reviewCommitResponseLossUnitOfWork struct {
+	delegate foundation.UnitOfWork
+	cause    error
+}
+
+func (unitOfWork reviewCommitResponseLossUnitOfWork) Within(
+	ctx context.Context,
+	options foundation.TransactionOptions,
+	work foundation.TransactionFunc,
+) error {
+	if err := unitOfWork.delegate.Within(ctx, options, work); err != nil {
+		return err
+	}
+	return unitOfWork.cause
+}
+
+type reviewStatementCounter struct {
+	count atomic.Int64
+}
+
+func (counter *reviewStatementCounter) LogMode(gormlogger.LogLevel) gormlogger.Interface {
+	return counter
+}
+
+func (*reviewStatementCounter) Info(context.Context, string, ...any)  {}
+func (*reviewStatementCounter) Warn(context.Context, string, ...any)  {}
+func (*reviewStatementCounter) Error(context.Context, string, ...any) {}
+
+func (counter *reviewStatementCounter) Trace(context.Context, time.Time, func() (string, int64), error) {
+	counter.count.Add(1)
+}
+
+func (counter *reviewStatementCounter) reset() {
+	if counter != nil {
+		counter.count.Store(0)
+	}
+}
+
+func (counter *reviewStatementCounter) statements() int64 {
+	if counter == nil {
+		return 0
+	}
+	return counter.count.Load()
+}
+
+func installReviewStatementCounter(t *testing.T, repository reviewIntegrationRepository) *reviewStatementCounter {
+	t.Helper()
+	gormRepository, ok := repository.(*GORMRepository)
+	if !ok {
+		return nil
+	}
+	if gormRepository.database == nil || gormRepository.database.Config == nil {
+		t.Fatal("Review GORM repository has no logger configuration")
+	}
+	original := gormRepository.database.Config.Logger
+	counter := &reviewStatementCounter{}
+	gormRepository.database.Config.Logger = counter
+	t.Cleanup(func() {
+		gormRepository.database.Config.Logger = original
+	})
+	return counter
+}
+
+type reviewExplainPlan struct {
+	NodeType     string              `json:"Node Type"`
+	RelationName string              `json:"Relation Name"`
+	IndexName    string              `json:"Index Name"`
+	ActualRows   float64             `json:"Actual Rows"`
+	Plans        []reviewExplainPlan `json:"Plans"`
+}
+
+type reviewExplainQuerier interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func explainReviewQuery(t *testing.T, ctx context.Context, querier reviewExplainQuerier, query string, args ...any) reviewExplainPlan {
+	t.Helper()
+	var raw []byte
+	if err := querier.QueryRow(ctx, `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, COSTS OFF, SUMMARY OFF, TIMING OFF) `+query, args...).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	var documents []struct {
+		Plan reviewExplainPlan `json:"Plan"`
+	}
+	if err := json.Unmarshal(raw, &documents); err != nil || len(documents) != 1 {
+		t.Fatalf("invalid Review EXPLAIN document: err=%v plan=%s", err, raw)
+	}
+	return documents[0].Plan
+}
+
+func reviewPlanUsesAnyIndex(plan reviewExplainPlan, indexNames ...string) bool {
+	for _, indexName := range indexNames {
+		if plan.IndexName == indexName {
+			return true
+		}
+	}
+	for _, child := range plan.Plans {
+		if reviewPlanUsesAnyIndex(child, indexNames...) {
+			return true
+		}
+	}
+	return false
+}
+
+func reviewPlanIndexNames(plan reviewExplainPlan) []string {
+	indexNames := make([]string, 0)
+	if plan.IndexName != "" {
+		indexNames = append(indexNames, plan.IndexName)
+	}
+	for _, child := range plan.Plans {
+		indexNames = append(indexNames, reviewPlanIndexNames(child)...)
+	}
+	return indexNames
+}
+
 type commitResponseLossDB struct{ DB }
 
-type answerEligibilityBypassRepository struct{ *Repository }
+type answerEligibilityBypassRepository struct{ reviewIntegrationRepository }
 
 type answerABABlockingRepository struct {
-	*Repository
+	reviewIntegrationRepository
 	started chan<- reviewapp.SubmitAnswerRecord
 	release <-chan struct{}
 }
@@ -1267,7 +1918,7 @@ func (repository *answerABABlockingRepository) SubmitAnswer(ctx context.Context,
 	repository.started <- record
 	select {
 	case <-repository.release:
-		return repository.Repository.SubmitAnswer(ctx, record)
+		return repository.reviewIntegrationRepository.SubmitAnswer(ctx, record)
 	case <-ctx.Done():
 		return reviewapp.AnswerResult{}, ctx.Err()
 	}

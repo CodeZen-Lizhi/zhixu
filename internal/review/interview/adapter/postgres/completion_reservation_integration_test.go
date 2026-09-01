@@ -16,14 +16,13 @@ import (
 )
 
 func TestInterviewRepositoryAbandonsStaleCompletionAndRecoversSameAttempt(t *testing.T) {
+	runInterviewIntegrationVariants(t, testInterviewRepositoryAbandonsStaleCompletionAndRecoversSameAttempt)
+}
+
+func testInterviewRepositoryAbandonsStaleCompletionAndRecoversSameAttempt(t *testing.T, variant interviewIntegrationVariant) {
 	ctx := context.Background()
-	pool, cleanup := newInterviewTestDatabase(t, ctx)
-	defer cleanup()
+	repository, _, pool := variant.open(t)
 	seedInterviewPersistence(t, ctx, pool)
-	repository, err := NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	workspaceID := interviewIntegrationID(1)
 	sessionID := interviewIntegrationID(60)
@@ -72,9 +71,18 @@ func TestInterviewRepositoryAbandonsStaleCompletionAndRecoversSameAttempt(t *tes
 		t.Fatal(err)
 	}
 
+	assertInterviewCompletionMaintenancePlan(t, ctx, pool)
+	counter := installInterviewStatementCounter(t, repository)
+	counter.reset()
 	maintenance, err := repository.AbandonStaleCompletions(ctx, 10)
 	if err != nil || maintenance.AbandonedReservations != 1 || maintenance.OrphanedHolds != 1 {
 		t.Fatalf("maintenance=%+v err=%v", maintenance, err)
+	}
+	if counter != nil && counter.statements() != 1 {
+		t.Fatalf("GORM Interview maintenance statements=%d, want 1", counter.statements())
+	}
+	if counter != nil {
+		t.Logf("GORM Interview maintenance statements=%d", counter.statements())
 	}
 	var status, disposition, orphanDigest string
 	if err := pool.QueryRow(ctx, `SELECT reservation.status,hold.disposition,hold.attempt_digest
@@ -129,6 +137,33 @@ func TestInterviewRepositoryAbandonsStaleCompletionAndRecoversSameAttempt(t *tes
 	}); err == nil {
 		t.Fatal("different idempotency key acquired a pending Completion reservation")
 	}
+}
+
+func assertInterviewCompletionMaintenancePlan(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+	t.Helper()
+	if _, err := pool.Exec(ctx, `ANALYZE learning.interview_completion_reservation`); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	if _, err := tx.Exec(ctx, `SET LOCAL enable_seqscan=off`); err != nil {
+		t.Fatal(err)
+	}
+	plan := explainInterviewQuery(t, ctx, tx, `
+		SELECT workspace_id,session_id
+		  FROM learning.interview_completion_reservation
+		 WHERE status='PENDING'
+		   AND updated_at <= clock_timestamp() - interval '24 hours'
+		 ORDER BY updated_at,workspace_id,session_id
+		 LIMIT 10
+		 FOR UPDATE SKIP LOCKED`)
+	if !interviewPlanUsesIndex(plan, "idx_learning_interview_completion_pending_maintenance") {
+		t.Fatalf("Interview maintenance EXPLAIN did not use the bounded candidate index: indexes=%v", interviewPlanIndexNames(plan))
+	}
+	t.Logf("Interview maintenance EXPLAIN actual_rows=%.0f indexes=%v", plan.ActualRows, interviewPlanIndexNames(plan))
 }
 
 func seedInterviewCompletionPlanReceipt(

@@ -4,33 +4,35 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	interviewapp "github.com/CodeZen-Lizhi/zhixu/internal/review/interview/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/review/interview/domain"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	gormlogger "gorm.io/gorm/logger"
 )
 
 func TestQuestionSourceSelectsTopicScopedConfirmedEvidenceOnlyFromActiveIndex(t *testing.T) {
+	runInterviewIntegrationVariants(t, testQuestionSourceSelectsTopicScopedConfirmedEvidenceOnlyFromActiveIndex)
+}
+
+func testQuestionSourceSelectsTopicScopedConfirmedEvidenceOnlyFromActiveIndex(t *testing.T, variant interviewIntegrationVariant) {
 	ctx := context.Background()
-	pool, cleanup := newInterviewTestDatabase(t, ctx)
-	defer cleanup()
+	repository, _, pool := variant.open(t)
 	fixture := seedInterviewQuestionSourceFixture(t, ctx, pool)
-	repository, err := NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	selection := interviewapp.Selection{
 		WorkspaceID: fixture.workspaceID,
@@ -46,12 +48,20 @@ func TestQuestionSourceSelectsTopicScopedConfirmedEvidenceOnlyFromActiveIndex(t 
 	}
 
 	activateInterviewQuestionSourceIndex(t, ctx, pool, fixture)
+	counter := installInterviewStatementCounter(t, repository)
+	counter.reset()
 	materials, err = repository.Select(ctx, selection)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(materials) != 1 {
 		t.Fatalf("topic-scoped materials = %+v, want exactly one", materials)
+	}
+	if counter != nil && counter.statements() != 1 {
+		t.Fatalf("GORM Interview Select statements=%d, want 1", counter.statements())
+	}
+	if counter != nil {
+		t.Logf("GORM Interview Select statements=%d", counter.statements())
 	}
 	material := materials[0]
 	if material.ClaimID != fixture.claimID || material.TopicID == nil || *material.TopicID != fixture.topicID || len(material.Evidence) != 1 {
@@ -97,14 +107,15 @@ func TestQuestionSourceSelectsTopicScopedConfirmedEvidenceOnlyFromActiveIndex(t 
 }
 
 func TestInterviewRepositoryPersistsTurnsReportsPathsAndNeverWritesFSRS(t *testing.T) {
+	runInterviewIntegrationVariants(t, testInterviewRepositoryPersistsTurnsReportsPathsAndNeverWritesFSRS)
+}
+
+func testInterviewRepositoryPersistsTurnsReportsPathsAndNeverWritesFSRS(t *testing.T, variant interviewIntegrationVariant) {
 	ctx := context.Background()
-	pool, cleanup := newInterviewTestDatabase(t, ctx)
-	defer cleanup()
+	repository, _, pool := variant.open(t)
+	counter := installInterviewStatementCounter(t, repository)
 	seedInterviewPersistence(t, ctx, pool)
-	repository, err := NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
+	var err error
 	now := time.Date(2026, 7, 27, 10, 0, 0, 0, time.UTC)
 	workspaceID := interviewIntegrationID(1)
 	claimID := interviewIntegrationID(2)
@@ -198,9 +209,16 @@ func TestInterviewRepositoryPersistsTurnsReportsPathsAndNeverWritesFSRS(t *testi
 		t.Fatalf("missing-hold completion committed partial state: snapshot=%+v err=%v", failedSnapshot, err)
 	}
 	seedInterviewCompletionVisibilityHold(t, ctx, pool, workspaceID, session.ID, pathBinding.ArtifactID, "PATH", attemptDigest, now.Add(2*time.Minute))
+	counter.reset()
 	completed, err := repository.Complete(ctx, completeRecord)
 	if err != nil || completed.Replayed || completed.Report.Artifact != reportBinding || completed.Path.Artifact != pathBinding {
 		t.Fatalf("complete=%+v err=%v", completed, err)
+	}
+	if counter != nil && counter.statements() > 20 {
+		t.Fatalf("GORM Interview Complete statements=%d, want <=20", counter.statements())
+	}
+	if counter != nil {
+		t.Logf("GORM Interview Complete statements=%d", counter.statements())
 	}
 	if count := interviewRowCount(t, ctx, pool, `SELECT count(*) FROM learning.artifact_visibility_hold WHERE workspace_id=$1 AND owner_id=$2`, string(workspaceID), string(session.ID)); count != 0 {
 		t.Fatalf("completion visibility hold count=%d want=0", count)
@@ -243,14 +261,13 @@ func pgErrCode(err *pgconn.PgError) string {
 }
 
 func TestInterviewRepositoryListsWorkspaceSessionsWithStableKeyset(t *testing.T) {
+	runInterviewIntegrationVariants(t, testInterviewRepositoryListsWorkspaceSessionsWithStableKeyset)
+}
+
+func testInterviewRepositoryListsWorkspaceSessionsWithStableKeyset(t *testing.T, variant interviewIntegrationVariant) {
 	ctx := context.Background()
-	pool, cleanup := newInterviewTestDatabase(t, ctx)
-	defer cleanup()
+	repository, _, pool := variant.open(t)
 	seedInterviewPersistence(t, ctx, pool)
-	repository, err := NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
 	workspaceID := interviewIntegrationID(1)
 	startedAt := time.Date(2026, 7, 27, 16, 0, 0, 0, time.UTC)
 	for _, fixture := range []struct {
@@ -269,12 +286,21 @@ func TestInterviewRepositoryListsWorkspaceSessionsWithStableKeyset(t *testing.T)
 		}
 	}
 
+	assertInterviewListPlan(t, ctx, pool, workspaceID)
+	counter := installInterviewStatementCounter(t, repository)
+	counter.reset()
 	first, err := repository.List(ctx, interviewapp.SessionListQuery{WorkspaceID: workspaceID, Limit: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(first.Items) != 2 || first.Items[0].ID != interviewIntegrationID(62) || first.Items[1].ID != interviewIntegrationID(61) || first.Next == nil || first.Next.ID != interviewIntegrationID(61) {
 		t.Fatalf("first page=%+v", first)
+	}
+	if counter != nil && counter.statements() != 1 {
+		t.Fatalf("GORM Interview List statements=%d, want 1", counter.statements())
+	}
+	if counter != nil {
+		t.Logf("GORM Interview List statements=%d", counter.statements())
 	}
 	second, err := repository.List(ctx, interviewapp.SessionListQuery{WorkspaceID: workspaceID, Limit: 2, After: first.Next})
 	if err != nil {
@@ -289,6 +315,256 @@ func TestInterviewRepositoryListsWorkspaceSessionsWithStableKeyset(t *testing.T)
 	}
 	if len(empty.Items) != 0 || empty.Next != nil {
 		t.Fatalf("cross-workspace page=%+v", empty)
+	}
+}
+
+func TestInterviewRepositoryCommitResponseLossCancellationAndTxDone(t *testing.T) {
+	runInterviewIntegrationVariants(t, testInterviewRepositoryCommitResponseLossCancellationAndTxDone)
+}
+
+func testInterviewRepositoryCommitResponseLossCancellationAndTxDone(t *testing.T, variant interviewIntegrationVariant) {
+	ctx, cancel := context.WithTimeout(context.Background(), 55*time.Second)
+	defer cancel()
+	repository, platform, pool := variant.open(t)
+	seedInterviewPersistence(t, ctx, pool)
+
+	workspaceID := interviewIntegrationID(1)
+	record := interviewListStartRecord(t, workspaceID, interviewIntegrationID(80), interviewIntegrationID(81),
+		time.Date(2026, 7, 27, 18, 0, 0, 0, time.UTC), "interview-response-loss")
+	responseLoss := errors.New("simulated Interview commit response loss")
+	lossy, err := interviewResponseLossRepository(variant, repository, platform, responseLoss)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := lossy.Start(ctx, record)
+	if err != nil || !started.Replayed || started.Session.ID != record.Session.ID || len(started.Questions) != 1 {
+		t.Fatalf("response-loss Start=%+v err=%v", started, err)
+	}
+	if count := interviewRowCount(t, ctx, pool, `SELECT count(*) FROM learning.review_session WHERE workspace_id=$1 AND id=$2`, string(workspaceID), string(record.Session.ID)); count != 1 {
+		t.Fatalf("response-loss shell count=%d want=1", count)
+	}
+	if count := interviewRowCount(t, ctx, pool, `SELECT count(*) FROM learning.interview_question WHERE workspace_id=$1 AND session_id=$2`, string(workspaceID), string(record.Session.ID)); count != 1 {
+		t.Fatalf("response-loss question count=%d want=1", count)
+	}
+	if count := interviewRowCount(t, ctx, pool, `SELECT count(*) FROM learning.interview_command WHERE workspace_id=$1 AND idempotency_key=$2`, string(workspaceID), record.IdempotencyKey); count != 1 {
+		t.Fatalf("response-loss receipt count=%d want=1", count)
+	}
+
+	assertInterviewRowsCancellationAndPoolReuse(t, ctx, variant, repository, pool, workspaceID)
+	assertInterviewSQLTxDoneClassification(t, ctx, variant, repository, workspaceID)
+}
+
+func interviewResponseLossRepository(
+	variant interviewIntegrationVariant,
+	repository interviewIntegrationRepository,
+	platform *platformpostgres.Pool,
+	cause error,
+) (interviewIntegrationRepository, error) {
+	if platform == nil || platform.DB() == nil {
+		return nil, errors.New("Interview response-loss platform is unavailable")
+	}
+	switch variant.name {
+	case "legacy-pgx":
+		return NewRepository(interviewCommitResponseLossDB{DB: platform.DB(), cause: cause})
+	case "gorm":
+		gormRepository, ok := repository.(*GORMRepository)
+		if !ok || gormRepository == nil {
+			return nil, errors.New("Interview GORM response-loss repository has unexpected type")
+		}
+		lossy := *gormRepository
+		lossy.unitOfWork = interviewCommitResponseLossUnitOfWork{delegate: gormRepository.unitOfWork, cause: cause}
+		return &lossy, nil
+	default:
+		return nil, fmt.Errorf("unknown Interview integration variant %q", variant.name)
+	}
+}
+
+type interviewCommitResponseLossDB struct {
+	DB
+	cause error
+}
+
+func (database interviewCommitResponseLossDB) Begin(ctx context.Context) (pgx.Tx, error) {
+	tx, err := database.DB.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return interviewCommitResponseLossTx{Tx: tx, cause: database.cause}, nil
+}
+
+type interviewCommitResponseLossTx struct {
+	pgx.Tx
+	cause error
+}
+
+func (tx interviewCommitResponseLossTx) Commit(ctx context.Context) error {
+	if err := tx.Tx.Commit(ctx); err != nil {
+		return err
+	}
+	return tx.cause
+}
+
+type interviewCommitResponseLossUnitOfWork struct {
+	delegate foundation.UnitOfWork
+	cause    error
+}
+
+func (unitOfWork interviewCommitResponseLossUnitOfWork) Within(
+	ctx context.Context,
+	options foundation.TransactionOptions,
+	work foundation.TransactionFunc,
+) error {
+	if err := unitOfWork.delegate.Within(ctx, options, work); err != nil {
+		return err
+	}
+	return unitOfWork.cause
+}
+
+func assertInterviewRowsCancellationAndPoolReuse(
+	t *testing.T,
+	ctx context.Context,
+	variant interviewIntegrationVariant,
+	repository interviewIntegrationRepository,
+	pool *pgxpool.Pool,
+	workspaceID foundation.ID,
+) {
+	t.Helper()
+	blocker, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	released := false
+	defer func() {
+		if !released {
+			blocker.Release()
+		}
+	}()
+	blockerTx, err := blocker.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = blockerTx.Rollback(context.Background()) }()
+	if _, err := blockerTx.Exec(ctx, `LOCK TABLE learning.review_session IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatal(err)
+	}
+	baselineAcquired := pool.Stat().AcquiredConns()
+
+	cancelCause := errors.New("Interview list canceled by caller")
+	queryCtx, cancelQuery := context.WithCancelCause(ctx)
+	cancelResult := make(chan error, 1)
+	go func() {
+		_, listErr := repository.List(queryCtx, interviewapp.SessionListQuery{WorkspaceID: workspaceID, Limit: 2})
+		cancelResult <- listErr
+	}()
+	waitForBlockedInterviewList(t, ctx, pool)
+	cancelQuery(cancelCause)
+	select {
+	case listErr := <-cancelResult:
+		if !errors.Is(listErr, context.Canceled) {
+			t.Fatalf("blocked Interview list cancellation error=%v", listErr)
+		}
+		if variant.name == "gorm" && !errors.Is(listErr, cancelCause) {
+			t.Fatalf("blocked GORM Interview list did not preserve cancellation cause: %v", listErr)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("blocked Interview list did not return after cancellation")
+	}
+	waitForInterviewAcquiredConnections(t, pool, baselineAcquired)
+
+	deadlineCtx, deadlineCancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer deadlineCancel()
+	deadlineResult := make(chan error, 1)
+	go func() {
+		_, listErr := repository.List(deadlineCtx, interviewapp.SessionListQuery{WorkspaceID: workspaceID, Limit: 2})
+		deadlineResult <- listErr
+	}()
+	waitForBlockedInterviewList(t, ctx, pool)
+	select {
+	case listErr := <-deadlineResult:
+		if !errors.Is(listErr, context.DeadlineExceeded) {
+			t.Fatalf("blocked Interview list deadline error=%v", listErr)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("blocked Interview list did not return after deadline")
+	}
+	waitForInterviewAcquiredConnections(t, pool, baselineAcquired)
+
+	if err := blockerTx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	blocker.Release()
+	released = true
+	waitForInterviewAcquiredConnections(t, pool, 0)
+	var one int
+	if err := pool.QueryRow(ctx, `SELECT 1`).Scan(&one); err != nil || one != 1 {
+		t.Fatalf("Interview shared pool was not reusable: one=%d err=%v", one, err)
+	}
+}
+
+func waitForBlockedInterviewList(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		var blocked bool
+		if err := pool.QueryRow(ctx, `SELECT EXISTS (
+			SELECT 1 FROM pg_stat_activity
+			 WHERE datname=current_database() AND pid<>pg_backend_pid()
+			   AND wait_event_type='Lock' AND state='active'
+			   AND query LIKE '%learning.review_session%'
+		)`).Scan(&blocked); err != nil {
+			t.Fatal(err)
+		}
+		if blocked {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("blocked Interview list was not observed in pg_stat_activity")
+}
+
+func waitForInterviewAcquiredConnections(t *testing.T, pool *pgxpool.Pool, want int32) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for pool.Stat().AcquiredConns() != want && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if acquired := pool.Stat().AcquiredConns(); acquired != want {
+		t.Fatalf("Interview shared pool acquired connections=%d, want %d", acquired, want)
+	}
+}
+
+func assertInterviewSQLTxDoneClassification(
+	t *testing.T,
+	ctx context.Context,
+	variant interviewIntegrationVariant,
+	repository interviewIntegrationRepository,
+	workspaceID foundation.ID,
+) {
+	t.Helper()
+	if variant.name != "gorm" {
+		return
+	}
+	gormRepository, ok := repository.(*GORMRepository)
+	if !ok || gormRepository == nil {
+		t.Fatal("Interview GORM repository has unexpected type")
+	}
+	copyRepository := *gormRepository
+	copyRepository.unitOfWork = interviewErrTxDoneUnitOfWork{}
+	record := interviewListStartRecord(t, workspaceID, interviewIntegrationID(82), interviewIntegrationID(83),
+		time.Date(2026, 7, 27, 18, 1, 0, 0, time.UTC), "interview-tx-done")
+	_, err := (&copyRepository).Start(ctx, record)
+	if err == nil {
+		t.Fatal("GORM Interview sql.ErrTxDone classification returned nil")
+	}
+	if !errors.Is(err, sql.ErrTxDone) {
+		t.Fatalf("GORM Interview sql.ErrTxDone classification lost sentinel: %v", err)
+	}
+	var classified *foundation.Error
+	if !errors.As(err, &classified) {
+		t.Fatalf("GORM Interview sql.ErrTxDone classification is not a foundation error: %v", err)
+	}
+	if classified.Kind != foundation.ErrorDependencyUnavailable || classified.Code != domain.ErrorCodeDependencyUnavailable || !classified.Retryable {
+		t.Fatalf("GORM Interview sql.ErrTxDone classification=%+v", classified)
 	}
 }
 
@@ -321,41 +597,183 @@ func interviewListStartRecord(t *testing.T, workspaceID, sessionID, questionID f
 	return interviewapp.StartRecord{Session: session, Questions: []domain.Question{question}, IdempotencyKey: key, RequestHash: strings.Repeat("9", 64)}
 }
 
-func newInterviewTestDatabase(t *testing.T, ctx context.Context) (*pgxpool.Pool, func()) {
+type interviewIntegrationRepository interface {
+	interviewapp.Store
+	interviewapp.QuestionSource
+	AbandonStaleCompletions(context.Context, int) (interviewapp.CompletionMaintenanceResult, error)
+}
+
+type interviewIntegrationVariant struct {
+	name string
+}
+
+func runInterviewIntegrationVariants(t *testing.T, scenario func(*testing.T, interviewIntegrationVariant)) {
 	t.Helper()
-	baseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
-	if baseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL for Interview PostgreSQL integration test")
+	for _, name := range []string{"legacy-pgx", "gorm"} {
+		variant := interviewIntegrationVariant{name: name}
+		t.Run(name, func(t *testing.T) {
+			scenario(t, variant)
+		})
 	}
-	parsed, err := url.Parse(baseURL)
+}
+
+func (variant interviewIntegrationVariant) open(t *testing.T) (interviewIntegrationRepository, *platformpostgres.Pool, *pgxpool.Pool) {
+	t.Helper()
+	fixture := testdb.Require(t, testdb.Config{
+		ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
+		Availability:     testdb.FailWhenUnavailable,
+		MaxConns:         16,
+	})
+	platform := fixture.Pool()
+	if platform == nil || platform.DB() == nil {
+		t.Fatal("shared Interview PostgreSQL fixture did not provide a platform pool")
+	}
+	var (
+		repository interviewIntegrationRepository
+		err        error
+	)
+	switch variant.name {
+	case "legacy-pgx":
+		repository, err = NewRepository(platform.DB())
+	case "gorm":
+		repository, err = NewGORMRepository(platform)
+	default:
+		t.Fatalf("unknown Interview integration variant %q", variant.name)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
-	admin, err := pgxpool.New(ctx, baseURL)
+	return repository, platform, platform.DB()
+}
+
+type interviewStatementCounter struct {
+	count atomic.Int64
+}
+
+func (counter *interviewStatementCounter) LogMode(gormlogger.LogLevel) gormlogger.Interface {
+	return counter
+}
+
+func (*interviewStatementCounter) Info(context.Context, string, ...any)  {}
+func (*interviewStatementCounter) Warn(context.Context, string, ...any)  {}
+func (*interviewStatementCounter) Error(context.Context, string, ...any) {}
+
+func (counter *interviewStatementCounter) Trace(context.Context, time.Time, func() (string, int64), error) {
+	counter.count.Add(1)
+}
+
+func (counter *interviewStatementCounter) reset() {
+	if counter != nil {
+		counter.count.Store(0)
+	}
+}
+
+func (counter *interviewStatementCounter) statements() int64 {
+	if counter == nil {
+		return 0
+	}
+	return counter.count.Load()
+}
+
+func installInterviewStatementCounter(t *testing.T, repository interviewIntegrationRepository) *interviewStatementCounter {
+	t.Helper()
+	gormRepository, ok := repository.(*GORMRepository)
+	if !ok {
+		return nil
+	}
+	if gormRepository.database == nil || gormRepository.database.Config == nil {
+		t.Fatal("Interview GORM repository has no logger configuration")
+	}
+	original := gormRepository.database.Config.Logger
+	counter := &interviewStatementCounter{}
+	gormRepository.database.Config.Logger = counter
+	t.Cleanup(func() {
+		gormRepository.database.Config.Logger = original
+	})
+	return counter
+}
+
+type interviewExplainPlan struct {
+	IndexName  string                 `json:"Index Name"`
+	ActualRows float64                `json:"Actual Rows"`
+	Plans      []interviewExplainPlan `json:"Plans"`
+}
+
+type interviewExplainQuerier interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func explainInterviewQuery(t *testing.T, ctx context.Context, querier interviewExplainQuerier, query string, args ...any) interviewExplainPlan {
+	t.Helper()
+	var raw []byte
+	if err := querier.QueryRow(ctx, `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, COSTS OFF, SUMMARY OFF, TIMING OFF) `+query, args...).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	var documents []struct {
+		Plan interviewExplainPlan `json:"Plan"`
+	}
+	if err := json.Unmarshal(raw, &documents); err != nil || len(documents) != 1 {
+		t.Fatalf("invalid Interview EXPLAIN document: err=%v plan=%s", err, raw)
+	}
+	return documents[0].Plan
+}
+
+func interviewPlanUsesIndex(plan interviewExplainPlan, indexName string) bool {
+	if plan.IndexName == indexName {
+		return true
+	}
+	for _, child := range plan.Plans {
+		if interviewPlanUsesIndex(child, indexName) {
+			return true
+		}
+	}
+	return false
+}
+
+func interviewPlanIndexNames(plan interviewExplainPlan) []string {
+	indexNames := make([]string, 0)
+	if plan.IndexName != "" {
+		indexNames = append(indexNames, plan.IndexName)
+	}
+	for _, child := range plan.Plans {
+		indexNames = append(indexNames, interviewPlanIndexNames(child)...)
+	}
+	return indexNames
+}
+
+func assertInterviewListPlan(t *testing.T, ctx context.Context, pool *pgxpool.Pool, workspaceID foundation.ID) {
+	t.Helper()
+	if _, err := pool.Exec(ctx, `ANALYZE learning.review_session,learning.interview_session`); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	name := "zhixu_interview_" + strings.ReplaceAll(time.Now().UTC().Format("150405.000000000"), ".", "")
-	identifier := pgx.Identifier{name}.Sanitize()
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+identifier); err != nil {
-		admin.Close()
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	if _, err := tx.Exec(ctx, `SET LOCAL enable_seqscan=off`); err != nil {
 		t.Fatal(err)
 	}
-	parsed.Path = "/" + name
-	pool, err := pgxpool.New(ctx, parsed.String())
-	if err != nil {
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier)
-		admin.Close()
-		t.Fatal(err)
+	plan := explainInterviewQuery(t, ctx, tx, `
+		SELECT session.session_id
+		  FROM learning.review_session AS shell
+		  JOIN learning.interview_session AS session
+		    ON session.session_id=shell.id
+		   AND session.workspace_id=shell.workspace_id
+		 WHERE shell.workspace_id=$1
+		   AND shell.session_type='INTERVIEW'
+		 ORDER BY shell.started_at DESC,session.session_id DESC
+		 LIMIT 3`, string(workspaceID))
+	if !interviewPlanUsesIndex(plan, "idx_learning_review_session_interview_started") {
+		t.Fatalf("Interview List EXPLAIN did not use the bounded keyset index: indexes=%v", interviewPlanIndexNames(plan))
 	}
-	if err := platformmigration.MigrateAtlas(ctx, pool); err != nil {
-		t.Fatal(err)
-	}
-	return pool, func() {
-		pool.Close()
-		_, _ = admin.Exec(context.Background(), "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-	}
+	t.Logf("Interview List EXPLAIN actual_rows=%.0f indexes=%v", plan.ActualRows, interviewPlanIndexNames(plan))
+}
+
+type interviewErrTxDoneUnitOfWork struct{}
+
+func (interviewErrTxDoneUnitOfWork) Within(context.Context, foundation.TransactionOptions, foundation.TransactionFunc) error {
+	return sql.ErrTxDone
 }
 
 type interviewQuestionSourceFixture struct {
@@ -393,8 +811,11 @@ func seedInterviewQuestionSourceFixture(t *testing.T, ctx context.Context, pool 
 		query string
 		args  []any
 	}{
-		{`INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at)
-			VALUES($1,'interview-question-source','/tmp/interview-question-source','/tmp/interview-question-source',$2,'test',1,$2,$2)`, []any{string(fixture.workspaceID), fixture.now}},
+		{`INSERT INTO core.workspace(
+			id,name,root_path,root_fingerprint,binding_version,git_repository_path,git_checked_at,
+			status,availability,availability_reason,availability_checked_at,version,created_at,updated_at
+		) VALUES($1,'interview-question-source','/tmp/interview-question-source',repeat('1',64),1,
+			'/tmp/interview-question-source',$2,'inactive','available',NULL,$2,1,$2,$2)`, []any{string(fixture.workspaceID), fixture.now}},
 		{`INSERT INTO core.content_artifact(id,workspace_id,content_hash,byte_size,managed_location,created_at)
 			VALUES($1,$2,$3,29,$4,$5)`, []any{string(interviewIntegrationID(101)), string(fixture.workspaceID), contentHash, ".knowledge/sources/" + contentHash, fixture.now}},
 		{`INSERT INTO core.source(id,workspace_id,type,logical_name,original_location,created_at)
@@ -486,7 +907,11 @@ func seedInterviewPersistence(t *testing.T, ctx context.Context, pool *pgxpool.P
 		query string
 		args  []any
 	}{
-		{`INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'interview','/tmp/interview','/tmp/interview',$2,'test',1,$2,$2)`, []any{workspaceID, now}},
+		{`INSERT INTO core.workspace(
+			id,name,root_path,root_fingerprint,binding_version,git_repository_path,git_checked_at,
+			status,availability,availability_reason,availability_checked_at,version,created_at,updated_at
+		) VALUES($1,'interview','/tmp/interview',repeat('2',64),1,'/tmp/interview',$2,
+			'inactive','available',NULL,$2,1,$2,$2)`, []any{workspaceID, now}},
 		{`INSERT INTO core.content_artifact(id,workspace_id,content_hash,byte_size,managed_location,created_at) VALUES($1,$2,$3,4,$4,$5)`, []any{string(interviewIntegrationID(20)), workspaceID, contentHash, ".knowledge/sources/" + contentHash, now}},
 		{`INSERT INTO core.source(id,workspace_id,type,logical_name,original_location,created_at) VALUES($1,$2,'text','interview.txt','interview.txt',$3)`, []any{string(interviewIntegrationID(21)), workspaceID, now}},
 		{`INSERT INTO core.source_version(id,source_id,workspace_id,content_artifact_id,content_hash,byte_size,mime_type,original_content_location,security_status,captured_at) VALUES($1,$2,$3,$4,$5,4,'text/plain','interview.txt','pending',$6)`, []any{string(interviewIntegrationID(30)), string(interviewIntegrationID(21)), workspaceID, string(interviewIntegrationID(20)), contentHash, now}},
@@ -610,7 +1035,7 @@ func assertInterviewBindingConstraints(t *testing.T, ctx context.Context, pool *
 	}
 }
 
-func assertInterviewPathCompletionInvariant(t *testing.T, ctx context.Context, repository *Repository, now time.Time) {
+func assertInterviewPathCompletionInvariant(t *testing.T, ctx context.Context, repository interviewapp.Store, now time.Time) {
 	t.Helper()
 	workspaceID := interviewIntegrationID(1)
 	pathID := interviewIntegrationID(14)
