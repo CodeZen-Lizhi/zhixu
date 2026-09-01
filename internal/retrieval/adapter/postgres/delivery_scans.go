@@ -5,7 +5,6 @@ import (
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
-	"github.com/jackc/pgx/v5"
 )
 
 const deliveryColumns = `id::text,consumer_name,outbox_event_id::text,workspace_id::text,writeback_execution_id::text,
@@ -18,7 +17,7 @@ const deliveryAttemptColumns = `id::text,delivery_id::text,attempt_no,dispatch_n
 	delivery_key,lease_owner,lease_until,status,ingestion_attempt_id::text,failure_class,error_kind,error_code,
 	error_summary,started_at,heartbeat_at,ended_at`
 
-func scanDelivery(row pgx.Row) (domain.Delivery, error) {
+func scanDelivery(row retrievalRowScanner) (domain.Delivery, error) {
 	var value domain.Delivery
 	var currentAttemptID, sourceVersionID, projectionID, indexID, activationID *string
 	var regressionCode, regressionHash *string
@@ -46,7 +45,7 @@ func scanDelivery(row pgx.Row) (domain.Delivery, error) {
 	return value, nil
 }
 
-func scanDeliveryAttempt(row pgx.Row) (domain.DeliveryAttempt, error) {
+func scanDeliveryAttempt(row retrievalRowScanner) (domain.DeliveryAttempt, error) {
 	var value domain.DeliveryAttempt
 	var ingestionAttemptID *string
 	var failureClass, errorKind, errorCode, errorSummary *string

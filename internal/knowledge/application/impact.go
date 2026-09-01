@@ -30,12 +30,26 @@ type ImpactRepository interface {
 	GetImpactReportByID(context.Context, foundation.ID, foundation.ID) (domain.ImpactReport, error)
 }
 
+// ScopedImpactRepository 是 GORM 迁移路径使用的原子报告+审计边界。
+// legacy Repository 继续实现 ImpactRepository，Final 通过专用构造选择该能力。
+type ScopedImpactRepository interface {
+	ImpactRepository
+	SaveImpactReportWithScopedAudit(context.Context, domain.ImpactReport, string, ScopedImpactAuditPort) (domain.ImpactReport, bool, error)
+}
+
 // ImpactAuditPort 是 Impact Analysis 使用的最小审计适配接口。
 // Application 不依赖具体 Audit 类型，避免 Timeline 与审计形成第二套历史事实。
 type ImpactAuditPort interface {
 	RecordImpactAnalysis(context.Context, ImpactAuditRecord) error
 	// RecordImpactAnalysisTx 在调用方事务中追加审计，不提交或回滚事务。
 	RecordImpactAnalysisTx(context.Context, any, ImpactAuditRecord) error
+}
+
+// ScopedImpactAuditPort 是 GORM 迁移路径使用的 opaque transaction 审计能力。
+// legacy pgx Repository 继续使用 ImpactAuditPort，直到 Final 统一切换。
+type ScopedImpactAuditPort interface {
+	// RecordImpactAnalysisScoped 在调用方 scope 中追加审计，不提交或回滚事务。
+	RecordImpactAnalysisScoped(context.Context, foundation.TransactionScope, ImpactAuditRecord) error
 }
 
 // ImpactAuditRecord 是写入 Audit Port 的脱敏关联摘要。
@@ -66,10 +80,12 @@ type ImpactAnalysisResult struct {
 
 // ImpactService 生成只读 Impact 报告和 Proposal 草稿，不执行知识写回。
 type ImpactService struct {
-	repository ImpactRepository
-	ids        foundation.IDGenerator
-	clock      foundation.Clock
-	audit      ImpactAuditPort
+	repository       ImpactRepository
+	scopedRepository ScopedImpactRepository
+	ids              foundation.IDGenerator
+	clock            foundation.Clock
+	audit            ImpactAuditPort
+	scopedAudit      ScopedImpactAuditPort
 }
 
 // NewImpactService 构造不带审计适配器的只读 Impact 服务。
@@ -79,15 +95,24 @@ func NewImpactService(repository ImpactRepository, ids foundation.IDGenerator, c
 
 // NewImpactServiceWithAudit 构造带可选审计适配器的只读 Impact 服务。
 func NewImpactServiceWithAudit(repository ImpactRepository, ids foundation.IDGenerator, clock foundation.Clock, audit ImpactAuditPort) (*ImpactService, error) {
-	if isNil(repository) || ids == nil || clock == nil {
+	if isNil(repository) || isNil(ids) || isNil(clock) {
 		return nil, foundation.NewError(foundation.ErrorDependencyUnavailable, domain.ErrorCodeImpactUnavailable, true, errors.New("impact analysis dependencies are unavailable"))
 	}
 	return &ImpactService{repository: repository, ids: ids, clock: clock, audit: audit}, nil
 }
 
+// NewScopedImpactServiceWithAudit 构造 GORM 路径的原子 Impact+Audit 服务。
+// scoped Repository 与 Audit 的方法签名在编译期禁止具体事务类型泄漏。
+func NewScopedImpactServiceWithAudit(repository ScopedImpactRepository, ids foundation.IDGenerator, clock foundation.Clock, audit ScopedImpactAuditPort) (*ImpactService, error) {
+	if isNil(repository) || isNil(ids) || isNil(clock) || isNil(audit) {
+		return nil, foundation.NewError(foundation.ErrorDependencyUnavailable, domain.ErrorCodeImpactUnavailable, true, errors.New("scoped impact analysis dependencies are unavailable"))
+	}
+	return &ImpactService{repository: repository, scopedRepository: repository, ids: ids, clock: clock, scopedAudit: audit}, nil
+}
+
 // Analyze 读取源事件和下游事实，幂等保存当前策略的 Impact 报告。
 func (service *ImpactService) Analyze(ctx context.Context, request ImpactAnalysisRequest) (ImpactAnalysisResult, error) {
-	if service == nil || isNil(service.repository) || service.ids == nil || service.clock == nil {
+	if service == nil || isNil(service.repository) || isNil(service.ids) || isNil(service.clock) {
 		return ImpactAnalysisResult{}, impactUnavailable("impact analysis service is unavailable")
 	}
 	if ctx == nil || !validID(request.WorkspaceID) || !validID(request.SourceEventID) {
@@ -173,7 +198,12 @@ func (service *ImpactService) Analyze(ctx context.Context, request ImpactAnalysi
 	}
 	var persisted domain.ImpactReport
 	var replayed bool
-	if isNil(service.audit) {
+	if !isNil(service.scopedRepository) || !isNil(service.scopedAudit) {
+		if isNil(service.scopedRepository) || isNil(service.scopedAudit) {
+			return ImpactAnalysisResult{}, impactUnavailable("scoped impact persistence is unavailable")
+		}
+		persisted, replayed, err = service.scopedRepository.SaveImpactReportWithScopedAudit(ctx, report, request.IdempotencyKey, service.scopedAudit)
+	} else if isNil(service.audit) {
 		persisted, replayed, err = service.repository.SaveImpactReport(ctx, report)
 	} else {
 		persisted, replayed, err = service.repository.SaveImpactReportWithAudit(ctx, report, request.IdempotencyKey, service.audit)
@@ -231,7 +261,28 @@ func (service *ImpactService) replayImpactReport(ctx context.Context, request Im
 	if existing.Fingerprint != fingerprint || !reflect.DeepEqual(existing.Objects, objects) {
 		return ImpactAnalysisResult{}, impactInconsistent("impact report owner binding has drifted")
 	}
-	result := ImpactAnalysisResult{Report: existing, ProposalDrafts: draftsForReport(existing), Replayed: true}
+	replayedReport := existing
+	if !isNil(service.scopedRepository) || !isNil(service.scopedAudit) {
+		if isNil(service.scopedRepository) || isNil(service.scopedAudit) {
+			return ImpactAnalysisResult{}, impactUnavailable("scoped impact persistence is unavailable")
+		}
+		persisted, replayed, persistErr := service.scopedRepository.SaveImpactReportWithScopedAudit(
+			ctx, existing, request.IdempotencyKey, service.scopedAudit,
+		)
+		if persistErr != nil {
+			return ImpactAnalysisResult{}, persistErr
+		}
+		if !replayed || persisted.ID != existing.ID || persisted.WorkspaceID != existing.WorkspaceID ||
+			persisted.SourceEventID != existing.SourceEventID || persisted.EffectiveAnalysisVersion() != analysisVersion ||
+			persisted.Fingerprint != existing.Fingerprint || !reflect.DeepEqual(persisted.Objects, existing.Objects) {
+			return ImpactAnalysisResult{}, impactInconsistent("scoped impact replay binding is invalid")
+		}
+		replayedReport = persisted
+	}
+	result := ImpactAnalysisResult{Report: replayedReport, ProposalDrafts: draftsForReport(replayedReport), Replayed: true}
+	if !isNil(service.scopedRepository) {
+		return result, nil
+	}
 	if err := service.recordAudit(ctx, result, request.IdempotencyKey); err != nil {
 		return ImpactAnalysisResult{}, err
 	}

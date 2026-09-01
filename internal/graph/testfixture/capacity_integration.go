@@ -260,7 +260,7 @@ func insertCapacityWorkspace(ctx context.Context, tx pgx.Tx, workspaceID foundat
 	root := capacityWorkspaceRoot(shape, workspaceID)
 	_, err := tx.Exec(ctx, `INSERT INTO core.workspace(
 		id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at
-	) VALUES($1,$2,$3,$3,$4,'test',1,$4,$4)`, string(workspaceID), shape.workspaceName, root, now)
+	) VALUES($1,$2,$3,$3,$4,'inactive',1,$4,$4)`, string(workspaceID), shape.workspaceName, root, now)
 	return err
 }
 

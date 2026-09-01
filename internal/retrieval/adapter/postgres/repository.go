@@ -109,6 +109,13 @@ func (r *Repository) GetEmbeddingVersion(ctx context.Context, id foundation.ID) 
 
 // BeginIndex 在一个事务内创建 Building Index 并冻结完整 Manifest。
 func (r *Repository) BeginIndex(ctx context.Context, build domain.IndexBuild) (domain.IndexVersionResult, error) {
+	if r == nil || r.db == nil {
+		return domain.IndexVersionResult{}, dependency("RETRIEVAL_DATABASE_UNAVAILABLE", errors.New("repository is not initialized"))
+	}
+	return beginIndexNative(ctx, r.db, build)
+}
+
+func beginIndexNative(ctx context.Context, database DB, build domain.IndexBuild) (domain.IndexVersionResult, error) {
 	canonical, hash, err := domain.CanonicalizeManifest(build.IndexVersion.WorkspaceID, build.IndexVersion.ID, build.Manifest)
 	if err != nil {
 		return domain.IndexVersionResult{}, err
@@ -120,7 +127,7 @@ func (r *Repository) BeginIndex(ctx context.Context, build domain.IndexBuild) (d
 	if err := domain.ValidateIndexBuild(build); err != nil {
 		return domain.IndexVersionResult{}, err
 	}
-	tx, err := r.db.Begin(ctx)
+	tx, err := database.Begin(ctx)
 	if err != nil {
 		return domain.IndexVersionResult{}, classify(err, "RETRIEVAL_INDEX_TRANSACTION_FAILED")
 	}

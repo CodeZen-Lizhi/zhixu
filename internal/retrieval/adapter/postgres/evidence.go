@@ -14,6 +14,141 @@ import (
 
 const evidenceReferenceNotFoundCode = "RETRIEVAL_EVIDENCE_REFERENCE_NOT_FOUND"
 
+const sourceVersionReferenceSQL = `
+	SELECT
+		s.workspace_id::text,
+		s.id::text,
+		sv.id::text,
+		ca.id::text,
+		s.type,
+		s.logical_name,
+		s.original_location,
+		sv.original_content_location,
+		sv.content_hash,
+		sv.byte_size,
+		sv.mime_type,
+		COALESCE(attempt.security_status,sv.security_status),
+		COALESCE(attempt.status,''),
+		COALESCE(run.status,''),
+		COALESCE(manifest.selection_status,''),
+		sv.captured_at
+	FROM core.source_version AS sv
+	JOIN core.source AS s
+	  ON s.id=sv.source_id
+	 AND s.workspace_id=$1
+	JOIN core.content_artifact AS ca
+	  ON ca.id=sv.content_artifact_id
+	 AND ca.workspace_id=s.workspace_id
+	 AND ca.content_hash=sv.content_hash
+	 AND ca.byte_size=sv.byte_size
+	LEFT JOIN LATERAL (
+		SELECT status,security_status,workflow_run_id
+		FROM ingestion.attempt
+		WHERE source_version_id=sv.id
+		ORDER BY started_at DESC,id DESC
+		LIMIT 1
+	) AS attempt ON true
+	LEFT JOIN workflow.run AS run ON run.id=attempt.workflow_run_id
+	LEFT JOIN retrieval.index_version AS active_index
+	  ON active_index.workspace_id=s.workspace_id
+	 AND active_index.status='active'
+	LEFT JOIN retrieval.index_manifest_source AS manifest
+	  ON manifest.index_version_id=active_index.id
+	 AND manifest.source_id=s.id
+	 AND (manifest.selection_status='excluded' OR manifest.source_version_id=sv.id)
+	WHERE sv.id=$2`
+
+const sourceVersionReferenceBatchSQL = `
+	WITH requested(source_version_id, ordinality) AS (
+		SELECT id, ordinality FROM unnest($2::uuid[]) WITH ORDINALITY AS input(id, ordinality)
+	)
+	SELECT requested.ordinality,
+		s.workspace_id::text,
+		s.id::text,
+		sv.id::text,
+		ca.id::text,
+		s.type,
+		s.logical_name,
+		s.original_location,
+		sv.original_content_location,
+		sv.content_hash,
+		sv.byte_size,
+		sv.mime_type,
+		COALESCE(attempt.security_status,sv.security_status),
+		COALESCE(attempt.status,''),
+		COALESCE(run.status,''),
+		COALESCE(manifest.selection_status,''),
+		sv.captured_at
+	FROM requested
+	JOIN core.source_version AS sv ON sv.id=requested.source_version_id
+	JOIN core.source AS s ON s.id=sv.source_id AND s.workspace_id=$1
+	JOIN core.content_artifact AS ca ON ca.id=sv.content_artifact_id AND ca.workspace_id=s.workspace_id AND ca.content_hash=sv.content_hash AND ca.byte_size=sv.byte_size
+	LEFT JOIN LATERAL (
+		SELECT status,security_status,workflow_run_id
+		FROM ingestion.attempt
+		WHERE source_version_id=sv.id
+		ORDER BY started_at DESC,id DESC
+		LIMIT 1
+	) AS attempt ON true
+	LEFT JOIN workflow.run AS run ON run.id=attempt.workflow_run_id
+	LEFT JOIN retrieval.index_version AS active_index ON active_index.workspace_id=s.workspace_id AND active_index.status='active'
+	LEFT JOIN retrieval.index_manifest_source AS manifest ON manifest.index_version_id=active_index.id AND manifest.source_id=s.id AND (manifest.selection_status='excluded' OR manifest.source_version_id=sv.id)
+	WHERE sv.id=requested.source_version_id
+	ORDER BY requested.ordinality`
+
+const sourceSpanReferenceSQL = `
+	SELECT
+		s.workspace_id::text,
+		s.id::text,
+		sv.id::text,
+		ca.id::text,
+		s.type,
+		s.logical_name,
+		s.original_location,
+		sv.original_content_location,
+		sv.content_hash,
+		sv.byte_size,
+		sv.mime_type,
+		sv.security_status,
+		sv.captured_at,
+		pp.id::text,
+		sp.id::text,
+		sp.start_line,
+		sp.end_line,
+		sp.start_byte,
+		sp.end_byte,
+		sp.span_type,
+		sp.selector,
+		sp.excerpt_hash,
+		sp.evidence_kind,
+		sp.derived_excerpt,
+		sp.parser_version,
+		sp.schema_version
+	FROM core.source_version AS sv
+	JOIN core.source AS s
+	  ON s.id=sv.source_id
+	 AND s.workspace_id=$1
+	JOIN core.content_artifact AS ca
+	  ON ca.id=sv.content_artifact_id
+	 AND ca.workspace_id=s.workspace_id
+	 AND ca.content_hash=sv.content_hash
+	 AND ca.byte_size=sv.byte_size
+	JOIN ingestion.source_version_projection AS svp
+	  ON svp.source_version_id=sv.id
+	 AND svp.workspace_id=s.workspace_id
+	JOIN ingestion.parse_projection AS pp
+	  ON pp.id=svp.parse_projection_id
+	 AND pp.workspace_id=s.workspace_id
+	 AND pp.content_artifact_id=ca.id
+	JOIN ingestion.source_span AS sp
+	  ON sp.id=$3
+	 AND sp.workspace_id=s.workspace_id
+	 AND sp.content_artifact_id=ca.id
+	 AND sp.parse_projection_id=pp.id
+	 AND sp.parser_version=pp.parser_version
+	 AND sp.schema_version=pp.schema_version
+	WHERE sv.id=$2`
+
 var _ application.EvidenceReferenceStore = (*SearchRepository)(nil)
 var _ application.CitationEvidenceStore = (*SearchRepository)(nil)
 var _ application.SourceVersionReferenceBatchStore = (*SearchRepository)(nil)
@@ -28,49 +163,7 @@ func (r *SearchRepository) LoadSourceVersionReference(
 	if err := validateEvidenceReferenceIDs(workspaceID, sourceVersionID); err != nil {
 		return domain.SourceVersionReference{}, err
 	}
-	reference, versionRelativePath, err := scanSourceVersionReference(r.db.QueryRow(ctx, `
-		SELECT
-			s.workspace_id::text,
-			s.id::text,
-			sv.id::text,
-			ca.id::text,
-			s.type,
-			s.logical_name,
-			s.original_location,
-			sv.original_content_location,
-			sv.content_hash,
-			sv.byte_size,
-			sv.mime_type,
-			COALESCE(attempt.security_status,sv.security_status),
-			COALESCE(attempt.status,''),
-			COALESCE(run.status,''),
-			COALESCE(manifest.selection_status,''),
-			sv.captured_at
-		FROM core.source_version AS sv
-		JOIN core.source AS s
-		  ON s.id=sv.source_id
-		 AND s.workspace_id=$1
-		JOIN core.content_artifact AS ca
-		  ON ca.id=sv.content_artifact_id
-		 AND ca.workspace_id=s.workspace_id
-		 AND ca.content_hash=sv.content_hash
-		 AND ca.byte_size=sv.byte_size
-		LEFT JOIN LATERAL (
-			SELECT status,security_status,workflow_run_id
-			FROM ingestion.attempt
-			WHERE source_version_id=sv.id
-			ORDER BY started_at DESC,id DESC
-			LIMIT 1
-		) AS attempt ON true
-		LEFT JOIN workflow.run AS run ON run.id=attempt.workflow_run_id
-		LEFT JOIN retrieval.index_version AS active_index
-		  ON active_index.workspace_id=s.workspace_id
-		 AND active_index.status='active'
-		LEFT JOIN retrieval.index_manifest_source AS manifest
-		  ON manifest.index_version_id=active_index.id
-		 AND manifest.source_id=s.id
-		 AND (manifest.selection_status='excluded' OR manifest.source_version_id=sv.id)
-		WHERE sv.id=$2`, string(workspaceID), string(sourceVersionID)))
+	reference, versionRelativePath, err := scanSourceVersionReference(r.db.QueryRow(ctx, sourceVersionReferenceSQL, string(workspaceID), string(sourceVersionID)))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.SourceVersionReference{}, notFound(evidenceReferenceNotFoundCode, err)
 	}
@@ -110,43 +203,7 @@ func (r *SearchRepository) LoadSourceVersionReferences(
 		seen[sourceVersionID] = struct{}{}
 		ids[index] = string(sourceVersionID)
 	}
-	rows, err := r.db.Query(ctx, `
-		WITH requested(source_version_id, ordinality) AS (
-			SELECT id, ordinality FROM unnest($2::uuid[]) WITH ORDINALITY AS input(id, ordinality)
-		)
-		SELECT requested.ordinality,
-			s.workspace_id::text,
-			s.id::text,
-			sv.id::text,
-			ca.id::text,
-			s.type,
-			s.logical_name,
-			s.original_location,
-			sv.original_content_location,
-			sv.content_hash,
-			sv.byte_size,
-			sv.mime_type,
-			COALESCE(attempt.security_status,sv.security_status),
-			COALESCE(attempt.status,''),
-			COALESCE(run.status,''),
-			COALESCE(manifest.selection_status,''),
-			sv.captured_at
-		FROM requested
-		JOIN core.source_version AS sv ON sv.id=requested.source_version_id
-		JOIN core.source AS s ON s.id=sv.source_id AND s.workspace_id=$1
-		JOIN core.content_artifact AS ca ON ca.id=sv.content_artifact_id AND ca.workspace_id=s.workspace_id AND ca.content_hash=sv.content_hash AND ca.byte_size=sv.byte_size
-		LEFT JOIN LATERAL (
-			SELECT status,security_status,workflow_run_id
-			FROM ingestion.attempt
-			WHERE source_version_id=sv.id
-			ORDER BY started_at DESC,id DESC
-			LIMIT 1
-		) AS attempt ON true
-		LEFT JOIN workflow.run AS run ON run.id=attempt.workflow_run_id
-		LEFT JOIN retrieval.index_version AS active_index ON active_index.workspace_id=s.workspace_id AND active_index.status='active'
-		LEFT JOIN retrieval.index_manifest_source AS manifest ON manifest.index_version_id=active_index.id AND manifest.source_id=s.id AND (manifest.selection_status='excluded' OR manifest.source_version_id=sv.id)
-		WHERE sv.id=requested.source_version_id
-		ORDER BY requested.ordinality`, string(workspaceID), ids)
+	rows, err := r.db.Query(ctx, sourceVersionReferenceBatchSQL, string(workspaceID), ids)
 	if err != nil {
 		return nil, classify(err, "RETRIEVAL_EVIDENCE_REFERENCE_BATCH_QUERY_FAILED")
 	}
@@ -191,103 +248,19 @@ func (r *SearchRepository) LoadSourceSpanReference(
 	if err := validateEvidenceReferenceIDs(workspaceID, sourceVersionID, spanID); err != nil {
 		return domain.SourceSpanReference{}, err
 	}
-	var (
-		reference                 domain.SourceSpanReference
-		workspaceText, sourceText string
-		versionText, artifactText string
-		projectionText, spanText  string
-		versionRelativePath       string
-		selector                  []byte
-	)
-	err := r.db.QueryRow(ctx, `
-		SELECT
-			s.workspace_id::text,
-			s.id::text,
-			sv.id::text,
-			ca.id::text,
-			s.type,
-			s.logical_name,
-			s.original_location,
-			sv.original_content_location,
-			sv.content_hash,
-			sv.byte_size,
-			sv.mime_type,
-			sv.security_status,
-			sv.captured_at,
-			pp.id::text,
-			sp.id::text,
-			sp.start_line,
-			sp.end_line,
-			sp.start_byte,
-			sp.end_byte,
-			sp.span_type,
-			sp.selector,
-			sp.excerpt_hash,
-			sp.evidence_kind,
-			sp.derived_excerpt,
-			sp.parser_version,
-			sp.schema_version
-		FROM core.source_version AS sv
-		JOIN core.source AS s
-		  ON s.id=sv.source_id
-		 AND s.workspace_id=$1
-		JOIN core.content_artifact AS ca
-		  ON ca.id=sv.content_artifact_id
-		 AND ca.workspace_id=s.workspace_id
-		 AND ca.content_hash=sv.content_hash
-		 AND ca.byte_size=sv.byte_size
-		JOIN ingestion.source_version_projection AS svp
-		  ON svp.source_version_id=sv.id
-		 AND svp.workspace_id=s.workspace_id
-		JOIN ingestion.parse_projection AS pp
-		  ON pp.id=svp.parse_projection_id
-		 AND pp.workspace_id=s.workspace_id
-		 AND pp.content_artifact_id=ca.id
-		JOIN ingestion.source_span AS sp
-		  ON sp.id=$3
-		 AND sp.workspace_id=s.workspace_id
-		 AND sp.content_artifact_id=ca.id
-		 AND sp.parse_projection_id=pp.id
-		 AND sp.parser_version=pp.parser_version
-		 AND sp.schema_version=pp.schema_version
-		WHERE sv.id=$2`, string(workspaceID), string(sourceVersionID), string(spanID)).Scan(
-		&workspaceText,
-		&sourceText,
-		&versionText,
-		&artifactText,
-		&reference.SourceVersion.SourceType,
-		&reference.SourceVersion.LogicalName,
-		&reference.SourceVersion.RelativePath,
-		&versionRelativePath,
-		&reference.SourceVersion.ContentHash,
-		&reference.SourceVersion.ByteSize,
-		&reference.SourceVersion.MediaType,
-		&reference.SourceVersion.SecurityStatus,
-		&reference.SourceVersion.CapturedAt,
-		&projectionText,
-		&spanText,
-		&reference.Span.StartLine,
-		&reference.Span.EndLine,
-		&reference.Span.StartByte,
-		&reference.Span.EndByte,
-		&reference.SpanType,
-		&selector,
-		&reference.ExcerptHash,
-		&reference.EvidenceKind,
-		&reference.DerivedExcerpt,
-		&reference.ParserVersion,
-		&reference.SchemaVersion,
-	)
+	reference, versionRelativePath, err := scanSourceSpanReference(r.db.QueryRow(
+		ctx, sourceSpanReferenceSQL, string(workspaceID), string(sourceVersionID), string(spanID),
+	))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.SourceSpanReference{}, notFound(evidenceReferenceNotFoundCode, err)
 	}
 	if err != nil {
+		var classified *foundation.Error
+		if errors.As(err, &classified) {
+			return domain.SourceSpanReference{}, err
+		}
 		return domain.SourceSpanReference{}, classify(err, "RETRIEVAL_EVIDENCE_REFERENCE_QUERY_FAILED")
 	}
-	if err := parseEvidenceReferenceIDs(&reference, workspaceText, sourceText, versionText, artifactText, projectionText, spanText); err != nil {
-		return domain.SourceSpanReference{}, err
-	}
-	reference.Selector = append(json.RawMessage(nil), selector...)
 	if reference.SourceVersion.WorkspaceID != workspaceID || reference.SourceVersion.SourceVersionID != sourceVersionID ||
 		reference.SourceVersion.RelativePath != versionRelativePath || reference.Span.ID != spanID {
 		return domain.SourceSpanReference{}, consistency(domain.ErrorCodeEvidenceReferenceInvalid, errors.New("source span reference binding is inconsistent"))
@@ -616,7 +589,7 @@ WITH requested AS MATERIALIZED (
 )
 SELECT COALESCE(jsonb_agg(reference ORDER BY ordinality),'[]'::jsonb) FROM bound`
 
-func scanSourceVersionReference(row pgx.Row) (domain.SourceVersionReference, string, error) {
+func scanSourceVersionReference(row interface{ Scan(...any) error }) (domain.SourceVersionReference, string, error) {
 	var reference domain.SourceVersionReference
 	var workspaceText, sourceText, versionText, artifactText string
 	var versionRelativePath string
@@ -643,6 +616,52 @@ func scanSourceVersionReference(row pgx.Row) (domain.SourceVersionReference, str
 	if err := parseSourceVersionReferenceIDs(&reference, workspaceText, sourceText, versionText, artifactText); err != nil {
 		return domain.SourceVersionReference{}, "", err
 	}
+	return reference, versionRelativePath, nil
+}
+
+func scanSourceSpanReference(row interface{ Scan(...any) error }) (domain.SourceSpanReference, string, error) {
+	var (
+		reference                 domain.SourceSpanReference
+		workspaceText, sourceText string
+		versionText, artifactText string
+		projectionText, spanText  string
+		versionRelativePath       string
+		selector                  []byte
+	)
+	if err := row.Scan(
+		&workspaceText,
+		&sourceText,
+		&versionText,
+		&artifactText,
+		&reference.SourceVersion.SourceType,
+		&reference.SourceVersion.LogicalName,
+		&reference.SourceVersion.RelativePath,
+		&versionRelativePath,
+		&reference.SourceVersion.ContentHash,
+		&reference.SourceVersion.ByteSize,
+		&reference.SourceVersion.MediaType,
+		&reference.SourceVersion.SecurityStatus,
+		&reference.SourceVersion.CapturedAt,
+		&projectionText,
+		&spanText,
+		&reference.Span.StartLine,
+		&reference.Span.EndLine,
+		&reference.Span.StartByte,
+		&reference.Span.EndByte,
+		&reference.SpanType,
+		&selector,
+		&reference.ExcerptHash,
+		&reference.EvidenceKind,
+		&reference.DerivedExcerpt,
+		&reference.ParserVersion,
+		&reference.SchemaVersion,
+	); err != nil {
+		return domain.SourceSpanReference{}, "", err
+	}
+	if err := parseEvidenceReferenceIDs(&reference, workspaceText, sourceText, versionText, artifactText, projectionText, spanText); err != nil {
+		return domain.SourceSpanReference{}, "", err
+	}
+	reference.Selector = append(json.RawMessage(nil), selector...)
 	return reference, versionRelativePath, nil
 }
 

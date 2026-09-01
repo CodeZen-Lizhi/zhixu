@@ -7,19 +7,194 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	auditpostgres "github.com/CodeZen-Lizhi/zhixu/internal/audit/adapter/postgres"
+	auditapplication "github.com/CodeZen-Lizhi/zhixu/internal/audit/application"
+	auditdomain "github.com/CodeZen-Lizhi/zhixu/internal/audit/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	graphtestfixture "github.com/CodeZen-Lizhi/zhixu/internal/graph/testfixture"
+	knowledgeaudit "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/adapter/audit"
 	knowledgeapp "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func TestTimelineRepositoryAppendPageAndImpactReplay(t *testing.T) {
-	repository, tx, ctx := integrationRepository(t)
+type timelineIntegrationRepository interface {
+	domain.Repository
+	knowledgeapp.EvidenceTopicRepository
+	knowledgeapp.TimelineReader
+	knowledgeapp.EventProjector
+	knowledgeapp.ImpactRepository
+	knowledgeapp.TimelineProjectionPort
+}
+
+type timelineImpactAuditCollaborator interface {
+	knowledgeapp.ImpactAuditPort
+	knowledgeapp.ScopedImpactAuditPort
+}
+
+type timelineIntegrationVariant struct {
+	open          func(*testing.T, *platformpostgres.Pool) timelineIntegrationRepository
+	openAudit     func(*testing.T, *platformpostgres.Pool) timelineImpactAuditCollaborator
+	saveWithAudit func(context.Context, timelineIntegrationRepository, domain.ImpactReport, string, timelineImpactAuditCollaborator) (domain.ImpactReport, bool, error)
+}
+
+type timelineIntegrationCase struct {
+	repository timelineIntegrationRepository
+	pool       *pgxpool.Pool
+	platform   *platformpostgres.Pool
+	ctx        context.Context
+	variant    timelineIntegrationVariant
+	audit      timelineImpactAuditCollaborator
+}
+
+func TestTimelineImpactProjectionLegacyIntegration(t *testing.T) {
+	runTimelineIntegrationVariant(t, timelineIntegrationVariant{
+		open:          openLegacyTimelineIntegrationRepository,
+		openAudit:     openLegacyTimelineImpactAudit,
+		saveWithAudit: saveLegacyTimelineImpactWithAudit,
+	})
+}
+
+func TestTimelineImpactProjectionGORMIntegration(t *testing.T) {
+	runTimelineIntegrationVariant(t, timelineIntegrationVariant{
+		open:          openGORMTimelineIntegrationRepository,
+		openAudit:     openGORMTimelineImpactAudit,
+		saveWithAudit: saveGORMTimelineImpactWithAudit,
+	})
+}
+
+func runTimelineIntegrationVariant(t *testing.T, variant timelineIntegrationVariant) {
+	t.Helper()
+	fixture := testdb.Require(t, testdb.Config{
+		ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
+		Availability:     testdb.FailWhenUnavailable,
+		MaxConns:         16,
+	})
+	platform := fixture.Pool()
+	if platform == nil || platform.DB() == nil {
+		t.Fatal("Knowledge Timeline fixture did not provide a shared platform pool")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Second)
+	defer cancel()
+	testCase := timelineIntegrationCase{
+		repository: variant.open(t, platform),
+		pool:       platform.DB(),
+		platform:   platform,
+		ctx:        ctx,
+		variant:    variant,
+		audit:      variant.openAudit(t, platform),
+	}
+	scenarios := []struct {
+		name string
+		run  func(*testing.T, timelineIntegrationCase)
+	}{
+		{name: "append_page_and_impact_replay", run: testTimelineRepositoryAppendPageAndImpactReplay},
+		{name: "impact_v2_supersedes_v1", run: testImpactReportV2SupersedesV1AndDerivesSuccessor},
+		{name: "impact_v2_predecessor", run: testImpactReportV2RequiresMatchingV1Predecessor},
+		{name: "impact_object_limit", run: testTimelineRepositoryListImpactObjectsRejectsMoreThan500Candidates},
+		{name: "impact_concurrent_replay", run: testImpactReportV2ConcurrentCreateReplaysOneWinner},
+		{name: "impact_selector_not_ready", run: testImpactReportV2RejectsIncompleteSelectorMarkerWithoutWrites},
+		{name: "impact_owner_binding", run: testTimelineRepositoryListsOwnerBackedImpactFromExactProvenanceAndRejectsStaleSnapshot},
+		{name: "impact_audit_rollback", run: testImpactReportAndTimelineOutboxRollBackWhenTransactionalAuditFails},
+		{name: "impact_actions_read_only", run: testTimelineRepositoryListImpactObjectsKeepsActionsReadOnly},
+		{name: "projection_domain_sources", run: testTimelineProjectionOutboxConnectsProposalConflictAndImpact},
+		{name: "projection_poison", run: testTimelineProjectionPersistsPoisonWithoutWritingKnowledgeEvent},
+		{name: "projection_v2_owner_replay", run: testTimelineProjectionV2PersistsOwnerBindingAndReplays},
+		{name: "projection_skip_locked", run: testTimelineProjectionTwoDispatchersSkipLockedAndPersistExactlyOneEvent},
+		{name: "connection_resources", run: testTimelineRepositoryReturnsConnections},
+		{name: "projection_v2_malformed_poison", run: testTimelineProjectionV2PoisonsMalformedOwnerAndOperator},
+	}
+	for _, scenario := range scenarios {
+		scenario := scenario
+		t.Run(scenario.name, func(t *testing.T) {
+			scenario.run(t, testCase)
+		})
+	}
+}
+
+func openLegacyTimelineIntegrationRepository(t *testing.T, platform *platformpostgres.Pool) timelineIntegrationRepository {
+	t.Helper()
+	repository, err := NewRepository(platform.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return repository
+}
+
+func openGORMTimelineIntegrationRepository(t *testing.T, platform *platformpostgres.Pool) timelineIntegrationRepository {
+	t.Helper()
+	repository, err := NewGORMRepository(platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return repository
+}
+
+func openLegacyTimelineImpactAudit(t *testing.T, platform *platformpostgres.Pool) timelineImpactAuditCollaborator {
+	t.Helper()
+	store, err := auditpostgres.NewStore(platform.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return newTimelineImpactAudit(t, store)
+}
+
+func openGORMTimelineImpactAudit(t *testing.T, platform *platformpostgres.Pool) timelineImpactAuditCollaborator {
+	t.Helper()
+	store, err := auditpostgres.NewGORMStore(platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return newTimelineImpactAudit(t, store)
+}
+
+func newTimelineImpactAudit(t *testing.T, repository auditapplication.Repository) timelineImpactAuditCollaborator {
+	t.Helper()
+	recorder, err := auditapplication.NewRecorder(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	impactRecorder, err := knowledgeaudit.NewImpactRecorder(recorder, func(context.Context) (auditdomain.ActorType, string) {
+		return auditdomain.ActorUser, "timeline-impact-integration"
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return impactRecorder
+}
+
+func saveLegacyTimelineImpactWithAudit(ctx context.Context, repository timelineIntegrationRepository, report domain.ImpactReport, key string, audit timelineImpactAuditCollaborator) (domain.ImpactReport, bool, error) {
+	return repository.SaveImpactReportWithAudit(ctx, report, key, audit)
+}
+
+func saveGORMTimelineImpactWithAudit(ctx context.Context, repository timelineIntegrationRepository, report domain.ImpactReport, key string, audit timelineImpactAuditCollaborator) (domain.ImpactReport, bool, error) {
+	scoped, ok := repository.(knowledgeapp.ScopedImpactRepository)
+	if !ok {
+		return domain.ImpactReport{}, false, errors.New("Knowledge GORM repository does not expose scoped Impact persistence")
+	}
+	return scoped.SaveImpactReportWithScopedAudit(ctx, report, key, audit)
+}
+
+func (testCase timelineIntegrationCase) openRepository(t *testing.T) timelineIntegrationRepository {
+	t.Helper()
+	return testCase.variant.open(t, testCase.platform)
+}
+
+func (testCase timelineIntegrationCase) saveImpactWithAudit(ctx context.Context, report domain.ImpactReport, key string, audit timelineImpactAuditCollaborator) (domain.ImpactReport, bool, error) {
+	return testCase.variant.saveWithAudit(ctx, testCase.repository, report, key, audit)
+}
+
+func testTimelineRepositoryAppendPageAndImpactReplay(t *testing.T, testCase timelineIntegrationCase) {
+	repository, tx, ctx := testCase.repository, testCase.pool, testCase.ctx
 	fixture := seedProvenance(t, ctx, tx, "timeline-impact")
 	now := time.Now().UTC().Add(time.Minute).Truncate(time.Microsecond)
 	aggregateID := newID(t)
@@ -58,21 +233,33 @@ func TestTimelineRepositoryAppendPageAndImpactReplay(t *testing.T) {
 		SourceVersion: 1, Status: domain.ImpactReportReady, Objects: []domain.ImpactObject{}, Summary: domain.SummarizeImpactObjects(nil),
 		Fingerprint: fingerprint, GeneratedAt: now.Add(time.Second), CreatedAt: now.Add(time.Second), Version: 1,
 	}
-	saved, replayed, err := repository.SaveImpactReport(ctx, report)
+	const firstAuditKey = "timeline-impact-replay"
+	saved, replayed, err := testCase.saveImpactWithAudit(ctx, report, firstAuditKey, testCase.audit)
 	if err != nil || replayed || saved.ID != report.ID {
-		t.Fatalf("save report=%#v replayed=%t err=%v", saved, replayed, err)
+		t.Fatalf("save report=%#v replayed=%t err=%v cause=%v", saved, replayed, err, errors.Unwrap(err))
 	}
-	if _, replayed, err = repository.SaveImpactReport(ctx, report); err != nil || !replayed {
+	if _, replayed, err = testCase.saveImpactWithAudit(ctx, report, firstAuditKey, testCase.audit); err != nil || !replayed {
 		t.Fatalf("report replay=%t err=%v", replayed, err)
+	}
+	if _, replayed, err = testCase.saveImpactWithAudit(ctx, report, "timeline-impact-replay-second", testCase.audit); err != nil || !replayed {
+		t.Fatalf("report second audit replay=%t err=%v", replayed, err)
 	}
 	loaded, err := repository.GetImpactReportByID(ctx, fixture.workspaceID, report.ID)
 	if err != nil || loaded.Fingerprint != fingerprint || loaded.SourceEventRef != newer.SourceEventRef {
 		t.Fatalf("loaded=%#v err=%v", loaded, err)
 	}
+	var auditRows int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM ops.audit_event
+WHERE workspace_id=$1 AND action='IMPACT_ANALYZED' AND resource_ref=$2`, string(fixture.workspaceID), string(report.ID)).Scan(&auditRows); err != nil {
+		t.Fatal(err)
+	}
+	if auditRows != 2 {
+		t.Fatalf("impact audit rows=%d want 2", auditRows)
+	}
 }
 
-func TestImpactReportV2SupersedesV1AndDerivesSuccessor(t *testing.T) {
-	repository, tx, ctx := integrationRepository(t)
+func testImpactReportV2SupersedesV1AndDerivesSuccessor(t *testing.T, testCase timelineIntegrationCase) {
+	repository, tx, ctx := testCase.repository, testCase.pool, testCase.ctx
 	fixture := seedProvenance(t, ctx, tx, "timeline-impact-v2-supersession")
 	now := time.Now().UTC().Add(time.Minute).Truncate(time.Microsecond)
 	aggregateID := newID(t)
@@ -141,8 +328,8 @@ FROM ops.impact_report WHERE workspace_id=$1 AND id=$2`, string(fixture.workspac
 	}
 }
 
-func TestImpactReportV2RequiresMatchingV1Predecessor(t *testing.T) {
-	repository, tx, ctx := integrationRepository(t)
+func testImpactReportV2RequiresMatchingV1Predecessor(t *testing.T, testCase timelineIntegrationCase) {
+	repository, tx, ctx := testCase.repository, testCase.pool, testCase.ctx
 	fixture := seedProvenance(t, ctx, tx, "timeline-impact-v2-predecessor")
 	now := time.Now().UTC().Add(time.Minute).Truncate(time.Microsecond)
 	event := timelineIntegrationEvent(newID(t), fixture.workspaceID, newID(t), "impact:v2-predecessor", now)
@@ -203,8 +390,8 @@ WHERE workspace_id=$1 AND source_event_id=$2 AND analysis_version='impact-analys
 	}
 }
 
-func TestTimelineRepositoryListImpactObjectsRejectsMoreThan500Candidates(t *testing.T) {
-	repository, tx, ctx := integrationRepository(t)
+func testTimelineRepositoryListImpactObjectsRejectsMoreThan500Candidates(t *testing.T, testCase timelineIntegrationCase) {
+	repository, tx, ctx := testCase.repository, testCase.pool, testCase.ctx
 	fixture := seedProvenance(t, ctx, tx, "timeline-impact-object-limit")
 	now := time.Now().UTC().Add(time.Minute).Truncate(time.Microsecond)
 	claimID := newID(t)
@@ -240,8 +427,8 @@ func TestTimelineRepositoryListImpactObjectsRejectsMoreThan500Candidates(t *test
 	}
 }
 
-func TestImpactReportV2ConcurrentCreateReplaysOneWinner(t *testing.T) {
-	repository, pool, ctx := integrationPoolRepository(t)
+func testImpactReportV2ConcurrentCreateReplaysOneWinner(t *testing.T, testCase timelineIntegrationCase) {
+	repository, pool, ctx := testCase.repository, testCase.pool, testCase.ctx
 	fixture := seedProvenance(t, ctx, pool, "timeline-impact-v2-concurrent")
 	now := time.Now().UTC().Add(time.Minute).Truncate(time.Microsecond)
 	event := timelineIntegrationEvent(newID(t), fixture.workspaceID, newID(t), "impact:v2-concurrent", now)
@@ -273,10 +460,7 @@ func TestImpactReportV2ConcurrentCreateReplaysOneWinner(t *testing.T) {
 			GeneratedAt: at, CreatedAt: at, Version: 1,
 		}
 	}
-	secondRepository, err := NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
+	secondRepository := testCase.openRepository(t)
 	type result struct {
 		report   domain.ImpactReport
 		replayed bool
@@ -286,14 +470,14 @@ func TestImpactReportV2ConcurrentCreateReplaysOneWinner(t *testing.T) {
 	results := make(chan result, 2)
 	var workers sync.WaitGroup
 	for _, candidate := range []struct {
-		repository *Repository
+		repository timelineIntegrationRepository
 		report     domain.ImpactReport
 	}{
 		{repository: repository, report: makeReport(newID(t), now.Add(time.Second))},
 		{repository: secondRepository, report: makeReport(newID(t), now.Add(2*time.Second))},
 	} {
 		workers.Add(1)
-		go func(candidateRepository *Repository, candidateReport domain.ImpactReport) {
+		go func(candidateRepository timelineIntegrationRepository, candidateReport domain.ImpactReport) {
 			defer workers.Done()
 			<-start
 			persisted, replayed, saveErr := candidateRepository.SaveImpactReport(ctx, candidateReport)
@@ -339,8 +523,8 @@ WHERE workspace_id=$1 AND source_event_ref LIKE $2`, string(fixture.workspaceID)
 	}
 }
 
-func TestImpactReportV2RejectsIncompleteSelectorMarkerWithoutWrites(t *testing.T) {
-	repository, tx, ctx := integrationRepository(t)
+func testImpactReportV2RejectsIncompleteSelectorMarkerWithoutWrites(t *testing.T, testCase timelineIntegrationCase) {
+	repository, tx, ctx := testCase.repository, testCase.pool, testCase.ctx
 	fixture := seedProvenance(t, ctx, tx, "timeline-impact-v2-not-ready")
 	now := time.Now().UTC().Add(time.Minute).Truncate(time.Microsecond)
 	aggregateID := newID(t)
@@ -348,15 +532,23 @@ func TestImpactReportV2RejectsIncompleteSelectorMarkerWithoutWrites(t *testing.T
 	if _, replayed, err := repository.AppendEvent(ctx, event); err != nil || replayed {
 		t.Fatalf("append source event replayed=%t err=%v", replayed, err)
 	}
-	if _, err := tx.Exec(ctx, `SET LOCAL session_replication_role = replica`); err != nil {
+	setupTx, err := tx.Begin(ctx)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE learning.artifact_citation_selector_backfill
+	defer func() { _ = setupTx.Rollback(context.Background()) }()
+	if _, err := setupTx.Exec(ctx, `SET LOCAL session_replication_role = replica`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := setupTx.Exec(ctx, `UPDATE learning.artifact_citation_selector_backfill
 SET status='PENDING',completed_at=NULL,version=version+1,updated_at=updated_at+interval '1 microsecond'
 WHERE workspace_id=$1`, string(fixture.workspaceID)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.Exec(ctx, `SET LOCAL session_replication_role = origin`); err != nil {
+	if _, err := setupTx.Exec(ctx, `SET LOCAL session_replication_role = origin`); err != nil {
+		t.Fatal(err)
+	}
+	if err := setupTx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
 	ready, err := repository.ImpactAnalysisReady(ctx, fixture.workspaceID)
@@ -388,23 +580,28 @@ WHERE workspace_id=$1`, string(fixture.workspaceID)); err != nil {
 	}
 }
 
-func TestTimelineRepositoryListsOwnerBackedImpactFromExactProvenanceAndRejectsStaleSnapshot(t *testing.T) {
-	repository, tx, ctx := integrationRepository(t)
-	first := seedProvenance(t, ctx, tx, "timeline-owner-impact-first")
-	second := seedProvenanceForWorkspace(t, ctx, tx, first.workspaceID, "timeline-owner-impact-second", true)
+func testTimelineRepositoryListsOwnerBackedImpactFromExactProvenanceAndRejectsStaleSnapshot(t *testing.T, testCase timelineIntegrationCase) {
+	repository, pool, ctx := testCase.repository, testCase.pool, testCase.ctx
+	first := seedProvenance(t, ctx, pool, "timeline-owner-impact-first")
+	second := seedProvenanceForWorkspace(t, ctx, pool, first.workspaceID, "timeline-owner-impact-second", true)
 	now := time.Now().UTC().Add(time.Minute).Truncate(time.Microsecond)
+	seedTx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = seedTx.Rollback(context.Background()) }()
 
 	insertClaim := func(id foundation.ID, fixture provenanceFixture, label string) string {
 		t.Helper()
 		evidenceHash := testHash("timeline-owner-impact-claim-source-" + label)
-		if _, err := tx.Exec(ctx, `INSERT INTO core.claim(
+		if _, err := seedTx.Exec(ctx, `INSERT INTO core.claim(
 id,workspace_id,statement,normalized_statement,applicability,applicability_schema_version,applicability_hash,
 status,confidence_score,confidence_factors,fingerprint,version,created_at,updated_at
 ) VALUES($1,$2,$3,$3,'{}','knowledge-applicability/v1',$4,'SUGGESTED',0.9,'{}',$5,1,$6,$6)`,
 			string(id), string(first.workspaceID), "Timeline owner impact claim "+label, testHash("timeline-owner-impact-applicability-"+label), testHash("timeline-owner-impact-claim-"+label), now); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO core.claim_source(
+		if _, err := seedTx.Exec(ctx, `INSERT INTO core.claim_source(
 id,workspace_id,claim_id,source_version_id,source_span_id,support_type,reason,evidence_hash,created_at
 ) VALUES($1,$2,$3,$4,$5,'SUPPORTS',$6,$7,$8)`,
 			string(newID(t)), string(first.workspaceID), string(id), string(fixture.sourceVersionID), string(fixture.sourceSpanID), "timeline owner impact provenance", evidenceHash, now); err != nil {
@@ -418,14 +615,14 @@ id,workspace_id,claim_id,source_version_id,source_span_id,support_type,reason,ev
 	insertClaim(claimB, first, "b")
 	claimCEvidenceHash := insertClaim(claimC, second, "c")
 	relationID := newID(t)
-	if _, err := tx.Exec(ctx, `INSERT INTO core.relation(
+	if _, err := seedTx.Exec(ctx, `INSERT INTO core.relation(
 id,workspace_id,source_node_type,source_node_id,target_node_type,target_node_id,relation_type,status,
 fingerprint,version,created_at,updated_at
 ) VALUES($1,$2,'CLAIM',$3,'CLAIM',$4,'CITES','SUGGESTED',$5,1,$6,$6)`,
 		string(relationID), string(first.workspaceID), string(claimA), string(claimB), testHash("timeline-owner-impact-relation"), now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO core.relation_evidence(
+	if _, err := seedTx.Exec(ctx, `INSERT INTO core.relation_evidence(
 id,workspace_id,relation_id,source_version_id,source_span_id,reason,evidence_hash,
 applicability,applicability_schema_version,applicability_hash,confirmation_method,confirmed_by,created_at
 ) VALUES($1,$2,$3,$4,$5,$6,$7,'{}','knowledge-applicability/v1',$8,'SOURCE_DERIVED',$9,$10)`,
@@ -438,14 +635,14 @@ applicability,applicability_schema_version,applicability_hash,confirmation_metho
 		t.Helper()
 		artifactID, revisionID := newID(t), newID(t)
 		contentHash := testHash("timeline-owner-impact-artifact-" + label)
-		if _, err := tx.Exec(ctx, `INSERT INTO learning.artifact(
+		if _, err := seedTx.Exec(ctx, `INSERT INTO learning.artifact(
 id,workspace_id,artifact_type,title,scope,status,version,created_at,updated_at,
 domain_schema_version,scope_definition,source_coverage,current_revision_id
 ) VALUES($1,$2,'CUSTOM',$3,'{}','DRAFT',1,$4,$4,'artifact/v1','workspace','[]',$5)`,
 			string(artifactID), string(first.workspaceID), "Timeline owner impact artifact "+label, now, string(revisionID)); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO learning.artifact_revision(
+		if _, err := seedTx.Exec(ctx, `INSERT INTO learning.artifact_revision(
 id,artifact_id,workspace_id,revision_no,status,outline,sections,coverage,missing,conflicts,content_markdown,provenance,created_at,
 domain_schema_version,content_hash,created_by_type,generation_metadata
 ) VALUES($1,$2,$3,1,'SNAPSHOT','[]','[]','[]','[]','[]','', '{}',$4,
@@ -453,7 +650,7 @@ domain_schema_version,content_hash,created_by_type,generation_metadata
 			string(revisionID), string(artifactID), string(first.workspaceID), now, contentHash); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO learning.artifact_revision_citation_selector(
+		if _, err := seedTx.Exec(ctx, `INSERT INTO learning.artifact_revision_citation_selector(
 workspace_id,artifact_id,revision_id,source_version_id,source_span_id
 ) VALUES($1,$2,$3,$4,$5)`,
 			string(first.workspaceID), string(artifactID), string(revisionID), string(fixture.sourceVersionID), string(fixture.sourceSpanID)); err != nil {
@@ -465,7 +662,7 @@ workspace_id,artifact_id,revision_id,source_version_id,source_span_id
 	artifactB, _, artifactBHash := insertArtifact(second, "b")
 
 	deckID := newID(t)
-	if _, err := tx.Exec(ctx, `INSERT INTO learning.review_deck(
+	if _, err := seedTx.Exec(ctx, `INSERT INTO learning.review_deck(
 id,workspace_id,name,scope,status,daily_limit,scheduler_version,version,created_at,updated_at
 ) VALUES($1,$2,$3,'{}','ACTIVE',20,'fsrs/v1',1,$4,$4)`, string(deckID), string(first.workspaceID), "Timeline owner impact deck", now); err != nil {
 		t.Fatal(err)
@@ -480,12 +677,19 @@ id,workspace_id,name,scope,status,daily_limit,scheduler_version,version,created_
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO learning.review_card(
+		if _, err := seedTx.Exec(ctx, `INSERT INTO learning.review_card(
 id,workspace_id,deck_id,claim_id,question,answer_points,evidence,card_type,difficulty,status,
 fingerprint,model_version,version,created_at,updated_at
 ) VALUES($1,$2,$3,$4,$5,'["answer"]',$6::jsonb,'SHORT_ANSWER',0.5,$7,$8,'manual',1,$9,$9)`,
 			string(cardID), string(first.workspaceID), string(deckID), string(claimID), "Timeline owner impact card "+label, string(evidence), status, testHash("timeline-owner-impact-card-"+label), now); err != nil {
 			t.Fatal(err)
+		}
+		if status == "APPROVED" {
+			if _, err := seedTx.Exec(ctx, `INSERT INTO learning.review_schedule(
+card_id,workspace_id,due_at,interval_days,stability,difficulty,last_reviewed_at,scheduler_version,paused,version
+) VALUES($1,$2,$3,0,0,0.5,NULL,'fsrs/v1',false,1)`, string(cardID), string(first.workspaceID), now); err != nil {
+				t.Fatal(err)
+			}
 		}
 		return cardID
 	}
@@ -505,12 +709,20 @@ fingerprint,model_version,version,created_at,updated_at
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO learning.review_card(
+	if _, err := seedTx.Exec(ctx, `INSERT INTO learning.review_card(
 	id,workspace_id,deck_id,claim_id,question,answer_points,evidence,card_type,difficulty,status,
 	fingerprint,model_version,version,created_at,updated_at
 ) VALUES($1,$2,$3,$4,$5,'["answer"]',$6::jsonb,'SHORT_ANSWER',0.5,'APPROVED',$7,'manual',1,$8,$8)`,
 		string(crossPairCard), string(first.workspaceID), string(deckID), string(claimC), "Timeline owner impact cross-pair card",
 		string(crossPairEvidence), testHash("timeline-owner-impact-card-cross-pair"), now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := seedTx.Exec(ctx, `INSERT INTO learning.review_schedule(
+card_id,workspace_id,due_at,interval_days,stability,difficulty,last_reviewed_at,scheduler_version,paused,version
+) VALUES($1,$2,$3,0,0,0.5,NULL,'fsrs/v1',false,1)`, string(crossPairCard), string(first.workspaceID), now); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedTx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
 
@@ -557,7 +769,7 @@ fingerprint,model_version,version,created_at,updated_at
 		t.Fatal(err)
 	}
 	newRevisionID := newID(t)
-	if _, err := tx.Exec(ctx, `INSERT INTO learning.artifact_revision(
+	if _, err := pool.Exec(ctx, `INSERT INTO learning.artifact_revision(
 id,artifact_id,workspace_id,revision_no,status,outline,sections,coverage,missing,conflicts,content_markdown,provenance,created_at,
 domain_schema_version,content_hash,created_by_type,generation_metadata
 ) VALUES($1,$2,$3,2,'SNAPSHOT','[]','[]','[]','[]','[]','', '{}',$4,
@@ -565,7 +777,7 @@ domain_schema_version,content_hash,created_by_type,generation_metadata
 		string(newRevisionID), string(artifactA), string(first.workspaceID), now.Add(time.Second), testHash("timeline-owner-impact-artifact-a-next")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE learning.artifact
+	if _, err := pool.Exec(ctx, `UPDATE learning.artifact
 SET current_revision_id=$1,version=version+1,updated_at=$2
 WHERE workspace_id=$3 AND id=$4`, string(newRevisionID), now.Add(time.Second), string(first.workspaceID), string(artifactA)); err != nil {
 		t.Fatal(err)
@@ -580,7 +792,7 @@ WHERE workspace_id=$3 AND id=$4`, string(newRevisionID), now.Add(time.Second), s
 		t.Fatalf("stale owner snapshot save err=%v", err)
 	}
 	var reportCount int
-	if err := tx.QueryRow(ctx, `SELECT count(*) FROM ops.impact_report WHERE workspace_id=$1 AND source_event_id=$2 AND analysis_version='impact-analysis/v2'`, string(first.workspaceID), string(event.ID)).Scan(&reportCount); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM ops.impact_report WHERE workspace_id=$1 AND source_event_id=$2 AND analysis_version='impact-analysis/v2'`, string(first.workspaceID), string(event.ID)).Scan(&reportCount); err != nil {
 		t.Fatal(err)
 	}
 	if reportCount != 0 {
@@ -588,8 +800,8 @@ WHERE workspace_id=$3 AND id=$4`, string(newRevisionID), now.Add(time.Second), s
 	}
 }
 
-func TestImpactReportAndTimelineOutboxRollBackWhenTransactionalAuditFails(t *testing.T) {
-	repository, tx, ctx := integrationRepository(t)
+func testImpactReportAndTimelineOutboxRollBackWhenTransactionalAuditFails(t *testing.T, testCase timelineIntegrationCase) {
+	repository, tx, ctx := testCase.repository, testCase.pool, testCase.ctx
 	fixture := seedProvenance(t, ctx, tx, "timeline-impact-audit-rollback")
 	now := time.Now().UTC().Add(time.Minute).Truncate(time.Microsecond)
 	aggregateID := newID(t)
@@ -607,7 +819,7 @@ func TestImpactReportAndTimelineOutboxRollBackWhenTransactionalAuditFails(t *tes
 		Summary: domain.SummarizeImpactObjects(nil), Fingerprint: fingerprint, GeneratedAt: now, CreatedAt: now, Version: 1,
 	}
 	auditFailure := errors.New("injected transactional audit failure")
-	if _, _, err := repository.SaveImpactReportWithAudit(ctx, report, "audit-rollback", impactAuditFailureStub{err: auditFailure}); !errors.Is(err, auditFailure) {
+	if _, _, err := testCase.saveImpactWithAudit(ctx, report, "audit-rollback", impactAuditFailureStub{err: auditFailure}); !errors.Is(err, auditFailure) {
 		t.Fatalf("atomic impact save error=%v", err)
 	}
 	if _, found, err := repository.GetImpactReport(ctx, fixture.workspaceID, event.ID, domain.ImpactAnalysisVersionV1); err != nil || found {
@@ -633,8 +845,12 @@ func (stub impactAuditFailureStub) RecordImpactAnalysisTx(context.Context, any, 
 	return stub.err
 }
 
-func TestTimelineRepositoryListImpactObjectsKeepsActionsReadOnly(t *testing.T) {
-	repository, pool, ctx := integrationPoolRepository(t)
+func (stub impactAuditFailureStub) RecordImpactAnalysisScoped(context.Context, foundation.TransactionScope, knowledgeapp.ImpactAuditRecord) error {
+	return stub.err
+}
+
+func testTimelineRepositoryListImpactObjectsKeepsActionsReadOnly(t *testing.T, testCase timelineIntegrationCase) {
+	repository, pool, ctx := testCase.repository, testCase.pool, testCase.ctx
 	fixture, err := graphtestfixture.SeedFunctional(ctx, pool)
 	if err != nil {
 		t.Fatal(err)
@@ -751,8 +967,8 @@ FROM core.claim WHERE workspace_id=$1 AND id=ANY($2::uuid[])`, string(fixture.Wo
 	}
 }
 
-func TestTimelineProjectionOutboxConnectsProposalConflictAndImpact(t *testing.T) {
-	repository, pool, ctx := integrationPoolRepository(t)
+func testTimelineProjectionOutboxConnectsProposalConflictAndImpact(t *testing.T, testCase timelineIntegrationCase) {
+	repository, pool, ctx := testCase.repository, testCase.pool, testCase.ctx
 	dispatcher, err := knowledgeapp.NewTimelineProjectionDispatcher(repository)
 	if err != nil {
 		t.Fatal(err)
@@ -849,8 +1065,8 @@ VALUES($1,$2,'ready_for_review','LOW',$3,$4,$5,$5)`,
 	}
 }
 
-func TestTimelineProjectionPersistsPoisonWithoutWritingKnowledgeEvent(t *testing.T) {
-	repository, pool, ctx := integrationPoolRepository(t)
+func testTimelineProjectionPersistsPoisonWithoutWritingKnowledgeEvent(t *testing.T, testCase timelineIntegrationCase) {
+	repository, pool, ctx := testCase.repository, testCase.pool, testCase.ctx
 	dispatcher, err := knowledgeapp.NewTimelineProjectionDispatcher(repository)
 	if err != nil {
 		t.Fatal(err)
@@ -884,8 +1100,8 @@ VALUES($1,$2,$3,'CONFLICT_OPENED','CONFLICT',$4,'poison:unknown-correlation','co
 	}
 }
 
-func TestTimelineProjectionV2PersistsOwnerBindingAndReplays(t *testing.T) {
-	repository, pool, ctx := integrationPoolRepository(t)
+func testTimelineProjectionV2PersistsOwnerBindingAndReplays(t *testing.T, testCase timelineIntegrationCase) {
+	repository, pool, ctx := testCase.repository, testCase.pool, testCase.ctx
 	drainTimelineProjectionQueue(t, ctx, mustTimelineDispatcher(t, repository))
 	fixture := seedProvenance(t, ctx, pool, "timeline-projector-v2")
 	now := time.Now().UTC().Add(time.Minute).Truncate(time.Microsecond)
@@ -989,8 +1205,8 @@ WHERE workspace_id=$1 AND source_event_ref=$2`, string(event.WorkspaceID), event
 	}
 }
 
-func TestTimelineProjectionV2PoisonsMalformedOwnerAndOperator(t *testing.T) {
-	repository, tx, ctx := integrationRepository(t)
+func testTimelineProjectionV2PoisonsMalformedOwnerAndOperator(t *testing.T, testCase timelineIntegrationCase) {
+	repository, tx, ctx := testCase.repository, testCase.pool, testCase.ctx
 	drainTimelineProjectionQueue(t, ctx, mustTimelineDispatcher(t, repository))
 	fixture := seedProvenance(t, ctx, tx, "timeline-projector-v2-poison")
 	now := time.Now().UTC().Add(time.Minute).Truncate(time.Microsecond)
@@ -1047,8 +1263,8 @@ VALUES($1,$2,$3,'ARTIFACT_GENERATED','ARTIFACT',$4,$5,$6,1,'knowledge-event/v2',
 	}
 }
 
-func TestTimelineProjectionTwoDispatchersSkipLockedAndPersistExactlyOneEvent(t *testing.T) {
-	repository, pool, ctx := integrationPoolRepository(t)
+func testTimelineProjectionTwoDispatchersSkipLockedAndPersistExactlyOneEvent(t *testing.T, testCase timelineIntegrationCase) {
+	repository, pool, ctx := testCase.repository, testCase.pool, testCase.ctx
 	drainTimelineProjectionQueue(t, ctx, mustTimelineDispatcher(t, repository))
 	fixture := seedProvenance(t, ctx, pool, "timeline-projector-concurrent")
 	now := time.Now().UTC().Add(time.Minute).Truncate(time.Microsecond)
@@ -1080,10 +1296,7 @@ WHERE id=$1 FOR UPDATE SKIP LOCKED`, string(sourceID)).Scan(&lockedID); err != n
 		t.Fatal(err)
 	}
 
-	secondRepository, err := NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
+	secondRepository := testCase.openRepository(t)
 	start := make(chan struct{})
 	type dispatchResult struct {
 		result knowledgeapp.TimelineProjectionResult
@@ -1092,9 +1305,9 @@ WHERE id=$1 FOR UPDATE SKIP LOCKED`, string(sourceID)).Scan(&lockedID); err != n
 	}
 	results := make(chan dispatchResult, 2)
 	var workers sync.WaitGroup
-	for _, dispatcher := range []*Repository{repository, secondRepository} {
+	for _, dispatcher := range []knowledgeapp.TimelineProjectionPort{repository, secondRepository} {
 		workers.Add(1)
-		go func(projector *Repository) {
+		go func(projector knowledgeapp.TimelineProjectionPort) {
 			defer workers.Done()
 			<-start
 			result, found, projectErr := projector.ProjectNext(ctx)
@@ -1139,7 +1352,47 @@ WHERE workspace_id=$1 AND source_event_ref=$2`, fixture.workspaceID, "concurrent
 	}
 }
 
-func mustTimelineDispatcher(t *testing.T, repository *Repository) *knowledgeapp.TimelineProjectionDispatcher {
+func testTimelineRepositoryReturnsConnections(t *testing.T, testCase timelineIntegrationCase) {
+	repository, pool, ctx := testCase.repository, testCase.pool, testCase.ctx
+	fixture := seedProvenance(t, ctx, pool, "timeline-connection-resources")
+	now := time.Now().UTC().Add(time.Minute).Truncate(time.Microsecond)
+	event := timelineIntegrationEvent(newID(t), fixture.workspaceID, newID(t), "timeline:connection-resources", now)
+	if _, replayed, err := repository.AppendEvent(ctx, event); err != nil || replayed {
+		t.Fatalf("append connection event replayed=%t err=%v", replayed, err)
+	}
+	for iteration := 0; iteration < 20; iteration++ {
+		page, err := repository.ListEvents(ctx, domain.TimelineQuery{
+			WorkspaceID: fixture.workspaceID,
+			Filter:      domain.TimelineFilter{SourceEventRef: event.SourceEventRef},
+			Limit:       1,
+		})
+		if err != nil || len(page.Items) != 1 || page.Items[0].ID != event.ID {
+			t.Fatalf("connection page iteration=%d page=%#v err=%v", iteration, page, err)
+		}
+		if _, err := repository.GetEvent(ctx, fixture.workspaceID, event.ID); err != nil {
+			t.Fatalf("connection event iteration=%d err=%v", iteration, err)
+		}
+		if _, _, err := repository.GetImpactReport(ctx, fixture.workspaceID, event.ID, domain.ImpactAnalysisVersionV2); err != nil {
+			t.Fatalf("connection report iteration=%d err=%v", iteration, err)
+		}
+	}
+	database, err := testCase.platform.GORM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlDB, err := database.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats := sqlDB.Stats(); stats.InUse != 0 {
+		t.Fatalf("GORM connections still in use=%d", stats.InUse)
+	}
+	if acquired := pool.Stat().AcquiredConns(); acquired != 0 {
+		t.Fatalf("pgx connections still acquired=%d", acquired)
+	}
+}
+
+func mustTimelineDispatcher(t *testing.T, repository knowledgeapp.TimelineProjectionPort) *knowledgeapp.TimelineProjectionDispatcher {
 	t.Helper()
 	dispatcher, err := knowledgeapp.NewTimelineProjectionDispatcher(repository)
 	if err != nil {
@@ -1162,13 +1415,17 @@ func drainTimelineProjectionQueue(t *testing.T, ctx context.Context, dispatcher 
 	t.Fatal("timeline projection queue did not drain within 100 batches")
 }
 
-func mustTimelineEventBySource(t *testing.T, ctx context.Context, repository *Repository, workspaceID foundation.ID, sourceEventRef string) domain.KnowledgeEvent {
+func mustTimelineEventBySource(t *testing.T, ctx context.Context, repository knowledgeapp.TimelineReader, workspaceID foundation.ID, sourceEventRef string) domain.KnowledgeEvent {
 	t.Helper()
-	event, found, err := getTimelineEventBySource(ctx, repository.db, workspaceID, sourceEventRef)
-	if err != nil || !found {
-		t.Fatalf("timeline source %q found=%t err=%v", sourceEventRef, found, err)
+	page, err := repository.ListEvents(ctx, domain.TimelineQuery{
+		WorkspaceID: workspaceID,
+		Filter:      domain.TimelineFilter{SourceEventRef: sourceEventRef},
+		Limit:       1,
+	})
+	if err != nil || len(page.Items) != 1 || page.HasMore {
+		t.Fatalf("timeline source %q page=%#v err=%v", sourceEventRef, page, err)
 	}
-	return event
+	return page.Items[0]
 }
 
 func timelineIntegrationEvent(id, workspaceID, aggregateID foundation.ID, sourceEventRef string, occurredAt time.Time) domain.KnowledgeEvent {

@@ -74,21 +74,29 @@ func (d *Dispatcher) DispatchBatch(ctx context.Context, batch int) error {
 	if d == nil || nilDispatcherDependency(d.store) || nilDispatcherDependency(d.jobs) {
 		return dispatcherError(foundation.ErrorDependencyUnavailable, "REINDEX_DISPATCHER_DEPENDENCY_UNAVAILABLE", true, errors.New("dispatcher is not initialized"))
 	}
+	return dispatchBatch(ctx, batch, &d.mu, &d.next, func(ctx context.Context, path DispatchPath) (bool, error) {
+		return d.store.DispatchOne(ctx, path, d.jobs)
+	})
+}
+
+type dispatchOneFunc func(context.Context, DispatchPath) (bool, error)
+
+func dispatchBatch(ctx context.Context, batch int, mu *sync.Mutex, next *DispatchPath, dispatch dispatchOneFunc) error {
 	if ctx == nil || batch < 1 || batch > maxDispatchBatchSize {
 		return dispatcherError(foundation.ErrorInvalidInput, "REINDEX_DISPATCH_BATCH_INVALID", false, errors.New("dispatch batch is outside the supported range"))
 	}
 
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	mu.Lock()
+	defer mu.Unlock()
 	for dispatched := 0; dispatched < batch; dispatched++ {
-		path := d.next
-		found, err := d.store.DispatchOne(ctx, path, d.jobs)
+		path := *next
+		found, err := dispatch(ctx, path)
 		if err != nil {
 			return err
 		}
 		if !found {
 			path = otherDispatchPath(path)
-			found, err = d.store.DispatchOne(ctx, path, d.jobs)
+			found, err = dispatch(ctx, path)
 			if err != nil {
 				return err
 			}
@@ -96,7 +104,7 @@ func (d *Dispatcher) DispatchBatch(ctx context.Context, batch int) error {
 		if !found {
 			return nil
 		}
-		d.next = otherDispatchPath(path)
+		*next = otherDispatchPath(path)
 	}
 	return nil
 }

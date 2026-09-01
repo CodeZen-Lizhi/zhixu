@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -23,10 +24,144 @@ import (
 	knowledgepostgres "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/adapter/postgres"
 	knowledgeapplication "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/application"
 	knowledge "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+type approvedRelationApplyIntegrationRepository interface {
+	knowledgeapplication.ApprovedRelationApprovalPort
+}
+
+type approvedRelationApplyIntegrationVariant struct {
+	name string
+	open func(*testing.T, *platformpostgres.Pool, foundation.Clock, eventsdomainScopedAppender) approvedRelationApplyIntegrationRepository
+	loss func(*testing.T, *platformpostgres.Pool, foundation.Clock, eventsdomainScopedAppender, error) approvedRelationApplyIntegrationRepository
+}
+
+type eventsdomainScopedAppender interface {
+	AppendScoped(context.Context, foundation.TransactionScope, eventsdomain.AppendRequest) (eventsdomain.ServerEvent, bool, error)
+}
+
+type approvedRelationApplyIntegrationCase struct {
+	pool       *platformpostgres.Pool
+	repository approvedRelationApplyIntegrationRepository
+	fixture    approvedCandidateApplyFixture
+}
+
+func runApprovedRelationApplyIntegrationVariants(
+	t *testing.T,
+	label string,
+	events func(*testing.T, eventsdomainScopedAppender) eventsdomainScopedAppender,
+	open func(approvedRelationApplyIntegrationVariant, *testing.T, *platformpostgres.Pool, foundation.Clock, eventsdomainScopedAppender) approvedRelationApplyIntegrationRepository,
+	scenario func(*testing.T, approvedRelationApplyIntegrationCase),
+) {
+	t.Helper()
+	variants := []approvedRelationApplyIntegrationVariant{
+		{name: "legacy", open: openLegacyApprovedRelationApplyIntegrationRepository, loss: openLegacyApprovedRelationApplyCommitLossIntegrationRepository},
+		{name: "gorm", open: openGORMApprovedRelationApplyIntegrationRepository, loss: openGORMApprovedRelationApplyCommitLossIntegrationRepository},
+	}
+	for _, variant := range variants {
+		variant := variant
+		t.Run(variant.name, func(t *testing.T) {
+			fixture := testdb.Require(t, testdb.Config{
+				ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
+				Availability:     testdb.FailWhenUnavailable,
+				MaxConns:         16,
+			})
+			platform := fixture.Pool()
+			if platform == nil || platform.DB() == nil {
+				t.Fatal("Relation Apply fixture did not provide a shared platform pool")
+			}
+			seed := prepareCommittedCandidateApplyProposal(t, platform, label+"-"+variant.name)
+			appender, err := eventspostgres.NewGORMStore(platform)
+			if err != nil {
+				t.Fatalf("NewGORMStore from Relation Apply pool: %v", err)
+			}
+			if events != nil {
+				appender = events(t, appender).(*eventspostgres.GORMStore)
+			}
+			clock := foundation.FixedClock{Value: seed.now.Add(3 * time.Second)}
+			repository := open(variant, t, platform, clock, appender)
+			scenario(t, approvedRelationApplyIntegrationCase{pool: platform, repository: repository, fixture: seed})
+		})
+	}
+}
+
+func openLegacyApprovedRelationApplyIntegrationRepository(
+	t *testing.T,
+	platform *platformpostgres.Pool,
+	clock foundation.Clock,
+	_ eventsdomainScopedAppender,
+) approvedRelationApplyIntegrationRepository {
+	t.Helper()
+	events, err := eventspostgres.NewStore(platform.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := knowledgepostgres.NewApprovedRelationApplyRepository(platform.DB(), foundation.NewUUIDGenerator(nil), clock, events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return repository
+}
+
+func openGORMApprovedRelationApplyIntegrationRepository(
+	t *testing.T,
+	platform *platformpostgres.Pool,
+	clock foundation.Clock,
+	events eventsdomainScopedAppender,
+) approvedRelationApplyIntegrationRepository {
+	t.Helper()
+	repository, err := knowledgepostgres.NewGORMApprovedRelationApplyRepository(platform, foundation.NewUUIDGenerator(nil), clock, events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return repository
+}
+
+func openLegacyApprovedRelationApplyCommitLossIntegrationRepository(
+	t *testing.T,
+	platform *platformpostgres.Pool,
+	clock foundation.Clock,
+	_ eventsdomainScopedAppender,
+	loss error,
+) approvedRelationApplyIntegrationRepository {
+	t.Helper()
+	events, err := eventspostgres.NewStore(platform.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := knowledgepostgres.NewApprovedRelationApplyRepository(
+		candidateConfirmCommitLossBeginner{Tx: platform.DB(), err: loss}, foundation.NewUUIDGenerator(nil), clock, events,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return repository
+}
+
+func openGORMApprovedRelationApplyCommitLossIntegrationRepository(
+	t *testing.T,
+	platform *platformpostgres.Pool,
+	clock foundation.Clock,
+	events eventsdomainScopedAppender,
+	loss error,
+) approvedRelationApplyIntegrationRepository {
+	t.Helper()
+	repository, err := knowledgepostgres.NewGORMApprovedRelationApplyRepository(platform, foundation.NewUUIDGenerator(nil), clock, events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unitOfWork, err := platform.UnitOfWork()
+	if err != nil {
+		t.Fatal(err)
+	}
+	setGORMRelationApplyUnitOfWork(t, repository, &relationApplyPostCommitErrorUnitOfWork{delegate: unitOfWork, err: loss})
+	return repository
+}
 
 func TestApprovedCandidateAppliesOneConfirmedRelationAndExactlyReplays(t *testing.T) {
 	fixture := prepareApprovedCandidateApply(t, "approved-apply")

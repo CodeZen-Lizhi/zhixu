@@ -71,7 +71,7 @@ func TestFunctionalFixtureCommitsAndCleansCanonicalFacts(t *testing.T) {
 	unmarkedRoot := "/tmp/not-a-graph-fixture-" + string(unmarkedWorkspaceID)
 	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(
 		id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at
-	) VALUES($1,'not-a-graph-fixture',$2,$2,$3,'test',1,$3,$3)`,
+	) VALUES($1,'not-a-graph-fixture',$2,$2,$3,'inactive',1,$3,$3)`,
 		string(unmarkedWorkspaceID), unmarkedRoot, time.Now().UTC(),
 	); err != nil {
 		t.Fatal(err)

@@ -8,21 +8,122 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	knowledgeapp "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+type knowledgeCoreIntegrationRepository interface {
+	domain.Repository
+	knowledgeapp.EvidenceTopicRepository
+}
+
+type knowledgeCoreIntegrationVariant struct {
+	name           string
+	open           func(*testing.T, *platformpostgres.Pool) knowledgeCoreIntegrationRepository
+	openCommitLoss func(*testing.T, *platformpostgres.Pool) knowledgeCoreIntegrationRepository
+}
+
+type knowledgeCoreIntegrationCase struct {
+	repository knowledgeCoreIntegrationRepository
+	pool       *pgxpool.Pool
+	platform   *platformpostgres.Pool
+	variant    knowledgeCoreIntegrationVariant
+	ctx        context.Context
+}
+
+func runKnowledgeCoreIntegrationVariants(t *testing.T, scenario func(*testing.T, knowledgeCoreIntegrationCase)) {
+	t.Helper()
+	variants := []knowledgeCoreIntegrationVariant{
+		{name: "legacy", open: openLegacyKnowledgeCoreIntegrationRepository, openCommitLoss: openLegacyKnowledgeCoreCommitLossRepository},
+		{name: "gorm", open: openGORMKnowledgeCoreIntegrationRepository, openCommitLoss: openGORMKnowledgeCoreCommitLossRepository},
+	}
+	for _, variant := range variants {
+		variant := variant
+		t.Run(variant.name, func(t *testing.T) {
+			fixture := testdb.Require(t, testdb.Config{
+				ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
+				Availability:     testdb.FailWhenUnavailable,
+				MaxConns:         16,
+			})
+			platform := fixture.Pool()
+			if platform == nil || platform.DB() == nil {
+				t.Fatal("Knowledge PostgreSQL fixture did not provide a shared platform pool")
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+			defer cancel()
+			scenario(t, knowledgeCoreIntegrationCase{
+				repository: variant.open(t, platform),
+				pool:       platform.DB(),
+				platform:   platform,
+				variant:    variant,
+				ctx:        ctx,
+			})
+		})
+	}
+}
+
+func openLegacyKnowledgeCoreIntegrationRepository(t *testing.T, platform *platformpostgres.Pool) knowledgeCoreIntegrationRepository {
+	t.Helper()
+	repository, err := NewRepository(platform.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return repository
+}
+
+func openGORMKnowledgeCoreIntegrationRepository(t *testing.T, platform *platformpostgres.Pool) knowledgeCoreIntegrationRepository {
+	t.Helper()
+	repository, err := NewGORMRepository(platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return repository
+}
+
+func openLegacyKnowledgeCoreCommitLossRepository(t *testing.T, platform *platformpostgres.Pool) knowledgeCoreIntegrationRepository {
+	t.Helper()
+	repository, err := NewRepository(commitResponseLossDB{pool: platform.DB()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return repository
+}
+
+func openGORMKnowledgeCoreCommitLossRepository(t *testing.T, platform *platformpostgres.Pool) knowledgeCoreIntegrationRepository {
+	t.Helper()
+	repository, err := NewGORMRepository(platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unitOfWork, err := platform.UnitOfWork()
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository.unitOfWork = &commitResponseLossUnitOfWork{delegate: unitOfWork}
+	return repository
+}
+
 func TestRepositoryKnowledgeLifecycleReplayAndEvidenceHistory(t *testing.T) {
-	repository, tx, ctx := integrationRepository(t)
+	runKnowledgeCoreIntegrationVariants(t, testRepositoryKnowledgeLifecycleReplayAndEvidenceHistory)
+}
+
+func testRepositoryKnowledgeLifecycleReplayAndEvidenceHistory(t *testing.T, testCase knowledgeCoreIntegrationCase) {
+	repository, tx, ctx := testCase.repository, testCase.pool, testCase.ctx
 	primary := seedProvenance(t, ctx, tx, "primary")
 	other := seedProvenance(t, ctx, tx, "other")
 	alternate := seedProvenanceForWorkspace(t, ctx, tx, primary.workspaceID, "primary-alternate", true)
@@ -33,7 +134,9 @@ func TestRepositoryKnowledgeLifecycleReplayAndEvidenceHistory(t *testing.T) {
 	topic := newTopic(t, primary.workspaceID, "Go 并发", now)
 	topicRequestHash := testHash("topic-create")
 	createdTopic, err := repository.CreateTopic(ctx, domain.CreateTopicRecord{Topic: topic, IdempotencyKey: "topic-create", RequestHash: topicRequestHash})
-	if err != nil || createdTopic.Replayed || createdTopic.Topic.ID != topic.ID || len(createdTopic.Topic.Aliases) != 1 {
+	if err != nil || createdTopic.Replayed || createdTopic.Topic.ID != topic.ID || len(createdTopic.Topic.Aliases) != 1 ||
+		!createdTopic.Topic.CreatedAt.Equal(topic.CreatedAt.Truncate(time.Microsecond)) ||
+		!createdTopic.Topic.UpdatedAt.Equal(topic.UpdatedAt.Truncate(time.Microsecond)) {
 		t.Fatalf("CreateTopic()=%#v err=%v", createdTopic, err)
 	}
 	lookup, err := repository.LookupCommandReceipt(ctx, domain.CommandReceiptQuery{
@@ -275,7 +378,11 @@ func TestRepositoryKnowledgeLifecycleReplayAndEvidenceHistory(t *testing.T) {
 }
 
 func TestRepositoryBatchWritesMultipleTopicAliasesAndSuggestedRelationEvidence(t *testing.T) {
-	repository, tx, ctx := integrationRepository(t)
+	runKnowledgeCoreIntegrationVariants(t, testRepositoryBatchWritesMultipleTopicAliasesAndSuggestedRelationEvidence)
+}
+
+func testRepositoryBatchWritesMultipleTopicAliasesAndSuggestedRelationEvidence(t *testing.T, testCase knowledgeCoreIntegrationCase) {
+	repository, tx, ctx := testCase.repository, testCase.pool, testCase.ctx
 	primary := seedProvenance(t, ctx, tx, "batch-primary")
 	alternate := seedProvenanceForWorkspace(t, ctx, tx, primary.workspaceID, "batch-alternate", true)
 	applicability := mustApplicability(t, `{"region":"cn"}`)
@@ -400,45 +507,23 @@ func TestRepositoryBatchWritesMultipleTopicAliasesAndSuggestedRelationEvidence(t
 }
 
 func TestRepositoryCommitResponseLossReplaysWithoutDuplicateSource(t *testing.T) {
-	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
-	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
-	seedTx, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fixture := seedProvenance(t, ctx, seedTx, "response-loss")
-	normalRepository, err := NewRepository(seedTx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runKnowledgeCoreIntegrationVariants(t, testRepositoryCommitResponseLossReplaysWithoutDuplicateSource)
+}
+
+func testRepositoryCommitResponseLossReplaysWithoutDuplicateSource(t *testing.T, testCase knowledgeCoreIntegrationCase) {
+	ctx, pool := testCase.ctx, testCase.pool
+	fixture := seedProvenance(t, ctx, pool, "response-loss")
+	normalRepository := testCase.repository
 	now := time.Now().UTC().Add(-time.Minute)
 	claim := suggestClaim(t, ctx, normalRepository, fixture.workspaceID, "提交成功但响应丢失", mustApplicability(t, `{}`), "response-loss-claim", now)
-	if err := seedTx.Commit(ctx); err != nil {
-		t.Fatal(err)
-	}
 	source := newClaimSource(t, fixture.workspaceID, claim.Claim.ID, fixture, now.Add(time.Second))
 	command := domain.ConfirmClaimRecord{
 		WorkspaceID: fixture.workspaceID, ClaimID: claim.Claim.ID, ExpectedVersion: 1, Source: source,
 		IdempotencyKey: "response-loss-confirm", RequestHash: testHash("response-loss-confirm"), At: now.Add(time.Second),
 	}
-	lossRepository, err := NewRepository(commitResponseLossDB{pool: pool})
-	if err != nil {
-		t.Fatal(err)
-	}
+	lossRepository := testCase.variant.openCommitLoss(t, testCase.platform)
 	if _, err := lossRepository.ConfirmClaim(ctx, command); err == nil {
 		t.Fatal("injected commit response loss returned success")
-	}
-	normalRepository, err = NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
 	}
 	replayed, err := normalRepository.ConfirmClaim(ctx, command)
 	if err != nil || !replayed.Replayed || replayed.Claim.Status != domain.ClaimStatusConfirmed || replayed.Claim.Version != 2 || len(replayed.Sources) != 1 {
@@ -457,7 +542,11 @@ func TestRepositoryCommitResponseLossReplaysWithoutDuplicateSource(t *testing.T)
 }
 
 func TestRepositoryOpenConflictIsAtomicAndReplayable(t *testing.T) {
-	repository, tx, ctx := integrationPoolRepository(t)
+	runKnowledgeCoreIntegrationVariants(t, testRepositoryOpenConflictIsAtomicAndReplayable)
+}
+
+func testRepositoryOpenConflictIsAtomicAndReplayable(t *testing.T, testCase knowledgeCoreIntegrationCase) {
+	repository, tx, ctx := testCase.repository, testCase.pool, testCase.ctx
 	fixture := seedProvenance(t, ctx, tx, "conflict")
 	applicability := mustApplicability(t, `{"release":"v1"}`)
 	now := time.Now().UTC().Add(-time.Minute)
@@ -543,7 +632,11 @@ func TestRepositoryOpenConflictIsAtomicAndReplayable(t *testing.T) {
 }
 
 func TestRepositoryEvidenceEligibilityBatchesFiveHundredWithoutNPlusOne(t *testing.T) {
-	repository, database, ctx := integrationPoolRepository(t)
+	runKnowledgeCoreIntegrationVariants(t, testRepositoryEvidenceEligibilityBatchesFiveHundredWithoutNPlusOne)
+}
+
+func testRepositoryEvidenceEligibilityBatchesFiveHundredWithoutNPlusOne(t *testing.T, testCase knowledgeCoreIntegrationCase) {
+	repository, database, ctx := testCase.repository, testCase.pool, testCase.ctx
 	primary := seedProvenance(t, ctx, database, "eligibility-primary")
 	alternate := seedProvenanceForWorkspace(t, ctx, database, primary.workspaceID, "eligibility-alternate", true)
 	applicability := mustApplicability(t, `{"release":"v1"}`)
@@ -632,7 +725,11 @@ func TestRepositoryEvidenceEligibilityBatchesFiveHundredWithoutNPlusOne(t *testi
 }
 
 func TestRepositoryResolveEvidenceTopicsUsesFormalKnowledgeAndTopicEndpoints(t *testing.T) {
-	repository, database, ctx := integrationPoolRepository(t)
+	runKnowledgeCoreIntegrationVariants(t, testRepositoryResolveEvidenceTopicsUsesFormalKnowledgeAndTopicEndpoints)
+}
+
+func testRepositoryResolveEvidenceTopicsUsesFormalKnowledgeAndTopicEndpoints(t *testing.T, testCase knowledgeCoreIntegrationCase) {
+	repository, database, ctx := testCase.repository, testCase.pool, testCase.ctx
 	primary := seedProvenance(t, ctx, database, "evidence-topic-primary")
 	relationProvenance := seedProvenanceForWorkspace(t, ctx, database, primary.workspaceID, "evidence-topic-relation", true)
 	crossWorkspace := seedProvenance(t, ctx, database, "evidence-topic-cross-workspace")
@@ -699,8 +796,14 @@ func TestRepositoryResolveEvidenceTopicsUsesFormalKnowledgeAndTopicEndpoints(t *
 		t.Fatalf("bindings=%#v", bindings)
 	}
 
+	if _, err := repository.TransitionRelation(ctx, domain.TransitionRelationRecord{
+		WorkspaceID: primary.workspaceID, RelationID: belongsTo.ID, ExpectedVersion: 2, Status: domain.RelationStatusDeprecated,
+		IdempotencyKey: "evidence-topic-relation-deprecate", RequestHash: testHash("evidence-topic-relation-deprecate"), At: now.Add(7 * time.Second),
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := database.Exec(ctx, `UPDATE core.topic SET status='DEPRECATED',version=version+1,updated_at=$3 WHERE id=$1 AND workspace_id=$2`,
-		string(createdTopic.Topic.ID), string(primary.workspaceID), now.Add(7*time.Second)); err != nil {
+		string(createdTopic.Topic.ID), string(primary.workspaceID), now.Add(8*time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	bindings, err = repository.ResolveEvidenceTopics(ctx, primary.workspaceID, requested)
@@ -710,7 +813,11 @@ func TestRepositoryResolveEvidenceTopicsUsesFormalKnowledgeAndTopicEndpoints(t *
 }
 
 func TestDatabaseConfirmedRelationRequiresMatchingConfirmationEvidence(t *testing.T) {
-	repository, pool, ctx := integrationPoolRepository(t)
+	runKnowledgeCoreIntegrationVariants(t, testDatabaseConfirmedRelationRequiresMatchingConfirmationEvidence)
+}
+
+func testDatabaseConfirmedRelationRequiresMatchingConfirmationEvidence(t *testing.T, testCase knowledgeCoreIntegrationCase) {
+	repository, pool, ctx := testCase.repository, testCase.pool, testCase.ctx
 	fixture := seedProvenance(t, ctx, pool, "relation-confirmation-guard")
 	applicability := mustApplicability(t, `{}`)
 	now := time.Now().UTC().Add(-time.Minute)
@@ -720,40 +827,21 @@ func TestDatabaseConfirmedRelationRequiresMatchingConfirmationEvidence(t *testin
 }
 
 func TestRepositoryCanonicalSymmetricRelationConcurrentReplay(t *testing.T) {
-	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
-	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
-	seedTx, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fixture := seedProvenance(t, ctx, seedTx, "symmetric")
-	repository, err := NewRepository(seedTx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runKnowledgeCoreIntegrationVariants(t, testRepositoryCanonicalSymmetricRelationConcurrentReplay)
+}
+
+func testRepositoryCanonicalSymmetricRelationConcurrentReplay(t *testing.T, testCase knowledgeCoreIntegrationCase) {
+	ctx, pool, repository := testCase.ctx, testCase.pool, testCase.repository
+	fixture := seedProvenance(t, ctx, pool, "symmetric")
 	applicability := mustApplicability(t, `{}`)
 	now := time.Now().UTC().Add(-time.Minute)
 	first := suggestClaim(t, ctx, repository, fixture.workspaceID, "相同知识 A", applicability, "symmetric-a", now)
 	second := suggestClaim(t, ctx, repository, fixture.workspaceID, "相同知识 B", applicability, "symmetric-b", now)
-	if err := seedTx.Commit(ctx); err != nil {
-		t.Fatal(err)
-	}
-	repository, err = NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
 	forward := newRelation(t, fixture.workspaceID, domain.RelationDuplicates,
 		domain.NodeRef{Type: domain.NodeTypeClaim, ID: first.Claim.ID}, domain.NodeRef{Type: domain.NodeTypeClaim, ID: second.Claim.ID}, now.Add(time.Second))
 	reverse := forward
 	reverse.ID = newID(t)
+	var err error
 	reverse.Source, reverse.Target, err = domain.CanonicalizeRelationEndpoints(domain.RelationDuplicates,
 		domain.NodeRef{Type: domain.NodeTypeClaim, ID: second.Claim.ID}, domain.NodeRef{Type: domain.NodeTypeClaim, ID: first.Claim.ID})
 	if err != nil {
@@ -788,6 +876,290 @@ func TestRepositoryCanonicalSymmetricRelationConcurrentReplay(t *testing.T) {
 	var count int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM core.relation WHERE workspace_id=$1 AND fingerprint=$2`, string(fixture.workspaceID), forward.Fingerprint).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("symmetric relation count=%d err=%v", count, err)
+	}
+}
+
+func TestRepositoryCanceledReadsReleaseConnectionsAndUseKnowledgeIndexes(t *testing.T) {
+	runKnowledgeCoreIntegrationVariants(t, testRepositoryCanceledReadsReleaseConnectionsAndUseKnowledgeIndexes)
+}
+
+func testRepositoryCanceledReadsReleaseConnectionsAndUseKnowledgeIndexes(t *testing.T, testCase knowledgeCoreIntegrationCase) {
+	fixture := seedProvenance(t, testCase.ctx, testCase.pool, "read-resources")
+	baseline := testCase.pool.Stat().AcquiredConns()
+
+	canceled, cancel := context.WithCancel(testCase.ctx)
+	cancel()
+	if _, err := testCase.repository.BatchGetClaims(canceled, domain.BatchGetClaimsQuery{
+		WorkspaceID: fixture.workspaceID, IDs: []foundation.ID{newID(t)}, Statuses: []domain.ClaimStatus{domain.ClaimStatusSuggested}, Limit: 1,
+	}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled BatchGetClaims error=%v", err)
+	}
+	assertKnowledgePoolAcquiredConnections(t, testCase.pool, baseline)
+
+	deadline, deadlineCancel := context.WithDeadline(testCase.ctx, time.Now().Add(-time.Second))
+	defer deadlineCancel()
+	if _, err := testCase.repository.BatchGetRelations(deadline, domain.BatchGetRelationsQuery{
+		WorkspaceID: fixture.workspaceID, IDs: []foundation.ID{newID(t)}, Statuses: []domain.RelationStatus{domain.RelationStatusSuggested}, Limit: 1,
+	}); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("deadline BatchGetRelations error=%v", err)
+	}
+	assertKnowledgePoolAcquiredConnections(t, testCase.pool, baseline)
+
+	if testCase.variant.name == "gorm" {
+		customCause := errors.New("knowledge read canceled by caller")
+		caused, causeCancel := context.WithCancelCause(testCase.ctx)
+		causeCancel(customCause)
+		if _, err := testCase.repository.BatchGetConflicts(caused, domain.BatchGetConflictsQuery{
+			WorkspaceID: fixture.workspaceID, IDs: []foundation.ID{newID(t)}, Statuses: []domain.ConflictStatus{domain.ConflictStatusOpen}, Limit: 1,
+		}); !errors.Is(err, customCause) || !errors.Is(err, context.Canceled) {
+			t.Fatalf("custom-cause BatchGetConflicts error=%v", err)
+		}
+		assertKnowledgePoolAcquiredConnections(t, testCase.pool, baseline)
+	}
+
+	assertKnowledgeReadIndexPlans(t, testCase.ctx, testCase.pool, fixture.workspaceID)
+	assertKnowledgePoolAcquiredConnections(t, testCase.pool, baseline)
+}
+
+func TestRepositoryBoundedReadsHydrateFiveHundredAggregates(t *testing.T) {
+	runKnowledgeCoreIntegrationVariants(t, testRepositoryBoundedReadsHydrateFiveHundredAggregates)
+}
+
+func testRepositoryBoundedReadsHydrateFiveHundredAggregates(t *testing.T, testCase knowledgeCoreIntegrationCase) {
+	fixture := seedProvenance(t, testCase.ctx, testCase.pool, "bounded-read-500")
+	claimIDs, relationIDs, conflictIDs := seedKnowledgeBoundedReadFacts(t, testCase.ctx, testCase.pool, fixture)
+	baseline := testCase.pool.Stat().AcquiredConns()
+
+	claims, err := testCase.repository.BatchGetClaims(testCase.ctx, domain.BatchGetClaimsQuery{
+		WorkspaceID: fixture.workspaceID, IDs: claimIDs, Statuses: []domain.ClaimStatus{domain.ClaimStatusSuggested}, Limit: domain.MaxBatchLimit,
+	})
+	if err != nil || len(claims) != domain.MaxBatchLimit {
+		t.Fatalf("BatchGetClaims count=%d err=%v", len(claims), err)
+	}
+	for _, claim := range claims {
+		if len(claim.Sources) != 0 {
+			t.Fatalf("suggested claim %s sources=%d", claim.Claim.ID, len(claim.Sources))
+		}
+	}
+
+	relations, err := testCase.repository.BatchGetRelations(testCase.ctx, domain.BatchGetRelationsQuery{
+		WorkspaceID: fixture.workspaceID, IDs: relationIDs, Statuses: []domain.RelationStatus{domain.RelationStatusSuggested}, Limit: domain.MaxBatchLimit,
+	})
+	if err != nil || len(relations) != domain.MaxBatchLimit {
+		t.Fatalf("BatchGetRelations count=%d err=%v", len(relations), err)
+	}
+	for _, relation := range relations {
+		if len(relation.Evidence) != 0 {
+			t.Fatalf("suggested relation %s evidence=%d", relation.Relation.ID, len(relation.Evidence))
+		}
+	}
+
+	conflicts, err := testCase.repository.BatchGetConflicts(testCase.ctx, domain.BatchGetConflictsQuery{
+		WorkspaceID: fixture.workspaceID, IDs: conflictIDs, Statuses: []domain.ConflictStatus{domain.ConflictStatusResolved}, Limit: domain.MaxBatchLimit,
+	})
+	if err != nil || len(conflicts) != domain.MaxBatchLimit {
+		t.Fatalf("BatchGetConflicts count=%d err=%v", len(conflicts), err)
+	}
+	for _, conflict := range conflicts {
+		if len(conflict.Members) != 2 {
+			t.Fatalf("resolved conflict %s members=%d", conflict.Conflict.ID, len(conflict.Members))
+		}
+	}
+	assertKnowledgePoolAcquiredConnections(t, testCase.pool, baseline)
+}
+
+func seedKnowledgeBoundedReadFacts(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fixture provenanceFixture) ([]foundation.ID, []foundation.ID, []foundation.ID) {
+	t.Helper()
+	workspaceID := fixture.workspaceID
+	applicability := mustApplicability(t, `{"batch":"500"}`)
+	at := time.Now().UTC().Add(-time.Minute).Truncate(time.Microsecond)
+	conflictMemberCount := domain.MaxBatchLimit * 2
+	claims := make([]domain.Claim, conflictMemberCount+domain.MaxBatchLimit)
+	claimRows := make([][]any, len(claims))
+	for index := range claims {
+		claims[index] = newSuggestedClaim(t, workspaceID, fmt.Sprintf("批量读取主张 %03d", index), applicability, at.Add(time.Duration(index)*time.Microsecond))
+		claims[index].Applicability = applicability
+		claims[index].Fingerprint = domain.ComputeClaimFingerprint(workspaceID, claims[index].NormalizedStatement, applicability)
+		claimRows[index] = []any{
+			string(claims[index].ID), string(workspaceID), claims[index].Statement, claims[index].NormalizedStatement,
+			string(applicability.CanonicalJSON), applicability.SchemaVersion, applicability.Hash, string(claims[index].Status),
+			claims[index].ConfidenceScore, string(claims[index].ConfidenceFactors), claims[index].Fingerprint, claims[index].Version,
+			claims[index].CreatedAt, claims[index].UpdatedAt,
+		}
+	}
+
+	relationIDs := make([]foundation.ID, domain.MaxBatchLimit)
+	relationRows := make([][]any, domain.MaxBatchLimit)
+	for index := range relationRows {
+		relation := newRelation(t, workspaceID, domain.RelationSupports,
+			domain.NodeRef{Type: domain.NodeTypeClaim, ID: claims[0].ID},
+			domain.NodeRef{Type: domain.NodeTypeClaim, ID: claims[conflictMemberCount+index].ID}, at.Add(time.Duration(index)*time.Microsecond))
+		relationIDs[index] = relation.ID
+		relationRows[index] = []any{
+			string(relation.ID), string(workspaceID), string(relation.Source.Type), string(relation.Source.ID),
+			string(relation.Target.Type), string(relation.Target.ID), string(relation.Type), string(relation.Status),
+			relation.ConfidenceScore, relation.Fingerprint, nil, nil, nil, relation.ValidFrom, relation.ValidTo,
+			relation.Version, relation.CreatedAt, relation.UpdatedAt,
+		}
+	}
+
+	claimIDs := make([]foundation.ID, domain.MaxBatchLimit)
+	for index := range claimIDs {
+		claimIDs[index] = claims[conflictMemberCount+index].ID
+	}
+	conflictIDs := make([]foundation.ID, domain.MaxBatchLimit)
+	conflictRows := make([][]any, domain.MaxBatchLimit)
+	memberRows := make([][]any, 0, domain.MaxBatchLimit*2)
+	for index := 0; index < domain.MaxBatchLimit; index++ {
+		conflictID := newID(t)
+		members := []domain.ConflictMember{
+			{ConflictID: conflictID, WorkspaceID: workspaceID, ClaimID: claims[index*2].ID, Applicability: applicability, ApplicabilityHash: applicability.Hash, PositionSummary: "第一项批量主张", CreatedAt: at.Add(2 * time.Second)},
+			{ConflictID: conflictID, WorkspaceID: workspaceID, ClaimID: claims[index*2+1].ID, Applicability: applicability, ApplicabilityHash: applicability.Hash, PositionSummary: "第二项批量主张", CreatedAt: at.Add(2 * time.Second)},
+		}
+		conflict := domain.Conflict{
+			ID: conflictID, WorkspaceID: workspaceID, Status: domain.ConflictStatusOpen, Severity: domain.ConflictSeverityMedium,
+			Summary: "批量读取冲突", ApplicabilityAssessment: domain.ApplicabilityAssessmentExact,
+			Version: 1, CreatedAt: at.Add(2 * time.Second), UpdatedAt: at.Add(2 * time.Second),
+		}
+		conflict.Fingerprint = domain.ComputeConflictFingerprint(workspaceID, conflict.ApplicabilityAssessment, members)
+		conflictIDs[index] = conflictID
+		conflictRows[index] = []any{
+			string(conflict.ID), string(workspaceID), nil, string(conflict.Status), string(conflict.Severity), conflict.Summary,
+			string(conflict.ApplicabilityAssessment), applicability.Hash, nil, conflict.Fingerprint, nil, nil,
+			conflict.Version, conflict.CreatedAt, conflict.UpdatedAt, nil,
+		}
+		for _, member := range members {
+			memberRows = append(memberRows, []any{
+				string(member.ConflictID), string(member.ClaimID), string(workspaceID), string(applicability.CanonicalJSON),
+				applicability.SchemaVersion, applicability.Hash, member.PositionSummary, member.CreatedAt,
+			})
+		}
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	copyKnowledgeRows(t, ctx, tx, pgx.Identifier{"core", "claim"}, []string{
+		"id", "workspace_id", "statement", "normalized_statement", "applicability", "applicability_schema_version", "applicability_hash",
+		"status", "confidence_score", "confidence_factors", "fingerprint", "version", "created_at", "updated_at",
+	}, claimRows)
+	sourceRows := make([][]any, conflictMemberCount)
+	memberClaimIDs := make([]string, conflictMemberCount)
+	for index := 0; index < conflictMemberCount; index++ {
+		source := newClaimSource(t, workspaceID, claims[index].ID, fixture, at.Add(time.Second))
+		source.EvidenceHash = domain.ComputeClaimSourceEvidenceHash(source, applicability)
+		sourceRows[index] = []any{
+			string(source.ID), string(workspaceID), string(source.ClaimID), string(source.Provenance.SourceVersionID),
+			string(source.Provenance.SourceSpanID), string(source.SupportType), source.Reason, source.EvidenceHash, source.ModelRunRef, source.CreatedAt,
+		}
+		memberClaimIDs[index] = string(claims[index].ID)
+	}
+	copyKnowledgeRows(t, ctx, tx, pgx.Identifier{"core", "claim_source"}, []string{
+		"id", "workspace_id", "claim_id", "source_version_id", "source_span_id", "support_type", "reason", "evidence_hash", "model_run_ref", "created_at",
+	}, sourceRows)
+	if _, err := tx.Exec(ctx, `UPDATE core.claim SET status='CONFIRMED',version=2,updated_at=$1 WHERE workspace_id=$2 AND id=ANY($3::uuid[])`,
+		at.Add(time.Second), string(workspaceID), memberClaimIDs); err != nil {
+		t.Fatal(err)
+	}
+	copyKnowledgeRows(t, ctx, tx, pgx.Identifier{"core", "relation"}, []string{
+		"id", "workspace_id", "source_node_type", "source_node_id", "target_node_type", "target_node_id", "relation_type", "status",
+		"confidence_score", "fingerprint", "evidence_fingerprint", "confirmation_method", "confirmation_ref", "valid_from", "valid_to",
+		"version", "created_at", "updated_at",
+	}, relationRows)
+	copyKnowledgeRows(t, ctx, tx, pgx.Identifier{"core", "conflict"}, []string{
+		"id", "workspace_id", "topic_id", "status", "severity", "summary", "applicability_assessment", "applicability_hash",
+		"overlap_reason", "fingerprint", "resolution", "resolution_reference", "version", "created_at", "updated_at", "resolved_at",
+	}, conflictRows)
+	copyKnowledgeRows(t, ctx, tx, pgx.Identifier{"core", "conflict_member"}, []string{
+		"conflict_id", "claim_id", "workspace_id", "applicability", "applicability_schema_version", "applicability_hash", "position_summary", "created_at",
+	}, memberRows)
+	if _, err := tx.Exec(ctx, `UPDATE core.claim SET status='DISPUTED',version=3,updated_at=$1 WHERE workspace_id=$2 AND id=ANY($3::uuid[])`,
+		at.Add(2*time.Second), string(workspaceID), memberClaimIDs); err != nil {
+		t.Fatal(err)
+	}
+	transitions := []struct {
+		status domain.ConflictStatus
+		at     time.Time
+	}{
+		{status: domain.ConflictStatusInvestigating, at: at.Add(3 * time.Second)},
+		{status: domain.ConflictStatusResolutionProposed, at: at.Add(4 * time.Second)},
+	}
+	for _, transition := range transitions {
+		if _, err := tx.Exec(ctx, `UPDATE core.conflict SET status=$1,version=version+1,updated_at=$2 WHERE workspace_id=$3 AND id=ANY($4::uuid[])`,
+			string(transition.status), transition.at, string(workspaceID), idsAsStrings(conflictIDs)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := tx.Exec(ctx, `UPDATE core.conflict
+		SET status='RESOLVED',resolution=$1,resolution_reference=$2,resolved_at=$3,version=version+1,updated_at=$3
+		WHERE workspace_id=$4 AND id=ANY($5::uuid[])`,
+		"批量读取冲突已解决", "integration:bounded-read", at.Add(5*time.Second), string(workspaceID), idsAsStrings(conflictIDs)); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	return claimIDs, relationIDs, conflictIDs
+}
+
+func copyKnowledgeRows(t *testing.T, ctx context.Context, tx pgx.Tx, table pgx.Identifier, columns []string, rows [][]any) {
+	t.Helper()
+	copied, err := tx.CopyFrom(ctx, table, columns, pgx.CopyFromRows(rows))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if copied != int64(len(rows)) {
+		t.Fatalf("copy %s rows=%d want=%d", table.Sanitize(), copied, len(rows))
+	}
+}
+
+func assertKnowledgePoolAcquiredConnections(t *testing.T, pool *pgxpool.Pool, expected int32) {
+	t.Helper()
+	if acquired := pool.Stat().AcquiredConns(); acquired != expected {
+		t.Fatalf("Knowledge pool acquired connections=%d want=%d", acquired, expected)
+	}
+}
+
+func assertKnowledgeReadIndexPlans(t *testing.T, ctx context.Context, pool *pgxpool.Pool, workspaceID foundation.ID) {
+	t.Helper()
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	if _, err := tx.Exec(ctx, `SET LOCAL enable_seqscan=off`); err != nil {
+		t.Fatal(err)
+	}
+	plans := []struct {
+		name, index, query string
+		args               []any
+	}{
+		{
+			name: "claim", index: "idx_knowledge_claim_workspace_status",
+			query: `EXPLAIN (FORMAT JSON) SELECT id FROM core.claim WHERE workspace_id=$1 AND status=$2 ORDER BY updated_at DESC,id LIMIT 500`,
+			args:  []any{string(workspaceID), string(domain.ClaimStatusSuggested)},
+		},
+		{
+			name: "relation", index: "idx_knowledge_relation_workspace_status",
+			query: `EXPLAIN (FORMAT JSON) SELECT id FROM core.relation WHERE workspace_id=$1 AND status=$2 ORDER BY updated_at DESC,id LIMIT 500`,
+			args:  []any{string(workspaceID), string(domain.RelationStatusSuggested)},
+		},
+		{
+			name: "conflict", index: "idx_knowledge_conflict_workspace_status",
+			query: `EXPLAIN (FORMAT JSON) SELECT id FROM core.conflict WHERE workspace_id=$1 AND status=$2 ORDER BY updated_at DESC,id LIMIT 500`,
+			args:  []any{string(workspaceID), string(domain.ConflictStatusOpen)},
+		},
+	}
+	for _, plan := range plans {
+		var encoded []byte
+		if err := tx.QueryRow(ctx, plan.query, plan.args...).Scan(&encoded); err != nil {
+			t.Fatalf("EXPLAIN %s: %v", plan.name, err)
+		}
+		if !strings.Contains(string(encoded), plan.index) {
+			t.Fatalf("EXPLAIN %s did not use %s: %s", plan.name, plan.index, encoded)
+		}
 	}
 }
 
@@ -847,7 +1219,7 @@ func seedProvenance(t *testing.T, ctx context.Context, tx sqlExecer, label strin
 	workspaceID := newID(t)
 	now := time.Now().UTC().Add(-2 * time.Minute)
 	root := "/tmp/knowledge-" + string(workspaceID)
-	if _, err := tx.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,$2,$3,$3,$4,'test',1,$4,$4)`, string(workspaceID), label, root, now); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,$2,$3,$3,$4,'inactive',1,$4,$4)`, string(workspaceID), label, root, now); err != nil {
 		t.Fatal(err)
 	}
 	return seedProvenanceForWorkspace(t, ctx, tx, workspaceID, label, true)
@@ -993,6 +1365,26 @@ func assertTerminalConflictAllowsClaimTransition(t *testing.T, ctx context.Conte
 
 type commitResponseLossDB struct{ pool *pgxpool.Pool }
 
+type commitResponseLossUnitOfWork struct {
+	delegate foundation.UnitOfWork
+	injected atomic.Bool
+}
+
+func (u *commitResponseLossUnitOfWork) Within(
+	ctx context.Context,
+	options foundation.TransactionOptions,
+	work foundation.TransactionFunc,
+) error {
+	err := u.delegate.Within(ctx, options, work)
+	if err != nil {
+		return err
+	}
+	if u.injected.CompareAndSwap(false, true) {
+		return errors.New("injected knowledge commit response loss")
+	}
+	return nil
+}
+
 func (d commitResponseLossDB) Begin(ctx context.Context) (pgx.Tx, error) {
 	tx, err := d.pool.Begin(ctx)
 	if err != nil {
@@ -1033,7 +1425,17 @@ func newTopic(t *testing.T, workspaceID foundation.ID, name string, at time.Time
 		Status: domain.TopicStatusActive, Version: 1, CreatedAt: at, UpdatedAt: at}
 }
 
-func suggestClaim(t *testing.T, ctx context.Context, repository *Repository, workspaceID foundation.ID, statement string, applicability domain.Applicability, key string, at time.Time) domain.ClaimResult {
+func suggestClaim(t *testing.T, ctx context.Context, repository knowledgeCoreIntegrationRepository, workspaceID foundation.ID, statement string, applicability domain.Applicability, key string, at time.Time) domain.ClaimResult {
+	t.Helper()
+	claim := newSuggestedClaim(t, workspaceID, statement, applicability, at)
+	result, err := repository.SuggestClaim(ctx, domain.SuggestClaimRecord{Claim: claim, IdempotencyKey: key, RequestHash: testHash(key + "-payload")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func newSuggestedClaim(t *testing.T, workspaceID foundation.ID, statement string, applicability domain.Applicability, at time.Time) domain.Claim {
 	t.Helper()
 	canonical, normalized, err := domain.NormalizeStatement(statement)
 	if err != nil {
@@ -1047,14 +1449,10 @@ func suggestClaim(t *testing.T, ctx context.Context, repository *Repository, wor
 		Applicability: applicability, Status: domain.ClaimStatusSuggested, ConfidenceFactors: factors,
 		Version: 1, CreatedAt: at, UpdatedAt: at}
 	claim.Fingerprint = domain.ComputeClaimFingerprint(workspaceID, normalized, applicability)
-	result, err := repository.SuggestClaim(ctx, domain.SuggestClaimRecord{Claim: claim, IdempotencyKey: key, RequestHash: testHash(key + "-payload")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return result
+	return claim
 }
 
-func confirmClaim(t *testing.T, ctx context.Context, repository *Repository, claim domain.ClaimResult, fixture provenanceFixture, key string, at time.Time) domain.ClaimResult {
+func confirmClaim(t *testing.T, ctx context.Context, repository knowledgeCoreIntegrationRepository, claim domain.ClaimResult, fixture provenanceFixture, key string, at time.Time) domain.ClaimResult {
 	t.Helper()
 	source := newClaimSource(t, fixture.workspaceID, claim.Claim.ID, fixture, at)
 	result, err := repository.ConfirmClaim(ctx, domain.ConfirmClaimRecord{

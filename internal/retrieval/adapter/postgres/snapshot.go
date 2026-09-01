@@ -21,11 +21,21 @@ type snapshotConnectionPool interface {
 
 // BeginWorkspaceSnapshot 在 repeatable-read 与 Workspace advisory lock 内分页物化完整 Source/Chunk Snapshot。
 func (r *Repository) BeginWorkspaceSnapshot(ctx context.Context, command domain.WorkspaceSnapshotCommand) (domain.WorkspaceSnapshotResult, error) {
-	if err := domain.ValidateWorkspaceSnapshotCommand(command); err != nil {
-		return domain.WorkspaceSnapshotResult{}, err
+	if r == nil || r.db == nil {
+		return domain.WorkspaceSnapshotResult{}, dependency("REINDEX_SNAPSHOT_CONNECTION_UNAVAILABLE", errors.New("repository is not initialized"))
 	}
 	pool, ok := r.db.(snapshotConnectionPool)
 	if !ok {
+		return domain.WorkspaceSnapshotResult{}, dependency("REINDEX_SNAPSHOT_CONNECTION_UNAVAILABLE", errors.New("database does not support dedicated snapshot connections"))
+	}
+	return beginWorkspaceSnapshotNative(ctx, pool, command)
+}
+
+func beginWorkspaceSnapshotNative(ctx context.Context, pool snapshotConnectionPool, command domain.WorkspaceSnapshotCommand) (domain.WorkspaceSnapshotResult, error) {
+	if err := domain.ValidateWorkspaceSnapshotCommand(command); err != nil {
+		return domain.WorkspaceSnapshotResult{}, err
+	}
+	if pool == nil {
 		return domain.WorkspaceSnapshotResult{}, dependency("REINDEX_SNAPSHOT_CONNECTION_UNAVAILABLE", errors.New("database does not support dedicated snapshot connections"))
 	}
 	connection, err := pool.Acquire(ctx)

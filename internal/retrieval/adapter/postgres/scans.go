@@ -15,13 +15,17 @@ import (
 const embeddingColumns = `id::text,provider,adapter_name,adapter_version,model,dimensions,normalization,distance_metric,config_hash,model_settings_revision,created_at`
 const indexColumns = `id::text,workspace_id::text,embedding_version_id::text,model_settings_revision,tokenizer_id,tokenizer_version,tokenizer_config_hash,fusion_config,source_snapshot_ref,manifest_hash,expected_chunk_count,source_manifest_hash,expected_source_count,source_parser_id,source_parser_version,source_parser_config_hash,source_chunk_strategy_version,source_schema_version,idempotency_key,status,degraded_capabilities,failure_code,version,created_at,updated_at`
 
-func scanEmbedding(row pgx.Row) (domain.EmbeddingVersion, error) {
+type retrievalRowScanner interface {
+	Scan(...any) error
+}
+
+func scanEmbedding(row retrievalRowScanner) (domain.EmbeddingVersion, error) {
 	var v domain.EmbeddingVersion
 	err := row.Scan(&v.ID, &v.Provider, &v.AdapterName, &v.AdapterVersion, &v.Model, &v.Dimensions, &v.Normalization, &v.DistanceMetric, &v.ConfigHash, &v.ModelSettingsRevision, &v.CreatedAt)
 	return v, err
 }
 
-func scanIndex(row pgx.Row) (domain.IndexVersion, error) {
+func scanIndex(row retrievalRowScanner) (domain.IndexVersion, error) {
 	var v domain.IndexVersion
 	var embedding *string
 	var sourceManifestHash *string

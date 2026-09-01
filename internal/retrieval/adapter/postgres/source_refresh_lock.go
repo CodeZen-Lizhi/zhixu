@@ -31,15 +31,22 @@ type sourceRefreshLease struct {
 
 // AcquireSourceRefresh holds a dedicated PostgreSQL session lock until the returned lease is released.
 func (r *Repository) AcquireSourceRefresh(ctx context.Context, workspaceID foundation.ID) (application.SourceRefreshLease, error) {
-	parsed, err := foundation.ParseID(string(workspaceID))
-	if err != nil || parsed != workspaceID {
-		return nil, foundation.NewError(foundation.ErrorInvalidInput, "SOURCE_REFRESH_WORKSPACE_INVALID", false, errors.New("workspace identity is not canonical"))
-	}
-	if r == nil {
+	if r == nil || r.db == nil {
 		return nil, dependency("SOURCE_REFRESH_LOCK_CONNECTION_UNAVAILABLE", errors.New("repository is nil"))
 	}
 	pool, ok := r.db.(sourceRefreshConnectionPool)
 	if !ok {
+		return nil, dependency("SOURCE_REFRESH_LOCK_CONNECTION_UNAVAILABLE", errors.New("database does not support dedicated source refresh connections"))
+	}
+	return acquireSourceRefreshNative(ctx, pool, workspaceID)
+}
+
+func acquireSourceRefreshNative(ctx context.Context, pool sourceRefreshConnectionPool, workspaceID foundation.ID) (application.SourceRefreshLease, error) {
+	parsed, err := foundation.ParseID(string(workspaceID))
+	if err != nil || parsed != workspaceID {
+		return nil, foundation.NewError(foundation.ErrorInvalidInput, "SOURCE_REFRESH_WORKSPACE_INVALID", false, errors.New("workspace identity is not canonical"))
+	}
+	if pool == nil {
 		return nil, dependency("SOURCE_REFRESH_LOCK_CONNECTION_UNAVAILABLE", errors.New("database does not support dedicated source refresh connections"))
 	}
 	lockKey := sourceRefreshLockNamespace + string(workspaceID)

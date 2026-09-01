@@ -9,6 +9,7 @@ import (
 
 	auditapplication "github.com/CodeZen-Lizhi/zhixu/internal/audit/application"
 	auditdomain "github.com/CodeZen-Lizhi/zhixu/internal/audit/domain"
+	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	knowledgeapplication "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/application"
 )
 
@@ -25,6 +26,9 @@ type ImpactRecorder struct {
 	recorder     *auditapplication.Recorder
 	resolveActor ImpactActorResolver
 }
+
+var _ knowledgeapplication.ImpactAuditPort = (*ImpactRecorder)(nil)
+var _ knowledgeapplication.ScopedImpactAuditPort = (*ImpactRecorder)(nil)
 
 // NewImpactRecorder 构造 Impact 到 Audit 的窄适配器。
 func NewImpactRecorder(recorder *auditapplication.Recorder, resolveActor ImpactActorResolver) (*ImpactRecorder, error) {
@@ -66,6 +70,22 @@ func (recorder *ImpactRecorder) RecordImpactAnalysisTx(ctx context.Context, tran
 		return err
 	}
 	_, _, err = recorder.recorder.RecordTx(ctx, transaction, event)
+	return err
+}
+
+// RecordImpactAnalysisScoped 在调用方 opaque transaction 中追加 Impact Audit；不会提交或回滚事务。
+func (recorder *ImpactRecorder) RecordImpactAnalysisScoped(ctx context.Context, scope foundation.TransactionScope, record knowledgeapplication.ImpactAuditRecord) error {
+	if recorder == nil || recorder.recorder == nil || recorder.resolveActor == nil {
+		return errors.New("impact audit recorder is unavailable")
+	}
+	if ctx == nil || scope == nil {
+		return errors.New("impact audit scoped transaction is unavailable")
+	}
+	event, err := recorder.impactEvent(ctx, record)
+	if err != nil {
+		return err
+	}
+	_, _, err = recorder.recorder.RecordScoped(ctx, scope, event)
 	return err
 }
 

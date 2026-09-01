@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
@@ -46,6 +47,39 @@ func TestClassifyPreservesCallerCancellation(t *testing.T) {
 	var classified *foundation.Error
 	if !errors.As(err, &classified) || classified.Kind != foundation.ErrorDependencyUnavailable || classified.Retryable || !errors.Is(err, context.Canceled) {
 		t.Fatalf("classified=%#v err=%v", classified, err)
+	}
+}
+
+func TestClassifyGORMKnowledgePreservesFoundationEnvelope(t *testing.T) {
+	original := foundation.NewError(foundation.ErrorVersionConflict, "KNOWLEDGE_TEST_CONFLICT", false, errors.New("conflict"))
+	wrapped := fmt.Errorf("execute PostgreSQL transaction: %w", original)
+
+	if classified := classifyGORMKnowledge(context.Background(), wrapped, "KNOWLEDGE_TEST_FALLBACK"); classified != original {
+		t.Fatalf("classified=%#v want original=%#v", classified, original)
+	}
+	if classified := classifyGORMRelationApply(context.Background(), wrapped, "KNOWLEDGE_TEST_FALLBACK"); classified != original {
+		t.Fatalf("relation apply classified=%#v want original=%#v", classified, original)
+	}
+}
+
+func TestClassifyGORMKnowledgeContextMatrix(t *testing.T) {
+	tests := []struct {
+		name      string
+		err       error
+		kind      foundation.ErrorKind
+		retryable bool
+	}{
+		{name: "caller cancellation", err: context.Canceled, kind: foundation.ErrorNonRetryableFailure},
+		{name: "deadline", err: context.DeadlineExceeded, kind: foundation.ErrorRetryableFailure, retryable: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := classifyGORMKnowledge(context.Background(), test.err, "KNOWLEDGE_TEST_CONTEXT")
+			var classified *foundation.Error
+			if !errors.As(err, &classified) || classified.Kind != test.kind || classified.Retryable != test.retryable || !errors.Is(err, test.err) {
+				t.Fatalf("classified=%#v err=%v", classified, err)
+			}
+		})
 	}
 }
 

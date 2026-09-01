@@ -32,6 +32,17 @@ type SourceVersionReferenceBatchStore interface {
 	LoadSourceVersionReferences(context.Context, foundation.ID, []foundation.ID) ([]domain.SourceVersionReference, error)
 }
 
+// ScopedSourceVersionReferenceBatchStore 在 caller-owned transaction scope 内批量读取 Source Version 引用。
+// 实现不得管理事务生命周期，也不得回退到 root 数据库。
+type ScopedSourceVersionReferenceBatchStore interface {
+	LoadSourceVersionReferencesScoped(
+		context.Context,
+		foundation.TransactionScope,
+		foundation.ID,
+		[]foundation.ID,
+	) ([]domain.SourceVersionReference, error)
+}
+
 // CitationEvidenceStore 按完整 frozen Index Citation tuple 加载 Source Span 绑定。
 type CitationEvidenceStore interface {
 	// LoadCitationSourceSpanReferences 必须单批证明 Index、Chunk、Source Version、Projection 与 Span。

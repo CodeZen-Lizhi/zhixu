@@ -261,7 +261,19 @@ type searchCandidateScan struct {
 	stageScore     float64
 }
 
-func scanLexicalCandidates(rows pgx.Rows) ([]domain.SearchCandidate, error) {
+type searchCandidateRows interface {
+	Next() bool
+	Scan(...any) error
+	Err() error
+}
+
+type searchCandidateErrorClassifier func(error, string) error
+
+func scanLexicalCandidates(rows searchCandidateRows) ([]domain.SearchCandidate, error) {
+	return scanLexicalCandidatesWithClassifier(rows, classify)
+}
+
+func scanLexicalCandidatesWithClassifier(rows searchCandidateRows, classifyError searchCandidateErrorClassifier) ([]domain.SearchCandidate, error) {
 	result := make([]domain.SearchCandidate, 0)
 	for rows.Next() {
 		var value searchCandidateScan
@@ -275,7 +287,7 @@ func scanLexicalCandidates(rows pgx.Rows) ([]domain.SearchCandidate, error) {
 			&value.candidate.ProvenanceTruncated, &value.stageRank, &value.stageScore,
 			&value.lexicalFTS, &value.lexicalTrigram,
 		); err != nil {
-			return nil, classify(err, "RETRIEVAL_LEXICAL_SEARCH_SCAN_FAILED")
+			return nil, classifyError(err, "RETRIEVAL_LEXICAL_SEARCH_SCAN_FAILED")
 		}
 		if err := finalizeSearchCandidate(&value); err != nil {
 			return nil, err
@@ -289,12 +301,16 @@ func scanLexicalCandidates(rows pgx.Rows) ([]domain.SearchCandidate, error) {
 		result = append(result, value.candidate)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, classify(err, "RETRIEVAL_LEXICAL_SEARCH_QUERY_FAILED")
+		return nil, classifyError(err, "RETRIEVAL_LEXICAL_SEARCH_QUERY_FAILED")
 	}
 	return result, nil
 }
 
-func scanVectorCandidates(rows pgx.Rows) ([]domain.SearchCandidate, error) {
+func scanVectorCandidates(rows searchCandidateRows) ([]domain.SearchCandidate, error) {
+	return scanVectorCandidatesWithClassifier(rows, classify)
+}
+
+func scanVectorCandidatesWithClassifier(rows searchCandidateRows, classifyError searchCandidateErrorClassifier) ([]domain.SearchCandidate, error) {
 	result := make([]domain.SearchCandidate, 0)
 	for rows.Next() {
 		var value searchCandidateScan
@@ -307,7 +323,7 @@ func scanVectorCandidates(rows pgx.Rows) ([]domain.SearchCandidate, error) {
 			&value.candidate.Snippet, &value.candidate.RerankText, &value.provenances,
 			&value.candidate.ProvenanceTruncated, &value.stageRank, &value.stageScore,
 		); err != nil {
-			return nil, classify(err, "RETRIEVAL_VECTOR_SEARCH_SCAN_FAILED")
+			return nil, classifyError(err, "RETRIEVAL_VECTOR_SEARCH_SCAN_FAILED")
 		}
 		if err := finalizeSearchCandidate(&value); err != nil {
 			return nil, err
@@ -319,7 +335,7 @@ func scanVectorCandidates(rows pgx.Rows) ([]domain.SearchCandidate, error) {
 		result = append(result, value.candidate)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, classify(err, "RETRIEVAL_VECTOR_SEARCH_QUERY_FAILED")
+		return nil, classifyError(err, "RETRIEVAL_VECTOR_SEARCH_QUERY_FAILED")
 	}
 	return result, nil
 }
