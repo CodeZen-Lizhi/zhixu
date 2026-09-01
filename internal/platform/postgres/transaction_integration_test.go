@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -18,13 +17,10 @@ import (
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	river "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/riverqueue/river/riverdriver/riverpgxv5"
-	"github.com/riverqueue/river/rivermigrate"
 	"github.com/riverqueue/river/rivertype"
 )
 
@@ -32,99 +28,30 @@ const foundationProbeTable = "foundation_test.transaction_probe"
 
 type foundationIntegrationFixture struct {
 	platform *platformpostgres.Pool
-	admin    *pgxpool.Pool
-	database string
 }
 
 func newFoundationIntegrationFixture(t *testing.T) *foundationIntegrationFixture {
 	t.Helper()
-	baseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
-	if baseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a disposable PostgreSQL instance")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	fixture := testdb.Require(t, testdb.Config{
+		ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
+		Availability:     testdb.FailWhenUnavailable,
+		MaxConns:         4,
+	})
+	platform := fixture.Pool()
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
-	parsed, err := url.Parse(baseURL)
-	if err != nil {
-		t.Fatalf("parse integration database URL: %v", err)
+	if platform == nil || platform.DB() == nil {
+		t.Fatal("test database fixture returned no shared platform pool")
 	}
-	admin, err := pgxpool.New(ctx, baseURL)
-	if err != nil {
-		t.Fatalf("open integration admin pool: %v", err)
-	}
-	databaseName := "zhixu_foundation_" + strconv.FormatInt(time.Now().UnixNano(), 10)
-	databaseIdentifier := pgx.Identifier{databaseName}.Sanitize()
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+databaseIdentifier); err != nil {
-		admin.Close()
-		t.Fatalf("create isolated integration database: %v", err)
-	}
-	parsed.Path = "/" + databaseName
-	databaseURL := parsed.String()
-	rawPool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		cleanupFoundationDatabase(t, admin, databaseIdentifier)
-		t.Fatalf("open isolated integration pool: %v", err)
-	}
-	if _, err := rawPool.Exec(ctx, "CREATE EXTENSION IF NOT EXISTS vector"); err != nil {
-		rawPool.Close()
-		cleanupFoundationDatabase(t, admin, databaseIdentifier)
-		t.Fatalf("install pgvector extension: %v", err)
-	}
-	if _, err := rawPool.Exec(ctx, "CREATE SCHEMA IF NOT EXISTS workflow; CREATE SCHEMA IF NOT EXISTS foundation_test; CREATE TABLE "+foundationProbeTable+" (id text PRIMARY KEY, value text NOT NULL)"); err != nil {
-		rawPool.Close()
-		cleanupFoundationDatabase(t, admin, databaseIdentifier)
+	if _, err := platform.DB().Exec(ctx, "CREATE SCHEMA IF NOT EXISTS foundation_test; CREATE TABLE "+foundationProbeTable+" (id text PRIMARY KEY, value text NOT NULL)"); err != nil {
 		t.Fatalf("create foundation integration fixture: %v", err)
 	}
-	migrator, err := rivermigrate.New(riverpgxv5.New(rawPool), &rivermigrate.Config{Schema: "workflow"})
-	if err != nil {
-		rawPool.Close()
-		cleanupFoundationDatabase(t, admin, databaseIdentifier)
-		t.Fatalf("create River migrator: %v", err)
-	}
-	if _, err := migrator.Migrate(ctx, rivermigrate.DirectionUp, nil); err != nil {
-		rawPool.Close()
-		cleanupFoundationDatabase(t, admin, databaseIdentifier)
-		t.Fatalf("migrate River schema: %v", err)
-	}
-	validation, err := migrator.Validate(ctx, nil)
-	if err != nil || validation == nil || !validation.OK {
-		rawPool.Close()
-		cleanupFoundationDatabase(t, admin, databaseIdentifier)
-		if err != nil {
-			t.Fatalf("validate River schema: %v", err)
-		}
-		t.Fatalf("validate River schema: %#v", validation)
-	}
-	rawPool.Close()
-	platform, err := platformpostgres.Open(ctx, databaseURL, 4, 0)
-	if err != nil {
-		cleanupFoundationDatabase(t, admin, databaseIdentifier)
-		t.Fatalf("open shared GORM platform pool: %v", err)
-	}
-	fixture := &foundationIntegrationFixture{platform: platform, admin: admin, database: databaseIdentifier}
-	t.Cleanup(func() {
-		fixture.platform.Close()
-		cleanupFoundationDatabase(t, fixture.admin, fixture.database)
-	})
-	return fixture
-}
-
-func cleanupFoundationDatabase(t *testing.T, admin *pgxpool.Pool, databaseIdentifier string) {
-	t.Helper()
-	if admin == nil {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if _, err := admin.Exec(ctx, "DROP DATABASE "+databaseIdentifier+" WITH (FORCE)"); err != nil {
-		t.Errorf("drop isolated foundation database: %v", err)
-	}
-	admin.Close()
+	return &foundationIntegrationFixture{platform: platform}
 }
 
 func foundationContext(t *testing.T) (context.Context, context.CancelFunc) {
 	t.Helper()
-	return context.WithTimeout(context.Background(), 20*time.Second)
+	return context.WithTimeout(t.Context(), 20*time.Second)
 }
 
 func TestRealGORMUnitOfWorkCommitRollbackAndScopeLifetime(t *testing.T) {

@@ -1,11 +1,12 @@
 //go:build integration
 
-package migration
+package migration_test
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -14,28 +15,202 @@ import (
 	auditapplication "github.com/CodeZen-Lizhi/zhixu/internal/audit/application"
 	auditdomain "github.com/CodeZen-Lizhi/zhixu/internal/audit/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	workspacepostgres "github.com/CodeZen-Lizhi/zhixu/internal/workspace/adapter/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workspace/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workspace/domain"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+type workspaceRootRebindHarness struct {
+	repository   workspaceRootGrantRepository
+	failing      func(error) (workspaceRootGrantRepository, error)
+	missingAudit func() (workspaceRootGrantRepository, error)
+}
+
+type workspaceRootRebindVariant struct {
+	name string
+	open func(*platformpostgres.Pool) (workspaceRootRebindHarness, error)
+}
+
+func runWorkspaceRootRebindVariants(t *testing.T, test func(*testing.T, *platformpostgres.Pool, context.Context, workspaceRootRebindHarness)) {
+	t.Helper()
+	variants := []workspaceRootRebindVariant{
+		{name: "legacy", open: openLegacyWorkspaceRootRebindHarness},
+		{name: "gorm", open: openGORMWorkspaceRootRebindHarness},
+	}
+	for _, variant := range variants {
+		variant := variant
+		t.Run(variant.name, func(t *testing.T) {
+			fixture := testdb.Require(t, testdb.Config{
+				ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
+				Availability:     testdb.FailWhenUnavailable,
+				MaxConns:         16,
+			})
+			harness, err := variant.open(fixture.Pool())
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+			defer cancel()
+			test(t, fixture.Pool(), ctx, harness)
+		})
+	}
+}
+
+func openLegacyWorkspaceRootRebindHarness(platform *platformpostgres.Pool) (workspaceRootRebindHarness, error) {
+	auditStore, err := auditpostgres.NewStore(platform.DB())
+	if err != nil {
+		return workspaceRootRebindHarness{}, err
+	}
+	repository, err := workspacepostgres.NewRepository(platform.DB(), workspacepostgres.WithAuditAppender(auditStore))
+	if err != nil {
+		return workspaceRootRebindHarness{}, err
+	}
+	return workspaceRootRebindHarness{
+		repository: repository,
+		failing: func(failure error) (workspaceRootGrantRepository, error) {
+			return workspacepostgres.NewRepository(platform.DB(), workspacepostgres.WithAuditAppender(
+				failAfterWorkspaceRootRebindAuditAppender{delegate: auditStore, err: failure},
+			))
+		},
+		missingAudit: func() (workspaceRootGrantRepository, error) {
+			return workspacepostgres.NewRepository(platform.DB(), workspacepostgres.WithAuditAppender(
+				omitWorkspaceRootRebindAuditAppender{},
+			))
+		},
+	}, nil
+}
+
+func openGORMWorkspaceRootRebindHarness(platform *platformpostgres.Pool) (workspaceRootRebindHarness, error) {
+	auditStore, err := auditpostgres.NewGORMStore(platform)
+	if err != nil {
+		return workspaceRootRebindHarness{}, err
+	}
+	repository, err := workspacepostgres.NewGORMRepository(platform, workspacepostgres.WithGORMScopedAuditAppender(auditStore))
+	if err != nil {
+		return workspaceRootRebindHarness{}, err
+	}
+	return workspaceRootRebindHarness{
+		repository: repository,
+		failing: func(failure error) (workspaceRootGrantRepository, error) {
+			return workspacepostgres.NewGORMRepository(platform, workspacepostgres.WithGORMScopedAuditAppender(
+				failAfterWorkspaceRootRebindScopedAuditAppender{delegate: auditStore, err: failure},
+			))
+		},
+		missingAudit: func() (workspaceRootGrantRepository, error) {
+			return workspacepostgres.NewGORMRepository(platform, workspacepostgres.WithGORMScopedAuditAppender(
+				omitWorkspaceRootRebindScopedAuditAppender{},
+			))
+		},
+	}, nil
+}
+
 func TestWorkspaceRootRebindingIsAuditedIdempotentAndFailClosed(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := newMigrationTestDatabase(t, ctx)
-	defer cleanup()
-	provider := migrationProvider(t, pool)
-	if err := provider.UpTo(ctx, 81); err != nil {
+	runWorkspaceRootRebindVariants(t, testWorkspaceRootRebindingIsAuditedIdempotentAndFailClosed)
+}
+
+func TestWorkspaceRootRebindingSerializesReverseFingerprints(t *testing.T) {
+	runWorkspaceRootRebindVariants(t, testWorkspaceRootRebindingSerializesReverseFingerprints)
+}
+
+func testWorkspaceRootRebindingSerializesReverseFingerprints(t *testing.T, platform *platformpostgres.Pool, ctx context.Context, harness workspaceRootRebindHarness) {
+	t.Helper()
+	pool := platform.DB()
+	const (
+		firstWorkspaceID  = "68200000-0000-4000-8000-000000000001"
+		secondWorkspaceID = "68200000-0000-4000-8000-000000000002"
+		controllerID      = "68200000-0000-4000-8000-000000000003"
+		firstEventID      = "68200000-0000-4000-8000-000000000004"
+		secondEventID     = "68200000-0000-4000-8000-000000000005"
+		firstRoot         = "/tmp/reverse-fingerprint-one"
+		secondRoot        = "/tmp/reverse-fingerprint-two"
+	)
+	firstFingerprint := strings.Repeat("c", 64)
+	secondFingerprint := strings.Repeat("d", 64)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(
+		id,name,root_path,root_fingerprint,binding_version,git_repository_path,git_checked_at,
+		status,availability,availability_reason,availability_checked_at,version,created_at,updated_at)
+		VALUES
+		($1,'Reverse one',$3,$5,1,$3,$7,'inactive','migration_required','WORKSPACE_ROOT_IDENTITY_CHANGED',$7,7,$7,$7),
+		($2,'Reverse two',$4,$6,1,$4,$7,'inactive','migration_required','WORKSPACE_ROOT_IDENTITY_CHANGED',$7,7,$7,$7)`,
+		firstWorkspaceID, secondWorkspaceID, firstRoot, secondRoot, firstFingerprint, secondFingerprint, now); err != nil {
 		t.Fatal(err)
 	}
-	auditStore, err := auditpostgres.NewStore(pool)
-	if err != nil {
+	migrations := []domain.WorkspaceBindingMigration{
+		{
+			ID: foundation.ID(firstEventID), ControllerInstanceID: foundation.ID(controllerID),
+			IdempotencyKey: "reverse-fingerprint-one", WorkspaceID: foundation.ID(firstWorkspaceID),
+			CanonicalRoot: firstRoot, OldRootFingerprint: firstFingerprint, NewRootFingerprint: secondFingerprint,
+		},
+		{
+			ID: foundation.ID(secondEventID), ControllerInstanceID: foundation.ID(controllerID),
+			IdempotencyKey: "reverse-fingerprint-two", WorkspaceID: foundation.ID(secondWorkspaceID),
+			CanonicalRoot: secondRoot, OldRootFingerprint: secondFingerprint, NewRootFingerprint: firstFingerprint,
+		},
+	}
+	type rebindResult struct {
+		result domain.WorkspaceBindingMigrationResult
+		err    error
+	}
+	start := make(chan struct{})
+	results := make(chan rebindResult, len(migrations))
+	for _, migration := range migrations {
+		migration := migration
+		go func() {
+			<-start
+			result, err := harness.repository.RebindWorkspace(ctx, migration)
+			results <- rebindResult{result: result, err: err}
+		}()
+	}
+	close(start)
+	for range migrations {
+		result := <-results
+		if result.result != (domain.WorkspaceBindingMigrationResult{}) {
+			t.Fatalf("failed reverse rebind returned partial result=%#v", result.result)
+		}
+		assertWorkspaceRootGrantErrorOneOf(t, result.err, domain.ErrorCodeIdentityConflict)
+	}
+	for _, expected := range []struct {
+		id          string
+		fingerprint string
+	}{
+		{id: firstWorkspaceID, fingerprint: firstFingerprint},
+		{id: secondWorkspaceID, fingerprint: secondFingerprint},
+	} {
+		var fingerprint, availability, reason string
+		var bindingVersion, version int64
+		if err := pool.QueryRow(ctx, `SELECT root_fingerprint,binding_version,availability,availability_reason,version
+			FROM core.workspace WHERE id=$1`, expected.id).Scan(
+			&fingerprint, &bindingVersion, &availability, &reason, &version,
+		); err != nil {
+			t.Fatal(err)
+		}
+		if fingerprint != expected.fingerprint || bindingVersion != 1 || availability != "migration_required" ||
+			reason != "WORKSPACE_ROOT_IDENTITY_CHANGED" || version != 7 {
+			t.Fatalf("reverse rebind workspace %s=%q/%d/%q/%q/%d", expected.id, fingerprint,
+				bindingVersion, availability, reason, version)
+		}
+	}
+	var historyCount, auditCount int
+	if err := pool.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM ops.workspace_root_binding_history WHERE workspace_id IN ($1,$2)),
+		(SELECT count(*) FROM ops.audit_event WHERE workspace_id IN ($1,$2))`,
+		firstWorkspaceID, secondWorkspaceID).Scan(&historyCount, &auditCount); err != nil {
 		t.Fatal(err)
 	}
-	repository, err := workspacepostgres.NewRepository(pool, workspacepostgres.WithAuditAppender(auditStore))
-	if err != nil {
-		t.Fatal(err)
+	if historyCount != 0 || auditCount != 0 {
+		t.Fatalf("failed reverse rebind history/audit=%d/%d", historyCount, auditCount)
 	}
+	requireWorkspaceRootGrantPoolReleased(t, platform)
+}
+
+func testWorkspaceRootRebindingIsAuditedIdempotentAndFailClosed(t *testing.T, platform *platformpostgres.Pool, ctx context.Context, harness workspaceRootRebindHarness) {
+	t.Helper()
+	pool := platform.DB()
+	repository := harness.repository
 	const (
 		workspaceID  = "68100000-0000-4000-8000-000000000001"
 		controllerID = "68100000-0000-4000-8000-000000000002"
@@ -56,7 +231,7 @@ status,availability,availability_reason,availability_checked_at,version,created_
 	'WORKSPACE_ROOT_IDENTITY_CHANGED',$4,7,$4,$4)`, workspaceID, root, oldFingerprint, now); err != nil {
 		t.Fatal(err)
 	}
-	_, err = pool.Exec(ctx, `UPDATE core.workspace
+	_, err := pool.Exec(ctx, `UPDATE core.workspace
 SET root_fingerprint=$2,binding_version=2,availability='available',availability_reason=NULL,
     availability_checked_at=clock_timestamp(),version=version+1,updated_at=clock_timestamp()
 WHERE id=$1`, workspaceID, newFingerprint)
@@ -204,9 +379,7 @@ old_workspace_version,new_workspace_version)
 		t.Fatal(err)
 	}
 	injectedAuditFailure := errors.New("injected Workspace rebind audit failure")
-	failingRepository, err := workspacepostgres.NewRepository(pool, workspacepostgres.WithAuditAppender(
-		failAfterWorkspaceRootRebindAuditAppender{delegate: auditStore, err: injectedAuditFailure},
-	))
+	failingRepository, err := harness.failing(injectedAuditFailure)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,6 +405,39 @@ old_workspace_version,new_workspace_version)
 		t.Fatalf("audit failure changed control state\nbefore=%s\nafter=%s", controlStateBeforeAuditFailure, after)
 	}
 	assertWorkspaceRootRebindCounts(t, ctx, pool, auditFailureWorkspaceID, 0, 0)
+
+	const (
+		commitFailureWorkspaceID = "68100000-0000-4000-8000-000000000030"
+		commitFailureEventID     = "68100000-0000-4000-8000-000000000031"
+		commitFailureRoot        = "/tmp/root-rebinding-commit-failure"
+	)
+	commitFailureOldFingerprint := strings.Repeat("1", 64)
+	commitFailureNewFingerprint := strings.Repeat("2", 64)
+	insertWorkspaceRootRebindFixture(t, ctx, pool, commitFailureWorkspaceID, commitFailureRoot,
+		commitFailureOldFingerprint, 9, now.Add(time.Minute))
+	missingAuditRepository, err := harness.missingAudit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitFailureWorkspaceBefore := workspaceRootRebindWorkspaceJSON(t, ctx, pool, commitFailureWorkspaceID)
+	controlStateBeforeCommitFailure := workspaceRootRebindControlStateJSON(t, ctx, pool)
+	commitFailureResult, err := missingAuditRepository.RebindWorkspace(ctx, domain.WorkspaceBindingMigration{
+		ID: foundation.ID(commitFailureEventID), ControllerInstanceID: foundation.ID(controllerID),
+		IdempotencyKey: "root-rebind-commit-failure", WorkspaceID: foundation.ID(commitFailureWorkspaceID),
+		CanonicalRoot: commitFailureRoot, OldRootFingerprint: commitFailureOldFingerprint,
+		NewRootFingerprint: commitFailureNewFingerprint,
+	})
+	if commitFailureResult != (domain.WorkspaceBindingMigrationResult{}) {
+		t.Fatalf("commit failure returned partial result=%#v", commitFailureResult)
+	}
+	assertWorkspaceRootGrantErrorOneOf(t, err, domain.ErrorCodeControlCorrupt)
+	if after := workspaceRootRebindWorkspaceJSON(t, ctx, pool, commitFailureWorkspaceID); after != commitFailureWorkspaceBefore {
+		t.Fatalf("commit failure changed Workspace\nbefore=%s\nafter=%s", commitFailureWorkspaceBefore, after)
+	}
+	if after := workspaceRootRebindControlStateJSON(t, ctx, pool); after != controlStateBeforeCommitFailure {
+		t.Fatalf("commit failure changed control state\nbefore=%s\nafter=%s", controlStateBeforeCommitFailure, after)
+	}
+	assertWorkspaceRootRebindCounts(t, ctx, pool, commitFailureWorkspaceID, 0, 0)
 
 	const (
 		gitCheckpointWorkspaceID = "68100000-0000-4000-8000-000000000020"
@@ -267,11 +473,49 @@ old_workspace_version,new_workspace_version)
 		t.Fatalf("Git checkpoint rejection changed control state\nbefore=%s\nafter=%s", controlStateBeforeGitCheckpoint, after)
 	}
 	assertWorkspaceRootRebindCounts(t, ctx, pool, gitCheckpointWorkspaceID, 0, 0)
+	requireWorkspaceRootGrantPoolReleased(t, platform)
 }
 
 type failAfterWorkspaceRootRebindAuditAppender struct {
 	delegate auditapplication.Appender
 	err      error
+}
+
+type failAfterWorkspaceRootRebindScopedAuditAppender struct {
+	delegate auditapplication.ScopedAppender
+	err      error
+}
+
+type omitWorkspaceRootRebindAuditAppender struct{}
+
+type omitWorkspaceRootRebindScopedAuditAppender struct{}
+
+func (omitWorkspaceRootRebindAuditAppender) AppendTx(
+	_ context.Context,
+	_ any,
+	event auditdomain.Event,
+) (auditdomain.Event, bool, error) {
+	return event, false, nil
+}
+
+func (omitWorkspaceRootRebindScopedAuditAppender) AppendScoped(
+	_ context.Context,
+	_ foundation.TransactionScope,
+	event auditdomain.Event,
+) (auditdomain.Event, bool, error) {
+	return event, false, nil
+}
+
+func (appender failAfterWorkspaceRootRebindScopedAuditAppender) AppendScoped(
+	ctx context.Context,
+	scope foundation.TransactionScope,
+	event auditdomain.Event,
+) (auditdomain.Event, bool, error) {
+	created, replayed, err := appender.delegate.AppendScoped(ctx, scope, event)
+	if err != nil {
+		return auditdomain.Event{}, false, err
+	}
+	return created, replayed, appender.err
 }
 
 func (appender failAfterWorkspaceRootRebindAuditAppender) AppendTx(

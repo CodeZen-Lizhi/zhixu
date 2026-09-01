@@ -1,32 +1,185 @@
 //go:build integration
 
-package migration
+package migration_test
 
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/rootgrant"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	workspacepostgres "github.com/CodeZen-Lizhi/zhixu/internal/workspace/adapter/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workspace/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workspace/domain"
 )
 
-func TestWorkspaceRootGrantRepositorySerializesBeginAndTakesOverExpiredLease(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := newMigrationTestDatabase(t, ctx)
-	defer cleanup()
-	provider := migrationProvider(t, pool)
-	if err := provider.UpTo(ctx, 67); err != nil {
-		t.Fatal(err)
+type workspaceRootGrantRepository interface {
+	domain.Repository
+	application.RegistryStore
+	application.ControlStore
+}
+
+type workspaceRootGrantVariant struct {
+	name string
+	open func(*testing.T, *platformpostgres.Pool) workspaceRootGrantRepository
+}
+
+func runWorkspaceRootGrantVariants(t *testing.T, test func(*testing.T, *platformpostgres.Pool, context.Context, workspaceRootGrantRepository)) {
+	t.Helper()
+	variants := []workspaceRootGrantVariant{
+		{name: "legacy", open: openLegacyWorkspaceRootGrantRepository},
+		{name: "gorm", open: openGORMWorkspaceRootGrantRepository},
 	}
-	repository, err := workspacepostgres.NewRepository(pool)
+	for _, variant := range variants {
+		variant := variant
+		t.Run(variant.name, func(t *testing.T) {
+			fixture := testdb.Require(t, testdb.Config{
+				ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
+				Availability:     testdb.FailWhenUnavailable,
+				MaxConns:         16,
+			})
+			ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+			defer cancel()
+			test(t, fixture.Pool(), ctx, variant.open(t, fixture.Pool()))
+		})
+	}
+}
+
+func openLegacyWorkspaceRootGrantRepository(t *testing.T, platform *platformpostgres.Pool) workspaceRootGrantRepository {
+	t.Helper()
+	repository, err := workspacepostgres.NewRepository(platform.DB())
 	if err != nil {
 		t.Fatal(err)
 	}
+	return repository
+}
+
+func openGORMWorkspaceRootGrantRepository(t *testing.T, platform *platformpostgres.Pool) workspaceRootGrantRepository {
+	t.Helper()
+	repository, err := workspacepostgres.NewGORMRepository(platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return repository
+}
+
+type workspaceRootAuthorityVariant struct {
+	name string
+	open func(*platformpostgres.Pool, rootgrant.RuntimeGrantMode) (rootgrant.AuthoritativeStore, error)
+}
+
+func TestWorkspaceRootGrantAuthoritativeStoresMatchManagedAndDirect(t *testing.T) {
+	variants := []workspaceRootAuthorityVariant{
+		{
+			name: "legacy",
+			open: func(platform *platformpostgres.Pool, mode rootgrant.RuntimeGrantMode) (rootgrant.AuthoritativeStore, error) {
+				return rootgrant.NewPostgresAuthoritativeStore(platform.DB(), mode)
+			},
+		},
+		{
+			name: "gorm",
+			open: func(platform *platformpostgres.Pool, mode rootgrant.RuntimeGrantMode) (rootgrant.AuthoritativeStore, error) {
+				return rootgrant.NewGORMAuthoritativeStore(platform, mode)
+			},
+		},
+	}
+	for _, variant := range variants {
+		variant := variant
+		t.Run(variant.name, func(t *testing.T) {
+			fixture := testdb.Require(t, testdb.Config{
+				ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
+				Availability:     testdb.FailWhenUnavailable,
+				MaxConns:         16,
+			})
+			platform := fixture.Pool()
+			ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+			defer cancel()
+			const (
+				workspaceID = "67400000-0000-4000-8000-000000000001"
+				root        = "/tmp/root-authority"
+			)
+			now := time.Now().UTC().Truncate(time.Microsecond)
+			if _, err := platform.DB().Exec(ctx, `INSERT INTO core.workspace(
+				id,name,root_path,root_fingerprint,binding_version,git_repository_path,git_checked_at,
+				status,availability,availability_reason,availability_checked_at,version,created_at,updated_at)
+				VALUES($1,'Root authority',$2,$3,1,$2,$4,'active','available',NULL,$4,1,$4,$4)`,
+				workspaceID, root, strings.Repeat("a", 64), now); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := platform.DB().Exec(ctx, `UPDATE ops.workspace_control_state
+				SET active_workspace_id=$1,grant_generation=7,state_version=state_version+1,updated_at=clock_timestamp()
+				WHERE singleton=true`, workspaceID); err != nil {
+				t.Fatal(err)
+			}
+
+			managed, err := variant.open(platform, rootgrant.RuntimeGrantManaged)
+			if err != nil {
+				t.Fatal(err)
+			}
+			managedView, err := managed.CurrentRootGrant(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			expectedManaged := rootgrant.AuthoritativeView{
+				ActiveWorkspaceID: foundation.ID(workspaceID), WorkspaceID: foundation.ID(workspaceID),
+				WorkspaceActive: true, WorkspaceAvailable: true, PersistedRoot: root, GrantGeneration: 7,
+			}
+			if managedView != expectedManaged {
+				t.Fatalf("managed authority view=%#v want=%#v", managedView, expectedManaged)
+			}
+
+			direct, err := variant.open(platform, rootgrant.RuntimeGrantDirect)
+			if err != nil {
+				t.Fatal(err)
+			}
+			directView, err := direct.CurrentRootGrant(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			expectedDirect := expectedManaged
+			expectedDirect.GrantGeneration = 1
+			if directView != expectedDirect {
+				t.Fatalf("direct authority view=%#v want=%#v", directView, expectedDirect)
+			}
+
+			cancelCause := errors.New("root authority caller stopped waiting")
+			canceledCtx, cancelCauseFunc := context.WithCancelCause(ctx)
+			cancelCauseFunc(cancelCause)
+			canceledView, err := managed.CurrentRootGrant(canceledCtx)
+			if err == nil || canceledView != (rootgrant.AuthoritativeView{}) || !errors.Is(err, context.Canceled) {
+				t.Fatalf("canceled authority view=%#v error=%v", canceledView, err)
+			}
+			if variant.name == "gorm" && !errors.Is(err, cancelCause) {
+				t.Fatalf("GORM root authority lost caller cause: %v", err)
+			}
+			requireWorkspaceRootGrantPoolReleased(t, platform)
+		})
+	}
+}
+
+func requireWorkspaceRootGrantPoolReleased(t *testing.T, platform *platformpostgres.Pool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for platform.DB().Stat().AcquiredConns() != 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if acquired := platform.DB().Stat().AcquiredConns(); acquired != 0 {
+		t.Fatalf("shared root grant pool acquired connections=%d want=0", acquired)
+	}
+}
+
+func TestWorkspaceRootGrantRepositorySerializesBeginAndTakesOverExpiredLease(t *testing.T) {
+	runWorkspaceRootGrantVariants(t, testWorkspaceRootGrantRepositorySerializesBeginAndTakesOverExpiredLease)
+}
+
+func testWorkspaceRootGrantRepositorySerializesBeginAndTakesOverExpiredLease(t *testing.T, _ *platformpostgres.Pool, ctx context.Context, repository workspaceRootGrantRepository) {
+	t.Helper()
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	first := reserveWorkspaceRoot(t, ctx, repository,
 		"67300000-0000-4000-8000-000000000001", "/tmp/root-grant-concurrent-one", strings.Repeat("d", 64), now)
@@ -84,7 +237,7 @@ func TestWorkspaceRootGrantRepositorySerializesBeginAndTakesOverExpiredLease(t *
 	conflictingReplay := winner.command
 	conflictingReplay.OperationID = workspaceRootGrantID(t, "67300000-0000-4000-8000-000000000099")
 	conflictingReplay.RequestHash = strings.Repeat("f", 64)
-	_, err = repository.BeginSwitch(ctx, conflictingReplay)
+	_, err := repository.BeginSwitch(ctx, conflictingReplay)
 	assertWorkspaceRootGrantErrorOneOf(t, err, domain.ErrorCodeSwitchIdempotencyConflict)
 
 	time.Sleep(1100 * time.Millisecond)
@@ -128,17 +281,11 @@ func TestWorkspaceRootGrantRepositorySerializesBeginAndTakesOverExpiredLease(t *
 }
 
 func TestWorkspaceRootGrantRepositorySwitchAndRollback(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := newMigrationTestDatabase(t, ctx)
-	defer cleanup()
-	provider := migrationProvider(t, pool)
-	if err := provider.UpTo(ctx, 67); err != nil {
-		t.Fatal(err)
-	}
-	repository, err := workspacepostgres.NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runWorkspaceRootGrantVariants(t, testWorkspaceRootGrantRepositorySwitchAndRollback)
+}
+
+func testWorkspaceRootGrantRepositorySwitchAndRollback(t *testing.T, platform *platformpostgres.Pool, ctx context.Context, repository workspaceRootGrantRepository) {
+	t.Helper()
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	legacyDirect, err := repository.CreateWorkspace(ctx, domain.Workspace{
 		ID:   workspaceRootGrantID(t, "67100000-0000-4000-8000-000000000000"),
@@ -168,6 +315,27 @@ func TestWorkspaceRootGrantRepositorySwitchAndRollback(t *testing.T) {
 	if first.Workspace.Status != domain.WorkspaceStatusInactive || first.Workspace.Availability != domain.WorkspaceAvailabilityAvailable {
 		t.Fatalf("first Registry identity=%#v", first)
 	}
+	reused := reserveWorkspaceRoot(t, ctx, repository,
+		"67100000-0000-4000-8000-000000000098", "/tmp/root-grant-first", strings.Repeat("a", 64), now.Add(time.Second))
+	if !reused.Reused || reused.Workspace.ID != first.Workspace.ID || reused.Workspace.Version != first.Workspace.Version+1 {
+		t.Fatalf("reused Registry identity=%#v first=%#v", reused, first)
+	}
+	unavailable, err := repository.SetWorkspaceAvailability(ctx, domain.AvailabilityUpdate{
+		WorkspaceID: reused.Workspace.ID, ExpectedVersion: reused.Workspace.Version,
+		Availability: domain.WorkspaceAvailabilityUnavailable, Reason: "WORKSPACE_ROOT_TEMPORARILY_UNAVAILABLE",
+		CheckedAt: now.Add(2 * time.Second),
+	})
+	if err != nil || unavailable.Availability != domain.WorkspaceAvailabilityUnavailable || unavailable.Version != reused.Workspace.Version+1 {
+		t.Fatalf("unavailable Registry identity=%#v error=%v", unavailable, err)
+	}
+	available, err := repository.SetWorkspaceAvailability(ctx, domain.AvailabilityUpdate{
+		WorkspaceID: unavailable.ID, ExpectedVersion: unavailable.Version,
+		Availability: domain.WorkspaceAvailabilityAvailable, CheckedAt: now.Add(3 * time.Second),
+	})
+	if err != nil || available.Availability != domain.WorkspaceAvailabilityAvailable || available.Version != unavailable.Version+1 {
+		t.Fatalf("available Registry identity=%#v error=%v", available, err)
+	}
+	first = domain.WorkspaceResolution{Workspace: available, Reused: true}
 
 	controllerID := workspaceRootGrantID(t, "67100000-0000-4000-8000-000000000010")
 	leaseOwnerID := workspaceRootGrantID(t, "67100000-0000-4000-8000-000000000011")
@@ -212,6 +380,26 @@ func TestWorkspaceRootGrantRepositorySwitchAndRollback(t *testing.T) {
 	api = setWorkspaceRuntimePhase(t, ctx, repository, api, operation.ID, domain.RuntimePhaseVerifying)
 	worker = setWorkspaceRuntimePhase(t, ctx, repository, worker, operation.ID, domain.RuntimePhaseVerifying)
 	operation = advanceWorkspaceSwitch(t, ctx, repository, operation, leaseOwnerID, domain.SwitchPhaseCommitting)
+	snapshot = workspaceRootGrantSnapshot(t, ctx, repository)
+	if tag, err := platform.DB().Exec(ctx, `UPDATE ops.workspace_runtime
+		SET heartbeat_at=clock_timestamp()+interval '2 seconds',version=version+1
+		WHERE role='api' AND instance_id=$1 AND version=$2`, string(api.InstanceID), api.Version); err != nil || tag.RowsAffected() != 1 {
+		t.Fatalf("inject future runtime heartbeat rows=%d error=%v", tag.RowsAffected(), err)
+	}
+	api.Version++
+	_, err = repository.CommitTargetWorkspace(ctx, application.CommitTargetCommand{
+		OperationID: operation.ID, LeaseOwnerID: leaseOwnerID,
+		ExpectedOperationVersion: operation.Version, ExpectedStateVersion: snapshot.State.StateVersion,
+		LeaseDuration: time.Minute, RuntimeFreshWithin: time.Minute,
+	})
+	assertWorkspaceRootGrantErrorOneOf(t, err, domain.ErrorCodeRuntimeNotPrepared)
+	time.Sleep(2100 * time.Millisecond)
+	api, err = repository.HeartbeatRuntime(ctx, application.RuntimeHeartbeat{
+		Role: api.Role, InstanceID: api.InstanceID, OperationID: api.OperationID, ExpectedRuntimeVersion: api.Version,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	snapshot = workspaceRootGrantSnapshot(t, ctx, repository)
 	if _, err := repository.CommitTargetWorkspace(ctx, application.CommitTargetCommand{
 		OperationID: operation.ID, LeaseOwnerID: leaseOwnerID,
@@ -301,10 +489,91 @@ func TestWorkspaceRootGrantRepositorySwitchAndRollback(t *testing.T) {
 	}
 }
 
+func TestWorkspaceRootGrantRepositoryRuntimeFences(t *testing.T) {
+	runWorkspaceRootGrantVariants(t, testWorkspaceRootGrantRepositoryRuntimeFences)
+}
+
+func testWorkspaceRootGrantRepositoryRuntimeFences(t *testing.T, platform *platformpostgres.Pool, ctx context.Context, repository workspaceRootGrantRepository) {
+	t.Helper()
+	emptySnapshot, err := repository.ControlSnapshot(ctx, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if emptySnapshot.Registry == nil || len(emptySnapshot.Registry) != 0 ||
+		emptySnapshot.Runtimes == nil || len(emptySnapshot.Runtimes) != 0 {
+		t.Fatalf("empty control snapshot registry=%#v runtimes=%#v", emptySnapshot.Registry, emptySnapshot.Runtimes)
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	resolution := reserveWorkspaceRoot(t, ctx, repository,
+		"67500000-0000-4000-8000-000000000001", "/tmp/root-grant-runtime-fence", strings.Repeat("b", 64), now)
+	workspace := resolution.Workspace
+	if _, err := platform.DB().Exec(ctx, `UPDATE core.workspace
+		SET status='active',version=version+1,updated_at=clock_timestamp() WHERE id=$1`, string(workspace.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := platform.DB().Exec(ctx, `UPDATE ops.workspace_control_state
+		SET active_workspace_id=$1,grant_generation=1,state_version=state_version+1,updated_at=clock_timestamp()
+		WHERE singleton=true`, string(workspace.ID)); err != nil {
+		t.Fatal(err)
+	}
+	registration := application.RuntimeRegistration{
+		Role: domain.RuntimeRoleAPI, InstanceID: workspaceRootGrantID(t, "67500000-0000-4000-8000-000000000002"),
+		WorkspaceID: workspace.ID, GrantGeneration: 1, RootFingerprint: workspace.RootFingerprint,
+		BindingVersion: workspace.BindingVersion, Phase: domain.RuntimePhaseActive,
+	}
+	record, err := repository.RegisterRuntime(ctx, registration)
+	if err != nil || record.Version != 1 {
+		t.Fatalf("registered runtime=%#v error=%v", record, err)
+	}
+
+	wrongBinding := registration
+	wrongBinding.RootFingerprint = strings.Repeat("c", 64)
+	_, err = repository.RegisterRuntime(ctx, wrongBinding)
+	assertWorkspaceRootGrantErrorOneOf(t, err, domain.ErrorCodeRuntimeBindingMismatch)
+	wrongGrant := registration
+	wrongGrant.GrantGeneration++
+	_, err = repository.RegisterRuntime(ctx, wrongGrant)
+	assertWorkspaceRootGrantErrorOneOf(t, err, domain.ErrorCodeRuntimeConflict)
+	_, err = repository.HeartbeatRuntime(ctx, application.RuntimeHeartbeat{
+		Role: record.Role, InstanceID: workspaceRootGrantID(t, "67500000-0000-4000-8000-000000000099"),
+		ExpectedRuntimeVersion: record.Version,
+	})
+	assertWorkspaceRootGrantErrorOneOf(t, err, domain.ErrorCodeRuntimeConflict)
+	_, err = repository.HeartbeatRuntime(ctx, application.RuntimeHeartbeat{
+		Role: record.Role, InstanceID: record.InstanceID, ExpectedRuntimeVersion: record.Version + 1,
+	})
+	assertWorkspaceRootGrantErrorOneOf(t, err, domain.ErrorCodeRuntimeConflict)
+	record, err = repository.HeartbeatRuntime(ctx, application.RuntimeHeartbeat{
+		Role: record.Role, InstanceID: record.InstanceID, ExpectedRuntimeVersion: record.Version,
+	})
+	if err != nil || record.Version != 2 {
+		t.Fatalf("heartbeat runtime=%#v error=%v", record, err)
+	}
+	_, err = repository.SetRuntimePhase(ctx, application.RuntimePhaseCommand{
+		Role: record.Role, InstanceID: record.InstanceID, ExpectedPhase: domain.RuntimePhaseUnavailable,
+		NextPhase: domain.RuntimePhaseActive, ExpectedRuntimeVersion: record.Version,
+	})
+	assertWorkspaceRootGrantErrorOneOf(t, err, domain.ErrorCodeRuntimeConflict)
+
+	if tag, err := platform.DB().Exec(ctx, `UPDATE ops.workspace_runtime
+		SET heartbeat_at=clock_timestamp()+interval '10 minutes',version=version+1
+		WHERE role=$1 AND instance_id=$2 AND version=$3`, string(record.Role), string(record.InstanceID), record.Version); err != nil || tag.RowsAffected() != 1 {
+		t.Fatalf("inject future heartbeat rows=%d error=%v", tag.RowsAffected(), err)
+	}
+	snapshot, err := repository.ControlSnapshot(ctx, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Runtimes) != 1 || snapshot.Runtimes[0].Fresh {
+		t.Fatalf("future heartbeat snapshot runtimes=%#v", snapshot.Runtimes)
+	}
+	requireWorkspaceRootGrantPoolReleased(t, platform)
+}
+
 func reserveWorkspaceRoot(
 	t *testing.T,
 	ctx context.Context,
-	repository *workspacepostgres.Repository,
+	repository workspaceRootGrantRepository,
 	id, root, fingerprint string,
 	now time.Time,
 ) domain.WorkspaceResolution {
@@ -326,7 +595,7 @@ func reserveWorkspaceRoot(
 func advanceWorkspaceSwitch(
 	t *testing.T,
 	ctx context.Context,
-	repository *workspacepostgres.Repository,
+	repository workspaceRootGrantRepository,
 	operation domain.SwitchOperation,
 	leaseOwnerID foundation.ID,
 	next domain.SwitchPhase,
@@ -348,7 +617,7 @@ func advanceWorkspaceSwitch(
 func registerWorkspaceRuntime(
 	t *testing.T,
 	ctx context.Context,
-	repository *workspacepostgres.Repository,
+	repository workspaceRootGrantRepository,
 	operation domain.SwitchOperation,
 	workspace domain.Workspace,
 	role domain.RuntimeRole,
@@ -371,7 +640,7 @@ func registerWorkspaceRuntime(
 func setWorkspaceRuntimePhase(
 	t *testing.T,
 	ctx context.Context,
-	repository *workspacepostgres.Repository,
+	repository workspaceRootGrantRepository,
 	runtime domain.RuntimeRecord,
 	operationID foundation.ID,
 	next domain.RuntimePhase,
@@ -387,7 +656,7 @@ func setWorkspaceRuntimePhase(
 	return updated
 }
 
-func workspaceRootGrantSnapshot(t *testing.T, ctx context.Context, repository *workspacepostgres.Repository) domain.ControlSnapshot {
+func workspaceRootGrantSnapshot(t *testing.T, ctx context.Context, repository workspaceRootGrantRepository) domain.ControlSnapshot {
 	t.Helper()
 	snapshot, err := repository.ControlSnapshot(ctx, time.Minute)
 	if err != nil {
@@ -396,7 +665,7 @@ func workspaceRootGrantSnapshot(t *testing.T, ctx context.Context, repository *w
 	return snapshot
 }
 
-func workspaceRootGrantOperation(t *testing.T, ctx context.Context, repository *workspacepostgres.Repository, id foundation.ID) domain.SwitchOperation {
+func workspaceRootGrantOperation(t *testing.T, ctx context.Context, repository workspaceRootGrantRepository, id foundation.ID) domain.SwitchOperation {
 	t.Helper()
 	operation, err := repository.GetSwitchOperation(ctx, id)
 	if err != nil {

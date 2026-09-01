@@ -8,8 +8,8 @@ import (
 )
 
 // The staged models deliberately contain only storage fields. They are never
-// passed to schema mutation APIs or association saving; the existing Atlas/
-// Goose schema remains the sole schema authority.
+// passed to schema mutation APIs or association saving; the Atlas migration
+// directory remains the sole schema authority.
 
 type gitRemoteConfigModel struct {
 	WorkspaceID     string    `gorm:"column:workspace_id;type:uuid;primaryKey"`

@@ -1,15 +1,17 @@
 //go:build integration
 
-package migration
+package migration_test
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	agenteino "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/eino"
 	agentpostgres "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/postgres"
 	agentapp "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
 	agentdomain "github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
@@ -18,19 +20,116 @@ import (
 	capturedomain "github.com/CodeZen-Lizhi/zhixu/internal/capture/domain"
 	captureprofile "github.com/CodeZen-Lizhi/zhixu/internal/capture/profile"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
+	workspacepostgres "github.com/CodeZen-Lizhi/zhixu/internal/workspace/adapter/postgres"
+	workspacedomain "github.com/CodeZen-Lizhi/zhixu/internal/workspace/domain"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func TestUnavailableProfileGeneratorPersistsStateAndAttemptWithoutDerivedContent(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := newMigrationTestDatabase(t, ctx)
-	defer cleanup()
-	if err := migrationProvider(t, pool).UpTo(ctx, 68); err != nil {
+type captureProfileIntegrationCaptureRepository interface {
+	captureapp.Repository
+	captureapp.ProcessingRepository
+}
+
+type captureProfileIntegrationProfileRepository interface {
+	captureapp.ProfileGenerationRepository
+	captureapp.ProfileReader
+	captureapp.ProfileBatchReader
+	captureapp.ProfileRetryScheduler
+}
+
+type captureProfileRepositoryIntegrationHarness struct {
+	capture   captureProfileIntegrationCaptureRepository
+	profiles  captureProfileIntegrationProfileRepository
+	modelRuns agentapp.ModelRunRepository
+}
+
+type captureProfileRepositoryIntegrationVariant struct {
+	name string
+	open func(*testing.T, *platformpostgres.Pool) captureProfileRepositoryIntegrationHarness
+}
+
+func testCaptureProfileRepositoryVariants(
+	t *testing.T,
+	test func(*testing.T, *platformpostgres.Pool, context.Context, captureProfileRepositoryIntegrationHarness),
+) {
+	t.Helper()
+	variants := []captureProfileRepositoryIntegrationVariant{
+		{name: "legacy", open: openLegacyCaptureProfileRepositoryIntegration},
+		{name: "gorm", open: openGORMCaptureProfileRepositoryIntegration},
+	}
+	for _, variant := range variants {
+		t.Run(variant.name, func(t *testing.T) {
+			fixture := testdb.Require(t, testdb.Config{Availability: testdb.FailWhenUnavailable, MaxConns: 16})
+			platform := fixture.Pool()
+			test(t, platform, context.Background(), variant.open(t, platform))
+		})
+	}
+}
+
+func openLegacyCaptureProfileRepositoryIntegration(
+	t *testing.T,
+	platform *platformpostgres.Pool,
+) captureProfileRepositoryIntegrationHarness {
+	t.Helper()
+	pool := platform.DB()
+	captureRepository, err := capturepostgres.NewRepository(pool)
+	if err != nil {
 		t.Fatal(err)
 	}
+	modelRuns, err := agentpostgres.NewRepository(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profiles, err := capturepostgres.NewProfileRepository(pool, modelRuns)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return captureProfileRepositoryIntegrationHarness{
+		capture: captureRepository, profiles: profiles, modelRuns: modelRuns,
+	}
+}
 
+func openGORMCaptureProfileRepositoryIntegration(
+	t *testing.T,
+	platform *platformpostgres.Pool,
+) captureProfileRepositoryIntegrationHarness {
+	t.Helper()
+	workspaceRepository, err := workspacepostgres.NewGORMRepository(platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	captureRepository, err := capturepostgres.NewGORMRepository(platform, workspaceRepository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	modelRuns, err := agentpostgres.NewGORMRepository(platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profiles, err := capturepostgres.NewGORMProfileRepository(platform, modelRuns)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return captureProfileRepositoryIntegrationHarness{
+		capture: captureRepository, profiles: profiles, modelRuns: modelRuns,
+	}
+}
+
+func TestUnavailableProfileGeneratorPersistsStateAndAttemptWithoutDerivedContent(t *testing.T) {
+	testCaptureProfileRepositoryVariants(t, testUnavailableProfileGeneratorPersistsStateAndAttemptWithoutDerivedContent)
+}
+
+func testUnavailableProfileGeneratorPersistsStateAndAttemptWithoutDerivedContent(
+	t *testing.T,
+	platform *platformpostgres.Pool,
+	ctx context.Context,
+	harness captureProfileRepositoryIntegrationHarness,
+) {
+	pool := platform.DB()
 	now := time.Date(2026, 8, 2, 17, 0, 0, 0, time.UTC)
 	const (
 		workspaceID        foundation.ID = "68400000-0000-4000-8000-000000000001"
@@ -46,10 +145,8 @@ func TestUnavailableProfileGeneratorPersistsStateAndAttemptWithoutDerivedContent
 	)
 	insertCaptureWorkspace(t, ctx, pool, workspaceID, now)
 
-	captureRepository, err := capturepostgres.NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
+	captureRepository := harness.capture
+	profiles := harness.profiles
 	captureService, err := captureapp.NewService(captureapp.Dependencies{
 		Repository: captureRepository, Content: captureIntegrationContent{},
 		IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.FixedClock{Value: now},
@@ -159,14 +256,6 @@ func TestUnavailableProfileGeneratorPersistsStateAndAttemptWithoutDerivedContent
 			repeatedAttemptStage, repeatedIngestionAttemptID, repeatedIndexVersionID)
 	}
 
-	modelRuns, err := agentpostgres.NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
-	profiles, err := capturepostgres.NewProfileRepository(pool, modelRuns)
-	if err != nil {
-		t.Fatal(err)
-	}
 	generator, err := captureprofile.NewUnavailableGenerator(
 		profiles, foundation.NewUUIDGenerator(nil), foundation.FixedClock{Value: now.Add(3 * time.Second)},
 	)
@@ -288,13 +377,16 @@ func TestUnavailableProfileGeneratorPersistsStateAndAttemptWithoutDerivedContent
 }
 
 func TestReadyProfileGeneratorPersistsEvidenceAndReplaysWithoutCallingModelAgain(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := newMigrationTestDatabase(t, ctx)
-	defer cleanup()
-	if err := migrationProvider(t, pool).UpTo(ctx, 68); err != nil {
-		t.Fatal(err)
-	}
+	testCaptureProfileRepositoryVariants(t, testReadyProfileGeneratorPersistsEvidenceAndReplaysWithoutCallingModelAgain)
+}
 
+func testReadyProfileGeneratorPersistsEvidenceAndReplaysWithoutCallingModelAgain(
+	t *testing.T,
+	platform *platformpostgres.Pool,
+	ctx context.Context,
+	harness captureProfileRepositoryIntegrationHarness,
+) {
+	pool := platform.DB()
 	now := time.Date(2026, 8, 2, 18, 0, 0, 0, time.UTC)
 	const (
 		workspaceID                    foundation.ID = "68500000-0000-4000-8000-000000000001"
@@ -343,10 +435,9 @@ func TestReadyProfileGeneratorPersistsEvidenceAndReplaysWithoutCallingModelAgain
 	const content = "Spring AI integrates model providers."
 	insertCaptureWorkspace(t, ctx, pool, workspaceID, now)
 
-	captureRepository, err := capturepostgres.NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
+	captureRepository := harness.capture
+	profiles := harness.profiles
+	modelRuns := harness.modelRuns
 	captureService, err := captureapp.NewService(captureapp.Dependencies{
 		Repository: captureRepository, Content: captureIntegrationContent{},
 		IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.FixedClock{Value: now},
@@ -547,14 +638,6 @@ func TestReadyProfileGeneratorPersistsEvidenceAndReplaysWithoutCallingModelAgain
 		t.Fatal(err)
 	}
 
-	modelRuns, err := agentpostgres.NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
-	profiles, err := capturepostgres.NewProfileRepository(pool, modelRuns)
-	if err != nil {
-		t.Fatal(err)
-	}
 	if _, err := pool.Exec(ctx, `UPDATE retrieval.index_version
 		SET status='ready',version=2,built_at=$2,updated_at=$2 WHERE id=$1`,
 		buildingIndexVersionID, now.Add(3*time.Second)); err != nil {
@@ -588,6 +671,10 @@ func TestReadyProfileGeneratorPersistsEvidenceAndReplaysWithoutCallingModelAgain
 	if err := catalog.Freeze(); err != nil {
 		t.Fatal(err)
 	}
+	scheduler, err := agenteino.NewStructuredPhaseScheduler(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 	output, err := json.Marshal(map[string]any{
 		"result_type": agentdomain.ResultTypeDocumentKnowledgeProfile,
 		"schema_id":   captureprofile.SchemaID, "schema_version": capturedomain.ProfileSchemaVersion,
@@ -612,7 +699,8 @@ func TestReadyProfileGeneratorPersistsEvidenceAndReplaysWithoutCallingModelAgain
 	clock := &captureProfileIntegrationClock{next: now.Add(3 * time.Second)}
 	generator, err := captureprofile.NewGenerator(captureprofile.GeneratorDependencies{
 		Repository: profiles, ModelRuns: modelRuns, Model: initialModel, Catalog: catalog,
-		ModelProfileRef: profileRef, IDs: foundation.NewUUIDGenerator(nil), Clock: clock,
+		Scheduler: scheduler, ModelProfileRef: profileRef,
+		IDs: foundation.NewUUIDGenerator(nil), Clock: clock,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -636,7 +724,7 @@ func TestReadyProfileGeneratorPersistsEvidenceAndReplaysWithoutCallingModelAgain
 	case <-time.After(5 * time.Second):
 		t.Fatal("profile model did not start")
 	}
-	activateCaptureProfileModelSettingsRevision(t, ctx, pool)
+	activateCaptureProfileModelSettingsRevision(t, ctx, pool, workerRuntimeID)
 	close(initialModel.release)
 	outcome := <-generation
 	if outcome.err != nil {
@@ -748,9 +836,6 @@ func TestReadyProfileGeneratorPersistsEvidenceAndReplaysWithoutCallingModelAgain
 		query string
 		args  []any
 	}{
-		{`INSERT INTO ops.model_settings_runtime(
-			role,instance_id,applied_revision,phase,applied_at,heartbeat_at
-		) VALUES('worker',$1,1,'active',$2,$2)`, []any{workerRuntimeID, rebuildNow}},
 		{`INSERT INTO workflow.run(id,workspace_id,definition_id,status,input,version,created_at,updated_at)
 			VALUES($1,$2,$3,'running','{}',1,$4,$4)`, []any{rebuildWorkflowRunID, string(workspaceID), definitionID, rebuildNow}},
 		{`INSERT INTO workflow.node_run(id,run_id,node_key,node_type,status,input,lease_owner,lease_until,version,created_at,updated_at)
@@ -782,7 +867,7 @@ func TestReadyProfileGeneratorPersistsEvidenceAndReplaysWithoutCallingModelAgain
 	rebuildModel := agentapp.NewDeterministicChatModel(modelStep)
 	rebuildGenerator, err := captureprofile.NewGenerator(captureprofile.GeneratorDependencies{
 		Repository: profiles, ModelRuns: modelRuns, Model: rebuildModel, Catalog: catalog,
-		ModelProfileRef: profileRef, IDs: foundation.NewUUIDGenerator(nil),
+		Scheduler: scheduler, ModelProfileRef: profileRef, IDs: foundation.NewUUIDGenerator(nil),
 		Clock: &captureProfileIntegrationClock{next: rebuildNow.Add(2 * time.Second)},
 	})
 	if err != nil {
@@ -824,6 +909,17 @@ func TestReadyProfileGeneratorPersistsEvidenceAndReplaysWithoutCallingModelAgain
 		finalView.Revision.IndexVersionID != rebuildIndexVersionID || finalView.Revision.ModelSettingsRevision == nil ||
 		*finalView.Revision.ModelSettingsRevision != settingsRevision || len(finalView.Evidence) != 1 {
 		t.Fatalf("final rebuilt profile=%#v", finalView)
+	}
+	batchViews, err := profiles.GetProfiles(ctx, captureapp.ProfileBatchQuery{
+		WorkspaceID: workspaceID, SourceVersionIDs: []foundation.ID{created.Capture.LatestSourceVersionID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(batchViews) != 1 || batchViews[0].Profile.ID != profileID ||
+		batchViews[0].Revision == nil || batchViews[0].Revision.ID != rebuilt.RevisionID ||
+		len(batchViews[0].Evidence) != 1 || batchViews[0].Evidence[0].SourceSpanID != spanID {
+		t.Fatalf("batch profile views=%#v", batchViews)
 	}
 	replayedRebuild, err := rebuildGenerator.Generate(ctx, rebuildRequest)
 	if err != nil {
@@ -961,7 +1057,7 @@ func TestReadyProfileGeneratorPersistsEvidenceAndReplaysWithoutCallingModelAgain
 	interleaveModel := newCaptureProfileBlockingModel(modelStep.Response)
 	interleaveGenerator, err := captureprofile.NewGenerator(captureprofile.GeneratorDependencies{
 		Repository: profiles, ModelRuns: modelRuns, Model: interleaveModel, Catalog: catalog,
-		ModelProfileRef: profileRef, IDs: foundation.NewUUIDGenerator(nil),
+		Scheduler: scheduler, ModelProfileRef: profileRef, IDs: foundation.NewUUIDGenerator(nil),
 		Clock: &captureProfileIntegrationClock{next: interleaveNow.Add(4 * time.Second)},
 	})
 	if err != nil {
@@ -1046,23 +1142,54 @@ func TestReadyProfileGeneratorPersistsEvidenceAndReplaysWithoutCallingModelAgain
 	}
 }
 
-func activateCaptureProfileModelSettingsRevision(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+func activateCaptureProfileModelSettingsRevision(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	workerRuntimeID foundation.ID,
+) {
 	t.Helper()
 	insertModelSettingsMigrationRevision(t, ctx, pool)
-	statements := []string{
-		`UPDATE ops.model_settings_state SET desired_revision=1,version=version+1,updated_at=clock_timestamp() WHERE singleton=true`,
-		`UPDATE ops.model_settings_state SET rollout_id='68500000-0000-4000-8000-000000000099',
-			target_revision=1,previous_active_revision=0,phase='validating',lease_expires_at=clock_timestamp()+interval '1 minute',
-			version=version+1,updated_at=clock_timestamp() WHERE singleton=true`,
-		`UPDATE ops.model_settings_state SET phase='draining',version=version+1,updated_at=clock_timestamp() WHERE singleton=true`,
-		`UPDATE ops.model_settings_state SET phase='applying',version=version+1,updated_at=clock_timestamp() WHERE singleton=true`,
-		`UPDATE ops.model_settings_state SET phase='verifying',version=version+1,updated_at=clock_timestamp() WHERE singleton=true`,
-		`UPDATE ops.model_settings_state SET active_revision=1,rollout_id=NULL,target_revision=NULL,previous_active_revision=NULL,
-			phase='idle',lease_expires_at=NULL,last_error_code=NULL,version=version+1,updated_at=clock_timestamp()
-			WHERE singleton=true`,
+	const (
+		rolloutID    = "68500000-0000-4000-8000-000000000099"
+		apiRuntimeID = "68500000-0000-4000-8000-000000000098"
+	)
+	statements := []struct {
+		query string
+		args  []any
+	}{
+		{`INSERT INTO ops.model_settings_runtime(
+			role,instance_id,applied_revision,phase,applied_at,heartbeat_at
+		) VALUES('api',$1,0,'active',clock_timestamp(),clock_timestamp()),
+			('worker',$2,0,'active',clock_timestamp(),clock_timestamp())`, []any{apiRuntimeID, workerRuntimeID}},
+		{`UPDATE ops.model_settings_state SET desired_revision=1,rollout_id=$1,target_revision=1,
+			previous_active_revision=0,phase='preparing',lease_expires_at=clock_timestamp()+interval '1 minute',
+			last_error_code=NULL,version=version+1,updated_at=clock_timestamp() WHERE singleton=true`, []any{rolloutID}},
+		{`INSERT INTO ops.model_settings_rollout_participant(
+			rollout_id,role,instance_id,target_revision,phase,heartbeat_at,version
+		) VALUES($1,'api',$2,1,'preparing',clock_timestamp(),1),
+			($1,'worker',$3,1,'preparing',clock_timestamp(),1)`, []any{rolloutID, apiRuntimeID, workerRuntimeID}},
+		{`UPDATE ops.model_settings_rollout_participant SET phase='prepared',prepared_at=clock_timestamp(),
+			heartbeat_at=clock_timestamp(),version=version+1 WHERE rollout_id=$1`, []any{rolloutID}},
+		{`UPDATE ops.model_settings_state SET phase='arming',lease_expires_at=clock_timestamp()+interval '1 minute',
+			version=version+1,updated_at=clock_timestamp() WHERE singleton=true`, nil},
+		{`UPDATE ops.model_settings_rollout_participant SET phase='armed',heartbeat_at=clock_timestamp(),
+			version=version+1 WHERE rollout_id=$1`, []any{rolloutID}},
+		{`UPDATE ops.model_settings_state SET active_revision=target_revision,phase='activating',
+			lease_expires_at=clock_timestamp()+interval '1 minute',version=version+1,
+			updated_at=clock_timestamp() WHERE singleton=true`, nil},
+		{`UPDATE ops.model_settings_runtime SET applied_revision=1,phase='active',rollout_id=NULL,
+			applied_at=clock_timestamp(),heartbeat_at=clock_timestamp() WHERE role IN ('api','worker')`, nil},
+		{`UPDATE ops.model_settings_rollout_participant SET phase='activated',activated_at=clock_timestamp(),
+			heartbeat_at=clock_timestamp(),version=version+1 WHERE rollout_id=$1`, []any{rolloutID}},
+		{`UPDATE ops.model_settings_state SET rollout_id=NULL,target_revision=NULL,previous_active_revision=NULL,
+			phase='idle',lease_expires_at=NULL,last_error_code=NULL,version=version+1,
+			updated_at=clock_timestamp() WHERE singleton=true`, nil},
+		{`UPDATE ops.model_settings_rollout_participant SET phase='retired',retired_at=clock_timestamp(),
+			heartbeat_at=clock_timestamp(),version=version+1 WHERE rollout_id=$1`, []any{rolloutID}},
 	}
 	for _, statement := range statements {
-		if _, err := pool.Exec(ctx, statement); err != nil {
+		if _, err := pool.Exec(ctx, statement.query, statement.args...); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1314,6 +1441,77 @@ type captureProfileBlockingModel struct {
 	calls    int
 }
 
+type captureIntegrationContent struct{}
+
+func (captureIntegrationContent) StageManagedBytes(
+	_ context.Context,
+	_ foundation.ID,
+	sourceRef string,
+	content []byte,
+	hash string,
+) (workspacedomain.ManagedContentStage, error) {
+	return workspacedomain.ManagedContentStage{
+		ContentHash: hash, ByteSize: int64(len(content)), ManagedLocation: ".knowledge/sources/" + hash,
+		StagingLocation: ".knowledge/sources/.staging/" + sourceRef,
+	}, nil
+}
+
+func (captureIntegrationContent) PublishManagedBytes(
+	_ context.Context,
+	_ foundation.ID,
+	stage workspacedomain.ManagedContentStage,
+) (workspacedomain.ContentCapture, error) {
+	return workspacedomain.ContentCapture{
+		ContentHash: stage.ContentHash, ByteSize: stage.ByteSize,
+		ManagedLocation: stage.ManagedLocation, Created: true,
+	}, nil
+}
+
+func (captureIntegrationContent) DiscardManagedBytes(
+	context.Context,
+	foundation.ID,
+	workspacedomain.ManagedContentStage,
+) error {
+	return nil
+}
+
+func insertCaptureWorkspace(
+	t *testing.T,
+	ctx context.Context,
+	database *pgxpool.Pool,
+	workspaceID foundation.ID,
+	now time.Time,
+) {
+	t.Helper()
+	if _, err := database.Exec(ctx, `INSERT INTO core.workspace(
+		id,name,root_path,root_fingerprint,binding_version,git_repository_path,git_checked_at,
+		status,availability,availability_reason,availability_checked_at,version,created_at,updated_at
+	) VALUES($1,'capture-profile-test','/tmp/capture-profile-test',$2,1,
+		'/tmp/capture-profile-test',$3,'inactive','available',NULL,$3,1,$3,$3)`,
+		string(workspaceID), "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", now); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func insertModelSettingsMigrationRevision(t *testing.T, ctx context.Context, queryer interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}) {
+	t.Helper()
+	_, err := queryer.Exec(ctx, `INSERT INTO ops.model_settings_revisions(
+		revision,chat_provider,chat_base_url,chat_model,chat_model_version,chat_adapter_version,
+		chat_timeout_microseconds,chat_max_request_bytes,chat_max_response_bytes,
+		embedding_provider,embedding_base_url,embedding_model,embedding_dimensions,
+		embedding_normalization,embedding_distance_metric,embedding_max_batch_size,
+		embedding_max_input_bytes,embedding_max_batch_input_bytes,embedding_timeout_microseconds,
+		embedding_max_response_bytes,created_by
+	) VALUES(1,'openai-compatible','https://models.example.test/v1','chat-model','2026-07','v1',
+		30000000,4194304,4194304,'ollama','http://127.0.0.1:11434','embed-model',768,
+		'l2','cosine',128,65536,8388608,30000000,67108864,'migration-test')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func newCaptureProfileBlockingModel(response agentapp.ChatResponse) *captureProfileBlockingModel {
 	return &captureProfileBlockingModel{
 		response: response,
@@ -1339,4 +1537,144 @@ func (model *captureProfileBlockingModel) CallCount() int {
 	model.mu.Lock()
 	defer model.mu.Unlock()
 	return model.calls
+}
+
+func TestCaptureProfileRepositoryPreservesContextCauseAndReusesConnection(t *testing.T) {
+	testCaptureProfileRepositoryVariants(t, testCaptureProfileRepositoryPreservesContextCauseAndReusesConnection)
+}
+
+func testCaptureProfileRepositoryPreservesContextCauseAndReusesConnection(
+	t *testing.T,
+	platform *platformpostgres.Pool,
+	ctx context.Context,
+	harness captureProfileRepositoryIntegrationHarness,
+) {
+	query := captureapp.ProfileQuery{
+		WorkspaceID:     foundation.ID("68900000-0000-4000-8000-000000000001"),
+		SourceVersionID: foundation.ID("68900000-0000-4000-8000-000000000002"),
+	}
+	cancelCause := errors.New("profile caller stopped waiting")
+	canceledCtx, cancel := context.WithCancelCause(ctx)
+	cancel(cancelCause)
+	view, err := harness.profiles.GetProfile(canceledCtx, query)
+	if err == nil || view.Profile.ID != "" || view.Revision != nil || len(view.Evidence) != 0 || !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled profile Get() view=%#v error=%v", view, err)
+	}
+	if _, isGORM := harness.profiles.(*capturepostgres.GORMProfileRepository); isGORM && !errors.Is(err, cancelCause) {
+		t.Fatalf("GORM profile cancellation lost caller cause: %v", err)
+	}
+
+	deadlineCause := errors.New("profile caller deadline budget expired")
+	deadlineCtx, deadlineCancel := context.WithDeadlineCause(ctx, time.Unix(0, 0), deadlineCause)
+	defer deadlineCancel()
+	views, err := harness.profiles.GetProfiles(deadlineCtx, captureapp.ProfileBatchQuery{
+		WorkspaceID: query.WorkspaceID, SourceVersionIDs: []foundation.ID{query.SourceVersionID},
+	})
+	if err == nil || len(views) != 0 || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("deadline profile batch views=%#v error=%v", views, err)
+	}
+	if _, isGORM := harness.profiles.(*capturepostgres.GORMProfileRepository); isGORM && !errors.Is(err, deadlineCause) {
+		t.Fatalf("GORM profile deadline lost caller cause: %v", err)
+	}
+	var one int
+	if err := platform.DB().QueryRow(ctx, `SELECT 1`).Scan(&one); err != nil || one != 1 {
+		t.Fatalf("pool unusable after profile cancellation value=%d error=%v", one, err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for platform.DB().Stat().AcquiredConns() != 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if acquired := platform.DB().Stat().AcquiredConns(); acquired != 0 {
+		t.Fatalf("profile pool acquired connections=%d want=0", acquired)
+	}
+}
+
+func TestCaptureProfileRepositoryTargetQueryPlansUseDeclaredIndexes(t *testing.T) {
+	testCaptureProfileRepositoryVariants(t, testCaptureProfileRepositoryTargetQueryPlansUseDeclaredIndexes)
+}
+
+func testCaptureProfileRepositoryTargetQueryPlansUseDeclaredIndexes(
+	t *testing.T,
+	platform *platformpostgres.Pool,
+	ctx context.Context,
+	harness captureProfileRepositoryIntegrationHarness,
+) {
+	workspaceID := foundation.ID("69000000-0000-4000-8000-000000000001")
+	sourceVersionID := foundation.ID("69000000-0000-4000-8000-000000000002")
+	_ = harness
+	pool := platform.DB()
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	if _, err := tx.Exec(ctx, `SET LOCAL enable_seqscan=off`); err != nil {
+		t.Fatal(err)
+	}
+	queries := []struct {
+		name    string
+		sql     string
+		args    []any
+		indexes []string
+	}{
+		{
+			name:    "profile by source version",
+			sql:     `SELECT id FROM learning.document_knowledge_profile WHERE workspace_id=$1 AND source_version_id=$2`,
+			args:    []any{string(workspaceID), string(sourceVersionID)},
+			indexes: []string{"uq_document_profile_source_version"},
+		},
+		{
+			name:    "profile revision by workspace",
+			sql:     `SELECT id FROM learning.document_knowledge_profile_revision WHERE workspace_id=$1 AND id=$2`,
+			args:    []any{string(workspaceID), string(sourceVersionID)},
+			indexes: []string{"uq_document_profile_revision_workspace", "uq_document_profile_revision_evidence"},
+		},
+		{
+			name:    "active profile attempt",
+			sql:     `SELECT id FROM learning.document_knowledge_profile_attempt WHERE profile_id=$1 AND status='RUNNING'`,
+			args:    []any{string(workspaceID)},
+			indexes: []string{"uq_document_profile_attempt_active"},
+		},
+	}
+	for _, query := range queries {
+		t.Run(query.name, func(t *testing.T) {
+			rows, err := tx.Query(ctx, "EXPLAIN (COSTS OFF) "+query.sql, query.args...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer rows.Close()
+			var lines []string
+			for rows.Next() {
+				var line string
+				if err := rows.Scan(&line); err != nil {
+					t.Fatal(err)
+				}
+				lines = append(lines, line)
+			}
+			if err := rows.Err(); err != nil {
+				t.Fatal(err)
+			}
+			plan := strings.Join(lines, "\n")
+			matched := false
+			for _, index := range query.indexes {
+				if strings.Contains(plan, index) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				t.Fatalf("query plan missing one of indexes %v:\n%s", query.indexes, plan)
+			}
+		})
+	}
+	if err := tx.Rollback(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for pool.Stat().AcquiredConns() != 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if acquired := pool.Stat().AcquiredConns(); acquired != 0 {
+		t.Fatalf("profile plan pool acquired connections=%d want=0", acquired)
+	}
 }

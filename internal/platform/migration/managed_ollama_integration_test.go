@@ -1,26 +1,117 @@
 //go:build integration
 
-package migration
+package migration_test
 
 import (
 	"context"
+	"errors"
+	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	localmodelruntime "github.com/CodeZen-Lizhi/zhixu/internal/localmodelruntime"
+	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
+	gormlogger "gorm.io/gorm/logger"
 )
+
+type managedOllamaIntegrationStore interface {
+	localmodelruntime.LifecycleStore
+	localmodelruntime.TestPreparationStore
+	CompleteTestPreparation(context.Context, foundation.ID, string, bool) (localmodelruntime.OperationRecord, error)
+}
+
+type managedOllamaIntegrationVariant struct {
+	name string
+	open func(*testing.T, *platformpostgres.Pool) managedOllamaIntegrationStore
+}
+
+func managedOllamaTestPlatform(t *testing.T) *platformpostgres.Pool {
+	t.Helper()
+	fixture := testdb.Require(t, testdb.Config{
+		ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
+		Availability:     testdb.FailWhenUnavailable,
+		MaxConns:         16,
+	})
+	platform := fixture.Pool()
+	if platform == nil || platform.DB() == nil {
+		t.Fatal("managed Ollama fixture did not provide a platform pool")
+	}
+	return platform
+}
+
+func runManagedOllamaIntegrationVariants(
+	t *testing.T,
+	scenario func(*testing.T, context.Context, *pgxpool.Pool, managedOllamaIntegrationStore),
+) {
+	t.Helper()
+	variants := []managedOllamaIntegrationVariant{
+		{name: "legacy-pgx", open: func(t *testing.T, platform *platformpostgres.Pool) managedOllamaIntegrationStore {
+			store, err := localmodelruntime.NewPostgresStore(platform.DB())
+			if err != nil {
+				t.Fatal(err)
+			}
+			return store
+		}},
+		{name: "gorm", open: func(t *testing.T, platform *platformpostgres.Pool) managedOllamaIntegrationStore {
+			store, err := localmodelruntime.NewGORMStore(platform)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return store
+		}},
+	}
+	for _, variant := range variants {
+		t.Run(variant.name, func(t *testing.T) {
+			platform := managedOllamaTestPlatform(t)
+			scenario(t, context.Background(), platform.DB(), variant.open(t, platform))
+		})
+	}
+}
+
+func assertPostgresCode(t *testing.T, err error, want string) {
+	t.Helper()
+	var postgresError *pgconn.PgError
+	if err == nil || !errors.As(err, &postgresError) || postgresError.Code != want {
+		t.Fatalf("PostgreSQL error=%v code=%q want=%q", err, postgresErrorCode(postgresError), want)
+	}
+}
+
+func postgresErrorCode(err *pgconn.PgError) string {
+	if err == nil {
+		return ""
+	}
+	return err.Code
+}
+
+var errManagedOllamaScopedRollback = errors.New("rollback managed Ollama scoped transaction")
+
+type managedOllamaStatementCounter struct {
+	count atomic.Int64
+}
+
+func (counter *managedOllamaStatementCounter) LogMode(gormlogger.LogLevel) gormlogger.Interface {
+	return counter
+}
+
+func (*managedOllamaStatementCounter) Info(context.Context, string, ...any)  {}
+func (*managedOllamaStatementCounter) Warn(context.Context, string, ...any)  {}
+func (*managedOllamaStatementCounter) Error(context.Context, string, ...any) {}
+
+func (counter *managedOllamaStatementCounter) Trace(context.Context, time.Time, func() (string, int64), error) {
+	counter.count.Add(1)
+}
 
 func TestManagedOllamaMigrationConstraints(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := newMigrationTestDatabase(t, ctx)
-	defer cleanup()
-	runner := newAtlasRunnerForPool(t, pool)
-	if err := runner.Up(ctx); err != nil {
-		t.Fatal(err)
-	}
+	pool := managedOllamaTestPlatform(t).DB()
 
 	var phase, mode string
 	var ownerEpoch, version int64
@@ -103,25 +194,18 @@ func TestManagedOllamaMigrationConstraints(t *testing.T) {
 
 func TestManagedOllamaMigrationRepeatedUp(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := newMigrationTestDatabase(t, ctx)
-	defer cleanup()
-	provider := migrationProvider(t, pool)
-	if err := provider.Up(ctx); err != nil {
+	pool := managedOllamaTestPlatform(t).DB()
+	if err := platformmigration.MigrateAtlas(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
-	if err := provider.Up(ctx); err != nil {
+	if err := platformmigration.MigrateAtlas(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestManagedOllamaRuntimeRoleLeastPrivilege(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := newMigrationTestDatabase(t, ctx)
-	defer cleanup()
-	runner := newAtlasRunnerForPool(t, pool)
-	if err := runner.Up(ctx); err != nil {
-		t.Fatal(err)
-	}
+	pool := managedOllamaTestPlatform(t).DB()
 
 	const role = "zhixu_local_model_runtime"
 	for _, table := range []string{
@@ -201,17 +285,15 @@ func TestManagedOllamaRuntimeRoleLeastPrivilege(t *testing.T) {
 }
 
 func TestManagedOllamaPersistentPullBudgetAndDeadline(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := newMigrationTestDatabase(t, ctx)
-	defer cleanup()
-	runner := newAtlasRunnerForPool(t, pool)
-	if err := runner.Up(ctx); err != nil {
-		t.Fatal(err)
-	}
-	store, err := localmodelruntime.NewPostgresStore(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runManagedOllamaIntegrationVariants(t, testManagedOllamaPersistentPullBudgetAndDeadline)
+}
+
+func testManagedOllamaPersistentPullBudgetAndDeadline(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	store managedOllamaIntegrationStore,
+) {
 	owner, _ := foundation.ParseID("80000000-0000-4000-8000-000000000020")
 	requirement, err := localmodelruntime.NewRequirement([]localmodelruntime.ModelRef{"qwen2.5:3b"})
 	if err != nil {
@@ -331,14 +413,15 @@ func assertManagedOllamaHoldReleased(t *testing.T, ctx context.Context, pool int
 }
 
 func TestManagedOllamaActiveRecoverySeed(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := newMigrationTestDatabase(t, ctx)
-	defer cleanup()
-	runner := newAtlasRunnerForPool(t, pool)
-	if err := runner.Up(ctx); err != nil {
-		t.Fatal(err)
-	}
+	runManagedOllamaIntegrationVariants(t, testManagedOllamaActiveRecoverySeed)
+}
 
+func testManagedOllamaActiveRecoverySeed(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	store managedOllamaIntegrationStore,
+) {
 	var revision int64
 	if err := pool.QueryRow(ctx, `INSERT INTO ops.model_settings_revisions(
 		chat_provider,chat_api_style,chat_base_url,chat_model,chat_model_version,chat_adapter_version,
@@ -372,10 +455,6 @@ func TestManagedOllamaActiveRecoverySeed(t *testing.T) {
 	}
 	var settingsVersion int64
 	if err := pool.QueryRow(ctx, `SELECT version FROM ops.model_settings_state WHERE singleton=true`).Scan(&settingsVersion); err != nil {
-		t.Fatal(err)
-	}
-	store, err := localmodelruntime.NewPostgresStore(pool)
-	if err != nil {
 		t.Fatal(err)
 	}
 	owner, _ := foundation.ParseID("80000000-0000-4000-8000-000000000030")
@@ -475,13 +554,15 @@ func TestManagedOllamaActiveRecoverySeed(t *testing.T) {
 }
 
 func TestManagedOllamaSupersedesStaleActiveRecovery(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := newMigrationTestDatabase(t, ctx)
-	defer cleanup()
-	runner := newAtlasRunnerForPool(t, pool)
-	if err := runner.Up(ctx); err != nil {
-		t.Fatal(err)
-	}
+	runManagedOllamaIntegrationVariants(t, testManagedOllamaSupersedesStaleActiveRecovery)
+}
+
+func testManagedOllamaSupersedesStaleActiveRecovery(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	store managedOllamaIntegrationStore,
+) {
 	requirement, _ := localmodelruntime.NewRequirement([]localmodelruntime.ModelRef{"qwen2.5:3b"})
 	const operationID = "80000000-0000-4000-8000-000000000031"
 	const holdID = "80000000-0000-4000-8000-000000000032"
@@ -495,10 +576,6 @@ func TestManagedOllamaSupersedesStaleActiveRecovery(t *testing.T) {
 		hold_id,owner_kind,owner_id,owner_epoch,revision,operation_id,requirement_hash,models,lease_expires_at
 	) VALUES($1::uuid,'preparation',$2::uuid,1,1,$2::uuid,$3,$4::jsonb,clock_timestamp()+interval '1 hour')`,
 		holdID, operationID, requirement.Hash, `["qwen2.5:3b"]`); err != nil {
-		t.Fatal(err)
-	}
-	store, err := localmodelruntime.NewPostgresStore(pool)
-	if err != nil {
 		t.Fatal(err)
 	}
 	owner, _ := foundation.ParseID("80000000-0000-4000-8000-000000000033")
@@ -555,18 +632,249 @@ func TestManagedOllamaSupersedesStaleActiveRecovery(t *testing.T) {
 }
 
 func TestManagedOllamaLifecycleStoreCAS(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := newMigrationTestDatabase(t, ctx)
-	defer cleanup()
-	runner := newAtlasRunnerForPool(t, pool)
-	if err := runner.Up(ctx); err != nil {
-		t.Fatal(err)
-	}
+	runManagedOllamaIntegrationVariants(t, testManagedOllamaLifecycleStoreCAS)
+}
 
-	store, err := localmodelruntime.NewPostgresStore(pool)
+func TestManagedOllamaScopedActivationTransaction(t *testing.T) {
+	ctx := context.Background()
+	platform := managedOllamaTestPlatform(t)
+	store, err := localmodelruntime.NewGORMStore(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
+	unitOfWork, err := platform.UnitOfWork()
+	if err != nil {
+		t.Fatal(err)
+	}
+	requirement, err := localmodelruntime.NewRequirement([]localmodelruntime.ModelRef{"qwen2.5:3b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerID, _ := foundation.ParseID("80000000-0000-4000-8000-000000000040")
+
+	committed := localmodelruntime.ActivationPreparationCommand{
+		OperationID:    mustManagedOllamaID(t, "80000000-0000-4000-8000-000000000041"),
+		HoldID:         mustManagedOllamaID(t, "80000000-0000-4000-8000-000000000042"),
+		RolloutID:      mustManagedOllamaID(t, "80000000-0000-4000-8000-000000000043"),
+		TargetRevision: 41,
+		IdempotencyKey: "managed-ollama-scoped-commit",
+		RequestHash:    strings.Repeat("b", 64),
+		Requirement:    requirement,
+		OwnerID:        ownerID,
+		OwnerEpoch:     1,
+		LeaseDuration:  time.Minute,
+	}
+	var stale localmodelruntime.TxStore
+	if err := unitOfWork.Within(ctx, foundation.TransactionOptions{}, func(callbackCtx context.Context, scope foundation.TransactionScope) error {
+		scoped, bindErr := store.WithScope(scope)
+		if bindErr != nil {
+			return bindErr
+		}
+		stale = scoped
+		preparation, seedErr := scoped.SeedActivationPreparation(callbackCtx, committed)
+		if seedErr != nil {
+			return seedErr
+		}
+		if preparation.Operation.RolloutID == nil || *preparation.Operation.RolloutID != committed.RolloutID || preparation.Hold.OperationID == nil || *preparation.Hold.OperationID != committed.OperationID {
+			return errors.New("managed Ollama scoped seed identity mismatch")
+		}
+		byRollout, readErr := scoped.ReadOperationByRollout(callbackCtx, committed.RolloutID)
+		if readErr != nil || byRollout.OperationID != committed.OperationID {
+			return errors.New("managed Ollama scoped rollout read mismatch")
+		}
+		byTarget, readErr := scoped.ReadOperationByTarget(callbackCtx, committed.TargetRevision)
+		if readErr != nil || byTarget.OperationID != committed.OperationID {
+			return errors.New("managed Ollama scoped target read mismatch")
+		}
+		if count := managedOllamaOperationCount(t, ctx, platform.DB(), committed.OperationID); count != 0 {
+			return errors.New("managed Ollama scoped insert became visible before commit")
+		}
+		completed, completeErr := scoped.CompleteActivationPreparation(callbackCtx, committed.RolloutID, "SCOPED_TEST_FAILURE", false)
+		if completeErr != nil {
+			return completeErr
+		}
+		if completed.Phase != localmodelruntime.OperationPhaseFailed || completed.TerminalAt == nil {
+			return errors.New("managed Ollama scoped completion did not become terminal")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if count := managedOllamaOperationCount(t, ctx, platform.DB(), committed.OperationID); count != 1 {
+		t.Fatalf("committed scoped operation count=%d, want 1", count)
+	}
+	var releasedAt *time.Time
+	if err := platform.DB().QueryRow(ctx, `SELECT released_at FROM ops.managed_ollama_holds WHERE hold_id=$1::uuid`, string(committed.HoldID)).Scan(&releasedAt); err != nil {
+		t.Fatal(err)
+	}
+	if releasedAt == nil {
+		t.Fatal("committed scoped completion did not release preparation hold")
+	}
+	if _, err := stale.ReadOperationByRollout(ctx, committed.RolloutID); err == nil {
+		t.Fatal("stale managed Ollama scope unexpectedly remained usable")
+	}
+
+	rolledBack := committed
+	rolledBack.OperationID = mustManagedOllamaID(t, "80000000-0000-4000-8000-000000000044")
+	rolledBack.HoldID = mustManagedOllamaID(t, "80000000-0000-4000-8000-000000000045")
+	rolledBack.RolloutID = mustManagedOllamaID(t, "80000000-0000-4000-8000-000000000046")
+	rolledBack.TargetRevision = 42
+	rolledBack.IdempotencyKey = "managed-ollama-scoped-rollback"
+	rolledBack.RequestHash = strings.Repeat("c", 64)
+	err = unitOfWork.Within(ctx, foundation.TransactionOptions{}, func(callbackCtx context.Context, scope foundation.TransactionScope) error {
+		scoped, bindErr := store.WithScope(scope)
+		if bindErr != nil {
+			return bindErr
+		}
+		if _, seedErr := scoped.SeedActivationPreparation(callbackCtx, rolledBack); seedErr != nil {
+			return seedErr
+		}
+		if _, completeErr := scoped.CompleteActivationPreparation(callbackCtx, rolledBack.RolloutID, "SCOPED_TEST_FAILURE", true); completeErr != nil {
+			return completeErr
+		}
+		return errManagedOllamaScopedRollback
+	})
+	if !errors.Is(err, errManagedOllamaScopedRollback) {
+		t.Fatalf("scoped rollback error=%v, want sentinel", err)
+	}
+	if count := managedOllamaOperationCount(t, ctx, platform.DB(), rolledBack.OperationID); count != 0 {
+		t.Fatalf("rolled-back scoped operation count=%d, want 0", count)
+	}
+}
+
+func TestManagedOllamaReadDemandCancellationAndConnectionRelease(t *testing.T) {
+	runManagedOllamaIntegrationVariants(t, func(t *testing.T, ctx context.Context, pool *pgxpool.Pool, store managedOllamaIntegrationStore) {
+		lock, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = lock.Rollback(context.Background()) }()
+		if _, err := lock.Exec(ctx, `LOCK TABLE ops.managed_ollama_runtime IN ACCESS EXCLUSIVE MODE`); err != nil {
+			t.Fatal(err)
+		}
+		baseline := pool.Stat().AcquiredConns()
+		cause := errors.New("cancel blocked managed Ollama demand read")
+		blockedCtx, cancel := context.WithCancelCause(ctx)
+		done := make(chan error, 1)
+		go func() {
+			_, readErr := store.ReadDemand(blockedCtx)
+			done <- readErr
+		}()
+		deadline := time.Now().Add(5 * time.Second)
+		for pool.Stat().AcquiredConns() <= baseline && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		cancel(cause)
+		select {
+		case readErr := <-done:
+			if !errors.Is(readErr, context.Canceled) {
+				t.Fatalf("canceled demand read error=%v, want context cancellation", readErr)
+			}
+			if _, isGORM := store.(*localmodelruntime.GORMStore); isGORM && !errors.Is(readErr, cause) {
+				t.Fatalf("GORM canceled demand read error=%v, want custom cause", readErr)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("canceled managed Ollama demand read did not return")
+		}
+		deadline = time.Now().Add(5 * time.Second)
+		for pool.Stat().AcquiredConns() > baseline && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if acquired := pool.Stat().AcquiredConns(); acquired != baseline {
+			t.Fatalf("acquired connections after cancellation=%d, want %d", acquired, baseline)
+		}
+	})
+}
+
+func TestManagedOllamaGORMStatementCountAndExplain(t *testing.T) {
+	ctx := context.Background()
+	platform := managedOllamaTestPlatform(t)
+	store, err := localmodelruntime.NewGORMStore(platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err := platform.GORM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := database.Config.Logger
+	counter := &managedOllamaStatementCounter{}
+	database.Config.Logger = counter
+	t.Cleanup(func() { database.Config.Logger = original })
+	if _, err := store.ReadDemand(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if statements := counter.count.Load(); statements != 4 {
+		t.Fatalf("GORM ReadDemand statements=%d, want 4", statements)
+	}
+
+	queries := []struct {
+		name  string
+		query string
+		args  []any
+		index string
+	}{
+		{name: "operation idempotency", query: `SELECT operation_id FROM ops.managed_ollama_operations WHERE kind=$1 AND idempotency_key=$2`, args: []any{"test", "missing"}, index: "ops_managed_ollama_operations_idempotency_idx"},
+		{name: "hold operation", query: `SELECT hold_id FROM ops.managed_ollama_holds WHERE operation_id=$1::uuid`, args: []any{"80000000-0000-4000-8000-000000000047"}, index: "ops_managed_ollama_holds_operation_idx"},
+	}
+	tx, err := platform.DB().Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	if _, err := tx.Exec(ctx, `SET LOCAL enable_seqscan=off`); err != nil {
+		t.Fatal(err)
+	}
+	for _, query := range queries {
+		t.Run(query.name, func(t *testing.T) {
+			rows, explainErr := tx.Query(ctx, `EXPLAIN (COSTS OFF) `+query.query, query.args...)
+			if explainErr != nil {
+				t.Fatal(explainErr)
+			}
+			defer rows.Close()
+			var lines []string
+			for rows.Next() {
+				var line string
+				if err := rows.Scan(&line); err != nil {
+					t.Fatal(err)
+				}
+				lines = append(lines, line)
+			}
+			if err := rows.Err(); err != nil {
+				t.Fatal(err)
+			}
+			plan := strings.Join(lines, "\n")
+			if !strings.Contains(plan, query.index) {
+				t.Fatalf("managed Ollama EXPLAIN missing %s:\n%s", query.index, plan)
+			}
+		})
+	}
+}
+
+func mustManagedOllamaID(t *testing.T, raw string) foundation.ID {
+	t.Helper()
+	id, err := foundation.ParseID(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func managedOllamaOperationCount(t *testing.T, ctx context.Context, pool *pgxpool.Pool, operationID foundation.ID) int {
+	t.Helper()
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM ops.managed_ollama_operations WHERE operation_id=$1::uuid`, string(operationID)).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	return count
+}
+
+func testManagedOllamaLifecycleStoreCAS(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	store managedOllamaIntegrationStore,
+) {
 	owner, err := foundation.ParseID("80000000-0000-4000-8000-000000000010")
 	if err != nil {
 		t.Fatal(err)
