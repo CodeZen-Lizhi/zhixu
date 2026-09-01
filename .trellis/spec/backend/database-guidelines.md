@@ -103,6 +103,7 @@ git diff --check
 
 - 容器模式固定 `pgvector/pgvector:pg16`，使用随机映射端口、SQL `SELECT 1` readiness、无固定容器名、无 reuse；迁移只通过当前 Atlas/River callback 执行，再打开一个共享 platform Pool。
 - 外部模式使用 cryptographically-random `zhixu_test_*` 名称，通过 `pgx.Identifier` 执行 `CREATE DATABASE`；成功、失败和 close 均先关闭临时库连接，再以 `DROP DATABASE <generated> WITH (FORCE)` 删除生成库，最后关闭 admin Pool。admin 库永不迁移或删除。
+- 迁移后的 `core.workspace.status` 只允许 `active`/`inactive`。业务 fixture 默认写 `inactive`；只有明确验证 active Workspace 语义时才写 `active`。历史测试标记 `test` 不再合法，清理身份必须组合 Workspace ID、name、root 等受控 marker，不能依赖非法状态值。
 - `Availability` 默认 `FailWhenUnavailable`；只有调用方显式指定 `SkipWhenUnavailable` 才能跳过 Docker 不可用测试。
 - Close 幂等且有独立有限 cleanup context；错误保留可匹配的主因，但错误文本和 Diagnostics 不包含密码、完整 DSN、绝对路径或高敏 SQL 参数。
 
@@ -114,19 +115,21 @@ git diff --check
 | Docker 不可用 + 显式 Skip | `Require` 跳过测试 |
 | 外部 URL 非 PostgreSQL、缺 host 或缺 admin database | `Open` 返回稳定错误，不泄露输入 secret |
 | 迁移 callback 失败 | 返回可用 sentinel/error match，已创建的容器或临时库完成清理 |
+| fixture 写入 `core.workspace.status='test'` | PostgreSQL 返回 `23514`；修复 fixture，不得放宽迁移约束或跳过真实数据库测试 |
 | 两个并行 fixture | 容器、URL、写入数据互相隔离 |
 | 重复 Close | 无额外 DROP/Terminate，返回相同结果 |
 
 ### 5. Good/Base/Bad Cases
 
 - Good：TODO10 child 用 `Require` 取得 Pool，再从同一 Pool 取得 GORM、pgx、River 和 UoW 能力，并只断言自己的业务行为。
-- Base：本地没有 Docker 时显式选择 Skip；CI 保持 Ryuk 默认开启并将 provider 故障作为可操作失败。
-- Bad：把 `ZHIXU_TEST_DATABASE_URL` 当作直接迁移目标、固定容器名/端口、启用 reuse、拼接未约束数据库名，或打印完整 DSN。
+- Base：不关心 Workspace 激活语义的 fixture 写 `inactive`，并用独立 marker 做精确 cleanup；本地没有 Docker 时显式选择 Skip。
+- Bad：把 `ZHIXU_TEST_DATABASE_URL` 当作直接迁移目标、写历史 `status='test'`、固定容器名/端口、启用 reuse、拼接未约束数据库名，或打印完整 DSN。
 
 ### 6. Tests Required
 
 - 单测覆盖 Config 校验、admin URL、随机命名、脱敏、Fail/Skip policy 和 Close 幂等。
 - `integration && testcontainers` 覆盖空库 Atlas/River/vector、GORM/UoW/pgx 能力、两个并行 fixture、external admin 生成库生命周期、admin 库未迁移、迁移失败后的容器/数据库清理。
+- 修改共享 Workspace fixture 时，至少运行一条真实 seed+cleanup 用例和一条消费该 fixture 的业务用例，断言 `inactive` marker 可精确清理且不存在 `status='test'`。
 - 必须运行定向 `go test`、`-race`、`go vet`、`go mod tidy -diff`、vendor 编译测试、`git diff --check` 和显式容器 smoke。
 
 ### 7. Wrong vs Correct
@@ -137,6 +140,9 @@ Correct: 先用 sharedURL 连接 admin 库，生成 zhixu_test_*，只对生成�
 
 Wrong: Close 使用已经取消的业务 ctx，导致失败路径遗留容器或临时库。
 Correct: Close 使用独立、有限的 cleanup context，并通过 sync.Once 保证幂等资源释放。
+
+Wrong: 用 core.workspace.status='test' 标记 fixture，再依赖该非法状态做 cleanup。
+Correct: 写入 status='inactive'，并组合受控 Workspace ID、name 与 root marker 验证 cleanup 所有权。
 ```
 
 ## Scenario: Model Runtime Hot Activation Persistence
@@ -237,6 +243,8 @@ Correct: trigger/Repository 都以数据库时间和 version/owner CAS fail clos
   自动 resolve。Schedule 默认 DISABLED，due/lease 使用 DB time + `FOR UPDATE SKIP LOCKED`。
 - Smart Collection scope 必须同时绑定 collection version、query hash、read-model revision 和 exact count；任何漂移
   返回 stale/invalid，不退化为 Workspace scope。
+- Health 可以缓存同一 durable binding 的成员物化结果，但每次缓存命中都必须先通过 Collection owner 的
+  O(1) durable revision 校验；校验失败必须淘汰该 binding，缓存不能成为第二事实源。
 
 ### 4. Validation & Error Matrix
 

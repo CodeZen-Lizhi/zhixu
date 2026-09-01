@@ -22,7 +22,7 @@ class ChildrenProgressTest(unittest.TestCase):
             children_progress(
                 ["completed-child", "done-child", "active-child"], statuses
             ),
-            " [2/3 children done]",
+            " [2/3 done]",
         )
 
     def test_counts_missing_archived_child_as_done(self) -> None:
@@ -31,7 +31,7 @@ class ChildrenProgressTest(unittest.TestCase):
                 ("archived-child", "active-child"),
                 {"active-child": "in_progress"},
             ),
-            " [1/2 children done]",
+            " [1/2 done]",
         )
 
 

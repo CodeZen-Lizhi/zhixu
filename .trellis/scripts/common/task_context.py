@@ -19,13 +19,13 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 
 from .config import get_context_injection_limits
 from .git import branch_exists_locally
 from .io import read_json
 from .log import Colors, colored
-from .paths import FILE_TASK_JSON, get_repo_root
+from .paths import DIR_ARCHIVE, DIR_TASKS, DIR_WORKFLOW, FILE_TASK_JSON, get_repo_root
 from .task_utils import resolve_task_dir
 
 # Extensions that look like code rather than spec/research docs. Entries with
@@ -52,47 +52,6 @@ _CODE_FILE_EXTENSIONS = {
 }
 
 
-def _resolve_repo_entry_path(repo_root: Path, file_path: object) -> tuple[Path, str] | None:
-    """Resolve a repo-relative JSONL entry without traversal or symlink escape."""
-    if not isinstance(file_path, str) or not file_path.strip():
-        return None
-
-    normalized = file_path.replace("\\", "/")
-    windows_path = PureWindowsPath(normalized)
-    if Path(normalized).is_absolute() or windows_path.is_absolute() or windows_path.drive:
-        return None
-    if ".." in normalized.split("/"):
-        return None
-
-    try:
-        resolved_root = repo_root.resolve()
-        resolved_path = (resolved_root / Path(normalized)).resolve()
-        relative_path = resolved_path.relative_to(resolved_root)
-    except (OSError, RuntimeError, ValueError):
-        return None
-    return resolved_path, relative_path.as_posix()
-
-
-def _resolve_context_jsonl_path(
-    repo_root: Path, target_dir: Path, jsonl_name: object
-) -> Path | None:
-    """Resolve a context manifest that remains inside its task directory."""
-    if not isinstance(jsonl_name, str) or Path(jsonl_name).name != jsonl_name:
-        return None
-    if PureWindowsPath(jsonl_name).is_absolute() or PureWindowsPath(jsonl_name).drive:
-        return None
-
-    try:
-        resolved_root = repo_root.resolve()
-        resolved_task_dir = target_dir.resolve()
-        resolved_task_dir.relative_to(resolved_root)
-        resolved_jsonl = (resolved_task_dir / jsonl_name).resolve()
-        resolved_jsonl.relative_to(resolved_task_dir)
-    except (OSError, RuntimeError, ValueError):
-        return None
-    return resolved_jsonl
-
-
 # =============================================================================
 # Command: add-context
 # =============================================================================
@@ -114,22 +73,8 @@ def cmd_add_context(args: argparse.Namespace) -> int:
     if not jsonl_name.endswith(".jsonl"):
         jsonl_name = f"{jsonl_name}.jsonl"
 
-    jsonl_file = _resolve_context_jsonl_path(repo_root, target_dir, jsonl_name)
-    if jsonl_file is None:
-        print(colored(f"Error: invalid context file: {jsonl_name}", Colors.RED))
-        return 1
-
-    resolved_entry = _resolve_repo_entry_path(repo_root, path)
-    if resolved_entry is None:
-        print(
-            colored(
-                "Error: context paths must be repo-relative and cannot contain '..' or escape through symlinks",
-                Colors.RED,
-            )
-        )
-        return 1
-
-    full_path, path = resolved_entry
+    jsonl_file = target_dir / jsonl_name
+    full_path = repo_root / path
 
     entry_type = "file"
     if full_path.is_dir():
@@ -172,12 +117,6 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
     if not target_dir.is_dir():
         print(colored("Error: task directory required", Colors.RED))
-        return 1
-
-    try:
-        target_dir.resolve().relative_to(repo_root.resolve())
-    except (OSError, RuntimeError, ValueError):
-        print(colored("Error: task directory must be inside the repository", Colors.RED))
         return 1
 
     print(colored("=== Validating Context Files ===", Colors.BLUE))
@@ -231,6 +170,59 @@ def _is_exempt_from_code_file_warning(file_path: str, task_rel: str) -> bool:
     return False
 
 
+def _resolve_context_entry_path(
+    file_path: str, repo_root: Path, task_dir: Path | None
+) -> Path | None:
+    """Resolve a JSONL entry, binding archived self-references to the archive copy.
+
+    Exact historical self-references are remapped only for archived tasks.
+    ``None`` means the remapped path traversed or resolved outside that archive.
+    """
+    repo_path = repo_root / file_path
+    if task_dir is None:
+        return repo_path
+
+    try:
+        task_parts = task_dir.resolve().relative_to(repo_root.resolve()).parts
+    except ValueError:
+        return repo_path
+
+    archive_prefix = (DIR_WORKFLOW, DIR_TASKS, DIR_ARCHIVE)
+    if len(task_parts) != 5 or task_parts[:3] != archive_prefix:
+        return repo_path
+
+    year_month = task_parts[3]
+    if (
+        len(year_month) != 7
+        or year_month[4] != "-"
+        or not year_month[:4].isdigit()
+        or not year_month[5:].isdigit()
+    ):
+        return repo_path
+
+    historical_root = f"{DIR_WORKFLOW}/{DIR_TASKS}/{task_dir.name}"
+    posix_path = file_path.replace("\\", "/")
+    if posix_path == historical_root:
+        relative_parts: tuple[str, ...] = ()
+    elif posix_path.startswith(f"{historical_root}/"):
+        relative_path = posix_path[len(historical_root) + 1 :]
+        if relative_path.endswith("/"):
+            relative_path = relative_path[:-1]
+        relative_parts = tuple(relative_path.split("/")) if relative_path else ()
+        if any(part in ("", ".", "..") for part in relative_parts):
+            return None
+    else:
+        return repo_path
+
+    try:
+        archive_root = task_dir.resolve()
+        resolved_path = task_dir.joinpath(*relative_parts).resolve()
+        resolved_path.relative_to(archive_root)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return resolved_path
+
+
 def _validate_jsonl(jsonl_file: Path, repo_root: Path, task_dir: Path | None = None) -> int:
     """Validate a single JSONL file.
 
@@ -245,12 +237,6 @@ def _validate_jsonl(jsonl_file: Path, repo_root: Path, task_dir: Path | None = N
     """
     file_name = jsonl_file.name
     errors = 0
-
-    if task_dir is not None:
-        jsonl_file = _resolve_context_jsonl_path(repo_root, task_dir, file_name)
-        if jsonl_file is None:
-            print(f"  {colored(f'{file_name}: invalid context manifest path', Colors.RED)}")
-            return 1
 
     if not jsonl_file.is_file():
         print(f"  {colored(f'{file_name}: not found (skipped)', Colors.YELLOW)}")
@@ -279,51 +265,22 @@ def _validate_jsonl(jsonl_file: Path, repo_root: Path, task_dir: Path | None = N
             errors += 1
             continue
 
-        if not isinstance(data, dict):
-            print(f"  {colored(f'{file_name}:{line_num}: Entry must be a JSON object', Colors.RED)}")
-            errors += 1
-            continue
-
-        if "file" not in data:
-            if "path" in data:
-                print(
-                    f"  {colored(f'{file_name}:{line_num}: use file instead of the unsupported path alias', Colors.RED)}"
-                )
-                errors += 1
-            # Seed / comment row — skip silently
-            continue
-
         file_path = data.get("file")
         entry_type = data.get("type", "file")
 
-        if not isinstance(file_path, str) or not file_path:
-            print(f"  {colored(f'{file_name}:{line_num}: file must be a non-empty string', Colors.RED)}")
-            errors += 1
-            continue
-        if not isinstance(entry_type, str) or entry_type not in {"file", "directory"}:
-            print(
-                f"  {colored(f'{file_name}:{line_num}: type must be file or directory', Colors.RED)}"
-            )
-            errors += 1
-            continue
-
-        resolved_entry = _resolve_repo_entry_path(repo_root, file_path)
-        if resolved_entry is None:
-            print(
-                f"  {colored(f'{file_name}:{line_num}: path must be repo-relative without .. or symlink escape: {file_path}', Colors.RED)}"
-            )
-            errors += 1
+        if not file_path:
+            # Seed / comment row — skip silently
             continue
 
         real_entries += 1
-        full_path, file_path = resolved_entry
+        full_path = _resolve_context_entry_path(file_path, repo_root, task_dir)
         if entry_type == "directory":
-            if not full_path.is_dir():
+            if full_path is None or not full_path.is_dir():
                 print(f"  {colored(f'{file_name}:{line_num}: Directory not found: {file_path}', Colors.RED)}")
                 errors += 1
             continue
 
-        if not full_path.is_file():
+        if full_path is None or not full_path.is_file():
             print(f"  {colored(f'{file_name}:{line_num}: File not found: {file_path}', Colors.RED)}")
             errors += 1
             continue
