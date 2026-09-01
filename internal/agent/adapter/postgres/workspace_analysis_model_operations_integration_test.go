@@ -18,58 +18,60 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
 	conversationworkflow "github.com/CodeZen-Lizhi/zhixu/internal/conversation/workflow"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
+	workflowpostgres "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/postgres"
 	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestWorkspaceAnalysisModelOperationAuthorizeReconcileAndReplacementUnknownIntegration(t *testing.T) {
-	pool, ctx := newAgentRepositoryIntegrationPool(t)
-	fixture := seedWorkspaceAnalysisModelOperationIntegration(t, ctx, pool)
-	repository, err := NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
+	for _, variant := range workspaceAnalysisModelRepositoryIntegrationVariants() {
+		t.Run(variant.name, func(t *testing.T) {
+			platform, ctx := newAgentPlatformIntegrationPool(t)
+			pool := platform.DB()
+			fixture := seedWorkspaceAnalysisModelOperationIntegration(t, ctx, pool)
+			repository := variant.open(t, platform)
 
-	created, err := repository.AuthorizeWorkspaceAnalysisModelCall(ctx, fixture.command)
-	if err != nil || created.Disposition != application.WorkspaceAnalysisModelAuthorizationCreated {
-		t.Fatalf("first authorization=%#v err=%v", created, err)
-	}
-	checkpointQuery := application.WorkspaceAnalysisRetrievalPlanCheckpointQuery{
-		WorkspaceID: fixture.command.Identity.WorkspaceID, WorkflowRunID: fixture.command.Identity.WorkflowRunID,
-		AnalysisRunID: fixture.command.OperationKey.AnalysisRunID, NodeRunID: fixture.command.Identity.NodeRunID,
-	}
-	checkpoint, found, err := repository.FindWorkspaceAnalysisRetrievalPlanCheckpoint(ctx, checkpointQuery)
-	if err != nil || !found || checkpoint.Status != domain.WorkspaceAnalysisOperationStarted ||
-		checkpoint.ModelResultID != "" || checkpoint.ResultHash != "" ||
-		checkpoint.OperationID != created.OperationID || checkpoint.ModelRunID != created.Run.ID ||
-		checkpoint.ModelCallID != created.Call.ID || !sameRetrieval(checkpoint.Retrieval, created.Run.Retrieval) {
-		t.Fatalf("started checkpoint=%#v found=%t err=%v", checkpoint, found, err)
-	}
-	reconciled, err := repository.AuthorizeWorkspaceAnalysisModelCall(ctx, fixture.command)
-	if err != nil || reconciled.Disposition != application.WorkspaceAnalysisModelAuthorizationReconcile ||
-		reconciled.Run.ID != created.Run.ID || reconciled.Call.ID != created.Call.ID {
-		t.Fatalf("same-attempt reconcile=%#v err=%v", reconciled, err)
-	}
+			created, err := repository.AuthorizeWorkspaceAnalysisModelCall(ctx, fixture.command)
+			if err != nil || created.Disposition != application.WorkspaceAnalysisModelAuthorizationCreated {
+				t.Fatalf("first authorization=%#v err=%v", created, err)
+			}
+			checkpointQuery := application.WorkspaceAnalysisRetrievalPlanCheckpointQuery{
+				WorkspaceID: fixture.command.Identity.WorkspaceID, WorkflowRunID: fixture.command.Identity.WorkflowRunID,
+				AnalysisRunID: fixture.command.OperationKey.AnalysisRunID, NodeRunID: fixture.command.Identity.NodeRunID,
+			}
+			checkpoint, found, err := repository.FindWorkspaceAnalysisRetrievalPlanCheckpoint(ctx, checkpointQuery)
+			if err != nil || !found || checkpoint.Status != domain.WorkspaceAnalysisOperationStarted ||
+				checkpoint.ModelResultID != "" || checkpoint.ResultHash != "" ||
+				checkpoint.OperationID != created.OperationID || checkpoint.ModelRunID != created.Run.ID ||
+				checkpoint.ModelCallID != created.Call.ID || !sameRetrieval(checkpoint.Retrieval, created.Run.Retrieval) {
+				t.Fatalf("started checkpoint=%#v found=%t err=%v", checkpoint, found, err)
+			}
+			reconciled, err := repository.AuthorizeWorkspaceAnalysisModelCall(ctx, fixture.command)
+			if err != nil || reconciled.Disposition != application.WorkspaceAnalysisModelAuthorizationReconcile ||
+				reconciled.Run.ID != created.Run.ID || reconciled.Call.ID != created.Call.ID {
+				t.Fatalf("same-attempt reconcile=%#v err=%v", reconciled, err)
+			}
 
-	advanceWorkspaceAnalysisModelAttemptIntegration(t, ctx, pool)
-	replacement := fixture.command
-	replacement.Identity.NodeAttemptID = workspaceAnalysisModelIntegrationID(90)
-	replacement.Identity.LeaseFence = 2
-	replacement.Run.ID = workspaceAnalysisModelIntegrationID(91)
-	replacement.Run.NodeAttemptID = replacement.Identity.NodeAttemptID
-	replacement.Call.ID = workspaceAnalysisModelIntegrationID(92)
-	replacement.Call.ModelRunID = replacement.Run.ID
-	reduced, err := repository.AuthorizeWorkspaceAnalysisModelCall(ctx, replacement)
-	if err != nil || reduced.Disposition != application.WorkspaceAnalysisModelAuthorizationTerminateUnknown ||
-		reduced.Run.ID != created.Run.ID || reduced.Call.ID != created.Call.ID ||
-		reduced.Run.Status != domain.ModelRunUnknown || reduced.Call.Status != domain.ModelCallUnknown {
-		t.Fatalf("replacement reduction=%#v err=%v", reduced, err)
-	}
+			advanceWorkspaceAnalysisModelAttemptIntegration(t, ctx, pool)
+			replacement := fixture.command
+			replacement.Identity.NodeAttemptID = workspaceAnalysisModelIntegrationID(90)
+			replacement.Identity.LeaseFence = 2
+			replacement.Run.ID = workspaceAnalysisModelIntegrationID(91)
+			replacement.Run.NodeAttemptID = replacement.Identity.NodeAttemptID
+			replacement.Call.ID = workspaceAnalysisModelIntegrationID(92)
+			replacement.Call.ModelRunID = replacement.Run.ID
+			reduced, err := repository.AuthorizeWorkspaceAnalysisModelCall(ctx, replacement)
+			if err != nil || reduced.Disposition != application.WorkspaceAnalysisModelAuthorizationTerminateUnknown ||
+				reduced.Run.ID != created.Run.ID || reduced.Call.ID != created.Call.ID ||
+				reduced.Run.Status != domain.ModelRunUnknown || reduced.Call.Status != domain.ModelCallUnknown {
+				t.Fatalf("replacement reduction=%#v err=%v", reduced, err)
+			}
 
-	var callStatus, runStatus, operationStatus, reservationStatus, errorCode string
-	var settledInput, settledOutput, runReservedInput, runReservedOutput, runSettledInput, runSettledOutput int64
-	if err := pool.QueryRow(ctx, `SELECT call.status,model.status,operation.status,reservation.status,operation.error_code,
+			var callStatus, runStatus, operationStatus, reservationStatus, errorCode string
+			var settledInput, settledOutput, runReservedInput, runReservedOutput, runSettledInput, runSettledOutput int64
+			if err := pool.QueryRow(ctx, `SELECT call.status,model.status,operation.status,reservation.status,operation.error_code,
 		reservation.settled_input_tokens,reservation.settled_output_tokens,
 		analysis.reserved_input_tokens,analysis.reserved_output_tokens,
 		analysis.settled_input_tokens,analysis.settled_output_tokens
@@ -79,21 +81,671 @@ func TestWorkspaceAnalysisModelOperationAuthorizeReconcileAndReplacementUnknownI
 		JOIN agent.model_call AS call ON call.id=operation.model_call_id
 		JOIN agent.model_run AS model ON model.id=call.model_run_id
 		WHERE operation.id=$1`, string(created.OperationID)).Scan(
-		&callStatus, &runStatus, &operationStatus, &reservationStatus, &errorCode,
-		&settledInput, &settledOutput, &runReservedInput, &runReservedOutput, &runSettledInput, &runSettledOutput,
-	); err != nil {
+				&callStatus, &runStatus, &operationStatus, &reservationStatus, &errorCode,
+				&settledInput, &settledOutput, &runReservedInput, &runReservedOutput, &runSettledInput, &runSettledOutput,
+			); err != nil {
+				t.Fatal(err)
+			}
+			if callStatus != "UNKNOWN" || runStatus != "UNKNOWN" || operationStatus != "UNKNOWN" ||
+				reservationStatus != "UNKNOWN_CHARGED" || errorCode != string(domain.WorkspaceAnalysisRunResultUnknown) ||
+				settledInput != domain.WorkspaceAnalysisV1MaxInputTokensPerModelCall ||
+				settledOutput != domain.WorkspaceAnalysisV1PlanMaxOutputTokens || runReservedInput != 0 || runReservedOutput != 0 ||
+				runSettledInput != domain.WorkspaceAnalysisV1MaxInputTokensPerModelCall ||
+				runSettledOutput != domain.WorkspaceAnalysisV1PlanMaxOutputTokens {
+				t.Fatalf("unknown closure call=%s run=%s operation=%s reservation=%s error=%s settled=(%d,%d) run=(%d,%d,%d,%d)",
+					callStatus, runStatus, operationStatus, reservationStatus, errorCode, settledInput, settledOutput,
+					runReservedInput, runReservedOutput, runSettledInput, runSettledOutput)
+			}
+		})
+	}
+}
+
+type workspaceAnalysisModelRepositoryIntegrationStore interface {
+	application.WorkspaceAnalysisModelOperationRepository
+	application.WorkspaceAnalysisRetrievalPlanCheckpointReader
+	application.WorkspaceAnalysisCandidateAuthorityReader
+}
+
+type workspaceAnalysisModelRepositoryIntegrationVariant struct {
+	name               string
+	open               func(*testing.T, *platformpostgres.Pool) workspaceAnalysisModelRepositoryIntegrationStore
+	openWithCommitLoss func(*testing.T, *platformpostgres.Pool) (workspaceAnalysisModelRepositoryIntegrationStore, func())
+}
+
+func workspaceAnalysisModelRepositoryIntegrationVariants() []workspaceAnalysisModelRepositoryIntegrationVariant {
+	return []workspaceAnalysisModelRepositoryIntegrationVariant{
+		{name: "legacy", open: openLegacyWorkspaceAnalysisModelRepositoryIntegration,
+			openWithCommitLoss: openLegacyWorkspaceAnalysisModelRepositoryWithCommitLossIntegration},
+		{name: "gorm", open: openGORMWorkspaceAnalysisModelRepositoryIntegration,
+			openWithCommitLoss: openGORMWorkspaceAnalysisModelRepositoryWithCommitLossIntegration},
+	}
+}
+
+func openLegacyWorkspaceAnalysisModelRepositoryIntegration(
+	t *testing.T,
+	platform *platformpostgres.Pool,
+) workspaceAnalysisModelRepositoryIntegrationStore {
+	t.Helper()
+	repository, err := NewRepository(platform.DB())
+	if err != nil {
 		t.Fatal(err)
 	}
-	if callStatus != "UNKNOWN" || runStatus != "UNKNOWN" || operationStatus != "UNKNOWN" ||
-		reservationStatus != "UNKNOWN_CHARGED" || errorCode != string(domain.WorkspaceAnalysisRunResultUnknown) ||
-		settledInput != domain.WorkspaceAnalysisV1MaxInputTokensPerModelCall ||
-		settledOutput != domain.WorkspaceAnalysisV1PlanMaxOutputTokens || runReservedInput != 0 || runReservedOutput != 0 ||
-		runSettledInput != domain.WorkspaceAnalysisV1MaxInputTokensPerModelCall ||
-		runSettledOutput != domain.WorkspaceAnalysisV1PlanMaxOutputTokens {
-		t.Fatalf("unknown closure call=%s run=%s operation=%s reservation=%s error=%s settled=(%d,%d) run=(%d,%d,%d,%d)",
-			callStatus, runStatus, operationStatus, reservationStatus, errorCode, settledInput, settledOutput,
-			runReservedInput, runReservedOutput, runSettledInput, runSettledOutput)
+	return repository
+}
+
+func openGORMWorkspaceAnalysisModelRepositoryIntegration(
+	t *testing.T,
+	platform *platformpostgres.Pool,
+) workspaceAnalysisModelRepositoryIntegrationStore {
+	t.Helper()
+	fence, err := workflowpostgres.NewGORMWorkspaceAnalysisExecutionFence(platform)
+	if err != nil {
+		t.Fatal(err)
 	}
+	repository, err := NewGORMWorkspaceAnalysisRepository(platform, fence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return repository
+}
+
+func openLegacyWorkspaceAnalysisModelRepositoryWithCommitLossIntegration(
+	t *testing.T,
+	platform *platformpostgres.Pool,
+) (workspaceAnalysisModelRepositoryIntegrationStore, func()) {
+	t.Helper()
+	database := &workspaceAnalysisModelCommitLossDB{DB: platform.DB()}
+	repository, err := NewRepository(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return repository, func() { database.injectNext.Store(true) }
+}
+
+func openGORMWorkspaceAnalysisModelRepositoryWithCommitLossIntegration(
+	t *testing.T,
+	platform *platformpostgres.Pool,
+) (workspaceAnalysisModelRepositoryIntegrationStore, func()) {
+	t.Helper()
+	repository := openGORMWorkspaceAnalysisModelRepositoryIntegration(t, platform).(*GORMWorkspaceAnalysisRepository)
+	loss := &workspaceAnalysisModelPostCommitErrorUnitOfWork{
+		inner: repository.unitOfWork,
+		err:   errors.New("injected GORM workspace analysis model commit response loss"),
+	}
+	repository.unitOfWork = loss
+	return repository, func() {
+		loss.lost.Store(false)
+		loss.armed.Store(true)
+	}
+}
+
+func testWorkspaceAnalysisModelRepositoryIntegrationVariants(
+	t *testing.T,
+	test func(*testing.T, *pgxpool.Pool, context.Context, workspaceAnalysisModelRepositoryIntegrationStore),
+) {
+	t.Helper()
+	for _, variant := range workspaceAnalysisModelRepositoryIntegrationVariants() {
+		t.Run(variant.name, func(t *testing.T) {
+			platform, ctx := newAgentPlatformIntegrationPool(t)
+			test(t, platform.DB(), ctx, variant.open(t, platform))
+		})
+	}
+}
+
+func testWorkspaceAnalysisModelRepositoryCommitLossIntegrationVariants(
+	t *testing.T,
+	test func(*testing.T, *pgxpool.Pool, context.Context, workspaceAnalysisModelRepositoryIntegrationStore, func()),
+) {
+	t.Helper()
+	for _, variant := range workspaceAnalysisModelRepositoryIntegrationVariants() {
+		t.Run(variant.name, func(t *testing.T) {
+			platform, ctx := newAgentPlatformIntegrationPool(t)
+			repository, armCommitLoss := variant.openWithCommitLoss(t, platform)
+			test(t, platform.DB(), ctx, repository, armCommitLoss)
+		})
+	}
+}
+
+func TestWorkspaceAnalysisModelOperationCommitResponseLossRecoveryIntegration(t *testing.T) {
+	t.Run("authorization", func(t *testing.T) {
+		testWorkspaceAnalysisModelRepositoryCommitLossIntegrationVariants(t, func(
+			t *testing.T,
+			pool *pgxpool.Pool,
+			ctx context.Context,
+			repository workspaceAnalysisModelRepositoryIntegrationStore,
+			armCommitLoss func(),
+		) {
+			fixture := seedWorkspaceAnalysisModelOperationIntegration(t, ctx, pool)
+			armCommitLoss()
+			recovered, err := repository.AuthorizeWorkspaceAnalysisModelCall(ctx, fixture.command)
+			if err != nil || recovered.Disposition != application.WorkspaceAnalysisModelAuthorizationReconcile ||
+				recovered.OperationID != fixture.command.OperationID || recovered.ReservationID != fixture.command.ReservationID ||
+				recovered.Run.ID != fixture.command.Run.ID || recovered.Call.ID != fixture.command.Call.ID {
+				t.Fatalf("authorization response-loss recovery=%#v err=%v", recovered, err)
+			}
+		})
+	})
+
+	t.Run("call finalization", func(t *testing.T) {
+		testWorkspaceAnalysisModelRepositoryCommitLossIntegrationVariants(t, func(
+			t *testing.T,
+			pool *pgxpool.Pool,
+			ctx context.Context,
+			repository workspaceAnalysisModelRepositoryIntegrationStore,
+			armCommitLoss func(),
+		) {
+			fixture := seedWorkspaceAnalysisModelOperationIntegration(t, ctx, pool)
+			authorized, err := repository.AuthorizeWorkspaceAnalysisModelCall(ctx, fixture.command)
+			if err != nil {
+				t.Fatal(err)
+			}
+			command := terminalWorkspaceAnalysisModelCallCommand(
+				authorized, fixture.command, domain.ModelCallFailed, domain.ModelRunFailed, "", "MODEL_PROVIDER_FAILED",
+			)
+			armCommitLoss()
+			recovered, err := repository.FinalizeWorkspaceAnalysisModelCall(ctx, command)
+			if err != nil || !recovered.Replayed || recovered.OperationID != authorized.OperationID ||
+				recovered.ReservationID != authorized.ReservationID || recovered.Call.Status != domain.ModelCallFailed ||
+				recovered.Run.Status != domain.ModelRunFailed {
+				t.Fatalf("call response-loss recovery=%#v err=%v", recovered, err)
+			}
+		})
+	})
+
+	t.Run("candidate finalization", func(t *testing.T) {
+		testWorkspaceAnalysisModelRepositoryCommitLossIntegrationVariants(t, func(
+			t *testing.T,
+			pool *pgxpool.Pool,
+			ctx context.Context,
+			repository workspaceAnalysisModelRepositoryIntegrationStore,
+			armCommitLoss func(),
+		) {
+			fixture := seedWorkspaceAnalysisModelOperationIntegration(t, ctx, pool)
+			planAuthorization, err := repository.AuthorizeWorkspaceAnalysisModelCall(ctx, fixture.command)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := repository.FinalizeWorkspaceAnalysisModelResult(ctx,
+				successfulWorkspaceAnalysisModelResultCommand(t, fixture, planAuthorization)); err != nil {
+				t.Fatal(err)
+			}
+			seedWorkspaceAnalysisModelEvidencePrefixIntegration(t, ctx, pool)
+			authorizationCommand := synthesisWorkspaceAnalysisModelAuthorizationCommand(fixture)
+			authorized, err := repository.AuthorizeWorkspaceAnalysisModelCall(ctx, authorizationCommand)
+			if err != nil {
+				t.Fatal(err)
+			}
+			command := successfulWorkspaceAnalysisModelCandidateCommand(t, fixture, authorized, authorizationCommand)
+			armCommitLoss()
+			recovered, err := repository.FinalizeWorkspaceAnalysisModelCandidate(ctx, command)
+			if err != nil || !recovered.Replayed || recovered.Candidate == nil ||
+				!sameWorkspaceAnalysisCandidate(*recovered.Candidate, command.Candidate) {
+				t.Fatalf("candidate response-loss recovery=%#v err=%v", recovered, err)
+			}
+		})
+	})
+}
+
+func TestGORMWorkspaceAnalysisRepositoryRejectsMissingFenceIntegration(t *testing.T) {
+	platform, _ := newAgentPlatformIntegrationPool(t)
+	if _, err := NewGORMWorkspaceAnalysisRepository(platform, nil); agentErrorCode(err) != application.ErrorCodeWorkspaceAnalysisModelAuthorizationUnavailable {
+		t.Fatalf("nil fence code=%s err=%v", agentErrorCode(err), err)
+	}
+	var typedNil *workspaceAnalysisModelNilExecutionFence
+	if _, err := NewGORMWorkspaceAnalysisRepository(platform, typedNil); agentErrorCode(err) != application.ErrorCodeWorkspaceAnalysisModelAuthorizationUnavailable {
+		t.Fatalf("typed nil fence code=%s err=%v", agentErrorCode(err), err)
+	}
+}
+
+func TestGORMWorkspaceAnalysisModelOperationPreservesCallerCancellationIntegration(t *testing.T) {
+	platform, ctx := newAgentPlatformIntegrationPool(t)
+	pool := platform.DB()
+	fixture := seedWorkspaceAnalysisModelOperationIntegration(t, ctx, pool)
+	repository := openGORMWorkspaceAnalysisModelRepositoryIntegration(t, platform)
+
+	cancelCause := errors.New("workspace analysis model caller stopped")
+	canceledCtx, cancel := context.WithCancelCause(ctx)
+	cancel(cancelCause)
+	_, err := repository.AuthorizeWorkspaceAnalysisModelCall(canceledCtx, fixture.command)
+	var classified *foundation.Error
+	if !errors.As(err, &classified) || classified.Code != "AGENT_DATABASE_CANCELLED" ||
+		classified.Kind != foundation.ErrorNonRetryableFailure || classified.Retryable ||
+		!errors.Is(err, context.Canceled) || !errors.Is(err, cancelCause) {
+		t.Fatalf("canceled authorization err=%#v", err)
+	}
+	assertWorkspaceAnalysisConcurrentModelFacts(t, ctx, pool, fixture.command, false)
+
+	result, err := repository.AuthorizeWorkspaceAnalysisModelCall(ctx, fixture.command)
+	if err != nil || result.Disposition != application.WorkspaceAnalysisModelAuthorizationCreated {
+		t.Fatalf("authorization after cancellation=%#v err=%v", result, err)
+	}
+}
+
+func TestWorkspaceAnalysisCapabilityLifecycleParityIntegration(t *testing.T) {
+	for _, variant := range workspaceAnalysisCapabilityIntegrationVariants() {
+		t.Run(variant.name, func(t *testing.T) {
+			platform, ctx := newAgentPlatformIntegrationPool(t)
+			repository, requireReady := variant.open(t, platform)
+			contract := workspaceAnalysisCapabilityContractIntegration()
+			first := workspaceAnalysisCapabilityAdvertisementIntegration(201, contract)
+			second := workspaceAnalysisCapabilityAdvertisementIntegration(202, contract)
+
+			created, err := repository.AdvertiseWorkspaceAnalysisWorker(ctx, first)
+			if err != nil || created.Version != 1 || created.ReleasedAt != nil ||
+				!created.HeartbeatAt.Equal(created.CreatedAt) || !created.HeartbeatAt.Equal(created.UpdatedAt) ||
+				created.LeaseUntil.Sub(created.HeartbeatAt) != first.LeaseDuration {
+				t.Fatalf("first advertise=%#v err=%v", created, err)
+			}
+			replayed, err := repository.AdvertiseWorkspaceAnalysisWorker(ctx, first)
+			if err != nil || replayed.Version != 2 || replayed.HeartbeatAt.Before(created.HeartbeatAt) {
+				t.Fatalf("advertise replay=%#v err=%v", replayed, err)
+			}
+			heartbeated, err := repository.HeartbeatWorkspaceAnalysisWorker(ctx, first)
+			if err != nil || heartbeated.Version != 3 || heartbeated.HeartbeatAt.Before(replayed.HeartbeatAt) ||
+				heartbeated.LeaseUntil.Sub(heartbeated.HeartbeatAt) != first.LeaseDuration {
+				t.Fatalf("heartbeat=%#v err=%v", heartbeated, err)
+			}
+			if err := requireReady(ctx, contract); err != nil {
+				t.Fatalf("exact ready check: %v", err)
+			}
+			drifted := contract
+			drifted.ConfigRevision++
+			if err := requireReady(ctx, drifted); agentErrorCode(err) != application.ErrorCodeWorkspaceAnalysisCapabilityUnavailable {
+				t.Fatalf("drifted ready code=%s err=%v", agentErrorCode(err), err)
+			}
+			if _, err := repository.AdvertiseWorkspaceAnalysisWorker(ctx, second); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := repository.ReleaseWorkspaceAnalysisWorker(ctx, first); err != nil {
+				t.Fatal(err)
+			}
+			if err := requireReady(ctx, contract); err != nil {
+				t.Fatalf("second worker did not preserve readiness: %v", err)
+			}
+			if _, err := repository.ReleaseWorkspaceAnalysisWorker(ctx, second); err != nil {
+				t.Fatal(err)
+			}
+			if err := requireReady(ctx, contract); agentErrorCode(err) != application.ErrorCodeWorkspaceAnalysisCapabilityUnavailable {
+				t.Fatalf("released ready code=%s err=%v", agentErrorCode(err), err)
+			}
+		})
+	}
+}
+
+type workspaceAnalysisCapabilityIntegrationStore interface {
+	application.WorkspaceAnalysisCapabilityLifecyclePort
+}
+
+type workspaceAnalysisCapabilityIntegrationVariant struct {
+	name string
+	open func(*testing.T, *platformpostgres.Pool) (
+		workspaceAnalysisCapabilityIntegrationStore,
+		func(context.Context, application.WorkspaceAnalysisCapabilityContract) error,
+	)
+}
+
+func workspaceAnalysisCapabilityIntegrationVariants() []workspaceAnalysisCapabilityIntegrationVariant {
+	return []workspaceAnalysisCapabilityIntegrationVariant{
+		{name: "legacy", open: func(t *testing.T, platform *platformpostgres.Pool) (
+			workspaceAnalysisCapabilityIntegrationStore,
+			func(context.Context, application.WorkspaceAnalysisCapabilityContract) error,
+		) {
+			t.Helper()
+			repository, err := NewRepository(platform.DB())
+			if err != nil {
+				t.Fatal(err)
+			}
+			return repository, func(ctx context.Context, contract application.WorkspaceAnalysisCapabilityContract) error {
+				tx, err := platform.DB().Begin(ctx)
+				if err != nil {
+					return err
+				}
+				defer func() { _ = tx.Rollback(context.Background()) }()
+				return repository.RequireWorkspaceAnalysisWorkerReadyTx(ctx, tx, contract)
+			}
+		}},
+		{name: "gorm", open: func(t *testing.T, platform *platformpostgres.Pool) (
+			workspaceAnalysisCapabilityIntegrationStore,
+			func(context.Context, application.WorkspaceAnalysisCapabilityContract) error,
+		) {
+			t.Helper()
+			repository, err := NewGORMRepository(platform)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return repository, func(ctx context.Context, contract application.WorkspaceAnalysisCapabilityContract) error {
+				return repository.unitOfWork.Within(ctx, foundation.TransactionOptions{ReadOnly: true}, func(
+					callbackCtx context.Context,
+					scope foundation.TransactionScope,
+				) error {
+					return repository.RequireWorkspaceAnalysisWorkerReadyScoped(callbackCtx, scope, contract)
+				})
+			}
+		}},
+	}
+}
+
+func workspaceAnalysisCapabilityContractIntegration() application.WorkspaceAnalysisCapabilityContract {
+	return application.WorkspaceAnalysisCapabilityContract{
+		DefinitionKey: "workspace-analysis", DefinitionVersion: 1,
+		DefinitionHash: hash64('a'), ToolCatalogHash: hash64('b'),
+		PolicyVersion: 1, ConfigRevision: 7,
+	}
+}
+
+func workspaceAnalysisCapabilityAdvertisementIntegration(
+	seed int,
+	contract application.WorkspaceAnalysisCapabilityContract,
+) application.WorkspaceAnalysisWorkerAdvertisement {
+	return application.WorkspaceAnalysisWorkerAdvertisement{
+		WorkerInstanceID: workspaceAnalysisModelIntegrationID(seed),
+		Contract:         contract,
+		LeaseDuration:    application.DefaultWorkspaceAnalysisWorkerCapabilityLease,
+	}
+}
+
+func TestWorkspaceAnalysisCapabilityCheckedRunStarterAtomicityIntegration(t *testing.T) {
+	for _, variant := range workspaceAnalysisRunStarterIntegrationVariants() {
+		t.Run(variant.name, func(t *testing.T) {
+			platform, ctx := newAgentPlatformIntegrationPool(t)
+			config, contract, command := seedWorkspaceAnalysisRunStartIntegration(t, ctx, platform.DB())
+			harness := variant.open(t, platform, config, contract)
+			advertisement := workspaceAnalysisCapabilityAdvertisementIntegration(211, contract)
+
+			if _, err := harness.start(ctx, command, false); agentErrorCode(err) != application.ErrorCodeWorkspaceAnalysisCapabilityUnavailable {
+				t.Fatalf("run without capability code=%s err=%v", agentErrorCode(err), err)
+			}
+			assertWorkspaceAnalysisDispatchCountsIntegration(t, ctx, platform.DB(), command.QuestionID, 0)
+			if _, err := harness.capability.AdvertiseWorkspaceAnalysisWorker(ctx, advertisement); err != nil {
+				t.Fatal(err)
+			}
+
+			rolledBack, err := harness.start(ctx, command, true)
+			if err != nil || rolledBack.ID != workspaceAnalysisRunStartIntegrationID(20) {
+				t.Fatalf("rolled-back start=%#v err=%v", rolledBack, err)
+			}
+			assertWorkspaceAnalysisDispatchCountsIntegration(t, ctx, platform.DB(), command.QuestionID, 0)
+
+			created, err := harness.start(ctx, command, false)
+			if err != nil || created.ID != rolledBack.ID || created.Status != domain.WorkspaceAnalysisRunQueued || created.Version != 1 {
+				t.Fatalf("committed start=%#v err=%v", created, err)
+			}
+			assertWorkspaceAnalysisDispatchCountsIntegration(t, ctx, platform.DB(), command.QuestionID, 1)
+			replay := command
+			replay.Replayed = true
+			replayed, err := harness.start(ctx, replay, false)
+			if err != nil || replayed.ID != created.ID || replayed.DefinitionHash != created.DefinitionHash ||
+				replayed.ToolCatalogHash != created.ToolCatalogHash || replayed.ConfigRevision != created.ConfigRevision {
+				t.Fatalf("run replay=%#v err=%v", replayed, err)
+			}
+			loaded, err := harness.loader.LoadWorkspaceAnalysisRunForExecution(ctx, application.WorkspaceAnalysisRunExecutionQuery{
+				WorkspaceID: command.WorkspaceID, WorkflowRunID: command.WorkflowRunID,
+				ConversationID: command.ConversationID, QuestionID: command.QuestionID, AnswerID: command.AnswerID,
+			})
+			if err != nil || loaded.ID != created.ID {
+				t.Fatalf("execution load=%#v err=%v", loaded, err)
+			}
+
+			if _, err := harness.capability.ReleaseWorkspaceAnalysisWorker(ctx, advertisement); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := harness.start(ctx, replay, false); agentErrorCode(err) != application.ErrorCodeWorkspaceAnalysisCapabilityUnavailable {
+				t.Fatalf("replay after release code=%s err=%v", agentErrorCode(err), err)
+			}
+			assertWorkspaceAnalysisDispatchCountsIntegration(t, ctx, platform.DB(), command.QuestionID, 1)
+		})
+	}
+}
+
+type workspaceAnalysisRunStarterIntegrationHarness struct {
+	capability workspaceAnalysisCapabilityIntegrationStore
+	loader     application.WorkspaceAnalysisRunLoader
+	start      func(context.Context, application.WorkspaceAnalysisRunStartCommand, bool) (domain.WorkspaceAnalysisRun, error)
+}
+
+type workspaceAnalysisRunStarterIntegrationVariant struct {
+	name string
+	open func(
+		*testing.T,
+		*platformpostgres.Pool,
+		application.WorkspaceAnalysisRunStartConfig,
+		application.WorkspaceAnalysisCapabilityContract,
+	) workspaceAnalysisRunStarterIntegrationHarness
+}
+
+var errWorkspaceAnalysisRunStartIntegrationRollback = errors.New("rollback workspace analysis run start integration transaction")
+
+func workspaceAnalysisRunStarterIntegrationVariants() []workspaceAnalysisRunStarterIntegrationVariant {
+	return []workspaceAnalysisRunStarterIntegrationVariant{
+		{name: "legacy", open: func(
+			t *testing.T,
+			platform *platformpostgres.Pool,
+			config application.WorkspaceAnalysisRunStartConfig,
+			contract application.WorkspaceAnalysisCapabilityContract,
+		) workspaceAnalysisRunStarterIntegrationHarness {
+			t.Helper()
+			repository, err := NewRepository(platform.DB())
+			if err != nil {
+				t.Fatal(err)
+			}
+			service, err := application.NewWorkspaceAnalysisRunService(
+				repository,
+				workspaceAnalysisRunStartIntegrationIDGenerator{id: workspaceAnalysisRunStartIntegrationID(20)},
+				config,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			starter, err := application.NewWorkspaceAnalysisCapabilityCheckedRunStarter(repository, service, contract)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return workspaceAnalysisRunStarterIntegrationHarness{
+				capability: repository,
+				loader:     repository,
+				start: func(ctx context.Context, command application.WorkspaceAnalysisRunStartCommand, rollback bool) (domain.WorkspaceAnalysisRun, error) {
+					tx, err := platform.DB().Begin(ctx)
+					if err != nil {
+						return domain.WorkspaceAnalysisRun{}, err
+					}
+					defer func() { _ = tx.Rollback(context.Background()) }()
+					if _, err := tx.Exec(ctx, workspaceAnalysisRunStartAnswerSQL(false), workspaceAnalysisRunStartAnswerArguments(command)...); err != nil {
+						return domain.WorkspaceAnalysisRun{}, err
+					}
+					run, err := starter.StartWorkspaceAnalysisRunTx(ctx, tx, command)
+					if err != nil {
+						return domain.WorkspaceAnalysisRun{}, err
+					}
+					if rollback {
+						if err := tx.Rollback(context.Background()); err != nil {
+							return domain.WorkspaceAnalysisRun{}, err
+						}
+						return run, nil
+					}
+					if err := tx.Commit(ctx); err != nil {
+						return domain.WorkspaceAnalysisRun{}, err
+					}
+					return run, nil
+				},
+			}
+		}},
+		{name: "gorm", open: func(
+			t *testing.T,
+			platform *platformpostgres.Pool,
+			config application.WorkspaceAnalysisRunStartConfig,
+			contract application.WorkspaceAnalysisCapabilityContract,
+		) workspaceAnalysisRunStarterIntegrationHarness {
+			t.Helper()
+			repository, err := NewGORMRepository(platform)
+			if err != nil {
+				t.Fatal(err)
+			}
+			service, err := application.NewScopedWorkspaceAnalysisRunService(
+				repository,
+				workspaceAnalysisRunStartIntegrationIDGenerator{id: workspaceAnalysisRunStartIntegrationID(20)},
+				config,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			starter, err := application.NewScopedWorkspaceAnalysisCapabilityCheckedRunStarter(repository, service, contract)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return workspaceAnalysisRunStarterIntegrationHarness{
+				capability: repository,
+				loader:     repository,
+				start: func(ctx context.Context, command application.WorkspaceAnalysisRunStartCommand, rollback bool) (domain.WorkspaceAnalysisRun, error) {
+					var run domain.WorkspaceAnalysisRun
+					err := repository.unitOfWork.Within(ctx, foundation.TransactionOptions{}, func(
+						callbackCtx context.Context,
+						scope foundation.TransactionScope,
+					) error {
+						transaction, err := platformpostgres.GORMTransaction(scope)
+						if err != nil {
+							return err
+						}
+						if result := transaction.WithContext(callbackCtx).Exec(
+							workspaceAnalysisRunStartAnswerSQL(true),
+							workspaceAnalysisRunStartAnswerArguments(command)...,
+						); result.Error != nil {
+							return result.Error
+						}
+						run, err = starter.StartWorkspaceAnalysisRunScoped(callbackCtx, scope, command)
+						if err != nil {
+							return err
+						}
+						if rollback {
+							return errWorkspaceAnalysisRunStartIntegrationRollback
+						}
+						return nil
+					})
+					if rollback && errors.Is(err, errWorkspaceAnalysisRunStartIntegrationRollback) {
+						return run, nil
+					}
+					return run, err
+				},
+			}
+		}},
+	}
+}
+
+type workspaceAnalysisRunStartIntegrationIDGenerator struct {
+	id foundation.ID
+}
+
+func (generator workspaceAnalysisRunStartIntegrationIDGenerator) New() (foundation.ID, error) {
+	return generator.id, nil
+}
+
+func seedWorkspaceAnalysisRunStartIntegration(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+) (
+	application.WorkspaceAnalysisRunStartConfig,
+	application.WorkspaceAnalysisCapabilityContract,
+	application.WorkspaceAnalysisRunStartCommand,
+) {
+	t.Helper()
+	createdAt := time.Now().UTC().Truncate(time.Microsecond)
+	workspaceID, conversationID := workspaceAnalysisRunStartIntegrationID(1), workspaceAnalysisRunStartIntegrationID(2)
+	questionID, definitionID := workspaceAnalysisRunStartIntegrationID(3), workspaceAnalysisRunStartIntegrationID(4)
+	workflowRunID, answerID := workspaceAnalysisRunStartIntegrationID(5), workspaceAnalysisRunStartIntegrationID(6)
+	queries := []struct {
+		statement string
+		arguments []any
+	}{
+		{`INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,created_at,updated_at)
+			VALUES($1,'wa-run-start','/tmp/wa-run-start','/tmp/wa-run-start',clock_timestamp(),'active',clock_timestamp(),clock_timestamp())`, []any{string(workspaceID)}},
+		{`INSERT INTO agent.conversation(
+			id,workspace_id,status,title,version,last_activity_at,created_at,updated_at,idempotency_key,request_hash
+		) VALUES($1,$2,'open','Workspace Analysis Run Start',1,clock_timestamp(),clock_timestamp(),clock_timestamp(),'wa-run-start',repeat('1',64))`, []any{string(conversationID), string(workspaceID)}},
+		{`INSERT INTO agent.question(
+			id,workspace_id,conversation_id,ordinal,mode,question_text,scope,answer_depth,output_format,
+			context_through_ordinal,context_hash,idempotency_key,request_hash,created_at
+		) VALUES($1,$2,$3,1,'workspace_analysis','analyze workspace','{}','standard','markdown',0,repeat('2',64),'wa-run-question',repeat('3',64),clock_timestamp())`, []any{string(questionID), string(workspaceID), string(conversationID)}},
+		{`INSERT INTO workflow.definition(id,workspace_id,key,version,graph,created_at)
+			VALUES($1,$2,'workspace-analysis',1,'{"nodes":[]}'::jsonb,clock_timestamp())`, []any{string(definitionID), string(workspaceID)}},
+		{`INSERT INTO workflow.run(id,workspace_id,definition_id,status,input,version,created_at,updated_at)
+			VALUES($1,$2,$3,'running','{}',1,clock_timestamp(),clock_timestamp())`, []any{string(workflowRunID), string(workspaceID), string(definitionID)}},
+	}
+	for _, query := range queries {
+		if _, err := pool.Exec(ctx, query.statement, query.arguments...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	config := application.WorkspaceAnalysisRunStartConfig{
+		DefinitionHash: hash64('a'), ToolCatalogHash: hash64('b'), ConfigRevision: 7,
+		SynthesisProfileMaxOutputTokens: int(application.WorkspaceAnalysisV1SynthesisMaxOutputTokens),
+		Timeouts: application.WorkspaceAnalysisV1Timeouts{
+			PlanModelTimeout: 2 * time.Second, SynthesisModelTimeout: 3 * time.Second, ReviewModelTimeout: 2 * time.Second,
+			GitToolTimeout: time.Second, SearchToolTimeout: time.Second, SourceReadToolTimeout: time.Second,
+			ValidateCitationToolTimeout: time.Second,
+		},
+		RuntimeLimits: application.WorkspaceAnalysisRuntimeLimits{
+			RiverJobTimeout: time.Minute, LeaseDuration: 30 * time.Second, HeartbeatInterval: 5 * time.Second,
+		},
+	}
+	contract := workspaceAnalysisCapabilityContractIntegration()
+	command := application.WorkspaceAnalysisRunStartCommand{
+		WorkspaceID: workspaceID, ConversationID: conversationID, QuestionID: questionID, AnswerID: answerID,
+		WorkflowRunID: workflowRunID, CreatedAt: createdAt,
+	}
+	return config, contract, command
+}
+
+func assertWorkspaceAnalysisDispatchCountsIntegration(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	questionID foundation.ID,
+	want int,
+) {
+	t.Helper()
+	var answers, runs int
+	if err := pool.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM agent.answer WHERE question_id=$1),
+		(SELECT count(*) FROM agent.workspace_analysis_run WHERE question_id=$1)`, string(questionID)).Scan(&answers, &runs); err != nil {
+		t.Fatal(err)
+	}
+	if answers != want || runs != want {
+		t.Fatalf("workspace analysis dispatch facts answers=%d runs=%d, want %d each", answers, runs, want)
+	}
+}
+
+func workspaceAnalysisRunStartAnswerSQL(gorm bool) string {
+	if gorm {
+		return `INSERT INTO agent.answer(
+			id,workspace_id,conversation_id,question_id,workflow_run_id,publication_status,version,created_at,updated_at
+		) SELECT ?,?,?,?,?,'pending',1,clock_timestamp(),clock_timestamp()
+		WHERE NOT EXISTS (SELECT 1 FROM agent.answer WHERE id=?::uuid)`
+	}
+	return `INSERT INTO agent.answer(
+		id,workspace_id,conversation_id,question_id,workflow_run_id,publication_status,version,created_at,updated_at
+	) SELECT $1,$2,$3,$4,$5,'pending',1,clock_timestamp(),clock_timestamp()
+	WHERE NOT EXISTS (SELECT 1 FROM agent.answer WHERE id=$6::uuid)`
+}
+
+func workspaceAnalysisRunStartAnswerArguments(command application.WorkspaceAnalysisRunStartCommand) []any {
+	return []any{
+		string(command.AnswerID), string(command.WorkspaceID), string(command.ConversationID),
+		string(command.QuestionID), string(command.WorkflowRunID), string(command.AnswerID),
+	}
+}
+
+func workspaceAnalysisRunStartIntegrationID(seed int) foundation.ID {
+	return foundation.ID(fmt.Sprintf("86000000-0000-4000-8000-%012d", seed))
+}
+
+type workspaceAnalysisModelNilExecutionFence struct{}
+
+func (*workspaceAnalysisModelNilExecutionFence) LockWorkspaceAnalysisExecutionScoped(
+	context.Context,
+	foundation.TransactionScope,
+	workflowapplication.WorkspaceAnalysisExecutionFenceRequest,
+) (workflowapplication.WorkspaceAnalysisExecutionFenceSnapshot, bool, error) {
+	panic("typed nil execution fence must be rejected by the constructor")
 }
 
 func TestWorkspaceAnalysisModelOperationRejectsStaleFenceAndDeadlineIntegration(t *testing.T) {
@@ -121,48 +773,62 @@ func TestWorkspaceAnalysisModelOperationRejectsStaleFenceAndDeadlineIntegration(
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			pool, ctx := newAgentRepositoryIntegrationPool(t)
-			fixture := seedWorkspaceAnalysisModelOperationIntegrationWithRunAge(t, ctx, pool, test.runAge)
-			if test.mutate != nil {
-				test.mutate(&fixture.command)
-			}
-			repository, err := NewRepository(pool)
-			if err != nil {
-				t.Fatal(err)
-			}
-			_, authorizationErr := repository.AuthorizeWorkspaceAnalysisModelCall(ctx, fixture.command)
-			var classified *foundation.Error
-			if !errors.As(authorizationErr, &classified) || classified.Code != test.wantCode ||
-				classified.Kind != test.wantKind || classified.Retryable ||
-				errors.Is(authorizationErr, context.DeadlineExceeded) != test.wantDeadlineCause {
-				t.Fatalf("authorization err=%#v", authorizationErr)
-			}
-			var runtimeFacts int64
-			if err := pool.QueryRow(ctx, `SELECT
+			testWorkspaceAnalysisModelRepositoryIntegrationVariants(t, func(
+				t *testing.T,
+				pool *pgxpool.Pool,
+				ctx context.Context,
+				repository workspaceAnalysisModelRepositoryIntegrationStore,
+			) {
+				fixture := seedWorkspaceAnalysisModelOperationIntegrationWithRunAge(t, ctx, pool, test.runAge)
+				if test.mutate != nil {
+					test.mutate(&fixture.command)
+				}
+				_, authorizationErr := repository.AuthorizeWorkspaceAnalysisModelCall(ctx, fixture.command)
+				var classified *foundation.Error
+				if !errors.As(authorizationErr, &classified) || classified.Code != test.wantCode ||
+					classified.Kind != test.wantKind || classified.Retryable ||
+					errors.Is(authorizationErr, context.DeadlineExceeded) != test.wantDeadlineCause {
+					t.Fatalf("authorization err=%#v", authorizationErr)
+				}
+				var runtimeFacts int64
+				if err := pool.QueryRow(ctx, `SELECT
 				(SELECT count(*) FROM agent.model_run WHERE id=$1)+
 				(SELECT count(*) FROM agent.model_call WHERE id=$2)+
 				(SELECT count(*) FROM agent.workspace_analysis_operation WHERE id=$3)+
 				(SELECT count(*) FROM agent.workspace_analysis_budget_reservation WHERE id=$4)`,
-				string(fixture.command.Run.ID), string(fixture.command.Call.ID),
-				string(fixture.command.OperationID), string(fixture.command.ReservationID),
-			).Scan(&runtimeFacts); err != nil {
-				t.Fatal(err)
-			}
-			if runtimeFacts != 0 {
-				t.Fatalf("rejected authorization persisted %d runtime facts", runtimeFacts)
-			}
+					string(fixture.command.Run.ID), string(fixture.command.Call.ID),
+					string(fixture.command.OperationID), string(fixture.command.ReservationID),
+				).Scan(&runtimeFacts); err != nil {
+					t.Fatal(err)
+				}
+				if runtimeFacts != 0 {
+					t.Fatalf("rejected authorization persisted %d runtime facts", runtimeFacts)
+				}
+			})
 		})
 	}
 }
 
 func TestWorkspaceAnalysisModelOperationSuccessReplayLoadScopeAndCommitRecoveryIntegration(t *testing.T) {
-	pool, ctx := newAgentRepositoryIntegrationPool(t)
-	fixture := seedWorkspaceAnalysisModelOperationIntegration(t, ctx, pool)
-	database := &workspaceAnalysisModelCommitLossDB{DB: pool}
-	repository, err := NewRepository(database)
-	if err != nil {
-		t.Fatal(err)
+	for _, variant := range workspaceAnalysisModelRepositoryIntegrationVariants() {
+		t.Run(variant.name, func(t *testing.T) {
+			platform, ctx := newAgentPlatformIntegrationPool(t)
+			repository, armCommitLoss := variant.openWithCommitLoss(t, platform)
+			testWorkspaceAnalysisModelOperationSuccessReplayLoadScopeAndCommitRecoveryIntegration(
+				t, platform.DB(), ctx, repository, armCommitLoss,
+			)
+		})
 	}
+}
+
+func testWorkspaceAnalysisModelOperationSuccessReplayLoadScopeAndCommitRecoveryIntegration(
+	t *testing.T,
+	pool *pgxpool.Pool,
+	ctx context.Context,
+	repository workspaceAnalysisModelRepositoryIntegrationStore,
+	armCommitLoss func(),
+) {
+	fixture := seedWorkspaceAnalysisModelOperationIntegration(t, ctx, pool)
 	checkpointQuery := application.WorkspaceAnalysisRetrievalPlanCheckpointQuery{
 		WorkspaceID: fixture.command.Identity.WorkspaceID, WorkflowRunID: fixture.command.Identity.WorkflowRunID,
 		AnalysisRunID: fixture.command.OperationKey.AnalysisRunID, NodeRunID: fixture.command.Identity.NodeRunID,
@@ -175,7 +841,7 @@ func TestWorkspaceAnalysisModelOperationSuccessReplayLoadScopeAndCommitRecoveryI
 		t.Fatal(err)
 	}
 	command := successfulWorkspaceAnalysisModelResultCommand(t, fixture, authorized)
-	database.injectNext.Store(true)
+	armCommitLoss()
 	mutation, err := repository.FinalizeWorkspaceAnalysisModelResult(ctx, command)
 	if err != nil || !mutation.Replayed || mutation.Result == nil {
 		t.Fatalf("commit-loss finalization=%#v err=%v", mutation, err)
@@ -220,12 +886,16 @@ func TestWorkspaceAnalysisModelOperationSuccessReplayLoadScopeAndCommitRecoveryI
 }
 
 func TestWorkspaceAnalysisModelOperationCandidateReplayAndLoadIntegration(t *testing.T) {
-	pool, ctx := newAgentRepositoryIntegrationPool(t)
+	testWorkspaceAnalysisModelRepositoryIntegrationVariants(t, testWorkspaceAnalysisModelOperationCandidateReplayAndLoadIntegration)
+}
+
+func testWorkspaceAnalysisModelOperationCandidateReplayAndLoadIntegration(
+	t *testing.T,
+	pool *pgxpool.Pool,
+	ctx context.Context,
+	repository workspaceAnalysisModelRepositoryIntegrationStore,
+) {
 	fixture := seedWorkspaceAnalysisModelOperationIntegration(t, ctx, pool)
-	repository, err := NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	planAuthorization, err := repository.AuthorizeWorkspaceAnalysisModelCall(ctx, fixture.command)
 	if err != nil {
@@ -262,6 +932,20 @@ func TestWorkspaceAnalysisModelOperationCandidateReplayAndLoadIntegration(t *tes
 	if err != nil || !sameWorkspaceAnalysisCandidate(loaded, command.Candidate) {
 		t.Fatalf("exact candidate load=%#v err=%v", loaded, err)
 	}
+	authorityQuery := application.WorkspaceAnalysisCandidateAuthorityQuery{
+		WorkspaceID: command.Candidate.WorkspaceID, WorkflowRunID: fixture.command.Identity.WorkflowRunID,
+		AnalysisRunID: command.Candidate.AnalysisRunID, CandidateID: command.Candidate.ID,
+		CandidateHash: command.Candidate.DocumentHash,
+	}
+	authoritative, err := repository.LoadWorkspaceAnalysisCandidateAuthority(ctx, authorityQuery)
+	if err != nil || !sameWorkspaceAnalysisCandidate(authoritative, command.Candidate) {
+		t.Fatalf("candidate authority=%#v err=%v", authoritative, err)
+	}
+	driftedWorkflow := authorityQuery
+	driftedWorkflow.WorkflowRunID = workspaceAnalysisModelIntegrationID(98)
+	if _, err := repository.LoadWorkspaceAnalysisCandidateAuthority(ctx, driftedWorkflow); agentErrorCode(err) != ErrorCodeRuntimeNotFound {
+		t.Fatalf("drifted-workflow authority code=%s err=%v", agentErrorCode(err), err)
+	}
 	crossWorkspace := query
 	crossWorkspace.WorkspaceID = workspaceAnalysisModelIntegrationID(99)
 	if _, err := repository.LoadWorkspaceAnalysisCandidate(ctx, crossWorkspace); agentErrorCode(err) != ErrorCodeRuntimeNotFound {
@@ -281,70 +965,72 @@ func TestWorkspaceAnalysisModelOperationReviewPassedFailedAndCandidateBindingInt
 			name = "passed"
 		}
 		t.Run(name, func(t *testing.T) {
-			pool, ctx := newAgentRepositoryIntegrationPool(t)
-			fixture := seedWorkspaceAnalysisModelOperationIntegration(t, ctx, pool)
-			repository, err := NewRepository(pool)
-			if err != nil {
-				t.Fatal(err)
-			}
-			planAuthorization, err := repository.AuthorizeWorkspaceAnalysisModelCall(ctx, fixture.command)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := repository.FinalizeWorkspaceAnalysisModelResult(ctx,
-				successfulWorkspaceAnalysisModelResultCommand(t, fixture, planAuthorization)); err != nil {
-				t.Fatal(err)
-			}
-			seedWorkspaceAnalysisModelEvidencePrefixIntegration(t, ctx, pool)
-			synthesisAuthorizationCommand := synthesisWorkspaceAnalysisModelAuthorizationCommand(fixture)
-			synthesisAuthorization, err := repository.AuthorizeWorkspaceAnalysisModelCall(ctx, synthesisAuthorizationCommand)
-			if err != nil {
-				t.Fatal(err)
-			}
-			candidateCommand := successfulWorkspaceAnalysisModelCandidateCommand(
-				t, fixture, synthesisAuthorization, synthesisAuthorizationCommand,
-			)
-			candidateMutation, err := repository.FinalizeWorkspaceAnalysisModelCandidate(ctx, candidateCommand)
-			if err != nil || candidateMutation.Candidate == nil {
-				t.Fatalf("candidate finalization=%#v err=%v", candidateMutation, err)
-			}
-			seedWorkspaceAnalysisModelCitationValidationIntegration(t, ctx, pool, candidateCommand.Candidate)
-
-			reviewAuthorizationCommand := reviewWorkspaceAnalysisModelAuthorizationCommand(t, fixture, candidateCommand.Candidate)
-			reviewAuthorization, err := repository.AuthorizeWorkspaceAnalysisModelCall(ctx, reviewAuthorizationCommand)
-			if err != nil || reviewAuthorization.Disposition != application.WorkspaceAnalysisModelAuthorizationCreated {
-				t.Fatalf("review authorization=%#v err=%v", reviewAuthorization, err)
-			}
-			command := successfulWorkspaceAnalysisModelReviewCommand(
-				t, reviewAuthorization, reviewAuthorizationCommand, candidateCommand.Candidate, passed,
-			)
-			if passed {
-				drifted := command
-				drifted.Result.SubjectCandidateHash = strings.Repeat("c", 64)
-				if _, err := repository.FinalizeWorkspaceAnalysisModelResult(ctx, drifted); agentErrorCode(err) != ErrorCodeRuntimeConsistency {
-					t.Fatalf("drifted candidate hash code=%s err=%v", agentErrorCode(err), err)
+			testWorkspaceAnalysisModelRepositoryIntegrationVariants(t, func(
+				t *testing.T,
+				pool *pgxpool.Pool,
+				ctx context.Context,
+				repository workspaceAnalysisModelRepositoryIntegrationStore,
+			) {
+				fixture := seedWorkspaceAnalysisModelOperationIntegration(t, ctx, pool)
+				planAuthorization, err := repository.AuthorizeWorkspaceAnalysisModelCall(ctx, fixture.command)
+				if err != nil {
+					t.Fatal(err)
 				}
-			}
-			mutation, err := repository.FinalizeWorkspaceAnalysisModelResult(ctx, command)
-			if err != nil || mutation.Replayed || mutation.Result == nil {
-				t.Fatalf("review finalization=%#v err=%v", mutation, err)
-			}
-			replayed, err := repository.FinalizeWorkspaceAnalysisModelResult(ctx, command)
-			if err != nil || !replayed.Replayed || replayed.Result == nil ||
-				!sameWorkspaceAnalysisModelResult(*replayed.Result, command.Result) {
-				t.Fatalf("review replay=%#v err=%v", replayed, err)
-			}
-			query := application.WorkspaceAnalysisModelResultQuery{
-				WorkspaceID: command.Result.WorkspaceID, AnalysisRunID: command.Result.AnalysisRunID,
-				OperationID: command.Result.OperationID, ModelRunID: command.Result.ModelRunID,
-				ModelCallID: command.Result.ModelCallID,
-			}
-			loaded, err := repository.LoadWorkspaceAnalysisModelResult(ctx, query)
-			if err != nil || !sameWorkspaceAnalysisModelResult(loaded, command.Result) ||
-				loaded.SubjectCandidateID == nil || *loaded.SubjectCandidateID != candidateCommand.Candidate.ID ||
-				loaded.SubjectCandidateHash != candidateCommand.Candidate.DocumentHash {
-				t.Fatalf("exact review load=%#v err=%v", loaded, err)
-			}
+				if _, err := repository.FinalizeWorkspaceAnalysisModelResult(ctx,
+					successfulWorkspaceAnalysisModelResultCommand(t, fixture, planAuthorization)); err != nil {
+					t.Fatal(err)
+				}
+				seedWorkspaceAnalysisModelEvidencePrefixIntegration(t, ctx, pool)
+				synthesisAuthorizationCommand := synthesisWorkspaceAnalysisModelAuthorizationCommand(fixture)
+				synthesisAuthorization, err := repository.AuthorizeWorkspaceAnalysisModelCall(ctx, synthesisAuthorizationCommand)
+				if err != nil {
+					t.Fatal(err)
+				}
+				candidateCommand := successfulWorkspaceAnalysisModelCandidateCommand(
+					t, fixture, synthesisAuthorization, synthesisAuthorizationCommand,
+				)
+				candidateMutation, err := repository.FinalizeWorkspaceAnalysisModelCandidate(ctx, candidateCommand)
+				if err != nil || candidateMutation.Candidate == nil {
+					t.Fatalf("candidate finalization=%#v err=%v", candidateMutation, err)
+				}
+				seedWorkspaceAnalysisModelCitationValidationIntegration(t, ctx, pool, candidateCommand.Candidate)
+
+				reviewAuthorizationCommand := reviewWorkspaceAnalysisModelAuthorizationCommand(t, fixture, candidateCommand.Candidate)
+				reviewAuthorization, err := repository.AuthorizeWorkspaceAnalysisModelCall(ctx, reviewAuthorizationCommand)
+				if err != nil || reviewAuthorization.Disposition != application.WorkspaceAnalysisModelAuthorizationCreated {
+					t.Fatalf("review authorization=%#v err=%v", reviewAuthorization, err)
+				}
+				command := successfulWorkspaceAnalysisModelReviewCommand(
+					t, reviewAuthorization, reviewAuthorizationCommand, candidateCommand.Candidate, passed,
+				)
+				if passed {
+					drifted := command
+					drifted.Result.SubjectCandidateHash = strings.Repeat("c", 64)
+					if _, err := repository.FinalizeWorkspaceAnalysisModelResult(ctx, drifted); agentErrorCode(err) != ErrorCodeRuntimeConsistency {
+						t.Fatalf("drifted candidate hash code=%s err=%v", agentErrorCode(err), err)
+					}
+				}
+				mutation, err := repository.FinalizeWorkspaceAnalysisModelResult(ctx, command)
+				if err != nil || mutation.Replayed || mutation.Result == nil {
+					t.Fatalf("review finalization=%#v err=%v", mutation, err)
+				}
+				replayed, err := repository.FinalizeWorkspaceAnalysisModelResult(ctx, command)
+				if err != nil || !replayed.Replayed || replayed.Result == nil ||
+					!sameWorkspaceAnalysisModelResult(*replayed.Result, command.Result) {
+					t.Fatalf("review replay=%#v err=%v", replayed, err)
+				}
+				query := application.WorkspaceAnalysisModelResultQuery{
+					WorkspaceID: command.Result.WorkspaceID, AnalysisRunID: command.Result.AnalysisRunID,
+					OperationID: command.Result.OperationID, ModelRunID: command.Result.ModelRunID,
+					ModelCallID: command.Result.ModelCallID,
+				}
+				loaded, err := repository.LoadWorkspaceAnalysisModelResult(ctx, query)
+				if err != nil || !sameWorkspaceAnalysisModelResult(loaded, command.Result) ||
+					loaded.SubjectCandidateID == nil || *loaded.SubjectCandidateID != candidateCommand.Candidate.ID ||
+					loaded.SubjectCandidateHash != candidateCommand.Candidate.DocumentHash {
+					t.Fatalf("exact review load=%#v err=%v", loaded, err)
+				}
+			})
 		})
 	}
 }
@@ -379,42 +1065,44 @@ func TestWorkspaceAnalysisModelOperationFailureRefusalAndUnknownClosureIntegrati
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			pool, ctx := newAgentRepositoryIntegrationPool(t)
-			fixture := seedWorkspaceAnalysisModelOperationIntegration(t, ctx, pool)
-			repository, err := NewRepository(pool)
-			if err != nil {
-				t.Fatal(err)
-			}
-			authorized, err := repository.AuthorizeWorkspaceAnalysisModelCall(ctx, fixture.command)
-			if err != nil {
-				t.Fatal(err)
-			}
-			command := terminalWorkspaceAnalysisModelCallCommand(authorized, fixture.command, test.callStatus,
-				test.runStatus, test.resultType, test.errorCode)
-			mutation, err := repository.FinalizeWorkspaceAnalysisModelCall(ctx, command)
-			if err != nil || mutation.Replayed {
-				t.Fatalf("finalization=%#v err=%v", mutation, err)
-			}
-			replayed, err := repository.FinalizeWorkspaceAnalysisModelCall(ctx, command)
-			if err != nil || !replayed.Replayed {
-				t.Fatalf("replay=%#v err=%v", replayed, err)
-			}
-			var operationStatus, reservationStatus string
-			var settledInput, settledOutput int64
-			if err := pool.QueryRow(ctx, `SELECT operation.status,reservation.status,
+			testWorkspaceAnalysisModelRepositoryIntegrationVariants(t, func(
+				t *testing.T,
+				pool *pgxpool.Pool,
+				ctx context.Context,
+				repository workspaceAnalysisModelRepositoryIntegrationStore,
+			) {
+				fixture := seedWorkspaceAnalysisModelOperationIntegration(t, ctx, pool)
+				authorized, err := repository.AuthorizeWorkspaceAnalysisModelCall(ctx, fixture.command)
+				if err != nil {
+					t.Fatal(err)
+				}
+				command := terminalWorkspaceAnalysisModelCallCommand(authorized, fixture.command, test.callStatus,
+					test.runStatus, test.resultType, test.errorCode)
+				mutation, err := repository.FinalizeWorkspaceAnalysisModelCall(ctx, command)
+				if err != nil || mutation.Replayed {
+					t.Fatalf("finalization=%#v err=%v", mutation, err)
+				}
+				replayed, err := repository.FinalizeWorkspaceAnalysisModelCall(ctx, command)
+				if err != nil || !replayed.Replayed {
+					t.Fatalf("replay=%#v err=%v", replayed, err)
+				}
+				var operationStatus, reservationStatus string
+				var settledInput, settledOutput int64
+				if err := pool.QueryRow(ctx, `SELECT operation.status,reservation.status,
 				reservation.settled_input_tokens,reservation.settled_output_tokens
 				FROM agent.workspace_analysis_operation AS operation
 				JOIN agent.workspace_analysis_budget_reservation AS reservation ON reservation.operation_id=operation.id
 				WHERE operation.id=$1`, string(authorized.OperationID)).Scan(
-				&operationStatus, &reservationStatus, &settledInput, &settledOutput,
-			); err != nil {
-				t.Fatal(err)
-			}
-			if operationStatus != test.wantOperation || reservationStatus != test.wantReservation ||
-				settledInput != test.wantSettledInput || settledOutput != test.wantSettledOutput {
-				t.Fatalf("closure operation=%s reservation=%s usage=(%d,%d)",
-					operationStatus, reservationStatus, settledInput, settledOutput)
-			}
+					&operationStatus, &reservationStatus, &settledInput, &settledOutput,
+				); err != nil {
+					t.Fatal(err)
+				}
+				if operationStatus != test.wantOperation || reservationStatus != test.wantReservation ||
+					settledInput != test.wantSettledInput || settledOutput != test.wantSettledOutput {
+					t.Fatalf("closure operation=%s reservation=%s usage=(%d,%d)",
+						operationStatus, reservationStatus, settledInput, settledOutput)
+				}
+			})
 		})
 	}
 }
@@ -445,69 +1133,71 @@ func TestWorkspaceAnalysisModelOperationCancellationSettlesAuthorizedCallIntegra
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			pool, ctx := newAgentRepositoryIntegrationPool(t)
-			fixture := seedWorkspaceAnalysisModelOperationIntegration(t, ctx, pool)
-			repository, err := NewRepository(pool)
-			if err != nil {
-				t.Fatal(err)
-			}
-			authorized, err := repository.AuthorizeWorkspaceAnalysisModelCall(ctx, fixture.command)
-			if err != nil {
-				t.Fatal(err)
-			}
-			cancel := newWorkspaceAnalysisConcurrentCancelCoordinator(t, pool)
-			if _, err := cancel.Cancel(ctx, workflowapplication.RunControlCommand{
-				WorkflowRunID:   fixture.command.Identity.WorkflowRunID,
-				ExpectedVersion: 1,
-				IdempotencyKey:  "wa-model-cancel-settlement-" + test.name,
-			}); err != nil {
-				t.Fatalf("persist cancellation: %v", err)
-			}
+			testWorkspaceAnalysisModelRepositoryIntegrationVariants(t, func(
+				t *testing.T,
+				pool *pgxpool.Pool,
+				ctx context.Context,
+				repository workspaceAnalysisModelRepositoryIntegrationStore,
+			) {
+				fixture := seedWorkspaceAnalysisModelOperationIntegration(t, ctx, pool)
+				authorized, err := repository.AuthorizeWorkspaceAnalysisModelCall(ctx, fixture.command)
+				if err != nil {
+					t.Fatal(err)
+				}
+				cancel := newWorkspaceAnalysisConcurrentCancelCoordinator(t, pool)
+				if _, err := cancel.Cancel(ctx, workflowapplication.RunControlCommand{
+					WorkflowRunID:   fixture.command.Identity.WorkflowRunID,
+					ExpectedVersion: 1,
+					IdempotencyKey:  "wa-model-cancel-settlement-" + test.name,
+				}); err != nil {
+					t.Fatalf("persist cancellation: %v", err)
+				}
 
-			if _, err := repository.FinalizeWorkspaceAnalysisModelResult(ctx,
-				successfulWorkspaceAnalysisModelResultCommand(t, fixture, authorized)); err == nil {
-				t.Fatal("cancelled model call unexpectedly accepted a successful result")
-			} else if !application.WorkspaceAnalysisModelCancellationConflict(err) {
-				t.Fatalf("successful result cancellation error lost its stable marker: %v", err)
-			}
-			if _, err := repository.FinalizeWorkspaceAnalysisModelCall(ctx,
-				terminalWorkspaceAnalysisModelCallCommand(
-					authorized, fixture.command, domain.ModelCallSucceeded, domain.ModelRunRefused,
-					domain.ResultTypeRefusal, string(domain.WorkspaceAnalysisRunModelRefused),
-				)); err == nil {
-				t.Fatal("cancelled model call unexpectedly accepted a refusal")
-			}
+				if _, err := repository.FinalizeWorkspaceAnalysisModelResult(ctx,
+					successfulWorkspaceAnalysisModelResultCommand(t, fixture, authorized)); err == nil {
+					t.Fatal("cancelled model call unexpectedly accepted a successful result")
+				} else if !application.WorkspaceAnalysisModelCancellationConflict(err) {
+					t.Fatalf("successful result cancellation error lost its stable marker: %v", err)
+				}
+				if _, err := repository.FinalizeWorkspaceAnalysisModelCall(ctx,
+					terminalWorkspaceAnalysisModelCallCommand(
+						authorized, fixture.command, domain.ModelCallSucceeded, domain.ModelRunRefused,
+						domain.ResultTypeRefusal, string(domain.WorkspaceAnalysisRunModelRefused),
+					)); err == nil {
+					t.Fatal("cancelled model call unexpectedly accepted a refusal")
+				}
 
-			command := terminalWorkspaceAnalysisModelCallCommand(
-				authorized, fixture.command, test.callStatus, test.runStatus, "", "WORKSPACE_ANALYSIS_CANCELLED",
-			)
-			mutation, err := repository.FinalizeWorkspaceAnalysisModelCall(ctx, command)
-			if err != nil || mutation.Replayed {
-				t.Fatalf("cancelled finalization=%#v err=%v", mutation, err)
-			}
-			replayed, err := repository.FinalizeWorkspaceAnalysisModelCall(ctx, command)
-			if err != nil || !replayed.Replayed {
-				t.Fatalf("cancelled replay=%#v err=%v", replayed, err)
-			}
+				command := terminalWorkspaceAnalysisModelCallCommand(
+					authorized, fixture.command, test.callStatus, test.runStatus, "", "WORKSPACE_ANALYSIS_CANCELLED",
+				)
+				mutation, err := repository.FinalizeWorkspaceAnalysisModelCall(ctx, command)
+				if err != nil || mutation.Replayed {
+					t.Fatalf("cancelled finalization=%#v err=%v", mutation, err)
+				}
+				replayed, err := repository.FinalizeWorkspaceAnalysisModelCall(ctx, command)
+				if err != nil || !replayed.Replayed {
+					t.Fatalf("cancelled replay=%#v err=%v", replayed, err)
+				}
 
-			var operationStatus, reservationStatus string
-			var settledInput, settledOutput, modelResults, candidates int64
-			if err := pool.QueryRow(ctx, `SELECT operation.status,reservation.status,
+				var operationStatus, reservationStatus string
+				var settledInput, settledOutput, modelResults, candidates int64
+				if err := pool.QueryRow(ctx, `SELECT operation.status,reservation.status,
 				reservation.settled_input_tokens,reservation.settled_output_tokens,
 				(SELECT count(*) FROM agent.workspace_analysis_model_result WHERE operation_id=operation.id),
 				(SELECT count(*) FROM agent.workspace_analysis_candidate WHERE synthesis_operation_id=operation.id)
 				FROM agent.workspace_analysis_operation AS operation
 				JOIN agent.workspace_analysis_budget_reservation AS reservation ON reservation.operation_id=operation.id
 				WHERE operation.id=$1`, string(authorized.OperationID)).Scan(
-				&operationStatus, &reservationStatus, &settledInput, &settledOutput, &modelResults, &candidates,
-			); err != nil {
-				t.Fatal(err)
-			}
-			if operationStatus != test.wantOperation || reservationStatus != test.wantReservation ||
-				settledInput != test.wantInput || settledOutput != test.wantOutput || modelResults != 0 || candidates != 0 {
-				t.Fatalf("cancelled closure operation=%s reservation=%s usage=(%d,%d) result=%d candidate=%d",
-					operationStatus, reservationStatus, settledInput, settledOutput, modelResults, candidates)
-			}
+					&operationStatus, &reservationStatus, &settledInput, &settledOutput, &modelResults, &candidates,
+				); err != nil {
+					t.Fatal(err)
+				}
+				if operationStatus != test.wantOperation || reservationStatus != test.wantReservation ||
+					settledInput != test.wantInput || settledOutput != test.wantOutput || modelResults != 0 || candidates != 0 {
+					t.Fatalf("cancelled closure operation=%s reservation=%s usage=(%d,%d) result=%d candidate=%d",
+						operationStatus, reservationStatus, settledInput, settledOutput, modelResults, candidates)
+				}
+			})
 		})
 	}
 }
@@ -517,12 +1207,16 @@ func TestWorkspaceAnalysisModelOperationCancellationSettlesAuthorizedCallIntegra
 // is reported distinctly, so the Runner can settle the existing Call instead
 // of leaving STARTED/RESERVED facts for the cancellation hook.
 func TestWorkspaceAnalysisModelOperationCandidateCancellationConflictMarkerIntegration(t *testing.T) {
-	pool, ctx := newAgentRepositoryIntegrationPool(t)
+	testWorkspaceAnalysisModelRepositoryIntegrationVariants(t, testWorkspaceAnalysisModelOperationCandidateCancellationConflictMarkerIntegration)
+}
+
+func testWorkspaceAnalysisModelOperationCandidateCancellationConflictMarkerIntegration(
+	t *testing.T,
+	pool *pgxpool.Pool,
+	ctx context.Context,
+	repository workspaceAnalysisModelRepositoryIntegrationStore,
+) {
 	fixture := seedWorkspaceAnalysisModelOperationIntegration(t, ctx, pool)
-	repository, err := NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
 	planAuthorization, err := repository.AuthorizeWorkspaceAnalysisModelCall(ctx, fixture.command)
 	if err != nil {
 		t.Fatal(err)
@@ -596,54 +1290,58 @@ func TestWorkspaceAnalysisModelOperationCandidateCancellationConflictMarkerInteg
 
 func TestWorkspaceAnalysisModelOperationCancellationMarkerRequiresActiveLeaseIntegration(t *testing.T) {
 	t.Run("plan result with expired lease", func(t *testing.T) {
-		pool, ctx := newAgentRepositoryIntegrationPool(t)
-		fixture := seedWorkspaceAnalysisModelOperationIntegration(t, ctx, pool)
-		repository, err := NewRepository(pool)
-		if err != nil {
-			t.Fatal(err)
-		}
-		authorized, err := repository.AuthorizeWorkspaceAnalysisModelCall(ctx, fixture.command)
-		if err != nil {
-			t.Fatal(err)
-		}
-		persistWorkspaceAnalysisModelCancellation(t, ctx, pool, fixture.command.Identity.WorkflowRunID, "wa-model-stale-plan")
-		expireWorkspaceAnalysisModelLease(t, ctx, pool, fixture.command.Identity)
+		testWorkspaceAnalysisModelRepositoryIntegrationVariants(t, func(
+			t *testing.T,
+			pool *pgxpool.Pool,
+			ctx context.Context,
+			repository workspaceAnalysisModelRepositoryIntegrationStore,
+		) {
+			fixture := seedWorkspaceAnalysisModelOperationIntegration(t, ctx, pool)
+			authorized, err := repository.AuthorizeWorkspaceAnalysisModelCall(ctx, fixture.command)
+			if err != nil {
+				t.Fatal(err)
+			}
+			persistWorkspaceAnalysisModelCancellation(t, ctx, pool, fixture.command.Identity.WorkflowRunID, "wa-model-stale-plan")
+			expireWorkspaceAnalysisModelLease(t, ctx, pool, fixture.command.Identity)
 
-		_, err = repository.FinalizeWorkspaceAnalysisModelResult(
-			ctx, successfulWorkspaceAnalysisModelResultCommand(t, fixture, authorized),
-		)
-		assertWorkspaceAnalysisModelStaleFenceIsNotCancellationMarker(t, err)
+			_, err = repository.FinalizeWorkspaceAnalysisModelResult(
+				ctx, successfulWorkspaceAnalysisModelResultCommand(t, fixture, authorized),
+			)
+			assertWorkspaceAnalysisModelStaleFenceIsNotCancellationMarker(t, err)
+		})
 	})
 
 	t.Run("candidate with expired lease", func(t *testing.T) {
-		pool, ctx := newAgentRepositoryIntegrationPool(t)
-		fixture := seedWorkspaceAnalysisModelOperationIntegration(t, ctx, pool)
-		repository, err := NewRepository(pool)
-		if err != nil {
-			t.Fatal(err)
-		}
-		planAuthorization, err := repository.AuthorizeWorkspaceAnalysisModelCall(ctx, fixture.command)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := repository.FinalizeWorkspaceAnalysisModelResult(ctx,
-			successfulWorkspaceAnalysisModelResultCommand(t, fixture, planAuthorization)); err != nil {
-			t.Fatal(err)
-		}
-		seedWorkspaceAnalysisModelEvidencePrefixIntegration(t, ctx, pool)
-		synthesisCommand := synthesisWorkspaceAnalysisModelAuthorizationCommand(fixture)
-		synthesisAuthorization, err := repository.AuthorizeWorkspaceAnalysisModelCall(ctx, synthesisCommand)
-		if err != nil {
-			t.Fatal(err)
-		}
-		persistWorkspaceAnalysisModelCancellation(t, ctx, pool, synthesisCommand.Identity.WorkflowRunID, "wa-model-stale-candidate")
-		expireWorkspaceAnalysisModelLease(t, ctx, pool, synthesisCommand.Identity)
+		testWorkspaceAnalysisModelRepositoryIntegrationVariants(t, func(
+			t *testing.T,
+			pool *pgxpool.Pool,
+			ctx context.Context,
+			repository workspaceAnalysisModelRepositoryIntegrationStore,
+		) {
+			fixture := seedWorkspaceAnalysisModelOperationIntegration(t, ctx, pool)
+			planAuthorization, err := repository.AuthorizeWorkspaceAnalysisModelCall(ctx, fixture.command)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := repository.FinalizeWorkspaceAnalysisModelResult(ctx,
+				successfulWorkspaceAnalysisModelResultCommand(t, fixture, planAuthorization)); err != nil {
+				t.Fatal(err)
+			}
+			seedWorkspaceAnalysisModelEvidencePrefixIntegration(t, ctx, pool)
+			synthesisCommand := synthesisWorkspaceAnalysisModelAuthorizationCommand(fixture)
+			synthesisAuthorization, err := repository.AuthorizeWorkspaceAnalysisModelCall(ctx, synthesisCommand)
+			if err != nil {
+				t.Fatal(err)
+			}
+			persistWorkspaceAnalysisModelCancellation(t, ctx, pool, synthesisCommand.Identity.WorkflowRunID, "wa-model-stale-candidate")
+			expireWorkspaceAnalysisModelLease(t, ctx, pool, synthesisCommand.Identity)
 
-		_, err = repository.FinalizeWorkspaceAnalysisModelCandidate(
-			ctx,
-			successfulWorkspaceAnalysisModelCandidateCommand(t, fixture, synthesisAuthorization, synthesisCommand),
-		)
-		assertWorkspaceAnalysisModelStaleFenceIsNotCancellationMarker(t, err)
+			_, err = repository.FinalizeWorkspaceAnalysisModelCandidate(
+				ctx,
+				successfulWorkspaceAnalysisModelCandidateCommand(t, fixture, synthesisAuthorization, synthesisCommand),
+			)
+			assertWorkspaceAnalysisModelStaleFenceIsNotCancellationMarker(t, err)
+		})
 	})
 }
 
@@ -1599,6 +2297,27 @@ func (tx *workspaceAnalysisModelCommitLossTx) Commit(ctx context.Context) error 
 	}
 	if tx.injectNext.CompareAndSwap(true, false) {
 		return errors.New("injected workspace analysis model commit response loss")
+	}
+	return nil
+}
+
+type workspaceAnalysisModelPostCommitErrorUnitOfWork struct {
+	inner foundation.UnitOfWork
+	err   error
+	armed atomic.Bool
+	lost  atomic.Bool
+}
+
+func (unitOfWork *workspaceAnalysisModelPostCommitErrorUnitOfWork) Within(
+	ctx context.Context,
+	options foundation.TransactionOptions,
+	work foundation.TransactionFunc,
+) error {
+	if err := unitOfWork.inner.Within(ctx, options, work); err != nil {
+		return err
+	}
+	if unitOfWork.armed.Load() && unitOfWork.lost.CompareAndSwap(false, true) {
+		return unitOfWork.err
 	}
 	return nil
 }

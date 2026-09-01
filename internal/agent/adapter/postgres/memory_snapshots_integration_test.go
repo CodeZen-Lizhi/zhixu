@@ -4,6 +4,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -11,34 +12,23 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestRepositoryRAGMemorySnapshotBeginHasExactlyOneConcurrentClaimant(t *testing.T) {
-	pool, ctx := newAgentRepositoryIntegrationPool(t)
+	testAgentRepositoryIntegrationVariants(t, testRepositoryRAGMemorySnapshotBeginHasExactlyOneConcurrentClaimant)
+}
+
+func testRepositoryRAGMemorySnapshotBeginHasExactlyOneConcurrentClaimant(
+	t *testing.T,
+	platform *platformpostgres.Pool,
+	ctx context.Context,
+	repository agentRepositoryIntegrationStore,
+) {
+	pool := platform.DB()
 	seedAgentRuntime(t, ctx, pool)
 	seedRAGMemoryNodeKind(t, ctx, pool)
-	firstConnection, err := pool.Acquire(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer firstConnection.Release()
-	secondConnection, err := pool.Acquire(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer secondConnection.Release()
-	firstRepository, err := NewRepository(firstConnection)
-	if err != nil {
-		t.Fatal(err)
-	}
-	secondRepository, err := NewRepository(secondConnection)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if firstConnection.Conn().PgConn().PID() == secondConnection.Conn().PgConn().PID() {
-		t.Fatal("concurrent claim test requires independent PostgreSQL connections")
-	}
 	conversationID := seedRAGMemoryConversation(t, ctx, pool, testAgentID(60))
 	at := time.Now().UTC().Truncate(time.Microsecond)
 	first := testRAGMemorySnapshot(testAgentID(61), testAgentID(62), conversationID, at)
@@ -52,13 +42,9 @@ func TestRepositoryRAGMemorySnapshotBeginHasExactlyOneConcurrentClaimant(t *test
 	start := make(chan struct{})
 	results := make(chan result, 2)
 	var group sync.WaitGroup
-	for index, candidate := range []domain.RAGMemorySnapshot{first, second} {
-		repository := firstRepository
-		if index == 1 {
-			repository = secondRepository
-		}
+	for _, candidate := range []domain.RAGMemorySnapshot{first, second} {
 		group.Add(1)
-		go func(repository *Repository, candidate domain.RAGMemorySnapshot) {
+		go func(repository application.RAGMemorySnapshotRepository, candidate domain.RAGMemorySnapshot) {
 			defer group.Done()
 			<-start
 			snapshot, claimed, beginErr := repository.BeginRAGMemorySnapshot(ctx, candidate)
@@ -104,13 +90,18 @@ func TestRepositoryRAGMemorySnapshotBeginHasExactlyOneConcurrentClaimant(t *test
 }
 
 func TestRepositoryRAGMemorySnapshotFinalizeAtomicallyBindsReadySnapshotAndModelRun(t *testing.T) {
-	pool, ctx := newAgentRepositoryIntegrationPool(t)
+	testAgentRepositoryIntegrationVariants(t, testRepositoryRAGMemorySnapshotFinalizeAtomicallyBindsReadySnapshotAndModelRun)
+}
+
+func testRepositoryRAGMemorySnapshotFinalizeAtomicallyBindsReadySnapshotAndModelRun(
+	t *testing.T,
+	platform *platformpostgres.Pool,
+	ctx context.Context,
+	repository agentRepositoryIntegrationStore,
+) {
+	pool := platform.DB()
 	seedAgentRuntime(t, ctx, pool)
 	seedRAGMemoryNodeKind(t, ctx, pool)
-	repository, err := NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
 	conversationID := seedRAGMemoryConversation(t, ctx, pool, testAgentID(70))
 	at := time.Now().UTC().Add(-time.Minute).Truncate(time.Microsecond)
 	snapshot := testRAGMemorySnapshot(testAgentID(71), testAgentID(72), conversationID, at)
@@ -135,14 +126,14 @@ func TestRepositoryRAGMemorySnapshotFinalizeAtomicallyBindsReadySnapshotAndModel
 	if _, err := repository.FinalizeRAGMemorySnapshotAndCreateModelRun(ctx, wrongClaimant); err == nil {
 		t.Fatal("finalize with another claimant was accepted")
 	}
-	assertRAGMemorySnapshotState(t, ctx, repository, snapshot.WorkspaceID, snapshot.ID, domain.RAGMemorySnapshotPreparing, "", "")
+	assertRAGMemorySnapshotState(t, ctx, pool, snapshot.WorkspaceID, snapshot.ID, domain.RAGMemorySnapshotPreparing, "", "")
 	assertRAGMemoryModelRunCount(t, ctx, pool, snapshot.NodeAttemptID, 0)
 
 	created, err := repository.FinalizeRAGMemorySnapshotAndCreateModelRun(ctx, command)
 	if err != nil || created.ID != run.ID || created.MemoryContext != contextRef {
 		t.Fatalf("FinalizeRAGMemorySnapshotAndCreateModelRun run=%+v err=%v", created, err)
 	}
-	ready := assertRAGMemorySnapshotState(t, ctx, repository, snapshot.WorkspaceID, snapshot.ID, domain.RAGMemorySnapshotReady, run.ID, "")
+	ready := assertRAGMemorySnapshotState(t, ctx, pool, snapshot.WorkspaceID, snapshot.ID, domain.RAGMemorySnapshotReady, run.ID, "")
 	if ready.Context != contextRef {
 		t.Fatalf("ready context=%+v, want %+v", ready.Context, contextRef)
 	}
@@ -155,18 +146,23 @@ func TestRepositoryRAGMemorySnapshotFinalizeAtomicallyBindsReadySnapshotAndModel
 	if _, err := repository.FinalizeRAGMemorySnapshotAndCreateModelRun(ctx, command); err == nil {
 		t.Fatal("duplicate finalize was accepted")
 	}
-	assertRAGMemorySnapshotState(t, ctx, repository, snapshot.WorkspaceID, snapshot.ID, domain.RAGMemorySnapshotReady, run.ID, "")
+	assertRAGMemorySnapshotState(t, ctx, pool, snapshot.WorkspaceID, snapshot.ID, domain.RAGMemorySnapshotReady, run.ID, "")
 	assertRAGMemoryModelRunCount(t, ctx, pool, snapshot.NodeAttemptID, 1)
 }
 
 func TestRepositoryRAGMemorySnapshotFailureIsTerminalForAttempt(t *testing.T) {
-	pool, ctx := newAgentRepositoryIntegrationPool(t)
+	testAgentRepositoryIntegrationVariants(t, testRepositoryRAGMemorySnapshotFailureIsTerminalForAttempt)
+}
+
+func testRepositoryRAGMemorySnapshotFailureIsTerminalForAttempt(
+	t *testing.T,
+	platform *platformpostgres.Pool,
+	ctx context.Context,
+	repository agentRepositoryIntegrationStore,
+) {
+	pool := platform.DB()
 	seedAgentRuntime(t, ctx, pool)
 	seedRAGMemoryNodeKind(t, ctx, pool)
-	repository, err := NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
 	conversationID := seedRAGMemoryConversation(t, ctx, pool, testAgentID(80))
 	at := time.Now().UTC().Truncate(time.Microsecond)
 	snapshot := testRAGMemorySnapshot(testAgentID(81), testAgentID(82), conversationID, at)
@@ -184,7 +180,7 @@ func TestRepositoryRAGMemorySnapshotFailureIsTerminalForAttempt(t *testing.T) {
 	if replay, err := repository.FailRAGMemorySnapshot(ctx, failure); err != nil || replay != failed {
 		t.Fatalf("FailRAGMemorySnapshot replay=%+v err=%v", replay, err)
 	}
-	assertRAGMemorySnapshotState(t, ctx, repository, snapshot.WorkspaceID, snapshot.ID, domain.RAGMemorySnapshotFailed, "", failure.ErrorCode)
+	assertRAGMemorySnapshotState(t, ctx, pool, snapshot.WorkspaceID, snapshot.ID, domain.RAGMemorySnapshotFailed, "", failure.ErrorCode)
 
 	retry := testRAGMemorySnapshot(testAgentID(83), testAgentID(84), conversationID, at)
 	existing, claimed, err := repository.BeginRAGMemorySnapshot(ctx, retry)
@@ -193,6 +189,84 @@ func TestRepositoryRAGMemorySnapshotFailureIsTerminalForAttempt(t *testing.T) {
 		t.Fatalf("retry reservation=%+v claimed=%t err=%v", existing, claimed, err)
 	}
 	assertRAGMemoryModelRunCount(t, ctx, pool, snapshot.NodeAttemptID, 0)
+}
+
+func TestRepositoryRAGMemorySnapshotFinalizeCommitResponseLossIntegration(t *testing.T) {
+	for _, variant := range []struct {
+		name string
+		open func(*testing.T, *platformpostgres.Pool) (application.RAGMemorySnapshotRepository, func())
+	}{
+		{name: "legacy", open: openLegacyRAGMemorySnapshotRepositoryWithCommitLossIntegration},
+		{name: "gorm", open: openGORMRAGMemorySnapshotRepositoryWithCommitLossIntegration},
+	} {
+		t.Run(variant.name, func(t *testing.T) {
+			platform, ctx := newAgentPlatformIntegrationPool(t)
+			pool := platform.DB()
+			seedAgentRuntime(t, ctx, pool)
+			seedRAGMemoryNodeKind(t, ctx, pool)
+			repository, armCommitLoss := variant.open(t, platform)
+			conversationID := seedRAGMemoryConversation(t, ctx, pool, testAgentID(90))
+			at := time.Now().UTC().Add(-time.Minute).Truncate(time.Microsecond)
+			snapshot := testRAGMemorySnapshot(testAgentID(97), testAgentID(98), conversationID, at)
+			if _, claimed, err := repository.BeginRAGMemorySnapshot(ctx, snapshot); err != nil || !claimed {
+				t.Fatalf("BeginRAGMemorySnapshot claimed=%t err=%v", claimed, err)
+			}
+			contextRef := domain.RAGMemoryContextRef{
+				SnapshotID: snapshot.ID, SchemaVersion: domain.RAGMemoryContextSchemaVersion,
+				Digest: hash64('f'), ItemCount: 1, ByteCount: 64,
+			}
+			run := testModelRun(testAgentID(99), testAgentID(5), at.Add(time.Second))
+			run.NodeRunID, run.NodeAttemptID, run.MemoryContext = snapshot.NodeRunID, snapshot.NodeAttemptID, contextRef
+			armCommitLoss()
+			_, err := repository.FinalizeRAGMemorySnapshotAndCreateModelRun(ctx, application.FinalizeRAGMemorySnapshotCommand{
+				SnapshotID: snapshot.ID, ClaimantID: snapshot.ClaimantID, Context: contextRef, Run: run,
+			})
+			if err == nil {
+				t.Fatal("commit response loss was reported as success")
+			}
+			if variant.name == "gorm" && agentErrorCode(err) != gormMemorySnapshotResultUnknownCode {
+				t.Fatalf("GORM commit response loss code=%s err=%v", agentErrorCode(err), err)
+			}
+			ready := assertRAGMemorySnapshotState(t, ctx, pool, snapshot.WorkspaceID, snapshot.ID, domain.RAGMemorySnapshotReady, run.ID, "")
+			if ready.Context != contextRef {
+				t.Fatalf("commit-loss READY context=%+v, want %+v", ready.Context, contextRef)
+			}
+			assertRAGMemoryModelRunCount(t, ctx, pool, snapshot.NodeAttemptID, 1)
+		})
+	}
+}
+
+func openLegacyRAGMemorySnapshotRepositoryWithCommitLossIntegration(
+	t *testing.T,
+	platform *platformpostgres.Pool,
+) (application.RAGMemorySnapshotRepository, func()) {
+	t.Helper()
+	database := &workspaceAnalysisModelCommitLossDB{DB: platform.DB()}
+	repository, err := NewRepository(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return repository, func() { database.injectNext.Store(true) }
+}
+
+func openGORMRAGMemorySnapshotRepositoryWithCommitLossIntegration(
+	t *testing.T,
+	platform *platformpostgres.Pool,
+) (application.RAGMemorySnapshotRepository, func()) {
+	t.Helper()
+	repository, err := NewGORMRepository(platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loss := &workspaceAnalysisModelPostCommitErrorUnitOfWork{
+		inner: repository.unitOfWork,
+		err:   errors.New("injected GORM RAG memory snapshot commit response loss"),
+	}
+	repository.unitOfWork = loss
+	return repository, func() {
+		loss.lost.Store(false)
+		loss.armed.Store(true)
+	}
 }
 
 func testRAGMemorySnapshot(id, claimantID, conversationID foundation.ID, at time.Time) domain.RAGMemorySnapshot {
@@ -231,9 +305,9 @@ func seedRAGMemoryNodeKind(t *testing.T, ctx context.Context, pool *pgxpool.Pool
 	}
 }
 
-func assertRAGMemorySnapshotState(t *testing.T, ctx context.Context, repository *Repository, workspaceID, snapshotID foundation.ID, status domain.RAGMemorySnapshotStatus, modelRunID foundation.ID, errorCode string) domain.RAGMemorySnapshot {
+func assertRAGMemorySnapshotState(t *testing.T, ctx context.Context, pool *pgxpool.Pool, workspaceID, snapshotID foundation.ID, status domain.RAGMemorySnapshotStatus, modelRunID foundation.ID, errorCode string) domain.RAGMemorySnapshot {
 	t.Helper()
-	snapshot, err := loadRAGMemorySnapshotByID(ctx, repository.db, workspaceID, snapshotID, false)
+	snapshot, err := loadRAGMemorySnapshotByID(ctx, pool, workspaceID, snapshotID, false)
 	if err != nil {
 		t.Fatal(err)
 	}

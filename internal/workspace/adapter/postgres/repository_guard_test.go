@@ -36,6 +36,19 @@ func TestManagedRepositoryRejectsRootListingBeforeDatabaseAccess(t *testing.T) {
 	}
 }
 
+func TestGORMClassifiersRejectCompletedTransactions(t *testing.T) {
+	requireRepositoryError(t,
+		classifyGORMWorkspace(context.Background(), sql.ErrTxDone, "SOURCE_VERSION_TRANSACTION_FAILED"),
+		foundation.ErrorDependencyUnavailable,
+		"WORKSPACE_DATABASE_UNAVAILABLE",
+	)
+	requireRepositoryError(t,
+		classifyGORMControl(context.Background(), sql.ErrTxDone, domain.ErrorCodeControlDatabaseUnavailable),
+		foundation.ErrorDependencyUnavailable,
+		domain.ErrorCodeControlDatabaseUnavailable,
+	)
+}
+
 func TestRepositoryGetActiveWorkspaceRequiresUniqueActiveRow(t *testing.T) {
 	t.Run("unique", func(t *testing.T) {
 		database := &activeWorkspaceTestDB{row: activeWorkspaceTestRow{values: activeWorkspaceValues(1)}}

@@ -12,7 +12,164 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
+	"github.com/jackc/pgx/v5/pgconn"
 )
+
+func TestGORMWorkspaceAnalysisModelFenceErrorTranslationUsesAgentContract(t *testing.T) {
+	t.Run("cancellation preserves context cause", func(t *testing.T) {
+		customCause := errors.New("model fence caller stopped")
+		fenceCause := errors.New("workflow fence cancellation detail")
+		ctx, cancel := context.WithCancelCause(context.Background())
+		cancel(customCause)
+		workflowErr := foundation.NewError(
+			foundation.ErrorDependencyUnavailable,
+			"WORKFLOW_WORKSPACE_ANALYSIS_EXECUTION_FENCE_UNAVAILABLE",
+			true,
+			errors.Join(
+				context.Canceled,
+				foundation.NewError(
+					foundation.ErrorRetryableFailure,
+					"WORKFLOW_DATABASE_CANCELLED",
+					true,
+					fenceCause,
+				),
+			),
+		)
+
+		err := translateGORMWorkspaceAnalysisModelFenceError(ctx, workflowErr)
+		assertGORMWorkspaceAnalysisModelFenceError(t, err, foundation.ErrorNonRetryableFailure, "AGENT_DATABASE_CANCELLED", false)
+		if !errors.Is(err, context.Canceled) || !errors.Is(err, customCause) || !errors.Is(err, fenceCause) {
+			t.Fatalf("translated cancellation lost its cause chain: %v", err)
+		}
+	})
+
+	t.Run("SQLSTATE preserves retryability", func(t *testing.T) {
+		postgresError := &pgconn.PgError{Code: "40001", Message: "serialization failure"}
+		fenceCause := errors.New("workflow fence SQLSTATE detail")
+		workflowErr := foundation.NewError(
+			foundation.ErrorDependencyUnavailable,
+			"WORKFLOW_WORKSPACE_ANALYSIS_EXECUTION_FENCE_UNAVAILABLE",
+			true,
+			errors.Join(
+				postgresError,
+				foundation.NewError(
+					foundation.ErrorRetryableFailure,
+					"WORKFLOW_DATABASE_UNAVAILABLE",
+					true,
+					fenceCause,
+				),
+			),
+		)
+
+		err := translateGORMWorkspaceAnalysisModelFenceError(context.Background(), workflowErr)
+		assertGORMWorkspaceAnalysisModelFenceError(t, err, foundation.ErrorRetryableFailure, ErrorCodeDatabaseUnavailable, true)
+		var translatedPostgresError *pgconn.PgError
+		if !errors.As(err, &translatedPostgresError) || translatedPostgresError != postgresError || !errors.Is(err, fenceCause) {
+			t.Fatalf("translated SQLSTATE lost its PostgreSQL cause: %v", err)
+		}
+	})
+
+	t.Run("unknown dependency strips workflow code", func(t *testing.T) {
+		cause := errors.New("workflow scope dependency is unavailable")
+		workflowErr := foundation.NewError(
+			foundation.ErrorDependencyUnavailable,
+			"WORKFLOW_WORKSPACE_ANALYSIS_EXECUTION_FENCE_UNAVAILABLE",
+			true,
+			foundation.NewError(
+				foundation.ErrorDependencyUnavailable,
+				"WORKFLOW_SCOPE_UNAVAILABLE",
+				true,
+				cause,
+			),
+		)
+
+		err := translateGORMWorkspaceAnalysisModelFenceError(context.Background(), workflowErr)
+		assertGORMWorkspaceAnalysisModelFenceError(t, err, foundation.ErrorDependencyUnavailable,
+			application.ErrorCodeWorkspaceAnalysisModelAuthorizationUnavailable, true)
+		if !errors.Is(err, cause) {
+			t.Fatalf("translated dependency error lost its cause: %v", err)
+		}
+	})
+}
+
+func assertGORMWorkspaceAnalysisModelFenceError(
+	t *testing.T,
+	err error,
+	wantKind foundation.ErrorKind,
+	wantCode string,
+	wantRetryable bool,
+) {
+	t.Helper()
+	var classified *foundation.Error
+	if !errors.As(err, &classified) || classified.Kind != wantKind || classified.Code != wantCode ||
+		classified.Retryable != wantRetryable || strings.HasPrefix(classified.Code, "WORKFLOW_") {
+		t.Fatalf("translated fence error = %#v, want kind=%s code=%s retryable=%t", err, wantKind, wantCode, wantRetryable)
+	}
+	assertNoGORMWorkspaceAnalysisModelWorkflowErrorCode(t, err)
+}
+
+func assertNoGORMWorkspaceAnalysisModelWorkflowErrorCode(t *testing.T, err error) {
+	t.Helper()
+	var visit func(error)
+	visit = func(current error) {
+		if current == nil {
+			return
+		}
+		if classified, ok := current.(*foundation.Error); ok && strings.HasPrefix(classified.Code, "WORKFLOW_") {
+			t.Fatalf("translated fence error retained Workflow code %q", classified.Code)
+		}
+		if joined, ok := current.(interface{ Unwrap() []error }); ok {
+			for _, cause := range joined.Unwrap() {
+				visit(cause)
+			}
+			return
+		}
+		visit(errors.Unwrap(current))
+	}
+	visit(err)
+}
+
+func TestGORMWorkspaceAnalysisModelFenceSnapshotRequiresExactScope(t *testing.T) {
+	request := workflowapplication.WorkspaceAnalysisExecutionFenceRequest{
+		WorkspaceID: workspaceAnalysisModelTestID(1), WorkflowRunID: workspaceAnalysisModelTestID(2),
+		NodeRunID: workspaceAnalysisModelTestID(3), NodeAttemptID: workspaceAnalysisModelTestID(4),
+	}
+	snapshot := workflowapplication.WorkspaceAnalysisExecutionFenceSnapshot{
+		WorkspaceID: request.WorkspaceID, WorkflowRunID: request.WorkflowRunID,
+		NodeRunID: request.NodeRunID, NodeAttemptID: request.NodeAttemptID,
+	}
+	if err := validateGORMWorkspaceAnalysisModelFenceSnapshotBinding(snapshot, request); err != nil {
+		t.Fatalf("exact fence scope rejected: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*workflowapplication.WorkspaceAnalysisExecutionFenceSnapshot)
+	}{
+		{name: "workspace", mutate: func(value *workflowapplication.WorkspaceAnalysisExecutionFenceSnapshot) {
+			value.WorkspaceID = workspaceAnalysisModelTestID(11)
+		}},
+		{name: "workflow run", mutate: func(value *workflowapplication.WorkspaceAnalysisExecutionFenceSnapshot) {
+			value.WorkflowRunID = workspaceAnalysisModelTestID(12)
+		}},
+		{name: "node run", mutate: func(value *workflowapplication.WorkspaceAnalysisExecutionFenceSnapshot) {
+			value.NodeRunID = workspaceAnalysisModelTestID(13)
+		}},
+		{name: "node attempt", mutate: func(value *workflowapplication.WorkspaceAnalysisExecutionFenceSnapshot) {
+			value.NodeAttemptID = workspaceAnalysisModelTestID(14)
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			drifted := snapshot
+			test.mutate(&drifted)
+			err := validateGORMWorkspaceAnalysisModelFenceSnapshotBinding(drifted, request)
+			assertGORMWorkspaceAnalysisModelFenceError(t, err, foundation.ErrorVersionConflict,
+				application.ErrorCodeWorkspaceAnalysisModelAuthorizationInvalid, false)
+		})
+	}
+}
 
 func TestWorkspaceAnalysisModelAuthorizationRequestRequiresExactSlotAndProfile(t *testing.T) {
 	run, call := workspaceAnalysisModelRequestFixture()

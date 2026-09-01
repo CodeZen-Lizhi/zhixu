@@ -21,9 +21,172 @@ import (
 	modelcrypto "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/crypto"
 	"github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+func TestGORMRepositorySaveDesiredRollbackAndScopedEnqueueFence(t *testing.T) {
+	ctx := context.Background()
+	fixture := testdb.Require(t, testdb.Config{
+		ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
+		MaxConns:         8,
+		Availability:     testdb.SkipWhenUnavailable,
+	})
+	platform := fixture.Pool()
+	if platform == nil {
+		t.Fatal("test database fixture returned a nil platform pool")
+	}
+
+	sealer, err := modelcrypto.NewSealer(bytes.Repeat([]byte{0x2a}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	auditStore, err := auditpostgres.NewGORMStore(platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := NewGORMRepository(platform,
+		WithGORMSecretSealer(sealer),
+		WithGORMAuditAppender(auditStore),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	chatSecret, err := domain.ReplaceSecret("gorm-chat-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer chatSecret.Value.Destroy()
+	first, err := repository.SaveDesired(ctx, application.SaveCommand{
+		ExpectedRevision: 0,
+		Settings:         configuredTestSettings(),
+		ChatSecret:       chatSecret,
+		EmbeddingSecret:  domain.ClearSecret(),
+		CreatedBy:        "gorm-integration",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.DesiredRevision != 1 || first.ActiveRevision != 0 {
+		t.Fatalf("unexpected first GORM save snapshot: %+v", first)
+	}
+
+	failingRepository, err := NewGORMRepository(platform,
+		WithGORMSecretSealer(sealer),
+		WithGORMScopedSettingsAuditAppender(failingGORMSettingsAuditAppender{
+			err: errors.New("injected model settings audit failure"),
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = failingRepository.SaveDesired(ctx, application.SaveCommand{
+		ExpectedRevision: 1,
+		Settings:         configuredTestSettings(),
+		ChatSecret:       domain.KeepSecret(),
+		EmbeddingSecret:  domain.KeepSecret(),
+		CreatedBy:        "gorm-integration",
+	})
+	if err == nil {
+		t.Fatal("audit failure unexpectedly committed model settings revision")
+	}
+	var revisionCount int64
+	if err := platform.DB().QueryRow(ctx, `SELECT count(*) FROM ops.model_settings_revisions`).Scan(&revisionCount); err != nil {
+		t.Fatal(err)
+	}
+	if revisionCount != 1 {
+		t.Fatalf("audit failure left %d revisions, want 1", revisionCount)
+	}
+	var desiredRevision int64
+	if err := platform.DB().QueryRow(ctx, `SELECT desired_revision FROM ops.model_settings_state WHERE singleton=true`).Scan(&desiredRevision); err != nil {
+		t.Fatal(err)
+	}
+	if desiredRevision != 1 {
+		t.Fatalf("audit failure changed desired revision to %d, want 1", desiredRevision)
+	}
+
+	second, err := repository.SaveDesired(ctx, application.SaveCommand{
+		ExpectedRevision: 1,
+		Settings:         configuredTestSettings(),
+		ChatSecret:       domain.KeepSecret(),
+		EmbeddingSecret:  domain.KeepSecret(),
+		CreatedBy:        "gorm-integration",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.DesiredRevision <= first.DesiredRevision {
+		t.Fatalf("GORM save reused a rolled-back revision: first=%d second=%d", first.DesiredRevision, second.DesiredRevision)
+	}
+	rolloutID := mustModelSettingsID(t, "a1000000-0000-4000-8000-000000000030")
+	started, err := repository.StartActivation(ctx, application.StartActivationCommand{
+		RolloutID: rolloutID, TargetRevision: second.DesiredRevision,
+		ExpectedDesiredRevision: second.DesiredRevision,
+		ExpectedStateVersion:    second.Rollout.Version,
+		LeaseDuration:           30 * time.Second,
+		FreshWithin:             20 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed, err := repository.FailActivation(ctx, application.FailActivationCommand{
+		RolloutID: rolloutID, ExpectedPhase: domain.RolloutPhasePreparing,
+		ExpectedVersion: started.State.Version, ErrorCode: "MODEL_SETTINGS_TEST_ABORTED",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failed.Phase != domain.RolloutPhaseFailed || failed.Version <= started.State.Version {
+		t.Fatalf("unexpected GORM activation failure state: started=%+v failed=%+v", started.State, failed)
+	}
+	activationSnapshot, err := repository.Snapshot(ctx, 20*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if activationSnapshot.ActiveRevision != 0 || activationSnapshot.DesiredRevision != second.DesiredRevision {
+		t.Fatalf("activation failure changed publication state: %+v", activationSnapshot)
+	}
+
+	unitOfWork, err := platform.UnitOfWork()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var expiredScope foundation.TransactionScope
+	if err := unitOfWork.Within(ctx, foundation.TransactionOptions{}, func(callbackCtx context.Context, scope foundation.TransactionScope) error {
+		expiredScope = scope
+		return repository.CheckEnqueue(callbackCtx, scope)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.CheckEnqueue(ctx, expiredScope); err == nil {
+		t.Fatal("expired GORM transaction scope was accepted by enqueue fence")
+	}
+
+	events, err := auditStore.List(ctx, auditdomain.ListQuery{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("GORM model settings audit count=%d want=2", len(events))
+	}
+	if events[0].ResourceRef != fmt.Sprintf("model_settings_revision:%d", second.DesiredRevision) {
+		t.Fatalf("latest GORM audit resource=%q want revision %d", events[0].ResourceRef, second.DesiredRevision)
+	}
+}
+
+type failingGORMSettingsAuditAppender struct{ err error }
+
+func (appender failingGORMSettingsAuditAppender) AppendModelSettingsChangeScoped(
+	context.Context,
+	foundation.TransactionScope,
+	application.ModelSettingsChange,
+) error {
+	return appender.err
+}
+
+var _ application.ScopedSettingsAuditAppender = failingGORMSettingsAuditAppender{}
 
 func TestRepositoryRevisionRolloutRuntimeAndEnqueueFence(t *testing.T) {
 	t.Skip("superseded by the hot-activation repository protocol integration test")

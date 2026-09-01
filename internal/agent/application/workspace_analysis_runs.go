@@ -115,24 +115,16 @@ func NewWorkspaceAnalysisRunService(
 	ids foundation.IDGenerator,
 	config WorkspaceAnalysisRunStartConfig,
 ) (*WorkspaceAnalysisRunService, error) {
-	if isNilPort(repository) || isNilPort(ids) || !canonicalWorkspaceAnalysisSHA256(config.DefinitionHash) ||
-		!canonicalWorkspaceAnalysisSHA256(config.ToolCatalogHash) || config.ConfigRevision < 0 {
+	if isNilPort(repository) {
 		return nil, workspaceAnalysisRunStartError(
 			foundation.ErrorInvalidInput,
 			ErrorCodeWorkspaceAnalysisRunStartInvalid,
 			false,
-			errors.New("workspace analysis run dependencies or frozen identity are invalid"),
+			errors.New("workspace analysis run persistence is unavailable"),
 		)
 	}
-	budget, err := WorkspaceAnalysisBudgetV1(config.SynthesisProfileMaxOutputTokens)
+	budget, deadlines, err := newWorkspaceAnalysisRunStartDependencies(ids, config)
 	if err != nil {
-		return nil, err
-	}
-	deadlines, err := DeriveWorkspaceAnalysisV1Deadlines(config.Timeouts)
-	if err != nil {
-		return nil, err
-	}
-	if err := deadlines.ValidateRuntimeReadiness(config.RuntimeLimits); err != nil {
 		return nil, err
 	}
 	return &WorkspaceAnalysisRunService{
@@ -217,19 +209,20 @@ func (service *WorkspaceAnalysisRunService) StartWorkspaceAnalysisRunTx(
 }
 
 func (service *WorkspaceAnalysisRunService) sameQueuedRun(persisted, expected domain.WorkspaceAnalysisRun) bool {
-	return persisted.ID == expected.ID && service.sameFrozenStartBinding(persisted, WorkspaceAnalysisRunStartCommand{
-		WorkspaceID: expected.WorkspaceID, ConversationID: expected.ConversationID,
-		QuestionID: expected.QuestionID, AnswerID: expected.AnswerID, WorkflowRunID: expected.WorkflowRunID,
-		CreatedAt: expected.CreatedAt,
-	}) &&
-		persisted.Status == expected.Status && persisted.Version == expected.Version &&
-		persisted.TerminationReason == expected.TerminationReason && persisted.ValidationReceiptID == nil &&
-		persisted.ReviewModelRunID == nil && persisted.CompletedAt == nil &&
-		reflect.DeepEqual(persisted.Reserved, expected.Reserved) && reflect.DeepEqual(persisted.Settled, expected.Settled) &&
-		persisted.UpdatedAt.Equal(expected.UpdatedAt)
+	return sameWorkspaceAnalysisQueuedRun(persisted, expected, service.config, service.budget, service.deadlines)
 }
 
 func (service *WorkspaceAnalysisRunService) newQueuedRun(id foundation.ID, command WorkspaceAnalysisRunStartCommand) domain.WorkspaceAnalysisRun {
+	return newWorkspaceAnalysisQueuedRun(id, command, service.config, service.budget, service.deadlines)
+}
+
+func newWorkspaceAnalysisQueuedRun(
+	id foundation.ID,
+	command WorkspaceAnalysisRunStartCommand,
+	config WorkspaceAnalysisRunStartConfig,
+	budget WorkspaceAnalysisBudgetPolicy,
+	deadlines WorkspaceAnalysisV1Deadlines,
+) domain.WorkspaceAnalysisRun {
 	return domain.WorkspaceAnalysisRun{
 		ID:                id,
 		WorkspaceID:       command.WorkspaceID,
@@ -239,21 +232,21 @@ func (service *WorkspaceAnalysisRunService) newQueuedRun(id foundation.ID, comma
 		WorkflowRunID:     command.WorkflowRunID,
 		DefinitionKey:     "workspace-analysis",
 		DefinitionVersion: 1,
-		DefinitionHash:    service.config.DefinitionHash,
-		ToolCatalogHash:   service.config.ToolCatalogHash,
-		PolicyVersion:     service.budget.PolicyVersion,
-		ConfigRevision:    service.config.ConfigRevision,
-		DeadlineAt:        command.CreatedAt.Add(service.deadlines.RunDeadline()),
-		Timeouts:          service.config.Timeouts,
+		DefinitionHash:    config.DefinitionHash,
+		ToolCatalogHash:   config.ToolCatalogHash,
+		PolicyVersion:     budget.PolicyVersion,
+		ConfigRevision:    config.ConfigRevision,
+		DeadlineAt:        command.CreatedAt.Add(deadlines.RunDeadline()),
+		Timeouts:          config.Timeouts,
 		Limits: domain.WorkspaceAnalysisBudgetLimits{
-			Nodes:           service.budget.MaxNodes,
-			ToolConcurrency: service.budget.MaxToolConcurrency,
+			Nodes:           budget.MaxNodes,
+			ToolConcurrency: budget.MaxToolConcurrency,
 			Amount: domain.WorkspaceAnalysisBudgetAmount{
-				ModelCalls:   service.budget.MaxModelCalls,
-				ToolCalls:    service.budget.MaxToolCalls,
-				SourceReads:  service.budget.MaxSourceReads,
-				InputTokens:  service.budget.MaxRunInputTokens,
-				OutputTokens: service.budget.MaxRunOutputTokens,
+				ModelCalls:   budget.MaxModelCalls,
+				ToolCalls:    budget.MaxToolCalls,
+				SourceReads:  budget.MaxSourceReads,
+				InputTokens:  budget.MaxRunInputTokens,
+				OutputTokens: budget.MaxRunOutputTokens,
 			},
 		},
 		Status:    domain.WorkspaceAnalysisRunQueued,
@@ -264,7 +257,36 @@ func (service *WorkspaceAnalysisRunService) newQueuedRun(id foundation.ID, comma
 }
 
 func (service *WorkspaceAnalysisRunService) sameFrozenStartBinding(run domain.WorkspaceAnalysisRun, command WorkspaceAnalysisRunStartCommand) bool {
-	expected := service.newQueuedRun(run.ID, command)
+	return sameWorkspaceAnalysisFrozenStartBinding(run, command, service.config, service.budget, service.deadlines)
+}
+
+func sameWorkspaceAnalysisQueuedRun(
+	persisted domain.WorkspaceAnalysisRun,
+	expected domain.WorkspaceAnalysisRun,
+	config WorkspaceAnalysisRunStartConfig,
+	budget WorkspaceAnalysisBudgetPolicy,
+	deadlines WorkspaceAnalysisV1Deadlines,
+) bool {
+	return persisted.ID == expected.ID && sameWorkspaceAnalysisFrozenStartBinding(persisted, WorkspaceAnalysisRunStartCommand{
+		WorkspaceID: expected.WorkspaceID, ConversationID: expected.ConversationID,
+		QuestionID: expected.QuestionID, AnswerID: expected.AnswerID, WorkflowRunID: expected.WorkflowRunID,
+		CreatedAt: expected.CreatedAt,
+	}, config, budget, deadlines) &&
+		persisted.Status == expected.Status && persisted.Version == expected.Version &&
+		persisted.TerminationReason == expected.TerminationReason && persisted.ValidationReceiptID == nil &&
+		persisted.ReviewModelRunID == nil && persisted.CompletedAt == nil &&
+		reflect.DeepEqual(persisted.Reserved, expected.Reserved) && reflect.DeepEqual(persisted.Settled, expected.Settled) &&
+		persisted.UpdatedAt.Equal(expected.UpdatedAt)
+}
+
+func sameWorkspaceAnalysisFrozenStartBinding(
+	run domain.WorkspaceAnalysisRun,
+	command WorkspaceAnalysisRunStartCommand,
+	config WorkspaceAnalysisRunStartConfig,
+	budget WorkspaceAnalysisBudgetPolicy,
+	deadlines WorkspaceAnalysisV1Deadlines,
+) bool {
+	expected := newWorkspaceAnalysisQueuedRun(run.ID, command, config, budget, deadlines)
 	return run.WorkspaceID == expected.WorkspaceID && run.ConversationID == expected.ConversationID &&
 		run.QuestionID == expected.QuestionID && run.AnswerID == expected.AnswerID && run.WorkflowRunID == expected.WorkflowRunID &&
 		run.DefinitionKey == expected.DefinitionKey && run.DefinitionVersion == expected.DefinitionVersion &&
@@ -272,6 +294,33 @@ func (service *WorkspaceAnalysisRunService) sameFrozenStartBinding(run domain.Wo
 		run.PolicyVersion == expected.PolicyVersion && run.ConfigRevision == expected.ConfigRevision &&
 		run.DeadlineAt.Equal(expected.DeadlineAt) && reflect.DeepEqual(run.Timeouts, expected.Timeouts) &&
 		reflect.DeepEqual(run.Limits, expected.Limits) && run.CreatedAt.Equal(expected.CreatedAt)
+}
+
+func newWorkspaceAnalysisRunStartDependencies(
+	ids foundation.IDGenerator,
+	config WorkspaceAnalysisRunStartConfig,
+) (WorkspaceAnalysisBudgetPolicy, WorkspaceAnalysisV1Deadlines, error) {
+	if isNilPort(ids) || !canonicalWorkspaceAnalysisSHA256(config.DefinitionHash) ||
+		!canonicalWorkspaceAnalysisSHA256(config.ToolCatalogHash) || config.ConfigRevision < 0 {
+		return WorkspaceAnalysisBudgetPolicy{}, WorkspaceAnalysisV1Deadlines{}, workspaceAnalysisRunStartError(
+			foundation.ErrorInvalidInput,
+			ErrorCodeWorkspaceAnalysisRunStartInvalid,
+			false,
+			errors.New("workspace analysis run dependencies or frozen identity are invalid"),
+		)
+	}
+	budget, err := WorkspaceAnalysisBudgetV1(config.SynthesisProfileMaxOutputTokens)
+	if err != nil {
+		return WorkspaceAnalysisBudgetPolicy{}, WorkspaceAnalysisV1Deadlines{}, err
+	}
+	deadlines, err := DeriveWorkspaceAnalysisV1Deadlines(config.Timeouts)
+	if err != nil {
+		return WorkspaceAnalysisBudgetPolicy{}, WorkspaceAnalysisV1Deadlines{}, err
+	}
+	if err := deadlines.ValidateRuntimeReadiness(config.RuntimeLimits); err != nil {
+		return WorkspaceAnalysisBudgetPolicy{}, WorkspaceAnalysisV1Deadlines{}, err
+	}
+	return budget, deadlines, nil
 }
 
 func sameWorkspaceAnalysisRunDispatchBinding(run domain.WorkspaceAnalysisRun, command WorkspaceAnalysisRunStartCommand) bool {

@@ -61,6 +61,13 @@ type SettingsAuditAppender interface {
 	AppendModelSettingsChangeTx(context.Context, any, ModelSettingsChange) error
 }
 
+// ScopedSettingsAuditAppender appends the same redacted fact through an
+// opaque caller-owned transaction. Staged GORM repositories use this seam;
+// legacy pgx repositories keep SettingsAuditAppender until final cutover.
+type ScopedSettingsAuditAppender interface {
+	AppendModelSettingsChangeScoped(context.Context, foundation.TransactionScope, ModelSettingsChange) error
+}
+
 // DraftCommand resolves keep/replace/clear for a non-persistent connection test.
 type DraftCommand struct {
 	ExpectedRevision int64

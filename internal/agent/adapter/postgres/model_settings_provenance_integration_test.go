@@ -3,19 +3,26 @@
 package postgres
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 )
 
 func TestRepositoryModelRunMatchesAttemptModelSettingsRevisionAndRecoversIt(t *testing.T) {
-	pool, ctx := newAgentRepositoryIntegrationPool(t)
+	testAgentRepositoryIntegrationVariants(t, testRepositoryModelRunMatchesAttemptModelSettingsRevisionAndRecoversIt)
+}
+
+func testRepositoryModelRunMatchesAttemptModelSettingsRevisionAndRecoversIt(
+	t *testing.T,
+	platform *platformpostgres.Pool,
+	ctx context.Context,
+	repository agentRepositoryIntegrationStore,
+) {
+	pool := platform.DB()
 	seedAgentRuntime(t, ctx, pool)
-	repository, err := NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
 	nodeID := testAgentID(91)
 	attemptID := testAgentID(92)
 	if _, err := pool.Exec(ctx, `INSERT INTO workflow.node_run(

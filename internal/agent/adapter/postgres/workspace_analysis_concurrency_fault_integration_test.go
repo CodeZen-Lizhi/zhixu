@@ -21,12 +21,16 @@ import (
 // delivery may create the canonical model operation and the other must only
 // reconcile it; neither may reserve a second model/input/output budget.
 func TestWorkspaceAnalysisConcurrentModelAuthorizationKeepsOneBudgetReservation(t *testing.T) {
-	pool, ctx := newAgentRepositoryIntegrationPool(t)
+	testWorkspaceAnalysisModelRepositoryIntegrationVariants(t, testWorkspaceAnalysisConcurrentModelAuthorizationKeepsOneBudgetReservation)
+}
+
+func testWorkspaceAnalysisConcurrentModelAuthorizationKeepsOneBudgetReservation(
+	t *testing.T,
+	pool *pgxpool.Pool,
+	ctx context.Context,
+	repository workspaceAnalysisModelRepositoryIntegrationStore,
+) {
 	fixture := seedWorkspaceAnalysisModelOperationIntegration(t, ctx, pool)
-	repository, err := NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	start := make(chan struct{})
 	results := make(chan workspaceAnalysisConcurrentAuthorizationResult, 2)
@@ -76,12 +80,16 @@ func TestWorkspaceAnalysisConcurrentModelAuthorizationKeepsOneBudgetReservation(
 // authorization that wins leaves exactly one complete operation/call/reservation
 // bundle, and subsequent authorization is rejected by the persisted cancel flag.
 func TestWorkspaceAnalysisCancellationRacingModelAuthorizationHasNoOrphanFacts(t *testing.T) {
-	pool, ctx := newAgentRepositoryIntegrationPool(t)
+	testWorkspaceAnalysisModelRepositoryIntegrationVariants(t, testWorkspaceAnalysisCancellationRacingModelAuthorizationHasNoOrphanFacts)
+}
+
+func testWorkspaceAnalysisCancellationRacingModelAuthorizationHasNoOrphanFacts(
+	t *testing.T,
+	pool *pgxpool.Pool,
+	ctx context.Context,
+	repository workspaceAnalysisModelRepositoryIntegrationStore,
+) {
 	fixture := seedWorkspaceAnalysisModelOperationIntegration(t, ctx, pool)
-	repository, err := NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
 	cancel := newWorkspaceAnalysisConcurrentCancelCoordinator(t, pool)
 
 	start := make(chan struct{})

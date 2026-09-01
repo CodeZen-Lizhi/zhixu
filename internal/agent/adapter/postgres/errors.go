@@ -23,6 +23,10 @@ func classify(cause error) error {
 	if cause == nil {
 		return nil
 	}
+	var classified *foundation.Error
+	if errors.As(cause, &classified) {
+		return cause
+	}
 	switch {
 	case errors.Is(cause, context.Canceled):
 		return foundation.NewError(foundation.ErrorNonRetryableFailure, "AGENT_DATABASE_CANCELLED", false, context.Canceled)

@@ -1,42 +1,33 @@
 //go:build integration
 
-package workspacepostgres
+package workspacepostgres_test
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workspace/domain"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestRepositoryListSourceVersionsWithPostgres(t *testing.T) {
-	databaseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
-	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
+	runWorkspaceIntegrationVariants(t, testRepositoryListSourceVersionsWithPostgres)
+}
+
+func testRepositoryListSourceVersionsWithPostgres(t *testing.T, platform *platformpostgres.Pool, ctx context.Context, repository workspaceIntegrationRepository) {
+	t.Helper()
+	pool := platform.DB()
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	repository, err := NewRepository(tx)
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	now := time.Date(2026, 7, 22, 3, 0, 0, 0, time.UTC)
 	workspaceID := sourceVersionListID(1)
@@ -90,6 +81,9 @@ func TestRepositoryListSourceVersionsWithPostgres(t *testing.T) {
 	activateSourceVersionIndex(t, ctx, tx, indexID, workspaceID, now)
 	seedSourceVersionListPlanCardinality(t, ctx, tx, otherWorkspaceID, otherSourceID, now.Add(48*time.Hour))
 	assertSourceVersionListPlans(t, ctx, tx, workspaceID, secondID, now.Add(7*time.Hour))
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
 
 	firstPage, hasMore, err := repository.ListSourceVersions(ctx, domain.SourceVersionListQuery{WorkspaceID: workspaceID, Limit: 2})
 	if err != nil {
@@ -114,7 +108,7 @@ func TestRepositoryListSourceVersionsWithPostgres(t *testing.T) {
 	assertSourceVersionListIDs(t, repository, ctx, domain.SourceVersionListQuery{WorkspaceID: workspaceID, IndexStatus: "excluded", Limit: 10}, thirdID)
 	assertSourceVersionListIDs(t, repository, ctx, domain.SourceVersionListQuery{WorkspaceID: workspaceID, MimeType: "text/plain", Limit: 10}, fourthID)
 	assertSourceVersionListIDs(t, repository, ctx, domain.SourceVersionListQuery{WorkspaceID: workspaceID, IngestionStatus: "parsed", Limit: 10})
-	if _, err := tx.Exec(ctx, `UPDATE core.source SET removed_at=$1 WHERE id=$2`, now.Add(12*time.Hour), string(sourceThreeID)); err != nil {
+	if _, err := pool.Exec(ctx, `UPDATE core.source SET removed_at=$1 WHERE id=$2`, now.Add(12*time.Hour), string(sourceThreeID)); err != nil {
 		t.Fatal(err)
 	}
 	assertSourceVersionListIDs(t, repository, ctx, domain.SourceVersionListQuery{WorkspaceID: workspaceID, Limit: 10}, firstID, secondID, thirdID)
@@ -134,7 +128,7 @@ type sourceVersionFixture struct {
 func insertSourceVersionListWorkspace(t *testing.T, ctx context.Context, tx pgx.Tx, id foundation.ID, suffix string, now time.Time) {
 	t.Helper()
 	root := "/tmp/zhixu-m9-" + suffix
-	if _, err := tx.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,$2,$3,$3,$4,'test',1,$4,$4)`, string(id), suffix, root, now); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,$2,$3,$3,$4,'inactive',1,$4,$4)`, string(id), suffix, root, now); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -219,7 +213,7 @@ func insertSourceVersionProjection(t *testing.T, ctx context.Context, tx pgx.Tx,
 	}
 }
 
-func assertSourceVersionListIDs(t *testing.T, repository *Repository, ctx context.Context, query domain.SourceVersionListQuery, want ...foundation.ID) {
+func assertSourceVersionListIDs(t *testing.T, repository domain.SourceVersionListRepository, ctx context.Context, query domain.SourceVersionListQuery, want ...foundation.ID) {
 	t.Helper()
 	items, hasMore, err := repository.ListSourceVersions(ctx, query)
 	if err != nil {
@@ -326,7 +320,7 @@ func sourceVersionListIndexesAvailable(t *testing.T, ctx context.Context, tx pgx
 
 func assertSourceVersionListPlan(t *testing.T, ctx context.Context, tx pgx.Tx, label string, request domain.SourceVersionListQuery, performanceIndexesAvailable bool) {
 	t.Helper()
-	query, args := buildSourceVersionListQuery(request)
+	query, args := buildWorkspaceSourceVersionListExplainQuery(request)
 	var raw []byte
 	if err := tx.QueryRow(ctx, `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, COSTS OFF) `+query, args...).Scan(&raw); err != nil {
 		t.Fatal(err)
@@ -347,6 +341,32 @@ func assertSourceVersionListPlan(t *testing.T, ctx context.Context, tx pgx.Tx, l
 		t.Fatalf("source version list %s compatibility plan has no source_version relation: %s", label, raw)
 	}
 	t.Logf("source version list %s plan: %s", label, raw)
+}
+
+// Keep the EXPLAIN input identical to the fixed production query while using
+// pgx placeholders; the repository implementations are intentionally opaque.
+func buildWorkspaceSourceVersionListExplainQuery(request domain.SourceVersionListQuery) (string, []any) {
+	query := `SELECT sv.id::text,sv.source_id::text,sv.workspace_id::text,s.original_location,sv.mime_type,sv.byte_size,sv.captured_at,sv.content_hash,COALESCE(a.security_status,sv.security_status),COALESCE(a.status,''),COALESCE(wr.status,''),COALESCE(im.selection_status,'') FROM core.source_version sv JOIN core.source s ON s.id=sv.source_id AND s.workspace_id=sv.workspace_id AND s.removed_at IS NULL LEFT JOIN LATERAL (SELECT ia.status,ia.security_status,ia.workflow_run_id FROM ingestion.attempt ia WHERE ia.source_version_id=sv.id AND ia.workspace_id=sv.workspace_id ORDER BY ia.started_at DESC,ia.id DESC LIMIT 1) a ON true LEFT JOIN workflow.run wr ON wr.id=a.workflow_run_id AND wr.workspace_id=sv.workspace_id LEFT JOIN retrieval.index_version active_index ON active_index.workspace_id=sv.workspace_id AND active_index.status='active' LEFT JOIN retrieval.index_manifest_source im ON im.index_version_id=active_index.id AND im.workspace_id=sv.workspace_id AND im.source_id=sv.source_id AND (im.selection_status='excluded' OR im.source_version_id=sv.id) WHERE sv.workspace_id=$1`
+	args := []any{string(request.WorkspaceID)}
+	appendFilter := func(column, value string) {
+		if value == "" {
+			return
+		}
+		args = append(args, value)
+		query += ` AND ` + column + `=$` + fmt.Sprint(len(args))
+	}
+	appendFilter("COALESCE(a.security_status,sv.security_status)", request.SecurityStatus)
+	appendFilter("COALESCE(a.status,'')", request.IngestionStatus)
+	appendFilter("COALESCE(wr.status,'')", request.WorkflowStatus)
+	appendFilter("COALESCE(im.selection_status,'')", request.IndexStatus)
+	appendFilter("sv.mime_type", request.MimeType)
+	if request.CursorTime != nil {
+		args = append(args, request.CursorTime.UTC(), string(request.CursorID))
+		query += ` AND (sv.captured_at,sv.id)<($` + fmt.Sprint(len(args)-1) + `,$` + fmt.Sprint(len(args)) + `)`
+	}
+	query += ` ORDER BY sv.captured_at DESC,sv.id DESC LIMIT $` + fmt.Sprint(len(args)+1)
+	args = append(args, request.Limit+1)
+	return query, args
 }
 
 func sourceVersionListPlanHasRelation(plan sourceVersionListExplainPlan, relation, alias string) bool {

@@ -740,6 +740,10 @@ func scanSourceVersion(row rowScanner) (domain.SourceVersion, error) {
 }
 
 func classify(err error, fallbackCode string) error {
+	var classified *foundation.Error
+	if errors.As(err, &classified) {
+		return err
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return foundation.NewError(foundation.ErrorConsistencyViolation, "WORKSPACE_DATA_MISSING", false, err)
 	}

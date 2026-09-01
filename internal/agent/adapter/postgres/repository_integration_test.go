@@ -6,100 +6,222 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/url"
-	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
-	"github.com/jackc/pgx/v5"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"gorm.io/gorm"
 )
 
 func TestRepositoryGetModelRunRecordTxUsesCallerTransaction(t *testing.T) {
-	pool, ctx := newAgentRepositoryIntegrationPool(t)
-	seedAgentRuntime(t, ctx, pool)
-	repository, err := NewRepository(pool)
+	for _, variant := range agentCallerTransactionIntegrationVariants() {
+		t.Run(variant.name, func(t *testing.T) {
+			platform, ctx := newAgentPlatformIntegrationPool(t)
+			testRepositoryGetModelRunRecordUsesCallerTransaction(t, platform, ctx, variant.open(t, platform, ctx))
+		})
+	}
+}
+
+type agentModelRunRecordReader func(context.Context, foundation.ID, foundation.ID, bool) (application.ModelRunRecord, error)
+
+type agentCallerTransactionIntegrationHarness struct {
+	repository  application.ModelRunRepository
+	within      func(func(application.ModelRunRepository, agentModelRunRecordReader) error) error
+	invalidRead func() error
+}
+
+type agentCallerTransactionIntegrationVariant struct {
+	name string
+	open func(*testing.T, *platformpostgres.Pool, context.Context) agentCallerTransactionIntegrationHarness
+}
+
+var errAgentCallerTransactionRollback = errors.New("rollback agent caller transaction integration fixture")
+
+func agentCallerTransactionIntegrationVariants() []agentCallerTransactionIntegrationVariant {
+	return []agentCallerTransactionIntegrationVariant{
+		{name: "legacy", open: openLegacyAgentCallerTransactionIntegration},
+		{name: "gorm", open: openGORMAgentCallerTransactionIntegration},
+	}
+}
+
+func openLegacyAgentCallerTransactionIntegration(
+	t *testing.T,
+	platform *platformpostgres.Pool,
+	ctx context.Context,
+) agentCallerTransactionIntegrationHarness {
+	t.Helper()
+	repository, err := NewRepository(platform.DB())
 	if err != nil {
 		t.Fatal(err)
 	}
+	return agentCallerTransactionIntegrationHarness{
+		repository: repository,
+		within: func(work func(application.ModelRunRepository, agentModelRunRecordReader) error) error {
+			tx, err := platform.DB().Begin(ctx)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback(context.Background()) }()
+			transactionRepository, err := NewRepository(tx)
+			if err != nil {
+				return err
+			}
+			return work(transactionRepository, func(
+				readCtx context.Context,
+				workspaceID foundation.ID,
+				runID foundation.ID,
+				forUpdate bool,
+			) (application.ModelRunRecord, error) {
+				return repository.GetModelRunRecordTx(readCtx, tx, workspaceID, runID, forUpdate)
+			})
+		},
+		invalidRead: func() error {
+			_, err := repository.GetModelRunRecordTx(ctx, nil, testAgentID(1), testAgentID(87), false)
+			return err
+		},
+	}
+}
+
+func openGORMAgentCallerTransactionIntegration(
+	t *testing.T,
+	platform *platformpostgres.Pool,
+	ctx context.Context,
+) agentCallerTransactionIntegrationHarness {
+	t.Helper()
+	repository, err := NewGORMRepository(platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var staleScope foundation.TransactionScope
+	return agentCallerTransactionIntegrationHarness{
+		repository: repository,
+		within: func(work func(application.ModelRunRepository, agentModelRunRecordReader) error) error {
+			err := repository.unitOfWork.Within(ctx, foundation.TransactionOptions{}, func(
+				callbackCtx context.Context,
+				scope foundation.TransactionScope,
+			) error {
+				staleScope = scope
+				transaction, err := platformpostgres.GORMTransaction(scope)
+				if err != nil {
+					return err
+				}
+				transactionRepository := &GORMRepository{database: transaction, unitOfWork: repository.unitOfWork}
+				if err := work(transactionRepository, func(
+					readCtx context.Context,
+					workspaceID foundation.ID,
+					runID foundation.ID,
+					forUpdate bool,
+				) (application.ModelRunRecord, error) {
+					return repository.GetModelRunRecordScoped(readCtx, scope, workspaceID, runID, forUpdate)
+				}); err != nil {
+					return err
+				}
+				return errAgentCallerTransactionRollback
+			})
+			if errors.Is(err, errAgentCallerTransactionRollback) {
+				return nil
+			}
+			return err
+		},
+		invalidRead: func() error {
+			_, err := repository.GetModelRunRecordScoped(ctx, staleScope, testAgentID(1), testAgentID(87), false)
+			return err
+		},
+	}
+}
+
+func testRepositoryGetModelRunRecordUsesCallerTransaction(
+	t *testing.T,
+	platform *platformpostgres.Pool,
+	ctx context.Context,
+	harness agentCallerTransactionIntegrationHarness,
+) {
+	pool := platform.DB()
+	seedAgentRuntime(t, ctx, pool)
 	started := time.Now().UTC().Add(-time.Minute).Truncate(time.Microsecond)
 	run := testModelRun(testAgentID(87), testAgentID(5), started)
-	if _, replayed, err := repository.CreateModelRun(ctx, run); err != nil || replayed {
+	if _, replayed, err := harness.repository.CreateModelRun(ctx, run); err != nil || replayed {
 		t.Fatalf("CreateModelRun replayed=%t err=%v", replayed, err)
 	}
 
-	tx, err := pool.Begin(ctx)
-	if err != nil {
+	if err := harness.within(func(transactionRepository application.ModelRunRepository, readRecord agentModelRunRecordReader) error {
+		first := domain.ModelCall{
+			ID: testAgentID(88), ModelRunID: run.ID, CallNo: 1, Phase: domain.ModelCallInitial,
+			Model: run.Model, Profile: run.Profile, Prompt: run.Prompt, Schema: run.Schema, MaxOutputTokens: 128,
+			Status: domain.ModelCallStarted, RequestHash: hash64('a'), RequestBytes: 64,
+			Version: 1, StartedAt: started.Add(time.Second),
+		}
+		if _, replayed, err := transactionRepository.StartModelCall(ctx, run.WorkspaceID, first); err != nil || replayed {
+			return fmt.Errorf("StartModelCall first replayed=%t: %w", replayed, err)
+		}
+		firstCompletedAt := started.Add(2 * time.Second)
+		firstCompleted := first
+		firstCompleted.Status = domain.ModelCallSucceeded
+		firstCompleted.ResponseHash = hash64('b')
+		firstCompleted.ResponseBytes = 32
+		firstCompleted.Usage = domain.TokenUsage{InputTokens: 5, OutputTokens: 3, TotalTokens: 8}
+		firstCompleted.LatencyMillis = 10
+		firstCompleted.Version = 2
+		firstCompleted.CompletedAt = &firstCompletedAt
+		if _, replayed, err := transactionRepository.CompleteModelCall(ctx, application.CompleteModelCallCommand{
+			WorkspaceID: run.WorkspaceID, ExpectedVersion: 1, Call: firstCompleted,
+		}); err != nil || replayed {
+			return fmt.Errorf("CompleteModelCall first replayed=%t: %w", replayed, err)
+		}
+		second := domain.ModelCall{
+			ID: testAgentID(89), ModelRunID: run.ID, CallNo: 2, Phase: domain.ModelCallReview,
+			Model: run.Model, Profile: run.Profile, Prompt: run.Prompt, Schema: run.Schema, MaxOutputTokens: 64,
+			Status: domain.ModelCallStarted, RequestHash: hash64('c'), RequestBytes: 48,
+			Version: 1, StartedAt: started.Add(3 * time.Second),
+		}
+		if _, replayed, err := transactionRepository.StartModelCall(ctx, run.WorkspaceID, second); err != nil || replayed {
+			return fmt.Errorf("StartModelCall second replayed=%t: %w", replayed, err)
+		}
+		record, err := readRecord(ctx, run.WorkspaceID, run.ID, true)
+		if err != nil || record.Run.ID != run.ID || len(record.Calls) != 2 ||
+			record.Calls[0].CallNo != 1 || record.Calls[1].CallNo != 2 {
+			return fmt.Errorf("caller transaction record=%#v: %w", record, err)
+		}
+		outside, err := harness.repository.GetModelRun(ctx, run.WorkspaceID, run.ID)
+		if err != nil || len(outside.Calls) != 0 {
+			return fmt.Errorf("outside transaction record=%#v: %w", outside, err)
+		}
+		if _, err := readRecord(ctx, testAgentID(2), run.ID, false); agentErrorCode(err) != ErrorCodeRuntimeNotFound {
+			return fmt.Errorf("cross-workspace code=%s: %w", agentErrorCode(err), err)
+		}
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = tx.Rollback(context.Background()) })
-	txRepository, err := NewRepository(tx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	first := domain.ModelCall{
-		ID: testAgentID(88), ModelRunID: run.ID, CallNo: 1, Phase: domain.ModelCallInitial,
-		Model: run.Model, Profile: run.Profile, Prompt: run.Prompt, Schema: run.Schema, MaxOutputTokens: 128,
-		Status: domain.ModelCallStarted, RequestHash: hash64('a'), RequestBytes: 64,
-		Version: 1, StartedAt: started.Add(time.Second),
-	}
-	if _, replayed, err := txRepository.StartModelCall(ctx, run.WorkspaceID, first); err != nil || replayed {
-		t.Fatalf("StartModelCall first replayed=%t err=%v", replayed, err)
-	}
-	firstCompletedAt := started.Add(2 * time.Second)
-	firstCompleted := first
-	firstCompleted.Status = domain.ModelCallSucceeded
-	firstCompleted.ResponseHash = hash64('b')
-	firstCompleted.ResponseBytes = 32
-	firstCompleted.Usage = domain.TokenUsage{InputTokens: 5, OutputTokens: 3, TotalTokens: 8}
-	firstCompleted.LatencyMillis = 10
-	firstCompleted.Version = 2
-	firstCompleted.CompletedAt = &firstCompletedAt
-	if _, replayed, err := txRepository.CompleteModelCall(ctx, application.CompleteModelCallCommand{
-		WorkspaceID: run.WorkspaceID, ExpectedVersion: 1, Call: firstCompleted,
-	}); err != nil || replayed {
-		t.Fatalf("CompleteModelCall first replayed=%t err=%v", replayed, err)
-	}
-	second := domain.ModelCall{
-		ID: testAgentID(89), ModelRunID: run.ID, CallNo: 2, Phase: domain.ModelCallReview,
-		Model: run.Model, Profile: run.Profile, Prompt: run.Prompt, Schema: run.Schema, MaxOutputTokens: 64,
-		Status: domain.ModelCallStarted, RequestHash: hash64('c'), RequestBytes: 48,
-		Version: 1, StartedAt: started.Add(3 * time.Second),
-	}
-	if _, replayed, err := txRepository.StartModelCall(ctx, run.WorkspaceID, second); err != nil || replayed {
-		t.Fatalf("StartModelCall second replayed=%t err=%v", replayed, err)
-	}
-
-	record, err := repository.GetModelRunRecordTx(ctx, tx, run.WorkspaceID, run.ID, true)
-	if err != nil || record.Run.ID != run.ID || len(record.Calls) != 2 ||
-		record.Calls[0].CallNo != 1 || record.Calls[1].CallNo != 2 {
-		t.Fatalf("GetModelRunRecordTx=%#v err=%v", record, err)
-	}
-	outside, err := repository.GetModelRun(ctx, run.WorkspaceID, run.ID)
+	outside, err := harness.repository.GetModelRun(ctx, run.WorkspaceID, run.ID)
 	if err != nil || len(outside.Calls) != 0 {
-		t.Fatalf("outside transaction record=%#v err=%v", outside, err)
+		t.Fatalf("rolled back transaction record=%#v err=%v", outside, err)
 	}
-	if _, err := repository.GetModelRunRecordTx(ctx, tx, testAgentID(2), run.ID, false); agentErrorCode(err) != ErrorCodeRuntimeNotFound {
-		t.Fatalf("cross-workspace code=%s err=%v", agentErrorCode(err), err)
-	}
-	if _, err := repository.GetModelRunRecordTx(ctx, nil, run.WorkspaceID, run.ID, false); agentErrorCode(err) != domain.ErrorCodeModelRunInvalid {
-		t.Fatalf("invalid transaction code=%s err=%v", agentErrorCode(err), err)
+	if err := harness.invalidRead(); agentErrorCode(err) != domain.ErrorCodeModelRunInvalid && agentErrorCode(err) != ErrorCodeDatabaseUnavailable {
+		t.Fatalf("invalid/stale transaction code=%s err=%v", agentErrorCode(err), err)
 	}
 }
 
 func TestRepositoryModelRunCallReplayCASAndUnknownRecovery(t *testing.T) {
-	pool, ctx := newAgentRepositoryIntegrationPool(t)
+	testAgentRepositoryIntegrationVariants(t, testRepositoryModelRunCallReplayCASAndUnknownRecovery)
+}
+
+func testRepositoryModelRunCallReplayCASAndUnknownRecovery(
+	t *testing.T,
+	platform *platformpostgres.Pool,
+	ctx context.Context,
+	repository agentRepositoryIntegrationStore,
+) {
+	pool := platform.DB()
 	seedAgentRuntime(t, ctx, pool)
-	repository, err := NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
 	started := time.Now().UTC().Add(-2 * time.Minute).Truncate(time.Microsecond)
 	run := testModelRun(testAgentID(7), testAgentID(5), started)
 	created, replayed, err := repository.CreateModelRun(ctx, run)
@@ -256,13 +378,151 @@ func TestRepositoryModelRunCallReplayCASAndUnknownRecovery(t *testing.T) {
 	}
 }
 
+func TestRepositoryUnknownRecoveryConcurrentWorkersIntegration(t *testing.T) {
+	testAgentRepositoryIntegrationVariants(t, func(
+		t *testing.T,
+		platform *platformpostgres.Pool,
+		ctx context.Context,
+		repository agentRepositoryIntegrationStore,
+	) {
+		pool := platform.DB()
+		seedAgentRuntime(t, ctx, pool)
+		started := time.Now().UTC().Add(-2 * time.Minute).Truncate(time.Microsecond)
+		callIDs := make([]foundation.ID, 0, 4)
+		runIDs := make([]foundation.ID, 0, 4)
+		for index := 0; index < 4; index++ {
+			nodeID := testAgentID(120 + index)
+			attemptID := testAgentID(130 + index)
+			if _, err := pool.Exec(ctx, `
+				INSERT INTO workflow.node_run(
+					id,run_id,node_key,node_type,status,input,lease_owner,lease_until,version,created_at,updated_at
+				) VALUES($1,$2,$3,'agent.relation-assessment','running','{}','worker',now()+interval '5 minutes',1,now(),now())`,
+				nodeID, testAgentID(4), fmt.Sprintf("recovery-%d", index)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := pool.Exec(ctx, `
+				INSERT INTO workflow.node_attempt(
+					id,node_run_id,attempt_no,dispatch_no,retry_no,delivery_id,lease_owner,lease_until,status,started_at
+				) VALUES($1,$2,1,1,0,$3,'worker',now()+interval '5 minutes','running',now())`,
+				attemptID, nodeID, fmt.Sprintf("recovery-%d", index)); err != nil {
+				t.Fatal(err)
+			}
+
+			run := testModelRun(testAgentID(140+index), nodeID, started.Add(time.Duration(index)*time.Microsecond))
+			run.NodeAttemptID = attemptID
+			if _, replayed, err := repository.CreateModelRun(ctx, run); err != nil || replayed {
+				t.Fatalf("create recovery run %d replayed=%t err=%v", index, replayed, err)
+			}
+			call := domain.ModelCall{
+				ID: testAgentID(150 + index), ModelRunID: run.ID, CallNo: 1, Phase: domain.ModelCallInitial,
+				Model: run.Model, Profile: run.Profile, Prompt: run.Prompt, Schema: run.Schema, MaxOutputTokens: 32,
+				Status: domain.ModelCallStarted, RequestHash: hash64(byte('a' + index)), RequestBytes: 32,
+				Version: 1, StartedAt: run.CreatedAt.Add(time.Second),
+			}
+			if _, replayed, err := repository.StartModelCall(ctx, run.WorkspaceID, call); err != nil || replayed {
+				t.Fatalf("create recovery call %d replayed=%t err=%v", index, replayed, err)
+			}
+			callIDs = append(callIDs, call.ID)
+			runIDs = append(runIDs, run.ID)
+		}
+
+		recovery := application.UnknownRecoveryQuery{
+			Before: time.Now().UTC().Add(-time.Minute),
+			At:     time.Now().UTC().Truncate(time.Microsecond),
+			Limit:  2,
+		}
+		callResults := make(chan []domain.ModelCall, 2)
+		callErrors := make(chan error, 2)
+		startCalls := make(chan struct{})
+		var callWorkers sync.WaitGroup
+		for worker := 0; worker < 2; worker++ {
+			callWorkers.Add(1)
+			go func() {
+				defer callWorkers.Done()
+				<-startCalls
+				calls, err := repository.MarkStaleModelCallsUnknown(ctx, recovery)
+				callResults <- calls
+				callErrors <- err
+			}()
+		}
+		close(startCalls)
+		callWorkers.Wait()
+		close(callResults)
+		close(callErrors)
+		for err := range callErrors {
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		seenCalls := make(map[foundation.ID]struct{}, len(callIDs))
+		for calls := range callResults {
+			if len(calls) != recovery.Limit {
+				t.Fatalf("concurrent recovery calls=%d, want %d", len(calls), recovery.Limit)
+			}
+			for _, call := range calls {
+				if _, exists := seenCalls[call.ID]; exists {
+					t.Fatalf("model call %s was recovered by more than one worker", call.ID)
+				}
+				seenCalls[call.ID] = struct{}{}
+			}
+		}
+		if len(seenCalls) != len(callIDs) {
+			t.Fatalf("recovered model calls=%d, want %d", len(seenCalls), len(callIDs))
+		}
+
+		runResults := make(chan []domain.ModelRun, 2)
+		runErrors := make(chan error, 2)
+		startRuns := make(chan struct{})
+		var runWorkers sync.WaitGroup
+		for worker := 0; worker < 2; worker++ {
+			runWorkers.Add(1)
+			go func() {
+				defer runWorkers.Done()
+				<-startRuns
+				runs, err := repository.MarkStaleModelRunsUnknown(ctx, recovery)
+				runResults <- runs
+				runErrors <- err
+			}()
+		}
+		close(startRuns)
+		runWorkers.Wait()
+		close(runResults)
+		close(runErrors)
+		for err := range runErrors {
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		seenRuns := make(map[foundation.ID]struct{}, len(runIDs))
+		for runs := range runResults {
+			if len(runs) != recovery.Limit {
+				t.Fatalf("concurrent recovery runs=%d, want %d", len(runs), recovery.Limit)
+			}
+			for _, run := range runs {
+				if _, exists := seenRuns[run.ID]; exists {
+					t.Fatalf("model run %s was recovered by more than one worker", run.ID)
+				}
+				seenRuns[run.ID] = struct{}{}
+			}
+		}
+		if len(seenRuns) != len(runIDs) {
+			t.Fatalf("recovered model runs=%d, want %d", len(seenRuns), len(runIDs))
+		}
+	})
+}
+
 func TestRepositoryRAGRunDefersAndAtomicallyBindsRetrieval(t *testing.T) {
-	pool, ctx := newAgentRepositoryIntegrationPool(t)
+	testAgentRepositoryIntegrationVariants(t, testRepositoryRAGRunDefersAndAtomicallyBindsRetrieval)
+}
+
+func testRepositoryRAGRunDefersAndAtomicallyBindsRetrieval(
+	t *testing.T,
+	platform *platformpostgres.Pool,
+	ctx context.Context,
+	repository agentRepositoryIntegrationStore,
+) {
+	pool := platform.DB()
 	seedAgentRuntime(t, ctx, pool)
-	repository, err := NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
 	started := time.Now().UTC().Add(-time.Minute).Truncate(time.Microsecond)
 	run := testModelRun(testAgentID(27), testAgentID(5), started)
 	run.Schema.Version = domain.OutputSchemaVersionV2
@@ -321,12 +581,212 @@ func TestRepositoryRAGRunDefersAndAtomicallyBindsRetrieval(t *testing.T) {
 }
 
 func TestRepositoryRAGRefusalCallRequirements(t *testing.T) {
-	pool, ctx := newAgentRepositoryIntegrationPool(t)
-	seedAgentRuntime(t, ctx, pool)
-	repository, err := NewRepository(pool)
+	testAgentRepositoryIntegrationVariants(t, testRepositoryRAGRefusalCallRequirements)
+}
+
+func TestGORMRepositoryPreservesSQLStateAndCallerContextIntegration(t *testing.T) {
+	platform, ctx := newAgentPlatformIntegrationPool(t)
+	seedAgentRuntime(t, ctx, platform.DB())
+	repository, err := NewGORMRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	foreign := testModelRun(testAgentID(111), testAgentID(5), time.Now().UTC().Add(-time.Minute))
+	foreign.WorkspaceID = testAgentID(112)
+	_, _, err = repository.CreateModelRun(ctx, foreign)
+	assertAgentGORMPostgresError(t, err, "23503", foundation.ErrorConsistencyViolation, ErrorCodeRuntimeConsistency)
+
+	cause := errors.New("agent caller cancellation integration cause")
+	cancelCtx, cancel := context.WithCancelCause(ctx)
+	cancel(cause)
+	_, _, err = repository.CreateModelRun(cancelCtx, testModelRun(testAgentID(113), testAgentID(5), time.Now().UTC().Add(-time.Minute)))
+	if agentErrorCode(err) != "AGENT_DATABASE_CANCELLED" || !errors.Is(err, context.Canceled) || !errors.Is(err, cause) {
+		t.Fatalf("cancelled GORM operation code=%s err=%v", agentErrorCode(err), err)
+	}
+
+	deadlineCause := errors.New("agent caller deadline integration cause")
+	deadlineCtx, deadlineCancel := context.WithDeadlineCause(ctx, time.Now().Add(-time.Second), deadlineCause)
+	defer deadlineCancel()
+	_, err = repository.GetModelRun(deadlineCtx, testAgentID(1), testAgentID(999))
+	if agentErrorCode(err) != "AGENT_DATABASE_TIMEOUT" || !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, deadlineCause) {
+		t.Fatalf("deadline GORM operation code=%s err=%v", agentErrorCode(err), err)
+	}
+}
+
+func TestGORMRepositoryDeferredConstraintFailureRollsBackIntegration(t *testing.T) {
+	platform, ctx := newAgentPlatformIntegrationPool(t)
+	config, _, command := seedWorkspaceAnalysisRunStartIntegration(t, ctx, platform.DB())
+	_ = config
+	repository, err := NewGORMRepository(platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = repository.within(ctx, foundation.TransactionOptions{}, func(
+		callbackCtx context.Context,
+		transaction *gorm.DB,
+		_ foundation.TransactionScope,
+	) error {
+		result := transaction.WithContext(callbackCtx).Exec(workspaceAnalysisRunStartAnswerSQL(true), workspaceAnalysisRunStartAnswerArguments(command)...)
+		if result.Error != nil {
+			return result.Error
+		}
+		return transaction.WithContext(callbackCtx).Exec(`SET CONSTRAINTS ALL IMMEDIATE`).Error
+	})
+	assertAgentGORMPostgresError(t, err, "55000", foundation.ErrorConsistencyViolation, ErrorCodeRuntimeConsistency)
+	assertWorkspaceAnalysisDispatchCountsIntegration(t, ctx, platform.DB(), command.QuestionID, 0)
+}
+
+func TestGORMRepositoryRejectsCorruptModelCallWithoutPartialRecordIntegration(t *testing.T) {
+	for _, variant := range agentRepositoryIntegrationVariants() {
+		t.Run(variant.name, func(t *testing.T) {
+			platform, ctx := newAgentPlatformIntegrationPool(t)
+			pool := platform.DB()
+			seedAgentRuntime(t, ctx, pool)
+			repository := variant.open(t, platform)
+			run := testModelRun(testAgentID(114), testAgentID(5), time.Now().UTC().Add(-time.Minute))
+			if _, _, err := repository.CreateModelRun(ctx, run); err != nil {
+				t.Fatal(err)
+			}
+			call := domain.ModelCall{
+				ID: testAgentID(115), ModelRunID: run.ID, CallNo: 1, Phase: domain.ModelCallInitial,
+				Model: run.Model, Profile: run.Profile, Prompt: run.Prompt, Schema: run.Schema, MaxOutputTokens: 32,
+				Status: domain.ModelCallStarted, RequestHash: hash64('c'), RequestBytes: 32, Version: 1, StartedAt: run.CreatedAt,
+			}
+			if _, _, err := repository.StartModelCall(ctx, run.WorkspaceID, call); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := pool.Exec(ctx, `ALTER TABLE agent.model_call DISABLE TRIGGER USER`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := pool.Exec(ctx, `ALTER TABLE agent.model_call DROP CONSTRAINT agent_model_call_lifecycle`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := pool.Exec(ctx, `UPDATE agent.model_call SET response_bytes=1 WHERE id=$1`, string(call.ID)); err != nil {
+				t.Fatal(err)
+			}
+			record, err := repository.GetModelRun(ctx, run.WorkspaceID, run.ID)
+			var classified *foundation.Error
+			if !errors.As(err, &classified) || classified.Kind != foundation.ErrorConsistencyViolation ||
+				record.Run.ID != "" || len(record.Calls) != 0 {
+				t.Fatalf("corrupt model call record=%#v err=%#v", record, err)
+			}
+		})
+	}
+}
+
+func TestGORMRepositoryReturnsConnectionsAfterRowsAndTransactionsIntegration(t *testing.T) {
+	platform, ctx := newAgentPlatformIntegrationPool(t)
+	seedAgentRuntime(t, ctx, platform.DB())
+	repository, err := NewGORMRepository(platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := testModelRun(testAgentID(116), testAgentID(5), time.Now().UTC().Add(-time.Minute))
+	if _, _, err := repository.CreateModelRun(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 20; index++ {
+		if _, err := repository.GetModelRun(ctx, run.WorkspaceID, run.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	database, err := platform.GORM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlDB, err := database.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats := sqlDB.Stats(); stats.InUse != 0 {
+		t.Fatalf("GORM connections still in use=%d", stats.InUse)
+	}
+	if acquired := platform.DB().Stat().AcquiredConns(); acquired != 0 {
+		t.Fatalf("pgx connections still acquired=%d", acquired)
+	}
+}
+
+func TestAgentTargetQueryPlansUseDeclaredIndexesIntegration(t *testing.T) {
+	platform, ctx := newAgentPlatformIntegrationPool(t)
+	seedAgentRuntime(t, ctx, platform.DB())
+	queries := []struct {
+		name   string
+		sql    string
+		args   []any
+		index  string
+		nosort bool
+	}{
+		{name: "model run workspace", sql: `SELECT id FROM agent.model_run WHERE workspace_id=$1 AND id=$2`, args: []any{string(testAgentID(1)), string(testAgentID(1))}, index: "uq_agent_model_run_id_workspace_workflow"},
+		{name: "model call history", sql: `SELECT call.id FROM agent.model_call call JOIN agent.model_run run ON run.id=call.model_run_id WHERE run.workspace_id=$1 AND call.model_run_id=$2 ORDER BY call.call_no,call.id`, args: []any{string(testAgentID(1)), string(testAgentID(2))}, index: "idx_agent_model_call_run_history", nosort: true},
+		{name: "model call recovery", sql: `SELECT id FROM agent.model_call WHERE status='STARTED' ORDER BY started_at,id LIMIT $1`, args: []any{10}, index: "idx_agent_model_call_status"},
+		{name: "analysis operation slot", sql: `SELECT id FROM agent.workspace_analysis_operation WHERE analysis_run_id=$1 AND node_key=$2 AND operation_kind=$3 AND ordinal=$4`, args: []any{string(testAgentID(1)), "retrieve_evidence", "RETRIEVAL_PLAN", 1}, index: "uq_workspace_analysis_operation_key"},
+		{name: "analysis model result", sql: `SELECT id FROM agent.workspace_analysis_model_result WHERE analysis_run_id=$1 AND operation_kind=$2 ORDER BY id`, args: []any{string(testAgentID(1)), "RETRIEVAL_PLAN"}, index: "idx_workspace_analysis_model_result_run"},
+		{name: "capability readiness", sql: `SELECT worker_instance_id FROM agent.workspace_analysis_worker_capability WHERE definition_key=$1 AND definition_version=$2 AND definition_hash=$3 AND tool_catalog_hash=$4 AND policy_version=$5 AND config_revision=$6 AND released_at IS NULL AND heartbeat_at<=clock_timestamp() AND lease_until>clock_timestamp()`, args: []any{"workspace-analysis", 1, hash64('a'), hash64('b'), 1, 7}, index: "idx_workspace_analysis_worker_capability_ready"},
+	}
+	tx, err := platform.DB().Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	if _, err := tx.Exec(ctx, `SET LOCAL enable_seqscan=off`); err != nil {
+		t.Fatal(err)
+	}
+	for _, query := range queries {
+		t.Run(query.name, func(t *testing.T) {
+			rows, err := tx.Query(ctx, "EXPLAIN (COSTS OFF) "+query.sql, query.args...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer rows.Close()
+			var planLines []string
+			for rows.Next() {
+				var line string
+				if err := rows.Scan(&line); err != nil {
+					t.Fatal(err)
+				}
+				planLines = append(planLines, line)
+			}
+			if err := rows.Err(); err != nil {
+				t.Fatal(err)
+			}
+			plan := strings.Join(planLines, "\n")
+			if !strings.Contains(plan, query.index) || (query.nosort && strings.Contains(plan, "Sort")) {
+				t.Fatalf("query plan missing index or has unbounded sort: expected=%s\n%s", query.index, plan)
+			}
+		})
+	}
+}
+
+func assertAgentGORMPostgresError(
+	t *testing.T,
+	err error,
+	state string,
+	wantKind foundation.ErrorKind,
+	wantCode string,
+) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("expected PostgreSQL SQLSTATE %s", state)
+	}
+	var postgresError *pgconn.PgError
+	if !errors.As(err, &postgresError) || postgresError.Code != state {
+		t.Fatalf("error=%v, want SQLSTATE %s", err, state)
+	}
+	var classified *foundation.Error
+	if !errors.As(err, &classified) || classified.Kind != wantKind || classified.Code != wantCode {
+		t.Fatalf("classified error=%#v, want kind=%s code=%s", err, wantKind, wantCode)
+	}
+}
+
+func testRepositoryRAGRefusalCallRequirements(
+	t *testing.T,
+	platform *platformpostgres.Pool,
+	ctx context.Context,
+	repository agentRepositoryIntegrationStore,
+) {
+	pool := platform.DB()
+	seedAgentRuntime(t, ctx, pool)
 	started := time.Now().UTC().Add(-time.Minute).Truncate(time.Microsecond)
 
 	zeroCallRun := testModelRun(testAgentID(37), testAgentID(5), started)
@@ -386,55 +846,62 @@ func TestRepositoryRAGRefusalCallRequirements(t *testing.T) {
 	}
 }
 
+type agentRepositoryIntegrationStore interface {
+	application.ModelRunRepository
+	application.RAGMemorySnapshotRepository
+}
+
+type agentRepositoryIntegrationVariant struct {
+	name string
+	open func(*testing.T, *platformpostgres.Pool) agentRepositoryIntegrationStore
+}
+
+func agentRepositoryIntegrationVariants() []agentRepositoryIntegrationVariant {
+	return []agentRepositoryIntegrationVariant{
+		{name: "legacy", open: func(t *testing.T, platform *platformpostgres.Pool) agentRepositoryIntegrationStore {
+			t.Helper()
+			repository, err := NewRepository(platform.DB())
+			if err != nil {
+				t.Fatal(err)
+			}
+			return repository
+		}},
+		{name: "gorm", open: func(t *testing.T, platform *platformpostgres.Pool) agentRepositoryIntegrationStore {
+			t.Helper()
+			repository, err := NewGORMRepository(platform)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return repository
+		}},
+	}
+}
+
+func testAgentRepositoryIntegrationVariants(
+	t *testing.T,
+	test func(*testing.T, *platformpostgres.Pool, context.Context, agentRepositoryIntegrationStore),
+) {
+	t.Helper()
+	for _, variant := range agentRepositoryIntegrationVariants() {
+		t.Run(variant.name, func(t *testing.T) {
+			platform, ctx := newAgentPlatformIntegrationPool(t)
+			test(t, platform, ctx, variant.open(t, platform))
+		})
+	}
+}
+
 func newAgentRepositoryIntegrationPool(t *testing.T) (*pgxpool.Pool, context.Context) {
 	t.Helper()
-	baseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
-	if baseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL for Agent repository integration tests")
-	}
-	ctx := context.Background()
-	parsed, err := url.Parse(baseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	admin, err := pgxpool.New(ctx, baseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	name := fmt.Sprintf("zhixu_agent_%d", time.Now().UnixNano())
-	identifier := pgx.Identifier{name}.Sanitize()
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+identifier); err != nil {
-		admin.Close()
-		t.Fatal(err)
-	}
-	parsed.Path = "/" + name
-	databaseURL := parsed.String()
-	migrationPool, err := platformpostgres.OpenMigration(ctx, databaseURL, 4, 0)
-	if err == nil {
-		var runner *platformmigration.AtlasRunner
-		runner, err = platformmigration.NewAtlasEmbeddedRunner(migrationPool.DB())
-		if err == nil {
-			err = runner.Up(ctx)
-		}
-		migrationPool.Close()
-	}
-	if err != nil {
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-		t.Fatal(err)
-	}
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		pool.Close()
-		_, _ = admin.Exec(context.Background(), "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-	})
-	return pool, ctx
+	platform, ctx := newAgentPlatformIntegrationPool(t)
+	return platform.DB(), ctx
+}
+
+func newAgentPlatformIntegrationPool(t *testing.T) (*platformpostgres.Pool, context.Context) {
+	t.Helper()
+	// 统一使用 TODO 9 共享 Testcontainers 工厂：数据库 provisioning、迁移与
+	// 生命周期由 fixture 拥有；legacy 与 GORM Adapter 共享唯一 platform Pool。
+	fixture := testdb.Require(t, testdb.Config{Availability: testdb.FailWhenUnavailable, MaxConns: 16})
+	return fixture.Pool(), context.Background()
 }
 
 func seedAgentRuntime(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {

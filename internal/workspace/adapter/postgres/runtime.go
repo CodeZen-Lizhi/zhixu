@@ -333,7 +333,7 @@ FROM ops.workspace_runtime WHERE role IN ('api','worker') ORDER BY role FOR UPDA
 				runtime.OperationID != nil && *runtime.OperationID == operation.ID
 		}
 		if runtime.WorkspaceID != workspaceID || runtime.GrantGeneration != generation || !validPhase ||
-			runtime.HeartbeatAt.Before(now.Add(-freshWithin)) {
+			!runtimeHeartbeatFresh(runtime.HeartbeatAt, now, freshWithin) {
 			return runtimeNotPrepared(errors.New("workspace runtime is not fresh for the required grant"))
 		}
 		seen[runtime.Role] = true
@@ -345,6 +345,10 @@ FROM ops.workspace_runtime WHERE role IN ('api','worker') ORDER BY role FOR UPDA
 		return runtimeNotPrepared(errors.New("both workspace runtime roles are required"))
 	}
 	return nil
+}
+
+func runtimeHeartbeatFresh(heartbeat, now time.Time, freshWithin time.Duration) bool {
+	return !heartbeat.Before(now.Add(-freshWithin)) && !heartbeat.After(now)
 }
 
 func loadRuntimeForUpdate(ctx context.Context, tx pgx.Tx, role domain.RuntimeRole) (domain.RuntimeRecord, error) {

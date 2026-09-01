@@ -1,4 +1,6 @@
-package workspacepostgres
+//go:build integration
+
+package workspacepostgres_test
 
 import (
 	"context"
@@ -9,30 +11,76 @@ import (
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
+	workspacepostgres "github.com/CodeZen-Lizhi/zhixu/internal/workspace/adapter/postgres"
+	workspaceapplication "github.com/CodeZen-Lizhi/zhixu/internal/workspace/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workspace/domain"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+type workspaceIntegrationRepository interface {
+	domain.Repository
+	domain.ActiveWorkspaceRepository
+	domain.SourceMaterialRepository
+	domain.SourceVersionListRepository
+	domain.GitCaptureRepository
+}
+
+type workspaceIntegrationVariant struct {
+	name string
+	open func(*testing.T, *platformpostgres.Pool) workspaceIntegrationRepository
+}
+
+func runWorkspaceIntegrationVariants(t *testing.T, test func(*testing.T, *platformpostgres.Pool, context.Context, workspaceIntegrationRepository)) {
+	t.Helper()
+	variants := []workspaceIntegrationVariant{
+		{name: "legacy", open: openLegacyWorkspaceIntegrationRepository},
+		{name: "gorm", open: openGORMWorkspaceIntegrationRepository},
+	}
+	for _, variant := range variants {
+		variant := variant
+		t.Run(variant.name, func(t *testing.T) {
+			fixture := testdb.Require(t, testdb.Config{
+				ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
+				Availability:     testdb.FailWhenUnavailable,
+				MaxConns:         16,
+			})
+			platform := fixture.Pool()
+			if platform == nil || platform.DB() == nil {
+				t.Fatal("PostgreSQL fixture did not provide a shared platform pool")
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+			defer cancel()
+			test(t, platform, ctx, variant.open(t, platform))
+		})
+	}
+}
+
+func openLegacyWorkspaceIntegrationRepository(t *testing.T, platform *platformpostgres.Pool) workspaceIntegrationRepository {
+	t.Helper()
+	repository, err := workspacepostgres.NewRepository(platform.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return repository
+}
+
+func openGORMWorkspaceIntegrationRepository(t *testing.T, platform *platformpostgres.Pool) workspaceIntegrationRepository {
+	t.Helper()
+	repository, err := workspacepostgres.NewGORMRepository(platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return repository
+}
+
 func TestRepositoryWorkspaceAndSourceVersionLifecycle(t *testing.T) {
-	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
-	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	repository, err := NewRepository(tx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runWorkspaceIntegrationVariants(t, testRepositoryWorkspaceAndSourceVersionLifecycle)
+}
+
+func testRepositoryWorkspaceAndSourceVersionLifecycle(t *testing.T, platform *platformpostgres.Pool, ctx context.Context, repository workspaceIntegrationRepository) {
+	t.Helper()
+	pool := platform.DB()
 
 	now := time.Date(2026, 7, 16, 8, 0, 0, 0, time.UTC)
 	workspace := domain.Workspace{
@@ -133,13 +181,13 @@ func TestRepositoryWorkspaceAndSourceVersionLifecycle(t *testing.T) {
 		t.Fatalf("same-content different-source registration = %#v, error = %v", copyResult, err)
 	}
 
-	if _, err := tx.Exec(ctx, `UPDATE core.source_version SET byte_size = byte_size + 1 WHERE id = $1`, string(first.Version.ID)); err == nil {
+	if _, err := pool.Exec(ctx, `UPDATE core.source_version SET byte_size = byte_size + 1 WHERE id = $1`, string(first.Version.ID)); err == nil {
 		t.Fatal("immutable source version update succeeded")
 	}
-	if _, err := tx.Exec(ctx, `UPDATE core.content_artifact SET byte_size = byte_size + 1 WHERE id = $1`, string(first.Artifact.ID)); err == nil {
+	if _, err := pool.Exec(ctx, `UPDATE core.content_artifact SET byte_size = byte_size + 1 WHERE id = $1`, string(first.Artifact.ID)); err == nil {
 		t.Fatal("immutable content artifact update succeeded")
 	}
-	if _, err := tx.Exec(ctx, `
+	if _, err := pool.Exec(ctx, `
 		INSERT INTO core.source_version (
 			id, source_id, workspace_id, content_artifact_id, content_hash, byte_size, mime_type,
 			original_content_location, security_status, captured_at
@@ -150,25 +198,12 @@ func TestRepositoryWorkspaceAndSourceVersionLifecycle(t *testing.T) {
 }
 
 func TestRepositoryGetSourceMaterialRejectsLegacyAndCrossScopeRows(t *testing.T) {
-	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
-	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	repository, err := NewRepository(tx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runWorkspaceIntegrationVariants(t, testRepositoryGetSourceMaterialRejectsLegacyAndCrossScopeRows)
+}
+
+func testRepositoryGetSourceMaterialRejectsLegacyAndCrossScopeRows(t *testing.T, platform *platformpostgres.Pool, ctx context.Context, repository workspaceIntegrationRepository) {
+	t.Helper()
+	pool := platform.DB()
 	now := time.Date(2026, 7, 17, 8, 0, 0, 0, time.UTC)
 	workspaceID := "51000000-0000-4000-8000-000000000001"
 	otherWorkspaceID := "51000000-0000-4000-8000-000000000002"
@@ -181,11 +216,11 @@ func TestRepositoryGetSourceMaterialRejectsLegacyAndCrossScopeRows(t *testing.T)
 		`ALTER TABLE core.source_version DROP CONSTRAINT source_version_content_artifact_required`,
 		`ALTER TABLE core.source_version DROP CONSTRAINT fk_source_version_artifact_workspace`,
 	} {
-		if _, err := tx.Exec(ctx, statement); err != nil {
+		if _, err := pool.Exec(ctx, statement); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := tx.Exec(ctx, `
+	if _, err := pool.Exec(ctx, `
 		INSERT INTO core.workspace (
 			id,name,root_path,git_repository_path,git_branch,git_head,git_dirty,git_checked_at,status,version,created_at,updated_at
 		) VALUES
@@ -193,19 +228,19 @@ func TestRepositoryGetSourceMaterialRejectsLegacyAndCrossScopeRows(t *testing.T)
 			($2,'Other','/tmp/material-two','/tmp/material-two','','',false,$3,'inactive',1,$3,$3)`, workspaceID, otherWorkspaceID, now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.Exec(ctx, `
+	if _, err := pool.Exec(ctx, `
 		INSERT INTO core.source (id,workspace_id,type,logical_name,original_location,created_at)
 		VALUES ($1,$2,'markdown','legacy','legacy.md',$3)`, sourceID, workspaceID, now); err != nil {
 		t.Fatal(err)
 	}
 	legacyHash := strings.Repeat("d", 64)
 	crossScopeHash := strings.Repeat("e", 64)
-	if _, err := tx.Exec(ctx, `
+	if _, err := pool.Exec(ctx, `
 		INSERT INTO core.content_artifact (id,workspace_id,content_hash,byte_size,managed_location,created_at)
 		VALUES ($1,$2,$3,7,$4,$5)`, otherArtifactID, otherWorkspaceID, crossScopeHash, ".knowledge/sources/"+crossScopeHash, now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.Exec(ctx, `
+	if _, err := pool.Exec(ctx, `
 		INSERT INTO core.source_version (
 			id,source_id,workspace_id,content_artifact_id,content_hash,byte_size,mime_type,original_content_location,security_status,captured_at
 		) VALUES
@@ -213,7 +248,7 @@ func TestRepositoryGetSourceMaterialRejectsLegacyAndCrossScopeRows(t *testing.T)
 			($2,$3,$8,$4,$6,7,'text/markdown','legacy.md','pending',$7)`, legacyVersionID, crossScopeVersionID, sourceID, otherArtifactID, legacyHash, crossScopeHash, now, workspaceID); err != nil {
 		t.Fatal(err)
 	}
-	_, err = repository.GetSourceMaterial(ctx, mustID(t, legacyVersionID))
+	_, err := repository.GetSourceMaterial(ctx, mustID(t, legacyVersionID))
 	requireRepositoryErrorCode(t, err, "SOURCE_VERSION_ARTIFACT_MISSING")
 	_, err = repository.GetSourceMaterial(ctx, mustID(t, crossScopeVersionID))
 	requireRepositoryErrorCode(t, err, "SOURCE_MATERIAL_SCOPE_INVALID")
@@ -222,25 +257,11 @@ func TestRepositoryGetSourceMaterialRejectsLegacyAndCrossScopeRows(t *testing.T)
 }
 
 func TestRepositoryDatabaseConstraints(t *testing.T) {
-	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
-	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	repository, err := NewRepository(tx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runWorkspaceIntegrationVariants(t, testRepositoryDatabaseConstraints)
+}
+
+func testRepositoryDatabaseConstraints(t *testing.T, platform *platformpostgres.Pool, ctx context.Context, repository workspaceIntegrationRepository) {
+	t.Helper()
 	now := time.Date(2026, 7, 16, 8, 0, 0, 0, time.UTC)
 	base := domain.Workspace{
 		ID:       mustID(t, "40000000-0000-4000-8000-000000000001"),
@@ -256,10 +277,288 @@ func TestRepositoryDatabaseConstraints(t *testing.T) {
 	base.Name = "Second"
 	base.RootPath = "/tmp/zhixu-constraint-two"
 	base.Git.RepositoryPath = base.RootPath
-	_, err = repository.CreateWorkspace(ctx, base)
+	_, err := repository.CreateWorkspace(ctx, base)
 	var classified *foundation.Error
 	if !errors.As(err, &classified) || classified.Code != "ACTIVE_WORKSPACE_EXISTS" {
 		t.Fatalf("active workspace error = %#v", err)
+	}
+}
+
+func TestRepositorySourceRegistrationConflictsAndBatchRollback(t *testing.T) {
+	runWorkspaceIntegrationVariants(t, testRepositorySourceRegistrationConflictsAndBatchRollback)
+}
+
+func testRepositorySourceRegistrationConflictsAndBatchRollback(t *testing.T, platform *platformpostgres.Pool, ctx context.Context, repository workspaceIntegrationRepository) {
+	t.Helper()
+	workspaceID := mustID(t, "61000000-0000-4000-8000-000000000001")
+	now := time.Date(2026, 7, 18, 8, 0, 0, 0, time.UTC)
+	seedWorkspaceForSourceRegistration(t, ctx, repository, workspaceID, "/tmp/source-registration", now)
+
+	registered := workspaceSourceRegistration(workspaceID, "62000000", "sources/conflict.md", strings.Repeat("a", 64), now)
+	if result, err := repository.RegisterSourceVersion(ctx, registered); err != nil || !result.Created || !result.ArtifactCreated {
+		t.Fatalf("initial registration = %#v, error = %v", result, err)
+	}
+
+	sourceConflict := registered
+	sourceConflict.Source.ID = mustID(t, "62100000-0000-4000-8000-000000000001")
+	sourceConflict.Source.Type = "html"
+	_, err := repository.RegisterSourceVersion(ctx, sourceConflict)
+	requireRepositoryErrorCode(t, err, "SOURCE_METADATA_CONFLICT")
+
+	artifactConflict := registered
+	artifactConflict.Source.ID = mustID(t, "62200000-0000-4000-8000-000000000001")
+	artifactConflict.Artifact.ID = mustID(t, "62200000-0000-4000-8000-000000000002")
+	artifactConflict.Artifact.ByteSize++
+	artifactConflict.Version.ID = mustID(t, "62200000-0000-4000-8000-000000000003")
+	_, err = repository.RegisterSourceVersion(ctx, artifactConflict)
+	requireRepositoryErrorCode(t, err, "CONTENT_ARTIFACT_METADATA_CONFLICT")
+
+	versionConflict := registered
+	versionConflict.Source.ID = mustID(t, "62300000-0000-4000-8000-000000000001")
+	versionConflict.Artifact.ID = mustID(t, "62300000-0000-4000-8000-000000000002")
+	versionConflict.Version.ID = mustID(t, "62300000-0000-4000-8000-000000000003")
+	versionConflict.Version.MediaType = "text/plain"
+	_, err = repository.RegisterSourceVersion(ctx, versionConflict)
+	requireRepositoryErrorCode(t, err, "SOURCE_VERSION_METADATA_CONFLICT")
+
+	batchFirst := workspaceSourceRegistration(workspaceID, "63000000", "sources/batch-first.md", strings.Repeat("b", 64), now.Add(time.Minute))
+	missingWorkspaceID := mustID(t, "61000000-0000-4000-8000-000000000099")
+	batchSecond := workspaceSourceRegistration(missingWorkspaceID, "64000000", "sources/batch-second.md", strings.Repeat("c", 64), now.Add(2*time.Minute))
+	results, err := repository.RegisterSourceVersions(ctx, []domain.SourceRegistration{batchFirst, batchSecond})
+	if len(results) != 0 {
+		t.Fatalf("failed batch returned partial results = %#v", results)
+	}
+	requireRepositoryErrorCode(t, err, "WORKSPACE_REFERENCE_INVALID")
+	assertSourceRegistrationAbsent(t, ctx, platform, batchFirst)
+}
+
+func TestGORMScopedSourceWriterUsesCallerOwnedUnitOfWork(t *testing.T) {
+	fixture := testdb.Require(t, testdb.Config{
+		ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
+		Availability:     testdb.FailWhenUnavailable,
+		MaxConns:         16,
+	})
+	platform := fixture.Pool()
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+	repository, err := workspacepostgres.NewGORMRepository(platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := workspaceapplication.ScopedSourceWriter(repository)
+	uow, err := platform.UnitOfWork()
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaceID := mustID(t, "65000000-0000-4000-8000-000000000001")
+	now := time.Date(2026, 7, 19, 8, 0, 0, 0, time.UTC)
+	seedWorkspaceForSourceRegistration(t, ctx, repository, workspaceID, "/tmp/scoped-source-writer", now)
+
+	committed := workspaceSourceRegistration(workspaceID, "66000000", "sources/committed.md", strings.Repeat("d", 64), now)
+	var committedScope foundation.TransactionScope
+	err = uow.Within(ctx, foundation.TransactionOptions{}, func(callbackCtx context.Context, scope foundation.TransactionScope) error {
+		committedScope = scope
+		result, writeErr := writer.RegisterSourceVersionScoped(callbackCtx, scope, committed)
+		if writeErr != nil {
+			return writeErr
+		}
+		if !result.Created || !result.ArtifactCreated {
+			t.Fatalf("scoped committed registration = %#v", result)
+		}
+		transaction, unwrapErr := platformpostgres.SQLTransaction(scope)
+		if unwrapErr != nil {
+			return unwrapErr
+		}
+		var transactionCount int
+		if scanErr := transaction.QueryRowContext(callbackCtx, `SELECT count(*) FROM core.source_version WHERE id=$1`, string(committed.Version.ID)).Scan(&transactionCount); scanErr != nil {
+			return scanErr
+		}
+		if transactionCount != 1 {
+			t.Fatalf("caller transaction cannot see scoped write: count=%d", transactionCount)
+		}
+		var rootCount int
+		if scanErr := platform.DB().QueryRow(callbackCtx, `SELECT count(*) FROM core.source_version WHERE id=$1`, string(committed.Version.ID)).Scan(&rootCount); scanErr != nil {
+			return scanErr
+		}
+		if rootCount != 0 {
+			t.Fatalf("scoped writer committed caller transaction: root count=%d", rootCount)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSourceRegistrationPresent(t, ctx, platform, committed)
+
+	rollbackCause := errors.New("rollback scoped source registration")
+	rolledBack := workspaceSourceRegistration(workspaceID, "67000000", "sources/rolled-back.md", strings.Repeat("e", 64), now.Add(time.Minute))
+	err = uow.Within(ctx, foundation.TransactionOptions{}, func(callbackCtx context.Context, scope foundation.TransactionScope) error {
+		if _, writeErr := writer.RegisterSourceVersionScoped(callbackCtx, scope, rolledBack); writeErr != nil {
+			return writeErr
+		}
+		return rollbackCause
+	})
+	if !errors.Is(err, rollbackCause) {
+		t.Fatalf("scoped rollback error = %v", err)
+	}
+	assertSourceRegistrationAbsent(t, ctx, platform, rolledBack)
+
+	stale := workspaceSourceRegistration(workspaceID, "68000000", "sources/stale.md", strings.Repeat("f", 64), now.Add(2*time.Minute))
+	_, err = writer.RegisterSourceVersionScoped(ctx, committedScope, stale)
+	requireRepositoryErrorCode(t, err, "WORKSPACE_DATABASE_UNAVAILABLE")
+	_, err = writer.RegisterSourceVersionScoped(ctx, invalidWorkspaceTransactionScope{}, stale)
+	requireRepositoryErrorCode(t, err, "WORKSPACE_DATABASE_UNAVAILABLE")
+	_, err = writer.RegisterSourceVersionScoped(ctx, nil, stale)
+	requireRepositoryErrorCode(t, err, "WORKSPACE_DATABASE_UNAVAILABLE")
+	assertSourceRegistrationAbsent(t, ctx, platform, stale)
+	requireWorkspacePoolReleased(t, platform)
+}
+
+func TestRepositoryPreservesContextCauseAndReleasesConnections(t *testing.T) {
+	runWorkspaceIntegrationVariants(t, testRepositoryPreservesContextCauseAndReleasesConnections)
+}
+
+func testRepositoryPreservesContextCauseAndReleasesConnections(t *testing.T, platform *platformpostgres.Pool, ctx context.Context, repository workspaceIntegrationRepository) {
+	t.Helper()
+	workspaceID := mustID(t, "69000000-0000-4000-8000-000000000001")
+	now := time.Date(2026, 7, 20, 8, 0, 0, 0, time.UTC)
+	seedWorkspaceForSourceRegistration(t, ctx, repository, workspaceID, "/tmp/workspace-context", now)
+
+	deadlineCause := errors.New("workspace caller deadline budget expired")
+	deadlineCtx, deadlineCancel := context.WithDeadlineCause(ctx, time.Unix(0, 0), deadlineCause)
+	defer deadlineCancel()
+	roots, err := repository.ListWorkspaceRoots(deadlineCtx)
+	if err == nil || len(roots) != 0 || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("deadline ListWorkspaceRoots() roots=%#v error=%v", roots, err)
+	}
+	if _, isGORM := repository.(*workspacepostgres.GORMRepository); isGORM && !errors.Is(err, deadlineCause) {
+		t.Fatalf("GORM deadline error lost caller cause: %v", err)
+	}
+
+	blocker, err := platform.DB().Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = blocker.Rollback(context.Background()) }()
+	if _, err := blocker.Exec(ctx, `LOCK TABLE core.source IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatal(err)
+	}
+
+	registration := workspaceSourceRegistration(workspaceID, "69100000", "sources/canceled.md", strings.Repeat("1", 64), now)
+	cancelCause := errors.New("workspace caller stopped waiting")
+	canceledCtx, cancel := context.WithCancelCause(ctx)
+	errorCh := make(chan error, 1)
+	go func() {
+		_, registerErr := repository.RegisterSourceVersions(canceledCtx, []domain.SourceRegistration{registration})
+		errorCh <- registerErr
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for platform.DB().Stat().AcquiredConns() < 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if acquired := platform.DB().Stat().AcquiredConns(); acquired < 2 {
+		cancel(cancelCause)
+		t.Fatalf("blocked Workspace registration acquired connections=%d want at least 2", acquired)
+	}
+	time.Sleep(50 * time.Millisecond)
+	cancel(cancelCause)
+	select {
+	case err = <-errorCh:
+	case <-time.After(5 * time.Second):
+		_ = blocker.Rollback(context.Background())
+		t.Fatal("blocked Workspace registration did not stop after cancellation")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled RegisterSourceVersions() error=%v", err)
+	}
+	if _, isGORM := repository.(*workspacepostgres.GORMRepository); isGORM && !errors.Is(err, cancelCause) {
+		t.Fatalf("GORM canceled error lost caller cause: %v", err)
+	}
+	if err := blocker.Rollback(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	assertSourceRegistrationAbsent(t, ctx, platform, registration)
+	var one int
+	if err := platform.DB().QueryRow(ctx, `SELECT 1`).Scan(&one); err != nil || one != 1 {
+		t.Fatalf("pool unusable after canceled Workspace transaction value=%d error=%v", one, err)
+	}
+	requireWorkspacePoolReleased(t, platform)
+}
+
+type invalidWorkspaceTransactionScope struct{}
+
+func (invalidWorkspaceTransactionScope) TransactionScope() {}
+
+func seedWorkspaceForSourceRegistration(t *testing.T, ctx context.Context, repository domain.Repository, workspaceID foundation.ID, root string, now time.Time) {
+	t.Helper()
+	_, err := repository.CreateWorkspace(ctx, domain.Workspace{
+		ID: workspaceID, Name: "Source registration", RootPath: root,
+		Git:    domain.GitBaseline{RepositoryPath: root, CheckedAt: now},
+		Status: domain.WorkspaceStatusInactive, Version: 1, CreatedAt: now, UpdatedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func workspaceSourceRegistration(workspaceID foundation.ID, prefix, location, contentHash string, now time.Time) domain.SourceRegistration {
+	return domain.SourceRegistration{
+		Source: domain.Source{
+			ID: foundation.ID(prefix + "-0000-4000-8000-000000000001"), WorkspaceID: workspaceID,
+			Type: "markdown", LogicalName: location, OriginalLocation: location, CreatedAt: now,
+		},
+		Artifact: domain.ContentArtifact{
+			ID: foundation.ID(prefix + "-0000-4000-8000-000000000002"), WorkspaceID: workspaceID,
+			ContentHash: contentHash, ByteSize: 12, ManagedLocation: ".knowledge/sources/" + contentHash, CreatedAt: now,
+		},
+		Version: domain.SourceVersion{
+			ID: foundation.ID(prefix + "-0000-4000-8000-000000000003"), ContentHash: contentHash,
+			ByteSize: 12, MediaType: "text/markdown", OriginalContentLocation: location,
+			SecurityStatus: "pending", CapturedAt: now,
+		},
+	}
+}
+
+func assertSourceRegistrationPresent(t *testing.T, ctx context.Context, platform *platformpostgres.Pool, registration domain.SourceRegistration) {
+	t.Helper()
+	var count int
+	err := platform.DB().QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM core.source WHERE id=$1) +
+		(SELECT count(*) FROM core.content_artifact WHERE id=$2) +
+		(SELECT count(*) FROM core.source_version WHERE id=$3)`,
+		string(registration.Source.ID), string(registration.Artifact.ID), string(registration.Version.ID)).Scan(&count)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 3 {
+		t.Fatalf("source registration persisted row count=%d want=3", count)
+	}
+}
+
+func assertSourceRegistrationAbsent(t *testing.T, ctx context.Context, platform *platformpostgres.Pool, registration domain.SourceRegistration) {
+	t.Helper()
+	var count int
+	err := platform.DB().QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM core.source WHERE id=$1) +
+		(SELECT count(*) FROM core.content_artifact WHERE id=$2) +
+		(SELECT count(*) FROM core.source_version WHERE id=$3)`,
+		string(registration.Source.ID), string(registration.Artifact.ID), string(registration.Version.ID)).Scan(&count)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("source registration leaked %d rows", count)
+	}
+}
+
+func requireWorkspacePoolReleased(t *testing.T, platform *platformpostgres.Pool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for platform.DB().Stat().AcquiredConns() != 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if acquired := platform.DB().Stat().AcquiredConns(); acquired != 0 {
+		t.Fatalf("shared Workspace pool acquired connections=%d want=0", acquired)
 	}
 }
 

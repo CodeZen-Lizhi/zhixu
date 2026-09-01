@@ -78,7 +78,7 @@ FROM ops.workspace_runtime ORDER BY role`)
 			runtimeRows.Close()
 			return domain.ControlSnapshot{}, classifyControl(scanErr, domain.ErrorCodeControlDatabaseUnavailable)
 		}
-		runtime.Fresh = !runtime.HeartbeatAt.Before(now.Add(-freshWithin))
+		runtime.Fresh = runtimeHeartbeatFresh(runtime.HeartbeatAt, now, freshWithin)
 		runtimes = append(runtimes, runtime)
 	}
 	if err := runtimeRows.Err(); err != nil {

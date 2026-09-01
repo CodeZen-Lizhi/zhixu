@@ -1,30 +1,31 @@
 //go:build integration
 
-package workspacepostgres
+package workspacepostgres_test
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"net/url"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workspace/domain"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestRepositoryGitCaptureCheckpointReplayOrderAndSourceReappearance(t *testing.T) {
-	repository, database, ctx := newGitCaptureTestRepository(t)
+	runWorkspaceIntegrationVariants(t, testRepositoryGitCaptureCheckpointReplayOrderAndSourceReappearance)
+}
+
+func testRepositoryGitCaptureCheckpointReplayOrderAndSourceReappearance(t *testing.T, platform *platformpostgres.Pool, ctx context.Context, repository workspaceIntegrationRepository) {
+	t.Helper()
+	database := platform.DB()
 	now := time.Now().UTC().Add(-10 * time.Minute).Truncate(time.Microsecond)
 	workspaceID := foundation.ID("71000000-0000-4000-8000-000000000001")
-	seedGitCaptureWorkspaceAndRuns(t, ctx, database.DB(), workspaceID, now)
+	seedGitCaptureWorkspaceAndRuns(t, ctx, database, workspaceID, now)
 	firstRunID := foundation.ID("72000000-0000-4000-8000-000000000001")
 	firstBefore := strings.Repeat("a", 40)
 	firstAfter := strings.Repeat("b", 40)
@@ -85,6 +86,112 @@ func TestRepositoryGitCaptureCheckpointReplayOrderAndSourceReappearance(t *testi
 	}
 }
 
+func TestRepositoryGitCaptureSerializesConcurrentCheckpointUpdates(t *testing.T) {
+	runWorkspaceIntegrationVariants(t, testRepositoryGitCaptureSerializesConcurrentCheckpointUpdates)
+}
+
+func testRepositoryGitCaptureSerializesConcurrentCheckpointUpdates(t *testing.T, platform *platformpostgres.Pool, ctx context.Context, repository workspaceIntegrationRepository) {
+	t.Helper()
+	database := platform.DB()
+	now := time.Date(2026, 7, 21, 8, 0, 0, 0, time.UTC)
+	workspaceID := foundation.ID("71000000-0000-4000-8000-000000000001")
+	seedGitCaptureWorkspaceAndRuns(t, ctx, database, workspaceID, now)
+	before := strings.Repeat("a", 40)
+	batches := []domain.GitCaptureBatch{
+		{
+			WorkspaceID: workspaceID, RunID: foundation.ID("72000000-0000-4000-8000-000000000001"),
+			BeforeCommit: before, AfterCommit: strings.Repeat("b", 40), RequestHash: strings.Repeat("3", 64),
+			Registrations: []domain.SourceRegistration{gitCaptureRegistration(workspaceID, "75000000", "concurrent-one.md", strings.Repeat("4", 64), now)},
+			ObservedAt:    now,
+		},
+		{
+			WorkspaceID: workspaceID, RunID: foundation.ID("72000000-0000-4000-8000-000000000002"),
+			BeforeCommit: before, AfterCommit: strings.Repeat("c", 40), RequestHash: strings.Repeat("5", 64),
+			Registrations: []domain.SourceRegistration{gitCaptureRegistration(workspaceID, "76000000", "concurrent-two.md", strings.Repeat("6", 64), now.Add(time.Second))},
+			ObservedAt:    now.Add(time.Second),
+		},
+	}
+	type captureResult struct {
+		batch  domain.GitCaptureBatch
+		result domain.GitCaptureBatchResult
+		err    error
+	}
+	start := make(chan struct{})
+	results := make(chan captureResult, len(batches))
+	for _, batch := range batches {
+		batch := batch
+		go func() {
+			<-start
+			result, err := repository.ApplyGitCaptureBatch(ctx, batch)
+			results <- captureResult{batch: batch, result: result, err: err}
+		}()
+	}
+	close(start)
+	var winner captureResult
+	losers := 0
+	for range batches {
+		result := <-results
+		if result.err == nil {
+			winner = result
+			continue
+		}
+		losers++
+		if len(result.result.Registrations) != 0 || len(result.result.RemovedSourceIDs) != 0 || result.result.Replayed {
+			t.Fatalf("failed concurrent capture returned partial result = %#v", result.result)
+		}
+		requireGitCaptureErrorCode(t, result.err, "GIT_CAPTURE_OUT_OF_ORDER")
+	}
+	if winner.batch.RunID == "" || losers != 1 || len(winner.result.Registrations) != 1 || winner.result.Replayed {
+		t.Fatalf("concurrent capture winner=%#v losers=%d", winner, losers)
+	}
+
+	var completed, inflightRunID, inflightBefore, inflightAfter, inflightRequestHash string
+	var version int64
+	if err := database.QueryRow(ctx, `SELECT completed_head_oid,inflight_run_id::text,inflight_before_oid,
+		inflight_after_oid,inflight_request_hash,version
+		FROM core.workspace_git_capture_checkpoint WHERE workspace_id=$1`, string(workspaceID)).Scan(
+		&completed, &inflightRunID, &inflightBefore, &inflightAfter, &inflightRequestHash, &version,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if completed != before || inflightRunID != string(winner.batch.RunID) || inflightBefore != winner.batch.BeforeCommit ||
+		inflightAfter != winner.batch.AfterCommit || inflightRequestHash != winner.batch.RequestHash || version != 1 {
+		t.Fatalf("concurrent checkpoint=%q/%q/%q/%q/%q/%d winner=%#v", completed, inflightRunID,
+			inflightBefore, inflightAfter, inflightRequestHash, version, winner.batch)
+	}
+	var sourceCount, artifactCount, versionCount int
+	if err := database.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM core.source WHERE workspace_id=$1),
+		(SELECT count(*) FROM core.content_artifact WHERE workspace_id=$1),
+		(SELECT count(*) FROM core.source_version WHERE workspace_id=$1)`, string(workspaceID)).Scan(
+		&sourceCount, &artifactCount, &versionCount,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if sourceCount != 1 || artifactCount != 1 || versionCount != 1 {
+		t.Fatalf("concurrent capture rows source/artifact/version=%d/%d/%d", sourceCount, artifactCount, versionCount)
+	}
+
+	if err := repository.CompleteGitCaptureBatch(ctx, workspaceID, winner.batch.RunID, winner.batch.BeforeCommit, winner.batch.AfterCommit); err != nil {
+		t.Fatal(err)
+	}
+	var lastRunID, lastBefore, lastAfter, lastRequestHash string
+	var inflightCleared bool
+	if err := database.QueryRow(ctx, `SELECT completed_head_oid,last_run_id::text,last_before_oid,last_after_oid,last_request_hash,
+		inflight_run_id IS NULL AND inflight_before_oid IS NULL AND inflight_after_oid IS NULL AND inflight_request_hash IS NULL
+		FROM core.workspace_git_capture_checkpoint WHERE workspace_id=$1`, string(workspaceID)).Scan(
+		&completed, &lastRunID, &lastBefore, &lastAfter, &lastRequestHash, &inflightCleared,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if completed != winner.batch.AfterCommit || lastRunID != string(winner.batch.RunID) || lastBefore != winner.batch.BeforeCommit ||
+		lastAfter != winner.batch.AfterCommit || lastRequestHash != winner.batch.RequestHash || !inflightCleared {
+		t.Fatalf("completed concurrent checkpoint=%q/%q/%q/%q/%q cleared=%t", completed, lastRunID,
+			lastBefore, lastAfter, lastRequestHash, inflightCleared)
+	}
+	requireWorkspacePoolReleased(t, platform)
+}
+
 func gitCaptureRegistration(workspaceID foundation.ID, prefix, location, contentHash string, now time.Time) domain.SourceRegistration {
 	return domain.SourceRegistration{
 		Source:   domain.Source{ID: foundation.ID(prefix + "-0000-4000-8000-000000000001"), WorkspaceID: workspaceID, Type: "markdown", LogicalName: "guide", OriginalLocation: location, CreatedAt: now},
@@ -130,59 +237,4 @@ func requireGitCaptureErrorCode(t *testing.T, err error, code string) {
 	if !errors.As(err, &classified) || classified.Code != code {
 		t.Fatalf("error = %#v, want code %q", err, code)
 	}
-}
-
-func newGitCaptureTestRepository(t *testing.T) (*Repository, *platformpostgres.Pool, context.Context) {
-	t.Helper()
-	baseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
-	if baseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL for Git capture integration tests")
-	}
-	ctx := context.Background()
-	parsed, err := url.Parse(baseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	admin, err := pgxpool.New(ctx, baseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	name := fmt.Sprintf("zhixu_git_capture_%d", time.Now().UnixNano())
-	identifier := pgx.Identifier{name}.Sanitize()
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+identifier); err != nil {
-		admin.Close()
-		t.Fatal(err)
-	}
-	parsed.Path = "/" + name
-	databaseURL := parsed.String()
-	migrationPool, err := platformpostgres.OpenMigration(ctx, databaseURL, 4, 0)
-	if err == nil {
-		runner, runnerErr := platformmigration.NewAtlasEmbeddedRunner(migrationPool.DB())
-		if runnerErr == nil {
-			runnerErr = runner.Up(ctx)
-		}
-		migrationPool.Close()
-		err = runnerErr
-	}
-	if err != nil {
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-		t.Fatal(err)
-	}
-	database, err := platformpostgres.Open(ctx, databaseURL, 4, 0)
-	if err != nil {
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		database.Close()
-		_, _ = admin.Exec(context.Background(), "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-	})
-	repository, err := NewRepository(database.DB())
-	if err != nil {
-		t.Fatal(err)
-	}
-	return repository, database, ctx
 }

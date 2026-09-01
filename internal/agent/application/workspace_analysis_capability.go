@@ -82,22 +82,27 @@ type WorkspaceAnalysisWorkerCapability struct {
 	UpdatedAt   time.Time
 }
 
-// WorkspaceAnalysisCapabilityRepository 区分 Worker 自管广告事务与 API 调用方事务中的 ready 检查。
-type WorkspaceAnalysisCapabilityRepository interface {
+// WorkspaceAnalysisCapabilityLifecyclePort 是 Worker 自管广告事务所需的最小生命周期依赖。
+type WorkspaceAnalysisCapabilityLifecyclePort interface {
 	AdvertiseWorkspaceAnalysisWorker(context.Context, WorkspaceAnalysisWorkerAdvertisement) (WorkspaceAnalysisWorkerCapability, error)
 	HeartbeatWorkspaceAnalysisWorker(context.Context, WorkspaceAnalysisWorkerAdvertisement) (WorkspaceAnalysisWorkerCapability, error)
 	ReleaseWorkspaceAnalysisWorker(context.Context, WorkspaceAnalysisWorkerAdvertisement) (WorkspaceAnalysisWorkerCapability, error)
+}
+
+// WorkspaceAnalysisCapabilityRepository 保留 legacy caller-owned transaction ready 检查兼容。
+type WorkspaceAnalysisCapabilityRepository interface {
+	WorkspaceAnalysisCapabilityLifecyclePort
 	RequireWorkspaceAnalysisWorkerReadyTx(context.Context, any, WorkspaceAnalysisCapabilityContract) error
 }
 
 // WorkspaceAnalysisCapabilityService 是 Worker 生命周期调用的窄应用服务。
 // Repository 自管三种生命周期写入的短事务，避免把 Worker 心跳塞进调用方事务。
 type WorkspaceAnalysisCapabilityService struct {
-	repository WorkspaceAnalysisCapabilityRepository
+	repository WorkspaceAnalysisCapabilityLifecyclePort
 }
 
 // NewWorkspaceAnalysisCapabilityService 创建默认关闭的 Worker 广告服务。
-func NewWorkspaceAnalysisCapabilityService(repository WorkspaceAnalysisCapabilityRepository) (*WorkspaceAnalysisCapabilityService, error) {
+func NewWorkspaceAnalysisCapabilityService(repository WorkspaceAnalysisCapabilityLifecyclePort) (*WorkspaceAnalysisCapabilityService, error) {
 	if isNilPort(repository) {
 		return nil, workspaceAnalysisCapabilityError(
 			foundation.ErrorDependencyUnavailable,

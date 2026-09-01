@@ -4,44 +4,48 @@ package postgres
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	agentpostgres "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/postgres"
+	agentapplication "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
 	auditpostgres "github.com/CodeZen-Lizhi/zhixu/internal/audit/adapter/postgres"
 	auditapplication "github.com/CodeZen-Lizhi/zhixu/internal/audit/application"
 	auditdomain "github.com/CodeZen-Lizhi/zhixu/internal/audit/domain"
 	conversationworkflow "github.com/CodeZen-Lizhi/zhixu/internal/conversation/workflow"
 	eventspostgres "github.com/CodeZen-Lizhi/zhixu/internal/events/adapter/postgres"
+	eventsdomain "github.com/CodeZen-Lizhi/zhixu/internal/events/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	"github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/catalog"
 	toolsapplication "github.com/CodeZen-Lizhi/zhixu/internal/tools/application"
 	toolsdomain "github.com/CodeZen-Lizhi/zhixu/internal/tools/domain"
+	workflowpostgres "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/postgres"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestWorkspaceAnalysisToolRefusalAuditIsAtomicReplayableAndBudgetFree(t *testing.T) {
-	pool, ctx := newToolRepositoryIntegrationPool(t)
+	testWorkspaceAnalysisToolRefusalVariants(t, false, testWorkspaceAnalysisToolRefusalAuditIsAtomicReplayableAndBudgetFree)
+}
+
+func testWorkspaceAnalysisToolRefusalAuditIsAtomicReplayableAndBudgetFree(
+	t *testing.T,
+	platform *platformpostgres.Pool,
+	ctx context.Context,
+	harness workspaceAnalysisToolRefusalIntegrationHarness,
+) {
+	pool := platform.DB()
 	fixture := seedWorkspaceAnalysisToolRefusalRuntime(t, ctx, pool)
-	events, err := eventspostgres.NewStore(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
-	auditStore, err := auditpostgres.NewStore(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
-	auditRecorder, err := auditapplication.NewRecorder(auditStore)
-	if err != nil {
-		t.Fatal(err)
-	}
-	repository, err := NewRepositoryWithWorkspaceAnalysisEventsAndAudit(pool, events, auditRecorder)
-	if err != nil {
-		t.Fatal(err)
-	}
+	repository := harness.repository
 	command := toolsapplication.RecordWorkspaceAnalysisToolRefusalCommand{
 		RefusalID: fixture.refusalID, Identity: fixture.identity,
 		OperationKey: fixture.operationKey, ErrorCode: "TOOL_NOT_ALLOWED",
@@ -72,7 +76,7 @@ func TestWorkspaceAnalysisToolRefusalAuditIsAtomicReplayableAndBudgetFree(t *tes
 		t.Fatalf("facts refusal=%d operation=%d reservation=%d call=%d budget=(%d,%d)", refusalCount, operationCount, reservationCount, callCount, reservedTools, settledTools)
 	}
 
-	auditEvents, err := auditStore.List(ctx, auditdomain.ListQuery{WorkspaceID: &fixture.identity.WorkspaceID, Limit: 10})
+	auditEvents, err := harness.audit.List(ctx, auditdomain.ListQuery{WorkspaceID: &fixture.identity.WorkspaceID, Limit: 10})
 	if err != nil || len(auditEvents) != 1 {
 		t.Fatalf("audit=%+v err=%v", auditEvents, err)
 	}
@@ -112,25 +116,18 @@ func TestWorkspaceAnalysisToolRefusalAuditIsAtomicReplayableAndBudgetFree(t *tes
 }
 
 func TestWorkspaceAnalysisToolRefusalAuditRecoversAfterCommitResponseLoss(t *testing.T) {
-	pool, ctx := newToolRepositoryIntegrationPool(t)
+	testWorkspaceAnalysisToolRefusalVariants(t, true, testWorkspaceAnalysisToolRefusalAuditRecoversAfterCommitResponseLoss)
+}
+
+func testWorkspaceAnalysisToolRefusalAuditRecoversAfterCommitResponseLoss(
+	t *testing.T,
+	platform *platformpostgres.Pool,
+	ctx context.Context,
+	harness workspaceAnalysisToolRefusalIntegrationHarness,
+) {
+	pool := platform.DB()
 	fixture := seedWorkspaceAnalysisToolRefusalRuntime(t, ctx, pool)
-	events, err := eventspostgres.NewStore(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
-	auditStore, err := auditpostgres.NewStore(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
-	auditRecorder, err := auditapplication.NewRecorder(auditStore)
-	if err != nil {
-		t.Fatal(err)
-	}
-	repository, err := NewRepositoryWithWorkspaceAnalysisEventsAndAudit(&commitResponseLossDB{pool: pool}, events, auditRecorder)
-	if err != nil {
-		t.Fatal(err)
-	}
-	result, err := repository.RecordWorkspaceAnalysisToolRefusal(ctx, toolsapplication.RecordWorkspaceAnalysisToolRefusalCommand{
+	result, err := harness.repository.RecordWorkspaceAnalysisToolRefusal(ctx, toolsapplication.RecordWorkspaceAnalysisToolRefusalCommand{
 		RefusalID: fixture.refusalID, Identity: fixture.identity, OperationKey: fixture.operationKey, ErrorCode: "TOOL_NOT_ALLOWED",
 	})
 	if err != nil || !result.Replayed || result.RefusalID != fixture.refusalID || result.ErrorCode != "TOOL_NOT_ALLOWED" {
@@ -147,6 +144,373 @@ func TestWorkspaceAnalysisToolRefusalAuditRecoversAfterCommitResponseLoss(t *tes
 	if facts != 1 || audits != 1 {
 		t.Fatalf("response-loss persisted facts=%d audits=%d", facts, audits)
 	}
+}
+
+func TestWorkspaceAnalysisToolOperationParticipantAndAuthorityParityIntegration(t *testing.T) {
+	testWorkspaceAnalysisToolRefusalVariants(t, false, func(
+		t *testing.T,
+		platform *platformpostgres.Pool,
+		ctx context.Context,
+		harness workspaceAnalysisToolRefusalIntegrationHarness,
+	) {
+		pool := platform.DB()
+		fixture := seedWorkspaceAnalysisToolRefusalRuntime(t, ctx, pool)
+		definition, err := workspaceAnalysisBuiltinDefinition(workspaceAnalysisGitStatusRef)
+		if err != nil {
+			t.Fatal(err)
+		}
+		command := workspaceAnalysisToolOperationIntegrationCommand(fixture, definition)
+		authorized, err := harness.repository.AuthorizeWorkspaceAnalysisToolCall(ctx, command)
+		if err != nil || authorized.Disposition != toolsapplication.WorkspaceAnalysisToolAuthorizationCreated ||
+			authorized.OperationID != command.OperationID || authorized.ReservationID != command.ReservationID ||
+			authorized.Call.ID != command.Call.ID || authorized.Call.Status != toolsdomain.CallStarted {
+			t.Fatalf("authorized=%+v err=%v", authorized, err)
+		}
+		reconciled, err := harness.repository.AuthorizeWorkspaceAnalysisToolCall(ctx, command)
+		if err != nil || reconciled.Disposition != toolsapplication.WorkspaceAnalysisToolAuthorizationReconcile ||
+			reconciled.Call.ID != authorized.Call.ID || reconciled.OperationID != authorized.OperationID ||
+			reconciled.ReservationID != authorized.ReservationID {
+			t.Fatalf("reconciled=%+v err=%v", reconciled, err)
+		}
+
+		output := json.RawMessage(workspaceAnalysisToolOperationIntegrationOutput)
+		digest := sha256.Sum256(output)
+		completedAt := time.Now().UTC().Truncate(time.Microsecond)
+		completed := authorized.Call
+		completed.Status = toolsdomain.CallSucceeded
+		completed.ResponseHash = fmt.Sprintf("%x", digest)
+		completed.ResponseBytes = int64(len(output))
+		completed.ResponseSummary = json.RawMessage(`{"clean":true}`)
+		completed.Version = authorized.Call.Version + 1
+		completed.CompletedAt = &completedAt
+		completed.DurationMillis = max(0, completedAt.Sub(completed.StartedAt).Milliseconds())
+		completion := toolsapplication.FinalizeCallWithReceiptCommand{
+			ExpectedVersion: authorized.Call.Version,
+			Identity:        command.Identity,
+			Call:            completed,
+			Definition:      definition,
+			ReceiptID:       foundation.ID("92000000-0000-4000-8000-000000000014"),
+			Output:          output,
+		}
+		finalized, err := harness.repository.FinalizeCallWithReceipt(ctx, completion)
+		if err != nil || finalized.Replayed || finalized.Call.Status != toolsdomain.CallSucceeded ||
+			finalized.Receipt.ID != completion.ReceiptID || finalized.OperationID != authorized.OperationID {
+			t.Fatalf("finalized=%+v receipt=%+v err=%v", finalized, finalized.Receipt, err)
+		}
+		replayed, err := harness.repository.FinalizeCallWithReceipt(ctx, completion)
+		if err != nil || !replayed.Replayed || replayed.Call.ID != finalized.Call.ID || replayed.Receipt.ID != finalized.Receipt.ID {
+			t.Fatalf("completion replay=%+v err=%v", replayed, err)
+		}
+		loaded, err := harness.repository.LoadResultReceipt(ctx, toolsapplication.LoadResultReceiptCommand{
+			Call: finalized.Call, Definition: definition,
+		})
+		if err != nil || loaded.ID != finalized.Receipt.ID || loaded.OutputHash != finalized.Receipt.OutputHash {
+			t.Fatalf("loaded receipt=%+v err=%v", loaded, err)
+		}
+
+		var authority agentapplication.WorkspaceAnalysisSuccessfulToolAuthority
+		var found bool
+		err = harness.unitOfWork.Within(ctx, foundation.TransactionOptions{}, func(callbackCtx context.Context, scope foundation.TransactionScope) error {
+			var loadErr error
+			authority, found, loadErr = harness.authority.LoadWorkspaceAnalysisSuccessfulToolAuthorityScoped(
+				callbackCtx,
+				scope,
+				agentapplication.WorkspaceAnalysisSuccessfulToolAuthorityQuery{
+					WorkspaceID: fixture.identity.WorkspaceID, WorkflowRunID: fixture.identity.WorkflowRunID,
+					OperationKey: fixture.operationKey,
+				},
+			)
+			return loadErr
+		})
+		if err != nil || !found || authority.Validate() != nil || authority.OperationID != authorized.OperationID ||
+			authority.ReservationID != authorized.ReservationID || authority.ToolCallID != authorized.Call.ID ||
+			authority.ResultID != finalized.Receipt.ID || authority.ResultHash != finalized.Receipt.OutputHash {
+			t.Fatalf("authority=%+v found=%t err=%v", authority, found, err)
+		}
+
+		var callStatus, reservationStatus, operationStatus string
+		var resultID string
+		var reservedTools, settledTools, requestedEvents, completedEvents int
+		if err := pool.QueryRow(ctx, `SELECT call.status,reservation.status,operation.status,operation.result_id::text,
+			analysis.reserved_tool_calls,analysis.settled_tool_calls,
+			(SELECT count(*) FROM ops.server_event WHERE source_event_ref=$2),
+			(SELECT count(*) FROM ops.server_event WHERE source_event_ref=$3)
+			FROM workflow.tool_call call
+			JOIN agent.workspace_analysis_budget_reservation reservation ON reservation.tool_call_id=call.id
+			JOIN agent.workspace_analysis_operation operation ON operation.id=reservation.operation_id
+			JOIN agent.workspace_analysis_run analysis ON analysis.id=reservation.analysis_run_id
+			WHERE call.id=$1`, string(authorized.Call.ID),
+			"workspace_analysis.tool_requested:"+string(authorized.OperationID)+":v1",
+			"workspace_analysis.tool_completed:"+string(authorized.OperationID)+":v1",
+		).Scan(&callStatus, &reservationStatus, &operationStatus, &resultID, &reservedTools, &settledTools, &requestedEvents, &completedEvents); err != nil {
+			t.Fatal(err)
+		}
+		if callStatus != "SUCCEEDED" || reservationStatus != "SETTLED" || operationStatus != "SUCCEEDED" ||
+			resultID != string(finalized.Receipt.ID) || reservedTools != 0 || settledTools != 1 ||
+			requestedEvents != 1 || completedEvents != 1 {
+			t.Fatalf("closure call=%s reservation=%s operation=%s result=%s budget=(%d,%d) events=(%d,%d)",
+				callStatus, reservationStatus, operationStatus, resultID, reservedTools, settledTools, requestedEvents, completedEvents)
+		}
+	})
+}
+
+func TestWorkspaceAnalysisToolOperationEventFailureRollsBackAllOwnersIntegration(t *testing.T) {
+	testWorkspaceAnalysisToolRefusalVariants(t, false, func(
+		t *testing.T,
+		platform *platformpostgres.Pool,
+		ctx context.Context,
+		harness workspaceAnalysisToolRefusalIntegrationHarness,
+	) {
+		pool := platform.DB()
+		fixture := seedWorkspaceAnalysisToolRefusalRuntime(t, ctx, pool)
+		definition, err := workspaceAnalysisBuiltinDefinition(workspaceAnalysisGitStatusRef)
+		if err != nil {
+			t.Fatal(err)
+		}
+		failure := &workspaceAnalysisToolOperationFailingEventAppender{
+			err: errors.New("workspace analysis requested event failed"),
+		}
+		switch repository := harness.repository.(type) {
+		case *Repository:
+			repository.events = failure
+		case *GORMWorkspaceAnalysisRepository:
+			repository.events = failure
+		default:
+			t.Fatalf("unsupported repository %T", repository)
+		}
+		command := workspaceAnalysisToolOperationIntegrationCommand(fixture, definition)
+		if _, err := harness.repository.AuthorizeWorkspaceAnalysisToolCall(ctx, command); err == nil {
+			t.Fatal("authorization succeeded after requested Event failure")
+		}
+
+		var operationCount, reservationCount, callCount, eventCount, reservedTools, settledTools int
+		if err := pool.QueryRow(ctx, `SELECT
+			(SELECT count(*) FROM agent.workspace_analysis_operation WHERE analysis_run_id=$1),
+			(SELECT count(*) FROM agent.workspace_analysis_budget_reservation WHERE analysis_run_id=$1),
+			(SELECT count(*) FROM workflow.tool_call WHERE workflow_run_id=$2),
+			(SELECT count(*) FROM ops.server_event WHERE resource_ref=$3),
+			reserved_tool_calls,settled_tool_calls
+			FROM agent.workspace_analysis_run WHERE id=$1`,
+			string(fixture.operationKey.AnalysisRunID), string(fixture.identity.WorkflowRunID),
+			"workspace_analysis:"+string(fixture.operationKey.AnalysisRunID),
+		).Scan(&operationCount, &reservationCount, &callCount, &eventCount, &reservedTools, &settledTools); err != nil {
+			t.Fatal(err)
+		}
+		if operationCount != 0 || reservationCount != 0 || callCount != 0 || eventCount != 0 || reservedTools != 0 || settledTools != 0 {
+			t.Fatalf("partial rollback operation=%d reservation=%d call=%d event=%d budget=(%d,%d)",
+				operationCount, reservationCount, callCount, eventCount, reservedTools, settledTools)
+		}
+	})
+}
+
+type workspaceAnalysisToolOperationFailingEventAppender struct{ err error }
+
+func (appender *workspaceAnalysisToolOperationFailingEventAppender) AppendTx(
+	context.Context,
+	any,
+	eventsdomain.AppendRequest,
+) (eventsdomain.ServerEvent, bool, error) {
+	return eventsdomain.ServerEvent{}, false, appender.err
+}
+
+func (appender *workspaceAnalysisToolOperationFailingEventAppender) AppendScoped(
+	context.Context,
+	foundation.TransactionScope,
+	eventsdomain.AppendRequest,
+) (eventsdomain.ServerEvent, bool, error) {
+	return eventsdomain.ServerEvent{}, false, appender.err
+}
+
+const workspaceAnalysisToolOperationIntegrationOutput = `{"branch":"main","clean":true,"conflict_count":0,"head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","object_format":"sha1","staged_count":0,"unstaged_count":0,"untracked_count":0}`
+
+func workspaceAnalysisToolOperationIntegrationCommand(
+	fixture workspaceAnalysisToolRefusalFixture,
+	definition toolsdomain.Definition,
+) toolsapplication.AuthorizeWorkspaceAnalysisToolCallCommand {
+	tool := definition.Ref
+	inputSchema := definition.InputSchema
+	outputSchema := definition.OutputSchema
+	return toolsapplication.AuthorizeWorkspaceAnalysisToolCallCommand{
+		Identity: fixture.identity, OperationKey: fixture.operationKey,
+		OperationID:   foundation.ID("92000000-0000-4000-8000-000000000011"),
+		ReservationID: foundation.ID("92000000-0000-4000-8000-000000000012"),
+		Definition:    definition,
+		Call: toolsdomain.ToolCall{
+			ID: foundation.ID("92000000-0000-4000-8000-000000000013"), WorkspaceID: fixture.identity.WorkspaceID,
+			WorkflowRunID: fixture.identity.WorkflowRunID, NodeRunID: fixture.identity.NodeRunID,
+			NodeAttemptID: fixture.identity.NodeAttemptID, CallNo: 1, RequestedToolName: tool.Name,
+			Tool: &tool, DefinitionHash: definition.DefinitionHash, InputSchema: &inputSchema, OutputSchema: &outputSchema,
+			Capability: definition.RequiredCapability, SideEffectLevel: definition.SideEffectLevel,
+			InvocationPolicy: definition.InvocationPolicy, RequestHash: strings.Repeat("5", 64), RequestBytes: 2,
+			RequestSummary: json.RawMessage(`{}`), Status: toolsdomain.CallStarted, Version: 1,
+			StartedAt: time.Now().UTC().Truncate(time.Microsecond),
+		},
+	}
+}
+
+type workspaceAnalysisToolRefusalAuditLister interface {
+	List(context.Context, auditdomain.ListQuery) ([]auditdomain.Event, error)
+}
+
+type workspaceAnalysisToolIntegrationRepository interface {
+	toolsapplication.WorkspaceAnalysisToolRefusalRepository
+	toolsapplication.WorkspaceAnalysisToolOperationRepository
+	toolsapplication.ResultReceiptRepository
+}
+
+type workspaceAnalysisToolRefusalIntegrationHarness struct {
+	repository workspaceAnalysisToolIntegrationRepository
+	audit      workspaceAnalysisToolRefusalAuditLister
+	authority  agentapplication.ScopedWorkspaceAnalysisToolAuthorityReader
+	unitOfWork foundation.UnitOfWork
+}
+
+type workspaceAnalysisToolRefusalIntegrationVariant struct {
+	name string
+	open func(*testing.T, *platformpostgres.Pool, bool) workspaceAnalysisToolRefusalIntegrationHarness
+}
+
+func testWorkspaceAnalysisToolRefusalVariants(
+	t *testing.T,
+	commitResponseLoss bool,
+	test func(*testing.T, *platformpostgres.Pool, context.Context, workspaceAnalysisToolRefusalIntegrationHarness),
+) {
+	t.Helper()
+	variants := []workspaceAnalysisToolRefusalIntegrationVariant{
+		{name: "legacy", open: openLegacyWorkspaceAnalysisToolRefusalIntegration},
+		{name: "gorm", open: openGORMWorkspaceAnalysisToolRefusalIntegration},
+	}
+	for _, variant := range variants {
+		t.Run(variant.name, func(t *testing.T) {
+			fixture := testdb.Require(t, testdb.Config{Availability: testdb.FailWhenUnavailable, MaxConns: 16})
+			platform := fixture.Pool()
+			test(t, platform, context.Background(), variant.open(t, platform, commitResponseLoss))
+		})
+	}
+}
+
+func openLegacyWorkspaceAnalysisToolRefusalIntegration(
+	t *testing.T,
+	platform *platformpostgres.Pool,
+	commitResponseLoss bool,
+) workspaceAnalysisToolRefusalIntegrationHarness {
+	t.Helper()
+	pool := platform.DB()
+	events, err := eventspostgres.NewStore(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auditStore, err := auditpostgres.NewStore(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auditRecorder, err := auditapplication.NewRecorder(auditStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	database := transactionStarter(pool)
+	if commitResponseLoss {
+		database = &commitResponseLossDB{pool: pool}
+	}
+	repository, err := NewRepositoryWithWorkspaceAnalysisEventsAndAudit(database, events, auditRecorder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentRepository, err := agentpostgres.NewGORMRepository(platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unitOfWork, err := platform.UnitOfWork()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return workspaceAnalysisToolRefusalIntegrationHarness{
+		repository: repository, audit: auditStore, authority: agentRepository, unitOfWork: unitOfWork,
+	}
+}
+
+func openGORMWorkspaceAnalysisToolRefusalIntegration(
+	t *testing.T,
+	platform *platformpostgres.Pool,
+	commitResponseLoss bool,
+) workspaceAnalysisToolRefusalIntegrationHarness {
+	t.Helper()
+	executionFence, err := workflowpostgres.NewGORMWorkspaceAnalysisExecutionFence(platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentRepository, err := agentpostgres.NewGORMRepository(platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := eventspostgres.NewGORMStore(platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auditStore, err := auditpostgres.NewGORMStore(platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auditRecorder, err := auditapplication.NewRecorder(auditStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := NewGORMWorkspaceAnalysisRepository(
+		platform,
+		executionFence,
+		agentRepository,
+		agentRepository,
+		agentRepository,
+		events,
+		auditRecorder,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if commitResponseLoss {
+		fault := &workspaceAnalysisToolRefusalPostCommitUnitOfWork{
+			inner: repository.unitOfWork,
+			err:   errors.New("workspace analysis refusal commit response lost"),
+		}
+		fault.skip.Store(1)
+		fault.armed.Store(true)
+		repository.unitOfWork = fault
+	}
+	unitOfWork, err := platform.UnitOfWork()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return workspaceAnalysisToolRefusalIntegrationHarness{
+		repository: repository, audit: auditStore, authority: agentRepository, unitOfWork: unitOfWork,
+	}
+}
+
+type workspaceAnalysisToolRefusalPostCommitUnitOfWork struct {
+	inner foundation.UnitOfWork
+	err   error
+	armed atomic.Bool
+	lost  atomic.Bool
+	skip  atomic.Int64
+}
+
+func (unitOfWork *workspaceAnalysisToolRefusalPostCommitUnitOfWork) Within(
+	ctx context.Context,
+	options foundation.TransactionOptions,
+	work foundation.TransactionFunc,
+) error {
+	if err := unitOfWork.inner.Within(ctx, options, work); err != nil {
+		return err
+	}
+	if !unitOfWork.armed.Load() {
+		return nil
+	}
+	if remaining := unitOfWork.skip.Load(); remaining > 0 && unitOfWork.skip.CompareAndSwap(remaining, remaining-1) {
+		return nil
+	}
+	if unitOfWork.lost.CompareAndSwap(false, true) {
+		return unitOfWork.err
+	}
+	return nil
 }
 
 type workspaceAnalysisToolRefusalFixture struct {
