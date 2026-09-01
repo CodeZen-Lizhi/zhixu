@@ -397,7 +397,14 @@ func loadCommand(ctx context.Context, db DB, workspaceID foundation.ID, key stri
 	var receipt commandReceipt
 	var workspace, collectionID string
 	var receiptRaw []byte
-	err := db.QueryRow(ctx, `SELECT workspace_id::text,request_hash,command_type,collection_id::text,collection_version,receipt FROM learning.smart_collection_command WHERE workspace_id=$1 AND idempotency_key=$2 FOR UPDATE`, string(workspaceID), key).Scan(&workspace, &receipt.requestHash, &receipt.commandType, &collectionID, &receipt.collectionVersion, &receiptRaw)
+	query := `SELECT workspace_id::text,request_hash,command_type,collection_id::text,collection_version,receipt FROM learning.smart_collection_command WHERE workspace_id=$1 AND idempotency_key=$2 FOR UPDATE`
+	var row pgx.Row
+	if database, ok := db.(*gormDB); ok {
+		row = database.receiptRow(ctx, query, string(workspaceID), key)
+	} else {
+		row = db.QueryRow(ctx, query, string(workspaceID), key)
+	}
+	err := row.Scan(&workspace, &receipt.requestHash, &receipt.commandType, &collectionID, &receipt.collectionVersion, &receiptRaw)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return commandReceipt{}, false, nil
 	}
@@ -437,9 +444,18 @@ func loadCollection(ctx context.Context, db DB, workspaceID, collectionID founda
 	if forUpdate {
 		query += ` FOR UPDATE`
 	}
-	item, err := scanCollection(db.QueryRow(ctx, query, string(workspaceID), string(collectionID)))
+	var row pgx.Row
+	if database, ok := db.(*gormDB); ok {
+		row = database.collectionRow(ctx, query, string(workspaceID), string(collectionID))
+	} else {
+		row = db.QueryRow(ctx, query, string(workspaceID), string(collectionID))
+	}
+	item, err := scanCollection(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return collectionapp.Collection{}, notFound(errors.New("collection not found"))
+	}
+	if err == nil && (item.WorkspaceID != workspaceID || item.ID != collectionID) {
+		return collectionapp.Collection{}, inconsistent(errors.New("collection query returned a different identity"))
 	}
 	return item, err
 }
@@ -456,6 +472,21 @@ func scanCollection(row rowScanner) (collectionapp.Collection, error) {
 	}
 	item.ID, item.WorkspaceID, item.QuerySchemaVersion = foundation.ID(id), foundation.ID(workspace), schema
 	item.ViewType, item.Status = domain.ViewType(viewType), collectionapp.CollectionStatus(status)
+	item.CreatedAt = item.CreatedAt.UTC()
+	item.UpdatedAt = item.UpdatedAt.UTC()
+	if item.LastExecutedAt != nil {
+		value := item.LastExecutedAt.UTC()
+		item.LastExecutedAt = &value
+	}
+	if !validID(item.ID) || !validID(item.WorkspaceID) || item.Name == "" || item.NormalizedName == "" ||
+		item.QuerySchemaVersion != domain.QuerySchemaVersionV1 || item.QueryVersion < 1 || item.Version < 1 ||
+		(item.Status != collectionapp.CollectionStatusActive && item.Status != collectionapp.CollectionStatusArchived) ||
+		item.CreatedAt.IsZero() || item.UpdatedAt.Before(item.CreatedAt) {
+		return collectionapp.Collection{}, inconsistent(errors.New("persisted collection shape is invalid"))
+	}
+	if !isJSONObject(queryRaw) || !isJSONObject(viewRaw) {
+		return collectionapp.Collection{}, inconsistent(errors.New("persisted collection JSON shape is invalid"))
+	}
 	if err := json.Unmarshal(queryRaw, &item.Query); err != nil {
 		return collectionapp.Collection{}, inconsistent(err)
 	}
@@ -473,6 +504,11 @@ func scanCollection(row rowScanner) (collectionapp.Collection, error) {
 		return collectionapp.Collection{}, inconsistent(err)
 	}
 	return item, nil
+}
+
+func isJSONObject(raw []byte) bool {
+	trimmed := strings.TrimSpace(string(raw))
+	return len(trimmed) >= 2 && trimmed[0] == '{' && trimmed[len(trimmed)-1] == '}' && json.Valid(raw)
 }
 
 type rowScanner interface{ Scan(...any) error }

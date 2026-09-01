@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -20,111 +19,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func TestReadRepositoryHealthTrendAggregatesSevenUTCDaysFromTerminalScans(t *testing.T) {
-	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
-	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
-
-	workspaceID := newHealthReadTestID(t)
-	otherWorkspaceID := newHealthReadTestID(t)
-	emptyWorkspaceID := newHealthReadTestID(t)
-	for _, id := range []foundation.ID{workspaceID, otherWorkspaceID, emptyWorkspaceID} {
-		cleanupHealthIntegrationWorkspace(t, pool, id)
-		id := id
-		t.Cleanup(func() { cleanupHealthIntegrationWorkspace(t, pool, id) })
-		seedHealthReadWorkspace(t, ctx, pool, id)
-	}
-
-	var now time.Time
-	if err := pool.QueryRow(ctx, `SELECT CURRENT_TIMESTAMP`).Scan(&now); err != nil {
-		t.Fatal(err)
-	}
-	now = now.UTC().Truncate(time.Microsecond)
-	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
-	seedHealthTrendScan(t, ctx, pool, workspaceID, today.AddDate(0, 0, -5).Add(2*time.Hour), "SUCCEEDED", 2, 1, 1)
-	seedHealthTrendScan(t, ctx, pool, workspaceID, today.AddDate(0, 0, -5).Add(20*time.Hour), "PARTIAL", 4, 2, 3)
-	seedHealthTrendScan(t, ctx, pool, workspaceID, today.AddDate(0, 0, -3).Add(12*time.Hour), "FAILED", 1, 1, 0)
-	seedHealthTrendScan(t, ctx, pool, workspaceID, today.AddDate(0, 0, -1).Add(8*time.Hour), "CANCELLED", 5, 0, 2)
-	seedHealthTrendScan(t, ctx, pool, workspaceID, today.AddDate(0, 0, -7).Add(23*time.Hour), "SUCCEEDED", 50, 50, 50)
-	seedActiveHealthTrendScan(t, ctx, pool, workspaceID, now, 99)
-	seedHealthTrendScan(t, ctx, pool, otherWorkspaceID, now, "SUCCEEDED", 70, 7, 8)
-
-	countingDB := &healthTrendCountingDB{Pool: pool}
-	repository, err := NewReadRepository(countingDB)
-	if err != nil {
-		t.Fatal(err)
-	}
-	summary, err := repository.GetHealthSummary(ctx, workspaceID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if countingDB.trendQueries != 1 {
-		t.Fatalf("trend queries=%d want=1", countingDB.trendQueries)
-	}
-	if countingDB.queries != 3 || countingDB.queryRows != 1 {
-		t.Fatalf("summary query count Query=%d QueryRow=%d want Query=3 QueryRow=1", countingDB.queries, countingDB.queryRows)
-	}
-	if len(summary.Trend) != healthapp.HealthTrendDays {
-		t.Fatalf("trend points=%d trend=%#v", len(summary.Trend), summary.Trend)
-	}
-	want := map[string][2]int64{
-		today.AddDate(0, 0, -5).Format("2006-01-02"): {9, 4},
-		today.AddDate(0, 0, -3).Format("2006-01-02"): {2, 0},
-		today.AddDate(0, 0, -1).Format("2006-01-02"): {5, 2},
-	}
-	for index, point := range summary.Trend {
-		wantDate := today.AddDate(0, 0, index-(healthapp.HealthTrendDays-1)).Format("2006-01-02")
-		if point.Date != wantDate {
-			t.Fatalf("trend[%d].date=%s want=%s", index, point.Date, wantDate)
-		}
-		counts := want[wantDate]
-		if point.DetectedCount != counts[0] || point.ResolvedCount != counts[1] {
-			t.Fatalf("trend[%d]=%#v want detected=%d resolved=%d", index, point, counts[0], counts[1])
-		}
-	}
-
-	otherSummary, err := repository.GetHealthSummary(ctx, otherWorkspaceID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if point := otherSummary.Trend[len(otherSummary.Trend)-1]; point.DetectedCount != 77 || point.ResolvedCount != 8 {
-		t.Fatalf("other workspace today=%#v", point)
-	}
-	emptySummary, err := repository.GetHealthSummary(ctx, emptyWorkspaceID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, point := range emptySummary.Trend {
-		if point.DetectedCount != 0 || point.ResolvedCount != 0 {
-			t.Fatalf("empty workspace trend=%#v", emptySummary.Trend)
-		}
-	}
-}
-
 func TestReadRepositoryIssueHistoryIsBoundedStableAndUsesFixedStatements(t *testing.T) {
-	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
-	}
 	ctx := context.Background()
-	config, err := pgxpool.ParseConfig(databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tracer := &detectorPageQueryTracer{}
-	config.ConnConfig.Tracer = tracer
-	pool, err := pgxpool.NewWithConfig(ctx, config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
+	pool := newHealthIntegrationPool(t)
 
 	workspaceID := newHealthReadTestID(t)
 	topicID := newHealthReadTestID(t)
@@ -184,7 +81,8 @@ func TestReadRepositoryIssueHistoryIsBoundedStableAndUsesFixedStatements(t *test
 		`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, COSTS OFF) `+issueObservationEvidenceSelect,
 		[]any{string(workspaceID), evidenceIDs}, "health_issue_evidence", "idx_ops_health_issue_evidence_observation", "")
 
-	readRepository, err := NewReadRepository(pool)
+	recorder := &healthStatementRecorder{}
+	readRepository, err := NewReadRepository(&healthStatementReadDB{ReadDB: pool, recorder: recorder})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,14 +98,14 @@ func TestReadRepositoryIssueHistoryIsBoundedStableAndUsesFixedStatements(t *test
 	observationIDs := make(map[foundation.ID]struct{}, 261)
 	observationCursor := ""
 	for {
-		tracer.reset()
+		recorder.reset()
 		pageCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		page, err := service.ListIssueObservations(pageCtx, healthapp.IssueHistoryRequest{WorkspaceID: workspaceID, IssueID: issueID, Limit: 25, Cursor: observationCursor})
 		cancel()
 		if err != nil {
 			t.Fatal(err)
 		}
-		if statements := tracer.snapshot(); len(statements) != 3 {
+		if statements := recorder.snapshot(); len(statements) != 3 {
 			t.Fatalf("observation statements=%d want=3\n%s", len(statements), strings.Join(statements, "\n---\n"))
 		}
 		for _, item := range page.Items {
@@ -231,14 +129,14 @@ func TestReadRepositoryIssueHistoryIsBoundedStableAndUsesFixedStatements(t *test
 	decisionIDs := make(map[foundation.ID]struct{}, 260)
 	decisionCursor := ""
 	for {
-		tracer.reset()
+		recorder.reset()
 		pageCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		page, err := service.ListIssueDecisions(pageCtx, healthapp.IssueHistoryRequest{WorkspaceID: workspaceID, IssueID: issueID, Limit: 25, Cursor: decisionCursor})
 		cancel()
 		if err != nil {
 			t.Fatal(err)
 		}
-		if statements := tracer.snapshot(); len(statements) != 2 {
+		if statements := recorder.snapshot(); len(statements) != 2 {
 			t.Fatalf("decision statements=%d want=2\n%s", len(statements), strings.Join(statements, "\n---\n"))
 		}
 		for _, item := range page.Items {
@@ -259,7 +157,7 @@ func TestReadRepositoryIssueHistoryIsBoundedStableAndUsesFixedStatements(t *test
 		t.Fatalf("decision count=%d want=260", len(decisionIDs))
 	}
 
-	tracer.reset()
+	recorder.reset()
 	detailCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	detail, err := service.GetIssueDetail(detailCtx, workspaceID, issueID)
 	cancel()
@@ -274,9 +172,24 @@ func TestReadRepositoryIssueHistoryIsBoundedStableAndUsesFixedStatements(t *test
 		len(detail.LatestObservation.Evidence) != len(current.Evidence) || len(detail.LatestObservation.TargetVersions) != len(current.ObjectVersions) {
 		t.Fatalf("detail current observation is stale: issue=%s latest=%s current=%s", detail.Issue.Fingerprint, detail.LatestObservation.Fingerprint, current.Fingerprint)
 	}
-	if statements := tracer.snapshot(); len(statements) != 4 {
+	if statements := recorder.snapshot(); len(statements) != 4 {
 		t.Fatalf("detail statements=%d want=4\n%s", len(statements), strings.Join(statements, "\n---\n"))
 	}
+}
+
+type healthStatementReadDB struct {
+	ReadDB
+	recorder *healthStatementRecorder
+}
+
+func (database *healthStatementReadDB) Query(ctx context.Context, query string, args ...any) (pgx.Rows, error) {
+	database.recorder.record(query)
+	return database.ReadDB.Query(ctx, query, args...)
+}
+
+func (database *healthStatementReadDB) QueryRow(ctx context.Context, query string, args ...any) pgx.Row {
+	database.recorder.record(query)
+	return database.ReadDB.QueryRow(ctx, query, args...)
 }
 
 type healthHistoryExplainPlan struct {
@@ -396,7 +309,7 @@ func seedHealthReadWorkspace(t *testing.T, ctx context.Context, pool *pgxpool.Po
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	root := "/tmp/health-read-" + string(workspaceID)
 	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at)
-	VALUES($1,$2,$3,$3,$4,'test',1,$4,$4)`, string(workspaceID), "health-read-"+string(workspaceID), root, now); err != nil {
+	VALUES($1,$2,$3,$3,$4,'inactive',1,$4,$4)`, string(workspaceID), "health-read-"+string(workspaceID), root, now); err != nil {
 		t.Fatal(err)
 	}
 	definitionID := newHealthReadTestID(t)

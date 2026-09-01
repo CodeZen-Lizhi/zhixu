@@ -1,4 +1,4 @@
-//go:build integration
+//go:build integration && testcontainers
 
 package postgres
 
@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"os"
 	"testing"
 	"time"
 
@@ -19,20 +18,11 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/health/domain"
 	knowledge "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestTopicScopeReaderAndMissingSetUseConfirmedMembership(t *testing.T) {
-	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
-	}
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
+	pool := newHealthIntegrationPool(t)
 	fixture, err := graphfixture.SeedFunctional(ctx, pool)
 	if err != nil {
 		t.Fatal(err)

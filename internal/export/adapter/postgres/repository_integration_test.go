@@ -8,30 +8,198 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
+	"reflect"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	auditpostgres "github.com/CodeZen-Lizhi/zhixu/internal/audit/adapter/postgres"
 	auditdomain "github.com/CodeZen-Lizhi/zhixu/internal/audit/domain"
 	eventspostgres "github.com/CodeZen-Lizhi/zhixu/internal/events/adapter/postgres"
+	exportriver "github.com/CodeZen-Lizhi/zhixu/internal/export/adapter/river"
 	exportapp "github.com/CodeZen-Lizhi/zhixu/internal/export/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/export/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
-	"github.com/jackc/pgx/v5"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
+	workflowriver "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/riverqueue/river/rivertype"
 )
 
 func TestExportRepositoryLifecycleIdempotencyAndDownloadAudit(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	repository, pool := newExportIntegrationRepository(t, ctx)
+	testExportRepositoryVariants(t, testExportRepositoryLifecycleIdempotencyAndDownloadAudit)
+}
 
+func TestExportGORMRepositoryKeepsOptionalLifecycleEventSemantics(t *testing.T) {
+	fixture := requireExportIntegrationDatabase(t, 8)
+	platform := fixture.Pool()
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+
+	repository, err := NewGORMRepository(platform)
+	if err != nil {
+		t.Fatalf("create GORM export repository without optional appenders: %v", err)
+	}
+	workspaceID := exportIntegrationID(t)
+	collectionID := exportIntegrationID(t)
+	queryHash := exportIntegrationHash("collection:" + string(collectionID))
+	seedExportIntegrationScope(t, ctx, platform.DB(), workspaceID, collectionID, queryHash)
+
+	created, replayed, err := repository.Create(ctx, exportIntegrationJob(t, workspaceID, collectionID, queryHash, time.Hour, "optional-event"))
+	if err != nil || replayed || created.Status != domain.StatusPending {
+		t.Fatalf("create without optional Event appender job=%#v replayed=%t err=%v", created, replayed, err)
+	}
+	var lifecycleEvents int
+	if err := platform.DB().QueryRow(ctx, `SELECT count(*) FROM ops.server_event WHERE workspace_id=$1 AND resource_ref=$2`,
+		string(workspaceID), "export_job:"+string(created.ID)).Scan(&lifecycleEvents); err != nil {
+		t.Fatalf("count optional lifecycle events: %v", err)
+	}
+	if lifecycleEvents != 0 {
+		t.Fatalf("optional lifecycle events=%d, want 0", lifecycleEvents)
+	}
+}
+
+func TestExportGORMRepositoryCommitResponseLossDoesNotDuplicateFacts(t *testing.T) {
+	fixture := requireExportIntegrationDatabase(t, 16)
+	platform := fixture.Pool()
+	pool := platform.DB()
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+
+	database, err := platform.GORM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	unitOfWork, err := platform.UnitOfWork()
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := eventspostgres.NewGORMStore(platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	audit, err := auditpostgres.NewGORMStore(platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitResultUnknown := errors.New("export integration commit result unknown")
+	failNextCommit := &atomic.Bool{}
+	repository, err := newGORMRepository(database, exportPostCommitErrorUnitOfWork{
+		inner: unitOfWork, failNext: failNextCommit, cause: commitResultUnknown,
+	}, WithGORMEventAppender(events), WithGORMAuditAppender(audit))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	workspaceID := exportIntegrationID(t)
+	collectionID := exportIntegrationID(t)
+	queryHash := exportIntegrationHash("response-loss:" + string(collectionID))
+	seedExportIntegrationScope(t, ctx, pool, workspaceID, collectionID, queryHash)
+	candidate := exportIntegrationJob(t, workspaceID, collectionID, queryHash, time.Hour, "response-loss")
+	failNextCommit.Store(true)
+	if _, _, err := repository.Create(ctx, candidate); !errors.Is(err, commitResultUnknown) {
+		t.Fatalf("Create post-commit response loss error=%v", err)
+	}
+	retryCandidate := candidate
+	retryCandidate.ID = exportIntegrationID(t)
+	created, replayed, err := repository.Create(ctx, retryCandidate)
+	if err != nil || !replayed || created.ID != candidate.ID {
+		t.Fatalf("Create response-loss replay job=%#v replayed=%t err=%v", created, replayed, err)
+	}
+	var jobCount, createEventCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM ops.export_job WHERE workspace_id=$1 AND idempotency_key=$2`,
+		string(workspaceID), candidate.IdempotencyKey).Scan(&jobCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM ops.server_event WHERE workspace_id=$1 AND source_event_ref=$2`,
+		string(workspaceID), "export.created:"+string(created.ID)+":v1").Scan(&createEventCount); err != nil {
+		t.Fatal(err)
+	}
+	if jobCount != 1 || createEventCount != 1 {
+		t.Fatalf("Create response-loss facts jobs=%d events=%d", jobCount, createEventCount)
+	}
+
+	const owner = "export-response-loss-worker"
+	claimed, claimedOK, err := repository.Claim(ctx, workspaceID, created.ID, owner, 2*time.Minute)
+	if err != nil || !claimedOK {
+		t.Fatalf("claim response-loss fixture ok=%t err=%v", claimedOK, err)
+	}
+	payload := []byte("export response-loss payload")
+	preparedFile := exportapp.PreparedFile{
+		StagingPath: ".knowledge/exports/.staging/" + string(created.ID) + "-" + strings.Repeat("e", 32) + ".md.stage",
+		FinalPath:   ".knowledge/exports/" + string(created.ID) + ".md",
+		FileHash:    exportIntegrationBytesHash(payload),
+		FileSize:    int64(len(payload)),
+	}
+	prepared, err := repository.Prepare(ctx, exportapp.PrepareRequest{
+		WorkspaceID: workspaceID, JobID: created.ID, LeaseOwner: owner, ExpectedVersion: claimed.Version,
+		ReadModelRevision: exportIntegrationHash("response-loss-read-model"), ExactCount: 1, PreparedFile: preparedFile,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed, err := repository.Complete(ctx, exportapp.CompleteRequest{
+		WorkspaceID: workspaceID, JobID: created.ID, LeaseOwner: owner,
+		ExpectedVersion: prepared.Version, PreparedFile: preparedFile,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	auditID := exportIntegrationID(t)
+	download := exportapp.DownloadRecord{
+		WorkspaceID: workspaceID, JobID: created.ID, AuditEventID: auditID,
+		Actor:     exportapp.DownloadActor{Type: auditdomain.ActorUser, Ref: string(exportIntegrationID(t))},
+		ScopeKind: domain.ScopeCollection, FileHash: completed.FileHash, FileSize: completed.FileSize,
+	}
+	failNextCommit.Store(true)
+	if _, err := repository.RecordDownload(ctx, download); !errors.Is(err, commitResultUnknown) {
+		t.Fatalf("RecordDownload post-commit response loss error=%v", err)
+	}
+	if _, err := repository.RecordDownload(ctx, download); err == nil {
+		t.Fatal("RecordDownload replay unexpectedly reported success")
+	}
+	assertExportDownloadProjection(t, ctx, pool, created.ID, completed.Version+1, 1)
+	var auditCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM ops.audit_event WHERE id=$1 AND action='export.download'`, string(auditID)).Scan(&auditCount); err != nil {
+		t.Fatal(err)
+	}
+	if auditCount != 1 {
+		t.Fatalf("Download response-loss Audit rows=%d, want 1", auditCount)
+	}
+	requireExportPoolReleased(t, pool)
+}
+
+type exportPostCommitErrorUnitOfWork struct {
+	inner    foundation.UnitOfWork
+	failNext *atomic.Bool
+	cause    error
+}
+
+func (unitOfWork exportPostCommitErrorUnitOfWork) Within(
+	ctx context.Context,
+	options foundation.TransactionOptions,
+	work foundation.TransactionFunc,
+) error {
+	if err := unitOfWork.inner.Within(ctx, options, work); err != nil {
+		return err
+	}
+	if unitOfWork.failNext != nil && unitOfWork.failNext.CompareAndSwap(true, false) {
+		return unitOfWork.cause
+	}
+	return nil
+}
+
+func testExportRepositoryLifecycleIdempotencyAndDownloadAudit(
+	t *testing.T,
+	ctx context.Context,
+	repository exportapp.Repository,
+	pool *pgxpool.Pool,
+) {
 	workspaceID := exportIntegrationID(t)
 	collectionID := exportIntegrationID(t)
 	queryHash := exportIntegrationHash("collection:" + string(collectionID))
@@ -93,6 +261,13 @@ func TestExportRepositoryLifecycleIdempotencyAndDownloadAudit(t *testing.T) {
 	if err != nil || completed.Status != domain.StatusSucceeded || completed.Version != 4 || completed.LeaseOwner != "" {
 		t.Fatalf("complete job=%#v err=%v", completed, err)
 	}
+	orphanPreparedFile := exportIntegrationPreparedFile(exportIntegrationID(t))
+	unreferenced, err := repository.UnreferencedStaging(ctx, workspaceID, []string{
+		preparedFile.StagingPath, orphanPreparedFile.StagingPath,
+	})
+	if err != nil || len(unreferenced) != 1 || unreferenced[0] != orphanPreparedFile.StagingPath {
+		t.Fatalf("unreferenced staging paths=%#v err=%v", unreferenced, err)
+	}
 
 	invalidAuditID := exportIntegrationID(t)
 	_, err = repository.RecordDownload(ctx, exportapp.DownloadRecord{
@@ -137,10 +312,15 @@ func TestExportRepositoryLifecycleIdempotencyAndDownloadAudit(t *testing.T) {
 }
 
 func TestExportRepositoryAttachmentCapabilityLifecycleAndScopeIsolation(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	repository, pool := newExportIntegrationRepository(t, ctx)
+	testExportRepositoryVariants(t, testExportRepositoryAttachmentCapabilityLifecycleAndScopeIsolation)
+}
 
+func testExportRepositoryAttachmentCapabilityLifecycleAndScopeIsolation(
+	t *testing.T,
+	ctx context.Context,
+	repository exportapp.Repository,
+	pool *pgxpool.Pool,
+) {
 	workspaceID := exportIntegrationID(t)
 	collectionID := exportIntegrationID(t)
 	queryHash := exportIntegrationHash("collection:" + string(collectionID))
@@ -295,10 +475,15 @@ func TestExportRepositoryAttachmentCapabilityLifecycleAndScopeIsolation(t *testi
 }
 
 func TestExportRepositoryDatabaseTimeCAS(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	repository, pool := newExportIntegrationRepository(t, ctx)
+	testExportRepositoryVariants(t, testExportRepositoryDatabaseTimeCAS)
+}
 
+func testExportRepositoryDatabaseTimeCAS(
+	t *testing.T,
+	ctx context.Context,
+	repository exportapp.Repository,
+	pool *pgxpool.Pool,
+) {
 	workspaceID := exportIntegrationID(t)
 	collectionID := exportIntegrationID(t)
 	queryHash := exportIntegrationHash("collection:" + string(collectionID))
@@ -449,10 +634,15 @@ func TestExportRepositoryDatabaseTimeCAS(t *testing.T) {
 }
 
 func TestExportRepositoryConcurrentCreateAndDownload(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	repository, pool := newExportIntegrationRepository(t, ctx)
+	testExportRepositoryVariants(t, testExportRepositoryConcurrentCreateAndDownload)
+}
 
+func testExportRepositoryConcurrentCreateAndDownload(
+	t *testing.T,
+	ctx context.Context,
+	repository exportapp.Repository,
+	pool *pgxpool.Pool,
+) {
 	workspaceID := exportIntegrationID(t)
 	collectionID := exportIntegrationID(t)
 	queryHash := exportIntegrationHash("collection:" + string(collectionID))
@@ -587,10 +777,15 @@ func TestExportRepositoryConcurrentCreateAndDownload(t *testing.T) {
 }
 
 func TestExportRepositoryCleanupFailureCanRetry(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	repository, pool := newExportIntegrationRepository(t, ctx)
+	testExportRepositoryVariants(t, testExportRepositoryCleanupFailureCanRetry)
+}
 
+func testExportRepositoryCleanupFailureCanRetry(
+	t *testing.T,
+	ctx context.Context,
+	repository exportapp.Repository,
+	pool *pgxpool.Pool,
+) {
 	workspaceID := exportIntegrationID(t)
 	collectionID := exportIntegrationID(t)
 	queryHash := exportIntegrationHash("collection:" + string(collectionID))
@@ -599,12 +794,21 @@ func TestExportRepositoryCleanupFailureCanRetry(t *testing.T) {
 	if err != nil || replayed {
 		t.Fatalf("create cleanup retry job=%#v replayed=%t err=%v detail=%s", created, replayed, err, exportIntegrationErrorDetail(err))
 	}
+	sweepCreated, replayed, err := repository.Create(ctx, exportIntegrationJob(t, workspaceID, collectionID, queryHash, time.Second, "cleanup-sweep"))
+	if err != nil || replayed {
+		t.Fatalf("create expiry sweep job=%#v replayed=%t err=%v detail=%s", sweepCreated, replayed, err, exportIntegrationErrorDetail(err))
+	}
 	if _, err := pool.Exec(ctx, `SELECT pg_sleep(1.1)`); err != nil {
 		t.Fatalf("wait for cleanup retry job expiry: %v", err)
 	}
 	expired, err := repository.Expire(ctx, workspaceID, created.ID)
 	if err != nil || expired.Status != domain.StatusExpired || expired.CleanupStatus != domain.CleanupPending {
 		t.Fatalf("expire cleanup retry job=%#v err=%v", expired, err)
+	}
+	swept, err := repository.ExpireCandidates(ctx, 10)
+	if err != nil || len(swept) != 1 || swept[0].ID != sweepCreated.ID ||
+		swept[0].Status != domain.StatusExpired || swept[0].CleanupStatus != domain.CleanupPending {
+		t.Fatalf("expiry sweep jobs=%#v err=%v", swept, err)
 	}
 
 	const cleanupErrorCode = "EXPORT_TEST_CLEANUP_FAILED"
@@ -617,7 +821,14 @@ func TestExportRepositoryCleanupFailureCanRetry(t *testing.T) {
 		t.Fatalf("record failed cleanup job=%#v err=%v detail=%s", failed, err, exportIntegrationErrorDetail(err))
 	}
 	candidates, err := repository.CleanupCandidates(ctx, 10)
-	if err != nil || len(candidates) != 1 || candidates[0].ID != created.ID || candidates[0].CleanupStatus != domain.CleanupFailed {
+	var failedCandidate *domain.Job
+	for index := range candidates {
+		if candidates[index].ID == created.ID {
+			failedCandidate = &candidates[index]
+			break
+		}
+	}
+	if err != nil || failedCandidate == nil || failedCandidate.CleanupStatus != domain.CleanupFailed {
 		t.Fatalf("failed cleanup candidates=%#v err=%v", candidates, err)
 	}
 
@@ -631,10 +842,15 @@ func TestExportRepositoryCleanupFailureCanRetry(t *testing.T) {
 }
 
 func TestExportRepositoryOrphanSweepWorkspacesUsesStableCursor(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	repository, pool := newExportIntegrationRepository(t, ctx)
+	testExportRepositoryVariants(t, testExportRepositoryOrphanSweepWorkspacesUsesStableCursor)
+}
 
+func testExportRepositoryOrphanSweepWorkspacesUsesStableCursor(
+	t *testing.T,
+	ctx context.Context,
+	repository exportapp.Repository,
+	pool *pgxpool.Pool,
+) {
 	workspaceIDs := []foundation.ID{exportIntegrationID(t), exportIntegrationID(t)}
 	sort.Slice(workspaceIDs, func(left, right int) bool { return workspaceIDs[left] < workspaceIDs[right] })
 	for index, workspaceID := range workspaceIDs {
@@ -660,45 +876,453 @@ func TestExportRepositoryOrphanSweepWorkspacesUsesStableCursor(t *testing.T) {
 	}
 }
 
-func newExportIntegrationRepository(t *testing.T, ctx context.Context) (*Repository, *pgxpool.Pool) {
-	t.Helper()
-	baseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
-	if baseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a disposable PostgreSQL instance")
+func TestExportRepositoryPreservesContextCauseAndReusesConnection(t *testing.T) {
+	testExportRepositoryVariants(t, testExportRepositoryPreservesContextCauseAndReusesConnection)
+}
+
+func testExportRepositoryPreservesContextCauseAndReusesConnection(
+	t *testing.T,
+	ctx context.Context,
+	repository exportapp.Repository,
+	pool *pgxpool.Pool,
+) {
+	workspaceID := exportIntegrationID(t)
+	collectionID := exportIntegrationID(t)
+	queryHash := exportIntegrationHash("context:" + string(collectionID))
+	seedExportIntegrationScope(t, ctx, pool, workspaceID, collectionID, queryHash)
+	created, replayed, err := repository.Create(ctx, exportIntegrationJob(t, workspaceID, collectionID, queryHash, time.Hour, "context"))
+	if err != nil || replayed {
+		t.Fatalf("create context fixture replayed=%t err=%v detail=%s", replayed, err, exportIntegrationErrorDetail(err))
 	}
-	parsed, err := url.Parse(baseURL)
-	if err != nil {
-		t.Fatalf("parse PostgreSQL URL: %v", err)
+
+	cancelCause := errors.New("export caller stopped waiting")
+	canceledCtx, cancel := context.WithCancelCause(ctx)
+	cancel(cancelCause)
+	canceledJob, err := repository.Get(canceledCtx, workspaceID, created.ID)
+	if err == nil || !reflect.DeepEqual(canceledJob, domain.Job{}) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled Get() job=%#v error=%v", canceledJob, err)
 	}
-	admin, err := pgxpool.New(ctx, baseURL)
-	if err != nil {
-		t.Fatalf("connect PostgreSQL admin database: %v", err)
+	candidates, candidateErr := repository.RecoveryCandidates(canceledCtx, 10)
+	if candidateErr == nil || len(candidates) != 0 || !errors.Is(candidateErr, context.Canceled) {
+		t.Fatalf("canceled RecoveryCandidates() jobs=%#v error=%v", candidates, candidateErr)
 	}
-	databaseName := fmt.Sprintf("zhixu_export_%d", time.Now().UnixNano())
-	identifier := pgx.Identifier{databaseName}.Sanitize()
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+identifier); err != nil {
-		admin.Close()
-		t.Fatalf("create export test database: %v", err)
+	if _, isGORM := repository.(*GORMRepository); isGORM {
+		if !errors.Is(err, cancelCause) || !errors.Is(candidateErr, cancelCause) {
+			t.Fatalf("GORM cancellation lost caller cause: get=%v candidates=%v", err, candidateErr)
+		}
+		if strings.Contains(err.Error(), cancelCause.Error()) || strings.Contains(candidateErr.Error(), cancelCause.Error()) {
+			t.Fatalf("GORM cancellation leaked caller cause: get=%q candidates=%q", err, candidateErr)
+		}
 	}
-	parsed.Path = "/" + databaseName
-	pool, err := pgxpool.New(ctx, parsed.String())
-	if err != nil {
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-		t.Fatalf("connect export test database: %v", err)
+
+	deadlineCause := errors.New("export caller deadline budget expired")
+	deadlineCtx, deadlineCancel := context.WithDeadlineCause(ctx, time.Unix(0, 0), deadlineCause)
+	defer deadlineCancel()
+	page, err := repository.List(deadlineCtx, exportapp.ListQuery{
+		WorkspaceID: workspaceID, ScopeKind: domain.ScopeCollection, CollectionID: &collectionID, Limit: 10,
+	})
+	if err == nil || len(page.Items) != 0 || page.NextCursor != "" || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("deadline List() page=%#v error=%v", page, err)
+	}
+	if _, isGORM := repository.(*GORMRepository); isGORM && !errors.Is(err, deadlineCause) {
+		t.Fatalf("GORM deadline error lost caller cause: %v", err)
+	}
+	var one int
+	if err := pool.QueryRow(ctx, `SELECT 1`).Scan(&one); err != nil || one != 1 {
+		t.Fatalf("pool unusable after canceled Export operations value=%d error=%v", one, err)
+	}
+	requireExportPoolReleased(t, pool)
+}
+
+func TestExportRepositoryRejectsCorruptRowsWithoutPartialResult(t *testing.T) {
+	testExportRepositoryVariants(t, testExportRepositoryRejectsCorruptRowsWithoutPartialResult)
+}
+
+func testExportRepositoryRejectsCorruptRowsWithoutPartialResult(
+	t *testing.T,
+	ctx context.Context,
+	repository exportapp.Repository,
+	pool *pgxpool.Pool,
+) {
+	workspaceID := exportIntegrationID(t)
+	collectionID := exportIntegrationID(t)
+	queryHash := exportIntegrationHash("corrupt:" + string(collectionID))
+	seedExportIntegrationScope(t, ctx, pool, workspaceID, collectionID, queryHash)
+	created, replayed, err := repository.Create(ctx, exportIntegrationJob(t, workspaceID, collectionID, queryHash, time.Hour, "corrupt"))
+	if err != nil || replayed {
+		t.Fatalf("create corrupt fixture replayed=%t err=%v detail=%s", replayed, err, exportIntegrationErrorDetail(err))
+	}
+	if _, err := pool.Exec(ctx, `ALTER TABLE ops.export_job DISABLE TRIGGER trg_ops_export_job_update`); err != nil {
+		t.Fatalf("disable Export update guard: %v", err)
 	}
 	t.Cleanup(func() {
-		pool.Close()
-		_, _ = admin.Exec(context.Background(), "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
+		_, _ = pool.Exec(context.Background(), `ALTER TABLE ops.export_job ENABLE TRIGGER trg_ops_export_job_update`)
 	})
-	runner, err := platformmigration.NewAtlasEmbeddedRunner(pool)
-	if err == nil {
-		err = runner.Up(ctx)
+	if _, err := pool.Exec(ctx, `UPDATE ops.export_job SET fields='["CORRUPT"]'::jsonb WHERE workspace_id=$1 AND id=$2`,
+		string(workspaceID), string(created.ID)); err != nil {
+		t.Fatalf("corrupt Export row: %v", err)
 	}
+
+	corrupt, err := repository.Get(ctx, workspaceID, created.ID)
+	if err == nil || !reflect.DeepEqual(corrupt, domain.Job{}) {
+		t.Fatalf("corrupt Get() job=%#v error=%v", corrupt, err)
+	}
+	var classified *foundation.Error
+	if !errors.As(err, &classified) || classified.Kind != foundation.ErrorConsistencyViolation {
+		t.Fatalf("corrupt Get() error is not a consistency violation: %v", err)
+	}
+	page, pageErr := repository.List(ctx, exportapp.ListQuery{
+		WorkspaceID: workspaceID, ScopeKind: domain.ScopeCollection, CollectionID: &collectionID, Limit: 10,
+	})
+	if pageErr == nil || len(page.Items) != 0 || page.NextCursor != "" {
+		t.Fatalf("corrupt List() page=%#v error=%v", page, pageErr)
+	}
+	if !errors.As(pageErr, &classified) || classified.Kind != foundation.ErrorConsistencyViolation {
+		t.Fatalf("corrupt List() error is not a consistency violation: %v", pageErr)
+	}
+	requireExportPoolReleased(t, pool)
+}
+
+func TestExportRepositoryTargetQueryPlansUseDeclaredIndexes(t *testing.T) {
+	testExportRepositoryVariants(t, testExportRepositoryTargetQueryPlansUseDeclaredIndexes)
+}
+
+func testExportRepositoryTargetQueryPlansUseDeclaredIndexes(
+	t *testing.T,
+	ctx context.Context,
+	repository exportapp.Repository,
+	pool *pgxpool.Pool,
+) {
+	workspaceID := exportIntegrationID(t)
+	collectionID := exportIntegrationID(t)
+	queryHash := exportIntegrationHash("plan:" + string(collectionID))
+	seedExportIntegrationScope(t, ctx, pool, workspaceID, collectionID, queryHash)
+	if _, replayed, err := repository.Create(ctx, exportIntegrationJob(t, workspaceID, collectionID, queryHash, time.Hour, "plan-collection")); err != nil || replayed {
+		t.Fatalf("create collection plan fixture replayed=%t err=%v detail=%s", replayed, err, exportIntegrationErrorDetail(err))
+	}
+	setExportAttachmentCapability(t, ctx, pool, true)
+	if _, replayed, err := repository.Create(ctx, exportIntegrationAttachmentJob(t, workspaceID, time.Hour, "plan-attachment")); err != nil || replayed {
+		t.Fatalf("create attachment plan fixture replayed=%t err=%v detail=%s", replayed, err, exportIntegrationErrorDetail(err))
+	}
+
+	tx, err := pool.Begin(ctx)
 	if err != nil {
-		t.Fatalf("migrate export test database: %v", err)
+		t.Fatal(err)
 	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	if _, err := tx.Exec(ctx, `SET LOCAL enable_seqscan=off`); err != nil {
+		t.Fatal(err)
+	}
+	queries := []struct {
+		name  string
+		sql   string
+		args  []any
+		index string
+	}{
+		{
+			name: "collection keyset list",
+			sql:  exportCollectionListFirstPageSQL,
+			args: []any{string(workspaceID), string(collectionID), 11}, index: "idx_ops_export_collection",
+		},
+		{
+			name: "attachment keyset list",
+			sql:  exportAttachmentListFirstPageSQL,
+			args: []any{string(workspaceID), 11}, index: "idx_ops_export_attachment",
+		},
+		{
+			name: "expiry sweep",
+			sql:  exportExpireCandidatesSQL,
+			args: []any{10}, index: "idx_ops_export_expiry_candidate",
+		},
+		{
+			name: "recovery candidates",
+			sql:  exportRecoveryCandidatesSQL,
+			args: []any{10}, index: "idx_ops_export_pending_recovery",
+		},
+		{
+			name: "cleanup candidates",
+			sql:  exportCleanupCandidatesSQL,
+			args: []any{10}, index: "idx_ops_export_cleanup_candidate",
+		},
+		{
+			name: "prepared staging lookup",
+			sql:  exportUnreferencedStagingSQL,
+			args: []any{string(workspaceID), []string{exportIntegrationPreparedFile(exportIntegrationID(t)).StagingPath}}, index: "uq_ops_export_prepared_staging",
+		},
+	}
+	for _, query := range queries {
+		t.Run(query.name, func(t *testing.T) {
+			rows, err := tx.Query(ctx, "EXPLAIN (COSTS OFF) "+query.sql, query.args...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer rows.Close()
+			var lines []string
+			for rows.Next() {
+				var line string
+				if err := rows.Scan(&line); err != nil {
+					t.Fatal(err)
+				}
+				lines = append(lines, line)
+			}
+			if err := rows.Err(); err != nil {
+				t.Fatal(err)
+			}
+			plan := strings.Join(lines, "\n")
+			if !strings.Contains(plan, query.index) {
+				t.Fatalf("query plan missing index %q:\n%s", query.index, plan)
+			}
+		})
+	}
+	if err := tx.Rollback(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	requireExportPoolReleased(t, pool)
+}
+
+func requireExportPoolReleased(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for pool.Stat().AcquiredConns() != 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if acquired := pool.Stat().AcquiredConns(); acquired != 0 {
+		t.Fatalf("Export pool acquired connections=%d want=0", acquired)
+	}
+}
+
+func TestExportGORMDispatcherRollbackAndPGXWorkerConsumption(t *testing.T) {
+	fixture := requireExportIntegrationDatabase(t, 16)
+	platform := fixture.Pool()
+	pool := platform.DB()
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+
+	insertClient, err := workflowriver.NewClient(pool, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rejectCause := errors.New("export rollout is draining")
+	rejected, err := exportriver.NewGORMTransactionalDispatcher(platform, insertClient, exportRejectScopedFence{err: rejectCause})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rejectedWorkspaceID := exportIntegrationID(t)
+	rejectedExportID := exportIntegrationID(t)
+	err = rejected.Dispatch(ctx, rejectedWorkspaceID, rejectedExportID)
+	if !errors.Is(err, rejectCause) {
+		t.Fatalf("rejected GORM dispatch error=%v", err)
+	}
+	var capabilityEnabled bool
+	var rejectedJobs int
+	if err := pool.QueryRow(ctx, `SELECT enabled FROM ops.export_capability
+		WHERE capability_key='workspace-attachments' AND contract_version='workspace-attachments/v1'`).Scan(&capabilityEnabled); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM workflow.river_job
+		WHERE kind=$1 AND args->>'workspace_id'=$2 AND args->>'export_id'=$3`,
+		exportriver.JobKind, string(rejectedWorkspaceID), string(rejectedExportID)).Scan(&rejectedJobs); err != nil {
+		t.Fatal(err)
+	}
+	if capabilityEnabled || rejectedJobs != 0 {
+		t.Fatalf("rejected GORM dispatch committed capability=%t jobs=%d", capabilityEnabled, rejectedJobs)
+	}
+
+	dispatcher, err := exportriver.NewGORMTransactionalDispatcher(platform, insertClient, exportAllowScopedFence{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaceID := exportIntegrationID(t)
+	exportID := exportIntegrationID(t)
+	if err := dispatcher.Dispatch(ctx, workspaceID, exportID); err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatcher.Dispatch(ctx, workspaceID, exportID); err != nil {
+		t.Fatalf("repeat active Export dispatch: %v", err)
+	}
+	var activeJobs int
+	var jobID int64
+	if err := pool.QueryRow(ctx, `SELECT count(*),min(id) FROM workflow.river_job
+		WHERE kind=$1 AND args->>'workspace_id'=$2 AND args->>'export_id'=$3`,
+		exportriver.JobKind, string(workspaceID), string(exportID)).Scan(&activeJobs, &jobID); err != nil {
+		t.Fatal(err)
+	}
+	if activeJobs != 1 || jobID < 1 {
+		t.Fatalf("active duplicate Export jobs=%d first job id=%d", activeJobs, jobID)
+	}
+
+	executions := make(chan exportRiverExecution, 2)
+	worker, err := exportriver.NewWorker(exportRecordingExecutor{executions: executions}, "export-gorm-integration")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workers := workflowriver.NewWorkers()
+	if err := workflowriver.AddWorkerSafely(workers, worker); err != nil {
+		t.Fatal(err)
+	}
+	runtimeClient, err := workflowriver.NewClient(pool, workers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runtimeClient.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	stopped := false
+	t.Cleanup(func() {
+		if stopped {
+			return
+		}
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer stopCancel()
+		if err := runtimeClient.Stop(stopCtx); err != nil {
+			t.Errorf("stop Export River worker: %v", err)
+		}
+	})
+
+	requireExportRiverExecution(t, ctx, executions, workspaceID, exportID)
+	requireExportRiverJobState(t, ctx, pool, jobID, rivertype.JobStateCompleted)
+
+	if err := dispatcher.Dispatch(ctx, workspaceID, exportID); err != nil {
+		t.Fatalf("dispatch Export recovery after completion: %v", err)
+	}
+	var totalJobs int
+	var recoveryJobID int64
+	if err := pool.QueryRow(ctx, `SELECT count(*),max(id) FROM workflow.river_job
+		WHERE kind=$1 AND args->>'workspace_id'=$2 AND args->>'export_id'=$3`,
+		exportriver.JobKind, string(workspaceID), string(exportID)).Scan(&totalJobs, &recoveryJobID); err != nil {
+		t.Fatal(err)
+	}
+	if totalJobs != 2 || recoveryJobID <= jobID {
+		t.Fatalf("completed recovery Export jobs=%d first=%d recovery=%d", totalJobs, jobID, recoveryJobID)
+	}
+	requireExportRiverExecution(t, ctx, executions, workspaceID, exportID)
+	requireExportRiverJobState(t, ctx, pool, recoveryJobID, rivertype.JobStateCompleted)
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := runtimeClient.Stop(stopCtx); err != nil {
+		stopCancel()
+		t.Fatal(err)
+	}
+	stopCancel()
+	stopped = true
+	requireExportPoolReleased(t, pool)
+}
+
+func requireExportRiverExecution(
+	t *testing.T,
+	ctx context.Context,
+	executions <-chan exportRiverExecution,
+	workspaceID, exportID foundation.ID,
+) {
+	t.Helper()
+	select {
+	case execution := <-executions:
+		if execution.workspaceID != workspaceID || execution.exportID != exportID || execution.owner == "" {
+			t.Fatalf("Export River execution=%#v", execution)
+		}
+	case <-ctx.Done():
+		t.Fatalf("wait for pgx Export worker consumption: %v", ctx.Err())
+	}
+}
+
+func requireExportRiverJobState(t *testing.T, ctx context.Context, pool *pgxpool.Pool, jobID int64, want rivertype.JobState) {
+	t.Helper()
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var state string
+		if err := pool.QueryRow(ctx, `SELECT state FROM workflow.river_job WHERE id=$1`, jobID).Scan(&state); err != nil {
+			t.Fatal(err)
+		}
+		if state == string(want) {
+			return
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			t.Fatalf("Export River job %d state=%q want=%q: %v", jobID, state, want, ctx.Err())
+		}
+	}
+}
+
+type exportRejectScopedFence struct {
+	err error
+}
+
+func (fence exportRejectScopedFence) CheckEnqueue(ctx context.Context, scope foundation.TransactionScope) error {
+	transaction, err := platformpostgres.GORMTransaction(scope)
+	if err != nil {
+		return err
+	}
+	result := transaction.WithContext(ctx).Exec(`UPDATE ops.export_capability SET enabled=true,updated_at=clock_timestamp()
+		WHERE capability_key='workspace-attachments' AND contract_version='workspace-attachments/v1'`)
+	if result.Error != nil {
+		return result.Error
+	}
+	return fence.err
+}
+
+type exportAllowScopedFence struct{}
+
+func (exportAllowScopedFence) CheckEnqueue(context.Context, foundation.TransactionScope) error {
+	return nil
+}
+
+type exportRiverExecution struct {
+	workspaceID foundation.ID
+	exportID    foundation.ID
+	owner       string
+}
+
+type exportRecordingExecutor struct {
+	executions chan<- exportRiverExecution
+}
+
+func (executor exportRecordingExecutor) Execute(ctx context.Context, workspaceID, exportID foundation.ID, owner string) error {
+	select {
+	case executor.executions <- exportRiverExecution{workspaceID: workspaceID, exportID: exportID, owner: owner}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+type exportRepositoryIntegrationVariant struct {
+	name string
+	open func(*testing.T, *platformpostgres.Pool) exportapp.Repository
+}
+
+func testExportRepositoryVariants(
+	t *testing.T,
+	test func(*testing.T, context.Context, exportapp.Repository, *pgxpool.Pool),
+) {
+	t.Helper()
+	variants := []exportRepositoryIntegrationVariant{
+		{name: "legacy", open: openLegacyExportRepositoryIntegration},
+		{name: "gorm", open: openGORMExportRepositoryIntegration},
+	}
+	for _, variant := range variants {
+		t.Run(variant.name, func(t *testing.T) {
+			fixture := requireExportIntegrationDatabase(t, 16)
+			platform := fixture.Pool()
+			ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+			defer cancel()
+			test(t, ctx, variant.open(t, platform), platform.DB())
+		})
+	}
+}
+
+func requireExportIntegrationDatabase(t *testing.T, maxConns int32) *testdb.Fixture {
+	t.Helper()
+	return testdb.Require(t, testdb.Config{
+		ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
+		Availability:     testdb.FailWhenUnavailable,
+		MaxConns:         maxConns,
+	})
+}
+
+func openLegacyExportRepositoryIntegration(t *testing.T, platform *platformpostgres.Pool) exportapp.Repository {
+	t.Helper()
+	pool := platform.DB()
 	events, err := eventspostgres.NewStore(pool)
 	if err != nil {
 		t.Fatalf("create event store: %v", err)
@@ -711,7 +1335,24 @@ func newExportIntegrationRepository(t *testing.T, ctx context.Context) (*Reposit
 	if err != nil {
 		t.Fatalf("create export repository: %v", err)
 	}
-	return repository, pool
+	return repository
+}
+
+func openGORMExportRepositoryIntegration(t *testing.T, platform *platformpostgres.Pool) exportapp.Repository {
+	t.Helper()
+	events, err := eventspostgres.NewGORMStore(platform)
+	if err != nil {
+		t.Fatalf("create GORM event store: %v", err)
+	}
+	audit, err := auditpostgres.NewGORMStore(platform)
+	if err != nil {
+		t.Fatalf("create GORM audit store: %v", err)
+	}
+	repository, err := NewGORMRepository(platform, WithGORMEventAppender(events), WithGORMAuditAppender(audit))
+	if err != nil {
+		t.Fatalf("create GORM export repository: %v", err)
+	}
+	return repository
 }
 
 func exportIntegrationJob(t *testing.T, workspaceID, collectionID foundation.ID, queryHash string, ttl time.Duration, suffix string) domain.Job {
@@ -753,8 +1394,11 @@ func seedExportIntegrationScope(t *testing.T, ctx context.Context, pool *pgxpool
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	root := "/tmp/export-integration-" + string(workspaceID)
 	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(
-		id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at
-	) VALUES($1,$2,$3,$3,$4,'test',1,$4,$4)`, string(workspaceID), "export-integration-"+string(workspaceID), root, now); err != nil {
+		id,name,root_path,root_fingerprint,binding_version,git_repository_path,git_checked_at,
+		status,availability,availability_reason,availability_checked_at,version,created_at,updated_at
+	) VALUES($1,$2,$3,$4,1,$3,$5,'inactive','available',NULL,$5,1,$5,$5)`,
+		string(workspaceID), "export-integration-"+string(workspaceID), root,
+		exportIntegrationHash("workspace:"+string(workspaceID)), now); err != nil {
 		t.Fatalf("seed export Workspace: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `INSERT INTO learning.smart_collection(

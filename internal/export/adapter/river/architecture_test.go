@@ -6,6 +6,7 @@ import (
 	"go/token"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -30,17 +31,22 @@ func TestRiverInsertionSurfaceIsTransactionOnly(t *testing.T) {
 		}
 	}
 
-	dispatcherFile := parseGoFile(t, filepath.Join(packageDir, "dispatcher.go"))
-	constructors := make([]string, 0, 1)
-	for _, declaration := range dispatcherFile.Decls {
-		function, ok := declaration.(*ast.FuncDecl)
-		if !ok || function.Recv != nil || !returnsDispatcher(function.Type.Results) || !token.IsExported(function.Name.Name) {
-			continue
+	dispatcherFiles := []string{"dispatcher.go", "gorm_dispatcher.go"}
+	constructors := make([]string, 0, len(dispatcherFiles))
+	for _, name := range dispatcherFiles {
+		dispatcherFile := parseGoFile(t, filepath.Join(packageDir, name))
+		for _, declaration := range dispatcherFile.Decls {
+			function, ok := declaration.(*ast.FuncDecl)
+			if !ok || function.Recv != nil || !returnsDispatcher(function.Type.Results) || !token.IsExported(function.Name.Name) {
+				continue
+			}
+			constructors = append(constructors, function.Name.Name)
 		}
-		constructors = append(constructors, function.Name.Name)
 	}
-	if len(constructors) != 1 || constructors[0] != "NewTransactionalDispatcher" {
-		t.Fatalf("export River dispatcher constructors = %v, want only NewTransactionalDispatcher", constructors)
+	slices.Sort(constructors)
+	wantConstructors := []string{"NewGORMTransactionalDispatcher", "NewTransactionalDispatcher"}
+	if !slices.Equal(constructors, wantConstructors) {
+		t.Fatalf("export River dispatcher constructors = %v, want %v", constructors, wantConstructors)
 	}
 }
 
@@ -69,7 +75,7 @@ func returnsDispatcher(results *ast.FieldList) bool {
 		return false
 	}
 	for _, result := range results.List {
-		if receiverType(result.Type) == "Dispatcher" {
+		if receiverType(result.Type) == "Dispatcher" || receiverType(result.Type) == "GORMDispatcher" {
 			return true
 		}
 	}

@@ -1,11 +1,10 @@
-//go:build integration
+//go:build integration && testcontainers
 
 package postgres
 
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -23,16 +22,8 @@ import (
 // provenance rows per target, then verifies each target is emitted once and
 // both object types survive a page boundary when they share one UUID.
 func TestFactReaderEvidenceDetectorsDeduplicateAndPageByTypedKey(t *testing.T) {
-	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
-	}
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
+	pool := newHealthIntegrationPool(t)
 	fixture, err := graphfixture.SeedFunctional(ctx, pool)
 	if err != nil {
 		t.Fatal(err)

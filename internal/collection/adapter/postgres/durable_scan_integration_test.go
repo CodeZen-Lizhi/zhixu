@@ -5,6 +5,7 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -16,14 +17,16 @@ import (
 )
 
 func TestCollectionDurableScanRestartsWithStructuredKeysetAndFailsClosedOnDrift(t *testing.T) {
-	ctx, pool, fixture := collectionQueryFixture(t)
+	runCollectionRepositoryIntegrationCases(t, testCollectionDurableScanRestartsWithStructuredKeysetAndFailsClosedOnDrift)
+}
+
+func testCollectionDurableScanRestartsWithStructuredKeysetAndFailsClosedOnDrift(t *testing.T, testCase collectionIntegrationCase) {
+	ctx := testCase.context
+	pool := testCase.pool
+	fixture := seedCollectionQueryFixture(t, ctx, pool)
 	now := time.Now().UTC()
-	repository, err := NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
 	service, err := collectionapp.NewService(collectionapp.Dependencies{
-		Repository: repository,
+		Repository: testCase.repository,
 		IDs:        foundation.NewUUIDGenerator(nil),
 		Clock:      foundation.FixedClock{Value: now},
 	})
@@ -67,12 +70,8 @@ func TestCollectionDurableScanRestartsWithStructuredKeysetAndFailsClosedOnDrift(
 
 	// A fresh Repository has a different random HTTP cursor key. Structured scan
 	// checkpoints must remain readable because they do not depend on that key.
-	restartedRepository, err := NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
 	restartedService, err := collectionapp.NewService(collectionapp.Dependencies{
-		Repository: restartedRepository,
+		Repository: testCase.reopen(t),
 		IDs:        foundation.NewUUIDGenerator(nil),
 		Clock:      foundation.FixedClock{Value: now},
 	})
@@ -98,17 +97,10 @@ func TestCollectionDurableScanRestartsWithStructuredKeysetAndFailsClosedOnDrift(
 	if len(seenPairs) != 6 {
 		t.Fatalf("pair count=%d want=6", len(seenPairs))
 	}
-	startTx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := VerifyDurableScanBinding(ctx, startTx, binding); err != nil {
-		_ = startTx.Rollback(ctx)
+	if err := verifyCollectionDurableBinding(t, testCase, binding); err != nil {
 		t.Fatalf("valid start binding verification: %v", err)
 	}
-	if err := startTx.Rollback(ctx); err != nil {
-		t.Fatal(err)
-	}
+	verifyCollectionDurableBindingRollbackOwnership(t, testCase, binding)
 
 	for name, mutate := range map[string]func(collectionapp.DurableScanBinding) collectionapp.DurableScanBinding{
 		"version": func(value collectionapp.DurableScanBinding) collectionapp.DurableScanBinding {
@@ -142,12 +134,7 @@ func TestCollectionDurableScanRestartsWithStructuredKeysetAndFailsClosedOnDrift(
 	) VALUES($1,$2,'Durable revision drift','durable revision drift','revision changed','ACTIVE',1,$3,$3)`, string(newTopicID), string(fixture.WorkspaceID), now.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	driftedStartTx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = driftedStartTx.Rollback(ctx) }()
-	if err := VerifyDurableScanBinding(ctx, driftedStartTx, binding); !hasCollectionCode(err, collectionapp.ErrorCodeCursorStale) {
+	if err := verifyCollectionDurableBinding(t, testCase, binding); !hasCollectionCode(err, collectionapp.ErrorCodeCursorStale) {
 		t.Fatalf("plan-to-start drift verification error=%v", err)
 	}
 	if _, err := restartedService.ReadDurableScanPage(ctx, collectionapp.DurableScanPageRequest{Binding: binding, Limit: 2}); !hasCollectionCode(err, collectionapp.ErrorCodeCursorStale) {
@@ -156,14 +143,16 @@ func TestCollectionDurableScanRestartsWithStructuredKeysetAndFailsClosedOnDrift(
 }
 
 func TestCollectionDurableScanIgnoresOwnHealthOutputsUnlessHealthDefinesMembership(t *testing.T) {
-	ctx, pool, fixture := collectionQueryFixture(t)
+	runCollectionRepositoryIntegrationCases(t, testCollectionDurableScanIgnoresOwnHealthOutputsUnlessHealthDefinesMembership)
+}
+
+func testCollectionDurableScanIgnoresOwnHealthOutputsUnlessHealthDefinesMembership(t *testing.T, testCase collectionIntegrationCase) {
+	ctx := testCase.context
+	pool := testCase.pool
+	fixture := seedCollectionQueryFixture(t, ctx, pool)
 	now := time.Now().UTC()
-	repository, err := NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
 	service, err := collectionapp.NewService(collectionapp.Dependencies{
-		Repository: repository, IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.FixedClock{Value: now},
+		Repository: testCase.repository, IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.FixedClock{Value: now},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -253,6 +242,65 @@ func TestCollectionDurableScanIgnoresOwnHealthOutputsUnlessHealthDefinesMembersh
 	}
 	if _, err := service.ReadDurableScanPage(ctx, collectionapp.DurableScanPageRequest{Binding: healthBinding, Limit: 1}); !hasCollectionCode(err, collectionapp.ErrorCodeCursorStale) {
 		t.Fatalf("health membership change stale error=%v", err)
+	}
+}
+
+func verifyCollectionDurableBinding(t *testing.T, testCase collectionIntegrationCase, binding collectionapp.DurableScanBinding) error {
+	t.Helper()
+	if testCase.name == "legacy" {
+		transaction, err := testCase.pool.BeginTx(testCase.context, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+		if err != nil {
+			return err
+		}
+		defer func() { _ = transaction.Rollback(context.Background()) }()
+		return VerifyDurableScanBinding(testCase.context, transaction, binding)
+	}
+	verifier, ok := testCase.repository.(collectionapp.ScopedDurableScanBindingVerifier)
+	if !ok {
+		return errors.New("Collection GORM repository does not implement scoped durable binding verification")
+	}
+	unitOfWork, err := testCase.platform.UnitOfWork()
+	if err != nil {
+		return err
+	}
+	return unitOfWork.Within(testCase.context, foundation.TransactionOptions{Isolation: foundation.TransactionIsolationRepeatableRead}, func(callbackCtx context.Context, scope foundation.TransactionScope) error {
+		return verifier.VerifyDurableScanBindingScoped(callbackCtx, scope, binding)
+	})
+}
+
+func verifyCollectionDurableBindingRollbackOwnership(t *testing.T, testCase collectionIntegrationCase, binding collectionapp.DurableScanBinding) {
+	t.Helper()
+	if testCase.name == "legacy" {
+		transaction, err := testCase.pool.BeginTx(testCase.context, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := VerifyDurableScanBinding(testCase.context, transaction, binding); err != nil {
+			_ = transaction.Rollback(context.Background())
+			t.Fatal(err)
+		}
+		if err := transaction.Rollback(testCase.context); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	verifier, ok := testCase.repository.(collectionapp.ScopedDurableScanBindingVerifier)
+	if !ok {
+		t.Fatal("Collection GORM repository does not implement scoped durable binding verification")
+	}
+	unitOfWork, err := testCase.platform.UnitOfWork()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rollbackCause := errors.New("Collection caller requested durable binding rollback")
+	err = unitOfWork.Within(testCase.context, foundation.TransactionOptions{Isolation: foundation.TransactionIsolationRepeatableRead}, func(callbackCtx context.Context, scope foundation.TransactionScope) error {
+		if err := verifier.VerifyDurableScanBindingScoped(callbackCtx, scope, binding); err != nil {
+			return err
+		}
+		return rollbackCause
+	})
+	if !errors.Is(err, rollbackCause) {
+		t.Fatalf("scoped durable binding rollback err=%v", err)
 	}
 }
 

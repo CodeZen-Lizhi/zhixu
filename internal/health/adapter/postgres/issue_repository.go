@@ -28,9 +28,10 @@ type IssueDB interface {
 
 // IssueRepository 持久化 Issue、Observation、Evidence 和 CAS Decision。
 type IssueRepository struct {
-	db         IssueDB
-	generator  foundation.IDGenerator
-	membership healthapp.SmartCollectionMembershipPort
+	db              IssueDB
+	generator       foundation.IDGenerator
+	membership      healthapp.SmartCollectionMembershipPort
+	bindingVerifier SmartCollectionBindingVerifier
 }
 
 var _ healthapp.DetectorPageStore = (*IssueRepository)(nil)
@@ -49,6 +50,10 @@ func NewIssueRepository(db IssueDB, generators ...foundation.IDGenerator) (*Issu
 
 // NewSmartCollectionIssueRepository 构造会以 Collection durable membership 约束 missing-set 的 repository。
 func NewSmartCollectionIssueRepository(db IssueDB, membership healthapp.SmartCollectionMembershipPort, generators ...foundation.IDGenerator) (*IssueRepository, error) {
+	return newSmartCollectionIssueRepository(db, membership, nil, generators...)
+}
+
+func newSmartCollectionIssueRepository(db IssueDB, membership healthapp.SmartCollectionMembershipPort, verifier SmartCollectionBindingVerifier, generators ...foundation.IDGenerator) (*IssueRepository, error) {
 	if membership == nil {
 		return nil, errors.New("health smart-collection membership is nil")
 	}
@@ -57,6 +62,7 @@ func NewSmartCollectionIssueRepository(db IssueDB, membership healthapp.SmartCol
 		return nil, err
 	}
 	repository.membership = membership
+	repository.bindingVerifier = verifier
 	return repository, nil
 }
 
@@ -707,7 +713,11 @@ WHERE id=$1 AND workspace_id=$2 AND status='RUNNING'`, string(scanID), string(wo
 		}
 	}
 	if scan.Scope.Type == domain.ScanScopeTypeSmartCollection {
-		if err := revalidateSmartCollectionScope(ctx, repository.membership, binding); err != nil {
+		if repository.bindingVerifier != nil {
+			if err := repository.bindingVerifier.Verify(ctx, tx, binding); err != nil {
+				return 0, err
+			}
+		} else if err := revalidateSmartCollectionScope(ctx, repository.membership, binding); err != nil {
 			return 0, err
 		}
 	}

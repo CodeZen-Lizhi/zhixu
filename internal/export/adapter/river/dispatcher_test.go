@@ -140,6 +140,127 @@ func TestTransactionalDispatcherClassifiesTransactionFailures(t *testing.T) {
 	})
 }
 
+func TestGORMTransactionalDispatcherCommitsScopedInsertWithExportUniqueness(t *testing.T) {
+	t.Parallel()
+
+	scope := &dispatcherScope{}
+	committed := false
+	var gotOptions workflowriver.InsertOptions
+	dispatcher, err := newGORMTransactionalDispatcher(
+		dispatcherUnitOfWorkFunc(func(ctx context.Context, _ foundation.TransactionOptions, work foundation.TransactionFunc) error {
+			if err := work(ctx, scope); err != nil {
+				return err
+			}
+			committed = true
+			return nil
+		}),
+		scopedExportJobInserterFunc(func(_ context.Context, gotScope foundation.TransactionScope, args Args, options workflowriver.InsertOptions) (workflowriver.JobReceipt, error) {
+			if gotScope != scope {
+				t.Fatalf("transaction scope = %#v", gotScope)
+			}
+			if err := ValidateArgs(args); err != nil {
+				t.Fatal(err)
+			}
+			gotOptions = options
+			return workflowriver.JobReceipt{JobID: 81}, nil
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatcher.Dispatch(context.Background(), foundation.ID("10000000-0000-4000-8000-000000000001"), foundation.ID("20000000-0000-4000-8000-000000000002")); err != nil {
+		t.Fatal(err)
+	}
+	if !committed || !slices.Equal(gotOptions.UniqueStates, exportUniqueOpts().ByState) {
+		t.Fatalf("committed=%t unique states=%#v", committed, gotOptions.UniqueStates)
+	}
+}
+
+func TestGORMTransactionalDispatcherRollsBackRejectedInsert(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("rollout is draining")
+	committed := false
+	dispatcher, err := newGORMTransactionalDispatcher(
+		dispatcherUnitOfWorkFunc(func(ctx context.Context, _ foundation.TransactionOptions, work foundation.TransactionFunc) error {
+			if err := work(ctx, &dispatcherScope{}); err != nil {
+				return err
+			}
+			committed = true
+			return nil
+		}),
+		scopedExportJobInserterFunc(func(context.Context, foundation.TransactionScope, Args, workflowriver.InsertOptions) (workflowriver.JobReceipt, error) {
+			return workflowriver.JobReceipt{}, wantErr
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = dispatcher.Dispatch(context.Background(), foundation.ID("10000000-0000-4000-8000-000000000001"), foundation.ID("20000000-0000-4000-8000-000000000002"))
+	if !errors.Is(err, wantErr) || committed {
+		t.Fatalf("error=%v committed=%t", err, committed)
+	}
+}
+
+func TestGORMTransactionalDispatcherClassifiesTransactionFailures(t *testing.T) {
+	t.Parallel()
+
+	workspaceID := foundation.ID("10000000-0000-4000-8000-000000000001")
+	exportID := foundation.ID("20000000-0000-4000-8000-000000000002")
+	inserter := scopedExportJobInserterFunc(func(context.Context, foundation.TransactionScope, Args, workflowriver.InsertOptions) (workflowriver.JobReceipt, error) {
+		return workflowriver.JobReceipt{JobID: 82}, nil
+	})
+
+	t.Run("begin", func(t *testing.T) {
+		dispatcher, err := newGORMTransactionalDispatcher(
+			dispatcherUnitOfWorkFunc(func(context.Context, foundation.TransactionOptions, foundation.TransactionFunc) error {
+				return errors.New("database unavailable")
+			}),
+			inserter,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := dispatcher.Dispatch(context.Background(), workspaceID, exportID); exportDispatcherErrorCode(err) != "EXPORT_RIVER_TRANSACTION_BEGIN_FAILED" {
+			t.Fatalf("begin error = %v", err)
+		}
+	})
+
+	t.Run("commit", func(t *testing.T) {
+		dispatcher, err := newGORMTransactionalDispatcher(
+			dispatcherUnitOfWorkFunc(func(ctx context.Context, _ foundation.TransactionOptions, work foundation.TransactionFunc) error {
+				if err := work(ctx, &dispatcherScope{}); err != nil {
+					return err
+				}
+				return errors.New("commit result unknown")
+			}),
+			inserter,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := dispatcher.Dispatch(context.Background(), workspaceID, exportID); exportDispatcherErrorCode(err) != "EXPORT_RIVER_TRANSACTION_COMMIT_FAILED" {
+			t.Fatalf("commit error = %v", err)
+		}
+	})
+}
+
+type dispatcherUnitOfWorkFunc func(context.Context, foundation.TransactionOptions, foundation.TransactionFunc) error
+
+func (fn dispatcherUnitOfWorkFunc) Within(ctx context.Context, options foundation.TransactionOptions, work foundation.TransactionFunc) error {
+	return fn(ctx, options, work)
+}
+
+type scopedExportJobInserterFunc func(context.Context, foundation.TransactionScope, Args, workflowriver.InsertOptions) (workflowriver.JobReceipt, error)
+
+func (fn scopedExportJobInserterFunc) InsertTx(ctx context.Context, scope foundation.TransactionScope, args Args, options workflowriver.InsertOptions) (workflowriver.JobReceipt, error) {
+	return fn(ctx, scope, args, options)
+}
+
+type dispatcherScope struct{}
+
+func (*dispatcherScope) TransactionScope() {}
+
 type transactionBeginnerFunc func(context.Context) (pgx.Tx, error)
 
 func (fn transactionBeginnerFunc) Begin(ctx context.Context) (pgx.Tx, error) { return fn(ctx) }

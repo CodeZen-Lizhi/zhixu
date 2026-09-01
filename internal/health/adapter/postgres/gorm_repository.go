@@ -51,6 +51,13 @@ func NewGORMScanRepository(pool *platformpostgres.Pool, dependencies ...any) (*G
 				return nil, healthGORMInvalid("health GORM scoped Collection dependency is nil")
 			}
 			verifier = gormCollectionBindingVerifier{scoped: typed}
+		case interface {
+			VerifyBindingScoped(context.Context, foundation.TransactionScope, healthapplication.SmartCollectionBinding) error
+		}:
+			if isNilHealthDependency(typed) {
+				return nil, healthGORMInvalid("health GORM scoped Collection verifier is nil")
+			}
+			verifier = gormHealthBindingVerifier{scoped: typed}
 		case eventsapplication.ScopedAppender:
 			if isNilHealthDependency(typed) {
 				return nil, healthGORMInvalid("health GORM scoped Event dependency is nil")
@@ -116,6 +123,22 @@ func (verifier gormCollectionBindingVerifier) Verify(ctx context.Context, transa
 		CollectionVersion: binding.CollectionVersion, QueryHash: binding.QueryHash,
 		ReadModelRevision: binding.ReadModelRevision, ExactCount: binding.ExactCount,
 	})
+}
+
+// gormHealthBindingVerifier adapts Health's collection package seam while
+// preserving the caller-owned opaque transaction scope.
+type gormHealthBindingVerifier struct {
+	scoped interface {
+		VerifyBindingScoped(context.Context, foundation.TransactionScope, healthapplication.SmartCollectionBinding) error
+	}
+}
+
+func (verifier gormHealthBindingVerifier) Verify(ctx context.Context, transaction pgx.Tx, binding healthapplication.SmartCollectionBinding) error {
+	bridge, ok := transaction.(*healthGORMTx)
+	if !ok || bridge.scope == nil || isNilHealthDependency(verifier.scoped) {
+		return errors.New("health scoped Collection transaction is unavailable")
+	}
+	return verifier.scoped.VerifyBindingScoped(ctx, bridge.scope, binding)
 }
 
 // NewGORMScanStateRepository constructs the worker-only Scan state adapter.
@@ -313,6 +336,7 @@ func NewGORMIssueRepository(pool *platformpostgres.Pool, dependencies ...any) (*
 	}
 	var membership healthapplication.SmartCollectionMembershipPort
 	var generator foundation.IDGenerator
+	var bindingVerifier SmartCollectionBindingVerifier
 	for _, dependency := range dependencies {
 		switch typed := dependency.(type) {
 		case healthapplication.SmartCollectionMembershipPort:
@@ -325,6 +349,18 @@ func NewGORMIssueRepository(pool *platformpostgres.Pool, dependencies ...any) (*
 				return nil, healthGORMInvalid("health GORM Issue ID generator is nil")
 			}
 			generator = typed
+		case collectionapplication.ScopedDurableScanBindingVerifier:
+			if isNilHealthDependency(typed) {
+				return nil, healthGORMInvalid("health GORM scoped Collection dependency is nil")
+			}
+			bindingVerifier = gormCollectionBindingVerifier{scoped: typed}
+		case interface {
+			VerifyBindingScoped(context.Context, foundation.TransactionScope, healthapplication.SmartCollectionBinding) error
+		}:
+			if isNilHealthDependency(typed) {
+				return nil, healthGORMInvalid("health GORM scoped Collection verifier is nil")
+			}
+			bindingVerifier = gormHealthBindingVerifier{scoped: typed}
 		case nil:
 			return nil, healthGORMInvalid("health GORM Issue dependency is nil")
 		default:
@@ -336,8 +372,11 @@ func NewGORMIssueRepository(pool *platformpostgres.Pool, dependencies ...any) (*
 	}
 	var legacy *IssueRepository
 	if membership != nil {
-		legacy, err = NewSmartCollectionIssueRepository(database, membership, generator)
+		legacy, err = newSmartCollectionIssueRepository(database, membership, bindingVerifier, generator)
 	} else {
+		if bindingVerifier != nil {
+			return nil, healthGORMInvalid("health GORM scoped Collection verifier requires membership")
+		}
 		legacy, err = NewIssueRepository(database, generator)
 	}
 	if err != nil {

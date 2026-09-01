@@ -2,13 +2,29 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"strings"
 
 	exportapp "github.com/CodeZen-Lizhi/zhixu/internal/export/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/export/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	"github.com/jackc/pgx/v5"
+)
+
+const (
+	exportExpireCandidatesSQL = `SELECT ` + selectColumns + ` FROM ops.export_job
+		WHERE status IN ('PENDING','RUNNING','SUCCEEDED','FAILED') AND expires_at<=clock_timestamp()
+		ORDER BY expires_at,id LIMIT $1 FOR UPDATE SKIP LOCKED`
+	exportCleanupCandidatesSQL = `SELECT ` + selectColumns + ` FROM ops.export_job
+		WHERE status='EXPIRED' AND cleanup_status IN ('PENDING','FAILED') AND file_deleted_at IS NULL
+		ORDER BY COALESCE(cleanup_updated_at,updated_at),id LIMIT $1`
+	exportUnreferencedStagingSQL = `SELECT candidate.path
+		FROM unnest($2::text[]) WITH ORDINALITY AS candidate(path,position)
+		WHERE NOT EXISTS (
+			SELECT 1 FROM ops.export_job job
+			WHERE job.workspace_id=$1 AND job.prepared_staging_path=candidate.path
+		)
+		ORDER BY candidate.position`
 )
 
 // ExpireCandidates 原子归约一页数据库时间下已经到期的任务。
@@ -24,9 +40,7 @@ func (repository *Repository) ExpireCandidates(ctx context.Context, limit int) (
 		return nil, classify(err, true)
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
-	rows, err := tx.Query(ctx, `SELECT `+selectColumns+` FROM ops.export_job
-		WHERE status IN ('PENDING','RUNNING','SUCCEEDED','FAILED') AND expires_at<=clock_timestamp()
-		ORDER BY expires_at,id LIMIT $1 FOR UPDATE SKIP LOCKED`, limit)
+	rows, err := tx.Query(ctx, exportExpireCandidatesSQL, limit)
 	if err != nil {
 		return nil, classify(err, true)
 	}
@@ -72,9 +86,7 @@ func (repository *Repository) CleanupCandidates(ctx context.Context, limit int) 
 	if ctx == nil || limit < 1 || limit > exportapp.MaxListLimit {
 		return nil, invalid(errors.New("export cleanup limit is invalid"))
 	}
-	rows, err := repository.db.Query(ctx, `SELECT `+selectColumns+` FROM ops.export_job
-		WHERE status='EXPIRED' AND cleanup_status IN ('PENDING','FAILED') AND file_deleted_at IS NULL
-		ORDER BY COALESCE(cleanup_updated_at,updated_at),id LIMIT $1`, limit)
+	rows, err := repository.db.Query(ctx, exportCleanupCandidatesSQL, limit)
 	if err != nil {
 		return nil, classify(err, true)
 	}
@@ -145,7 +157,7 @@ func (repository *Repository) RecordCleanup(ctx context.Context, request exporta
 		RETURNING `+selectColumns,
 		string(request.WorkspaceID), string(request.JobID), now, string(expectedStatus), cleanupError, deletedAt, request.ExpectedVersion))
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, sql.ErrNoRows) {
 			return domain.Job{}, versionConflict(errors.New("export cleanup compare-and-swap failed"))
 		}
 		return domain.Job{}, classify(err, true)
@@ -180,13 +192,7 @@ func (repository *Repository) UnreferencedStaging(ctx context.Context, workspace
 		}
 		seen[path] = struct{}{}
 	}
-	rows, err := repository.db.Query(ctx, `SELECT candidate.path
-		FROM unnest($2::text[]) WITH ORDINALITY AS candidate(path,position)
-		WHERE NOT EXISTS (
-			SELECT 1 FROM ops.export_job job
-			WHERE job.workspace_id=$1 AND job.prepared_staging_path=candidate.path
-		)
-		ORDER BY candidate.position`, string(workspaceID), paths)
+	rows, err := repository.db.Query(ctx, exportUnreferencedStagingSQL, string(workspaceID), paths)
 	if err != nil {
 		return nil, classify(err, true)
 	}

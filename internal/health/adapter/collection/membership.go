@@ -6,12 +6,10 @@ import (
 	"errors"
 	"sync"
 
-	collectionpostgres "github.com/CodeZen-Lizhi/zhixu/internal/collection/adapter/postgres"
 	collectionapp "github.com/CodeZen-Lizhi/zhixu/internal/collection/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	healthapp "github.com/CodeZen-Lizhi/zhixu/internal/health/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/health/domain"
-	"github.com/jackc/pgx/v5"
 )
 
 const (
@@ -30,14 +28,6 @@ type Membership struct {
 	reader  DurableScanReader
 	cacheMu sync.RWMutex
 	cache   map[healthapp.SmartCollectionBinding]healthapp.SmartCollectionMembership
-}
-
-// DurableBindingVerifier 把 Health binding 转回 Collection owner 契约并在调用方事务内复核。
-type DurableBindingVerifier struct{}
-
-// Verify 使用 Collection owner 的唯一 durable binding 规则，不在 Health 重复编译 Query。
-func (DurableBindingVerifier) Verify(ctx context.Context, tx pgx.Tx, binding healthapp.SmartCollectionBinding) error {
-	return collectionpostgres.VerifyDurableScanBinding(ctx, tx, toCollectionBinding(binding))
 }
 
 var _ healthapp.SmartCollectionMembershipPort = (*Membership)(nil)
@@ -75,6 +65,9 @@ func (membership *Membership) LoadForScope(ctx context.Context, workspaceID foun
 		QueryHash: scope.Hash, ReadModelRevision: scope.ReadModelRevision, ExactCount: scope.ExactCount,
 	}
 	if cached, ok := membership.cached(expected); ok {
+		if err := membership.VerifyBinding(ctx, expected); err != nil {
+			return healthapp.SmartCollectionMembership{}, err
+		}
 		return cloneMembership(cached), nil
 	}
 	planned, err := membership.Plan(ctx, workspaceID, scope.Ref)

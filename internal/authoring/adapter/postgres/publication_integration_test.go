@@ -21,9 +21,13 @@ import (
 )
 
 func TestRepositoryPostgreSQLPublicationReservationCompletionReplayAndReads(t *testing.T) {
+	runAuthoringIntegrationVariants(t, testRepositoryPostgreSQLPublicationReservationCompletionReplayAndReads)
+}
+
+func testRepositoryPostgreSQLPublicationReservationCompletionReplayAndReads(t *testing.T, variant authoringIntegrationVariant) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	repository, pool := newAuthoringIntegrationRepository(t, ctx)
+	repository, pool := variant.open(t)
 	workspaceID := authoringIntegrationID(300)
 	otherWorkspaceID := authoringIntegrationID(301)
 	seedAuthoringWorkspace(t, ctx, pool, workspaceID, "authoring-publication")
@@ -137,9 +141,13 @@ func TestRepositoryPostgreSQLPublicationReservationCompletionReplayAndReads(t *t
 }
 
 func TestRepositoryPostgreSQLPublicationFinalizerPublishesAndMarksRecovery(t *testing.T) {
+	runAuthoringIntegrationVariants(t, testRepositoryPostgreSQLPublicationFinalizerPublishesAndMarksRecovery)
+}
+
+func testRepositoryPostgreSQLPublicationFinalizerPublishesAndMarksRecovery(t *testing.T, variant authoringIntegrationVariant) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	repository, pool := newAuthoringIntegrationRepository(t, ctx)
+	repository, pool := variant.open(t)
 	workspaceID := authoringIntegrationID(800)
 	seedAuthoringWorkspace(t, ctx, pool, workspaceID, "authoring-finalizer")
 	var now time.Time
@@ -264,9 +272,13 @@ func TestRepositoryPostgreSQLPublicationFinalizerPublishesAndMarksRecovery(t *te
 }
 
 func TestRepositoryPostgreSQLRestorePublicationAppendsRevisionAndReplays(t *testing.T) {
+	runAuthoringIntegrationVariants(t, testRepositoryPostgreSQLRestorePublicationAppendsRevisionAndReplays)
+}
+
+func testRepositoryPostgreSQLRestorePublicationAppendsRevisionAndReplays(t *testing.T, variant authoringIntegrationVariant) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	repository, pool := newAuthoringIntegrationRepository(t, ctx)
+	repository, pool := variant.open(t)
 	workspaceID := authoringIntegrationID(2100)
 	seedAuthoringWorkspace(t, ctx, pool, workspaceID, "authoring-restore-finalizer")
 	var now time.Time
@@ -555,6 +567,12 @@ func seedAuthoringProposalCommit(
 		t.Fatal(err)
 	} else if tag.RowsAffected() != 1 {
 		t.Fatal("authoring proposal was not bound to its writeback workflow")
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO change_control.proposal_revision_dispatch(
+		workspace_id,proposal_id,revision_id,approval_id,workflow_run_id,created_at
+	) VALUES($1,$2,$3,$4,$5,$6)`, string(reservation.WorkspaceID), string(proposal.ID),
+		string(proposal.Revision.ID), string(approvalID), string(runID), createdAt.UTC()); err != nil {
+		t.Fatal(err)
 	}
 	scope := changecontroldomain.ExpectedAuthorizationScopeForTarget(reservation.TargetPath, reservation.TargetMode)
 	for _, authorization := range []changecontroldomain.ToolAuthorization{

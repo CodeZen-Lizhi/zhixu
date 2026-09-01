@@ -8,15 +8,18 @@ import (
 
 	eventsdomain "github.com/CodeZen-Lizhi/zhixu/internal/events/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/export/domain"
-	"github.com/jackc/pgx/v5"
 )
 
-func (repository *Repository) appendLifecycleEvent(ctx context.Context, tx pgx.Tx, job domain.Job, stage string) error {
+func (repository *Repository) appendLifecycleEvent(ctx context.Context, tx exportTransaction, job domain.Job, stage string) error {
 	if isNilDependency(repository.events) {
 		return nil
 	}
 	stage = strings.ToLower(strings.TrimSpace(stage))
-	_, replayed, err := repository.events.AppendTx(ctx, tx, eventsdomain.AppendRequest{
+	var sideFactTransaction any
+	if tx != nil {
+		sideFactTransaction = tx.SideFactTransaction()
+	}
+	_, replayed, err := repository.events.AppendTx(ctx, sideFactTransaction, eventsdomain.AppendRequest{
 		WorkspaceID: job.WorkspaceID,
 		Type:        "export." + stage,
 		ResourceRef: "export_job:" + string(job.ID), ResourceVersion: job.Version,

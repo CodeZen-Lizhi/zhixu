@@ -6,12 +6,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
-	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -23,15 +23,23 @@ import (
 	changecontroldomain "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	gormlogger "gorm.io/gorm/logger"
 )
 
 func TestRepositoryPostgreSQLWorkingDraftCASReplayFreezeAndWorkspaceScope(t *testing.T) {
+	runAuthoringIntegrationVariants(t, testRepositoryPostgreSQLWorkingDraftCASReplayFreezeAndWorkspaceScope)
+}
+
+func testRepositoryPostgreSQLWorkingDraftCASReplayFreezeAndWorkspaceScope(t *testing.T, variant authoringIntegrationVariant) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	repository, pool := newAuthoringIntegrationRepository(t, ctx)
+	repository, pool := variant.open(t)
+	statementCounter := installAuthoringStatementCounter(t, repository)
 	workspaceA := authoringIntegrationID(1)
 	workspaceB := authoringIntegrationID(2)
 	seedAuthoringWorkspace(t, ctx, pool, workspaceA, "authoring-a")
@@ -103,14 +111,18 @@ func TestRepositoryPostgreSQLWorkingDraftCASReplayFreezeAndWorkspaceScope(t *tes
 	}) {
 		t.Fatalf("freeze replay=%#v err=%v", replayedFreeze, err)
 	}
+	statementCounter.reset()
 	searchHits, err := service.SearchArticleRevisions(ctx, authoringapp.ArticleRevisionSearchQuery{WorkspaceID: workspaceA, Query: "Java", Limit: 5})
 	if err != nil || len(searchHits) != 1 || searchHits[0].Document.ID != frozen.Document.ID || searchHits[0].RevisionID != frozen.Revision.ID {
 		t.Fatalf("article revision search=%#v err=%v", searchHits, err)
 	}
+	assertAuthoringStatementCount(t, statementCounter, 1, "article revision search")
+	statementCounter.reset()
 	otherWorkspaceHits, err := service.SearchArticleRevisions(ctx, authoringapp.ArticleRevisionSearchQuery{WorkspaceID: workspaceB, Query: "Java", Limit: 5})
 	if err != nil || len(otherWorkspaceHits) != 0 {
 		t.Fatalf("cross-workspace article revision search=%#v err=%v", otherWorkspaceHits, err)
 	}
+	assertAuthoringStatementCount(t, statementCounter, 1, "cross-workspace article revision search")
 
 	secondUpdate, err := service.UpdateWorkingDraft(ctx, authoringapp.UpdateCommand{
 		WorkspaceID: workspaceA, DraftID: created.Draft.ID, ExpectedVersion: 3,
@@ -130,6 +142,66 @@ func TestRepositoryPostgreSQLWorkingDraftCASReplayFreezeAndWorkspaceScope(t *tes
 		string(workspaceA), string(frozen.Document.ID)).Scan(&revisions); err != nil || revisions != 2 {
 		t.Fatalf("article revisions after explicit freezes=%d err=%v", revisions, err)
 	}
+
+	batchQuery := authoringapp.ArticleRevisionBatchQuery{
+		WorkspaceID: workspaceA,
+		Items: []authoringapp.ArticleRevisionIdentity{
+			{DocumentID: secondFreeze.Document.ID, RevisionID: secondFreeze.Revision.ID},
+			{DocumentID: frozen.Document.ID, RevisionID: frozen.Revision.ID},
+		},
+	}
+	statementCounter.reset()
+	snapshots, err := service.GetArticleRevisions(ctx, batchQuery)
+	if err != nil || len(snapshots) != 2 || snapshots[0].Document.ID != secondFreeze.Document.ID ||
+		snapshots[0].Revision.ID != secondFreeze.Revision.ID || snapshots[0].Revision.Content != secondFreeze.Revision.Content ||
+		snapshots[1].Document.ID != frozen.Document.ID || snapshots[1].Revision.ID != frozen.Revision.ID ||
+		snapshots[1].Revision.ContentHash != frozen.Revision.ContentHash {
+		t.Fatalf("article revision batch=%#v err=%v", snapshots, err)
+	}
+	assertAuthoringStatementCount(t, statementCounter, 1, "article revision batch")
+
+	statementCounter.reset()
+	missingSnapshots, err := service.GetArticleRevisions(ctx, authoringapp.ArticleRevisionBatchQuery{
+		WorkspaceID: workspaceA,
+		Items: []authoringapp.ArticleRevisionIdentity{
+			{DocumentID: frozen.Document.ID, RevisionID: frozen.Revision.ID},
+			{DocumentID: frozen.Document.ID, RevisionID: authoringIntegrationID(9999)},
+		},
+	})
+	if !authoringIntegrationError(err, foundation.ErrorNotFound, authoringapp.ErrorCodeNotFound) || len(missingSnapshots) != 0 {
+		t.Fatalf("missing article revision batch=%#v err=%v", missingSnapshots, err)
+	}
+	assertAuthoringStatementCount(t, statementCounter, 1, "missing article revision batch")
+
+	statementCounter.reset()
+	duplicateSnapshots, err := service.GetArticleRevisions(ctx, authoringapp.ArticleRevisionBatchQuery{
+		WorkspaceID: workspaceA,
+		Items: []authoringapp.ArticleRevisionIdentity{
+			{DocumentID: frozen.Document.ID, RevisionID: frozen.Revision.ID},
+			{DocumentID: frozen.Document.ID, RevisionID: frozen.Revision.ID},
+		},
+	})
+	if !authoringIntegrationError(err, foundation.ErrorInvalidInput, domain.ErrorCodeFreezeInvalid) || len(duplicateSnapshots) != 0 {
+		t.Fatalf("duplicate article revision batch=%#v err=%v", duplicateSnapshots, err)
+	}
+	assertAuthoringStatementCount(t, statementCounter, 0, "duplicate article revision validation")
+
+	statementCounter.reset()
+	detail, err := repository.GetDocumentDetail(ctx, workspaceA, frozen.Document.ID)
+	if err != nil || detail.Document.ID != frozen.Document.ID || detail.CurrentRevision == nil ||
+		detail.CurrentRevision.ID != secondFreeze.Revision.ID || detail.Publication != nil {
+		t.Fatalf("document detail=%#v err=%v", detail, err)
+	}
+	assertAuthoringStatementCount(t, statementCounter, 3, "document detail snapshot")
+
+	statementCounter.reset()
+	overview, err := repository.GetOverview(ctx, workspaceA, 10)
+	if err != nil || overview.WorkspaceID != workspaceA || len(overview.RecentDrafts) != 1 ||
+		overview.RecentDrafts[0].ID != created.Draft.ID || len(overview.PendingPublications) != 0 ||
+		len(overview.CompletedDocuments) != 0 {
+		t.Fatalf("authoring overview=%#v err=%v", overview, err)
+	}
+	assertAuthoringStatementCount(t, statementCounter, 3, "authoring overview snapshot")
 
 	if _, err := pool.Exec(ctx, `UPDATE core.article_revision SET content='mutated' WHERE id=$1`, string(frozen.Revision.ID)); err == nil {
 		t.Fatal("immutable article revision content was updated")
@@ -160,16 +232,23 @@ func TestRepositoryPostgreSQLWorkingDraftCASReplayFreezeAndWorkspaceScope(t *tes
 		authoringIntegrationPostgresCode(t, err, "23503")
 	}
 
+	statementCounter.reset()
 	page, err := service.ListWorkingDrafts(ctx, authoringapp.ListQuery{WorkspaceID: workspaceA, Limit: 10})
 	if err != nil || len(page.Items) != 1 || page.Items[0].ID != created.Draft.ID {
 		t.Fatalf("draft page=%#v err=%v", page, err)
 	}
+	assertAuthoringStatementCount(t, statementCounter, 1, "working draft list")
 }
 
 func TestRepositoryPostgreSQLListsWorkingAndDocumentDraftsByWorkspaceKeyset(t *testing.T) {
+	runAuthoringIntegrationVariants(t, testRepositoryPostgreSQLListsWorkingAndDocumentDraftsByWorkspaceKeyset)
+}
+
+func testRepositoryPostgreSQLListsWorkingAndDocumentDraftsByWorkspaceKeyset(t *testing.T, variant authoringIntegrationVariant) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	repository, pool := newAuthoringIntegrationRepository(t, ctx)
+	repository, pool := variant.open(t)
+	statementCounter := installAuthoringStatementCounter(t, repository)
 	workspaceA := authoringIntegrationID(930)
 	workspaceB := authoringIntegrationID(931)
 	seedAuthoringWorkspace(t, ctx, pool, workspaceA, "authoring-list-a")
@@ -184,20 +263,26 @@ func TestRepositoryPostgreSQLListsWorkingAndDocumentDraftsByWorkspaceKeyset(t *t
 	seedAuthoringListWorkingDraft(t, ctx, pool, workspaceA, workingNewest, "working-newest", base.Add(time.Second))
 	seedAuthoringListWorkingDraft(t, ctx, pool, workspaceB, authoringIntegrationID(935), "working-other", base.Add(2*time.Second))
 
+	statementCounter.reset()
 	workingFirst, err := repository.List(ctx, authoringapp.ListQuery{WorkspaceID: workspaceA, Limit: 2})
 	if err != nil || len(workingFirst.Items) != 2 || workingFirst.Next == nil ||
 		workingFirst.Items[0].ID != workingNewest || workingFirst.Items[1].ID != workingTieHigh {
 		t.Fatalf("working first page=%#v err=%v", workingFirst, err)
 	}
+	assertAuthoringStatementCount(t, statementCounter, 1, "working draft first page")
+	statementCounter.reset()
 	workingSecond, err := repository.List(ctx, authoringapp.ListQuery{WorkspaceID: workspaceA, Limit: 2, After: workingFirst.Next})
 	if err != nil || len(workingSecond.Items) != 1 || workingSecond.Next != nil || workingSecond.Items[0].ID != workingTieLow {
 		t.Fatalf("working second page=%#v err=%v", workingSecond, err)
 	}
+	assertAuthoringStatementCount(t, statementCounter, 1, "working draft second page")
+	statementCounter.reset()
 	workingAfterLast, err := repository.List(ctx, authoringapp.ListQuery{WorkspaceID: workspaceA, Limit: 2,
 		After: &authoringapp.Cursor{UpdatedAt: base, ID: workingTieLow}})
 	if err != nil || len(workingAfterLast.Items) != 0 || workingAfterLast.Next != nil {
 		t.Fatalf("working page after last=%#v err=%v", workingAfterLast, err)
 	}
+	assertAuthoringStatementCount(t, statementCounter, 1, "working draft terminal page")
 
 	documentNewest := authoringIntegrationID(938)
 	documentTieHigh := authoringIntegrationID(937)
@@ -207,26 +292,53 @@ func TestRepositoryPostgreSQLListsWorkingAndDocumentDraftsByWorkspaceKeyset(t *t
 	seedAuthoringListDocument(t, ctx, pool, workspaceA, documentNewest, "document-newest", base.Add(time.Second))
 	seedAuthoringListDocument(t, ctx, pool, workspaceB, authoringIntegrationID(939), "document-other", base.Add(2*time.Second))
 
+	statementCounter.reset()
 	documentFirst, err := repository.ListDocuments(ctx, authoringapp.DocumentListQuery{WorkspaceID: workspaceA, Limit: 2})
 	if err != nil || len(documentFirst.Items) != 2 || documentFirst.Next == nil ||
 		documentFirst.Items[0].ID != documentNewest || documentFirst.Items[1].ID != documentTieHigh {
 		t.Fatalf("document first page=%#v err=%v", documentFirst, err)
 	}
+	assertAuthoringStatementCount(t, statementCounter, 1, "document first page")
+	statementCounter.reset()
 	documentSecond, err := repository.ListDocuments(ctx, authoringapp.DocumentListQuery{WorkspaceID: workspaceA, Limit: 2, After: documentFirst.Next})
 	if err != nil || len(documentSecond.Items) != 1 || documentSecond.Next != nil || documentSecond.Items[0].ID != documentTieLow {
 		t.Fatalf("document second page=%#v err=%v", documentSecond, err)
 	}
+	assertAuthoringStatementCount(t, statementCounter, 1, "document second page")
+	statementCounter.reset()
 	documentAfterLast, err := repository.ListDocuments(ctx, authoringapp.DocumentListQuery{WorkspaceID: workspaceA, Limit: 2,
 		After: &authoringapp.DocumentCursor{UpdatedAt: base, ID: documentTieLow}})
 	if err != nil || len(documentAfterLast.Items) != 0 || documentAfterLast.Next != nil {
 		t.Fatalf("document page after last=%#v err=%v", documentAfterLast, err)
 	}
+	assertAuthoringStatementCount(t, statementCounter, 1, "document terminal page")
+
+	assertAuthoringListCancellationAndPoolReuse(t, ctx, variant, repository, pool, workspaceA)
+
+	corruptDocumentID := authoringIntegrationID(940)
+	if _, err := pool.Exec(ctx, `INSERT INTO core.document(
+		id,workspace_id,canonical_path,title,lifecycle_status,current_published_revision_id,version,created_at,updated_at
+	) VALUES($1,$2,'notes//corrupt.md','corrupt','DRAFT',NULL,1,$3,$3)`,
+		string(corruptDocumentID), string(workspaceA), base.Add(-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	statementCounter.reset()
+	corruptPage, err := repository.ListDocuments(ctx, authoringapp.DocumentListQuery{WorkspaceID: workspaceA, Limit: 10})
+	if !authoringIntegrationError(err, foundation.ErrorConsistencyViolation, authoringapp.ErrorCodeResultInvalid) ||
+		len(corruptPage.Items) != 0 || corruptPage.Next != nil {
+		t.Fatalf("corrupt document page=%#v err=%v", corruptPage, err)
+	}
+	assertAuthoringStatementCount(t, statementCounter, 1, "corrupt document page")
 }
 
 func TestRepositoryPostgreSQLPathConflictAndConcurrentCommandSerialization(t *testing.T) {
+	runAuthoringIntegrationVariants(t, testRepositoryPostgreSQLPathConflictAndConcurrentCommandSerialization)
+}
+
+func testRepositoryPostgreSQLPathConflictAndConcurrentCommandSerialization(t *testing.T, variant authoringIntegrationVariant) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	repository, pool := newAuthoringIntegrationRepository(t, ctx)
+	repository, pool := variant.open(t)
 	workspaceID := authoringIntegrationID(100)
 	seedAuthoringWorkspace(t, ctx, pool, workspaceID, "authoring-concurrency")
 	now := time.Date(2026, 8, 3, 9, 0, 0, 0, time.UTC)
@@ -338,9 +450,13 @@ func TestRepositoryPostgreSQLPathConflictAndConcurrentCommandSerialization(t *te
 }
 
 func TestRepositoryPostgreSQLTerminalProposalClosesPublicationAndReleasesDocument(t *testing.T) {
+	runAuthoringIntegrationVariants(t, testRepositoryPostgreSQLTerminalProposalClosesPublicationAndReleasesDocument)
+}
+
+func testRepositoryPostgreSQLTerminalProposalClosesPublicationAndReleasesDocument(t *testing.T, variant authoringIntegrationVariant) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	repository, pool := newAuthoringIntegrationRepository(t, ctx)
+	repository, pool := variant.open(t)
 	workspaceID := authoringIntegrationID(300)
 	seedAuthoringWorkspace(t, ctx, pool, workspaceID, "authoring-publication-terminal")
 	now := time.Date(2026, 8, 3, 11, 0, 0, 0, time.UTC)
@@ -438,9 +554,13 @@ func TestRepositoryPostgreSQLTerminalProposalClosesPublicationAndReleasesDocumen
 }
 
 func TestRepositoryPostgreSQLCreateOnlyProvesAbsenceBeforeProposalPersistence(t *testing.T) {
+	runAuthoringIntegrationVariants(t, testRepositoryPostgreSQLCreateOnlyProvesAbsenceBeforeProposalPersistence)
+}
+
+func testRepositoryPostgreSQLCreateOnlyProvesAbsenceBeforeProposalPersistence(t *testing.T, variant authoringIntegrationVariant) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	repository, pool := newAuthoringIntegrationRepository(t, ctx)
+	repository, pool := variant.open(t)
 	workspaceID := authoringIntegrationID(500)
 	seedAuthoringWorkspace(t, ctx, pool, workspaceID, "authoring-create-only-proof")
 	now := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
@@ -488,9 +608,13 @@ func TestRepositoryPostgreSQLCreateOnlyProvesAbsenceBeforeProposalPersistence(t 
 }
 
 func TestRepositoryPostgreSQLAbandonsDeterministicPreProposalFailure(t *testing.T) {
+	runAuthoringIntegrationVariants(t, testRepositoryPostgreSQLAbandonsDeterministicPreProposalFailure)
+}
+
+func testRepositoryPostgreSQLAbandonsDeterministicPreProposalFailure(t *testing.T, variant authoringIntegrationVariant) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	repository, pool := newAuthoringIntegrationRepository(t, ctx)
+	repository, pool := variant.open(t)
 	workspaceID := authoringIntegrationID(540)
 	seedAuthoringWorkspace(t, ctx, pool, workspaceID, "authoring-abandoned-reservation")
 	now := time.Date(2026, 8, 3, 12, 30, 0, 0, time.UTC)
@@ -616,9 +740,13 @@ func TestRepositoryPostgreSQLAbandonsDeterministicPreProposalFailure(t *testing.
 }
 
 func TestRepositoryPostgreSQLPublishedDocumentPathCannotDrift(t *testing.T) {
+	runAuthoringIntegrationVariants(t, testRepositoryPostgreSQLPublishedDocumentPathCannotDrift)
+}
+
+func testRepositoryPostgreSQLPublishedDocumentPathCannotDrift(t *testing.T, variant authoringIntegrationVariant) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	repository, pool := newAuthoringIntegrationRepository(t, ctx)
+	repository, pool := variant.open(t)
 	workspaceID := authoringIntegrationID(700)
 	seedAuthoringWorkspace(t, ctx, pool, workspaceID, "authoring-published-path")
 	var now time.Time
@@ -737,14 +865,586 @@ func TestDocumentDraftAuthoringMigrationConstraints(t *testing.T) {
 	}
 }
 
-func newAuthoringIntegrationRepository(t *testing.T, ctx context.Context) (*Repository, *pgxpool.Pool) {
-	t.Helper()
-	pool := newAuthoringIntegrationDatabase(t, ctx)
-	repository, err := NewRepository(pool)
+func TestGORMRepositoryPostgreSQLCommitFailureAndResponseLoss(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	fixture := testdb.Require(t, testdb.Config{MaxConns: 16, Availability: testdb.FailWhenUnavailable})
+	platform := fixture.Pool()
+	if platform == nil || platform.DB() == nil {
+		t.Fatal("shared PostgreSQL fixture did not provide a platform pool")
+	}
+	normalRepository, err := NewGORMRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return repository, pool
+	workspaceID := authoringIntegrationID(1500)
+	seedAuthoringWorkspace(t, ctx, platform.DB(), workspaceID, "authoring-gorm-commit-loss")
+	now := time.Date(2026, 8, 3, 18, 0, 0, 0, time.UTC)
+	responseLoss := errors.New("injected Authoring commit response loss")
+	lossyRepository := *normalRepository
+	lossyRepository.unitOfWork = authoringCommitResponseLossUnitOfWork{
+		delegate: normalRepository.unitOfWork,
+		cause:    responseLoss,
+	}
+	lossyService, err := authoringapp.NewService(authoringapp.Dependencies{
+		Repository: &lossyRepository,
+		IDs:        &authoringIntegrationIDs{next: 1500},
+		Clock:      foundation.FixedClock{Value: now},
+		Proposals:  authoringIntegrationProposalCreator{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := lossyService.CreateWorkingDraft(ctx, authoringapp.CreateCommand{
+		WorkspaceID: workspaceID, IdempotencyKey: "gorm-create-response-loss",
+	})
+	if created != (authoringapp.CreateResult{}) ||
+		!authoringIntegrationError(err, foundation.ErrorDependencyUnavailable, "AUTHORING_COMMIT_FAILED") ||
+		!errors.Is(err, responseLoss) {
+		t.Fatalf("commit response loss create=%#v err=%v", created, err)
+	}
+
+	replayService, err := authoringapp.NewService(authoringapp.Dependencies{
+		Repository: normalRepository,
+		IDs:        &authoringIntegrationIDs{next: 1600},
+		Clock:      foundation.FixedClock{Value: now},
+		Proposals:  authoringIntegrationProposalCreator{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := replayService.CreateWorkingDraft(ctx, authoringapp.CreateCommand{
+		WorkspaceID: workspaceID, IdempotencyKey: "gorm-create-response-loss",
+	})
+	if err != nil || !replayed.Replayed || replayed.Draft.ID != authoringIntegrationID(1501) ||
+		replayed.Draft.WorkspaceID != workspaceID || !replayed.Draft.CreatedAt.Equal(now) {
+		t.Fatalf("commit response loss replay=%#v err=%v", replayed, err)
+	}
+	var drafts, receipts int
+	if err := platform.DB().QueryRow(ctx, `SELECT count(*) FROM authoring.working_draft WHERE workspace_id=$1`,
+		string(workspaceID)).Scan(&drafts); err != nil {
+		t.Fatal(err)
+	}
+	if err := platform.DB().QueryRow(ctx, `SELECT count(*) FROM authoring.working_draft_command
+		WHERE workspace_id=$1 AND idempotency_key=$2`, string(workspaceID), "gorm-create-response-loss").Scan(&receipts); err != nil {
+		t.Fatal(err)
+	}
+	if drafts != 1 || receipts != 1 {
+		t.Fatalf("commit response loss facts drafts=%d receipts=%d", drafts, receipts)
+	}
+
+	documentID, revisionID, _, gitCommit := seedAuthoringPendingPublicationWithCommit(
+		t, ctx, platform.DB(), normalRepository, workspaceID, 1700, "gorm-deferred-commit", now.Add(time.Minute),
+	)
+	var deferredMutationCompleted atomic.Bool
+	failingRepository := *normalRepository
+	failingRepository.unitOfWork = authoringDeferredCommitFailureUnitOfWork{
+		delegate:          normalRepository.unitOfWork,
+		workspaceID:       workspaceID,
+		documentID:        documentID,
+		revisionID:        revisionID,
+		gitCommit:         gitCommit,
+		mutationCompleted: &deferredMutationCompleted,
+	}
+	failingService, err := authoringapp.NewService(authoringapp.Dependencies{
+		Repository: &failingRepository,
+		IDs:        &authoringIntegrationIDs{next: 1800},
+		Clock:      foundation.FixedClock{Value: now.Add(2 * time.Minute)},
+		Proposals:  authoringIntegrationProposalCreator{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed, err := failingService.CreateWorkingDraft(ctx, authoringapp.CreateCommand{
+		WorkspaceID: workspaceID, IdempotencyKey: "gorm-deferred-fail",
+	})
+	if failed != (authoringapp.CreateResult{}) {
+		t.Fatalf("deferred commit failure returned a result: %#v", failed)
+	}
+	if !deferredMutationCompleted.Load() {
+		t.Fatalf("deferred commit failure occurred before the transaction callback completed: %v", err)
+	}
+	if !authoringIntegrationError(err, foundation.ErrorInvalidInput, domain.ErrorCodeDraftInvalid) {
+		var classified *foundation.Error
+		_ = errors.As(err, &classified)
+		t.Fatalf("deferred commit failure classification=%#v err=%v", classified, err)
+	}
+	authoringIntegrationPostgresCode(t, err, "23514")
+
+	var failedDrafts, failedReceipts int
+	if err := platform.DB().QueryRow(ctx, `SELECT count(*) FROM authoring.working_draft
+		WHERE workspace_id=$1 AND id=$2`, string(workspaceID), string(authoringIntegrationID(1801))).Scan(&failedDrafts); err != nil {
+		t.Fatal(err)
+	}
+	if err := platform.DB().QueryRow(ctx, `SELECT count(*) FROM authoring.working_draft_command
+		WHERE workspace_id=$1 AND idempotency_key=$2`, string(workspaceID), "gorm-deferred-fail").Scan(&failedReceipts); err != nil {
+		t.Fatal(err)
+	}
+	var revisionStatus string
+	if err := platform.DB().QueryRow(ctx, `SELECT status FROM core.article_revision
+		WHERE workspace_id=$1 AND document_id=$2 AND id=$3`, string(workspaceID), string(documentID), string(revisionID)).Scan(&revisionStatus); err != nil {
+		t.Fatal(err)
+	}
+	if failedDrafts != 0 || failedReceipts != 0 || revisionStatus != string(domain.RevisionDraft) {
+		t.Fatalf("deferred commit failure leaked facts drafts=%d receipts=%d revision_status=%s",
+			failedDrafts, failedReceipts, revisionStatus)
+	}
+}
+
+func TestAuthoringPostgreSQLKeyQueryPlans(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	pool := newAuthoringIntegrationDatabase(t, ctx)
+	workspaceID := authoringIntegrationID(49000)
+	revisionDocumentID := authoringIntegrationID(49001)
+	historyDocumentID := authoringIntegrationID(49002)
+	seedAuthoringWorkspace(t, ctx, pool, workspaceID, "authoring-query-plans")
+	base := time.Date(2026, 8, 3, 19, 0, 0, 0, time.UTC)
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	if _, err := tx.Exec(ctx, `SET LOCAL session_replication_role=replica`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO authoring.working_draft(
+		id,workspace_id,document_id,title,target_path,body,status,version,created_at,updated_at
+	) SELECT md5('authoring-plan-draft-'||series::text)::uuid,$1,NULL,
+		'plan draft '||series::text,'notes/plan-draft-'||series::text||'.md','body','EDITING',1,
+		$2::timestamptz + series*interval '1 second',$2::timestamptz + series*interval '1 second'
+		FROM generate_series(1,5000) AS series`, string(workspaceID), base); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO core.document(
+		id,workspace_id,canonical_path,title,lifecycle_status,current_published_revision_id,version,created_at,updated_at
+	) SELECT md5('authoring-plan-document-'||series::text)::uuid,$1,
+		'notes/plan-document-'||series::text||'.md','plan document '||series::text,'DRAFT',NULL,1,
+		$2::timestamptz + series*interval '1 second',$2::timestamptz + series*interval '1 second'
+		FROM generate_series(1,5000) AS series`, string(workspaceID), base); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO core.document(
+		id,workspace_id,canonical_path,title,lifecycle_status,current_published_revision_id,version,created_at,updated_at
+	) VALUES($1,$2,'notes/plan-revisions.md','plan revisions','DRAFT',NULL,1,$3,$3)`,
+		string(revisionDocumentID), string(workspaceID), base); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO core.article_revision(
+		id,workspace_id,document_id,source_version_id,parent_revision_id,revision_no,content,content_hash,status,
+		optimization_mode,git_commit,created_by_type,created_at
+	) SELECT md5('authoring-plan-revision-'||series::text)::uuid,$1,$2,NULL,NULL,series,
+		'# plan revision '||series::text,lpad(to_hex(series),64,'0'),'DRAFT','NONE',NULL,'USER',
+		$3::timestamptz + series*interval '1 second' FROM generate_series(1,5000) AS series`,
+		string(workspaceID), string(revisionDocumentID), base); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO authoring.document_publication_binding(
+		id,reservation_id,workspace_id,document_id,article_revision_id,proposal_id,proposal_revision_id,
+		target_path,content_hash,target_mode,absence_token,status,git_commit,error_code,version,
+		created_at,updated_at,published_at
+	) SELECT md5('authoring-plan-published-'||series::text)::uuid,
+		md5('authoring-plan-published-reservation-'||series::text)::uuid,$1,$2,
+		md5('authoring-plan-published-article-'||series::text)::uuid,
+		md5('authoring-plan-published-proposal-'||series::text)::uuid,
+		md5('authoring-plan-published-proposal-revision-'||series::text)::uuid,
+		'notes/history.md',lpad(to_hex(10000+series),64,'0'),'REPLACE','','PUBLISHED',
+		CASE WHEN series=1 THEN repeat('a',40)
+			ELSE left(md5('authoring-plan-commit-'||series::text)||md5('authoring-plan-commit-extra-'||series::text),40) END,
+		'',1,$3::timestamptz + series*interval '1 second',$3::timestamptz + series*interval '1 second',$3::timestamptz + series*interval '1 second'
+		FROM generate_series(1,5000) AS series`, string(workspaceID), string(historyDocumentID), base); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO authoring.document_publication_binding(
+		id,reservation_id,workspace_id,document_id,article_revision_id,proposal_id,proposal_revision_id,
+		target_path,content_hash,target_mode,absence_token,status,git_commit,error_code,version,
+		created_at,updated_at,published_at
+	) SELECT md5('authoring-plan-pending-'||series::text)::uuid,
+		md5('authoring-plan-pending-reservation-'||series::text)::uuid,$1,
+		md5('authoring-plan-pending-document-'||series::text)::uuid,
+		md5('authoring-plan-pending-article-'||series::text)::uuid,
+		md5('authoring-plan-pending-proposal-'||series::text)::uuid,
+		md5('authoring-plan-pending-proposal-revision-'||series::text)::uuid,
+		'notes/pending-'||series::text||'.md',lpad(to_hex(20000+series),64,'0'),'REPLACE','','PENDING',
+		NULL,'',1,$2::timestamptz + series*interval '1 second',$2::timestamptz + series*interval '1 second',NULL
+		FROM generate_series(1,100) AS series`, string(workspaceID), base); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `SET LOCAL session_replication_role=origin`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `ANALYZE authoring.working_draft;
+		ANALYZE core.document;
+		ANALYZE core.article_revision;
+		ANALYZE authoring.document_publication_binding`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `SET LOCAL enable_seqscan=off`); err != nil {
+		t.Fatal(err)
+	}
+
+	cursorTime := base.Add(2 * time.Hour)
+	cursorID := "ffffffff-ffff-4fff-8fff-ffffffffffff"
+	tests := []struct {
+		name       string
+		indexNames []string
+		maxRows    int
+		query      string
+		args       []any
+	}{
+		{
+			name: "working-draft-keyset", indexNames: []string{"idx_authoring_working_draft_workspace_updated"}, maxRows: 11,
+			query: `SELECT id FROM authoring.working_draft WHERE workspace_id=$1
+				AND (updated_at,id)<($2,$3) ORDER BY updated_at DESC,id DESC LIMIT $4`,
+			args: []any{string(workspaceID), cursorTime, cursorID, 11},
+		},
+		{
+			name: "document-keyset", indexNames: []string{"idx_core_document_workspace_updated"}, maxRows: 11,
+			query: `SELECT id FROM core.document WHERE workspace_id=$1 AND lifecycle_status='DRAFT'
+				AND (updated_at,id)<($2,$3) ORDER BY updated_at DESC,id DESC LIMIT $4`,
+			args: []any{string(workspaceID), cursorTime, cursorID, 11},
+		},
+		{
+			name: "latest-article-revision", indexNames: []string{"uq_core_article_revision_no"}, maxRows: 1,
+			query: `SELECT id FROM core.article_revision WHERE workspace_id=$1 AND document_id=$2
+				ORDER BY revision_no DESC LIMIT 1`,
+			args: []any{string(workspaceID), string(revisionDocumentID)},
+		},
+		{
+			name: "publication-reconcile-candidates", indexNames: []string{
+				"uq_authoring_publication_nonterminal_document",
+				"idx_authoring_publication_workspace_status",
+			}, maxRows: 10,
+			query: `SELECT id FROM authoring.document_publication_binding WHERE workspace_id=$1
+				AND status IN ('PENDING','RECOVERY_REQUIRED') ORDER BY created_at,id LIMIT $2`,
+			args: []any{string(workspaceID), 10},
+		},
+		{
+			name: "publication-history-git", indexNames: []string{"idx_authoring_publication_history_git"}, maxRows: 10,
+			query: `SELECT id FROM authoring.document_publication_binding WHERE workspace_id=$1
+				AND document_id=$2 AND target_path=$3 AND git_commit=$4 LIMIT $5`,
+			args: []any{string(workspaceID), string(historyDocumentID), "notes/history.md", strings.Repeat("a", 40), 10},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			plan := explainAuthoringQuery(t, ctx, tx, test.query, test.args...)
+			if plan.ActualRows < 1 || plan.ActualRows > float64(test.maxRows) {
+				t.Fatalf("query plan actual rows=%v, want 1..%d: %+v", plan.ActualRows, test.maxRows, plan)
+			}
+			if !authoringPlanUsesAnyIndex(plan, test.indexNames...) {
+				t.Fatalf("query plan does not use one of indexes %v: %+v", test.indexNames, plan)
+			}
+		})
+	}
+}
+
+type authoringIntegrationRepository interface {
+	authoringapp.Repository
+	authoringapp.ArticleRevisionSearchRepository
+	ValidateRestoreWriteback(context.Context, authoringapp.RestoreWritebackCheck) error
+	FinalizeRestorePublication(context.Context, authoringapp.RestorePublicationRecord) (bool, error)
+}
+
+type authoringIntegrationVariant struct {
+	name string
+}
+
+func runAuthoringIntegrationVariants(
+	t *testing.T,
+	scenario func(*testing.T, authoringIntegrationVariant),
+) {
+	t.Helper()
+	for _, name := range []string{"legacy-pgx", "gorm"} {
+		variant := authoringIntegrationVariant{name: name}
+		t.Run(name, func(t *testing.T) {
+			scenario(t, variant)
+		})
+	}
+}
+
+func (variant authoringIntegrationVariant) open(t *testing.T) (authoringIntegrationRepository, *pgxpool.Pool) {
+	t.Helper()
+	fixture := testdb.Require(t, testdb.Config{MaxConns: 16, Availability: testdb.FailWhenUnavailable})
+	platform := fixture.Pool()
+	if platform == nil || platform.DB() == nil {
+		t.Fatal("shared PostgreSQL fixture did not provide a platform pool")
+	}
+	var repository authoringIntegrationRepository
+	var err error
+	switch variant.name {
+	case "legacy-pgx":
+		repository, err = NewRepository(platform.DB())
+	case "gorm":
+		repository, err = NewGORMRepository(platform)
+	default:
+		t.Fatalf("unknown Authoring integration variant %q", variant.name)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return repository, platform.DB()
+}
+
+type authoringCommitResponseLossUnitOfWork struct {
+	delegate foundation.UnitOfWork
+	cause    error
+}
+
+func (unitOfWork authoringCommitResponseLossUnitOfWork) Within(
+	ctx context.Context,
+	options foundation.TransactionOptions,
+	work foundation.TransactionFunc,
+) error {
+	if err := unitOfWork.delegate.Within(ctx, options, work); err != nil {
+		return err
+	}
+	return unitOfWork.cause
+}
+
+type authoringDeferredCommitFailureUnitOfWork struct {
+	delegate          foundation.UnitOfWork
+	workspaceID       foundation.ID
+	documentID        foundation.ID
+	revisionID        foundation.ID
+	gitCommit         string
+	mutationCompleted *atomic.Bool
+}
+
+func (unitOfWork authoringDeferredCommitFailureUnitOfWork) Within(
+	ctx context.Context,
+	options foundation.TransactionOptions,
+	work foundation.TransactionFunc,
+) error {
+	return unitOfWork.delegate.Within(ctx, options, func(callbackCtx context.Context, scope foundation.TransactionScope) error {
+		if err := work(callbackCtx, scope); err != nil {
+			return err
+		}
+		transaction, err := platformpostgres.GORMTransaction(scope)
+		if err != nil {
+			return err
+		}
+		result := transaction.WithContext(callbackCtx).Exec(`UPDATE core.article_revision
+			SET status='PUBLISHED',git_commit=?
+			WHERE workspace_id=? AND document_id=? AND id=? AND status='DRAFT'`,
+			unitOfWork.gitCommit, string(unitOfWork.workspaceID),
+			string(unitOfWork.documentID), string(unitOfWork.revisionID))
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return errors.New("deferred commit failure mutation did not update one revision")
+		}
+		if unitOfWork.mutationCompleted != nil {
+			unitOfWork.mutationCompleted.Store(true)
+		}
+		return nil
+	})
+}
+
+type authoringStatementCounter struct {
+	count atomic.Int64
+}
+
+func (counter *authoringStatementCounter) LogMode(gormlogger.LogLevel) gormlogger.Interface {
+	return counter
+}
+
+func (*authoringStatementCounter) Info(context.Context, string, ...any)  {}
+func (*authoringStatementCounter) Warn(context.Context, string, ...any)  {}
+func (*authoringStatementCounter) Error(context.Context, string, ...any) {}
+
+func (counter *authoringStatementCounter) Trace(context.Context, time.Time, func() (string, int64), error) {
+	counter.count.Add(1)
+}
+
+func (counter *authoringStatementCounter) reset() {
+	if counter != nil {
+		counter.count.Store(0)
+	}
+}
+
+func (counter *authoringStatementCounter) statements() int64 {
+	if counter == nil {
+		return 0
+	}
+	return counter.count.Load()
+}
+
+func installAuthoringStatementCounter(t *testing.T, repository authoringIntegrationRepository) *authoringStatementCounter {
+	t.Helper()
+	gormRepository, ok := repository.(*GORMRepository)
+	if !ok {
+		return nil
+	}
+	if gormRepository.database == nil || gormRepository.database.Config == nil {
+		t.Fatal("Authoring GORM repository has no logger configuration")
+	}
+	original := gormRepository.database.Config.Logger
+	counter := &authoringStatementCounter{}
+	gormRepository.database.Config.Logger = counter
+	t.Cleanup(func() {
+		gormRepository.database.Config.Logger = original
+	})
+	return counter
+}
+
+func assertAuthoringStatementCount(t *testing.T, counter *authoringStatementCounter, want int64, operation string) {
+	t.Helper()
+	if counter != nil && counter.statements() != want {
+		t.Fatalf("%s GORM statements=%d, want %d", operation, counter.statements(), want)
+	}
+}
+
+func assertAuthoringListCancellationAndPoolReuse(
+	t *testing.T,
+	ctx context.Context,
+	variant authoringIntegrationVariant,
+	repository authoringIntegrationRepository,
+	pool *pgxpool.Pool,
+	workspaceID foundation.ID,
+) {
+	t.Helper()
+	blocker, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	released := false
+	defer func() {
+		if !released {
+			blocker.Release()
+		}
+	}()
+	blockerTx, err := blocker.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = blockerTx.Rollback(context.Background()) }()
+	if _, err := blockerTx.Exec(ctx, `LOCK TABLE authoring.working_draft IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatal(err)
+	}
+	baselineAcquired := pool.Stat().AcquiredConns()
+
+	cancelCause := errors.New("Authoring list canceled by caller")
+	queryCtx, cancelQuery := context.WithCancelCause(ctx)
+	cancelResult := make(chan error, 1)
+	go func() {
+		_, listErr := repository.List(queryCtx, authoringapp.ListQuery{WorkspaceID: workspaceID, Limit: 2})
+		cancelResult <- listErr
+	}()
+	waitForBlockedAuthoringList(t, ctx, pool)
+	cancelQuery(cancelCause)
+	select {
+	case err := <-cancelResult:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("blocked Authoring list cancellation error=%v", err)
+		}
+		if variant.name == "gorm" && !errors.Is(err, cancelCause) {
+			t.Fatalf("blocked GORM Authoring list did not preserve cancellation cause: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("blocked Authoring list did not return after cancellation")
+	}
+	waitForAuthoringAcquiredConnections(t, pool, baselineAcquired)
+
+	deadlineCtx, deadlineCancel := context.WithTimeout(ctx, 2*time.Second)
+	defer deadlineCancel()
+	deadlineResult := make(chan error, 1)
+	go func() {
+		_, listErr := repository.List(deadlineCtx, authoringapp.ListQuery{WorkspaceID: workspaceID, Limit: 2})
+		deadlineResult <- listErr
+	}()
+	waitForBlockedAuthoringList(t, ctx, pool)
+	select {
+	case err := <-deadlineResult:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("blocked Authoring list deadline error=%v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("blocked Authoring list did not return after deadline")
+	}
+	waitForAuthoringAcquiredConnections(t, pool, baselineAcquired)
+
+	if err := blockerTx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	blocker.Release()
+	released = true
+	waitForAuthoringAcquiredConnections(t, pool, 0)
+	var one int
+	if err := pool.QueryRow(ctx, `SELECT 1`).Scan(&one); err != nil || one != 1 {
+		t.Fatalf("Authoring shared pool was not reusable: one=%d err=%v", one, err)
+	}
+}
+
+func waitForBlockedAuthoringList(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		var blocked bool
+		err := pool.QueryRow(ctx, `SELECT EXISTS (
+			SELECT 1 FROM pg_stat_activity
+			WHERE datname=current_database() AND pid<>pg_backend_pid()
+				AND wait_event_type='Lock' AND state='active'
+				AND query LIKE '%FROM authoring.working_draft%'
+		)`).Scan(&blocked)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if blocked {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("blocked Authoring list was not observed in pg_stat_activity")
+}
+
+func waitForAuthoringAcquiredConnections(t *testing.T, pool *pgxpool.Pool, want int32) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for pool.Stat().AcquiredConns() != want && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if acquired := pool.Stat().AcquiredConns(); acquired != want {
+		t.Fatalf("Authoring shared pool acquired connections=%d, want %d", acquired, want)
+	}
+}
+
+type authoringExplainPlan struct {
+	NodeType     string                 `json:"Node Type"`
+	RelationName string                 `json:"Relation Name"`
+	IndexName    string                 `json:"Index Name"`
+	ActualRows   float64                `json:"Actual Rows"`
+	Plans        []authoringExplainPlan `json:"Plans"`
+}
+
+func explainAuthoringQuery(t *testing.T, ctx context.Context, tx pgx.Tx, query string, args ...any) authoringExplainPlan {
+	t.Helper()
+	var raw []byte
+	if err := tx.QueryRow(ctx, `EXPLAIN (ANALYZE, FORMAT JSON, COSTS OFF, SUMMARY OFF, TIMING OFF) `+query, args...).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	var documents []struct {
+		Plan authoringExplainPlan `json:"Plan"`
+	}
+	if err := json.Unmarshal(raw, &documents); err != nil || len(documents) != 1 {
+		t.Fatalf("invalid Authoring EXPLAIN document: err=%v plan=%s", err, raw)
+	}
+	return documents[0].Plan
+}
+
+func authoringPlanUsesAnyIndex(plan authoringExplainPlan, indexNames ...string) bool {
+	for _, indexName := range indexNames {
+		if plan.IndexName == indexName {
+			return true
+		}
+	}
+	for _, child := range plan.Plans {
+		if authoringPlanUsesAnyIndex(child, indexNames...) {
+			return true
+		}
+	}
+	return false
 }
 
 func newAuthoringIntegrationDatabase(t *testing.T, ctx context.Context) *pgxpool.Pool {
@@ -756,40 +1456,18 @@ func newAuthoringIntegrationDatabase(t *testing.T, ctx context.Context) *pgxpool
 // only up to the given Atlas version; version<=0 applies every pending migration.
 func newAuthoringIntegrationDatabaseToVersion(t *testing.T, ctx context.Context, version int64) *pgxpool.Pool {
 	t.Helper()
-	baseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
-	if baseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a disposable PostgreSQL instance")
-	}
-	parsed, err := url.Parse(baseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	admin, err := pgxpool.New(ctx, baseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	name := fmt.Sprintf("zhixu_authoring_%d", time.Now().UnixNano())
-	identifier := pgx.Identifier{name}.Sanitize()
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+identifier); err != nil {
-		admin.Close()
-		t.Fatal(err)
-	}
-	parsed.Path = "/" + name
-	pool, err := pgxpool.New(ctx, parsed.String())
-	if err != nil {
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		pool.Close()
-		_, _ = admin.Exec(context.Background(), "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
+	fixture := testdb.Require(t, testdb.Config{
+		MaxConns:     16,
+		Availability: testdb.FailWhenUnavailable,
+		Migrate: func(migrationContext context.Context, pool *pgxpool.Pool) error {
+			return platformmigration.MigrateAtlasToVersion(migrationContext, pool, version)
+		},
 	})
-	if err := platformmigration.MigrateAtlasToVersion(ctx, pool, version); err != nil {
-		t.Fatal(err)
+	platform := fixture.Pool()
+	if platform == nil || platform.DB() == nil {
+		t.Fatal("shared PostgreSQL fixture did not provide a platform pool")
 	}
-	return pool
+	return platform.DB()
 }
 
 func seedAuthoringWorkspace(t *testing.T, ctx context.Context, pool *pgxpool.Pool, id foundation.ID, name string) {
@@ -852,7 +1530,7 @@ func (authoringIntegrationProposalCreator) CreatePublicationProposal(
 
 func newAuthoringPublicationIntegrationService(
 	t *testing.T,
-	repository *Repository,
+	repository authoringIntegrationRepository,
 	pool *pgxpool.Pool,
 	targets *authoringIntegrationTargetReader,
 	now time.Time,

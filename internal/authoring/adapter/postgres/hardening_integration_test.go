@@ -15,9 +15,13 @@ import (
 )
 
 func TestRepositoryPostgreSQLHardeningRejectsForgedPublicationFacts(t *testing.T) {
+	runAuthoringIntegrationVariants(t, testRepositoryPostgreSQLHardeningRejectsForgedPublicationFacts)
+}
+
+func testRepositoryPostgreSQLHardeningRejectsForgedPublicationFacts(t *testing.T, variant authoringIntegrationVariant) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	repository, pool := newAuthoringIntegrationRepository(t, ctx)
+	repository, pool := variant.open(t)
 	workspaceID := authoringIntegrationID(900)
 	documentID := authoringIntegrationID(901)
 	revisionID := authoringIntegrationID(902)
@@ -202,10 +206,14 @@ func TestRepositoryPostgreSQLHardeningRejectsForgedPublicationFacts(t *testing.T
 }
 
 func TestRepositoryPostgreSQLDeferredPublicationClosureRejectsPartialTransactions(t *testing.T) {
+	runAuthoringIntegrationVariants(t, testRepositoryPostgreSQLDeferredPublicationClosureRejectsPartialTransactions)
+}
+
+func testRepositoryPostgreSQLDeferredPublicationClosureRejectsPartialTransactions(t *testing.T, variant authoringIntegrationVariant) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	workspaceID := authoringIntegrationID(1000)
-	repository, pool := newAuthoringIntegrationRepository(t, ctx)
+	repository, pool := variant.open(t)
 	seedAuthoringWorkspace(t, ctx, pool, workspaceID, "authoring-deferred-closure")
 	var now time.Time
 	if err := pool.QueryRow(ctx, `SELECT CURRENT_TIMESTAMP - INTERVAL '1 hour'`).Scan(&now); err != nil {
@@ -307,7 +315,7 @@ func seedAuthoringPendingPublicationWithCommit(
 	t *testing.T,
 	ctx context.Context,
 	pool *pgxpool.Pool,
-	repository *Repository,
+	repository authoringIntegrationRepository,
 	workspaceID foundation.ID,
 	idStart int,
 	name string,

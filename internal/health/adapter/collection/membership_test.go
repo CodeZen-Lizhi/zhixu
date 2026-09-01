@@ -82,8 +82,8 @@ func TestMembershipLoadForScopeReusesDurableSnapshotAcrossDetectorPages(t *testi
 			t.Fatalf("iteration=%d verify err=%v", i, verifyErr)
 		}
 	}
-	if reader.pageCalls != 2 || reader.planCalls != 2 || reader.revisionCalls != 3 {
-		t.Fatalf("reader=%#v; expected one linear load, one final load check and three explicit binding checks", reader)
+	if reader.pageCalls != 2 || reader.planCalls != 2 || reader.revisionCalls != 5 {
+		t.Fatalf("reader=%#v; expected one linear load, one final load check, two cache checks and three explicit binding checks", reader)
 	}
 }
 

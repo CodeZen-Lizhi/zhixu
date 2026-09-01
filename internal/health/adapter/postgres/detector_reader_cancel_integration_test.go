@@ -1,11 +1,10 @@
-//go:build integration
+//go:build integration && testcontainers
 
 package postgres
 
 import (
 	"context"
 	"errors"
-	"os"
 	"testing"
 	"time"
 
@@ -16,35 +15,15 @@ import (
 )
 
 func TestFactReaderCancellationReleasesBlockedConnection(t *testing.T) {
-	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
-	}
 	ctx, stop := context.WithTimeout(context.Background(), 20*time.Second)
 	defer stop()
-	admin, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(admin.Close)
-	config, err := pgxpool.ParseConfig(databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	const applicationName = "health-detector-cancel-integration"
-	config.ConnConfig.RuntimeParams["application_name"] = applicationName
-	config.MaxConns = 1
-	config.MinConns = 0
-	readerPool, err := pgxpool.NewWithConfig(ctx, config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(readerPool.Close)
-	blocker, err := admin.Acquire(ctx)
+	pool := newHealthIntegrationPool(t)
+	blocker, err := pool.Acquire(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer blocker.Release()
+	baselineAcquired := pool.Stat().AcquiredConns()
 	blockerTx, err := blocker.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -53,7 +32,7 @@ func TestFactReaderCancellationReleasesBlockedConnection(t *testing.T) {
 	if _, err := blockerTx.Exec(ctx, `LOCK TABLE core.topic IN ACCESS EXCLUSIVE MODE`); err != nil {
 		t.Fatal(err)
 	}
-	reader, err := NewFactReader(readerPool)
+	reader, err := NewFactReader(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +55,7 @@ func TestFactReaderCancellationReleasesBlockedConnection(t *testing.T) {
 		})
 		result <- findErr
 	}()
-	waitForBlockedHealthDetectorQuery(t, ctx, admin, applicationName)
+	waitForBlockedHealthDetectorQuery(t, ctx, pool)
 	started := time.Now()
 	cancel()
 	select {
@@ -92,11 +71,11 @@ func TestFactReaderCancellationReleasesBlockedConnection(t *testing.T) {
 		t.Fatal("blocked detector query did not return after cancellation")
 	}
 	connectionDeadline := time.Now().Add(2 * time.Second)
-	for readerPool.Stat().AcquiredConns() != 0 && time.Now().Before(connectionDeadline) {
+	for pool.Stat().AcquiredConns() > baselineAcquired && time.Now().Before(connectionDeadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if acquired := readerPool.Stat().AcquiredConns(); acquired != 0 {
-		t.Fatalf("reader pool still has %d acquired connections after cancellation", acquired)
+	if acquired := pool.Stat().AcquiredConns(); acquired != baselineAcquired {
+		t.Fatalf("shared pool acquired connections=%d after cancellation, want baseline %d", acquired, baselineAcquired)
 	}
 	if err := blockerTx.Rollback(ctx); err != nil {
 		t.Fatal(err)
@@ -104,21 +83,22 @@ func TestFactReaderCancellationReleasesBlockedConnection(t *testing.T) {
 	reuseCtx, reuseCancel := context.WithTimeout(ctx, 2*time.Second)
 	defer reuseCancel()
 	var one int
-	if err := readerPool.QueryRow(reuseCtx, `SELECT 1`).Scan(&one); err != nil || one != 1 {
-		t.Fatalf("reader pool connection was not reusable: one=%d err=%v", one, err)
+	if err := pool.QueryRow(reuseCtx, `SELECT 1`).Scan(&one); err != nil || one != 1 {
+		t.Fatalf("shared pool connection was not reusable: one=%d err=%v", one, err)
 	}
-	t.Logf("reader pool released and reused connection; total=%d idle=%d acquired=%d", readerPool.Stat().TotalConns(), readerPool.Stat().IdleConns(), readerPool.Stat().AcquiredConns())
+	t.Logf("shared pool released and reused connection; total=%d idle=%d acquired=%d", pool.Stat().TotalConns(), pool.Stat().IdleConns(), pool.Stat().AcquiredConns())
 }
 
-func waitForBlockedHealthDetectorQuery(t *testing.T, ctx context.Context, admin *pgxpool.Pool, applicationName string) {
+func waitForBlockedHealthDetectorQuery(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		var blocked bool
-		err := admin.QueryRow(ctx, `SELECT EXISTS (
+		err := pool.QueryRow(ctx, `SELECT EXISTS (
 			SELECT 1 FROM pg_stat_activity
-			WHERE application_name=$1 AND wait_event_type='Lock' AND state='active'
-		)`, applicationName).Scan(&blocked)
+			WHERE datname=current_database() AND pid <> pg_backend_pid()
+				AND wait_event_type='Lock' AND state='active'
+		)`).Scan(&blocked)
 		if err != nil {
 			t.Fatal(err)
 		}

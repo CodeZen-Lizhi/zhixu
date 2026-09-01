@@ -249,7 +249,14 @@ func loadDurableScanPlanWithLock(ctx context.Context, db DB, workspaceID, collec
 	var collection collectionapp.Collection
 	var err error
 	if lockCollection {
-		collection, err = scanCollection(db.QueryRow(ctx, collectionSelect+` WHERE workspace_id=$1 AND id=$2 FOR SHARE`, string(workspaceID), string(collectionID)))
+		query := collectionSelect + ` WHERE workspace_id=$1 AND id=$2 FOR SHARE`
+		var row pgx.Row
+		if database, ok := db.(*gormDB); ok {
+			row = database.collectionRow(ctx, query, string(workspaceID), string(collectionID))
+		} else {
+			row = db.QueryRow(ctx, query, string(workspaceID), string(collectionID))
+		}
+		collection, err = scanCollection(row)
 		if errors.Is(err, pgx.ErrNoRows) {
 			err = notFound(errors.New("collection not found"))
 		}
@@ -398,15 +405,28 @@ ORDER BY source.ordinality,target.object_type,target.id`
 	}
 	defer rows.Close()
 	pairs := make([]collectionapp.DurableScanPair, 0, len(sources)*targetLimit)
+	sourceSet := make(map[collectionapp.DurableScanKey]struct{}, len(sources))
+	for _, source := range sources {
+		sourceSet[collectionapp.DurableScanKey{ObjectType: source.ObjectType, ID: source.ID}] = struct{}{}
+	}
 	for rows.Next() {
 		var sourceType, sourceID, targetType, targetID string
 		if err := rows.Scan(&sourceType, &sourceID, &targetType, &targetID); err != nil {
 			return nil, classify(err)
 		}
-		pairs = append(pairs, collectionapp.DurableScanPair{
+		pair := collectionapp.DurableScanPair{
 			Source: collectionapp.DurableScanKey{ObjectType: sourceType, ID: foundation.ID(sourceID)},
 			Target: collectionapp.DurableScanKey{ObjectType: targetType, ID: foundation.ID(targetID)},
-		})
+		}
+		if !validDurableScanKey(pair.Source) || !validDurableScanKey(pair.Target) ||
+			pair.Target.ObjectType < pair.Source.ObjectType ||
+			(pair.Target.ObjectType == pair.Source.ObjectType && pair.Target.ID <= pair.Source.ID) {
+			return nil, inconsistent(errors.New("collection durable scan pair is invalid"))
+		}
+		if _, exists := sourceSet[pair.Source]; !exists {
+			return nil, inconsistent(errors.New("collection durable scan pair crossed source page"))
+		}
+		pairs = append(pairs, pair)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, classify(err)
@@ -481,12 +501,19 @@ func loadDurableScanNodes(ctx context.Context, db DB, workspaceID foundation.ID,
 	for index, key := range keys {
 		objectTypes[index], ids[index] = key.ObjectType, string(key.ID)
 	}
-	rows, err := db.Query(ctx, durableScanNodeSQL, string(workspaceID), objectTypes, ids)
+	var rows pgx.Rows
+	var err error
+	if database, ok := db.(*gormDB); ok {
+		rows, err = database.durableNodeRows(ctx, durableScanNodeSQL, string(workspaceID), objectTypes, ids)
+	} else {
+		rows, err = db.Query(ctx, durableScanNodeSQL, string(workspaceID), objectTypes, ids)
+	}
 	if err != nil {
 		return nil, classify(err)
 	}
 	defer rows.Close()
 	nodes := make([]collectionapp.DurableScanNode, 0, len(keys))
+	seen := make(map[collectionapp.DurableScanKey]struct{}, len(keys))
 	for rows.Next() {
 		var objectType, id string
 		var version *int64
@@ -495,26 +522,42 @@ func loadDurableScanNodes(ctx context.Context, db DB, workspaceID foundation.ID,
 		if err := rows.Scan(&objectType, &id, &version, &status, &title, &summary, &aliases, &topicIDs, &sourceVersionIDs); err != nil {
 			return nil, classify(err)
 		}
-		if version == nil || status == nil || title == nil || summary == nil || *version < 1 {
+		key := collectionapp.DurableScanKey{ObjectType: objectType, ID: foundation.ID(id)}
+		if !validDurableScanKey(key) || version == nil || status == nil || title == nil || summary == nil || *version < 1 || *status == "" || *title == "" {
 			return nil, inconsistent(errors.New("collection durable scan node is missing"))
 		}
+		if _, expected := set[key]; !expected {
+			return nil, inconsistent(errors.New("collection durable scan node crossed requested boundary"))
+		}
+		if _, duplicate := seen[key]; duplicate {
+			return nil, inconsistent(errors.New("collection durable scan node is duplicated"))
+		}
+		seen[key] = struct{}{}
 		node := collectionapp.DurableScanNode{
-			Key:     collectionapp.DurableScanKey{ObjectType: objectType, ID: foundation.ID(id)},
+			Key:     key,
 			Version: *version, Status: *status, Title: *title, Summary: *summary,
 			Aliases: append([]string(nil), aliases...),
 		}
 		for _, value := range topicIDs {
-			node.TopicIDs = append(node.TopicIDs, foundation.ID(value))
+			parsed := foundation.ID(value)
+			if !validID(parsed) {
+				return nil, inconsistent(errors.New("collection durable scan topic reference is invalid"))
+			}
+			node.TopicIDs = append(node.TopicIDs, parsed)
 		}
 		for _, value := range sourceVersionIDs {
-			node.SourceVersionIDs = append(node.SourceVersionIDs, foundation.ID(value))
+			parsed := foundation.ID(value)
+			if !validID(parsed) {
+				return nil, inconsistent(errors.New("collection durable scan source reference is invalid"))
+			}
+			node.SourceVersionIDs = append(node.SourceVersionIDs, parsed)
 		}
 		nodes = append(nodes, node)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, classify(err)
 	}
-	if len(nodes) != len(keys) {
+	if len(seen) != len(keys) {
 		return nil, inconsistent(errors.New("collection durable scan node hydration is incomplete"))
 	}
 	return nodes, nil
@@ -522,4 +565,8 @@ func loadDurableScanNodes(ctx context.Context, db DB, workspaceID foundation.ID,
 
 func durableScanStale(message string) error {
 	return versionConflict(collectionapp.ErrorCodeCursorStale, errors.New(message))
+}
+
+func validDurableScanKey(key collectionapp.DurableScanKey) bool {
+	return (key.ObjectType == "CLAIM" || key.ObjectType == "TOPIC") && validID(key.ID)
 }

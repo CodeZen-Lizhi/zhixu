@@ -2,13 +2,20 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"time"
 
 	exportapp "github.com/CodeZen-Lizhi/zhixu/internal/export/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/export/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	"github.com/jackc/pgx/v5"
+)
+
+const (
+	exportAttachmentListFirstPageSQL = `SELECT ` + selectColumns + ` FROM ops.export_job
+		WHERE workspace_id=$1 AND scope_kind='WORKSPACE_ATTACHMENTS' ORDER BY created_at DESC,id DESC LIMIT $2 FOR UPDATE`
+	exportCollectionListFirstPageSQL = `SELECT ` + selectColumns + ` FROM ops.export_job
+		WHERE workspace_id=$1 AND scope_kind='COLLECTION' AND collection_id=$2 ORDER BY created_at DESC,id DESC LIMIT $3 FOR UPDATE`
 )
 
 // Create 写入或精确重放任务。既有幂等事实先于当前 Collection 状态读取。
@@ -31,7 +38,7 @@ func (repository *Repository) Create(ctx context.Context, job domain.Job) (domai
 		return domain.Job{}, false, classify(err, true)
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1 || chr(31) || $2,0))`, string(job.WorkspaceID), job.IdempotencyKey); err != nil {
+	if err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1 || chr(31) || $2,0))`, string(job.WorkspaceID), job.IdempotencyKey); err != nil {
 		return domain.Job{}, false, classify(err, true)
 	}
 	existing, err := scanJob(tx.QueryRow(ctx, `SELECT `+selectColumns+`
@@ -46,7 +53,7 @@ func (repository *Repository) Create(ctx context.Context, job domain.Job) (domai
 		}
 		return existing, true, nil
 	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+	if !errors.Is(err, sql.ErrNoRows) {
 		return domain.Job{}, false, classify(err, false)
 	}
 	if job.Scope.Kind == domain.ScopeCollection {
@@ -55,7 +62,7 @@ func (repository *Repository) Create(ctx context.Context, job domain.Job) (domai
 		if err := tx.QueryRow(ctx, `SELECT version,query_hash FROM learning.smart_collection
 			WHERE id=$1 AND workspace_id=$2 AND status='ACTIVE' FOR SHARE`,
 			string(*job.Scope.CollectionID), string(job.WorkspaceID)).Scan(&collectionVersion, &queryHash); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
+			if errors.Is(err, sql.ErrNoRows) {
 				return domain.Job{}, false, notFound(errors.New("active collection does not exist"))
 			}
 			return domain.Job{}, false, classify(err, true)
@@ -204,15 +211,13 @@ func (repository *Repository) List(ctx context.Context, query exportapp.ListQuer
 	return page, nil
 }
 
-func queryListRows(ctx context.Context, tx pgx.Tx, query exportapp.ListQuery, cursor *cursorValue) (pgx.Rows, error) {
+func queryListRows(ctx context.Context, tx exportTransaction, query exportapp.ListQuery, cursor *cursorValue) (exportRows, error) {
 	limit := query.Limit + 1
 	switch {
 	case query.ScopeKind == domain.ScopeWorkspaceAttachments && cursor == nil:
-		return tx.Query(ctx, `SELECT `+selectColumns+` FROM ops.export_job
-			WHERE workspace_id=$1 AND scope_kind='WORKSPACE_ATTACHMENTS' ORDER BY created_at DESC,id DESC LIMIT $2 FOR UPDATE`, string(query.WorkspaceID), limit)
+		return tx.Query(ctx, exportAttachmentListFirstPageSQL, string(query.WorkspaceID), limit)
 	case query.ScopeKind == domain.ScopeCollection && cursor == nil:
-		return tx.Query(ctx, `SELECT `+selectColumns+` FROM ops.export_job
-			WHERE workspace_id=$1 AND scope_kind='COLLECTION' AND collection_id=$2 ORDER BY created_at DESC,id DESC LIMIT $3 FOR UPDATE`,
+		return tx.Query(ctx, exportCollectionListFirstPageSQL,
 			string(query.WorkspaceID), string(*query.CollectionID), limit)
 	case query.ScopeKind == domain.ScopeWorkspaceAttachments:
 		return tx.Query(ctx, `SELECT `+selectColumns+` FROM ops.export_job
@@ -227,7 +232,7 @@ func queryListRows(ctx context.Context, tx pgx.Tx, query exportapp.ListQuery, cu
 	}
 }
 
-func attachmentCapabilityEnabledTx(ctx context.Context, tx pgx.Tx) (bool, error) {
+func attachmentCapabilityEnabledTx(ctx context.Context, tx exportTransaction) (bool, error) {
 	var enabled bool
 	if err := tx.QueryRow(ctx, `SELECT enabled FROM ops.export_capability
 		WHERE capability_key='workspace-attachments' AND contract_version='workspace-attachments/v1' FOR SHARE`).Scan(&enabled); err != nil {
@@ -261,7 +266,7 @@ func expirable(status domain.Status) bool {
 	return status == domain.StatusPending || status == domain.StatusRunning || status == domain.StatusSucceeded || status == domain.StatusFailed
 }
 
-func (repository *Repository) expireLocked(ctx context.Context, tx pgx.Tx, job domain.Job, now time.Time) (domain.Job, bool, error) {
+func (repository *Repository) expireLocked(ctx context.Context, tx exportTransaction, job domain.Job, now time.Time) (domain.Job, bool, error) {
 	if !expirable(job.Status) || job.ExpiresAt.After(now) {
 		return job, false, nil
 	}
@@ -273,7 +278,7 @@ func (repository *Repository) expireLocked(ctx context.Context, tx pgx.Tx, job d
 		WHERE workspace_id=$1 AND id=$2 AND version=$4
 		RETURNING `+selectColumns, string(job.WorkspaceID), string(job.ID), now, job.Version))
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, sql.ErrNoRows) {
 			return domain.Job{}, false, versionConflict(errors.New("export expiry version changed"))
 		}
 		return domain.Job{}, false, classify(err, true)
@@ -284,7 +289,7 @@ func (repository *Repository) expireLocked(ctx context.Context, tx pgx.Tx, job d
 	return updated, true, nil
 }
 
-func (repository *Repository) expireIfNowDue(ctx context.Context, tx pgx.Tx, job domain.Job) (domain.Job, bool, error) {
+func (repository *Repository) expireIfNowDue(ctx context.Context, tx exportTransaction, job domain.Job) (domain.Job, bool, error) {
 	now, err := databaseNow(ctx, tx)
 	if err != nil {
 		return domain.Job{}, false, err

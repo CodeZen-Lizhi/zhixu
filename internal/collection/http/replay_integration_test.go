@@ -9,39 +9,55 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/collection/adapter/postgres"
 	collectionapp "github.com/CodeZen-Lizhi/zhixu/internal/collection/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestCollectionHTTPExactReplayAfterMutationAndArchive(t *testing.T) {
-	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
+	variants := []struct {
+		name string
+		open func(*platformpostgres.Pool) (collectionapp.Repository, error)
+	}{
+		{name: "legacy", open: func(pool *platformpostgres.Pool) (collectionapp.Repository, error) {
+			return postgres.NewRepository(pool.DB())
+		}},
+		{name: "gorm", open: func(pool *platformpostgres.Pool) (collectionapp.Repository, error) {
+			return postgres.NewGORMRepository(pool)
+		}},
 	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
+	for _, variant := range variants {
+		variant := variant
+		t.Run(variant.name, func(t *testing.T) {
+			fixture := testdb.Require(t, testdb.Config{
+				ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
+				Availability:     testdb.FailWhenUnavailable,
+				MaxConns:         8,
+			})
+			ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+			defer cancel()
+			repository, err := variant.open(fixture.Pool())
+			if err != nil {
+				t.Fatal(err)
+			}
+			testCollectionHTTPExactReplayAfterMutationAndArchive(t, ctx, fixture.Pool().DB(), repository)
+		})
 	}
-	defer pool.Close()
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
+}
+
+func testCollectionHTTPExactReplayAfterMutationAndArchive(t *testing.T, ctx context.Context, pool *pgxpool.Pool, repository collectionapp.Repository) {
+	t.Helper()
 	now := time.Date(2026, 7, 22, 3, 0, 0, 0, time.UTC)
 	workspaceID := foundation.ID("92000000-0000-4000-8000-000000000001")
-	if _, err := tx.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'collection-http-replay',$2,$2,$3,'test',1,$3,$3)`, string(workspaceID), "/tmp/collection-http-replay", now); err != nil {
-		t.Fatal(err)
-	}
-	repository, err := postgres.NewRepository(tx)
-	if err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'collection-http-replay',$2,$2,$3,'inactive',1,$3,$3)`, string(workspaceID), "/tmp/collection-http-replay", now); err != nil {
 		t.Fatal(err)
 	}
 	collectionID := foundation.ID("92000000-0000-4000-8000-000000000002")

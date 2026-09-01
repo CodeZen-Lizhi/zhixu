@@ -1,4 +1,4 @@
-//go:build integration
+//go:build integration && testcontainers
 
 package postgres
 
@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"reflect"
 	"sync"
 	"testing"
@@ -309,16 +308,7 @@ func healthRiverStartCommandForCoverage(workspaceID foundation.ID, key string, c
 
 func newHealthRiverTestPool(t *testing.T, ctx context.Context) *pgxpool.Pool {
 	t.Helper()
-	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
-	}
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
-	return pool
+	return newHealthIntegrationPool(t)
 }
 
 func seedHealthRiverFixture(t *testing.T, ctx context.Context, pool *pgxpool.Pool) (foundation.ID, foundation.ID) {
@@ -340,7 +330,7 @@ func seedHealthRiverFixture(t *testing.T, ctx context.Context, pool *pgxpool.Poo
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
 	if _, err := tx.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at)
-		VALUES($1,'health-river-fixture',$2,$2,$3,'test',1,$3,$3)`, string(workspaceID), rootPath, now); err != nil {
+		VALUES($1,'health-river-fixture',$2,$2,$3,'inactive',1,$3,$3)`, string(workspaceID), rootPath, now); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO core.topic(id,workspace_id,name,normalized_name,description,status,version,created_at,updated_at)

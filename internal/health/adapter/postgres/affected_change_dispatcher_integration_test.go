@@ -1,4 +1,4 @@
-//go:build integration
+//go:build integration && testcontainers
 
 package postgres
 
@@ -311,7 +311,7 @@ func newAffectedChangeTestWorkspace(t *testing.T, suffix string) (context.Contex
 	rootPath := "/tmp/health-affected-" + suffix + "-" + string(workspaceID)
 	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(
 		id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at)
-		VALUES($1,$2,$3,$3,$4,'test',1,$4,$4)`, string(workspaceID), "health-affected-"+suffix, rootPath, now); err != nil {
+		VALUES($1,$2,$3,$3,$4,'inactive',1,$4,$4)`, string(workspaceID), "health-affected-"+suffix, rootPath, now); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { cleanupHealthIntegrationWorkspace(t, pool, workspaceID) })

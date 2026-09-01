@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"strings"
 	"time"
@@ -9,8 +10,17 @@ import (
 	exportapp "github.com/CodeZen-Lizhi/zhixu/internal/export/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/export/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	"github.com/jackc/pgx/v5"
 )
+
+const exportRecoveryCandidatesSQL = `SELECT ` + selectColumns + ` FROM ops.export_job
+	WHERE expires_at>clock_timestamp()
+	  AND (scope_kind='COLLECTION' OR EXISTS (
+	      SELECT 1 FROM ops.export_capability capability
+	      WHERE capability.capability_key='workspace-attachments'
+	        AND capability.contract_version='workspace-attachments/v1' AND capability.enabled
+	  ))
+	  AND (status='PENDING' OR (status='RUNNING' AND lease_expires_at<=clock_timestamp()))
+	ORDER BY created_at,id LIMIT $1`
 
 // Claim 以数据库时间获取 PENDING 或租约已到期 RUNNING 任务。
 func (repository *Repository) Claim(ctx context.Context, workspaceID, jobID foundation.ID, owner string, lease time.Duration) (domain.Job, bool, error) {
@@ -76,7 +86,7 @@ func (repository *Repository) Claim(ctx context.Context, workspaceID, jobID foun
 		RETURNING `+selectColumns,
 		string(workspaceID), string(jobID), owner, lease.Seconds(), job.Version))
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, sql.ErrNoRows) {
 			expiredJob, expiredNow, expireErr := repository.expireIfNowDue(ctx, tx, job)
 			if expireErr != nil {
 				return domain.Job{}, false, expireErr
@@ -169,7 +179,7 @@ func (repository *Repository) Prepare(ctx context.Context, request exportapp.Pre
 		request.PreparedFile.StagingPath, request.PreparedFile.FinalPath, request.PreparedFile.FileHash,
 		request.PreparedFile.FileSize, request.ExpectedVersion, request.LeaseOwner))
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, sql.ErrNoRows) {
 			expiredJob, expiredNow, expireErr := repository.expireIfNowDue(ctx, tx, job)
 			if expireErr != nil {
 				return domain.Job{}, expireErr
@@ -249,7 +259,7 @@ func (repository *Repository) Complete(ctx context.Context, request exportapp.Co
 		RETURNING `+selectColumns,
 		string(request.WorkspaceID), string(request.JobID), request.ExpectedVersion, request.LeaseOwner))
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, sql.ErrNoRows) {
 			expiredJob, expiredNow, expireErr := repository.expireIfNowDue(ctx, tx, job)
 			if expireErr != nil {
 				return domain.Job{}, expireErr
@@ -349,7 +359,7 @@ func (repository *Repository) Fail(ctx context.Context, request exportapp.FailRe
 		string(request.WorkspaceID), string(request.JobID), string(status), request.Retryable,
 		errorCode, errorMessage, request.ExpectedVersion, request.LeaseOwner))
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, sql.ErrNoRows) {
 			expiredJob, expiredNow, expireErr := repository.expireIfNowDue(ctx, tx, job)
 			if expireErr != nil {
 				return domain.Job{}, expireErr
@@ -413,15 +423,7 @@ func (repository *Repository) RecoveryCandidates(ctx context.Context, limit int)
 	if ctx == nil || limit < 1 || limit > exportapp.MaxListLimit {
 		return nil, invalid(errors.New("export recovery limit is invalid"))
 	}
-	rows, err := repository.db.Query(ctx, `SELECT `+selectColumns+` FROM ops.export_job
-		WHERE expires_at>clock_timestamp()
-		  AND (scope_kind='COLLECTION' OR EXISTS (
-		      SELECT 1 FROM ops.export_capability capability
-		      WHERE capability.capability_key='workspace-attachments'
-		        AND capability.contract_version='workspace-attachments/v1' AND capability.enabled
-		  ))
-		  AND (status='PENDING' OR (status='RUNNING' AND lease_expires_at<=clock_timestamp()))
-		ORDER BY created_at,id LIMIT $1`, limit)
+	rows, err := repository.db.Query(ctx, exportRecoveryCandidatesSQL, limit)
 	if err != nil {
 		return nil, classify(err, true)
 	}

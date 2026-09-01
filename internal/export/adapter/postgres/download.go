@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"time"
@@ -9,7 +10,6 @@ import (
 	auditdomain "github.com/CodeZen-Lizhi/zhixu/internal/audit/domain"
 	exportapp "github.com/CodeZen-Lizhi/zhixu/internal/export/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/export/domain"
-	"github.com/jackc/pgx/v5"
 )
 
 // RecordDownload 原子增加统计并追加当前 actor 的 append-only Audit。
@@ -65,7 +65,7 @@ func (repository *Repository) RecordDownload(ctx context.Context, request export
 		RETURNING `+selectColumns,
 		string(request.WorkspaceID), string(request.JobID), job.Version))
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, sql.ErrNoRows) {
 			_, expiredNow, expireErr := repository.expireIfNowDue(ctx, tx, job)
 			if expireErr != nil {
 				return domain.Job{}, expireErr
@@ -87,7 +87,7 @@ func (repository *Repository) RecordDownload(ctx context.Context, request export
 	if err != nil {
 		return domain.Job{}, invalid(err)
 	}
-	_, replayed, err := repository.audit.AppendTx(ctx, tx, auditEvent)
+	_, replayed, err := repository.audit.AppendTx(ctx, tx.SideFactTransaction(), auditEvent)
 	if err != nil {
 		return domain.Job{}, err
 	}

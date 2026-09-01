@@ -17,16 +17,31 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/export/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation/strictjson"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// DB 是导出 Repository 所需的最小 pgx 边界。
-type DB interface {
-	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
-	Query(context.Context, string, ...any) (pgx.Rows, error)
-	QueryRow(context.Context, string, ...any) pgx.Row
-	Begin(context.Context) (pgx.Tx, error)
+type exportRow interface {
+	Scan(...any) error
+}
+
+type exportRows interface {
+	Close()
+	Err() error
+	Next() bool
+	Scan(...any) error
+}
+
+type exportTransaction interface {
+	Exec(context.Context, string, ...any) error
+	Query(context.Context, string, ...any) (exportRows, error)
+	QueryRow(context.Context, string, ...any) exportRow
+	Commit(context.Context) error
+	Rollback(context.Context) error
+	SideFactTransaction() any
+}
+
+type exportDatabase interface {
+	Query(context.Context, string, ...any) (exportRows, error)
+	Begin(context.Context) (exportTransaction, error)
 }
 
 // Option 配置同事务的 Export side-fact appender。
@@ -62,13 +77,12 @@ func WithAuditAppender(appender auditapplication.Appender) Option {
 
 // Repository 持久化导出 Job，并执行 DB-time 租约、prepared 和 cleanup CAS。
 type Repository struct {
-	db     DB
+	db     exportDatabase
 	events eventsapplication.Appender
 	audit  auditapplication.Appender
 }
 
-// NewRepository 创建 Export PostgreSQL Repository。
-func NewRepository(db DB, options ...Option) (*Repository, error) {
+func newRepository(db exportDatabase, options ...Option) (*Repository, error) {
 	if isNilDependency(db) {
 		return nil, unavailable(errors.New("export database is nil"))
 	}
@@ -333,7 +347,7 @@ func validHash(value string) bool {
 	return true
 }
 
-func databaseNow(ctx context.Context, tx pgx.Tx) (time.Time, error) {
+func databaseNow(ctx context.Context, tx exportTransaction) (time.Time, error) {
 	var now time.Time
 	if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&now); err != nil {
 		return time.Time{}, classify(err, true)
@@ -362,12 +376,12 @@ func classify(err error, retryable bool) error {
 	if errors.As(err, &classified) {
 		return err
 	}
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, sql.ErrNoRows) {
 		return notFound(err)
 	}
-	var postgresError *pgconn.PgError
+	var postgresError interface{ SQLState() string }
 	if errors.As(err, &postgresError) {
-		switch postgresError.Code {
+		switch postgresError.SQLState() {
 		case "40001", "40P01", "55P03":
 			return foundation.NewError(foundation.ErrorRetryableFailure, "EXPORT_DATABASE_UNAVAILABLE", true, err)
 		case "23503", "23505", "23514", "55000":

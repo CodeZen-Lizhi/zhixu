@@ -431,10 +431,14 @@ func scanItem(row interface{ Scan(...any) error }) (collectionapp.CollectionItem
 	if err := row.Scan(&id, &workspace, &objectType, &topicID, &item.Title, &item.Summary, &item.Status, &item.Confidence, &relationType, &healthType, &sourceType, &filePath, &item.SortTextKey, &item.CreatedAt, &item.UpdatedAt); err != nil {
 		return collectionapp.CollectionItem{}, classify(err)
 	}
-	if !validID(foundation.ID(workspace)) || !validID(foundation.ID(id)) {
-		return collectionapp.CollectionItem{}, inconsistent(errors.New("collection result crossed workspace or id boundary"))
+	if !validID(foundation.ID(workspace)) || !validID(foundation.ID(id)) ||
+		(objectType != "TOPIC" && objectType != "CLAIM") || item.Title == "" || item.Status == "" ||
+		item.CreatedAt.IsZero() || item.UpdatedAt.Before(item.CreatedAt) {
+		return collectionapp.CollectionItem{}, inconsistent(errors.New("collection result identity or shape is invalid"))
 	}
 	item.ID, item.ObjectType = foundation.ID(id), objectType
+	item.CreatedAt = item.CreatedAt.UTC()
+	item.UpdatedAt = item.UpdatedAt.UTC()
 	item.RelationType, item.HealthType, item.SourceType, item.FilePath = relationType, healthType, sourceType, filePath
 	if topicID != nil && *topicID != "" {
 		parsed := foundation.ID(*topicID)
@@ -460,7 +464,13 @@ func hydrateCollectionItems(ctx context.Context, db DB, workspaceID foundation.I
 		}
 		objectTypes[index], ids[index], positions[key] = item.ObjectType, string(item.ID), index
 	}
-	rows, err := db.Query(ctx, hydrateCollectionItemsSQL, string(workspaceID), objectTypes, ids)
+	var rows pgx.Rows
+	var err error
+	if database, ok := db.(*gormDB); ok {
+		rows, err = database.hydrationRows(ctx, hydrateCollectionItemsSQL, string(workspaceID), objectTypes, ids)
+	} else {
+		rows, err = db.Query(ctx, hydrateCollectionItemsSQL, string(workspaceID), objectTypes, ids)
+	}
 	if err != nil {
 		return classify(err)
 	}

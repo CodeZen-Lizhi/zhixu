@@ -7,8 +7,18 @@ import (
 	"testing"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+func newHealthIntegrationPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	fixture := testdb.Require(t, testdb.Config{Availability: testdb.FailWhenUnavailable, MaxConns: 16})
+	if fixture == nil || fixture.Pool() == nil || fixture.Pool().DB() == nil {
+		t.Fatal("health PostgreSQL fixture did not provide a shared pool")
+	}
+	return fixture.Pool().DB()
+}
 
 // cleanupHealthIntegrationWorkspace 清理真实 PostgreSQL/River Health fixture。
 // 测试库约束刻意禁止业务事实删除，因此 cleanup 在专用测试连接上临时关闭触发器。

@@ -1,4 +1,4 @@
-//go:build integration
+//go:build integration && testcontainers
 
 package postgres
 
@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -24,16 +23,8 @@ import (
 )
 
 func TestHealthScanRepositoryRuntimeReplayAdvanceFinishAndCancellation(t *testing.T) {
-	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
-	}
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
+	pool := newHealthIntegrationPool(t)
 	ids := foundation.NewUUIDGenerator(nil)
 	workspaceID, err := ids.New()
 	if err != nil {
@@ -42,7 +33,7 @@ func TestHealthScanRepositoryRuntimeReplayAdvanceFinishAndCancellation(t *testin
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	rootPath := "/tmp/health-scan-" + string(workspaceID)
 	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at)
-VALUES($1,'health-scan-runtime',$2,$2,$3,'test',1,$3,$3)`, string(workspaceID), rootPath, now); err != nil {
+VALUES($1,'health-scan-runtime',$2,$2,$3,'inactive',1,$3,$3)`, string(workspaceID), rootPath, now); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { cleanupHealthIntegrationWorkspace(t, pool, workspaceID) })

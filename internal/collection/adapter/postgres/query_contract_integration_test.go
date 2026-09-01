@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -18,34 +17,32 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	graphfixture "github.com/CodeZen-Lizhi/zhixu/internal/graph/testfixture"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const collectionReferenceTopicCount = 512
 
 func TestCollectionQueryExecutesEveryRegisteredFieldOperator(t *testing.T) {
-	ctx, pool, fixture := collectionQueryFixture(t)
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
+	runCollectionRepositoryIntegrationCases(t, testCollectionQueryExecutesEveryRegisteredFieldOperator)
+}
+
+func testCollectionQueryExecutesEveryRegisteredFieldOperator(t *testing.T, testCase collectionIntegrationCase) {
+	ctx := testCase.context
+	pool := testCase.pool
+	fixture := seedCollectionQueryFixture(t, ctx, pool)
 
 	aliasID := collectionQueryID(t)
-	if _, err := tx.Exec(ctx, `INSERT INTO core.topic_alias(id,workspace_id,topic_id,alias,normalized_alias,created_at) VALUES($1,$2,$3,$4,$5,$6)`,
+	if _, err := pool.Exec(ctx, `INSERT INTO core.topic_alias(id,workspace_id,topic_id,alias,normalized_alias,created_at) VALUES($1,$2,$3,$4,$5,$6)`,
 		string(aliasID), string(fixture.WorkspaceID), string(fixture.PrimaryTopicID), `Literal%_\Alias`, `literal%_\alias`, collectionFixtureTime()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE core.source SET original_location='docs/literal%_path.md' WHERE workspace_id=$1`, string(fixture.WorkspaceID)); err != nil {
+	if _, err := pool.Exec(ctx, `UPDATE core.source SET original_location='docs/literal%_path.md' WHERE workspace_id=$1`, string(fixture.WorkspaceID)); err != nil {
 		t.Fatal(err)
 	}
-	insertCollectionHealthIssue(t, ctx, tx, fixture.WorkspaceID, fixture.FirstClaimID)
+	insertCollectionHealthIssue(t, ctx, pool, fixture.WorkspaceID, fixture.FirstClaimID)
 
-	repository, err := NewRepository(tx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	service := newCollectionQueryService(t, repository)
+	service := newCollectionQueryService(t, testCase.repository)
 	all := []foundation.ID{fixture.PrimaryTopicID, fixture.SecondaryTopicID, fixture.FirstClaimID, fixture.SecondClaimID}
 	topics := []foundation.ID{fixture.PrimaryTopicID, fixture.SecondaryTopicID}
 	claims := []foundation.ID{fixture.FirstClaimID, fixture.SecondClaimID}
@@ -103,17 +100,13 @@ func TestCollectionQueryExecutesEveryRegisteredFieldOperator(t *testing.T) {
 }
 
 func TestCollectionNullableConfidenceKeysetTraversesNullTail(t *testing.T) {
-	ctx, pool, fixture := collectionQueryFixture(t)
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
-	repository, err := NewRepository(tx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	service := newCollectionQueryService(t, repository)
+	runCollectionRepositoryIntegrationCases(t, testCollectionNullableConfidenceKeysetTraversesNullTail)
+}
+
+func testCollectionNullableConfidenceKeysetTraversesNullTail(t *testing.T, testCase collectionIntegrationCase) {
+	ctx := testCase.context
+	fixture := seedCollectionQueryFixture(t, ctx, testCase.pool)
+	service := newCollectionQueryService(t, testCase.repository)
 
 	for _, direction := range []string{"ASC", "DESC"} {
 		t.Run(direction, func(t *testing.T) {
@@ -153,12 +146,14 @@ func TestCollectionNullableConfidenceKeysetTraversesNullTail(t *testing.T) {
 }
 
 func TestCollectionPreviewCursorBindingAndRevisionMutations(t *testing.T) {
-	ctx, pool, fixture := collectionQueryFixture(t)
-	repository, err := NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
-	service := newCollectionQueryService(t, repository)
+	runCollectionRepositoryIntegrationCases(t, testCollectionPreviewCursorBindingAndRevisionMutations)
+}
+
+func testCollectionPreviewCursorBindingAndRevisionMutations(t *testing.T, testCase collectionIntegrationCase) {
+	ctx := testCase.context
+	pool := testCase.pool
+	fixture := seedCollectionQueryFixture(t, ctx, pool)
+	service := newCollectionQueryService(t, testCase.repository)
 	query := collectionQuery(collectionSingle("object_type", domain.OperatorEQ, "CLAIM"))
 	query.Sort = []domain.SortTerm{{Field: "text", Direction: "ASC"}}
 	freshCursor := func() string {
@@ -181,16 +176,9 @@ func TestCollectionPreviewCursorBindingAndRevisionMutations(t *testing.T) {
 
 	otherWorkspaceID := collectionQueryID(t)
 	otherRoot := "/tmp/collection-cursor-" + string(otherWorkspaceID)
-	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'collection-cursor-binding',$2,$2,$3,'test',1,$3,$3)`, string(otherWorkspaceID), otherRoot, collectionFixtureTime()); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'collection-cursor-binding',$2,$2,$3,'inactive',1,$3,$3)`, string(otherWorkspaceID), otherRoot, collectionFixtureTime()); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		defer cancel()
-		if _, cleanupErr := pool.Exec(cleanupCtx, `DELETE FROM core.workspace WHERE id=$1`, string(otherWorkspaceID)); cleanupErr != nil {
-			t.Errorf("cleanup cursor workspace: %v", cleanupErr)
-		}
-	})
 	assertPreviewError(collectionapp.PreviewQuery{WorkspaceID: otherWorkspaceID, Query: query, Limit: 1, Cursor: cursor}, "COLLECTION_CURSOR_INVALID")
 
 	aliasID := collectionQueryID(t)
@@ -226,83 +214,75 @@ func TestCollectionPreviewCursorBindingAndRevisionMutations(t *testing.T) {
 }
 
 func TestCollectionQuerySnapshotCountAndReferenceP95(t *testing.T) {
-	databaseURL := collectionDatabaseURL(t)
-	ctx := context.Background()
-	config, err := pgxpool.ParseConfig(databaseURL)
-	if err != nil {
-		t.Fatal("parse collection test database configuration")
-	}
-	tracer := &collectionQueryTracer{}
-	config.ConnConfig.Tracer = tracer
-	pool, err := pgxpool.NewWithConfig(ctx, config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
-	fixture, err := graphfixture.SeedFunctional(ctx, pool)
-	if err != nil {
-		t.Fatal(err)
-	}
-	registerCollectionQueryCleanup(t, pool, fixture.WorkspaceID)
-	seedCollectionReferenceTopics(t, ctx, pool, fixture.WorkspaceID)
-	repository, err := NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
-	service := newCollectionQueryService(t, repository)
-	query := collectionQuery(collectionIn("object_type", "TOPIC", "CLAIM"))
-	query.Sort = []domain.SortTerm{{Field: "updated_at", Direction: "DESC"}}
+	runCollectionRepositoryIntegrationCases(t, func(t *testing.T, testCase collectionIntegrationCase) {
+		ctx := testCase.context
+		fixture := seedCollectionQueryFixture(t, ctx, testCase.pool)
+		seedCollectionReferenceTopics(t, ctx, testCase.pool, fixture.WorkspaceID)
+		repository := testCase.repository
+		var tracer *collectionQueryTracer
+		if testCase.name == "legacy" {
+			tracer = &collectionQueryTracer{}
+			tracedRepository, err := NewRepository(&collectionTracingDB{pool: testCase.pool, tracer: tracer})
+			if err != nil {
+				t.Fatal(err)
+			}
+			repository = tracedRepository
+		}
+		service := newCollectionQueryService(t, repository)
+		query := collectionQuery(collectionIn("object_type", "TOPIC", "CLAIM"))
+		query.Sort = []domain.SortTerm{{Field: "updated_at", Direction: "DESC"}}
 
-	tracer.reset()
-	preview, err := service.Preview(ctx, collectionapp.PreviewQuery{WorkspaceID: fixture.WorkspaceID, Query: query, Limit: 25})
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertCollectionReferencePage(t, preview)
-	assertCollectionTrace(t, tracer.snapshot(), false)
+		resetCollectionTrace(tracer)
+		preview, err := service.Preview(ctx, collectionapp.PreviewQuery{WorkspaceID: fixture.WorkspaceID, Query: query, Limit: 25})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertCollectionReferencePage(t, preview)
+		assertCollectionTraceWhenEnabled(t, tracer, false)
 
-	created, err := service.Create(ctx, collectionapp.CreateCommand{
-		WorkspaceID: fixture.WorkspaceID, Name: "query count fixture", Query: query,
-		ViewType: domain.ViewTypeList, IdempotencyKey: "collection-query-count-create",
+		created, err := service.Create(ctx, collectionapp.CreateCommand{
+			WorkspaceID: fixture.WorkspaceID, Name: "query count fixture", Query: query,
+			ViewType: domain.ViewTypeList, IdempotencyKey: "collection-query-count-create",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		resetCollectionTrace(tracer)
+		saved, err := service.Results(ctx, collectionapp.ResultsQuery{WorkspaceID: fixture.WorkspaceID, CollectionID: created.Collection.ID, Limit: 25})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertCollectionReferencePage(t, saved)
+		assertCollectionTraceWhenEnabled(t, tracer, true)
+
+		for warmup := 0; warmup < 3; warmup++ {
+			resetCollectionTrace(tracer)
+			if _, err := service.Preview(ctx, collectionapp.PreviewQuery{WorkspaceID: fixture.WorkspaceID, Query: query, Limit: 25}); err != nil {
+				t.Fatalf("warmup %d: %v", warmup+1, err)
+			}
+			assertCollectionTraceWhenEnabled(t, tracer, false)
+		}
+		durations := make([]time.Duration, 0, 25)
+		for sample := 0; sample < 25; sample++ {
+			queryCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			resetCollectionTrace(tracer)
+			started := time.Now()
+			page, queryErr := service.Preview(queryCtx, collectionapp.PreviewQuery{WorkspaceID: fixture.WorkspaceID, Query: query, Limit: 25})
+			duration := time.Since(started)
+			cancel()
+			if queryErr != nil || page.ExactCount != collectionReferenceTopicCount+4 || len(page.Items) != 25 || page.NextCursor == "" {
+				t.Fatalf("sample %d page=%+v err=%v", sample+1, page, queryErr)
+			}
+			assertCollectionTraceWhenEnabled(t, tracer, false)
+			durations = append(durations, duration)
+		}
+		sort.Slice(durations, func(left, right int) bool { return durations[left] < durations[right] })
+		p95 := durations[(95*len(durations)+99)/100-1]
+		if p95 > 2*time.Second {
+			t.Fatalf("collection reference fixture p95=%s exceeds 2s", p95)
+		}
+		t.Logf("collection reference fixture samples=%d p95=%s", len(durations), p95)
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	tracer.reset()
-	saved, err := service.Results(ctx, collectionapp.ResultsQuery{WorkspaceID: fixture.WorkspaceID, CollectionID: created.Collection.ID, Limit: 25})
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertCollectionReferencePage(t, saved)
-	assertCollectionTrace(t, tracer.snapshot(), true)
-
-	for warmup := 0; warmup < 3; warmup++ {
-		tracer.reset()
-		if _, err := service.Preview(ctx, collectionapp.PreviewQuery{WorkspaceID: fixture.WorkspaceID, Query: query, Limit: 25}); err != nil {
-			t.Fatalf("warmup %d: %v", warmup+1, err)
-		}
-		assertCollectionTrace(t, tracer.snapshot(), false)
-	}
-	durations := make([]time.Duration, 0, 25)
-	for sample := 0; sample < 25; sample++ {
-		queryCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		tracer.reset()
-		started := time.Now()
-		page, queryErr := service.Preview(queryCtx, collectionapp.PreviewQuery{WorkspaceID: fixture.WorkspaceID, Query: query, Limit: 25})
-		duration := time.Since(started)
-		cancel()
-		if queryErr != nil || page.ExactCount != collectionReferenceTopicCount+4 || len(page.Items) != 25 || page.NextCursor == "" {
-			t.Fatalf("sample %d page=%+v err=%v", sample+1, page, queryErr)
-		}
-		assertCollectionTrace(t, tracer.snapshot(), false)
-		durations = append(durations, duration)
-	}
-	sort.Slice(durations, func(left, right int) bool { return durations[left] < durations[right] })
-	p95 := durations[(95*len(durations)+99)/100-1]
-	if p95 > 2*time.Second {
-		t.Fatalf("collection reference fixture p95=%s exceeds 2s", p95)
-	}
-	t.Logf("collection reference fixture samples=%d p95=%s", len(durations), p95)
 }
 
 func TestCollectionQueryPlanUsesCanonicalIndexes(t *testing.T) {
@@ -314,6 +294,10 @@ func TestCollectionQueryPlanUsesCanonicalIndexes(t *testing.T) {
 	defer func() { _ = tx.Rollback(context.Background()) }()
 	insertCollectionHealthIssue(t, ctx, tx, fixture.WorkspaceID, fixture.FirstClaimID)
 	seedCollectionPlanCardinality(t, ctx, tx, fixture)
+	seedCollectionPlanCollections(t, ctx, tx, fixture.WorkspaceID)
+	if _, err := tx.Exec(ctx, `ANALYZE learning.smart_collection`); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := tx.Exec(ctx, `SET LOCAL enable_seqscan=off`); err != nil {
 		t.Fatal(err)
 	}
@@ -321,6 +305,7 @@ func TestCollectionQueryPlanUsesCanonicalIndexes(t *testing.T) {
 		"core.idx_knowledge_relation_workspace_source_status_type",
 		"core.idx_knowledge_relation_workspace_target_status_type",
 		"ops.idx_ops_health_issue_workspace_target_status_type",
+		"learning.idx_learning_smart_collection_workspace_status_updated",
 	} {
 		var exists bool
 		if err := tx.QueryRow(ctx, `SELECT to_regclass($1) IS NOT NULL`, index).Scan(&exists); err != nil || !exists {
@@ -403,6 +388,45 @@ func TestCollectionQueryPlanUsesCanonicalIndexes(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("collection list", func(t *testing.T) {
+		explain := explainCollectionSQL(t, ctx, tx, collectionSelect+`
+			WHERE workspace_id=$1 AND status=ANY($2::text[])
+			ORDER BY updated_at DESC,id DESC LIMIT $3`, string(fixture.WorkspaceID), []string{"ACTIVE"}, 26)
+		assertCollectionTargetAccess(t, explain, collectionPlanTargetRequirement{
+			purpose: "Collection list", relation: "smart_collection",
+			indexes: []string{"idx_learning_smart_collection_workspace_status_updated", "uq_learning_smart_collection_active_name"},
+		})
+	})
+	t.Run("collection search", func(t *testing.T) {
+		explain := explainCollectionSQL(t, ctx, tx, collectionSelect+`
+			WHERE workspace_id=$1 AND status='ACTIVE'
+			  AND (position($2 in normalized_name)>0 OR position($2 in lower(description))>0)
+			ORDER BY CASE
+				WHEN normalized_name=$2 THEN 0
+				WHEN position($2 in normalized_name)=1 THEN 1
+				ELSE 2 END,
+				updated_at DESC,id DESC
+			LIMIT $3`, string(fixture.WorkspaceID), "collection", 26)
+		assertCollectionTargetAccess(t, explain, collectionPlanTargetRequirement{
+			purpose: "Collection search", relation: "smart_collection",
+			indexes: []string{"idx_learning_smart_collection_workspace_status_updated", "uq_learning_smart_collection_active_name"},
+		})
+	})
+	t.Run("durable result page", func(t *testing.T) {
+		query := collectionQueryAll(collectionSingle("object_type", domain.OperatorEQ, "TOPIC"), collectionSingle("status", domain.OperatorEQ, "ACTIVE"))
+		plan, err := collectionapp.CompileQuery(query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		where, args := shiftWhere(plan.Where, append([]any{string(fixture.WorkspaceID)}, plan.Args...))
+		pageSQL := unifiedItemCTE + "SELECT * FROM item WHERE " + where + fmt.Sprintf(" ORDER BY item.object_type,item.id LIMIT $%d", len(args)+1)
+		explain := explainCollectionSQL(t, ctx, tx, pageSQL, append(args, 26)...)
+		assertCollectionTargetAccess(t, explain, collectionPlanTargetRequirement{
+			purpose: "Durable Topic root", relation: "topic",
+			indexes: []string{"idx_knowledge_topic_workspace_status_id", "idx_knowledge_topic_workspace_status", "uq_knowledge_topic_workspace_name"},
+		})
+	})
 }
 
 type collectionPlanTargetRequirement struct {
@@ -421,14 +445,11 @@ type collectionQueryTracer struct {
 	sql []string
 }
 
-func (tracer *collectionQueryTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+func (tracer *collectionQueryTracer) record(statement string) {
 	tracer.mu.Lock()
-	tracer.sql = append(tracer.sql, strings.TrimSpace(data.SQL))
+	tracer.sql = append(tracer.sql, strings.TrimSpace(statement))
 	tracer.mu.Unlock()
-	return ctx
 }
-
-func (*collectionQueryTracer) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
 
 func (tracer *collectionQueryTracer) reset() {
 	tracer.mu.Lock()
@@ -442,71 +463,103 @@ func (tracer *collectionQueryTracer) snapshot() []string {
 	return append([]string(nil), tracer.sql...)
 }
 
+type collectionTracingDB struct {
+	pool   *pgxpool.Pool
+	tracer *collectionQueryTracer
+}
+
+func (database *collectionTracingDB) Exec(ctx context.Context, query string, arguments ...any) (pgconn.CommandTag, error) {
+	database.tracer.record(query)
+	return database.pool.Exec(ctx, query, arguments...)
+}
+
+func (database *collectionTracingDB) Query(ctx context.Context, query string, arguments ...any) (pgx.Rows, error) {
+	database.tracer.record(query)
+	return database.pool.Query(ctx, query, arguments...)
+}
+
+func (database *collectionTracingDB) QueryRow(ctx context.Context, query string, arguments ...any) pgx.Row {
+	database.tracer.record(query)
+	return database.pool.QueryRow(ctx, query, arguments...)
+}
+
+func (database *collectionTracingDB) Begin(ctx context.Context) (pgx.Tx, error) {
+	return database.BeginTx(ctx, pgx.TxOptions{})
+}
+
+func (database *collectionTracingDB) BeginTx(ctx context.Context, options pgx.TxOptions) (pgx.Tx, error) {
+	transaction, err := database.pool.BeginTx(ctx, options)
+	if err != nil {
+		return nil, err
+	}
+	database.tracer.record(fmt.Sprintf("BEGIN ISOLATION LEVEL %s %s", options.IsoLevel, options.AccessMode))
+	return &collectionTracingTx{Tx: transaction, tracer: database.tracer}, nil
+}
+
+type collectionTracingTx struct {
+	pgx.Tx
+	tracer *collectionQueryTracer
+}
+
+func (transaction *collectionTracingTx) Begin(ctx context.Context) (pgx.Tx, error) {
+	nested, err := transaction.Tx.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	transaction.tracer.record("SAVEPOINT")
+	return &collectionTracingTx{Tx: nested, tracer: transaction.tracer}, nil
+}
+
+func (transaction *collectionTracingTx) Commit(ctx context.Context) error {
+	err := transaction.Tx.Commit(ctx)
+	if err == nil {
+		transaction.tracer.record("COMMIT")
+	}
+	return err
+}
+
+func (transaction *collectionTracingTx) Rollback(ctx context.Context) error {
+	err := transaction.Tx.Rollback(ctx)
+	if err == nil {
+		transaction.tracer.record("ROLLBACK")
+	}
+	return err
+}
+
+func (transaction *collectionTracingTx) Exec(ctx context.Context, query string, arguments ...any) (pgconn.CommandTag, error) {
+	transaction.tracer.record(query)
+	return transaction.Tx.Exec(ctx, query, arguments...)
+}
+
+func (transaction *collectionTracingTx) Query(ctx context.Context, query string, arguments ...any) (pgx.Rows, error) {
+	transaction.tracer.record(query)
+	return transaction.Tx.Query(ctx, query, arguments...)
+}
+
+func (transaction *collectionTracingTx) QueryRow(ctx context.Context, query string, arguments ...any) pgx.Row {
+	transaction.tracer.record(query)
+	return transaction.Tx.QueryRow(ctx, query, arguments...)
+}
+
 func collectionQueryFixture(t *testing.T) (context.Context, *pgxpool.Pool, graphfixture.Fixture) {
 	t.Helper()
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, collectionDatabaseURL(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
+	database := requireCollectionIntegrationDatabase(t, 16)
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	t.Cleanup(cancel)
+	pool := database.Pool().DB()
+	return ctx, pool, seedCollectionQueryFixture(t, ctx, pool)
+}
+
+func seedCollectionQueryFixture(t *testing.T, ctx context.Context, pool *pgxpool.Pool) graphfixture.Fixture {
+	t.Helper()
 	fixture, err := graphfixture.SeedFunctional(ctx, pool)
 	if err != nil {
 		t.Fatal(err)
 	}
-	registerCollectionQueryCleanup(t, pool, fixture.WorkspaceID)
-	return ctx, pool, fixture
+	return fixture
 }
 
-func collectionDatabaseURL(t *testing.T) string {
-	t.Helper()
-	databaseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
-	}
-	return databaseURL
-}
-
-func registerCollectionQueryCleanup(t *testing.T, pool *pgxpool.Pool, workspaceID foundation.ID) {
-	t.Helper()
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		tx, err := pool.Begin(ctx)
-		if err != nil {
-			t.Errorf("begin collection query cleanup: %v", err)
-			return
-		}
-		committed := false
-		defer func() {
-			if !committed {
-				_ = tx.Rollback(context.Background())
-			}
-		}()
-		if _, err = tx.Exec(ctx, `SET LOCAL session_replication_role=replica`); err == nil {
-			_, err = tx.Exec(ctx, `DELETE FROM learning.smart_collection_command WHERE workspace_id=$1`, string(workspaceID))
-		}
-		if err == nil {
-			_, err = tx.Exec(ctx, `DELETE FROM learning.smart_collection WHERE workspace_id=$1`, string(workspaceID))
-		}
-		if err == nil {
-			_, err = tx.Exec(ctx, `DELETE FROM ops.health_issue WHERE workspace_id=$1`, string(workspaceID))
-		}
-		if err == nil {
-			err = tx.Commit(ctx)
-			committed = err == nil
-		}
-		if err != nil {
-			t.Errorf("cleanup collection query facts: %v", err)
-			return
-		}
-		if err := graphfixture.Cleanup(ctx, pool, workspaceID); err != nil {
-			t.Errorf("cleanup collection query fixture: %v", err)
-		}
-	})
-}
-
-func newCollectionQueryService(t *testing.T, repository *Repository) *collectionapp.Service {
+func newCollectionQueryService(t *testing.T, repository collectionIntegrationRepository) *collectionapp.Service {
 	t.Helper()
 	service, err := collectionapp.NewService(collectionapp.Dependencies{
 		Repository: repository,
@@ -517,6 +570,19 @@ func newCollectionQueryService(t *testing.T, repository *Repository) *collection
 		t.Fatal(err)
 	}
 	return service
+}
+
+func resetCollectionTrace(tracer *collectionQueryTracer) {
+	if tracer != nil {
+		tracer.reset()
+	}
+}
+
+func assertCollectionTraceWhenEnabled(t *testing.T, tracer *collectionQueryTracer, saved bool) {
+	t.Helper()
+	if tracer != nil {
+		assertCollectionTrace(t, tracer.snapshot(), saved)
+	}
 }
 
 func collectionFixtureTime() time.Time {
@@ -618,6 +684,23 @@ func seedCollectionPlanCardinality(t *testing.T, ctx context.Context, tx pgx.Tx,
 		t.Fatal(err)
 	}
 	if _, err := tx.Exec(ctx, `ANALYZE core.topic; ANALYZE core.claim; ANALYZE core.relation; ANALYZE ops.health_issue`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func seedCollectionPlanCollections(t *testing.T, ctx context.Context, tx pgx.Tx, workspaceID foundation.ID) {
+	t.Helper()
+	batch := &pgx.Batch{}
+	now := collectionFixtureTime().Add(4 * time.Hour)
+	for index := 0; index < 512; index++ {
+		name := fmt.Sprintf("Collection Plan %03d", index)
+		batch.Queue(`INSERT INTO learning.smart_collection(
+			id,workspace_id,name,normalized_name,description,query_schema_version,query_version,
+			query_definition,query_hash,view_type,view_config,status,version,created_at,updated_at
+		) VALUES($1,$2,$3,$4,'plan fixture','collection-query/v1',1,'{}'::jsonb,$5,'LIST','{}'::jsonb,'ACTIVE',1,$6,$6)`,
+			string(collectionQueryID(t)), string(workspaceID), name, strings.ToLower(name), strings.Repeat("a", 64), now.Add(time.Duration(index)*time.Microsecond))
+	}
+	if err := tx.SendBatch(ctx, batch).Close(); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -770,8 +853,13 @@ func explainCollectionPage(t *testing.T, ctx context.Context, db DB, workspaceID
 	}
 	where, args := shiftWhere(plan.Where, append([]any{string(workspaceID)}, plan.Args...))
 	pageSQL, args := buildCollectionPageQuery(plan, where, args, 26)
+	return explainCollectionSQL(t, ctx, db, pageSQL, args...)
+}
+
+func explainCollectionSQL(t *testing.T, ctx context.Context, db DB, query string, args ...any) collectionExplainResult {
+	t.Helper()
 	var raw []byte
-	if err := db.QueryRow(ctx, "EXPLAIN (FORMAT JSON, COSTS OFF) "+pageSQL, args...).Scan(&raw); err != nil {
+	if err := db.QueryRow(ctx, "EXPLAIN (FORMAT JSON, COSTS OFF) "+query, args...).Scan(&raw); err != nil {
 		t.Fatal(err)
 	}
 	var documents []struct {

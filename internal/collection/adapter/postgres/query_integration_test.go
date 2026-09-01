@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -14,39 +13,24 @@ import (
 	collectionapp "github.com/CodeZen-Lizhi/zhixu/internal/collection/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/collection/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	graphfixture "github.com/CodeZen-Lizhi/zhixu/internal/graph/testfixture"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestCollectionQueryUsesUnifiedReadModelAndCursor(t *testing.T) {
-	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
-	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	runCollectionRepositoryIntegrationCases(t, testCollectionQueryUsesUnifiedReadModelAndCursor)
+}
+
+func testCollectionQueryUsesUnifiedReadModelAndCursor(t *testing.T, testCase collectionIntegrationCase) {
+	ctx := testCase.context
+	pool := testCase.pool
 	now := time.Date(2026, 7, 22, 3, 0, 0, 0, time.UTC)
 	workspaceID := integrationID(t, "10000000-0000-4000-8000-000000000205")
-	seedCollectionWorkspace(t, ctx, tx, workspaceID, now)
+	seedCollectionWorkspace(t, ctx, pool, workspaceID, now)
 	for index, topicID := range []string{"30000000-0000-4000-8000-000000000205", "30000000-0000-4000-8000-000000000206"} {
-		if _, err := tx.Exec(ctx, `INSERT INTO core.topic(id,workspace_id,name,normalized_name,description,status,version,created_at,updated_at) VALUES($1,$2,$3,$3,'summary','ACTIVE',1,$4,$4)`, topicID, string(workspaceID), "Topic "+string(rune('A'+index)), now.Add(time.Duration(index)*time.Second)); err != nil {
+		if _, err := pool.Exec(ctx, `INSERT INTO core.topic(id,workspace_id,name,normalized_name,description,status,version,created_at,updated_at) VALUES($1,$2,$3,$3,'summary','ACTIVE',1,$4,$4)`, topicID, string(workspaceID), "Topic "+string(rune('A'+index)), now.Add(time.Duration(index)*time.Second)); err != nil {
 			t.Fatal(err)
 		}
 	}
-	repository, err := NewRepository(tx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	service, err := collectionapp.NewService(collectionapp.Dependencies{Repository: repository, IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.FixedClock{Value: now}})
+	service, err := collectionapp.NewService(collectionapp.Dependencies{Repository: testCase.repository, IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.FixedClock{Value: now}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,37 +55,14 @@ func TestCollectionQueryUsesUnifiedReadModelAndCursor(t *testing.T) {
 }
 
 func TestCollectionPreviewUsesMultiValueFactsAndStalesAfterSourceMutation(t *testing.T) {
-	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
-	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
-	fixture, err := graphfixture.SeedFunctional(ctx, pool)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		defer cancel()
-		if cleanupErr := graphfixture.Cleanup(cleanupCtx, pool, fixture.WorkspaceID); cleanupErr != nil {
-			t.Errorf("cleanup graph fixture: %v", cleanupErr)
-		}
-	}()
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	repository, err := NewRepository(tx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	service, err := collectionapp.NewService(collectionapp.Dependencies{Repository: repository, IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.FixedClock{Value: time.Date(2026, 7, 22, 4, 0, 0, 0, time.UTC)}})
+	runCollectionRepositoryIntegrationCases(t, testCollectionPreviewUsesMultiValueFactsAndStalesAfterSourceMutation)
+}
+
+func testCollectionPreviewUsesMultiValueFactsAndStalesAfterSourceMutation(t *testing.T, testCase collectionIntegrationCase) {
+	ctx := testCase.context
+	pool := testCase.pool
+	fixture := seedCollectionQueryFixture(t, ctx, pool)
+	service, err := collectionapp.NewService(collectionapp.Dependencies{Repository: testCase.repository, IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.FixedClock{Value: time.Date(2026, 7, 22, 4, 0, 0, 0, time.UTC)}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +93,7 @@ func TestCollectionPreviewUsesMultiValueFactsAndStalesAfterSourceMutation(t *tes
 	}
 
 	issueID := "99000000-0000-4000-8000-000000000001"
-	if _, err := tx.Exec(ctx, `INSERT INTO ops.health_issue(id,workspace_id,type,target_type,target_id,detector_id,identity_hash,fingerprint_schema_version,fingerprint,detector_version,severity,evidence_summary,status,version,first_detected_at,last_detected_at,last_verified_at,created_at,updated_at) VALUES($1,$2,'ORPHAN','CLAIM',$3,'health.detector.test',$4,'health-issue-fingerprint/v1',$5,'detector/v1','HIGH','fixture','OPEN',1,$6,$6,$6,$6,$6)`, issueID, string(fixture.WorkspaceID), string(fixture.FirstClaimID), strings.Repeat("1", 64), strings.Repeat("2", 64), time.Now().UTC()); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO ops.health_issue(id,workspace_id,type,target_type,target_id,detector_id,identity_hash,fingerprint_schema_version,fingerprint,detector_version,severity,evidence_summary,status,version,first_detected_at,last_detected_at,last_verified_at,created_at,updated_at) VALUES($1,$2,'ORPHAN','CLAIM',$3,'health.detector.test',$4,'health-issue-fingerprint/v1',$5,'detector/v1','HIGH','fixture','OPEN',1,$6,$6,$6,$6,$6)`, issueID, string(fixture.WorkspaceID), string(fixture.FirstClaimID), strings.Repeat("1", 64), strings.Repeat("2", 64), time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	collection = create(query("health_issue_type", "EQ", `"ORPHAN"`), "health-any")
@@ -150,7 +111,7 @@ func TestCollectionPreviewUsesMultiValueFactsAndStalesAfterSourceMutation(t *tes
 	if err != nil || len(second.Items) != 1 || second.Items[0].ID == first.Items[0].ID {
 		t.Fatalf("text second=%+v err=%v", second, err)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE core.source SET original_location='mutated-source.md' WHERE workspace_id=$1`, string(fixture.WorkspaceID)); err != nil {
+	if _, err := pool.Exec(ctx, `UPDATE core.source SET original_location='mutated-source.md' WHERE workspace_id=$1`, string(fixture.WorkspaceID)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := service.Results(ctx, collectionapp.ResultsQuery{WorkspaceID: fixture.WorkspaceID, CollectionID: collection.ID, Limit: 1, Cursor: first.NextCursor}); err == nil || !strings.Contains(err.Error(), "COLLECTION_CURSOR_STALE") {
@@ -159,43 +120,20 @@ func TestCollectionPreviewUsesMultiValueFactsAndStalesAfterSourceMutation(t *tes
 }
 
 func TestCollectionItemHydrationReturnsBoundedTopicClaimSummaries(t *testing.T) {
-	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
-	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
-	fixture, err := graphfixture.SeedFunctional(ctx, pool)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		defer cancel()
-		if cleanupErr := graphfixture.Cleanup(cleanupCtx, pool, fixture.WorkspaceID); cleanupErr != nil {
-			t.Errorf("cleanup graph fixture: %v", cleanupErr)
-		}
-	}()
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	runCollectionRepositoryIntegrationCases(t, testCollectionItemHydrationReturnsBoundedTopicClaimSummaries)
+}
+
+func testCollectionItemHydrationReturnsBoundedTopicClaimSummaries(t *testing.T, testCase collectionIntegrationCase) {
+	ctx := testCase.context
+	pool := testCase.pool
+	fixture := seedCollectionQueryFixture(t, ctx, pool)
 	now := time.Now().UTC()
-	if _, err := tx.Exec(ctx, `INSERT INTO core.topic_alias(id,workspace_id,topic_id,alias,normalized_alias,created_at) VALUES($1,$2,$3,$4,$5,$6)`,
+	if _, err := pool.Exec(ctx, `INSERT INTO core.topic_alias(id,workspace_id,topic_id,alias,normalized_alias,created_at) VALUES($1,$2,$3,$4,$5,$6)`,
 		string(integrationID(t, "98000000-0000-4000-8000-000000000001")), string(fixture.WorkspaceID), string(fixture.PrimaryTopicID), "Primary Alias", "primary alias", now); err != nil {
 		t.Fatal(err)
 	}
-	insertCollectionHealthIssue(t, ctx, tx, fixture.WorkspaceID, fixture.FirstClaimID)
-	repository, err := NewRepository(tx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	service, err := collectionapp.NewService(collectionapp.Dependencies{Repository: repository, IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.FixedClock{Value: now}})
+	insertCollectionHealthIssue(t, ctx, pool, fixture.WorkspaceID, fixture.FirstClaimID)
+	service, err := collectionapp.NewService(collectionapp.Dependencies{Repository: testCase.repository, IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.FixedClock{Value: now}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,16 +170,11 @@ func TestCollectionItemHydrationReturnsBoundedTopicClaimSummaries(t *testing.T) 
 }
 
 func TestCollectionQueryTimeoutClassificationAndConnectionReuse(t *testing.T) {
-	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
-	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
+	fixture := requireCollectionIntegrationDatabase(t, 4)
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+	platform := fixture.Pool()
+	pool := platform.DB()
 	for _, test := range []struct {
 		name      string
 		statement bool
@@ -281,6 +214,39 @@ func TestCollectionQueryTimeoutClassificationAndConnectionReuse(t *testing.T) {
 			}
 		})
 	}
+	gormRepository, err := NewGORMRepository(platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Run("gorm statement timeout", func(t *testing.T) {
+		err := gormRepository.within(ctx, foundation.TransactionOptions{}, func(callbackCtx context.Context, database *gormDB) error {
+			if timeoutErr := configureCollectionStatementTimeout(callbackCtx, database, time.Millisecond); timeoutErr != nil {
+				return timeoutErr
+			}
+			var value int
+			return database.QueryRow(callbackCtx, `SELECT 1 FROM pg_catalog.pg_sleep($1)`, 0.05).Scan(&value)
+		})
+		var classified *foundation.Error
+		if !errors.As(err, &classified) || classified.Code != collectionapp.ErrorCodeQueryTimeout || !classified.Retryable {
+			t.Fatalf("GORM statement timeout err=%v", err)
+		}
+	})
+	t.Run("gorm active cancellation cause", func(t *testing.T) {
+		cause := errors.New("collection query caller stopped waiting")
+		queryCtx, cancelCause := context.WithCancelCause(ctx)
+		timer := time.AfterFunc(20*time.Millisecond, func() { cancelCause(cause) })
+		err := gormRepository.within(queryCtx, foundation.TransactionOptions{}, func(callbackCtx context.Context, database *gormDB) error {
+			var value int
+			return database.QueryRow(callbackCtx, `SELECT 1 FROM pg_catalog.pg_sleep($1)`, 0.5).Scan(&value)
+		})
+		timer.Stop()
+		cancelCause(nil)
+		var classified *foundation.Error
+		if !errors.As(err, &classified) || classified.Code != collectionapp.ErrorCodeDependencyUnavailable || classified.Retryable ||
+			!errors.Is(err, context.Canceled) || !errors.Is(err, cause) {
+			t.Fatalf("GORM cancellation err=%v", err)
+		}
+	})
 	var one int
 	if err := pool.QueryRow(ctx, `SELECT 1`).Scan(&one); err != nil || one != 1 {
 		t.Fatalf("connection pool unusable after timeout: value=%d err=%v", one, err)

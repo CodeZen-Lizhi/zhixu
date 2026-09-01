@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,56 +18,109 @@ import (
 	healthapp "github.com/CodeZen-Lizhi/zhixu/internal/health/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/health/domain"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const detectorPageFixedStatementCount = 7
 
-type detectorPageQueryTracer struct {
+type healthStatementRecorder struct {
 	mu         sync.Mutex
 	statements []string
 }
 
-func (tracer *detectorPageQueryTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
-	tracer.mu.Lock()
-	tracer.statements = append(tracer.statements, strings.TrimSpace(data.SQL))
-	tracer.mu.Unlock()
-	return ctx
+func (recorder *healthStatementRecorder) record(statement string) {
+	recorder.mu.Lock()
+	recorder.statements = append(recorder.statements, strings.TrimSpace(statement))
+	recorder.mu.Unlock()
 }
 
-func (*detectorPageQueryTracer) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
-
-func (tracer *detectorPageQueryTracer) reset() {
-	tracer.mu.Lock()
-	tracer.statements = nil
-	tracer.mu.Unlock()
+func (recorder *healthStatementRecorder) reset() {
+	recorder.mu.Lock()
+	recorder.statements = nil
+	recorder.mu.Unlock()
 }
 
-func (tracer *detectorPageQueryTracer) snapshot() []string {
-	tracer.mu.Lock()
-	defer tracer.mu.Unlock()
-	return append([]string(nil), tracer.statements...)
+func (recorder *healthStatementRecorder) snapshot() []string {
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	return append([]string(nil), recorder.statements...)
+}
+
+type detectorPageInstrumentedDB struct {
+	*pgxpool.Pool
+	recorder *healthStatementRecorder
+	barrier  *detectorPageUpsertBarrier
+}
+
+func (database *detectorPageInstrumentedDB) Begin(ctx context.Context) (pgx.Tx, error) {
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if database.recorder != nil {
+		database.recorder.record("begin")
+	}
+	return &detectorPageInstrumentedTx{Tx: tx, recorder: database.recorder, barrier: database.barrier}, nil
+}
+
+type detectorPageInstrumentedTx struct {
+	pgx.Tx
+	recorder  *healthStatementRecorder
+	barrier   *detectorPageUpsertBarrier
+	completed atomic.Bool
+}
+
+func (tx *detectorPageInstrumentedTx) Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error) {
+	if tx.barrier != nil {
+		tx.barrier.wait(ctx, sql)
+	}
+	if tx.recorder != nil {
+		tx.recorder.record(sql)
+	}
+	return tx.Tx.Exec(ctx, sql, arguments...)
+}
+
+func (tx *detectorPageInstrumentedTx) Query(ctx context.Context, sql string, arguments ...any) (pgx.Rows, error) {
+	if tx.barrier != nil {
+		tx.barrier.wait(ctx, sql)
+	}
+	if tx.recorder != nil {
+		tx.recorder.record(sql)
+	}
+	return tx.Tx.Query(ctx, sql, arguments...)
+}
+
+func (tx *detectorPageInstrumentedTx) QueryRow(ctx context.Context, sql string, arguments ...any) pgx.Row {
+	if tx.barrier != nil {
+		tx.barrier.wait(ctx, sql)
+	}
+	if tx.recorder != nil {
+		tx.recorder.record(sql)
+	}
+	return tx.Tx.QueryRow(ctx, sql, arguments...)
+}
+
+func (tx *detectorPageInstrumentedTx) Commit(ctx context.Context) error {
+	if tx.completed.CompareAndSwap(false, true) && tx.recorder != nil {
+		tx.recorder.record("commit")
+	}
+	return tx.Tx.Commit(ctx)
+}
+
+func (tx *detectorPageInstrumentedTx) Rollback(ctx context.Context) error {
+	if tx.completed.CompareAndSwap(false, true) && tx.recorder != nil {
+		tx.recorder.record("rollback")
+	}
+	return tx.Tx.Rollback(ctx)
 }
 
 func TestIssueRepositoryReconcileDetectorPageUsesFixedStatementCount(t *testing.T) {
-	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
-	}
+	pool := newHealthIntegrationPool(t)
 	for caseIndex, observationCount := range []int{1, 25, 100} {
 		t.Run(fmt.Sprintf("observations_%d", observationCount), func(t *testing.T) {
 			ctx := context.Background()
-			config, err := pgxpool.ParseConfig(databaseURL)
-			if err != nil {
-				t.Fatal(err)
-			}
-			tracer := &detectorPageQueryTracer{}
-			config.ConnConfig.Tracer = tracer
-			pool, err := pgxpool.NewWithConfig(ctx, config)
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(pool.Close)
+			recorder := &healthStatementRecorder{}
 			workspaceID := detectorPageID(0x81000000+caseIndex, 1)
 			scanID := detectorPageID(0x82000000+caseIndex, 1)
 			cleanupHealthIntegrationWorkspace(t, pool, workspaceID)
@@ -114,16 +166,16 @@ func TestIssueRepositoryReconcileDetectorPageUsesFixedStatementCount(t *testing.
 					expected.Reopened++
 				}
 			}
-			repository, err := NewIssueRepository(pool)
+			repository, err := NewIssueRepository(&detectorPageInstrumentedDB{Pool: pool, recorder: recorder})
 			if err != nil {
 				t.Fatal(err)
 			}
-			tracer.reset()
+			recorder.reset()
 			result, err := repository.ReconcileDetectorPage(ctx, healthapp.DetectorPageReconcileRequest{
 				WorkspaceID: workspaceID, ScanID: scanID, DetectorID: "health.detector.missing_source",
 				Observations: observations, ObservedAt: now.Add(3 * time.Second),
 			})
-			statements := tracer.snapshot()
+			statements := recorder.snapshot()
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -153,16 +205,8 @@ FROM ops.health_issue issue WHERE issue.workspace_id=$1 AND issue.id=$2`, string
 }
 
 func TestIssueRepositoryReconcileDetectorPageDuplicateReopenUsesOriginalVersionCAS(t *testing.T) {
-	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
-	}
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
+	pool := newHealthIntegrationPool(t)
 	workspaceID := detectorPageID(0x8a000000, 1)
 	scanID := detectorPageID(0x8a000000, 2)
 	topicID := detectorPageID(0x8a000000, 3)
@@ -236,8 +280,8 @@ type detectorPageUpsertBarrier struct {
 	once    sync.Once
 }
 
-func (barrier *detectorPageUpsertBarrier) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
-	if barrier.enabled.Load() && strings.Contains(data.SQL, "INSERT INTO ops.health_issue(") && strings.Contains(data.SQL, "expected_version=0") {
+func (barrier *detectorPageUpsertBarrier) wait(ctx context.Context, sql string) {
+	if barrier.enabled.Load() && strings.Contains(sql, "INSERT INTO ops.health_issue(") && strings.Contains(sql, "expected_version=0") {
 		if barrier.arrived.Add(1) == 2 {
 			barrier.once.Do(func() { close(barrier.ready) })
 		}
@@ -246,30 +290,14 @@ func (barrier *detectorPageUpsertBarrier) TraceQueryStart(ctx context.Context, _
 		case <-ctx.Done():
 		}
 	}
-	return ctx
 }
 
-func (*detectorPageUpsertBarrier) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
-
 func TestIssueRepositoryConcurrentNewIdentityRollsBackLosingPage(t *testing.T) {
-	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
-	}
+	pool := newHealthIntegrationPool(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	config, err := pgxpool.ParseConfig(databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
 	barrier := &detectorPageUpsertBarrier{ready: make(chan struct{}), release: make(chan struct{})}
-	config.ConnConfig.Tracer = barrier
-	config.MaxConns = 4
-	pool, err := pgxpool.NewWithConfig(ctx, config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
+	database := &detectorPageInstrumentedDB{Pool: pool, barrier: barrier}
 	workspaceID := detectorPageID(0x85000000, 1)
 	firstScanID := detectorPageID(0x85000000, 2)
 	secondScanID := detectorPageID(0x85000000, 3)
@@ -290,7 +318,7 @@ func TestIssueRepositoryConcurrentNewIdentityRollsBackLosingPage(t *testing.T) {
 	results := make(chan pageResult, 2)
 	for _, scanID := range []foundation.ID{firstScanID, secondScanID} {
 		go func(scanID foundation.ID) {
-			repository, repositoryErr := NewIssueRepository(pool)
+			repository, repositoryErr := NewIssueRepository(database)
 			if repositoryErr != nil {
 				results <- pageResult{err: repositoryErr}
 				return
@@ -344,7 +372,7 @@ func TestIssueRepositoryConcurrentNewIdentityRollsBackLosingPage(t *testing.T) {
 func seedDetectorPageScan(t *testing.T, ctx context.Context, pool *pgxpool.Pool, workspaceID, scanID, definitionID, runID foundation.ID, now time.Time) {
 	t.Helper()
 	root := "/tmp/health-page-" + string(workspaceID)
-	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,$2,$3,$3,$4,'test',1,$4,$4)`, string(workspaceID), "health page "+string(workspaceID), root, now); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,$2,$3,$3,$4,'inactive',1,$4,$4)`, string(workspaceID), "health page "+string(workspaceID), root, now); err != nil {
 		t.Fatal(err)
 	}
 	seedDetectorPageScanOnly(t, ctx, pool, workspaceID, scanID, definitionID, runID, now)

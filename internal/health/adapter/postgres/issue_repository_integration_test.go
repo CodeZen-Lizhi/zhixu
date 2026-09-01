@@ -1,11 +1,10 @@
-//go:build integration
+//go:build integration && testcontainers
 
 package postgres
 
 import (
 	"context"
 	"errors"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -13,20 +12,11 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/health/domain"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestIssueRepositoryObservationReopenDecisionAndHistory(t *testing.T) {
-	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
-	}
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
+	pool := newHealthIntegrationPool(t)
 	workspaceID := repositoryTestID(t, "71000000-0000-4000-8000-000000000001")
 	cleanupHealthIntegrationWorkspace(t, pool, workspaceID)
 	t.Cleanup(func() { cleanupHealthIntegrationWorkspace(t, pool, workspaceID) })
@@ -126,7 +116,7 @@ func TestIssueRepositoryObservationReopenDecisionAndHistory(t *testing.T) {
 		t.Fatalf("history observations=%d evidence=%d decisions=%d", observations, evidence, decisions)
 	}
 	otherWorkspace := repositoryTestID(t, "71000000-0000-4000-8000-000000000007")
-	if _, err := tx.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'health-other',$2,$2,$3,'test',1,$3,$3)`, string(otherWorkspace), "/tmp/health-other-"+string(otherWorkspace), now); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'health-other',$2,$2,$3,'inactive',1,$3,$3)`, string(otherWorkspace), "/tmp/health-other-"+string(otherWorkspace), now); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := repository.GetIssue(ctx, otherWorkspace, issueID, nil); !errors.Is(err, pgx.ErrNoRows) {
@@ -135,16 +125,8 @@ func TestIssueRepositoryObservationReopenDecisionAndHistory(t *testing.T) {
 }
 
 func TestIssueRepositoryConcurrentDecisionReplaysWinner(t *testing.T) {
-	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
-	}
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
+	pool := newHealthIntegrationPool(t)
 	workspaceID := repositoryTestID(t, "73000000-0000-4000-8000-000000000001")
 	cleanupHealthIntegrationWorkspace(t, pool, workspaceID)
 	t.Cleanup(func() { cleanupHealthIntegrationWorkspace(t, pool, workspaceID) })
@@ -201,16 +183,8 @@ func TestIssueRepositoryConcurrentDecisionReplaysWinner(t *testing.T) {
 }
 
 func TestIssueRepositoryResolveMissingFinalizesOnlyAutoResolvableStatusesAndCounters(t *testing.T) {
-	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
-	}
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
+	pool := newHealthIntegrationPool(t)
 	workspaceID := repositoryTestID(t, "74000000-0000-4000-8000-000000000001")
 	cleanupHealthIntegrationWorkspace(t, pool, workspaceID)
 	t.Cleanup(func() { cleanupHealthIntegrationWorkspace(t, pool, workspaceID) })
@@ -332,22 +306,17 @@ func seedIssueRepositoryFacts(t *testing.T, ctx context.Context, tx pgx.Tx, work
 		sql  string
 		args []any
 	}{
-		{`INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'health-repository',$2,$2,$3,'test',1,$3,$3)`, []any{string(workspaceID), "/tmp/health-repository-" + string(workspaceID), now}},
+		{`INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'health-repository',$2,$2,$3,'inactive',1,$3,$3)`, []any{string(workspaceID), "/tmp/health-repository-" + string(workspaceID), now}},
 		{`INSERT INTO core.topic(id,workspace_id,name,normalized_name,description,status,version,created_at,updated_at) VALUES($1,$2,'health topic','health topic','','ACTIVE',1,$3,$3)`, []any{string(topicID), string(workspaceID), now}},
 		{`INSERT INTO workflow.definition(id,workspace_id,key,version,graph,created_at) VALUES($1,$2,'health-issue-test',1,'{"nodes":[]}', $3)`, []any{string(definitionID), string(workspaceID), now}},
 		{`INSERT INTO workflow.run(id,workspace_id,definition_id,status,input,version,created_at,updated_at) VALUES($1,$2,$3,'running','{}',1,$4,$4)`, []any{string(runID), string(workspaceID), string(definitionID), now}},
 		{`INSERT INTO ops.health_scan(id,workspace_id,scope_type,scope_ref,scope_version,scope_schema_version,fingerprint,idempotency_key,request_hash,workflow_run_id,max_items,status,version,created_at,updated_at) VALUES($1,$2,'WORKSPACE',$2,1,'health-scope/workspace/v1',$3,'health-issue-scan',$4,$5,100,'RUNNING',1,$6,$6)`, []any{string(scanID), string(workspaceID), strings.Repeat("c", 64), strings.Repeat("d", 64), string(runID), now}},
 	}
-	for _, statement := range statements {
+	for index, statement := range statements {
 		if _, err := tx.Exec(ctx, statement.sql, statement.args...); err != nil {
-			t.Fatal(err)
+			t.Fatalf("seed issue repository statement %d: %v", index, err)
 		}
 	}
-}
-
-func repositoryObservation(topicID foundation.ID, hash, summary string) domain.IssueObservation {
-	ref := domain.ObjectRef{Type: domain.ObjectTypeTopic, ID: topicID}
-	return domain.IssueObservation{Type: domain.IssueTypeMissingSource, Target: ref, DetectorID: "health.detector.missing_source", DetectorVersion: "detector/v1", Severity: domain.SeverityHigh, EvidenceSummary: summary, Evidence: []domain.IssueEvidence{{Ref: ref, Hash: hash, Summary: summary}}, ObjectVersions: []domain.ObjectVersion{{Ref: ref, Version: 1}}}
 }
 
 type repositorySequenceIDs struct {
