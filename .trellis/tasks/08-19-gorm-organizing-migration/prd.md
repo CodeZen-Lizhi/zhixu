@@ -9,7 +9,7 @@
 - 仅迁移 internal/organizing/adapter/postgres 及 Owner/Workflow transaction adapter，使用统一 GORM 事务 Port。
 - 保持 Serializable snapshot、Owner fence、终态结果、知识/检索聚合和重试语义。
 - 移除对知识/检索具体 postgres adapter 与 pgx.Tx 的业务层耦合，平台边界仅保留审计 allowlist。
-- 使用现有测试与局部编译；TODO 9 前不得切换生产组合或删除旧实现。
+- 使用现有测试与局部编译；TODO 9 工厂已可用，但本 child 不得切换生产组合或删除旧实现。
 
 ## Acceptance Criteria
 
@@ -18,7 +18,11 @@
 - [ ] 冲突重试、回滚、错误/取消/日志检查通过。
 - [ ] git diff --check、受影响包编译及现有相关测试通过。
 
-- [ ] TODO 9 不可用时仅保留行为基线或未接入 Composition 的实现，不得勾选完成或归档；TODO 3 仅阻断 Final。
+- [ ] TODO 9 工厂可用；本 child 仍不得切换生产组合或删除 legacy，TODO 3 仅阻断 Final。
+
+## 2026-09-01 测试范围调整
+
+按父任务精简政策，Organizing 保留 Owner/Workflow 主路径和直接改动的 Serializable/终态事务代表场景；重试、response-loss、跨模块端到端与容量专项仅按风险触发。
  
 ## Notes
 

@@ -1,0 +1,6 @@
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "SQL and transaction review contract"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "error and cancellation review contract"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "quality and TODO9 gate"}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-platform-transaction-foundation/research/static-validation.md", "reason": "shared platform evidence"}
+{"file": ".trellis/tasks/08-19-gorm-review-core-migration/research/baseline.md", "reason": "Review Core baseline and blind spots"}
+{"file": ".trellis/tasks/08-19-gorm-review-core-migration/research/implementation-contract.md", "reason": "compact child-specific review contract despite oversized shared specs"}

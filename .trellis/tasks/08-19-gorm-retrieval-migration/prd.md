@@ -26,7 +26,7 @@ Composition 的 GORM sibling。普通查询和事务迁入共享 GORM/UoW；只�
 - 本 child 只拥有 `internal/retrieval/**` 及本任务规划/验证工件；不修改 `cmd/**`、migration、
   Workflow/Change Control/Organizing concrete Adapter 或生产 selector。
 - 新增 staged sibling，保留 legacy Repository、Search、Delivery、Dispatcher、River inserter 和所有
-  生产构造。TODO 9 前不得双写、双读、fallback、删除 pgx 基线或切换 Composition。
+  生产构造。TODO 9 交付前不得双写、双读、fallback、删除 pgx 基线或切换 Composition；当前这些生产边界仍由 Final 独占。
 - Domain/Application 不导入 GORM、database/sql 或 pgx；legacy `transaction any` 保留兼容，但新路径必须
   使用 `foundation.TransactionScope` 的 additive scoped contract。
 
@@ -110,11 +110,15 @@ Composition 的 GORM sibling。普通查询和事务迁入共享 GORM/UoW；只�
   SQLSTATE错误分类。
 - [ ] AC3：Dispatcher 使用 opaque scoped contract 与 official database/sql River producer；Completion、
   Workflow outbox 与 Change Control 通过稳定 scoped Port参与同一 Retrieval UoW，不保留新 `any` seam。
-- [ ] AC4：真实 PostgreSQL legacy/GORM parity覆盖 pgvector、COPY、锁、SQLSTATE、context、回滚、
-  response-loss、River pgx worker interoperability和连接释放。
-- [ ] AC5：实际 GORM Raw SQL通过现有 EXPLAIN/index与500k容量门禁，无N+1和性能退化。
-- [ ] AC6：Go Review、SQL Review、Trellis Check、局部 test/race/vet/compile、module与
-  `git diff --check`有可复核记录，且未修改生产Composition/migration。
+- [ ] AC4：核心 Retrieval 主路径在真实 PostgreSQL 上有 legacy/GORM 或冻结基线证据；COPY、锁、River、
+  Completion 等专项仅在本 child 直接改动时补一条关键原子性/竞争场景。
+- [ ] AC5：实际 GORM Raw SQL 无 N+1 和无界读取；EXPLAIN/index 与 500k 容量门禁仅由查询/规模风险触发。
+- [ ] AC6：Go/SQL/Trellis Review、受影响包既有 test/vet、核心 integration、task 校验和
+  `git diff --check` 有可复核记录，且未修改生产 Composition/migration。
+
+## 2026-09-01 测试范围调整
+
+按父任务精简政策，Retrieval 不再默认要求全量 pgvector/COPY/锁/response-loss/容量/连接释放矩阵；直接改动的高风险 native capability 仍必须保留代表性专项。
 
 ## Out Of Scope
 

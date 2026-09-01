@@ -3,5 +3,5 @@
 {"file":".trellis/spec/backend/logging-guidelines.md","reason":"Audit 脱敏、canonical JSON、幂等锁和日志禁止项"}
 {"file":".trellis/spec/backend/quality-guidelines.md","reason":"局部 test/race/vet、SQL/Go Review 与 TODO 9 证据要求"}
 {"file":".trellis/tasks/08-18-gorm-data-access-migration/prd.md","reason":"父任务 staged 边界、opaque transaction 和 TODO 9/Final 门禁"}
-{"file":".trellis/tasks/08-19-gorm-platform-transaction-foundation/design.md","reason":"共享 Pool.GORM、Unit of Work、scope 生命周期和受控 unwrap 契约"}
+{"file":".trellis/tasks/archive/2026-08/08-19-gorm-platform-transaction-foundation/design.md","reason":"共享 Pool.GORM、Unit of Work、scope 生命周期和受控 unwrap 契约"}
 {"file":".trellis/tasks/08-19-gorm-audit-migration/research/baseline.md","reason":"Audit schema、SQL、调用方、测试和盲区基线"}

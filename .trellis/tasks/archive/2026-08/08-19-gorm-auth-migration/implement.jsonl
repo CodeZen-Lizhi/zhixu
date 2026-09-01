@@ -6,9 +6,9 @@
 {"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Auth/PostgreSQL/race 质量门禁"}
 {"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Repository 到 Domain/Application 数据流"}
 {"file": ".trellis/tasks/08-19-gorm-auth-migration/design.md", "reason": "本 child 文件、查询、错误和阶段设计"}
-{"file": ".trellis/tasks/08-19-gorm-platform-transaction-foundation/design.md", "reason": "共享 GORM root 与 TODO 9 边界"}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-platform-transaction-foundation/design.md", "reason": "共享 GORM root 与 TODO 9 边界"}
 {"file": ".trellis/tasks/08-18-gorm-data-access-migration/research/repository-inventory.md", "reason": "Auth owner、生产构造点与迁移顺序"}
 {"file": "docs/architecture/adr/0014-single-user-authentication.md", "reason": "单用户 Session/API Token 与写授权分离决策"}
-{"file": "migrations/00034_learning_ops_auth.sql", "reason": "Auth Schema、约束与索引唯一事实源"}
+{"file": "atlas/migrations/00034_learning_ops_auth.sql", "reason": "Auth Schema、约束与索引唯一事实源"}
 {"file": "internal/auth/adapter/postgres/repository.go", "reason": "既有 pgx 行为基线与错误契约"}
 {"file": "internal/auth/adapter/postgres/repository_integration_test.go", "reason": "DB time、并发、分页、损坏与明文门禁"}

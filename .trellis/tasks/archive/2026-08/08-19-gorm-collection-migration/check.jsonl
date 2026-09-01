@@ -1,0 +1,7 @@
+{"file":".trellis/spec/backend/index.md","reason":"后端质量门禁和模块边界"}
+{"file":".trellis/spec/backend/directory-structure.md","reason":"Application/Adapter/Composition 依赖方向与生产接线检查"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"query/receipt/SQL 参数/DSN/Secret 脱敏审查"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Collection/Graph/Health/Export/Organizing 数据流一致性检查"}
+{"file":".trellis/tasks/archive/2026-08/08-19-gorm-collection-migration/research/baseline.md","reason":"代码、接线和现有证据清单"}
+{"file":".trellis/tasks/archive/2026-08/08-19-gorm-collection-migration/research/sql-schema.md","reason":"SQL/Schema/事务/性能/TODO9 审查基线"}
+{"file":".trellis/tasks/archive/2026-08/08-19-gorm-collection-migration/research/spec-contracts.md","reason":"大型 database/error/quality 规范的 Review 摘要与完整读取路由"}

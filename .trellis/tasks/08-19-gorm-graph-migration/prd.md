@@ -73,15 +73,16 @@ Topic/Smart Collection Scan、Workflow/River 协作及容量门禁的既有行�
       Graph task只消费该Port，不共同拥有Change Control Adapter。
 - [ ] Workflow Start/Outbox/River、Collection durable binding 与 Scan 在同一 scope 原子提交；
       cancellation guard 也使用 scoped transaction。
-- [ ] CTE/BFS/LATERAL、Workspace 条件、keyset/排序/窗口、JSONB/array、锁序、CAS、
-      幂等与 response-loss 行为通过现有 PostgreSQL 对照测试。
-- [ ] 真实 PostgreSQL EXPLAIN 和现有 20k Topic/100k Relation/100k Evidence benchmark
-      满足既有索引、语句数和 p95 门禁，无 N+1 或无界读取。
-- [ ] context/error/logging/连接释放、Go test/race/vet、integration、Go Review、SQL Review、
-      Trellis Check 与 `git diff --check` 全部通过。
+- [ ] CTE/BFS/LATERAL、Workspace 条件、keyset/排序/窗口、JSONB/array、锁序、CAS 与幂等在核心
+      PostgreSQL 场景中有明确断言；response-loss 仅在本 child 直接改动时执行。
+- [ ] 关键查询无 N+1 或无界读取；EXPLAIN/容量 benchmark 仅在查询形状、索引或规模风险触发时执行。
+- [ ] context/error/logging、受影响包既有 test/vet、Go/SQL/Trellis Review、task 校验与 `git diff --check` 通过；全量 race/compile 按风险触发。
 - [ ] Final handoff 已记录生产构造点、同 Pool 依赖链和 legacy 删除清单。
-- [ ] TODO 9 不可用时只保留 staged 实现和静态证据，不勾选以上 AC、不切 Composition、
-      不归档；TODO 3 仅阻断 Final。
+- [ ] TODO 9 工厂可用；本 child 仍不切 Composition、不删 legacy，TODO 3 仅阻断 Final。
+
+## 2026-09-01 测试范围调整
+
+按父任务精简政策，Graph 保留一个主查询或 Candidate 主路径及直接涉及 Confirm/Scan 事务的代表场景，不再默认执行完整容量 benchmark、EXPLAIN 和 response-loss 矩阵。
 
 ## Dependencies
 

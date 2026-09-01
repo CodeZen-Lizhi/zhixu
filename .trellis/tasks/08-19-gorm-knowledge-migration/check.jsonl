@@ -2,9 +2,9 @@
 {"file":".trellis/spec/backend/error-handling.md","reason":"审查no-row、context cause、SQLSTATE、stable code/retryability"}
 {"file":".trellis/spec/backend/logging-guidelines.md","reason":"审查Evidence/Actor/JSON/SQL/DSN日志脱敏"}
 {"file":".trellis/spec/backend/quality-guidelines.md","reason":"审查并发/deferred trigger/response-loss/真实数据库门禁"}
-{"file":".trellis/tasks/08-19-gorm-platform-transaction-foundation/research/static-validation.md","reason":"核对单Pool、UoW和scope能力边界"}
-{"file":".trellis/tasks/08-19-gorm-events-migration/design.md","reason":"检查Relation Apply scoped Event原子性"}
-{"file":".trellis/tasks/08-19-gorm-audit-migration/design.md","reason":"检查Impact scoped Audit原子性"}
+{"file":".trellis/tasks/archive/2026-08/08-19-gorm-platform-transaction-foundation/research/static-validation.md","reason":"核对单Pool、UoW和scope能力边界"}
+{"file":".trellis/tasks/archive/2026-08/08-19-gorm-events-migration/design.md","reason":"检查Relation Apply scoped Event原子性"}
+{"file":".trellis/tasks/archive/2026-08/08-19-gorm-audit-migration/design.md","reason":"检查Impact scoped Audit原子性"}
 {"file":".trellis/tasks/08-19-gorm-knowledge-migration/research/baseline.md","reason":"按冻结代码、Schema、调用方和测试基线审查"}
 {"file":".trellis/tasks/08-19-gorm-knowledge-migration/research/implementation-contract.md","reason":"检查hard boundary、锁序、数据安全和完成门禁"}
 {"file":".trellis/tasks/08-19-gorm-knowledge-migration/research/planning-review.md","reason":"复核规划审查发现已闭环且未在实现中回归"}

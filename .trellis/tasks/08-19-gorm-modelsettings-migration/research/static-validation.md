@@ -36,11 +36,11 @@ git diff --check
 
 `go mod tidy -diff` 通过且无输出；未修改 `go.mod` 或 `go.sum`。
 
-静态扫描确认：Model Settings Domain/Application 不导入 GORM、database/sql 或 pgx；staged 文件不含 AutoMigrate/Migrator/Save/Preload/Association、自建 DSN/第二 pool；`BootstrapGORM` 没有生产调用点。现有测试没有 `NewGORMRepository`/`BootstrapGORM` 引用，符合当前阶段“不改测试”的边界，但也构成下述运行时盲区。
+静态扫描确认：Model Settings Domain/Application 不导入 GORM、database/sql 或 pgx；staged 文件不含 AutoMigrate/Migrator/Save/Preload/Association、自建 DSN/第二 pool；`BootstrapGORM` 没有生产调用点。现有 integration 文件已增加一个由 TODO 9 `testdb` 工厂驱动的 `NewGORMRepository` 主路径/回滚/fence 场景；生产 wiring 与其余跨 owner 门禁仍保持未切换。
 
 ## TODO 9 真实 PostgreSQL 阻断
 
-环境未设置 `ZHIXU_TEST_DATABASE_URL`，因此以下不能由静态检查或 legacy 测试替代：
+以下仍不能由本轮单条 GORM 场景替代：
 
 - GORM placeholder/cast、bytea/nullable/time scan、trigger SQLSTATE 和 no-row 的真实执行。
 - Revision + Audit、Activation + Local Runtime、Fence + River 三条跨 owner 同事务提交/回滚。

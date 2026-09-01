@@ -3,7 +3,7 @@
 {"file":".trellis/spec/backend/logging-guidelines.md","reason":"复核Markdown、Citation、Model输出、SQL、DSN与凭据不泄漏。"}
 {"file":".trellis/spec/backend/quality-guidelines.md","reason":"复核unit/race/vet、integration、fault、连接释放和真实数据库证据。"}
 {"file":".trellis/tasks/08-18-gorm-data-access-migration/design.md","reason":"复核single Pool、staged rollout、TODO9与Final边界。"}
-{"file":".trellis/tasks/08-19-gorm-platform-transaction-foundation/design.md","reason":"复核UoW options、scope lifetime、callback/commit stage和pool identity限制。"}
+{"file":".trellis/tasks/archive/2026-08/08-19-gorm-platform-transaction-foundation/design.md","reason":"复核UoW options、scope lifetime、callback/commit stage和pool identity限制。"}
 {"file":".trellis/tasks/08-19-gorm-workflow-migration/design.md","reason":"复核Workflow owner scoped binding、Start/River与terminal hook契约。"}
 {"file":".trellis/tasks/08-19-gorm-agent-migration/design.md","reason":"复核Agent ModelRun/Call scoped lock、read与finalize契约。"}
 {"file":".trellis/tasks/08-19-gorm-artifact-migration/design.md","reason":"逐项复核Artifact command、Generation、Backfill、错误、TODO9与回滚设计。"}

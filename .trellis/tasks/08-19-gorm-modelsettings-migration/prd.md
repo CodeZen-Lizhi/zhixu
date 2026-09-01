@@ -16,12 +16,16 @@
 ## Acceptance Criteria
 
 - [ ] Model Settings Repository 读写迁移到 GORM，激活/版本和 guard 行为不变。
-- [ ] 双进程竞争、固定锁序、数据库时间和回滚路径可验证。
-- [ ] Revision+Audit、Activation+Local Runtime、Workflow enqueue fence 的同事务提交/回滚可验证。
+- [ ] 双进程竞争、固定锁序、数据库时间和回滚路径有核心代表性场景验证。
+- [ ] Revision+Audit、Activation+Local Runtime、Workflow enqueue fence 的同事务提交/回滚在直接改动的边界上可验证。
 - [ ] 凭据不出现在日志或公共契约，错误/取消检查通过。
-- [ ] git diff --check、受影响包编译及现有相关测试通过。
+- [ ] `git diff --check`、受影响包既有 test/vet、task 校验及核心 Testcontainers 场景通过。
 
-- [ ] TODO 9 不可用时仅保留行为基线或未接入 Composition 的实现，不得勾选完成或归档；TODO 3 仅阻断 Final。
+- [ ] TODO 9 工厂可用；本 child 仍不得切换生产组合或删除 legacy，TODO 3 仅阻断 Final。
+
+## 2026-09-01 测试范围调整
+
+按父任务精简政策，保留 Model Settings 主路径与一条同事务/竞争验证；cancel ambiguity、连接释放和 EXPLAIN 仅在对应实现直接改动或出现风险时执行。
  
 ## Notes
 

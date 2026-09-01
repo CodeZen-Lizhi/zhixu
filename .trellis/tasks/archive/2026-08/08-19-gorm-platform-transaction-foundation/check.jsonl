@@ -1,0 +1,8 @@
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "复核单池、事务、参数化和 migration 边界"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "复核错误分类、SQLSTATE 与取消传播"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "复核 SQL 参数和连接信息不泄漏"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "复核测试、静态检查和未覆盖风险"}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-platform-transaction-foundation/prd.md", "reason": "Foundation 验收范围和 TODO 9 门禁"}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-platform-transaction-foundation/design.md", "reason": "实现、生命周期、River 双 Driver 与回滚设计"}
+{"file": ".trellis/tasks/08-18-gorm-data-access-migration/research/gorm-river-compatibility.md", "reason": "核对版本、调用点 owner 与 Spike 盲区"}
+{"file": "docs/architecture/adr/0019-mature-framework-first.md", "reason": "复核官方 Driver 复用与依赖边界"}

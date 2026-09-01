@@ -19,7 +19,7 @@ Impact 的过渡契约保持现有 Service/Repository 调用：
 - 现有 `adapter/audit.ImpactRecorder` 同时实现两者，scoped 方法调用 `auditapplication.Recorder.RecordScoped`；
 - 新增 `NewScopedImpactServiceWithAudit(ScopedImpactRepository, ..., ScopedImpactAuditPort)`，让GORM Composition在编译期选择 scoped能力；现有`NewImpactServiceWithAudit`与legacy方法完整保留。不得让GORM Service运行时退回legacy `any`方法，也不得单独提交Audit。
 
-Approved Relation Apply 不调用会自行开事务的 Change Control GORM Repository。它继续用固定 SQL锁定和推进 Change Control 事实，再用 scoped Event appender 追加事件，从而保留当前跨 Schema 单事务协议。
+Approved Relation Apply 不调用会自行开事务的 Change Control GORM Repository。它继续用固定 SQL锁定和推进 Change Control 事实，再用 scoped Event appender 追加事件，从而保留当前跨 Schema 单事务协议。Proposal/Revision 的定位、加锁读取与状态 CAS 必须绑定 `proposal.current_revision_id=revision.id`；只保留与 Change Control staged adapter 一致的 `current_revision_id IS NULL` 扩容期兼容，禁止旧 revision 在指针推进后继续 Approval/Apply。
 
 ## 2. File Layout
 
@@ -52,7 +52,7 @@ Schema 继续由历史 migration/trigger 管理，GORM 不拥有 DDL：
 | Change Control/Graph | Proposal/Revision/Approval、Semantic Link Candidate | Relation Apply 只读/锁定并按现有 CAS推进，不由 ORM association 管理 |
 | Events/Audit | `ops.server_event` / Audit facts | 只通过 scoped Port 原子追加，不复制 owner SQL |
 
-关键 migration 为 `00017_knowledge_domain.sql`、Timeline/Impact `00037`、Impact v2 `00062` 及 Relation Apply 所依赖的 Change Control/Graph migrations。Confirmed Claim/Relation、Conflict closure、Topic/Claim retirement等 deferred constraint必须在真实commit上验证，不能用AutoMigrate或Go hook替代。
+关键 migration 为 `00017_knowledge_domain.sql`、Timeline/Impact `00037`、Impact v2 `00062`、Proposal current revision `00082` 及 Relation Apply 所依赖的 Change Control/Graph migrations。Confirmed Claim/Relation、Conflict closure、Topic/Claim retirement等 deferred constraint必须在真实commit上验证，不能用AutoMigrate或Go hook替代。
 
 Persistence records显式列/类型/schema/TableName，不嵌入`gorm.Model`，不使用hooks、soft delete、auto timestamps或association。JSONB carrier校验JSON后返回string，避免pgx stdlib把`[]byte`绑定为`bytea`；`uuid[]`/`text[]`只用`pq.Array`作为单个`driver.Valuer`。
 
@@ -72,7 +72,7 @@ Persistence records显式列/类型/schema/TableName，不嵌入`gorm.Model`，�
 | Timeline append | advisory source ref -> existing event `FOR UPDATE` exact compare or insert -> commit |
 | Timeline projection | oldest pending source `FOR UPDATE SKIP LOCKED LIMIT 1` -> decode/validate -> event exact append -> projected/poison version CAS -> commit |
 | Impact save + Audit | report exact insert/replay + owner binding -> build redacted audit record -> `RecordImpactAnalysisScoped` in same scope -> commit |
-| Relation approval/apply | Candidate `FOR UPDATE` before Proposal -> Proposal/Revision `FOR UPDATE` -> Approval `FOR UPDATE`/append -> receipt advisory/fence -> canonical endpoints/provenance -> relation fingerprint advisory -> Relation/Evidence/receipt -> Proposal CAS -> `Event.AppendScoped` -> commit |
+| Relation approval/apply | bind current Revision without locking Proposal -> Candidate `FOR UPDATE` before Proposal -> current Proposal/Revision `FOR UPDATE` -> Approval `FOR UPDATE`/append -> receipt advisory/fence -> canonical endpoints/provenance -> relation fingerprint advisory -> Relation/Evidence/receipt -> current Revision-bound Proposal CAS -> `Event.AppendScoped` -> commit |
 
 Impact 的 scoped 方法同时承载首次保存和 Application 已有报告 replay：首次保存必须进入 `gormSaveImpactReport` 并检查 V2 selector readiness；已有报告 replay 在 Application 已完成 source/object/fingerprint 校验后，只在同一 scope 精确读取 `sameImpactReport` 并追加 Audit，不重复 readiness。该分支保持 legacy Application replay 语义，不能与直接调用 legacy `SaveImpactReportWithAudit` 的 Repository 级行为混为一谈。
 

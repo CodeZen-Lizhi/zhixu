@@ -5,7 +5,7 @@
 {"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "复核 race、集成缺口和交付门禁"}
 {"file": ".trellis/tasks/08-19-gorm-auth-migration/prd.md", "reason": "验收范围与 TODO 9 硬门禁"}
 {"file": ".trellis/tasks/08-19-gorm-auth-migration/design.md", "reason": "复核实现是否遵守阶段设计"}
-{"file": "migrations/00034_learning_ops_auth.sql", "reason": "确认无 Schema 漂移或 AutoMigrate"}
+{"file": "atlas/migrations/00034_learning_ops_auth.sql", "reason": "确认无 Schema 漂移或 AutoMigrate"}
 {"file": "internal/auth/adapter/postgres/repository.go", "reason": "对比 pgx 基线与共享语义"}
 {"file": "internal/auth/adapter/postgres/gorm_repository.go", "reason": "审查 GORM Repository 数据与错误路径"}
 {"file": "internal/auth/adapter/postgres/model.go", "reason": "审查 persistence record 到 Domain 映射"}

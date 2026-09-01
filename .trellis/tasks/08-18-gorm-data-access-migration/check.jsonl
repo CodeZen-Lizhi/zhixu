@@ -8,3 +8,4 @@
 {"file": ".trellis/tasks/08-18-gorm-data-access-migration/research/repository-inventory.md", "reason": "owner 清单和依赖证据"}
 {"file": ".trellis/tasks/08-18-gorm-data-access-migration/research/gorm-river-compatibility.md", "reason": "兼容性研究和风险边界"}
 {"file": "docs/architecture/adr/0019-mature-framework-first.md", "reason": "框架复用与自研边界检查"}
+{"file": ".trellis/tasks/08-18-gorm-data-access-migration/research/lean-test-policy-2026-09-01.md", "reason": "审查开放 child 的精简测试门禁是否仍覆盖核心风险"}

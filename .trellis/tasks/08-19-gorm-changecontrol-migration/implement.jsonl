@@ -4,9 +4,9 @@
 {"file":".trellis/spec/backend/quality-guidelines.md","reason":"应用 Change Control 并发、deadlock、trigger、真实 PostgreSQL 与 review 门禁"}
 {"file":".trellis/tasks/08-18-gorm-data-access-migration/prd.md","reason":"父任务 staged/TODO 9/Final 范围与完成语义"}
 {"file":".trellis/tasks/08-18-gorm-data-access-migration/research/repository-inventory.md","reason":"Change Control+Approval Dispatch owner、依赖图和下游顺序"}
-{"file":".trellis/tasks/08-19-gorm-platform-transaction-foundation/research/static-validation.md","reason":"共享 Pool/GORM/UoW/River 与 scope affinity 限制"}
+{"file":".trellis/tasks/archive/2026-08/08-19-gorm-platform-transaction-foundation/research/static-validation.md","reason":"共享 Pool/GORM/UoW/River 与 scope affinity 限制"}
 {"file":".trellis/tasks/08-19-gorm-workflow-migration/design.md","reason":"ScopedRuntimeStarter、Scoped River producer/fence 与 caller-owned scope 契约"}
-{"file":".trellis/tasks/08-19-gorm-events-migration/design.md","reason":"ScopedAppender 与同事务 Event append 契约"}
+{"file":".trellis/tasks/archive/2026-08/08-19-gorm-events-migration/design.md","reason":"ScopedAppender 与同事务 Event append 契约"}
 {"file":".trellis/tasks/08-19-gorm-changecontrol-migration/research/baseline.md","reason":"本模块方法、Schema、锁序、生产构造和测试基线"}
 {"file":".trellis/tasks/08-19-gorm-changecontrol-migration/research/implementation-contract.md","reason":"冻结 staged 边界、事务/安全不变量和完成门禁"}
 {"file":".trellis/tasks/08-19-gorm-changecontrol-migration/research/planning-review.md","reason":"落实独立规划审查发现、修复与方法级恢复协议"}

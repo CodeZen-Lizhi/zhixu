@@ -105,14 +105,17 @@ Workspace Analysis 预算、Result Receipt、Event/Audit 与恢复语义的前�
 - [ ] Tools GORM sibling 覆盖现有 Application Repository surface，legacy 与生产路径保持不变。
 - [ ] Workflow policy/recovery 与 Agent Tool participant/refusal/authority 前置 Port 已由各自模块任务交付；
       Tools GORM 文件不直接访问其 owner 表。
-- [ ] Tool Call、Policy、Trusted Write、Recovery、Timeline 的锁、DB time、CAS、重放和错误语义等价。
-- [ ] Workspace Analysis 授权/终结/Receipt/预算维持单 UoW 与固定锁序；event-enabled 路径的 Event 同事务，
-      失败无部分提交。
+- [ ] Tool Call、Policy、Trusted Write、Recovery、Timeline 的核心锁、DB time、CAS、重放和错误语义等价。
+- [ ] Workspace Analysis 授权/终结/Receipt/预算维持单 UoW 与固定锁序；直接改动的 event-enabled 路径以一条同事务提交/回滚场景证明无部分提交。
 - [ ] deterministic refusal 与 Audit 同事务且不写 Server Event，敏感字段和拒绝正文不泄漏。
 - [ ] GORM 路径无 pgx data access、第二 pool、DDL/AutoMigrate、动态输入拼 SQL、N+1 或 root fallback。
 - [ ] 静态质量门禁和独立 Go/SQL/Trellis Review 通过。
-- [ ] TODO 9 真实 PostgreSQL parity、并发、fault、response-loss 和连接释放门禁通过。
+- [ ] TODO 9 核心真实 PostgreSQL 主路径通过；并发、fault、response-loss 和连接释放仅在本 child 直接改动或出现明确风险时执行。
 - [ ] Final 才切换生产 Composition、删除 legacy 与收敛 allowlist；此前任务不完成、不归档。
+
+## 2026-09-01 测试范围调整
+
+按父任务精简政策，Tools 保留 Call/Policy/Timeline 主路径与直接改动的授权/Receipt/Audit 原子场景；不再默认执行完整 fault、response-loss、连接释放和全量 SQLSTATE 矩阵。
 
 ## Dependencies And Deferred Work
 

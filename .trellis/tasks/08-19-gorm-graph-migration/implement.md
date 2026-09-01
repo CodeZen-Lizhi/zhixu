@@ -117,3 +117,7 @@
 TODO9前只revert Graph staged GORM文件和`candidateconfirm` scoped capability。Change Control
 scoped实现由其owner task独立回滚。不得回滚migration、历史Proposal/Candidate/Scan事实、
 legacy生产路径或测试夹具。
+
+## 2026-09-01 精简测试门禁
+
+按父任务精简政策，本 child 的最低实库证据为一个 Graph 主查询或 Candidate 主路径场景；只有本轮直接改动 Confirm/Scan 事务、锁或跨 owner 协作时，再补一条代表性提交/回滚、冲突或并发场景。全量 BFS/CTE、response-loss、目标规模 EXPLAIN、容量 benchmark 和整包 integration race 不再默认逐项阻断，但 Workspace、幂等、锁序、状态机和无 N+1 仍需验证。

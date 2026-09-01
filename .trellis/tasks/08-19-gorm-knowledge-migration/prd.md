@@ -21,18 +21,22 @@
 - Timeline projection 保持 `FOR UPDATE SKIP LOCKED`、单 source 短事务、poison/project CAS；Impact Report 与 `IMPACT_ANALYZED` Audit 必须同一事务提交或回滚。
 - 批量读取上限 500，保持 Repeatable Read + Read Only snapshot、Workspace predicate、稳定排序、数组单参数绑定、完整 hydration 与无 N+1。
 - 保留 migration/trigger、显式数据库/调用方时间、错误分类、context cause、回滚和敏感日志策略；禁止 AutoMigrate、association、Preload、Save、soft delete、hooks 与隐式时间。
-- 使用现有测试文件和局部编译验证；TODO 9 前不得切换生产实现、删除 legacy、勾选完成或归档。
+- 使用现有测试文件和局部编译验证；TODO 9 交付前该 child 仅保留 staged 实现。当前仍不得切换生产实现或删除 legacy。
 
 ## Acceptance Criteria
 
 - [ ] GORM sibling 覆盖 Knowledge Repository 的 Topic/Claim/Relation/Conflict、bounded read、Evidence、Timeline/Impact 与 Projection 端口，结果和状态机与 legacy 等价。
 - [ ] GORM Approved Relation Apply 通过单一 opaque scope 原子维护 Change Control、Knowledge 与 optional Events 事实，锁序、stale 分支和 replay 不变。
 - [ ] Impact Report 与脱敏 Audit 在同一 scope 原子提交；GORM 新路径不再通过 `any` 传递事务。
-- [ ] 对称 Relation、provenance、deferred constraint、Conflict closure、Timeline projection、幂等/response-loss 和失败回滚在真实 PostgreSQL 上与 legacy 等价。
+- [ ] 对称 Relation、provenance、deferred constraint、Conflict closure、Timeline projection 和幂等在真实 PostgreSQL 上有核心路径证据；直接改动的跨 owner 事务另有一条代表性回滚或冲突场景。
 - [ ] Domain 不新增底层数据库类型，生产 Composition 仍只构造 legacy pgx，实现可独立回滚。
-- [ ] Go Review、SQL Review、Trellis Check、`git diff --check`、受影响包 test/race/vet、integration compile 与 cmd compile 通过。
+- [ ] Go/SQL/Trellis Review、`git diff --check`、受影响包既有 test/vet、核心 integration 与 task 校验通过；response-loss、全量 race、EXPLAIN 及 cmd compile 按风险触发。
 
-- [ ] TODO 9 不可用时仅保留行为基线或未接入 Composition 的实现，不得勾选完成或归档；TODO 3 仅阻断 Final。
+- [ ] TODO 9 工厂可用；本 child 仍不得切换生产 Composition 或删除 legacy，TODO 3 仅阻断 Final。
+
+## 2026-09-01 测试范围调整
+
+按父任务精简政策，Knowledge 保留一个主读写/查询实库场景和实际跨 owner 原子性代表场景；不再默认执行全部 command/read、response-loss、EXPLAIN 与 integration race 矩阵。
 
 ## Notes
 

@@ -1,8 +1,0 @@
-{"file":".trellis/spec/backend/index.md","reason":"后端模块边界、开发前检查和事实源索引"}
-{"file":".trellis/spec/backend/directory-structure.md","reason":"Collection Application/Adapter 与 Composition Root 依赖方向"}
-{"file":".trellis/spec/backend/logging-guidelines.md","reason":"query、receipt、SQL 参数、DSN 与路径脱敏规范"}
-{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Collection 到 Graph/Health/Export/Organizing 的跨层事务与数据流"}
-{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"复用现有 compiler/cursor/scanner/GORM Raw 模式，避免第二事实源"}
-{"file":".trellis/tasks/08-19-gorm-collection-migration/research/baseline.md","reason":"Collection API、代码、接线、测试与阶段边界基线"}
-{"file":".trellis/tasks/08-19-gorm-collection-migration/research/sql-schema.md","reason":"Schema、SQL、placeholder、array/JSONB、事务和 TODO9 研究"}
-{"file":".trellis/tasks/08-19-gorm-collection-migration/research/spec-contracts.md","reason":"大型 database/error/quality 规范的实施摘要与完整读取路由"}

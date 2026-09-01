@@ -6,3 +6,4 @@
 {"file": ".trellis/tasks/08-18-gorm-data-access-migration/research/repository-inventory.md", "reason": "PostgreSQL owner、依赖波次和证据锚点"}
 {"file": ".trellis/tasks/08-18-gorm-data-access-migration/research/gorm-river-compatibility.md", "reason": "GORM、pgx、River 官方兼容路径和 Spike"}
 {"file": "docs/architecture/adr/0019-mature-framework-first.md", "reason": "成熟框架复用和自研边界约束"}
+{"file": ".trellis/tasks/08-18-gorm-data-access-migration/research/lean-test-policy-2026-09-01.md", "reason": "开放 child 按风险精简测试门禁与完成边界"}

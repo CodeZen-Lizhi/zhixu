@@ -76,7 +76,7 @@
 
 ## 10. Completion And Rollback
 
-- [x] TODO 9 不可用时保持 PRD AC 未勾、task status=`in_progress`、legacy production不变，不归档/宣称完成。
+- [x] TODO 9 交付前保持 PRD AC 未勾、task status=`in_progress`、legacy production 不变，不归档/宣称完成；该历史前置现已解除，当前完成标准以 2026-09-01 精简测试门禁为准。
 - [ ] TODO 9 通过后记录下游 Knowledge/Graph/Retrieval/Artifact 和 Final constructor/legacy删除清单。
 - [ ] 回滚只删除本 child staged adapter/helper与必要测试fixture；不回滚 Schema/Foundation/Workflow/Events/Audit或用户改动。
 
@@ -86,3 +86,7 @@
 - [x] 复用现有 Knowledge Proposal canonical validation、JSONB/scanner、SQLSTATE 与 stable error；新建设置 `current_revision_id=revision.id`，exact read 固定 Revision 1 并兼容历史 NULL pointer。
 - [x] 静态证明不导入 Graph、Graph 不直接拥有 `change_control.*` GORM SQL、production wiring 不变；运行 Change Control test/race/vet/integration compile 与独立 Go/SQL/Trellis review。
 - [ ] 真 PostgreSQL TODO 9 原位扩展现有 integration，验证同 scope rollback、锁序、并发 replay、pointer兼容、取消/SQLSTATE/连接释放；无数据库时保持本项运行时证据未完成。
+
+## 2026-09-01 精简测试门禁
+
+按父任务精简政策，本 child 的最低实库证据为一个既有 Testcontainers 主路径，加一条 Change Control 最关键的同 scope 提交/回滚或幂等冲突场景。此前列出的完整 response-loss、取消/连接释放、EXPLAIN 和全量 integration race 仅在本 child 直接改动对应机制时执行；旧清单作为风险备查，不再逐项阻断归档。Workflow/Model Settings 前置、权限、锁序、状态机和原子性仍不可豁免。

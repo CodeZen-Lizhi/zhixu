@@ -86,3 +86,7 @@
 - [x] 更新 `research/static-validation.md`、review finding/fix ledger、生产与测试 wiring 清单。
 - [x] task.json 在 TODO 9 与 Final 前保持 `in_progress`；PRD AC 不提前勾选。
 - [ ] Final 仅切 Composition，不再重写事务语义；回滚恢复 legacy wiring。
+
+## 2026-09-01 精简测试门禁
+
+按父任务精简政策，Workflow 保留一个 Repository/Runtime 主路径 Testcontainers 场景，并针对本 child 直接负责的 River/Outbox 或 scoped fence 事务补一条提交/回滚、冲突或并发场景。response-loss、SIGKILL、全量 EXPLAIN、跨 owner 端到端和整包 integration race 仅在相应机制被改动或存在明确风险时执行；Model Settings fence、owner scoped Start/Hook 等未交付前置仍继续阻断。

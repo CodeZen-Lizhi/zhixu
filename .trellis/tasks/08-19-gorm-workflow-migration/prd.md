@@ -18,7 +18,7 @@
   不 fallback root；Tools commit response-loss recovery 不得重新调用 live policy/fence。
 - 按父任务 River/事务调用点矩阵让 GORM runtime_start/runtime_state 只消费 scoped JobInserter/EnqueueFence；业务事务内 River insert 使用官方 riverdatabasesql，现有 riverpgxv5 Worker/listener/migration 保持兼容。Model Settings scoped EnqueueFence 未交付前不得绕过 drain 或切生产。
 - 新增 GORM/scoped Application Port 和 Adapter 公共 API 不得泄漏 `any`、GORM、database/sql 或 pgx；legacy `StartTx(pgx.Tx)` 与 pgx-only Hook 在各消费 owner 迁移前列为临时 allowlist，不改签、不删除。
-- 使用现有测试与局部编译；TODO 9 前不得切换生产实现或删除旧 adapter。
+- 使用现有测试与局部编译；TODO 9 交付前该 child 仅保留 staged 实现。当前仍不得切换生产实现或删除旧 adapter。
 
 ## Acceptance Criteria
 
@@ -30,7 +30,11 @@
 - [ ] 新增 GORM/scoped API 不泄漏数据库类型，legacy pgx allowlist 无新增调用；错误、取消、日志和连接池检查通过。
 - [ ] git diff --check、受影响包编译及现有相关测试通过。
 
-- [ ] TODO 9 不可用时仅保留行为基线或未接入 Composition 的实现，不得勾选完成或归档；TODO 3 仅阻断 Final。
+- [ ] TODO 9 工厂可用；本 child 仍不得切换生产实现或删除 legacy，TODO 3 仅阻断 Final。
+
+## 2026-09-01 测试范围调整
+
+按父任务精简政策，Workflow 保留 Repository/Runtime 主路径及直接改动的 River/Outbox/scoped fence 代表性原子性场景；response-loss、SIGKILL、EXPLAIN、跨 owner 端到端和整包 race 按风险触发。
 
 ## Notes
 

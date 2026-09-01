@@ -112,3 +112,7 @@
 
 TODO9前只revert Retrieval staged GORM/Application scoped文件。不得回滚migration、历史Index/Delivery/
 Activation事实、native safety逻辑、legacy生产路径或其他owner task的scoped实现。
+
+## 2026-09-01 精简测试门禁
+
+按父任务精简政策，本 child 保留一个 Retrieval 主查询/写入 Testcontainers 场景；COPY、session lock、River、Completion 或跨 owner 事务只有在本 child 已交付且直接改动时补一条关键原子性/竞争场景。500k 容量、pgvector 专项、response-loss、连接释放和 EXPLAIN 仅按风险触发，不能以小 fixture 伪造容量证据；其余完整矩阵不再默认阻断。

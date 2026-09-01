@@ -163,3 +163,14 @@ git diff --check
 - TODO 10 的模块验收仍各自拥有真实 PostgreSQL legacy/GORM 等价、事务、锁、失败与性能门禁；工厂可用不表示任何模块或 Final Composition 已完成。
 - 30 个 child 的逐项筛选结论、证据来源、执行顺序和保留阻断见 [`research/todo9-screening-2026-08-27.md`](research/todo9-screening-2026-08-27.md)。在该清单完成前，任何 child 均不改 `cmd/**`、不删 legacy pgx，也不把 TODO 3/Final 收口提前完成。
 - 本轮已在同一共享 Pool 上完成并归档 Auth、Audit、DocumentHistory、Memory 与 Git Sync；Events、Collection 仅完成部分实库场景，因性能或 fixture 边界证据不足保持 `in_progress`；Workspace 在 Audit 完成后重新筛选，仍因多个手工/外部 DSN fixture 和大范围门禁缺口保持 `in_progress`；LocalModelRuntime、Review Core、Review Interview 因 import cycle、缺少既有门禁或仍依赖手工/外部 DSN fixture 保持 `in_progress`。其余 child 继续按筛选文档保留，父任务不据此提前关闭 AC3/AC7。
+
+## 11. 2026-09-01：按风险精简测试执行规则
+
+用户确认不再把每个 child 的完整 legacy/GORM 对照矩阵、全量 integration `-race`、无差别 EXPLAIN、response-loss、取消/连接释放和重复 hygiene 命令作为完成前置。开放 child 依次执行：
+
+1. 完成自身 GORM 实现，并运行受影响包既有 `go test`、`go vet`、`git diff --check` 与 task validate。
+2. 原位复用一个既有 integration fixture，通过 TODO 9 的共享 Testcontainers Pool 验证 GORM 的主读写或主查询路径；有 legacy 基线时优先在同场景对照，但不逐项穷举。
+3. 只有直接修改事务、锁、幂等、River/队列或跨 owner 原子性时，增加一条代表性提交/回滚、冲突或并发场景。
+4. EXPLAIN/容量、response-loss、取消/连接释放、全量 integration `-race`、跨模块端到端与 `go mod tidy -diff` 仅在该 child 直接改动相应机制、发现回归或用户另行要求时运行。
+
+权限、Workspace 隔离、状态机、幂等、敏感日志、Schema 禁止项和单一 Pool/无双写边界不因本规则豁免。每个开放 child 在自己的 `implement.md` 或规划 PRD 中引用该规则；已归档 child 不重写历史证据。

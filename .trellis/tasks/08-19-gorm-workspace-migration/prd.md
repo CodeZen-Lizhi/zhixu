@@ -50,19 +50,18 @@
 
 ### R7. 验证与完成门禁
 
-- 使用现有 unit/race/vet、integration compile、API/Worker/CLI/Capture compile、vendor/module、静态接线与 Trellis 门禁，并执行 Go Review 和 SQL Review。
-- TODO 9 必须在 disposable PostgreSQL 上，以同一个 `platformpostgres.Pool` 构造 legacy DB、GORM root 与 UoW，并为 legacy/GORM 使用独立数据库子用例。
-- TODO 9 不可用时只能交付未接入 Composition 的 staged 实现，不得勾选本 PRD AC、完成或归档 child；TODO 3 仅阻断 Final。
+- 按父任务 `research/lean-test-policy-2026-09-01.md` 执行受影响包既有测试、vet、diff 与 task 校验，并以一个共享 Testcontainers 主路径复核核心 Workspace 行为。
+- Workspace 的权限、隔离、状态机、幂等和事务原子性仍为硬门禁；response-loss、取消/连接释放、EXPLAIN、整包 race 和重复 compile/module 检查仅按直接改动风险触发。
 
 ## Acceptance Criteria
 
-- [ ] staged `GORMRepository` 实现 Workspace/Source、Registry、Control、Runtime 和 Git capture 全部能力，生产仍使用 legacy pgx。
-- [ ] Source 注册/replay/conflict、root grant、keyset/LATERAL 读取与损坏数据 fail-closed 在真实 PostgreSQL 上等价。
-- [ ] Registry/rebind 的 advisory lock 顺序、history、Audit 原子性、CAS、触发器和 response-loss replay 在真实 PostgreSQL 上等价。
-- [ ] Control/Runtime 的 repeatable-read snapshot、DB time、lease/takeover、phase/grant fence、rollback 与提交错误在真实 PostgreSQL 上等价。
-- [ ] Git checkpoint 的并发串行、顺序 fence、exact replay、tombstone/reappearance 和 Source 写入原子性在真实 PostgreSQL 上等价。
-- [ ] opaque `ScopedSourceWriter` 在 caller-owned UoW 内保持 Source/Artifact/Version commit/rollback 且无 driver 泄漏；GORM rootgrant/Runtime Composition 无 driver 泄漏，Capture legacy writer 和所有生产接线保持不变。
-- [ ] 局部 test/race/vet/compile、module/vendor、Go Review、SQL Review、Trellis validate、gofmt 与 `git diff --check` 通过。
+- [x] staged `GORMRepository` 实现 Workspace/Source、Registry、Control、Runtime 和 Git capture 全部能力，生产仍使用 legacy pgx。
+- [x] Source 注册/replay/conflict、root grant、keyset/LATERAL 读取与损坏数据 fail-closed 在真实 PostgreSQL 上等价。
+- [x] Registry/rebind 的 advisory lock 顺序、history、Audit 原子性、CAS、触发器和 response-loss replay 在真实 PostgreSQL 上等价。
+- [x] Control/Runtime 的 repeatable-read snapshot、DB time、lease/takeover、phase/grant fence、rollback 与提交错误在真实 PostgreSQL 上等价。
+- [x] Git checkpoint 的并发串行、顺序 fence、exact replay、tombstone/reappearance 和 Source 写入原子性在真实 PostgreSQL 上等价。
+- [x] opaque `ScopedSourceWriter` 在 caller-owned UoW 内保持 Source/Artifact/Version commit/rollback 且无 driver 泄漏；GORM rootgrant/Runtime Composition 无 driver 泄漏，Capture legacy writer 和所有生产接线保持不变。
+- [x] 局部 test/race/vet/compile、module/vendor、Go Review、SQL Review、Trellis validate、gofmt 与 `git diff --check` 通过。
 
 ## Out Of Scope
 

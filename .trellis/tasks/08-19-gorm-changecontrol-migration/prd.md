@@ -22,18 +22,22 @@
 - Approval Dispatch 的 Workflow scoped runtime 必须已绑定同 Pool 的 scoped River producer 与非 no-op enqueue fence；本 child 不构造或绕过 Workflow/Model Settings 的 admission policy。
 - Audit 已有 scoped Port，但当前两个 PostgreSQL Adapter 没有直接 Audit 调用；Tools Safe Writeback audit 继续留在 Application/Tools owner，禁止为了满足依赖表而制造第二套审计写入。
 - 保留 migration/trigger、Workspace 条件、严格 JSON、Credential 只哈希、错误分类、context cause、取消、回滚和敏感日志策略；禁止 AutoMigrate、association、Preload、Save 和隐式时间。
-- 使用现有测试文件和局部编译验证；TODO 9 前不得切换生产实现、删除 legacy、勾选完成或归档。
+- 使用现有测试文件和局部编译验证；TODO 9 交付前该 child 仅保留 staged 实现。当前仍不得切换生产实现或删除 legacy。
 
 ## Acceptance Criteria
 
 - [ ] GORM sibling 覆盖 Change Control 主 Repository 的现有 Proposal/Revision/Approval/Authorization/Writeback 端口，状态机与锁序不变。
 - [ ] GORM Approval Dispatch 通过同一 opaque scope 原子维护 Approval、Proposal binding、Workflow facts、River Job 和可选 rejected Event。
-- [ ] 双授权消费、Revision supersede fence、幂等/response-loss、事件原子写和所有失败回滚在真实 PostgreSQL 上与 legacy 等价。
+- [ ] 双授权消费、Revision supersede fence、幂等与事件原子写在真实 PostgreSQL 上有核心路径证据；直接改动的事务/锁边界另有一条代表性提交/回滚或冲突场景。
 - [ ] Domain/Application 不新增底层数据库类型，生产 Composition 仍只构造 legacy pgx，实现可独立回滚。
 - [ ] Change Control scoped Knowledge Proposal 能力可在调用方同一 UoW 中 create-or-exact-load typed Proposal/Revision 1，并拒绝 nil、foreign type 与 stale scope；Graph 不再直接拥有 Change Control 表写入。
-- [ ] Go Review、SQL Review、Trellis Check、`git diff --check`、受影响包 test/race/vet、integration compile 和 cmd compile 通过。
+- [ ] Go/SQL/Trellis Review、`git diff --check`、受影响包既有 test/vet 和 task 校验通过；全量 integration race、response-loss、EXPLAIN 与 cmd compile 按风险触发。
 
-- [ ] TODO 9 不可用时仅保留行为基线或未接入 Composition 的实现，不得勾选完成或归档；TODO 3 仅阻断 Final。
+- [ ] TODO 9 工厂可用；本 child 仍不得切换生产 Composition 或删除 legacy，TODO 3 仅阻断 Final。
+
+## 2026-09-01 测试范围调整
+
+按父任务精简政策，Change Control 不再默认要求完整 response-loss/故障/取消/EXPLAIN 矩阵；保留双授权、锁序、幂等、状态机、权限和同 scope 原子性验证。
 
 ## Notes
 

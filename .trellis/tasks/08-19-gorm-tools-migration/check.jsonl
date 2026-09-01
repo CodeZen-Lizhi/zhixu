@@ -4,7 +4,7 @@
 {"file":".trellis/spec/backend/quality-guidelines.md","reason":"复核unit/race/vet、integration、fault与真实数据库证据。"}
 {"file":".trellis/spec/backend/workspace-analysis-contract.md","reason":"复核授权、预算、operation、receipt、refusal和terminal closure。"}
 {"file":".trellis/tasks/08-18-gorm-data-access-migration/design.md","reason":"复核single Pool、opaque scope、staged rollout与Final边界。"}
-{"file":".trellis/tasks/08-19-gorm-platform-transaction-foundation/design.md","reason":"复核UoW options、scope lifetime和pool identity限制。"}
+{"file":".trellis/tasks/archive/2026-08/08-19-gorm-platform-transaction-foundation/design.md","reason":"复核UoW options、scope lifetime和pool identity限制。"}
 {"file":".trellis/tasks/08-19-gorm-tools-migration/design.md","reason":"逐项复核本child普通Call、Workspace Analysis、Event/Audit与回滚设计。"}
 {"file":".trellis/tasks/08-19-gorm-tools-migration/research/go-api-wiring.md","reason":"复核API、构造、scoped collaborator和legacy兼容事实。"}
 {"file":".trellis/tasks/08-19-gorm-tools-migration/research/sql-transaction-schema.md","reason":"复核SQL参数、锁序、carrier、SQLSTATE、trigger和并发矩阵。"}

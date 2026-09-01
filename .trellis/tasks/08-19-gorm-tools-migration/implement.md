@@ -114,3 +114,7 @@
 
 TODO 9 前只 revert Tools staged GORM/Application additive scoped文件和本任务工件。不得回滚 migration、历史
 Tool/Receipt/预算/Event/Audit 事实、其他 owner scoped实现或 legacy 生产路径。
+
+## 2026-09-01 精简测试门禁
+
+按父任务精简政策，本 child 保留一个 Tool Call/Policy/Timeline 主路径 Testcontainers 场景，并针对 Workspace Analysis 授权/Receipt 或 Event/Audit 同事务中实际修改的边界补一条代表性提交/回滚、冲突或并发场景。response-loss、fault、连接释放、全量 SQLSTATE 和整包 integration race 仅在直接改动相关机制时执行；拒绝不写 Server Event、敏感数据不落库、固定锁序和无跨 owner SQL 复制仍不可豁免。

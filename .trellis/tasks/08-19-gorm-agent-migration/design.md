@@ -300,7 +300,7 @@ Workflow ScopedWorkspaceAnalysisExecutionFence
 
 ### 7.3 读取闭包
 
-Result、Candidate、Retrieval Plan Checkpoint 和 Candidate Authority 的多表 JOIN 保持固定参数化 Raw SQL。JSON document 使用验证后返回 string 的 JSONB carrier，扫描 `::text` 后执行 canonical/hash/bytes/schema/domain 校验。所有读取保持 Workspace predicate 和 bounded 单行语义，无 Preload/N+1。
+Result、Candidate、Retrieval Plan Checkpoint 和 Candidate Authority 的多表 JOIN 保持固定参数化 Raw SQL。`00085` 将 Result/Candidate 的 canonical JSON document 定义为带 hash/bytes 约束的 `bytea`；GORM 必须按 `[]byte` 绑定和扫描，再执行 canonical/hash/bytes/schema/domain 校验，不得误用 JSONB carrier 或 `::text` 改变字节事实。所有读取保持 Workspace predicate 和 bounded 单行语义，无 Preload/N+1。
 
 ## 8. RAG Progress/Event 原子性
 

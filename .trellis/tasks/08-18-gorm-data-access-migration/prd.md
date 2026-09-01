@@ -52,17 +52,18 @@
 
 - TODO 9 Testcontainers-Go 工厂已交付，提供模块迁移完成所需的真实 PostgreSQL/pgvector、事务、锁、River 和约束验收环境。
 - TODO 9 交付前允许开展共享基础设计、可执行互操作 Spike、行为基线和模块实现；当前各模块仍须完成自身真实 PostgreSQL 门禁，且不得切换生产 Composition 或删除原实现。
-- TODO 3 Atlas 完成前，不执行 TODO 10 的最终全仓切换和旧迁移路径清理。
+- TODO 3 Atlas 已完成并提供唯一 Schema 事实源；TODO 10 Final 仍须在全部模块完成后才可执行全仓切换和旧路径清理。
 - TODO 9/TODO 3 是独立路线图任务，不作为 TODO 10 的模块子任务重复实现。
 
 ### R6. 模块子任务统一验收模板
 
-- 模块 child 保持 Application/Domain 接口与外部 API 行为不变，并在 TODO 9 后以真实 PostgreSQL 证明 GORM Repository 等价；所有生产入口切换统一由 Final child 完成。
-- 现有 Workspace/权限、稳定分页、幂等、乐观锁、唯一约束、错误码、数据库时间和 response-loss 语义保持不变。
-- 真实 PostgreSQL 测试覆盖模块的读写、事务、并发、回放和失败矩阵；性能敏感 SQL 有 EXPLAIN 或容量对等证据。
-- 无 N+1、隐式预加载、无界查询、循环远程调用或逐条写入退化；日志不泄露 Credential、正文、完整 DSN、绝对路径或高敏参数。
-- 模块 child 锁定需由 Final 删除的 legacy pgx 清单；Final 完成后模块内 pgx 生产依赖清零，或只剩父任务批准的底层 allowlist并由静态检查锁定。
-- 定向 Go test/race/vet、受影响集成门禁、`go mod tidy -diff` 与 `git diff --check` 通过；涉及 SQL 的变更完成 Go Review 和 SQL Review。
+- 模块 child 保持 Application/Domain 接口与外部 API 行为不变；所有生产入口切换、legacy 删除和 pgx 收口统一由 Final child 完成。
+- 每个模块以一个既有 Testcontainers integration 场景证明 GORM 的主读写或主查询路径；能方便同测时以该场景对照 legacy，不能时以既有行为基线和明确断言作为预期，不要求把所有 legacy/GORM 场景逐一成对执行。
+- 仅当模块改动了事务、锁、幂等、队列/River 或跨 owner 原子性时，额外保留一条代表性的提交/回滚、冲突或并发实库验证；它覆盖该模块最关键的不变量，不扩展为完整故障矩阵。
+- 性能敏感 SQL 仅在查询形状、索引使用或已知容量风险发生变化时运行 EXPLAIN/容量验证；response-loss、取消/连接释放、全量 integration `-race` 和跨模块端到端测试仅在本 child 直接改动相应机制时要求。
+- 无 N+1、隐式预加载、无界查询、循环远程调用或逐条写入退化；日志不泄露 Credential、正文、完整 DSN、绝对路径或高敏参数。权限、Workspace 隔离、幂等、唯一约束和数据库状态机仍不可豁免。
+- 最低静态门禁为受影响包的既有 `go test`、`go vet`、`git diff --check` 和任务校验；不再把 `go mod tidy -diff`、compile-only、整包 `-race` 或重复的同类测试设为每个 child 的完成前置。涉及 SQL 的变更保持轻量 Go/SQL Review。
+- 详细的有效规则见 `research/lean-test-policy-2026-09-01.md`。它覆盖尚未完成 child 中此前“全矩阵”测试清单的强制性；已归档 child 的历史证据不回写。
 
 ## Acceptance Criteria
 
@@ -72,13 +73,14 @@
 - [ ] AC4：API、Worker、Workspace CLI/Probe 和测试 Composition 使用同一批准的数据访问入口；模块迁移期间没有长期双写、双读或运行时 selector。
 - [ ] AC5：Domain/Application 不导入 GORM 或 pgx；普通业务 Repository 不直接依赖 pgx，残留 pgx 与父任务 allowlist 完全一致且被静态门禁保护。
 - [ ] AC6：生产、测试和命令入口均不能调用 GORM `AutoMigrate`/`Migrator` 修改 Schema；Persistence Model 与 Atlas 批准结构一致。
-- [ ] AC7：全量真实 PostgreSQL、pgvector、River、事务并发、锁、Outbox、Workflow 和 response-loss replay 门禁通过，关键 SQL 无性能退化。
+- [ ] AC7：每个模块均有 R6 规定的核心真实 PostgreSQL 证据；事务/锁/River/跨 owner 模块另有一条代表性原子性或冲突验证，性能与故障专项只在改动风险触发时执行。
 - [ ] AC8：TODO 9 已提供 Testcontainers 验收门禁、TODO 3 已完成 Atlas 唯一 Schema 事实源后，最终 Composition/pgx 收口子任务完成，TODO 10 才可归档。
 
 ## Key Decisions
 
 - `Review Core`、`Review Interview`、`Review Learning Path` 各自拥有独立 Repository 和验收边界，分别建立三个模块子任务；另设 Review 集成验收，不把三者重新合并成一个实现任务。
 - TODO 9 的 Testcontainers 工厂已由 `109d2cb4` 交付。它解除环境前置，但模块仍须在各自既有 integration fixture 中完成真实 PostgreSQL 门禁后才可声明完成；生产切换和旧实现删除仍只属于 Final。
+- 2026-09-01：用户确认采用按风险精简测试门禁。开放 child 不再以穷举 legacy/GORM、无差别 EXPLAIN、response-loss 或全量 integration `-race` 作为完成条件；R6 的核心实库证据和高风险代表性场景仍是完成底线。
 - TODO 3 是最终全仓收口门禁，而不是所有模块开始编码的门禁。
 - 父任务采用一个共享基础任务、每模块一个迁移任务、一个最终 Composition/pgx 收口任务的结构。
 

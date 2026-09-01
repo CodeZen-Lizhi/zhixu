@@ -116,12 +116,12 @@ Composition Root
 每个模块子任务按同一模式收敛：
 
 1. 重新盘点 Repository、调用方、SQL、事务参与者、具体 PostgreSQL 跨模块 import 和已有测试。
-2. 固定行为基线：权限/Workspace、分页、幂等、版本、数据库时间、锁序、错误码、response-loss、SQL/EXPLAIN。
+2. 固定行为基线：权限/Workspace、分页、幂等、版本、数据库时间、锁序和错误码；response-loss 与 SQL/EXPLAIN 仅在该模块直接改动相应机制或存在已知风险时纳入专项验证。
 3. 为现有表建立显式 Persistence Model；复杂 SQL 标注保留 Raw/Clauses 或 pgx allowlist 的证据。
 4. 使用共享 GORM root 和 Unit of Work 实现 Repository；跨模块依赖改为稳定 Port。
-5. 运行已有定向单元、集成、race/vet/SQL 门禁。若现有测试无法覆盖高风险契约，只报告盲区并请求用户授权；未经明确要求不新增测试文件或临时代码。
-6. 模块 child 只保留未接入生产 Composition 的实现，不得增加 runtime selector、双写或删除旧路径；只有其真实 PostgreSQL 门禁完成后才可标记模块完成。
-7. 使用已交付的 TODO 9 工厂完成真实 PostgreSQL 等价验收，记录 Final 所需的 Composition 构造与 legacy pgx 删除清单；模块 child 不修改 `cmd/**`。
+5. 运行受影响包既有测试和 `go vet`；每个模块使用一个既有 Testcontainers 场景覆盖 GORM 主路径。事务、锁、队列/River 或跨 owner 改动仅增加一条代表性不变量验证，而不是完整矩阵。
+6. 模块 child 只保留未接入生产 Composition 的实现，不得增加 runtime selector、双写或删除旧路径；完成父任务 R6 的核心门禁后可标记模块完成。
+7. 使用已交付的 TODO 9 工厂完成核心真实 PostgreSQL 验收，记录 Final 所需的 Composition 构造与 legacy pgx 删除清单；EXPLAIN、response-loss、全量 integration `-race` 仅在风险触发时执行，模块 child 不修改 `cmd/**`。
 8. 独立 Review、回滚说明和任务归档；Final 在全部模块完成后统一替换 Composition 并删除模块内非 allowlist pgx，任何共享契约漂移回到父任务。
 
 ## 6. 兼容、发布与回滚
@@ -142,7 +142,7 @@ Composition Root
 | 模块顺序错误 | 具体 Adapter/事务类型双轨 | child PRD 写依赖；共享 owner 先迁移 |
 | Raw SQL 被形式化改写 | 锁/性能/查询语义退化 | 复杂 SQL允许 GORM Raw/Clauses；EXPLAIN/容量对等 |
 | 迁移期双实现长期存在 | 两个事实源和维护分叉 | 无 runtime selector/双写；模块完成即冻结 GORM 等价证据，Final 在全部模块完成后一次收口并删除旧实现 |
-| 测试不足 | 无法证明高风险等价 | 只使用现有测试；不足时明确阻断完成并单独请求新增测试授权 |
+| 测试不足 | 核心行为或事务不变量可能漂移 | 每模块保留一个真实 PostgreSQL 主路径；事务/锁/River/跨 owner 变更再保留一个代表性不变量场景，其他专项按风险触发 |
 
 ## 8. 设计依据
 
@@ -154,3 +154,7 @@ Composition Root
 - `.trellis/spec/backend/logging-guidelines.md`
 - `.trellis/spec/backend/quality-guidelines.md`
 - `docs/architecture/adr/0019-mature-framework-first.md`
+
+## 9. 2026-09-01 按风险精简测试门禁
+
+开放 child 的测试范围以父任务 `research/lean-test-policy-2026-09-01.md` 为准。它只降低重复和低收益的验证，不降低权限、Workspace 隔离、状态机、幂等、事务原子性、敏感数据与 Schema 禁止项。已归档 child 的历史证据保持原样。

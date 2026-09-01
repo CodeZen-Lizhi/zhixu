@@ -71,7 +71,7 @@
 
 - 不新增测试文件；TODO 9 后原位参数化现有 Agent/Workspace Analysis/Capture Profile integration fixture，使 legacy 与 GORM 各使用独立数据库和同一个 `platformpostgres.Pool`。
 - TODO 9 前允许局部 unit/race/vet、integration compile-only、cmd compile-only、静态 wiring/import/AutoMigrate 检查和独立 Go/SQL Review，但不能据此勾选 AC。
-- TODO 9 真实 PostgreSQL 必须验证 scoped caller transaction、Run/Call triggers、Memory 双向绑定、Workspace Analysis 并发/取消/预算/commit-loss、RAG Progress + Event 原子性、连接释放和目标查询计划。
+- TODO 9 真实 PostgreSQL 至少验证 Agent 主路径；仅在本 child 直接改动 scoped caller transaction、RAG/Event 或 Tools participant 原子性时，补一条最关键的提交/回滚、冲突或并发场景。
 - 生产 Composition 切换和 legacy pgx 删除由 Final child 统一完成；本 child 只记录构造点和回滚边界。
 
 ## Acceptance Criteria
@@ -81,9 +81,13 @@
 - [ ] AC3：Workspace Analysis 的 scoped Capability Checked Starter 在同一 scope 内按 readiness -> Run 顺序执行；Model Operation 通过 Workflow owner 的 scoped fence 保持 Workflow Run -> Node Run -> Node Attempt -> Analysis -> Operation -> Reservation -> Run -> Call 锁序，`found=false`/scope/context/SQLSTATE 被稳定翻译为 Agent 既有错误，且 Agent GORM 路径不直接访问 `workflow.*`。
 - [ ] AC3a：Agent 为 Tools 提供 participant、durable closure、refusal 和 authority scoped Ports；Tools 可在一个 caller-owned scope 内完成 Tool Call/预算/Operation/拒绝 Audit 原子闭包，且 Agent 公开 API 不泄漏 Tools/GORM/sql/pgx/`any`。
 - [ ] AC4：RAG Progress 通过 Events `ScopedAppender` 在一个 UoW 内锁定并追加；失败回滚和 commit unknown 行为可验证。
-- [ ] AC5：错误码、retryability、context cause、敏感日志、Workspace 隔离、数据库时间、分页/批量和资源关闭检查通过。
-- [ ] AC6：受影响包 test/race/vet、integration/cmd compile、go mod/vendor、Trellis validate、gofmt 与 `git diff --check` 通过，Go/SQL/Trellis Review 无未解决 P0/P1/P2。
-- [ ] AC7：TODO 9 真实 PostgreSQL 门禁完成前不切换生产 Composition、不删除 legacy、不标记完成或归档；TODO 3 仅阻断 Final。
+- [ ] AC5：错误码、retryability、敏感日志、Workspace 隔离、数据库时间、分页/批量和直接改动的资源边界检查通过。
+- [ ] AC6：受影响包既有 test/vet、核心 integration、Trellis validate、gofmt 与 `git diff --check` 通过，Go/SQL/Trellis Review 无未解决 P0/P1/P2；全量 race/cmd compile 按风险触发。
+- [ ] AC7：TODO 9 核心真实 PostgreSQL 门禁完成前不切换生产 Composition、不删除 legacy；TODO 3 仅阻断 Final。
+
+## 2026-09-01 测试范围调整
+
+按父任务精简政策，Agent 保留 Model Run/Workspace Analysis 主路径及实际修改的 scoped atomicity 代表场景，不再默认执行全部 commit-loss、trigger、EXPLAIN、连接释放和跨模块端到端矩阵。
 
 ## Out Of Scope
 

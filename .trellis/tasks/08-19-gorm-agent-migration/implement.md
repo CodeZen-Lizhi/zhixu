@@ -44,14 +44,14 @@
 ## 6. Workspace Analysis Model Operation
 
 - [x] 前置确认 Workflow child 已交付 `ScopedWorkspaceAnalysisExecutionFence`；Agent Tools scoped 实现仍不复制 `workflow.*` SQL。
-- [ ] 新增 `GORMWorkspaceAnalysisRepository`，构造时强制接收同一 Pool 和非 nil/typed-nil Workflow fence，不提供默认/fallback。
-- [ ] 实现 fence error translator：`found=false`/快照 drift -> Agent authorization conflict；invalid/scope/context/SQLSTATE/未知依赖按既有 Agent code/retryability 翻译并保留 cause，禁止透传 Workflow code。
-- [ ] 实现 Authorize、Finalize Call/Result/Candidate 四个 Store-owned UoW 入口。
-- [ ] 先在同一 scope 调 Workflow fence 锁 Run -> Node Run -> Node Attempt，再锁 Analysis Run -> Operation -> Reservation -> Model Run -> Model Call，最后读取 DB clock。
-- [ ] 保持 Operation/Reservation/Analysis budget/Run/Call CAS、UNKNOWN 全额结算、replacement attempt 和 cancel/deadline fence。
-- [ ] 保持 `SET CONSTRAINTS ALL IMMEDIATE`、commit response-loss recovery 和 durable exact replay，不猜测提交结果。
-- [ ] 实现 Result/Candidate/Checkpoint/Authority bounded Raw reads 及完整闭包/canonical JSON/hash/bytes/schema 验证。
-- [ ] 按职责拆分私有 helper，避免复制 2163 行单体，但不改变 SQL 语义或锁顺序。
+- [x] 新增 `GORMWorkspaceAnalysisRepository`，构造时强制接收同一 Pool 和非 nil/typed-nil Workflow fence，不提供默认/fallback。
+- [x] 实现 fence error translator：`found=false`/快照 drift -> Agent authorization conflict；invalid/scope/context/SQLSTATE/未知依赖按既有 Agent code/retryability 翻译并保留 cause，禁止透传 Workflow code。
+- [x] 实现 Authorize、Finalize Call/Result/Candidate 四个 Store-owned UoW 入口。
+- [x] 先在同一 scope 调 Workflow fence 锁 Run -> Node Run -> Node Attempt，再锁 Analysis Run -> Operation -> Reservation -> Model Run -> Model Call，最后读取 DB clock。
+- [x] 保持 Operation/Reservation/Analysis budget/Run/Call CAS、UNKNOWN 全额结算、replacement attempt 和 cancel/deadline fence。
+- [x] 保持 `SET CONSTRAINTS ALL IMMEDIATE`、commit response-loss recovery 和 durable exact replay，不猜测提交结果。
+- [x] 实现 Result/Candidate/Checkpoint/Authority bounded Raw reads 及完整闭包/canonical JSON/hash/bytes/schema 验证。
+- [x] 按职责拆分私有 helper，避免复制 2163 行单体，但不改变 SQL 语义或锁顺序。
 
 ## 6A. Tools Owner Scoped Contracts
 
@@ -117,3 +117,7 @@ integration `-run '^$'` 只验证测试编译，不作为真实 PostgreSQL 证�
 - Model Runtime staged：删除新增 GORM core/runtime 和 scoped Model Run 文件，legacy 不变。
 - Workspace Analysis/Memory/RAG staged：按阶段删除新增文件并还原共享纯 helper，legacy 生产不变。
 - Final 切换失败：由 Final 恢复 legacy Composition；禁止双写、fallback 或拆事务掩盖差异。
+
+## 2026-09-01 精简测试门禁
+
+按父任务精简政策，本 child 保留一个 Agent Model Run/Workspace Analysis 主路径 Testcontainers 场景；只有本轮直接改动 scoped caller transaction、RAG/Event 或 Tools participant 原子性时，再补一条代表性提交/回滚、冲突或并发场景。此前完整 commit-loss、所有 trigger/SQLSTATE、连接释放、目标 EXPLAIN 和跨模块端到端清单改为按风险触发；公开 Port 不泄漏数据库类型、Workspace/预算/状态机和单 scope 原子性仍是硬门禁。

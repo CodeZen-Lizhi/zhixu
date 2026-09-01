@@ -72,3 +72,7 @@
 - [x] TODO 9不可用时保持PRD AC未勾、task status=`in_progress`、legacy production不变，不归档/宣称完成。
 - [ ] TODO 9通过后记录Graph/Organizing/Final constructor和legacy删除清单。
 - [ ] 回滚只删除本child staged adapter/helper与scoped Impact capability；不回滚Schema/Foundation/Change Control/Events/Audit或用户改动。
+
+## 2026-09-01 精简测试门禁
+
+按父任务精简政策，本 child 保留一个 Knowledge 主读写/查询 Testcontainers 场景，并针对 Relation Apply 或 Impact/Audit 中实际修改的同事务边界补一条提交/回滚或冲突场景。此前完整 command/read、response-loss、全量 SQLSTATE/EXPLAIN 与 integration race 清单仅在改动风险触发时执行；权限、Workspace、状态机、幂等、deferred constraint 和跨 owner 原子性仍不可豁免。

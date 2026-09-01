@@ -6,7 +6,7 @@
 {"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Retrieval与Workflow、Change Control、Organizing的opaque scoped数据流。"}
 {"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"共享scanner/SQL/codec与native能力，避免pgx/GORM双事实源。"}
 {"file":".trellis/tasks/08-18-gorm-data-access-migration/design.md","reason":"父任务single Pool、staged sibling、opaque scope、Final和pgx allowlist边界。"}
-{"file":".trellis/tasks/08-19-gorm-platform-transaction-foundation/design.md","reason":"Pool.GORM、UnitOfWork、TransactionScope生命周期与River database/sql互操作。"}
+{"file":".trellis/tasks/archive/2026-08/08-19-gorm-platform-transaction-foundation/design.md","reason":"Pool.GORM、UnitOfWork、TransactionScope生命周期与River database/sql互操作。"}
 {"file":".trellis/tasks/08-19-gorm-workflow-migration/design.md","reason":"Scoped River producer、enqueue fence和owner-scoped事务契约。"}
 {"file":".trellis/tasks/08-19-gorm-changecontrol-migration/design.md","reason":"Writeback/Proposal锁序、CAS、scoped collaborator和owner边界。"}
 {"file":".trellis/tasks/08-19-gorm-retrieval-migration/design.md","reason":"本child的GORM/native/Dispatcher/Completion/验证设计。"}

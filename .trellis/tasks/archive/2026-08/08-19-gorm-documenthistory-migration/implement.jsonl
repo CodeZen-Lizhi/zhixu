@@ -6,5 +6,5 @@
 {"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Repository 到 Application 的数据映射和依赖泄漏检查"}
 {"file":".trellis/tasks/08-18-gorm-data-access-migration/research/repository-inventory.md","reason":"父任务 owner、模块范围与执行顺序"}
 {"file":".trellis/tasks/08-18-gorm-data-access-migration/research/gorm-river-compatibility.md","reason":"共享 GORM/pgx 兼容与生产切换门禁"}
-{"file":".trellis/tasks/08-19-gorm-platform-transaction-foundation/research/static-validation.md","reason":"已交付 GORM root、配置和 TODO 9 运行时缺口"}
+{"file":".trellis/tasks/archive/2026-08/08-19-gorm-platform-transaction-foundation/research/static-validation.md","reason":"已交付 GORM root、配置和 TODO 9 运行时缺口"}
 {"file":".trellis/tasks/08-19-gorm-documenthistory-migration/research/baseline.md","reason":"本模块查询、调用点、测试与行为基线"}

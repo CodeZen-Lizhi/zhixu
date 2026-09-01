@@ -57,3 +57,13 @@
 
 - TODO 9 前只删除 staged GORM/scoped/Bootstrap 文件；legacy pgx、Schema、测试和 `cmd/**` 不变。
 - TODO 9 后保留 legacy Composition 为 Final 回退点；禁止双写或 fallback 掩盖差异。
+
+## 2026-09-01 精简测试门禁
+
+按父任务精简政策，本 child 保留一个既有 Testcontainers 主路径，并针对本模块直接负责的 Revision/Activation 同事务边界验证一条提交/回滚或竞争场景。双进程、DB-time、EXPLAIN、commit ambiguity、连接释放等专项只在对应实现确有改动或出现风险时执行；不再作为无差别全矩阵前置。Workflow enqueue fence 和跨 owner 原子性仍是硬依赖。
+
+## 2026-09-01 本轮增量
+
+- 在现有 `repository_integration_test.go` 原位接入 TODO 9 `testdb` 工厂，新增共享 `platformpostgres.Pool` 的 GORM 主路径验证。
+- 已实测 SaveDesired + scoped Audit 的成功写入、Audit 故障整事务回滚、sequence 不复用和 pre-commit activation failure；已实测 caller-owned enqueue fence 及 stale scope 拒绝。
+- 未勾选第 6 节 TODO 9 总项：Activation + Local Runtime、Fence + River worker、双进程/快照/取消/连接/EXPLAIN 等门禁仍待后续 owner 与 Final 组合完成。

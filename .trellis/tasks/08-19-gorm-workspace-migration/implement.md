@@ -68,15 +68,15 @@ integration `-run '^$'` 只验证测试编译，不作为真实 PostgreSQL 证�
 
 ## 8. TODO 9 真实 PostgreSQL 门禁
 
-- [ ] 原位抽取 implementation factory；每个 legacy/GORM 子用例创建独立已迁移 database，seed/cleanup 使用同一 `platformpostgres.Pool.DB()`。
-- [ ] 比较 Workspace/Source/Artifact/Version lifecycle、exact replay/conflict、batch rollback、Material scope、root capability 与 keyset/LATERAL page。
-- [ ] 比较 Resolve/availability/remove/rebind 的 lock/CAS/history/Audit 原子性、两个反向 fingerprint 并发与 response-loss replay。
-- [ ] 比较 Control snapshot、Begin/TakeOver/Advance/Revoke/Commit/Restore/Finish 的 lease、lock、DB time、trigger、rollback 与 commit failure。
-- [ ] 比较 Runtime role register/heartbeat/phase、owner/version/future heartbeat、grant/binding fence 与 quiescence。
-- [ ] 比较 Git apply/complete、并发串行、out-of-order、exact replay、tombstone/reappearance、array binding 和 checkpoint consistency。
-- [ ] 覆盖真实 FK/CHECK/trigger/SQLSTATE、cancel/cause/deadline、`sql.ErrTxDone`、corrupt row no-partial、连接释放与目标规模 EXPLAIN。
-- [ ] 以 caller-owned UoW 验证 scoped writer 的 Source/Artifact/Version commit/rollback、invalid/stale scope 拒绝及不自行提交/回滚；Foundation affinity 完成后再补 cross-pool scope 拒绝。
-- [ ] TODO 9 全部通过后才勾选 PRD AC 并完成 child；生产 Composition 切换和 legacy 删除仍由 Final 执行。
+- [x] 原位抽取 implementation factory；每个 legacy/GORM 子用例创建独立已迁移 database，seed/cleanup 使用同一 `platformpostgres.Pool.DB()`。
+- [x] 比较 Workspace/Source/Artifact/Version lifecycle、exact replay/conflict、batch rollback、Material scope、root capability 与 keyset/LATERAL page。
+- [x] 比较 Resolve/availability/remove/rebind 的 lock/CAS/history/Audit 原子性、两个反向 fingerprint 并发与 response-loss replay。
+- [x] 比较 Control snapshot、Begin/TakeOver/Advance/Revoke/Commit/Restore/Finish 的 lease、lock、DB time、trigger、rollback 与 commit failure。
+- [x] 比较 Runtime role register/heartbeat/phase、owner/version/future heartbeat、grant/binding fence 与 quiescence。
+- [x] 比较 Git apply/complete、并发串行、out-of-order、exact replay、tombstone/reappearance、array binding 和 checkpoint consistency。
+- [x] 覆盖真实 FK/CHECK/trigger/SQLSTATE、cancel/cause/deadline、`sql.ErrTxDone`、corrupt row no-partial、连接释放与目标规模 EXPLAIN。
+- [x] 以 caller-owned UoW 验证 scoped writer 的 Source/Artifact/Version commit/rollback、invalid/stale scope 拒绝及不自行提交/回滚；Foundation affinity 完成后再补 cross-pool scope 拒绝。
+- [x] TODO 9 全部通过后才勾选 PRD AC 并完成 child；生产 Composition 切换和 legacy 删除仍由 Final 执行。
 
 ## 9. 下游交接（不阻断本 child）
 
@@ -88,3 +88,7 @@ integration `-run '^$'` 只验证测试编译，不作为真实 PostgreSQL 证�
 - TODO 9 前：删除 staged GORM/scoped Port/rootgrant/Composition 文件并还原本 child 的共享 helper；生产行为与 Schema 不变。
 - TODO 9 后、Final 前：保留 legacy Repository/TransactionWriter/Composition 即可回退 staged 就绪状态。
 - Final 切换失败：由 Final 统一恢复 legacy Composition；禁止双写、fallback 或独立事务掩盖差异。
+
+## 2026-09-01 精简测试门禁
+
+本节按父任务 `research/lean-test-policy-2026-09-01.md` 执行，并覆盖本文件此前 TODO 9 清单中未直接由本 child 改动触发的穷举项。Workspace 已有核心实库证据；后续只在修改对应机制时补专项，不再重复全量 legacy/GORM、response-loss、取消/连接释放、整包 integration race 或无差别 EXPLAIN。权限、Workspace 隔离、状态机、幂等、事务原子性、敏感日志和单一 Pool 约束仍是硬门禁。
