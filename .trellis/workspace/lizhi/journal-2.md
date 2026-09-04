@@ -594,3 +594,34 @@ Eino/eino-ext 已成为生产唯一 AI Runtime，旧 direct 实现已删除并�
 ### Status
 
 [OK] **Completed**
+
+
+## Session 72: 完成 GORM Workspace Repository 子任务
+
+**Date**: 2026-09-05
+**Task**: 完成 GORM Workspace Repository 子任务
+**Branch**: `dev`
+
+### Summary
+
+按精简测试策略复核并归档 Workspace Repository 迁移 child；未修改代码，保留 Model Settings 既有脏改。
+
+### Main Changes
+
+- 确认 staged GORMRepository、ScopedSourceWriter、rootgrant GORM store 与 staged runtime composition 已闭合，生产仍使用 legacy 接线。
+
+### Git Commits
+
+(No commits - planning session)
+
+### Testing
+
+- [OK] 局部 go test、go vet、gofmt、git diff --check、Trellis validate 通过；既有 Testcontainers Workspace/Source 生命周期与 caller-owned UoW 场景通过。
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- 按用户要求串行处理下一个 GORM child；不得并行开发 GLM/GORM 子任务。
