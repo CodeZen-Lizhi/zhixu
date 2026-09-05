@@ -680,3 +680,24 @@ Eino/eino-ext 已成为生产唯一 AI Runtime，旧 direct 实现已删除并�
 ### Status
 
 [OK] **Completed**
+
+
+## Session 75: Knowledge GORM 精简实库门禁
+
+**Date**: 2026-09-05
+**Task**: Knowledge GORM 精简实库门禁
+**Branch**: `dev`
+
+### Summary
+
+修复 Impact GORM INSERT 占位错位，新增单 Pool 精简实库主路径与真实 Audit 跨 owner 回滚门禁，完成任务证据、规范同步和归档。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `119e9b7c` | (see git log) |
+
+### Status
+
+[OK] **Completed**

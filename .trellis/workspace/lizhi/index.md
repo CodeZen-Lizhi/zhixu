@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-2.md`
-- **Total Sessions**: 74
+- **Total Sessions**: 75
 - **Last Active**: 2026-09-05
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-2.md` | ~682 | Active |
+| `journal-2.md` | ~703 | Active |
 | `journal-1.md` | ~2005 | Archived |
 <!-- @@@/auto:active-documents -->
 
@@ -30,6 +30,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 75 | 2026-09-05 | Knowledge GORM 精简实库门禁 | `119e9b7c` | `dev` |
 | 74 | 2026-09-05 | 完成 Model Settings GORM 精简实库门禁 | `6b0afb66` | `dev` |
 | 73 | 2026-09-05 | 完成 Change Control GORM 精简门禁 | `1b7b7cd1` | `dev` |
 | 72 | 2026-09-05 | 完成 GORM Workspace Repository 子任务 | - | `dev` |
