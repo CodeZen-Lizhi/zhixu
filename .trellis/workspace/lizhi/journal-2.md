@@ -659,3 +659,24 @@ Eino/eino-ext 已成为生产唯一 AI Runtime，旧 direct 实现已删除并�
 ### Next Steps
 
 - 继续 Model Settings GORM 子任务，沿用精简测试政策。
+
+
+## Session 74: 完成 Model Settings GORM 精简实库门禁
+
+**Date**: 2026-09-05
+**Task**: 完成 Model Settings GORM 精简实库门禁
+**Branch**: `dev`
+
+### Summary
+
+在既有 Testcontainers 场景中收口同池 GORM 的 Revision/Audit、Activation/Local Runtime、River fence 提交回滚与锁释放验证；门禁 fail-closed，补齐稳定规范并完成 Go/SQL/Trellis 审查。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `6b0afb66` | (see git log) |
+
+### Status
+
+[OK] **Completed**
