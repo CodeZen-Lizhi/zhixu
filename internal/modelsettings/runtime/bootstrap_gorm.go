@@ -14,8 +14,8 @@ import (
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 )
 
-// GORMBootstrapResult contains the staged shared-pool dependencies. It is not
-// used by production composition until the TODO 9 PostgreSQL gate passes.
+// GORMBootstrapResult contains the staged shared-pool dependencies. Only the
+// Final migration may introduce this result into production composition.
 type GORMBootstrapResult struct {
 	Service         *modelsettingsapplication.Service
 	Manager         modelsettingsapplication.SettingsManager

@@ -17,12 +17,15 @@ import (
 	auditpostgres "github.com/CodeZen-Lizhi/zhixu/internal/audit/adapter/postgres"
 	auditdomain "github.com/CodeZen-Lizhi/zhixu/internal/audit/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	localmodelruntime "github.com/CodeZen-Lizhi/zhixu/internal/localmodelruntime"
 	"github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/application"
 	modelcrypto "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/crypto"
 	"github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
+	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -31,7 +34,7 @@ func TestGORMRepositorySaveDesiredRollbackAndScopedEnqueueFence(t *testing.T) {
 	fixture := testdb.Require(t, testdb.Config{
 		ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
 		MaxConns:         8,
-		Availability:     testdb.SkipWhenUnavailable,
+		Availability:     testdb.FailWhenUnavailable,
 	})
 	platform := fixture.Pool()
 	if platform == nil {
@@ -163,6 +166,168 @@ func TestGORMRepositorySaveDesiredRollbackAndScopedEnqueueFence(t *testing.T) {
 	if err := repository.CheckEnqueue(ctx, expiredScope); err == nil {
 		t.Fatal("expired GORM transaction scope was accepted by enqueue fence")
 	}
+	if err := unitOfWork.Within(ctx, foundation.TransactionOptions{}, func(callbackCtx context.Context, scope foundation.TransactionScope) error {
+		if err := repository.CheckEnqueue(callbackCtx, scope); err != nil {
+			return err
+		}
+		competitor, beginErr := platform.Begin(callbackCtx)
+		if beginErr != nil {
+			return beginErr
+		}
+		defer competitor.Rollback(callbackCtx) //nolint:errcheck
+		if _, execErr := competitor.Exec(callbackCtx, `SELECT phase FROM ops.model_settings_state WHERE singleton=true FOR UPDATE NOWAIT`); execErr == nil {
+			return errors.New("GORM enqueue fence did not hold the singleton lock")
+		} else {
+			var postgresError *pgconn.PgError
+			if !errors.As(execErr, &postgresError) || postgresError.Code != "55P03" {
+				return fmt.Errorf("unexpected competing lock error: %w", execErr)
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	releasedLock, err := platform.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := releasedLock.Exec(ctx, `SELECT phase FROM ops.model_settings_state WHERE singleton=true FOR UPDATE NOWAIT`); err != nil {
+		_ = releasedLock.Rollback(ctx)
+		t.Fatalf("GORM enqueue fence lock was not released: %v", err)
+	}
+	if err := releasedLock.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	riverClient, err := riveradapter.NewClient(platform.DB(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inserter, err := riveradapter.NewScopedJobInserter(platform, riverClient, repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobArgs, err := riveradapter.NewNodeJobArgs(mustModelSettingsID(t, "a4000000-0000-4000-8000-000000000001"), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rollbackErr := errors.New("rollback River enqueue")
+	if err := unitOfWork.Within(ctx, foundation.TransactionOptions{}, func(callbackCtx context.Context, scope foundation.TransactionScope) error {
+		if _, insertErr := inserter.InsertTx(callbackCtx, scope, jobArgs, riveradapter.InsertOptions{}); insertErr != nil {
+			return insertErr
+		}
+		return rollbackErr
+	}); !errors.Is(err, rollbackErr) {
+		t.Fatalf("River enqueue rollback error=%v, want=%v", err, rollbackErr)
+	}
+	var rolledBackJobs int64
+	if err := platform.DB().QueryRow(ctx, `SELECT count(*) FROM workflow.river_job WHERE kind=$1 AND args->>'node_run_id'=$2`, riveradapter.NodeJobKind, string(jobArgs.NodeRunID)).Scan(&rolledBackJobs); err != nil {
+		t.Fatal(err)
+	}
+	if rolledBackJobs != 0 {
+		t.Fatalf("rolled-back River enqueue left %d jobs", rolledBackJobs)
+	}
+	var committedJobID int64
+	if err := unitOfWork.Within(ctx, foundation.TransactionOptions{}, func(callbackCtx context.Context, scope foundation.TransactionScope) error {
+		receipt, insertErr := inserter.InsertTx(callbackCtx, scope, jobArgs, riveradapter.InsertOptions{})
+		if insertErr != nil {
+			return insertErr
+		}
+		committedJobID = receipt.JobID
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if committedJobID < 1 {
+		t.Fatalf("committed River receipt id=%d", committedJobID)
+	}
+	var committedJobs int64
+	if err := platform.DB().QueryRow(ctx, `SELECT count(*) FROM workflow.river_job
+		WHERE id=$1 AND kind=$2 AND args->>'node_run_id'=$3`,
+		committedJobID, riveradapter.NodeJobKind, string(jobArgs.NodeRunID)).Scan(&committedJobs); err != nil {
+		t.Fatal(err)
+	}
+	if committedJobs != 1 {
+		t.Fatalf("committed River enqueue rows=%d want=1", committedJobs)
+	}
+	defer func() {
+		_, _ = platform.DB().Exec(context.Background(), `DELETE FROM workflow.river_job WHERE id=$1`, committedJobID)
+	}()
+
+	localStore, err := localmodelruntime.NewGORMStore(platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	localFailure := errors.New("injected local preparation failure")
+	failingLocalRepository, err := NewGORMRepository(platform,
+		WithGORMSecretSealer(sealer),
+		WithGORMAuditAppender(auditStore),
+		WithGORMScopedLocalModelLifecycle(failingGORMActivationLifecycle{delegate: localStore, err: localFailure}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failedStateVersion := failed.Version
+	if _, err := failingLocalRepository.StartActivation(ctx, application.StartActivationCommand{
+		RolloutID: rolloutID, TargetRevision: second.DesiredRevision,
+		ExpectedDesiredRevision: second.DesiredRevision,
+		ExpectedStateVersion:    failedStateVersion,
+		LeaseDuration:           30 * time.Second,
+		FreshWithin:             20 * time.Second,
+	}); !errors.Is(err, localFailure) {
+		t.Fatalf("local preparation failure=%v want=%v", err, localFailure)
+	}
+	var operationCount, holdCount int64
+	if err := platform.DB().QueryRow(ctx, `SELECT count(*) FROM ops.managed_ollama_operations WHERE kind='activation' AND rollout_id=$1::uuid`, string(rolloutID)).Scan(&operationCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := platform.DB().QueryRow(ctx, `SELECT count(*) FROM ops.managed_ollama_holds WHERE owner_kind='preparation' AND rollout_id=$1::uuid`, string(rolloutID)).Scan(&holdCount); err != nil {
+		t.Fatal(err)
+	}
+	if operationCount != 0 || holdCount != 0 {
+		t.Fatalf("rolled-back local preparation left operations=%d holds=%d", operationCount, holdCount)
+	}
+	managedRepository, err := NewGORMRepository(platform,
+		WithGORMSecretSealer(sealer),
+		WithGORMAuditAppender(auditStore),
+		WithGORMScopedLocalModelLifecycle(localStore),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	managedStarted, err := managedRepository.StartActivation(ctx, application.StartActivationCommand{
+		RolloutID: rolloutID, TargetRevision: second.DesiredRevision,
+		ExpectedDesiredRevision: second.DesiredRevision,
+		ExpectedStateVersion:    failedStateVersion,
+		LeaseDuration:           30 * time.Second,
+		FreshWithin:             20 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if managedStarted.State.TargetRevision != second.DesiredRevision {
+		t.Fatalf("managed activation target=%+v", managedStarted.State)
+	}
+	if _, err := managedRepository.FailActivation(ctx, application.FailActivationCommand{
+		RolloutID: rolloutID, ExpectedPhase: domain.RolloutPhasePreparing,
+		ExpectedVersion: managedStarted.State.Version, ErrorCode: "MODEL_SETTINGS_TEST_ABORTED",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var operationPhase string
+	if err := platform.DB().QueryRow(ctx, `SELECT phase FROM ops.managed_ollama_operations WHERE kind='activation' AND rollout_id=$1::uuid`, string(rolloutID)).Scan(&operationPhase); err != nil {
+		t.Fatal(err)
+	}
+	if operationPhase != string(localmodelruntime.OperationPhaseFailed) {
+		t.Fatalf("managed activation operation phase=%q want=%q", operationPhase, localmodelruntime.OperationPhaseFailed)
+	}
+	var releasedAt *time.Time
+	if err := platform.DB().QueryRow(ctx, `SELECT released_at FROM ops.managed_ollama_holds WHERE owner_kind='preparation' AND rollout_id=$1::uuid`, string(rolloutID)).Scan(&releasedAt); err != nil {
+		t.Fatal(err)
+	}
+	if releasedAt == nil {
+		t.Fatal("managed activation preparation hold was not released")
+	}
 
 	events, err := auditStore.List(ctx, auditdomain.ListQuery{Limit: 10})
 	if err != nil {
@@ -187,6 +352,34 @@ func (appender failingGORMSettingsAuditAppender) AppendModelSettingsChangeScoped
 }
 
 var _ application.ScopedSettingsAuditAppender = failingGORMSettingsAuditAppender{}
+
+type failingGORMActivationLifecycle struct {
+	delegate localmodelruntime.ScopedTxLifecycle
+	err      error
+}
+
+func (lifecycle failingGORMActivationLifecycle) WithScope(scope foundation.TransactionScope) (localmodelruntime.TxStore, error) {
+	store, err := lifecycle.delegate.WithScope(scope)
+	if err != nil {
+		return nil, err
+	}
+	return failingGORMActivationTxStore{TxStore: store, err: lifecycle.err}, nil
+}
+
+type failingGORMActivationTxStore struct {
+	localmodelruntime.TxStore
+	err error
+}
+
+func (store failingGORMActivationTxStore) SeedActivationPreparation(ctx context.Context, command localmodelruntime.ActivationPreparationCommand) (localmodelruntime.ActivationPreparation, error) {
+	_, err := store.TxStore.SeedActivationPreparation(ctx, command)
+	if err != nil {
+		return localmodelruntime.ActivationPreparation{}, err
+	}
+	return localmodelruntime.ActivationPreparation{}, store.err
+}
+
+var _ localmodelruntime.ScopedTxLifecycle = failingGORMActivationLifecycle{}
 
 func TestRepositoryRevisionRolloutRuntimeAndEnqueueFence(t *testing.T) {
 	t.Skip("superseded by the hot-activation repository protocol integration test")

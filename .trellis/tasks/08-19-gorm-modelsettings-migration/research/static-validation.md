@@ -2,7 +2,7 @@
 
 ## 结论
 
-已新增 sibling `GORMRepository`、scoped Audit/Local Runtime/Workflow fence 和独立 `BootstrapGORM`。legacy `Repository`、`Bootstrap`、三处 `cmd/**` 生产接线、迁移与测试文件均未修改；当前实现仅为 TODO 9 前的 staged 路径。
+已新增 sibling `GORMRepository`、scoped Audit/Local Runtime/Workflow fence 和独立 `BootstrapGORM`。legacy `Repository`、`Bootstrap`、三处 `cmd/**` 生产接线与迁移均未修改；没有新增测试文件，只在既有 integration fixture 中原位扩充 GORM 场景。当前实现仍是未接生产的 staged 路径。
 
 实现覆盖 Revision、Rollout、Runtime、Runtime Availability、Participant、Activation、Snapshot 共 25 个 Application 方法，并增加 opaque scope 的 `CheckEnqueue`。Model Settings、Audit 与 Local Runtime 均从同一个 `*platformpostgres.Pool` 获取 GORM root/UoW；没有第二连接池、AutoMigrate、ORM association/hook 或事务外 fallback。
 
@@ -36,16 +36,16 @@ git diff --check
 
 `go mod tidy -diff` 通过且无输出；未修改 `go.mod` 或 `go.sum`。
 
-静态扫描确认：Model Settings Domain/Application 不导入 GORM、database/sql 或 pgx；staged 文件不含 AutoMigrate/Migrator/Save/Preload/Association、自建 DSN/第二 pool；`BootstrapGORM` 没有生产调用点。现有 integration 文件已增加一个由 TODO 9 `testdb` 工厂驱动的 `NewGORMRepository` 主路径/回滚/fence 场景；生产 wiring 与其余跨 owner 门禁仍保持未切换。
+静态扫描确认：Model Settings Domain/Application 不导入 GORM、database/sql 或 pgx；staged 文件不含 AutoMigrate/Migrator/Save/Preload/Association、自建 DSN/第二 pool；`BootstrapGORM` 没有生产调用点。现有 integration 文件已增加一个由 TODO 9 `testdb` 工厂驱动的 `NewGORMRepository` 主路径/回滚/fence 场景；生产 wiring 仍保持未切换，低频专项继续按风险触发。
 
-## TODO 9 真实 PostgreSQL 阻断
+## TODO 9 真实 PostgreSQL 阻断（按精简政策收敛）
 
-以下仍不能由本轮单条 GORM 场景替代：
+本轮主路径及直接改动触发的硬风险已通过真实 Testcontainers；以下完整专项不由单条场景替代，但不再作为无差别 child 门禁：
 
 - GORM placeholder/cast、bytea/nullable/time scan、trigger SQLSTATE 和 no-row 的真实执行。
-- Revision + Audit、Activation + Local Runtime、Fence + River 三条跨 owner 同事务提交/回滚。
-- 双进程 State/Runtime/Participant 锁竞争、DB-time lease、CAS、死锁/serialization 分类。
-- Snapshot repeatable-read/read-only 一致性、cancel/deadline/commit ambiguity、连接释放与 EXPLAIN。
+- Activation + Local Runtime 同事务提交/回滚、Fence + River 同事务提交/回滚，以及 GORM 路径锁竞争/释放代表场景均已通过。
+- DB-time lease、CAS、死锁/serialization 仅在对应风险触发时执行。
+- Snapshot repeatable-read/read-only 一致性、cancel/deadline/commit ambiguity、连接释放与 EXPLAIN 属于专项风险触发项，不作为本轮无差别门禁。
 - Foundation scope 没有 Pool identity；只能由同池 Composition 和 TODO 9 fixture 保证 active scope affinity。
 
-因此 PRD AC、TODO 9 清单和任务状态保持未完成/`in_progress`，不切生产、不删除 legacy。
+因此按精简政策 AC1-AC5 及工厂可用性均可视为满足；任务代码证据可完成验收。生产 Composition 切换、不删除 legacy 和全仓 allowlist 仍由 Final 负责。

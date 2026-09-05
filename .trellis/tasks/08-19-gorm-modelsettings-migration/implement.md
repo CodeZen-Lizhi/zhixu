@@ -26,7 +26,16 @@
 - [x] 抽取 GORM Row/Rows/no-row/context/error helper，复用领域 scanner/validation，不引入 AutoMigrate/association/hooks。
 - [x] 新增独立 `BootstrapGORM`/`GORMBootstrapResult`，同池构造 GORM Audit/Local Runtime/Model Settings；现有 Bootstrap 与 `cmd/**` 不改。
 
-## 4. 局部验证
+## 4. 局部验证（历史基线）
+
+本节勾选项记录 staged 实现阶段的历史验证结果，不是 2026-09-01 精简
+测试政策下每轮必须重复执行的清单。当前迭代以文末“2026-09-01 精简测试
+门禁”和父任务 `research/lean-test-policy-2026-09-01.md` 为准；除非风险
+触发，不再默认运行整包 integration race、命令 compile-only、`go list`
+或 `go mod verify/tidy`。
+
+> 统一标记：本节全部 `[x]` 项均为“历史基线，不再默认执行”，仅保留可
+> 追溯记录；后续验收只按精简门禁和实际风险触发项执行。
 
 - [x] `go test -mod=vendor ./internal/modelsettings/... -count=1 -timeout 60s`
 - [x] `go test -race -mod=vendor ./internal/modelsettings/... -count=1 -timeout 60s`
@@ -48,10 +57,13 @@
 
 ## 6. TODO 9
 
-- [ ] 仅原位参数化既有 legacy/GORM integration factory，不新增测试文件；每个实现使用独立数据库与同一完整 platform Pool。
-- [ ] 实测 Revision+Audit、Activation+Local Runtime、Fence+River 三条同事务提交/回滚。
-- [ ] 实测双进程锁序、DB-time lease、CAS/no-row/SQLSTATE、Snapshot、一致性、cancel/commit ambiguity、连接释放和 EXPLAIN。
-- [ ] TODO 9 全部通过后才勾选 PRD AC；Final 仍负责生产切换和 legacy 删除。
+本节原始清单保留为历史完整契约；按 2026-09-01 精简政策，只有直接改动触发的硬风险项阻断 child 验收，不要求恢复整套矩阵。
+
+- [x] 仅原位参数化既有 integration fixture，不新增测试文件；每个实现使用独立数据库与同一完整 platform Pool。
+- [x] 精简硬风险：Revision+Audit、Activation + Local Runtime、Fence+River 均有同事务提交/回滚代表场景。
+- [x] 精简硬风险：GORM enqueue `FOR SHARE` 与竞争事务 `FOR UPDATE NOWAIT` 的锁冲突/释放代表场景通过。
+- [ ] DB-time lease、CAS/no-row/SQLSTATE、Snapshot、一致性、cancel/commit ambiguity、连接释放和 EXPLAIN 等低频专项按风险触发，不作为当前无差别门禁。
+- [x] 直接改动触发的硬风险项已通过，可勾选对应 PRD AC；Final 仍负责生产切换和 legacy 删除。
 
 ## 7. 回滚点
 
@@ -66,4 +78,4 @@
 
 - 在现有 `repository_integration_test.go` 原位接入 TODO 9 `testdb` 工厂，新增共享 `platformpostgres.Pool` 的 GORM 主路径验证。
 - 已实测 SaveDesired + scoped Audit 的成功写入、Audit 故障整事务回滚、sequence 不复用和 pre-commit activation failure；已实测 caller-owned enqueue fence 及 stale scope 拒绝。
-- 未勾选第 6 节 TODO 9 总项：Activation + Local Runtime、Fence + River worker、双进程/快照/取消/连接/EXPLAIN 等门禁仍待后续 owner 与 Final 组合完成。
+- 第 6 节精简硬风险项已通过：Activation + Local Runtime、GORM 路径锁竞争/释放、Fence + River 均在本轮同事务/竞争场景中覆盖。双进程完整矩阵、快照/取消/连接/EXPLAIN 等低频专项按风险触发，不作为当前无差别门禁。

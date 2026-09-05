@@ -66,7 +66,7 @@ func WithGORMScopedLocalModelLifecycle(lifecycle localmodelruntime.ScopedTxLifec
 }
 
 // GORMRepository is the staged database/sql-backed implementation. Production
-// composition remains on Repository until the real PostgreSQL gate passes.
+// composition remains on Repository until the Final migration owns the cutover.
 type GORMRepository struct {
 	database       *gorm.DB
 	unitOfWork     foundation.UnitOfWork

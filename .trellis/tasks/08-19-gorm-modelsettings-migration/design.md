@@ -117,6 +117,8 @@ TODO 9 前回滚仅删除本 child 新增的 GORM/scoped/Bootstrap 文件；lega
 
 ## 9. TODO 9 真实 PostgreSQL 门禁
 
+本节保留为完整 hard-contract 目录；执行顺序和验收阻断范围按父任务 `research/lean-test-policy-2026-09-01.md` 收敛，仅对直接改动触发的风险项要求代表性专项，不恢复无差别全矩阵。
+
 TODO 9 到位后只修改现有 integration 文件并原位参数化 legacy/GORM implementation，不新增 fixture 或测试文件。每个实现用独立已迁移数据库；迁移完成后用 `platformpostgres.Open` 得到完整 Pool，legacy 用 `Pool.DB()`，GORM/Audit/Local Runtime/UoW 全部使用同一 Pool。
 
 必须验证：
@@ -129,4 +131,4 @@ TODO 9 到位后只修改现有 integration 文件并原位参数化 legacy/GORM
 - scoped enqueue fence + River insert 同事务回滚/提交，并由 pgx Worker 消费。
 - 真实 casts/JSON/nullable/time、trigger SQLSTATE、cancel/deadline、stale scope、commit response loss、连接释放和目标查询计划。
 
-当前未设置 `ZHIXU_TEST_DATABASE_URL` 时只允许 integration compile；不得勾选 PRD AC、完成或归档。
+“未设置 `ZHIXU_TEST_DATABASE_URL` 时只允许 integration compile；不得勾选 PRD AC、完成或归档”是旧基线条件。2026-09-01 已由 `testdb` Testcontainers 实测主路径；当前按父任务精简政策的主路径与直接风险触发项判定 child 验收，生产切线仍由 Final 负责。

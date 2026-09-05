@@ -9,6 +9,7 @@
 - 修改 `internal/modelsettings`、`internal/platform/secretstore`、模型 Factory/Transport、API/Worker Composition Root、
   Workflow Claim/Attempt、Retrieval Search/Reindex、`cmd/modelctl`、`deploy/compose.yml`、
   `deploy/compose.bootstrap.yml` 或根目录 `zhixu` 时，必须应用本规范。
+- 修改 staged `GORMRepository`、`BootstrapGORM`、scoped Audit/Local Runtime 或 River enqueue fence 时，也必须应用本规范。
 - 本规范只覆盖开发 Compose 的 managed 模式；普通二进制 static Env/YAML 模式继续兼容，revision 固定为 `0`。
 
 ### 2. Signatures
@@ -24,6 +25,8 @@
   caller 不提交 revision。Retrieval 以持久 Index/Embedding provenance 获取兼容 generation。
 - Revision、Activation Store、Runtime Store、participant 与 generation lifecycle 是模块内部 seam；正常 Apply 由
   Activation Coordinator 驱动。`zhixu-modelctl` 不再写旧 validating/draining 状态，仅保留兼容的检查/恢复边界。
+- staged GORM 组合入口固定接收一个 `*platformpostgres.Pool`；`GORMRepository.CheckEnqueue` 只接收 caller-owned
+  `foundation.TransactionScope`，不能接收裸 `*gorm.DB`、`*sql.Tx` 或 `pgx.Tx`。
 - 稳态 Compose 固定为 `docker compose --profile workspace-runtime -f deploy/compose.yml ...`；bootstrap
   仅由 launcher 以 `-f deploy/compose.yml -f deploy/compose.bootstrap.yml` 合并渲染和执行。
 
@@ -49,6 +52,12 @@
   不能合并业务上下文或跨用途打开密文。
 - Settings Audit 与 revision 保存同事务，只包含 action、revision、Provider 与 key-configured；禁止 Endpoint、draft、
   密文、Secret、Key 长度或 instance id。
+- staged GORM 的 Model Settings、Audit、managed Local Runtime、UnitOfWork 与 scoped River inserter 必须从同一个
+  `platformpostgres.Pool` 构造。Revision+Audit、Activation+Local Runtime、enqueue fence+River insert 都使用同一个
+  caller-owned `TransactionScope`；只有 UnitOfWork 可以 commit/rollback，协作者不得另开事务或降级到 root connection。
+- `foundation.TransactionScope` 当前不携带 Pool identity：nil 和已结束 scope 必须拒绝，仍活跃但来自另一 Pool 的 scope
+  无法由协作者可靠识别。因此同池 Composition 和同池 Testcontainers fixture 是强制边界，Final 切线前 staged GORM
+  入口不得进入 `cmd/**` 生产组合；不得用第二 Pool、no-op fence 或事务外 fallback 代替该约束。
 - 远程模型只允许 HTTPS，使用 `Proxy=nil`、禁止 redirect、逐新连接重解析的专用 Transport。A/AAAA 任一地址为
   loopback、私网、link-local、multicast、unspecified 或保留地址时整组拒绝；仅 Ollama preset 可访问精确
   `http://127.0.0.1:11434` relay。
@@ -107,6 +116,9 @@
 | 历史 Export 表数据量较大 | repair 前评估全表回填与 `ACCESS EXCLUSIVE` 锁窗口，并安排维护窗口；不得宣称在线零停机 |
 | 存在 `responses` revision 时试图移除 `chat_api_style` | 拒绝破坏性变更；先创建显式 `chat_completions` revision 并完成业务迁移，再以新的 Atlas 前向迁移收敛 schema |
 | 新保存、测试或激活 `responses` | 非重试配置错误；不发 Provider 请求、不追加可激活 revision、不回退到 Chat Completions |
+| GORM scoped 协作者收到 nil 或已结束 scope | 拒绝且零持久写入；不得退回 root connection |
+| GORM UoW callback 在 Audit、Local Runtime preparation 或 River insert 后返回错误 | owning transaction 整体回滚，不留下部分 revision、operation/hold 或 job |
+| GORM scoped 协作者来自不同 Pool | 当前 scope 无法可靠识别；Composition/fixture 必须阻断，Final 切线前不得进入生产 |
 | 任一 initializer 或 modelctl 失败 | launcher 保留退出码并停止，不运行后续 bootstrap、API 或 Worker |
 | 稳态模型出现 bootstrap service 或 completed-service 依赖 | Compose contract 失败；不允许继续启动 |
 | bootstrap wrapper 包含 Workspace grant/bind | Workspace contract 失败；initializer 不得读取宿主 Workspace |
@@ -116,10 +128,13 @@
 
 - Good：保存 desired 后显式 Apply；API/Worker 在原进程中各自构建并探测 candidate，短时关闭新 admission 后原子提交，
   两个 role 的 applied 与 active 收敛，容器 id、StartedAt 与 RestartCount 保持不变。错误 target 不影响 previous serving generation。
+- Good：GORM fixture 从一个 Pool 构造 Repository、Audit、Local Runtime、UoW 和 River；注入失败后三条跨 owner 写入
+  均随 owning transaction 回滚，正常路径提交后再由新事务观察结果。
 - Base：全部模型 disabled 时仍完成 Compose、迁移、readiness、Keyword Search 和 Settings 浏览器闭环。
 - Bad：保存时直接替换共享 Adapter、等待所有任务排空、只更新数据库 active、不冻结 Attempt/Embedding provenance、
   历史 embedding 静默使用 current、把 restart 当正常 Apply、Handler 持有明文 Key、让 Docker Desktop
   Start 代替 launcher bootstrap，或 `down` 隐式删除 volume。
+- Bad：Audit、Local Runtime 或 River 使用第二 Pool/自建事务，或 fence 失效后仍让 River job 提交。
 
 ### 6. Tests Required
 
@@ -130,6 +145,10 @@
   TLS hostname/SNI、精确 loopback relay。
 - PostgreSQL：fresh `00079` Atlas Up、append-only revision、同事务 Audit、并发 PUT/Start、state/runtime/participant
   锁序和 CAS、DB-time stale takeover、commit/fail/recovery、Attempt Claim binding/replay；SQL 必须参数化并用真实 PostgreSQL 验证。
+- staged GORM 精简门禁复用现有 Testcontainers fixture：从同一个 Pool 构造全部 scoped 协作者，至少覆盖一次
+  Revision+Audit、Activation+Local Runtime、fence+River 的提交/回滚，以及 singleton 锁冲突和事务结束后释放；完整
+  双进程、commit ambiguity、连接释放与 EXPLAIN 只在对应风险被直接修改或出现失败信号时追加。作为 child 验收证据的
+  场景必须使用 `FailWhenUnavailable`；只有明确标为可选的本地 smoke 才能在容器 provider 不可用时 skip。
 - Chat API style 迁移测试必须从旧 schema 插入 revision 后向前升级，断言回填 `chat_completions`、非法枚举受 `23514`
   拒绝；插入 `responses` 后应用层和后续前向迁移必须 fail closed，不得通过逆向 DDL 丢失协议事实。
 - HTTP/OpenAPI/Auth：activation exact body、202/409/503、Session-only、Origin/CSRF、`ManageSystemSettings` 路由映射、
@@ -157,6 +176,9 @@ Correct: Worker Claim 事务冻结 fresh runtime binding；Retrieval 按持久 I
 
 Wrong: 只更新数据库 active，或逐 consumer 替换 Adapter 指针并立即关闭旧 client。
 Correct: DB 是单一 publish 点；RuntimeHost 用 generation lease/refcount 绑定资源生命周期并在无引用后退役。
+
+Wrong: GORM Repository、Audit、Local Runtime 和 River 各自开连接/事务，或让 scoped 失败回退到 root connection。
+Correct: 从一个 platform Pool 构造全部协作者，只传 caller-owned opaque scope，并由唯一 UnitOfWork 决定 commit/rollback。
 
 Wrong: docker compose down -v、image prune 或宽泛名称匹配被包装进日常 down。
 Correct: down 保留数据；reset 单独确认；历史 smoke 只按精确 namespace 且确认无容器引用后删除。
