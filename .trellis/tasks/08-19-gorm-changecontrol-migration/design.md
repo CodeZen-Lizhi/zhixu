@@ -128,6 +128,11 @@ Revision 的 Authorization-before-Proposal 顺序与 Atomic Begin 一致；Creat
 
 ### TODO 9 PostgreSQL stage
 
+2026-09-01 调整：以下完整矩阵保留为 Final 与直接风险触发时的验证清单；
+本 child 的默认完成门禁改为父任务精简政策规定的一个 GORM 主路径，加一条
+直接事务/幂等/跨 owner 原子性场景。精简不改变单 Pool、权限、状态机、锁序、
+敏感数据与生产 Composition 边界。
+
 只扩展现有 integration fixtures。每个 legacy/GORM case 使用独立 migrated disposable database；migration pool 关闭后，由一个 `platformpostgres.Open` Pool 提供全部 staged 依赖。GORM fixture 按以下顺序构造，禁止 no-op fence、第二 Pool 或独立 `gorm.Open`：
 
 1. `auditpostgres.NewGORMStore(pool)`，以及由固定测试密钥构造的 `modelcrypto.NewSealer`；

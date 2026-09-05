@@ -57,8 +57,92 @@ The scoped prerequisite was additionally checked with the full Change Control un
 
 `go mod tidy -diff` was run read-only and returned exit 1 for the pre-existing repository-wide `go.sum` normalization drift, plus an unrelated sqlite checksum suggestion. No tidy output was applied and this child changed no dependency files.
 
-## TODO 9 Blockers
+## Focused PostgreSQL Fixture
 
-`ZHIXU_TEST_DATABASE_URL` is not configured. Compile-only integration checks do not prove PostgreSQL placeholder/cast binding, JSONB/array behavior, trigger/deferred closure, real SQLSTATE, DB time, lock competition/deadlock, commit response loss or cross-owner rollback.
+The existing `internal/changecontrol/adapter/postgres/repository_integration_test.go`
+now includes `TestGORMRepositoryProposalApprovalAndIdempotency`. It provisions a
+disposable database through the shared `testdb` factory, constructs the staged
+GORM repository from one platform Pool, and covers the minimal main path:
+Proposal create, exact idempotent replay, conflicting replay with no extra
+Revision, Approval, exact Approval replay, and the single-row Approval invariant.
+This is intentionally narrower than the legacy matrix and does not add
+response-loss, EXPLAIN, or indiscriminate race scenarios.
 
-Before production activation, the existing integration files must run legacy/GORM fixtures on separate disposable databases using the single-Pool dependency chain documented in `design.md`. This includes scoped Proposal rollback, lock competition, historical null/current-pointer behavior and real JSONB/SQLSTATE execution. The task therefore remains `in_progress`; PRD acceptance criteria and all TODO 9 items remain unchecked, and no staged constructor is wired into API or Worker.
+The test was executed against a disposable Testcontainers PostgreSQL database with:
+
+```text
+go test -mod=vendor -tags=integration -run '^TestGORMRepositoryProposalApprovalAndIdempotency$' ./internal/changecontrol/adapter/postgres -count=1 -timeout 120s
+```
+
+Result: PASS (about 11 seconds). The fixture uses the shared `testdb` factory
+and one platform Pool. The separate Approval Dispatch fixture below covers the
+same-Pool Workflow/River and Model Settings scoped fence path.
+
+The existing `internal/changecontrol/adapter/approvaldispatchpostgres/repository_integration_test.go`
+now also includes `TestGORMApprovalDispatchAtomicallyBindsWorkflowAndRiver`.
+It composes Audit GORM, a fixed-key Model Settings GORM repository, Events GORM,
+Change Control GORM as the Workflow cancellation-safety hook, Workflow GORM
+scoped River runtime, and Approval Dispatch GORM from one platform Pool. The
+test verifies the first approved dispatch, an exact replay without safety
+observations, Proposal binding, and exactly one Approval/Run/Node/Outbox/River
+row set. It passed against disposable Testcontainers PostgreSQL with:
+
+```text
+go test -mod=vendor -tags=integration -run '^TestGORMApprovalDispatchAtomicallyBindsWorkflowAndRiver$' ./internal/changecontrol/adapter/approvaldispatchpostgres -count=1 -timeout 180s
+```
+
+Result: PASS (about 8 seconds after the final hook fix). No no-op fence, second pool, or production
+composition change was used.
+
+The existing `internal/changecontrol/adapter/postgres/repository_integration_test.go`
+also includes `TestGORMScopedKnowledgeProposalUsesCallerTransaction`. It verifies
+typed Knowledge Proposal create/exact replay plus immutable Revision 1 read in
+the caller scope, the canonical current Revision pointer, committed visibility,
+explicit callback-error rollback, and rejection of nil, foreign-type, and stale
+scopes. It passed
+against disposable Testcontainers PostgreSQL with:
+
+```text
+go test -mod=vendor -tags=integration -run '^TestGORM(RepositoryProposalApprovalAndIdempotency|ScopedKnowledgeProposalUsesCallerTransaction)$' ./internal/changecontrol/adapter/postgres -count=1 -timeout 180s
+```
+
+Result: PASS (about 13 seconds after the final scope assertions).
+
+## Lean Gate Result And Final Boundary
+
+The focused Testcontainers fixtures now prove the staged Proposal/Approval path,
+same-Pool approved Dispatch chain, and scoped Knowledge Proposal commit/rollback.
+The full historical TODO 9 matrix remains intentionally out of scope under the
+2026-09-01 lean-test policy: response-loss, broad lock competition, EXPLAIN,
+full legacy/GORM parity, and indiscriminate integration race are not rerun
+unless their directly changed mechanism requires them. Production API/Worker
+composition remains on legacy constructors, and the Final constructor/legacy
+deletion gate remains separate from this child.
+
+## Final Trellis Check (2026-09-05)
+
+The final review corrected the focused Approval Dispatch fixture so the Change
+Control GORM repository is installed as Workflow's scoped cancellation-safety
+hook before the runtime is constructed. The replay command now contains only
+the Workspace and persisted Approval binding, which directly verifies that a
+complete replay does not require safety observations. The scoped Knowledge
+fixture now also covers exact create replay, the canonical current Revision
+pointer, and nil/foreign/stale scope rejection in the same lean scenario.
+
+Passed after the fixes:
+
+```text
+go test -mod=vendor ./internal/changecontrol/... -count=1 -timeout 60s
+go vet -mod=vendor ./internal/changecontrol/... ./internal/platform/postgres ./internal/events/... ./internal/workflow/... ./internal/modelsettings/... ./internal/audit/...
+go test -mod=vendor -tags=integration -run '^TestGORM(RepositoryProposalApprovalAndIdempotency|ScopedKnowledgeProposalUsesCallerTransaction)$' ./internal/changecontrol/adapter/postgres -count=1 -timeout 180s
+go test -mod=vendor -tags=integration -run '^TestGORMScopedKnowledgeProposalUsesCallerTransaction$' ./internal/changecontrol/adapter/postgres -count=1 -timeout 180s
+go test -mod=vendor -tags=integration -run '^TestGORMApprovalDispatchAtomicallyBindsWorkflowAndRiver$' ./internal/changecontrol/adapter/approvaldispatchpostgres -count=1 -timeout 180s
+python3 .trellis/scripts/task.py validate .trellis/tasks/08-19-gorm-changecontrol-migration
+gofmt -d internal/changecontrol/adapter/postgres/repository_integration_test.go internal/changecontrol/adapter/approvaldispatchpostgres/repository_integration_test.go
+git diff --check
+```
+
+The forbidden API/import scan remained empty: no independent `gorm.Open`,
+schema mutation, implicit association API, root GORM transaction, production
+GORM composition, or database implementation type entered Domain/Application.
+No P0/P1/P2 finding remains in the reviewed Change Control scope.

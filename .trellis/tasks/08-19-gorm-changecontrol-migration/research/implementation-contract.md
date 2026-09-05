@@ -28,4 +28,10 @@
 
 ## Completion Gate
 
-Static compilation/review proves only staged shape. Completion requires TODO 9 real PostgreSQL parity for triggers, SQLSTATE, JSON/array binding, DB time, lock competition/deadlock, response-loss and cross-owner rollback. Until then the task remains `in_progress`, AC remains unchecked and production remains legacy.
+Static compilation/review proves only staged shape. Under the 2026-09-01 parent
+lean-test policy, child completion additionally requires a real PostgreSQL GORM
+main path and one representative transaction/idempotency/cross-owner atomicity
+scenario. The former full parity matrix for triggers, SQLSTATE, DB time, broad
+lock competition, response-loss and EXPLAIN remains a Final or direct-risk gate,
+not a default child blocker. Completion never switches production: Composition
+remains legacy until Final.

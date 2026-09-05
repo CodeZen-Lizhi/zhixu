@@ -519,6 +519,25 @@ func (r *RuntimeRepository) StartTx(
     application.RuntimeStartRequest,
 ) (application.RuntimeStartResult, error)
 
+type ScopedRuntimeStarter interface {
+    StartScoped(context.Context, foundation.TransactionScope, RuntimeStartRequest) (RuntimeStartResult, error)
+}
+
+func NewGORMRuntimeRepositoryWithHooks(
+    *platformpostgres.Pool,
+    riveradapter.Options,
+    riveradapter.ScopedEnqueueFence,
+    GORMRuntimeRepositoryHooks,
+) (*GORMRuntimeRepository, error)
+
+func NewGORMApprovalDispatchRepository(
+    *platformpostgres.Pool,
+    application.ScopedRuntimeStarter,
+    foundation.IDGenerator,
+    foundation.Clock,
+    ...eventsapplication.ScopedAppender,
+) (*GORMApprovalDispatchRepository, error)
+
 func (r *Repository) FindWritebackExecutionByKey(
     context.Context,
     foundation.ID,
@@ -533,6 +552,7 @@ func (r *Repository) FindWritebackExecutionByKey(
 - `proposal.workflow_run_id` 通过 `(workflow_run_id,workspace_id) → workflow.run(id,workspace_id)` 复合 FK 只允许 NULL→唯一同 Workspace Run，禁止 INSERT 预绑定、解绑、换绑或在绑定后移动 Run Workspace；历史 Proposal 保持 NULL。
 - Approved 首次决定或历史未绑定补建必须先在事务外通过 Target Hash 与 strict Git snapshot；完整绑定 exact replay 不读取文件/Git。
 - `Dispatcher` 在一个调用方持有的 pgx transaction 内保存 Approval、Proposal binding、固定 Definition/Run/Node、版本化 Workflow Outbox 与 River `InsertTx` Job；Rejected 不创建 Workflow 事实。
+- staged GORM composition 必须从同一个 `platformpostgres.Pool` 构造 Events、Change Control、Model Settings fence、Workflow scoped River runtime 与 Approval Dispatch；先构造 Change Control，并通过 `GORMRuntimeRepositoryHooks.CancellationSafety` 注入 Workflow。opaque scope 当前不携带 Pool identity，不能用第二 Pool、no-op fence 或省略 cancellation guard 代替 composition 约束。
 - 固定 Node input 只允许 `schema_version/proposal_id/revision_id/approved_change_hash`；River Args 只允许 `schema_version/node_run_id/dispatch_no`。
 - Worker Claim 后使用 `safe-writeback:<node_run_id>` exact lookup；不存在才签发新的瞬时双授权并 Atomic Begin。原始 Credential 永不持久化，数据库只保存 Authorization token hash。
 - 正文、相对路径和 locator/identity token 只能存在于拥有恢复事实的 Change Control Proposal/Execution 记录，不得复制到 Runtime Job、Node input、Attempt、dispatch Outbox 或错误摘要。
@@ -546,6 +566,7 @@ func (r *Repository) FindWritebackExecutionByKey(
 | 首次/补建安全观察缺失或与 Base/HEAD 不一致 | `APPROVAL_DISPATCH_SAFETY_CONFLICT` / VersionConflict | 不创建 Workflow |
 | Runtime 已存在但 Approval 不存在 | `APPROVAL_DISPATCH_RUNTIME_ORPHANED` / ConsistencyViolation | 全事务回滚 |
 | Proposal binding 与 Runtime replay 不一致 | `APPROVAL_DISPATCH_BINDING_CONFLICT` / ConsistencyViolation | 不改绑定 |
+| GORM scoped collaborators 来自不同 Pool | opaque scope 无法在运行时可靠识别 | Composition 与同池 Testcontainers fixture 必须阻断，禁止接入生产 |
 | Execution exact lookup 全绑定不一致 | `WRITEBACK_EXECUTION_BINDING_CONFLICT` / ManualRecoveryRequired | 不签发新 Credential、不开始副作用 |
 | 更高 River attempt 遇到旧 delivery 未过期 lease | `WORKFLOW_LEASE_HELD` / RetryableFailure | River 保留唯一 Job，lease 到期后 reclaim |
 | River/数据库暂时错误或死锁 | 对应 Retryable/Dependency 错误 | 调用方重试前先 exact lookup |
@@ -553,12 +574,14 @@ func (r *Repository) FindWritebackExecutionByKey(
 ### 5. Good / Base / Bad Cases
 
 - Good：两个并发 Approved 请求只提交一个 Approval、Run、Node、Workflow Outbox 和 River Job，另一个返回相同 binding 的 replay。
+- Good：GORM fixture 先构造同池 Change Control guard，再构造带 Model Settings enqueue fence 的 Workflow runtime；exact replay 只提交 Workspace 与已持久 Approval binding，不携带 Base/HEAD safety observation。
 - Base：历史 Approved Proposal 的 `workflow_run_id` 为 NULL；重新通过文件/Git 安全门后补建唯一 dispatch。
-- Bad：Handler 先提交 Approval，再单独调用 Workflow Start；或完整 binding replay 重新读取已被写回改变的文件/Git。
+- Bad：Handler 先提交 Approval，再单独调用 Workflow Start；完整 binding replay 重新读取已被写回改变的文件/Git；或 GORM runtime 未注入 Change Control cancellation guard。
 
 ### 6. Tests Required
 
 - PostgreSQL：并发唯一 binding、Rejected 无 Workflow、Runtime 失败全回滚、commit response-loss 后 exact replay、迁移重复 Up 与同 Workspace 约束。
+- staged GORM 精简门禁：复用现有 Testcontainers fixture，从一个 Pool 构造真实 Model Settings fence、Change Control cancellation guard、Workflow scoped River producer 与 Dispatch；断言一次 Approval/Run/Node/Outbox/River Job，并以无 safety observation 的命令 exact replay。
 - Application/HTTP：首次 201、exact replay 200、Approved 返回同一 status URL、Rejected 省略 Workflow 字段、完整 replay 不访问 FS/Git。
 - Bootstrap：exact lookup、双授权、Begin response-loss、binding conflict Manual、授权 replay 无 Credential 时拒绝。
 - 真实 Smoke：HTTP Approval → River Claim → Bootstrap → Safe Writeback → Workflow Complete；双 Worker只产生一个 Execution/Commit/Mapping/Reindex Outbox。
@@ -572,6 +595,9 @@ Correct: 单一 pgx transaction 内 Approval + Proposal binding + Definition/Run
 
 Wrong: 每次 delivery 都重签 Credential 并 Begin，或把 Credential 放进 River Args 方便恢复。
 Correct: Claim 后先按 safe-writeback:<node_run_id> exact lookup；只有不存在才瞬时签发双授权并 Atomic Begin，响应丢失后再次 exact lookup。
+
+Wrong: GORM fixture 先构造无 cancellation guard 的 Workflow runtime，或给 River 配 no-op fence 后只断言 Dispatch 返回成功。
+Correct: 同一 Pool 依次构造 Model Settings fence、Events、Change Control guard、Workflow scoped River runtime 和 Dispatch，并核对五类持久事实的唯一 binding。
 ```
 
 ## M6-B Reindex Consumer Persistence Contract

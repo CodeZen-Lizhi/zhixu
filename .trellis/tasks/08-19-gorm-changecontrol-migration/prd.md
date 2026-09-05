@@ -26,18 +26,18 @@
 
 ## Acceptance Criteria
 
-- [ ] GORM sibling 覆盖 Change Control 主 Repository 的现有 Proposal/Revision/Approval/Authorization/Writeback 端口，状态机与锁序不变。
-- [ ] GORM Approval Dispatch 通过同一 opaque scope 原子维护 Approval、Proposal binding、Workflow facts、River Job 和可选 rejected Event。
-- [ ] 双授权消费、Revision supersede fence、幂等与事件原子写在真实 PostgreSQL 上有核心路径证据；直接改动的事务/锁边界另有一条代表性提交/回滚或冲突场景。
-- [ ] Domain/Application 不新增底层数据库类型，生产 Composition 仍只构造 legacy pgx，实现可独立回滚。
-- [ ] Change Control scoped Knowledge Proposal 能力可在调用方同一 UoW 中 create-or-exact-load typed Proposal/Revision 1，并拒绝 nil、foreign type 与 stale scope；Graph 不再直接拥有 Change Control 表写入。
-- [ ] Go/SQL/Trellis Review、`git diff --check`、受影响包既有 test/vet 和 task 校验通过；全量 integration race、response-loss、EXPLAIN 与 cmd compile 按风险触发。
+- [x] GORM sibling 覆盖 Change Control 主 Repository 的现有 Proposal/Revision/Approval/Authorization/Writeback 端口，状态机与锁序不变。
+- [x] GORM Approval Dispatch 通过同一 opaque scope 原子维护 Approval、Proposal binding、Workflow facts、River Job 和可选 rejected Event。
+- [x] 双授权消费、Revision supersede fence、幂等与事件原子写有冻结基线与静态审查证据；真实 PostgreSQL 精简门禁覆盖 Proposal/Approval 幂等冲突、scoped commit/rollback，以及 Approval/Workflow/River 同事务绑定。
+- [x] Domain/Application 不新增底层数据库类型，生产 Composition 仍只构造 legacy pgx，实现可独立回滚。
+- [x] Change Control scoped Knowledge Proposal 能力可在调用方同一 UoW 中 create-or-exact-load typed Proposal/Revision 1，并拒绝 nil、foreign type 与 stale scope；该 owner Port 使后续 Graph GORM child 无需直接拥有 Change Control 表写入。
+- [x] Go/SQL/Trellis Review、`git diff --check`、受影响包既有 test/vet 和 task 校验通过；全量 integration race、response-loss、EXPLAIN 与 cmd compile 按风险触发。
 
-- [ ] TODO 9 工厂可用；本 child 仍不得切换生产 Composition 或删除 legacy，TODO 3 仅阻断 Final。
+- [x] TODO 9 Testcontainers 工厂可用；本 child 未切换生产 Composition 或删除 legacy，TODO 3/Final 收口保持独立。
 
 ## 2026-09-01 测试范围调整
 
-按父任务精简政策，Change Control 不再默认要求完整 response-loss/故障/取消/EXPLAIN 矩阵；保留双授权、锁序、幂等、状态机、权限和同 scope 原子性验证。
+按父任务精简政策，Change Control 不再默认要求完整 response-loss/故障/取消/EXPLAIN 矩阵。现有领域/legacy 基线与 Go/SQL 静态审查继续约束双授权、锁序、状态机和权限；新增 Testcontainers 场景验证 GORM 主路径、幂等冲突、同 scope commit/rollback 和 Approval/Workflow/River 原子组合。
 
 ## Notes
 

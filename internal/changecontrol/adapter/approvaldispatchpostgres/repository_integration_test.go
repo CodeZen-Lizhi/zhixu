@@ -3,6 +3,7 @@
 package approvaldispatchpostgres
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -13,13 +14,17 @@ import (
 	"testing"
 	"time"
 
+	auditpostgres "github.com/CodeZen-Lizhi/zhixu/internal/audit/adapter/postgres"
 	changecontrolpostgres "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/postgres"
 	changedispatch "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/dispatch"
 	"github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/domain"
 	eventcontract "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/eventcontract"
 	eventspostgres "github.com/CodeZen-Lizhi/zhixu/internal/events/adapter/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	modelsettingspostgres "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/adapter/postgres"
+	modelcrypto "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/crypto"
 	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	workflowpostgres "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/postgres"
 	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
 	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
@@ -113,6 +118,101 @@ func TestApprovalDispatchAtomicallyCreatesAndReplaysWorkflowRiverBinding(t *test
 		if strings.Contains(strings.ToLower(input), forbidden) {
 			t.Fatalf("node input leaked %q: %s", forbidden, input)
 		}
+	}
+}
+
+// TestGORMApprovalDispatchAtomicallyBindsWorkflowAndRiver is the focused
+// PostgreSQL gate for the staged Approval Dispatch adapter. It keeps one
+// shared platform Pool across Change Control, Model Settings, Workflow,
+// Events, and River so the caller-owned scope is exercised end to end.
+func TestGORMApprovalDispatchAtomicallyBindsWorkflowAndRiver(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+	defer cancel()
+	fixture := testdb.Require(t, testdb.Config{Availability: testdb.FailWhenUnavailable, MaxConns: 16})
+	platform := fixture.Pool()
+	if platform == nil || platform.DB() == nil {
+		t.Fatal("PostgreSQL fixture did not provide a shared platform pool")
+	}
+
+	sealer, err := modelcrypto.NewSealer(bytes.Repeat([]byte{0x2a}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	auditStore, err := auditpostgres.NewGORMStore(platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings, err := modelsettingspostgres.NewGORMRepository(platform,
+		modelsettingspostgres.WithGORMSecretSealer(sealer),
+		modelsettingspostgres.WithGORMAuditAppender(auditStore),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := eventspostgres.NewGORMStore(platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := changecontrolpostgres.NewGORMRepository(platform, events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := workflowpostgres.NewGORMRuntimeRepositoryWithHooks(
+		platform,
+		riveradapter.DefaultOptions(),
+		settings,
+		workflowpostgres.GORMRuntimeRepositoryHooks{CancellationSafety: repository},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatcher, err := NewGORMApprovalDispatchRepository(
+		platform, runtime, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, events,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	workspaceID, proposal := createDispatchProposal(t, ctx, platform.DB(), repository, "gorm-atomic")
+	head := strings.Repeat("c", 40)
+	command := changedispatch.Command{
+		WorkspaceID: workspaceID,
+		Approval: domain.Approval{
+			ID: mustDispatchID(t), ProposalID: proposal.ID, RevisionID: proposal.Revision.ID,
+			ChangeHash: proposal.Revision.ChangeHash, Decision: domain.DecisionApproved,
+			ApprovedGitHead: &head, DecidedAt: time.Now().UTC(),
+		},
+		ObservedBaseHash: proposal.Revision.BaseHash,
+		ObservedGitHead:  head,
+	}
+	first, err := dispatcher.DecideAndDispatch(ctx, command)
+	if err != nil || first.Replayed || first.DispatchStatus != changedispatch.StatusQueued || first.WorkflowRunID == "" || first.NodeRunID == "" || first.JobID < 1 {
+		t.Fatalf("first=%#v err=%v", first, err)
+	}
+	replayed, err := dispatcher.DecideAndDispatch(ctx, changedispatch.Command{
+		WorkspaceID: workspaceID,
+		Approval:    command.Approval,
+	})
+	if err != nil || !replayed.Replayed || replayed.DispatchStatus != changedispatch.StatusReplayed || replayed.WorkflowRunID != first.WorkflowRunID || replayed.NodeRunID != first.NodeRunID || replayed.JobID != first.JobID {
+		t.Fatalf("replayed=%#v err=%v", replayed, err)
+	}
+
+	persisted, err := repository.GetProposal(ctx, proposal.ID)
+	if err != nil || persisted.WorkflowRunID == nil || *persisted.WorkflowRunID != first.WorkflowRunID || persisted.Status != domain.StatusApproved {
+		t.Fatalf("proposal=%#v err=%v", persisted, err)
+	}
+	var approvals, runs, nodes, outbox, jobs int
+	if err := platform.DB().QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM change_control.approval WHERE proposal_id=$1),
+		(SELECT count(*) FROM workflow.run WHERE id=$2),
+		(SELECT count(*) FROM workflow.node_run WHERE id=$3),
+		(SELECT count(*) FROM workflow.outbox_event WHERE run_id=$2),
+		(SELECT count(*) FROM workflow.river_job WHERE kind=$4 AND args->>'node_run_id'=$5)`,
+		string(proposal.ID), string(first.WorkflowRunID), string(first.NodeRunID), riveradapter.NodeJobKind, string(first.NodeRunID)).Scan(&approvals, &runs, &nodes, &outbox, &jobs); err != nil {
+		t.Fatal(err)
+	}
+	if approvals != 1 || runs != 1 || nodes != 1 || outbox != 1 || jobs != 1 {
+		t.Fatalf("approval=%d run=%d node=%d outbox=%d jobs=%d", approvals, runs, nodes, outbox, jobs)
 	}
 }
 
@@ -317,7 +417,11 @@ func approvalDispatchEventFixture(t *testing.T, ctx context.Context, pool *pgxpo
 	return repository, dispatcher
 }
 
-func createDispatchProposal(t *testing.T, ctx context.Context, pool *pgxpool.Pool, repository *changecontrolpostgres.Repository, suffix string) (foundation.ID, domain.Proposal) {
+type dispatchProposalCreator interface {
+	CreateProposal(context.Context, domain.Proposal) (domain.Proposal, error)
+}
+
+func createDispatchProposal(t *testing.T, ctx context.Context, pool *pgxpool.Pool, repository dispatchProposalCreator, suffix string) (foundation.ID, domain.Proposal) {
 	t.Helper()
 	workspaceID := mustDispatchID(t)
 	now := time.Now().UTC().Add(-time.Second)
@@ -333,7 +437,7 @@ func createDispatchProposal(t *testing.T, ctx context.Context, pool *pgxpool.Poo
 		t.Fatal(err)
 	}
 	proposal := domain.Proposal{
-		ID: proposalID, WorkspaceID: workspaceID, RiskLevel: domain.ProposalRiskLevelLow, TargetPath: "notes/a.md", IdempotencyKey: "proposal-" + suffix,
+		ID: proposalID, WorkspaceID: workspaceID, Type: domain.ProposalTypeFilePatch, RiskLevel: domain.ProposalRiskLevelLow, TargetPath: "notes/a.md", IdempotencyKey: "proposal-" + suffix,
 		RequestHash: requestHash,
 		Status:      domain.StatusReady, Version: 1, CreatedAt: now, UpdatedAt: now,
 		Revision: domain.Revision{ID: revisionID, ProposalID: proposalID, RevisionNo: 1, TargetPath: "notes/a.md", BaseHash: baseHash, Content: content, EvidenceSummary: "evidence", Risk: "low", RollbackPlan: "revert", ChangeHash: domain.ComputeChangeHash("notes/a.md", baseHash, content), CreatedAt: now},

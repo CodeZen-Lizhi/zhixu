@@ -18,6 +18,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	knowledge "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
 	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -193,6 +194,234 @@ func TestRepositoryProposalApprovalAndImmutability(t *testing.T) {
 
 	assertImmutable(t, ctx, tx, `UPDATE change_control.proposal_revision SET content='tampered' WHERE id=$1`, string(revisionID))
 	assertImmutable(t, ctx, tx, `UPDATE change_control.approval SET decision='rejected' WHERE id=$1`, string(approval.ID))
+}
+
+// TestGORMRepositoryProposalApprovalAndIdempotency is the focused PostgreSQL
+// gate for the staged adapter. It covers the main Proposal/Approval path and
+// the highest-value replay/conflict rollback invariant without rebuilding the
+// legacy matrix in this child task.
+func TestGORMRepositoryProposalApprovalAndIdempotency(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	fixture := testdb.Require(t, testdb.Config{Availability: testdb.FailWhenUnavailable, MaxConns: 8})
+	platform := fixture.Pool()
+	if platform == nil || platform.DB() == nil {
+		t.Fatal("PostgreSQL fixture did not provide a shared platform pool")
+	}
+	if err := platform.Ping(ctx); err != nil {
+		t.Fatal(err)
+	}
+	repository, err := NewGORMRepository(platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ids := foundation.NewUUIDGenerator(nil)
+	workspaceID, err := ids.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposalID, err := ids.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	revisionID, err := ids.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	if _, err := platform.DB().Exec(ctx, `
+		INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at)
+		VALUES($1,$2,$3,$3,$4,'active',1,$4,$4)`,
+		string(workspaceID), "GORM Change Control", "/tmp/change-control-gorm-"+string(workspaceID), now); err != nil {
+		t.Fatal(err)
+	}
+
+	baseHash := strings.Repeat("a", 64)
+	content := "gorm proposal content\n"
+	changeHash := domain.ComputeChangeHash("notes/gorm.md", baseHash, content)
+	requestHash, err := domain.ComputeRequestHashWithRiskLevel(workspaceID, "notes/gorm.md", baseHash, content, "evidence", domain.ProposalRiskLevelLow, "low", "revert")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposal := domain.Proposal{
+		ID: proposalID, WorkspaceID: workspaceID, Type: domain.ProposalTypeFilePatch,
+		RiskLevel: domain.ProposalRiskLevelLow, TargetPath: "notes/gorm.md", IdempotencyKey: "gorm-proposal-main",
+		RequestHash: requestHash, Status: domain.StatusReady, Version: 1, CreatedAt: now, UpdatedAt: now,
+		Revision: domain.Revision{ID: revisionID, ProposalID: proposalID, RevisionNo: 1, TargetPath: "notes/gorm.md", BaseHash: baseHash,
+			Content: content, EvidenceSummary: "evidence", Risk: "low", RollbackPlan: "revert", ChangeHash: changeHash, CreatedAt: now},
+	}
+	persisted, err := repository.CreateProposal(ctx, proposal)
+	if err != nil || persisted.ID != proposalID || persisted.CurrentRevisionID != revisionID {
+		t.Fatalf("created proposal=%#v err=%v", persisted, err)
+	}
+
+	replay := proposal
+	replay.ID, replay.Revision.ID = mustIntegrationUUID(t), mustIntegrationUUID(t)
+	replayed, err := repository.CreateProposal(ctx, replay)
+	if err != nil || replayed.ID != proposalID || replayed.Revision.ID != revisionID {
+		t.Fatalf("replayed proposal=%#v err=%v", replayed, err)
+	}
+
+	conflict := replay
+	conflict.ID, conflict.Revision.ID = mustIntegrationUUID(t), mustIntegrationUUID(t)
+	conflict.Revision.Content = "different content\n"
+	conflict.Revision.ChangeHash = domain.ComputeChangeHash(proposal.TargetPath, baseHash, conflict.Revision.Content)
+	conflict.RequestHash = mustFileRequestHash(t, workspaceID, proposal.TargetPath, baseHash, conflict.Revision.Content, "evidence", domain.ProposalRiskLevelLow, "low", "revert")
+	if _, err := repository.CreateProposal(ctx, conflict); !hasCode(err, "IDEMPOTENCY_KEY_REUSED") {
+		t.Fatalf("idempotency conflict err=%v", err)
+	}
+	var revisionCount int
+	if err := platform.DB().QueryRow(ctx, `SELECT count(*) FROM change_control.proposal_revision WHERE proposal_id=$1`, string(proposalID)).Scan(&revisionCount); err != nil {
+		t.Fatal(err)
+	}
+	if revisionCount != 1 {
+		t.Fatalf("revision count after conflict=%d, want 1", revisionCount)
+	}
+
+	approvedHead := strings.Repeat("b", 40)
+	approval := domain.Approval{ID: mustIntegrationUUID(t), ProposalID: proposalID, RevisionID: revisionID, ChangeHash: changeHash, Decision: domain.DecisionApproved, ApprovedGitHead: &approvedHead, DecidedAt: now.Add(time.Minute)}
+	approved, err := repository.Approve(ctx, approval)
+	if err != nil || approved.ID != approval.ID {
+		t.Fatalf("approved=%#v err=%v", approved, err)
+	}
+	replayedApproval, err := repository.Approve(ctx, domain.Approval{ID: mustIntegrationUUID(t), ProposalID: proposalID, RevisionID: revisionID, ChangeHash: changeHash, Decision: domain.DecisionApproved, ApprovedGitHead: &approvedHead, DecidedAt: now.Add(2 * time.Minute)})
+	if err != nil || replayedApproval.ID != approval.ID {
+		t.Fatalf("replayed approval=%#v err=%v", replayedApproval, err)
+	}
+	var approvalCount int
+	if err := platform.DB().QueryRow(ctx, `SELECT count(*) FROM change_control.approval WHERE proposal_id=$1`, string(proposalID)).Scan(&approvalCount); err != nil {
+		t.Fatal(err)
+	}
+	if approvalCount != 1 {
+		t.Fatalf("approval count after replay=%d, want 1", approvalCount)
+	}
+}
+
+// TestGORMScopedKnowledgeProposalUsesCallerTransaction verifies the typed
+// knowledge port commits and rolls back through the caller-owned scope.
+func TestGORMScopedKnowledgeProposalUsesCallerTransaction(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+	defer cancel()
+	fixture := testdb.Require(t, testdb.Config{Availability: testdb.FailWhenUnavailable, MaxConns: 8})
+	platform := fixture.Pool()
+	if platform == nil || platform.DB() == nil {
+		t.Fatal("PostgreSQL fixture did not provide a shared platform pool")
+	}
+	repository, err := NewGORMRepository(platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uow, err := platform.UnitOfWork()
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaceID := mustIntegrationUUID(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	if _, err := platform.DB().Exec(ctx, `
+		INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at)
+		VALUES($1,$2,$3,$3,$4,'active',1,$4,$4)`,
+		string(workspaceID), "GORM Knowledge", "/tmp/knowledge-gorm-"+string(workspaceID), now); err != nil {
+		t.Fatal(err)
+	}
+
+	newProposal := func(idempotency string) domain.Proposal {
+		proposalID := mustIntegrationUUID(t)
+		revisionID := mustIntegrationUUID(t)
+		change := knowledgeChangeFixtureForIntegration()
+		requestHash, hashErr := domain.ComputeKnowledgeChangeRequestHashWithRiskLevel(
+			workspaceID, change, domain.ProposalRiskLevelHigh, "medium", "restore relation",
+		)
+		if hashErr != nil {
+			t.Fatal(hashErr)
+		}
+		changeHash, hashErr := domain.ComputeKnowledgeChangeHash(change, "medium", "restore relation")
+		if hashErr != nil {
+			t.Fatal(hashErr)
+		}
+		return domain.Proposal{
+			ID: proposalID, WorkspaceID: workspaceID, Type: domain.ProposalTypeKnowledgeChange,
+			RiskLevel: domain.ProposalRiskLevelHigh, IdempotencyKey: idempotency, RequestHash: requestHash,
+			Status: domain.StatusReady, Version: 1, CreatedAt: now, UpdatedAt: now,
+			Revision: domain.Revision{
+				ID: revisionID, ProposalID: proposalID, RevisionNo: 1,
+				Risk: "medium", RollbackPlan: "restore relation", ChangeHash: changeHash,
+				KnowledgeChange: &change, CreatedAt: now,
+			},
+		}
+	}
+
+	proposal := newProposal("gorm-knowledge-commit")
+	replayProposal := newProposal("gorm-knowledge-commit")
+	var created domain.Proposal
+	var staleScope foundation.TransactionScope
+	if err := uow.Within(ctx, foundation.TransactionOptions{}, func(callbackCtx context.Context, scope foundation.TransactionScope) error {
+		staleScope = scope
+		var createErr error
+		created, createErr = repository.CreateKnowledgeChangeProposalScoped(callbackCtx, scope, proposal)
+		if createErr != nil {
+			return createErr
+		}
+		replayed, replayErr := repository.CreateKnowledgeChangeProposalScoped(callbackCtx, scope, replayProposal)
+		if replayErr != nil {
+			return replayErr
+		}
+		if replayed.ID != proposal.ID || replayed.Revision.ID != proposal.Revision.ID || replayed.CurrentRevisionID != proposal.Revision.ID {
+			return fmt.Errorf("scoped knowledge replay=%#v", replayed)
+		}
+		loaded, loadErr := repository.GetInitialKnowledgeChangeProposalScoped(callbackCtx, scope, workspaceID, proposal.ID)
+		if loadErr != nil {
+			return loadErr
+		}
+		if loaded.ID != proposal.ID || loaded.Revision.RevisionNo != 1 || loaded.CurrentRevisionID != proposal.Revision.ID || loaded.Revision.KnowledgeChange == nil {
+			return fmt.Errorf("scoped knowledge proposal=%#v", loaded)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if created.ID != proposal.ID || created.CurrentRevisionID != proposal.Revision.ID || created.Revision.KnowledgeChange == nil {
+		t.Fatalf("created=%#v", created)
+	}
+	if persisted, err := repository.GetProposal(ctx, proposal.ID); err != nil || persisted.CurrentRevisionID != proposal.Revision.ID || persisted.Revision.KnowledgeChange == nil {
+		t.Fatalf("persisted=%#v err=%v", persisted, err)
+	}
+	if _, err := repository.CreateKnowledgeChangeProposalScoped(ctx, nil, newProposal("gorm-knowledge-nil-scope")); !hasCode(err, "CHANGE_CONTROL_DATABASE_UNAVAILABLE") {
+		t.Fatalf("nil scope err=%v", err)
+	}
+	if _, err := repository.GetInitialKnowledgeChangeProposalScoped(ctx, foreignChangeControlTransactionScope{}, workspaceID, proposal.ID); !hasCode(err, "CHANGE_CONTROL_DATABASE_UNAVAILABLE") {
+		t.Fatalf("foreign scope err=%v", err)
+	}
+	if _, err := repository.GetInitialKnowledgeChangeProposalScoped(ctx, staleScope, workspaceID, proposal.ID); !hasCode(err, "CHANGE_CONTROL_DATABASE_UNAVAILABLE") {
+		t.Fatalf("stale scope err=%v", err)
+	}
+
+	rolledBack := newProposal("gorm-knowledge-rollback")
+	rollbackErr := errors.New("intentional scoped rollback")
+	if err := uow.Within(ctx, foundation.TransactionOptions{}, func(callbackCtx context.Context, scope foundation.TransactionScope) error {
+		if _, err := repository.CreateKnowledgeChangeProposalScoped(callbackCtx, scope, rolledBack); err != nil {
+			return err
+		}
+		return rollbackErr
+	}); !errors.Is(err, rollbackErr) {
+		t.Fatalf("rollback err=%v", err)
+	}
+	if _, err := repository.GetProposal(ctx, rolledBack.ID); !hasCode(err, "PROPOSAL_NOT_FOUND") {
+		t.Fatalf("rolled back proposal err=%v", err)
+	}
+}
+
+type foreignChangeControlTransactionScope struct{}
+
+func (foreignChangeControlTransactionScope) TransactionScope() {}
+
+func mustIntegrationUUID(t *testing.T) foundation.ID {
+	t.Helper()
+	id, err := foundation.NewUUIDGenerator(nil).New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
 }
 
 func TestProposalRevisionMigrationRejectsIncompleteCurrentBindings(t *testing.T) {

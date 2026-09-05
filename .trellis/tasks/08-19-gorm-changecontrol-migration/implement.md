@@ -67,25 +67,32 @@
 
 ## 9. TODO 9 PostgreSQL Gate
 
-- [ ] 仅在现有 integration 文件建立 legacy/GORM fixtures；每个实现独立 disposable DB，不新增测试文件。
-- [ ] 一个普通 platform Pool 按 `Audit GORM -> fixed-test-key Sealer -> Model Settings GORM enqueue fence -> Events GORM -> Change Control GORM cancellation guard -> Workflow GORM scoped River runtime -> Dispatch GORM` 构造全部依赖；legacy/GORM 独立数据库，验证无 no-op fence、第二 pool、错配或连接泄漏。
-- [ ] 成对覆盖五类 Proposal（含 conflict rollback 后 root read、Downstream report/owner 并发漂移）、Approval nil-Event rollback replay与 Event commit replay、Authorization、Revision fence、Writeback saga、Dispatch approved/rejected/replay/failure。
-- [ ] 在各同包现有 integration 文件分别包装 Change Control/Dispatch 被测 Repository 自身的 UoW（不包装 Workflow runtime UoW），用 success-then-error 验证首次 commit failure；有 receipt/binding 的方法后续由未包装实例 exact replay，Checkpoint 则用 `GetWritebackExecution` + Application `Resume` 继续；并发 barrier不靠 sleep。
-- [ ] 验证 00015/00090/deferred/append-only/binding triggers、真实 SQLSTATE、DB time、cancel/deadline、Rows/连接与关键 EXPLAIN。
-- [ ] 在用户允许的外部 DSN/Testcontainers环境运行受影响 integration race gate。
+2026-09-01 精简政策取代本节原有的逐项完整矩阵；旧矩阵仍作为 Final
+或直接风险触发时的备查清单，不再阻断本 child 归档。
+
+- [x] 只扩展两个 owner 的现有 integration 文件，均使用 `testdb.Require` 创建 disposable PostgreSQL；未新增测试文件。
+- [x] GORM Proposal/Approval 主路径覆盖 create、exact replay、幂等冲突回滚和单行 Approval 不变量。
+- [x] scoped Knowledge Proposal 在 caller UoW 中覆盖 create/exact replay、canonical current Revision pointer、commit、rollback，以及 nil、foreign type、stale scope 拒绝。
+- [x] Approval Dispatch 使用单一 Pool 按 `Audit GORM -> fixed-test-key Sealer -> Model Settings GORM enqueue fence -> Events GORM -> Change Control GORM cancellation guard -> Workflow GORM scoped River runtime -> Dispatch GORM` 完成 approved/replay，并断言唯一 Approval/Run/Node/Outbox/River Job。
+- [x] replay 仅提交 Workspace 与持久 Approval binding，不携带 safety observations，证明完整重放不重读 safety input。
+- [x] 未使用 no-op fence、第二 Pool、独立 `gorm.Open` 或生产 Composition 切换。
+
+历史完整矩阵包括五类 Proposal 成对覆盖、response-loss、广泛锁竞争、
+00015/00090 逐项负测、取消/连接释放、EXPLAIN 和 integration race；仅在
+Final 或其机制被直接改动时按风险执行。
 
 ## 10. Completion And Rollback
 
-- [x] TODO 9 交付前保持 PRD AC 未勾、task status=`in_progress`、legacy production 不变，不归档/宣称完成；该历史前置现已解除，当前完成标准以 2026-09-01 精简测试门禁为准。
-- [ ] TODO 9 通过后记录下游 Knowledge/Graph/Retrieval/Artifact 和 Final constructor/legacy删除清单。
-- [ ] 回滚只删除本 child staged adapter/helper与必要测试fixture；不回滚 Schema/Foundation/Workflow/Events/Audit或用户改动。
+- [x] 2026-09-01 精简 PostgreSQL 门禁通过；legacy production 保持不变，归档只表示 staged child 完成。
+- [x] 下游保持 Knowledge/Graph/Retrieval/Artifact scoped contract；Final 统一负责 constructor 切换、legacy 删除和 pgx allowlist 收口。
+- [x] 回滚只删除本 child staged adapter/helper与必要测试 fixture；不回滚 Schema/Foundation/Workflow/Events/Audit或用户改动。
 
 ## 11. Graph Scoped Proposal Prerequisite
 
 - [x] 在 Change Control owner 内新增 `CreateKnowledgeChangeProposalScoped` 与 `GetInitialKnowledgeChangeProposalScoped`，只解包 live `foundation.TransactionScope`，不自行 UoW/commit/rollback/root fallback。
 - [x] 复用现有 Knowledge Proposal canonical validation、JSONB/scanner、SQLSTATE 与 stable error；新建设置 `current_revision_id=revision.id`，exact read 固定 Revision 1 并兼容历史 NULL pointer。
 - [x] 静态证明不导入 Graph、Graph 不直接拥有 `change_control.*` GORM SQL、production wiring 不变；运行 Change Control test/race/vet/integration compile 与独立 Go/SQL/Trellis review。
-- [ ] 真 PostgreSQL TODO 9 原位扩展现有 integration，验证同 scope rollback、锁序、并发 replay、pointer兼容、取消/SQLSTATE/连接释放；无数据库时保持本项运行时证据未完成。
+- [x] 真 PostgreSQL 精简门禁原位验证同 scope commit/rollback 与 nil/foreign/stale scope；并发 replay、历史 pointer、取消/SQLSTATE/连接释放按直接风险或 Final 触发。
 
 ## 2026-09-01 精简测试门禁
 
