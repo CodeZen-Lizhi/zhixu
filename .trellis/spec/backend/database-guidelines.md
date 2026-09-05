@@ -35,6 +35,16 @@
 7. Worker 获取任务使用安全租约和等价的并发控制（文档明确提出 `SKIP LOCKED` 或安全领取）；完成 Node 时在同一事务中保存输出、更新状态、写后继 Outbox 和 checkpoint。
 8. Vector 只在同一 Index Version 中使用固定维度；变更维度必须新建列/表或 Index Version，不得混写。
 
+### Common Mistake: `INSERT ... SELECT` 类型占位错位
+
+**Symptom**: PostgreSQL 返回 `42804` 等类型错误，例如时间参数被解释为 JSONB；静态编译和不执行 SQL 的测试不会发现。
+
+**Cause**: 目标列、`SELECT` 表达式和参数列表没有逐项对齐，新增或移动 `?` / `$n` 后使后续参数整体偏移。
+
+**Fix**: 按目标列顺序逐项核对 `SELECT` 表达式及显式 cast，并同步参数列表；GORM Raw SQL 的 JSONB 参数继续使用项目 carrier，不以移除 cast 掩盖错位。
+
+**Prevention**: 修改复杂 `INSERT ... SELECT` 后，至少运行一条会实际执行该语句的真实 PostgreSQL 精简测试，并断言写入值或事务结果，而不只做 compile-only 校验。
+
 ## 迁移规则
 
 - 迁移只向前执行；DDL 和数据回填拆分，大表索引采用非阻塞策略。

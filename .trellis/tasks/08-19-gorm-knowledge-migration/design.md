@@ -118,9 +118,14 @@ Impact 的 scoped 方法同时承载首次保存和 Application 已有报告 rep
 
 ### TODO 9 PostgreSQL stage
 
+2026-09-01 调整：以下完整矩阵保留为 Final 与直接风险触发时的验证清单；
+本 child 默认完成门禁改为父任务精简政策规定的一个 GORM 主读写/查询路径，
+加一条直接事务或跨 owner 原子性代表场景。精简不改变单 Pool、Workspace、
+幂等、deferred constraint、敏感数据与 production Composition 边界。
+
 仅扩展现有integration文件。fixture必须先从`ZHIXU_TEST_DATABASE_URL`连接管理库，创建唯一disposable database；用migration pool执行完整migration后关闭它，再对目标DSN调用一次`platformpostgres.Open`。该Pool同时提供`DB()`给legacy seed/断言、GORM root、UoW、Events GORM与Audit GORM。legacy/GORM每个case使用不同数据库；GORM seed必须先commit，禁止把未提交pgx Tx交给GORM、复用全局pending outbox、创建第二Pool、独立`gorm.Open`或no-op collaborator。
 
-必须覆盖：
+完整清单（仅在上述条件触发时必须覆盖）：
 
 - Topic/Claim/Relation/Conflict全部command的receipt replay/conflict、CAS、对称Relation并发、fingerprint、provenance、deferred constraint与member/endpoint锁序；
 - 三类500条批读、Evidence eligibility/topic、RepeatableRead快照、array/JSONB/null binding、连接释放和关键EXPLAIN；

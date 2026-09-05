@@ -38,7 +38,7 @@ P0 为零；以上 P1/P2 均已修复，未发现其他 P1/P2。SQL Review 未�
 - `python3 ./.trellis/scripts/task.py validate .trellis/tasks/08-19-gorm-knowledge-migration`：PASS，仅有大规格文件注入截断警告
 - 受影响 Go 文件 `gofmt -d`、已跟踪及未跟踪文件 whitespace 检查、全局 `git diff --check`：PASS
 
-## 未完成门禁
+## 当时未完成门禁
 
 `ZHIXU_TEST_DATABASE_URL` 未配置，编译和现有 pgx 测试不能证明 GORM 在真实 migrated PostgreSQL 上的行为。TODO 9 仍需在现有 integration 文件内以 legacy/GORM 独立 disposable database 验证：
 
@@ -51,7 +51,8 @@ P0 为零；以上 P1/P2 均已修复，未发现其他 P1/P2。SQL Review 未�
 
 Foundation scope 当前不携带可验证的 Pool identity，因此 staged adapters 无法单独拒绝来自另一 active Pool 的 scope。Final Composition 和 TODO 9 fixture 必须从同一 `platformpostgres.Pool` 派生 Knowledge、Events、Audit 与 UoW。
 
-本任务继续保持 `in_progress`，PRD AC 与 TODO 9 未勾选，不归档，也不切生产 Composition。
+以上是 2026-08-20/2026-08-31 静态阶段的历史状态；当时任务保持
+`in_progress`，PRD AC 与 TODO 9 未勾选，不归档，也不切生产 Composition。
 
 ## 2026-08-31 独立会话复核证据
 
@@ -64,3 +65,11 @@ Foundation scope 当前不携带可验证的 Pool identity，因此 staged adapt
 - `task.py validate`：PASS，仅有既有大规格文件注入截断警告；`gofmt -d`、全局 `git diff --check` 与 scoped trailing-whitespace 扫描：PASS
 - 禁用模式扫描未发现 AutoMigrate/Migrator、独立 `gorm.Open`、root `.Transaction`、Save/Preload/Association；动态 SQL 片段仅来自包内固定列、条件和锁文本，外部值均绑定。
 - `ZHIXU_TEST_DATABASE_URL` 未配置；未运行真实 migrated PostgreSQL，故 TODO 9 的 deferred constraint、真实 driver binding、并发锁/response-loss、跨 owner rollback 与 Pool affinity 仍未验证。
+
+## 2026-09-05 状态更新
+
+父任务的精简测试政策已取代上述全矩阵完成要求。当前已通过 GORM-only
+Testcontainers 主读写/查询场景和 Impact/Audit 真实 scoped 写入后回滚场景；
+首轮暴露并修复的 Impact JSONB/时间占位错位、最终命令与剩余按风险专项见
+`2026-09-05-gorm-integration.md`。生产 Composition、Organizing caller-owned
+transaction 与 legacy 删除仍未改变，继续由后续 child/Final 负责。

@@ -11,3 +11,5 @@
 {"file":".trellis/tasks/08-19-gorm-knowledge-migration/prd.md","reason":"检查需求、Acceptance与TODO 9/Final状态"}
 {"file":".trellis/tasks/08-19-gorm-knowledge-migration/design.md","reason":"检查实现是否符合单Pool/scoped Port/Raw SQL/rollback设计"}
 {"file":".trellis/tasks/08-19-gorm-knowledge-migration/research/static-validation.md","reason":"复核已修问题、静态门禁证据与TODO 9剩余风险"}
+{"file":".trellis/tasks/08-18-gorm-data-access-migration/research/lean-test-policy-2026-09-01.md","reason":"按父任务精简政策判定本 child 的完成证据，不恢复无差别矩阵"}
+{"file":".trellis/tasks/08-19-gorm-knowledge-migration/research/2026-09-05-gorm-integration.md","reason":"复核本轮真实 PostgreSQL 主路径、跨 owner 回滚与 SQL 修复证据"}

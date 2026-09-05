@@ -72,6 +72,71 @@ func TestTimelineImpactProjectionGORMIntegration(t *testing.T) {
 	})
 }
 
+func TestGORMKnowledgeLeanMainPathAndScopedAuditRollback(t *testing.T) {
+	fixture := testdb.Require(t, testdb.Config{
+		ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
+		Availability:     testdb.FailWhenUnavailable,
+		MaxConns:         8,
+	})
+	platform := fixture.Pool()
+	if platform == nil || platform.DB() == nil {
+		t.Fatal("Knowledge GORM fixture did not provide a shared platform pool")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+	variant := timelineIntegrationVariant{
+		open:          openGORMTimelineIntegrationRepository,
+		openAudit:     openGORMTimelineImpactAudit,
+		saveWithAudit: saveGORMTimelineImpactWithAudit,
+	}
+	testCase := timelineIntegrationCase{
+		repository: variant.open(t, platform),
+		pool:       platform.DB(),
+		platform:   platform,
+		ctx:        ctx,
+		variant:    variant,
+		audit:      variant.openAudit(t, platform),
+	}
+
+	t.Run("claim_replay_confirm_and_batch_read", func(t *testing.T) {
+		primary := seedProvenance(t, ctx, testCase.pool, "gorm-lean-claim-primary")
+		other := seedProvenance(t, ctx, testCase.pool, "gorm-lean-claim-other")
+		now := time.Now().UTC().Add(-time.Minute).Truncate(time.Microsecond)
+		claim := newSuggestedClaim(t, primary.workspaceID, "精简门禁验证 Knowledge GORM 主链路", mustApplicability(t, `{"region":"cn"}`), now)
+		command := domain.SuggestClaimRecord{
+			Claim: claim, IdempotencyKey: "gorm-lean-claim-suggest", RequestHash: testHash("gorm-lean-claim-suggest-payload"),
+		}
+		suggested, err := testCase.repository.SuggestClaim(ctx, command)
+		if err != nil || suggested.Replayed || suggested.Claim.ID != claim.ID {
+			t.Fatalf("suggest claim=%#v err=%v", suggested, err)
+		}
+		replayed, err := testCase.repository.SuggestClaim(ctx, command)
+		if err != nil || !replayed.Replayed || replayed.Claim.ID != claim.ID {
+			t.Fatalf("suggest claim replay=%#v err=%v", replayed, err)
+		}
+		confirmed := confirmClaim(t, ctx, testCase.repository, suggested, primary, "gorm-lean-claim-confirm", now.Add(time.Second))
+		if confirmed.Replayed || confirmed.Claim.Status != domain.ClaimStatusConfirmed || confirmed.Claim.Version != 2 || len(confirmed.Sources) != 1 {
+			t.Fatalf("confirm claim=%#v", confirmed)
+		}
+		claims, err := testCase.repository.BatchGetClaims(ctx, domain.BatchGetClaimsQuery{
+			WorkspaceID: primary.workspaceID, IDs: []foundation.ID{claim.ID}, Limit: 1,
+		})
+		if err != nil || len(claims) != 1 || claims[0].Claim.ID != claim.ID || claims[0].Claim.Status != domain.ClaimStatusConfirmed || len(claims[0].Sources) != 1 {
+			t.Fatalf("batch get claims=%#v err=%v", claims, err)
+		}
+		crossWorkspace, err := testCase.repository.BatchGetClaims(ctx, domain.BatchGetClaimsQuery{
+			WorkspaceID: other.workspaceID, IDs: []foundation.ID{claim.ID}, Limit: 1,
+		})
+		if err != nil || len(crossWorkspace) != 0 {
+			t.Fatalf("cross-workspace claims=%#v err=%v", crossWorkspace, err)
+		}
+	})
+
+	t.Run("impact_and_audit_rollback", func(t *testing.T) {
+		testImpactReportAndTimelineOutboxRollBackWhenTransactionalAuditFails(t, testCase)
+	})
+}
+
 func runTimelineIntegrationVariant(t *testing.T, variant timelineIntegrationVariant) {
 	t.Helper()
 	fixture := testdb.Require(t, testdb.Config{
@@ -819,13 +884,17 @@ func testImpactReportAndTimelineOutboxRollBackWhenTransactionalAuditFails(t *tes
 		Summary: domain.SummarizeImpactObjects(nil), Fingerprint: fingerprint, GeneratedAt: now, CreatedAt: now, Version: 1,
 	}
 	auditFailure := errors.New("injected transactional audit failure")
-	if _, _, err := testCase.saveImpactWithAudit(ctx, report, "audit-rollback", impactAuditFailureStub{err: auditFailure}); !errors.Is(err, auditFailure) {
-		t.Fatalf("atomic impact save error=%v", err)
+	failingAudit := &impactAuditFailureAfterRecord{delegate: testCase.audit, err: auditFailure}
+	if _, _, err := testCase.saveImpactWithAudit(ctx, report, "audit-rollback", failingAudit); !errors.Is(err, auditFailure) {
+		t.Fatalf("atomic impact save error=%v cause=%v", err, errors.Unwrap(err))
+	}
+	if !failingAudit.recorded {
+		t.Fatal("injected audit failure was returned before the real audit write")
 	}
 	if _, found, err := repository.GetImpactReport(ctx, fixture.workspaceID, event.ID, domain.ImpactAnalysisVersionV1); err != nil || found {
 		t.Fatalf("rolled back impact report found=%t err=%v", found, err)
 	}
-	var outboxRows int
+	var outboxRows, auditRows int
 	if err := tx.QueryRow(ctx, `SELECT count(*) FROM ops.timeline_projection_outbox
 WHERE workspace_id=$1 AND source_event_ref=$2`, string(fixture.workspaceID), "impact-report:"+string(report.ID)+":v1").Scan(&outboxRows); err != nil {
 		t.Fatal(err)
@@ -833,20 +902,43 @@ WHERE workspace_id=$1 AND source_event_ref=$2`, string(fixture.workspaceID), "im
 	if outboxRows != 0 {
 		t.Fatalf("rolled back Impact Timeline outbox rows=%d", outboxRows)
 	}
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM ops.audit_event
+WHERE workspace_id=$1 AND action='IMPACT_ANALYZED' AND resource_ref=$2`, string(fixture.workspaceID), string(report.ID)).Scan(&auditRows); err != nil {
+		t.Fatal(err)
+	}
+	if auditRows != 0 {
+		t.Fatalf("rolled back Impact Audit rows=%d", auditRows)
+	}
 }
 
-type impactAuditFailureStub struct{ err error }
-
-func (stub impactAuditFailureStub) RecordImpactAnalysis(context.Context, knowledgeapp.ImpactAuditRecord) error {
-	return stub.err
+type impactAuditFailureAfterRecord struct {
+	delegate timelineImpactAuditCollaborator
+	err      error
+	recorded bool
 }
 
-func (stub impactAuditFailureStub) RecordImpactAnalysisTx(context.Context, any, knowledgeapp.ImpactAuditRecord) error {
-	return stub.err
+func (collaborator *impactAuditFailureAfterRecord) RecordImpactAnalysis(ctx context.Context, record knowledgeapp.ImpactAuditRecord) error {
+	if err := collaborator.delegate.RecordImpactAnalysis(ctx, record); err != nil {
+		return err
+	}
+	collaborator.recorded = true
+	return collaborator.err
 }
 
-func (stub impactAuditFailureStub) RecordImpactAnalysisScoped(context.Context, foundation.TransactionScope, knowledgeapp.ImpactAuditRecord) error {
-	return stub.err
+func (collaborator *impactAuditFailureAfterRecord) RecordImpactAnalysisTx(ctx context.Context, transaction any, record knowledgeapp.ImpactAuditRecord) error {
+	if err := collaborator.delegate.RecordImpactAnalysisTx(ctx, transaction, record); err != nil {
+		return err
+	}
+	collaborator.recorded = true
+	return collaborator.err
+}
+
+func (collaborator *impactAuditFailureAfterRecord) RecordImpactAnalysisScoped(ctx context.Context, scope foundation.TransactionScope, record knowledgeapp.ImpactAuditRecord) error {
+	if err := collaborator.delegate.RecordImpactAnalysisScoped(ctx, scope, record); err != nil {
+		return err
+	}
+	collaborator.recorded = true
+	return collaborator.err
 }
 
 func testTimelineRepositoryListImpactObjectsKeepsActionsReadOnly(t *testing.T, testCase timelineIntegrationCase) {

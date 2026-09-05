@@ -60,19 +60,31 @@
 
 ## 8. TODO 9 PostgreSQL Gate
 
-- [ ] 仅在现有integration文件建立legacy/GORM fixtures；每个实现独立disposable DB，不新增测试文件。
-- [ ] 现有integration文件内建立fixture：管理连接创建唯一DB -> migration pool完整迁移并关闭 -> 一次`platformpostgres.Open`；legacy/GORM独库，GORM seed先commit，再由同一Pool构造Knowledge/Events/Audit GORM与Scoped Impact Service，无全局pending outbox、第二root或no-op。
-- [ ] 成对覆盖全部Knowledge command/read、deferred constraint、500批读、Timeline/Projection、Impact+Audit、Relation Apply+Event与失败回滚。
-- [ ] 包装被测Repository自身UoW仅首次执行真实Within后注入错误：首次commit failure，后续由同Pool未包装实例按receipt/source/binding exact replay；并发barrier不靠sleep。
-- [ ] 验证真实SQLSTATE、DB/caller time、JSONB/uuid/text arrays、cancel/deadline、Rows/连接与关键EXPLAIN。
-- [ ] 在用户允许的外部DSN/Testcontainers环境运行受影响integration race gate。
+本节原始完整矩阵由 2026-09-01 精简政策取代；只有直接改动触发的硬风险项
+阻断 child 验收。
+
+- [x] 只扩展现有 `timeline_integration_test.go`，使用 `testdb.Require(FailWhenUnavailable)` 建立独立 migrated database，不新增测试文件。
+- [x] 从同一 `platformpostgres.Pool` 构造 Knowledge GORM Repository、UoW、pgx seed/assertion 与 Audit GORM Store；无第二 root、独立 `gorm.Open` 或 no-op collaborator。
+- [x] 精简主路径覆盖 Claim Suggest exact replay、Confirm、BatchGet、provenance/deferred constraint 与跨 Workspace miss。
+- [x] 精简硬风险覆盖 Impact Report、trigger 生成 Timeline outbox 与真实 scoped Audit 写入后注入错误，三类事实全部回滚。
+- [x] 定向 `TestGORMKnowledgeLeanMainPathAndScopedAuditRollback` Testcontainers 门禁通过。
+- [ ] 完整 command/read、Relation Apply、Projection、response-loss、SQLSTATE/cancel/连接、race 与 EXPLAIN 矩阵按风险触发，不作本轮无差别门禁。
 
 ## 9. Completion And Rollback
 
 - [x] TODO 9不可用时保持PRD AC未勾、task status=`in_progress`、legacy production不变，不归档/宣称完成。
-- [ ] TODO 9通过后记录Graph/Organizing/Final constructor和legacy删除清单。
-- [ ] 回滚只删除本child staged adapter/helper与scoped Impact capability；不回滚Schema/Foundation/Change Control/Events/Audit或用户改动。
+- [x] Design 第 9 节与 baseline 已记录 Graph/Organizing/Final constructor、legacy 删除与 production 回退边界。
+- [x] 回滚只删除本child staged adapter/helper与scoped Impact capability；不回滚Schema/Foundation/Change Control/Events/Audit或用户改动。
 
 ## 2026-09-01 精简测试门禁
 
 按父任务精简政策，本 child 保留一个 Knowledge 主读写/查询 Testcontainers 场景，并针对 Relation Apply 或 Impact/Audit 中实际修改的同事务边界补一条提交/回滚或冲突场景。此前完整 command/read、response-loss、全量 SQLSTATE/EXPLAIN 与 integration race 清单仅在改动风险触发时执行；权限、Workspace、状态机、幂等、deferred constraint 和跨 owner 原子性仍不可豁免。
+
+## 2026-09-05 本轮增量
+
+- 在现有 `timeline_integration_test.go` 增加单一 GORM-only 精简门禁，没有调用 15 场景 `runTimelineIntegrationVariant`。
+- 首轮实库运行暴露 Impact INSERT 的 JSONB 占位错位：`generated_at` 被错误绑定为 JSONB。已在 `gorm_timeline.go` 修正占位顺序，重跑同一门禁通过。
+- Audit 故障 collaborator 先通过同 scope 的真实 GORM Audit Recorder 完成 append，再返回注入错误；测试断言 report、timeline outbox 和 audit event 均为零。
+- 最终 Trellis/Go/SQL 复核逐项对照 legacy 列映射、参数化、Workspace、同池 UoW 和生产边界，未发现剩余 P0-P2。
+- 已把复杂 `INSERT ... SELECT` 的目标列、类型占位和参数列表对齐规则写入 backend database spec。
+- 精确命令与结果记录于 `research/2026-09-05-gorm-integration.md`；完整低频矩阵保持按风险触发，production Composition 未改。

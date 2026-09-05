@@ -25,18 +25,27 @@
 
 ## Acceptance Criteria
 
-- [ ] GORM sibling 覆盖 Knowledge Repository 的 Topic/Claim/Relation/Conflict、bounded read、Evidence、Timeline/Impact 与 Projection 端口，结果和状态机与 legacy 等价。
-- [ ] GORM Approved Relation Apply 通过单一 opaque scope 原子维护 Change Control、Knowledge 与 optional Events 事实，锁序、stale 分支和 replay 不变。
-- [ ] Impact Report 与脱敏 Audit 在同一 scope 原子提交；GORM 新路径不再通过 `any` 传递事务。
-- [ ] 对称 Relation、provenance、deferred constraint、Conflict closure、Timeline projection 和幂等在真实 PostgreSQL 上有核心路径证据；直接改动的跨 owner 事务另有一条代表性回滚或冲突场景。
-- [ ] Domain 不新增底层数据库类型，生产 Composition 仍只构造 legacy pgx，实现可独立回滚。
-- [ ] Go/SQL/Trellis Review、`git diff --check`、受影响包既有 test/vet、核心 integration 与 task 校验通过；response-loss、全量 race、EXPLAIN 及 cmd compile 按风险触发。
+- [x] GORM sibling 覆盖 Knowledge Repository 的 Topic/Claim/Relation/Conflict、bounded read、Evidence、Timeline/Impact 与 Projection 端口，结果和状态机与 legacy 等价。
+- [x] GORM Approved Relation Apply 通过单一 opaque scope 原子维护 Change Control、Knowledge 与 optional Events 事实，锁序、stale 分支和 replay 不变。
+- [x] Impact Report 与脱敏 Audit 在同一 scope 原子提交；GORM 新路径不再通过 `any` 传递事务。
+- [x] 精简实库主路径已覆盖 Claim exact replay、provenance/deferred confirmation、bounded read 与 Workspace 隔离；直接改动的 Impact/Audit 跨 owner 事务另有真实 Audit 写入后整体回滚证据。Relation/Conflict/Timeline 的完整矩阵按风险触发。
+- [x] Domain 不新增底层数据库类型，生产 Composition 仍只构造 legacy pgx，实现可独立回滚。
+- [x] Go/SQL/Trellis Review、`git diff --check`、受影响包既有 test/vet、核心 integration 与 task 校验通过；response-loss、全量 race、EXPLAIN 及 cmd compile 按风险触发。
 
-- [ ] TODO 9 工厂可用；本 child 仍不得切换生产 Composition 或删除 legacy，TODO 3 仅阻断 Final。
+- [x] TODO 9 工厂可用；本 child 仍不得切换生产 Composition 或删除 legacy，TODO 3 仅阻断 Final。
 
 ## 2026-09-01 测试范围调整
 
 按父任务精简政策，Knowledge 保留一个主读写/查询实库场景和实际跨 owner 原子性代表场景；不再默认执行全部 command/read、response-loss、EXPLAIN 与 integration race 矩阵。
+
+## 2026-09-05 精简验收判定
+
+AC1-AC6 与 TODO 9 工厂前置已满足。现有 integration 文件中的 GORM-only
+Testcontainers 场景从同一 `platformpostgres.Pool` 构造 Knowledge 与 Audit，
+验证 Claim Suggest 精确重放、Confirm、BatchGet、跨 Workspace miss，以及 Impact
+Report/Timeline outbox/真实 Audit 的同 scope 回滚。完整 legacy/GORM 矩阵、
+response-loss、race 和 EXPLAIN 依父任务政策按风险触发；生产切换与 legacy 删除仍
+只属于 Final。本轮 Trellis/Go/SQL 复核未发现剩余 P0-P2。
 
 ## Notes
 
