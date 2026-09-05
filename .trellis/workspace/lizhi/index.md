@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-2.md`
-- **Total Sessions**: 72
+- **Total Sessions**: 73
 - **Last Active**: 2026-09-05
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-2.md` | ~627 | Active |
+| `journal-2.md` | ~661 | Active |
 | `journal-1.md` | ~2005 | Archived |
 <!-- @@@/auto:active-documents -->
 
@@ -30,6 +30,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 73 | 2026-09-05 | 完成 Change Control GORM 精简门禁 | `1b7b7cd1` | `dev` |
 | 72 | 2026-09-05 | 完成 GORM Workspace Repository 子任务 | - | `dev` |
 | 71 | 2026-08-30 | 同步 TODO3 Atlas 文档状态并推送 | `beab02bc` | `dev` |
 | 70 | 2026-08-30 | 完成 TODO3 Atlas 迁移与文档状态同步 | `2a581f99`, `c7558f0a` | `dev` |

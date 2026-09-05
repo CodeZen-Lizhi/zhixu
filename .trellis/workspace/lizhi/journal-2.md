@@ -625,3 +625,37 @@ Eino/eino-ext 已成为生产唯一 AI Runtime，旧 direct 实现已删除并�
 ### Next Steps
 
 - 按用户要求串行处理下一个 GORM child；不得并行开发 GLM/GORM 子任务。
+
+
+## Session 73: 完成 Change Control GORM 精简门禁
+
+**Date**: 2026-09-05
+**Task**: 完成 Change Control GORM 精简门禁
+**Branch**: `dev`
+
+### Summary
+
+完成 Change Control 与 Approval Dispatch staged GORM 的精简 Testcontainers 验证、同池依赖装配审查和任务归档。
+
+### Main Changes
+
+- 补齐 Proposal/Approval 幂等冲突、scoped Knowledge 提交回滚与无效 scope、Approval/Workflow/River 原子绑定证据。
+- 将同池 GORM Approval Dispatch 装配约束沉淀到数据库规范。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `1b7b7cd1` | (see git log) |
+
+### Testing
+
+- [OK] 受影响包 go test/go vet、三条聚焦 integration、task validate、gofmt 与 git diff --check 通过。
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- 继续 Model Settings GORM 子任务，沿用精简测试政策。
