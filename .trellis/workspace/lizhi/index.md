@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-2.md`
-- **Total Sessions**: 77
-- **Last Active**: 2026-09-08
+- **Total Sessions**: 78
+- **Last Active**: 2026-09-09
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-2.md` | ~774 | Active |
+| `journal-2.md` | ~810 | Active |
 | `journal-1.md` | ~2005 | Archived |
 <!-- @@@/auto:active-documents -->
 
@@ -30,6 +30,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 78 | 2026-09-09 | M9 历史 Proposal 升级修复 | `a1f05ca6ae47072bba2118714adb14c27b998c25` | `dev` |
 | 77 | 2026-09-08 | TODO 10 提交推送与状态同步 | `cb93565561498674cda1dc1230fed587fba66075`, `bf2def7172ab1b19966556951d8c0eee12d4167c` | `dev` |
 | 76 | 2026-09-08 | TODO 10 全部子任务开发完成 | - | `dev` |
 | 75 | 2026-09-05 | Knowledge GORM 精简实库门禁 | `119e9b7c` | `dev` |

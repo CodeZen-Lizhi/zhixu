@@ -772,3 +772,39 @@ Eino/eino-ext 已成为生产唯一 AI Runtime，旧 direct 实现已删除并�
 ### Next Steps
 
 - 目标环境发布前处理 M9 既有 82 回填与 62 trigger 冲突；本轮未修改历史迁移，不将该 FAIL 或未执行的外部验证记为通过。
+
+
+## Session 78: M9 历史 Proposal 升级修复
+
+**Date**: 2026-09-09
+**Task**: M9 历史 Proposal 升级修复
+**Branch**: `dev`
+
+### Summary
+
+修复 M9 旧库升级的 Proposal Revision 回填兼容问题，完成隔离 PostgreSQL 16 验证、独立 Go/SQL 审查及需求、Trellis 和项目文档状态同步。
+
+### Main Changes
+
+- 新增 00093 兼容步骤，在原 00082 同一事务执行前置、迁移和后置校验；保留 00001–00092 原 SQL、checksum 及永久 Schema。
+- 严格校验旧 guard，仅允许合法最新 Revision 指针回填，失败完整回滚；历史 FAIL 记录保留并追加修复后的 PASS 证据。
+- 仅将 M9 跟进状态标记 completed，产品父任务仍为 in_progress；保留并行任务工作区改动。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `a1f05ca6ae47072bba2118714adb14c27b998c25` | (see git log) |
+
+### Testing
+
+- [OK] 隔离 PostgreSQL 16：原 M9 回归、最新 Revision、93 no-op、重复 Up、RealmDiff、失败回滚重试及非法回填拒绝全部 PASS，无 SKIP。
+- [OK] 迁移包 unit、integration go vet、单连接 race、Atlas lint/hash-check/validate 及 cmd/migrate 编译 PASS；独立 Go/SQL 审查无阻断问题。
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- 尚未部署；目标环境升级应按 rollout runbook 安排停写并使用本次修复后的迁移器，PostgreSQL 18 与完整 Goose adoption 矩阵未在本轮验证。
