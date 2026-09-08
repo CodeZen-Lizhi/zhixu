@@ -28,6 +28,7 @@
 | [AI 与工作流运行时](ai-runtime.md) | 检索、Agent、RAG、工具、持久工作流和十类业务执行流 |
 | [质量架构](quality.md) | 安全、工具权限、可观测、审计、性能、测试与 AI 评测 |
 | [Workspace Analysis 发布 Runbook](runbooks/workspace-analysis-rollout.md) | 新模式的迁移、灰度、观测、Worker-only 回滚和生产证据边界 |
+| [GORM 发布与回滚](runbooks/gorm-persistence-rollout.md) | 单池接线、pgx 例外、发布顺序、代码回滚及历史升级限制 |
 | [ADR 索引](adr/README.md) | 关键选择的历史理由、替代方案和状态 |
 
 安装、启动、升级、备份、恢复和排障见 [运行与恢复手册](../operations.md)。产品范围与稳定验收见 [需求文档](../requirements.md)。

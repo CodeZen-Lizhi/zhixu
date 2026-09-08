@@ -1,6 +1,6 @@
-{"file":".trellis/tasks/08-19-gorm-localmodelruntime-migration/prd.md","reason":"Check implementation against requirements and the explicit staged/legacy boundary."}
-{"file":".trellis/tasks/08-19-gorm-localmodelruntime-migration/design.md","reason":"Check scoped port, transaction, permission and rollback design."}
-{"file":".trellis/tasks/08-19-gorm-localmodelruntime-migration/implement.md","reason":"Check execution evidence, production wiring and TODO 9 gates."}
-{"file":".trellis/tasks/08-19-gorm-localmodelruntime-migration/research/planning-review.md","reason":"Check that planning findings were resolved before implementation."}
-{"file":".trellis/tasks/08-19-gorm-localmodelruntime-migration/research/sql-schema.md","reason":"Check SQL/permission/transaction equivalence during review."}
-{"file":".trellis/tasks/08-19-gorm-localmodelruntime-migration/research/test-wiring.md","reason":"Check fixture and real PostgreSQL evidence boundaries."}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-localmodelruntime-migration/prd.md", "reason": "Check implementation against requirements and the explicit staged/legacy boundary."}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-localmodelruntime-migration/design.md", "reason": "Check scoped port, transaction, permission and rollback design."}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-localmodelruntime-migration/implement.md", "reason": "Check execution evidence, production wiring and TODO 9 gates."}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-localmodelruntime-migration/research/planning-review.md", "reason": "Check that planning findings were resolved before implementation."}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-localmodelruntime-migration/research/sql-schema.md", "reason": "Check SQL/permission/transaction equivalence during review."}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-localmodelruntime-migration/research/test-wiring.md", "reason": "Check fixture and real PostgreSQL evidence boundaries."}

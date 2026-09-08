@@ -1,0 +1,12 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "后端规范索引"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "数据库和事务检查依据"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "错误语义检查依据"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "日志脱敏检查依据"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "质量门禁检查依据"}
+{"file": ".trellis/tasks/archive/2026-09/08-18-gorm-data-access-migration/prd.md", "reason": "父任务需求和验收标准"}
+{"file": ".trellis/tasks/archive/2026-09/08-18-gorm-data-access-migration/design.md", "reason": "共享架构、事务和依赖设计"}
+{"file": ".trellis/tasks/archive/2026-09/08-18-gorm-data-access-migration/research/repository-inventory.md", "reason": "owner 清单和依赖证据"}
+{"file": ".trellis/tasks/archive/2026-09/08-18-gorm-data-access-migration/research/gorm-river-compatibility.md", "reason": "兼容性研究和风险边界"}
+{"file": "docs/architecture/adr/0019-mature-framework-first.md", "reason": "框架复用与自研边界检查"}
+{"file": ".trellis/tasks/archive/2026-09/08-18-gorm-data-access-migration/research/lean-test-policy-2026-09-01.md", "reason": "审查开放 child 的精简测试门禁是否仍覆盖核心风险"}
+{"file": ".trellis/spec/backend/gorm-persistence.md", "reason": "Final 单池、scoped 事务、GORM/pgx 边界、错误与生命周期可执行契约"}

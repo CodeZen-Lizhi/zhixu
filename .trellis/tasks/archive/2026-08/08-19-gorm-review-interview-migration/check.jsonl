@@ -1,9 +1,9 @@
-{"file":".trellis/tasks/08-19-gorm-review-interview-migration/prd.md","reason":"核对需求、范围、验收和 TODO 9/Final 完成门禁"}
-{"file":".trellis/tasks/08-19-gorm-review-interview-migration/design.md","reason":"复核 staged 架构、事务锁序、completion、shared Path、错误、测试和回滚设计"}
-{"file":".trellis/spec/backend/database-guidelines.md","reason":"检查 reservation/two holds、CAS、view origin、DB time、SKIP LOCKED 与真实 PG 约束"}
-{"file":".trellis/spec/backend/error-handling.md","reason":"检查 no-row、context cause、SQLSTATE、错误码和 retryability 对等"}
-{"file":".trellis/spec/backend/logging-guidelines.md","reason":"检查 Interview/Artifact/receipt、SQL/参数、GORM logger 与 DSN 脱敏"}
-{"file":".trellis/spec/backend/quality-guidelines.md","reason":"检查 M8 并发/恢复门禁、局部验证和真实 PostgreSQL 剩余风险"}
-{"file":".trellis/tasks/08-18-gorm-data-access-migration/research/repository-inventory.md","reason":"确认修改限定于 Interview owner，Review 三模块门禁与生产 wiring 留给父任务/Final"}
-{"file":".trellis/tasks/08-19-gorm-review-interview-migration/research/baseline.md","reason":"按冻结的方法、Schema、调用方、测试和 dirty 基线审查实现"}
-{"file":".trellis/tasks/08-19-gorm-review-interview-migration/research/implementation-contract.md","reason":"检查 hard boundaries、锁/重放、completion、view、carrier 和状态门禁"}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-review-interview-migration/prd.md", "reason": "核对需求、范围、验收和 TODO 9/Final 完成门禁"}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-review-interview-migration/design.md", "reason": "复核 staged 架构、事务锁序、completion、shared Path、错误、测试和回滚设计"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "检查 reservation/two holds、CAS、view origin、DB time、SKIP LOCKED 与真实 PG 约束"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "检查 no-row、context cause、SQLSTATE、错误码和 retryability 对等"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "检查 Interview/Artifact/receipt、SQL/参数、GORM logger 与 DSN 脱敏"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "检查 M8 并发/恢复门禁、局部验证和真实 PostgreSQL 剩余风险"}
+{"file": ".trellis/tasks/archive/2026-09/08-18-gorm-data-access-migration/research/repository-inventory.md", "reason": "确认修改限定于 Interview owner，Review 三模块门禁与生产 wiring 留给父任务/Final"}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-review-interview-migration/research/baseline.md", "reason": "按冻结的方法、Schema、调用方、测试和 dirty 基线审查实现"}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-review-interview-migration/research/implementation-contract.md", "reason": "检查 hard boundaries、锁/重放、completion、view、carrier 和状态门禁"}

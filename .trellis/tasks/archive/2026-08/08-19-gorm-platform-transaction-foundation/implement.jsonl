@@ -3,6 +3,6 @@
 {"file": ".trellis/spec/backend/error-handling.md", "reason": "平台错误保留和模块错误翻译约束"}
 {"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "GORM SQL 日志与敏感信息脱敏"}
 {"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "基础设施验证与质量门禁"}
-{"file": ".trellis/tasks/08-18-gorm-data-access-migration/design.md", "reason": "父任务共享连接、事务和 River 设计"}
-{"file": ".trellis/tasks/08-18-gorm-data-access-migration/research/gorm-river-compatibility.md", "reason": "锁定版本、官方兼容路径和调用点矩阵"}
+{"file": ".trellis/tasks/archive/2026-09/08-18-gorm-data-access-migration/design.md", "reason": "父任务共享连接、事务和 River 设计"}
+{"file": ".trellis/tasks/archive/2026-09/08-18-gorm-data-access-migration/research/gorm-river-compatibility.md", "reason": "锁定版本、官方兼容路径和调用点矩阵"}
 {"file": "docs/architecture/adr/0019-mature-framework-first.md", "reason": "成熟框架优先与禁止自研 River SQL"}

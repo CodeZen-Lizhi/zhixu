@@ -1,7 +1,7 @@
-{"file":".trellis/spec/backend/authoring-contract.md","reason":"复核 Draft/Revision/Publication/Restore 行为未漂移"}
-{"file":".trellis/spec/backend/logging-guidelines.md","reason":"复核错误/日志不泄漏正文、参数、路径或凭据"}
-{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"复核生产构造和所有直接消费者未误切换"}
-{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"复核 legacy/GORM 共享规则和重复实现风险"}
-{"file":".trellis/tasks/08-19-gorm-authoring-migration/research/baseline.md","reason":"对照 owner、接线和测试 inventory"}
-{"file":".trellis/tasks/08-19-gorm-authoring-migration/research/sql-schema.md","reason":"对照锁序、Schema trigger、array、SQLSTATE 和 TODO9"}
-{"file":".trellis/tasks/08-19-gorm-authoring-migration/research/spec-contracts.md","reason":"对照项目规范摘要与完整路由"}
+{"file": ".trellis/spec/backend/authoring-contract.md", "reason": "复核 Draft/Revision/Publication/Restore 行为未漂移"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "复核错误/日志不泄漏正文、参数、路径或凭据"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "复核生产构造和所有直接消费者未误切换"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "复核 legacy/GORM 共享规则和重复实现风险"}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-authoring-migration/research/baseline.md", "reason": "对照 owner、接线和测试 inventory"}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-authoring-migration/research/sql-schema.md", "reason": "对照锁序、Schema trigger、array、SQLSTATE 和 TODO9"}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-authoring-migration/research/spec-contracts.md", "reason": "对照项目规范摘要与完整路由"}

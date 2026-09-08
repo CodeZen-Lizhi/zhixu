@@ -1,0 +1,13 @@
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"检查SQL参数化、UoW、锁、分页与AutoMigrate禁令"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"检查错误分类、context cause与commit unknown"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"检查敏感Agent输入输出与数据库错误脱敏"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"检查test/race/vet、资源和兼容性"}
+{"file":".trellis/spec/backend/workspace-analysis-contract.md","reason":"检查Workspace Analysis锁序、预算、proof与恢复等价"}
+{"file":".trellis/spec/backend/capture-profile-contract.md","reason":"检查scoped Model Run Port与Capture原子闭包"}
+{"file": ".trellis/tasks/archive/2026-09/08-19-gorm-agent-migration/research/baseline.md", "reason": "复核范围、legacy保留和production wiring"}
+{"file": ".trellis/tasks/archive/2026-09/08-19-gorm-agent-migration/research/sql-schema.md", "reason": "复核Schema、trigger、CAS、DB time和SQLSTATE"}
+{"file": ".trellis/tasks/archive/2026-09/08-19-gorm-agent-migration/research/test-wiring.md", "reason": "复核TODO 9真实PostgreSQL矩阵与验证盲区"}
+{"file": ".trellis/tasks/archive/2026-09/08-19-gorm-workflow-migration/prd.md", "reason": "复核Workflow scoped fence owner边界与Agent阶段依赖"}
+{"file": ".trellis/tasks/archive/2026-09/08-19-gorm-agent-migration/research/planning-review.md", "reason": "复核规划缺陷修复、状态与TODO 9盲区"}
+{"file": ".trellis/tasks/archive/2026-09/08-19-gorm-tools-migration/design.md", "reason": "检查 Agent owner scoped Ports 是否完整满足 Tools staged boundary。"}
+{"file": ".trellis/tasks/archive/2026-09/08-19-gorm-tools-migration/research/planning-review.md", "reason": "检查跨 owner Port 缺口与单模块回滚边界。"}

@@ -3,10 +3,9 @@
 {"file": ".trellis/spec/backend/error-handling.md", "reason": "复核 no-row、23505、取消与稳定错误"}
 {"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "复核 hash、SQL 参数、DSN 不泄漏"}
 {"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "复核 race、集成缺口和交付门禁"}
-{"file": ".trellis/tasks/08-19-gorm-auth-migration/prd.md", "reason": "验收范围与 TODO 9 硬门禁"}
-{"file": ".trellis/tasks/08-19-gorm-auth-migration/design.md", "reason": "复核实现是否遵守阶段设计"}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-auth-migration/prd.md", "reason": "验收范围与 TODO 9 硬门禁"}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-auth-migration/design.md", "reason": "复核实现是否遵守阶段设计"}
 {"file": "atlas/migrations/00034_learning_ops_auth.sql", "reason": "确认无 Schema 漂移或 AutoMigrate"}
-{"file": "internal/auth/adapter/postgres/repository.go", "reason": "对比 pgx 基线与共享语义"}
-{"file": "internal/auth/adapter/postgres/gorm_repository.go", "reason": "审查 GORM Repository 数据与错误路径"}
+{"file": "internal/auth/adapter/postgres/gorm_repository.go", "reason": "Final GORM 持久化及错误契约；legacy 行为基线保留在历史提交和既有断言中"}
 {"file": "internal/auth/adapter/postgres/model.go", "reason": "审查 persistence record 到 Domain 映射"}
 {"file": "internal/auth/adapter/postgres/repository_integration_test.go", "reason": "确认 TODO 9 必测行为完整"}

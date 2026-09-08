@@ -1,12 +1,12 @@
-{"file":".trellis/spec/backend/index.md","reason":"Local Model Runtime persistence must follow repository, transaction, permissions and no-AutoMigrate rules."}
-{"file":".trellis/spec/backend/database-guidelines.md","reason":"Defines DB-time, explicit SQL, transaction snapshot and SECURITY DEFINER persistence constraints."}
-{"file":".trellis/spec/backend/error-handling.md","reason":"Defines cancellation, SQLSTATE, error-chain and sanitized error behavior."}
-{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Defines local verification, resource and performance gates."}
-{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Required for the scoped transaction port and Model Settings owner boundary."}
-{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"Required to reuse existing lifecycle scanners/validation rather than duplicate domain rules."}
-{"file":".trellis/tasks/08-19-gorm-localmodelruntime-migration/design.md","reason":"Approved staged design and legacy compatibility boundary."}
-{"file":".trellis/tasks/08-19-gorm-localmodelruntime-migration/research/baseline.md","reason":"Public surface, callers and production wiring baseline."}
-{"file":".trellis/tasks/08-19-gorm-localmodelruntime-migration/research/sql-schema.md","reason":"Schema, permissions, SQL and transaction facts."}
-{"file":".trellis/tasks/08-19-gorm-localmodelruntime-migration/research/test-wiring.md","reason":"Fixture and TODO 9 test matrix."}
-{"file":".trellis/tasks/08-19-gorm-localmodelruntime-migration/research/planning-review.md","reason":"Resolved planning findings and approval boundary."}
-{"file":".trellis/tasks/08-19-gorm-localmodelruntime-migration/research/quality-gates.md","reason":"Review dimensions and verification limits."}
+{"file": ".trellis/spec/backend/index.md", "reason": "Local Model Runtime persistence must follow repository, transaction, permissions and no-AutoMigrate rules."}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Defines DB-time, explicit SQL, transaction snapshot and SECURITY DEFINER persistence constraints."}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Defines cancellation, SQLSTATE, error-chain and sanitized error behavior."}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Defines local verification, resource and performance gates."}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Required for the scoped transaction port and Model Settings owner boundary."}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Required to reuse existing lifecycle scanners/validation rather than duplicate domain rules."}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-localmodelruntime-migration/design.md", "reason": "Approved staged design and legacy compatibility boundary."}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-localmodelruntime-migration/research/baseline.md", "reason": "Public surface, callers and production wiring baseline."}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-localmodelruntime-migration/research/sql-schema.md", "reason": "Schema, permissions, SQL and transaction facts."}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-localmodelruntime-migration/research/test-wiring.md", "reason": "Fixture and TODO 9 test matrix."}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-localmodelruntime-migration/research/planning-review.md", "reason": "Resolved planning findings and approval boundary."}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-localmodelruntime-migration/research/quality-gates.md", "reason": "Review dimensions and verification limits."}

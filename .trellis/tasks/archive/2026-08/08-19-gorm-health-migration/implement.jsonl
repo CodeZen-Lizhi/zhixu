@@ -1,7 +1,7 @@
-{"file":".trellis/tasks/08-18-gorm-data-access-migration/prd.md","reason":"TODO 10 共享约束、模块验收模板、TODO 9/TODO 3 门禁"}
-{"file":".trellis/tasks/08-18-gorm-data-access-migration/design.md","reason":"GORM root、UnitOfWork、River database/sql 与 child 边界设计"}
-{"file":".trellis/tasks/08-18-gorm-data-access-migration/implement.md","reason":"Health child 依赖顺序、验证模板与 Final 回滚边界"}
-{"file":".trellis/tasks/08-19-gorm-health-migration/research/health-baseline.md","reason":"Health owner、跨模块 scoped Port 与 legacy 行为基线"}
-{"file":".trellis/spec/backend/database-guidelines.md","reason":"数据库事务、锁、分页、Schema 与 GORM 约束"}
-{"file":".trellis/spec/backend/error-handling.md","reason":"取消、deadline、错误分类和 fail-closed 规则"}
-{"file":".trellis/spec/backend/quality-guidelines.md","reason":"质量门禁、测试范围和交付要求"}
+{"file": ".trellis/tasks/archive/2026-09/08-18-gorm-data-access-migration/prd.md", "reason": "TODO 10 共享约束、模块验收模板、TODO 9/TODO 3 门禁"}
+{"file": ".trellis/tasks/archive/2026-09/08-18-gorm-data-access-migration/design.md", "reason": "GORM root、UnitOfWork、River database/sql 与 child 边界设计"}
+{"file": ".trellis/tasks/archive/2026-09/08-18-gorm-data-access-migration/implement.md", "reason": "Health child 依赖顺序、验证模板与 Final 回滚边界"}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-health-migration/research/health-baseline.md", "reason": "Health owner、跨模块 scoped Port 与 legacy 行为基线"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "数据库事务、锁、分页、Schema 与 GORM 约束"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "取消、deadline、错误分类和 fail-closed 规则"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "质量门禁、测试范围和交付要求"}

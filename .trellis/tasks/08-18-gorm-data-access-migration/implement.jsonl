@@ -1,9 +1,0 @@
-{"file": ".trellis/spec/backend/index.md", "reason": "后端规范索引，定位数据访问迁移适用规范"}
-{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "数据库连接、事务、SQL、分页和迁移边界"}
-{"file": ".trellis/spec/backend/error-handling.md", "reason": "Repository 错误翻译和失败语义"}
-{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "数据库日志和敏感信息脱敏"}
-{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "验证、测试和质量门禁"}
-{"file": ".trellis/tasks/08-18-gorm-data-access-migration/research/repository-inventory.md", "reason": "PostgreSQL owner、依赖波次和证据锚点"}
-{"file": ".trellis/tasks/08-18-gorm-data-access-migration/research/gorm-river-compatibility.md", "reason": "GORM、pgx、River 官方兼容路径和 Spike"}
-{"file": "docs/architecture/adr/0019-mature-framework-first.md", "reason": "成熟框架复用和自研边界约束"}
-{"file": ".trellis/tasks/08-18-gorm-data-access-migration/research/lean-test-policy-2026-09-01.md", "reason": "开放 child 按风险精简测试门禁与完成边界"}

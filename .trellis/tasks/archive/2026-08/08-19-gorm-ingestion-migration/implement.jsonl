@@ -1,11 +1,11 @@
-{"file":".trellis/spec/backend/database-guidelines.md","reason":"Ingestion Projection 原子事务、唯一键、策略隔离、错误矩阵和批量门禁"}
-{"file":".trellis/spec/backend/error-handling.md","reason":"Attempt/API 幂等、取消、retryable 和稳定错误码契约"}
-{"file":".trellis/spec/backend/capture-profile-contract.md","reason":"Capture 到 Ingestion 的 evidence、checkpoint 和取消边界"}
-{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Source/Chunk 内容、JSON、SQL 参数和数据库错误的脱敏规范"}
-{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Go、race、integration、PostgreSQL 和任务交付门禁"}
-{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Repository 到 Domain/Application 的映射、错误和依赖泄漏检查"}
-{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"共享 scanner/query/helper 的复用边界，避免 pgx/GORM 双事实源"}
-{"file":".trellis/tasks/08-18-gorm-data-access-migration/research/repository-inventory.md","reason":"父任务 owner、调用点、模块范围和执行顺序"}
-{"file":".trellis/tasks/08-18-gorm-data-access-migration/research/gorm-river-compatibility.md","reason":"共享 GORM/pgx root、生产切换和 TODO 9 门禁"}
-{"file":".trellis/tasks/archive/2026-08/08-19-gorm-platform-transaction-foundation/research/static-validation.md","reason":"已交付 GORM 配置、显式事务和当前真实 PostgreSQL 缺口"}
-{"file":".trellis/tasks/08-19-gorm-ingestion-migration/research/baseline.md","reason":"本模块端口、Schema、SQL、测试、批量和错误行为基线"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Ingestion Projection 原子事务、唯一键、策略隔离、错误矩阵和批量门禁"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Attempt/API 幂等、取消、retryable 和稳定错误码契约"}
+{"file": ".trellis/spec/backend/capture-profile-contract.md", "reason": "Capture 到 Ingestion 的 evidence、checkpoint 和取消边界"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Source/Chunk 内容、JSON、SQL 参数和数据库错误的脱敏规范"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Go、race、integration、PostgreSQL 和任务交付门禁"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Repository 到 Domain/Application 的映射、错误和依赖泄漏检查"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "共享 scanner/query/helper 的复用边界，避免 pgx/GORM 双事实源"}
+{"file": ".trellis/tasks/archive/2026-09/08-18-gorm-data-access-migration/research/repository-inventory.md", "reason": "父任务 owner、调用点、模块范围和执行顺序"}
+{"file": ".trellis/tasks/archive/2026-09/08-18-gorm-data-access-migration/research/gorm-river-compatibility.md", "reason": "共享 GORM/pgx root、生产切换和 TODO 9 门禁"}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-platform-transaction-foundation/research/static-validation.md", "reason": "已交付 GORM 配置、显式事务和当前真实 PostgreSQL 缺口"}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-ingestion-migration/research/baseline.md", "reason": "本模块端口、Schema、SQL、测试、批量和错误行为基线"}

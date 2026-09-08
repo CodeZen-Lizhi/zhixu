@@ -4,7 +4,7 @@
 
 本路线图只维护未交付方向、优先级、依赖和不可破坏的迁移边界。实际拆分、负责人、状态、验收证据与发布时间在 `.trellis/tasks/` 管理；人天是熟悉项目的单人初估，不含需求澄清、外部协调和发布观察。
 
-当前架构事实以 [架构文档](architecture/README.md) 为准。Gin、Eino、前端 OpenAPI 生成客户端、TODO 9 的 Testcontainers 测试工厂与 Atlas 唯一迁移事实源均已交付；GORM 生产切换以及 `gin-contrib/sessions` 评估仍是未来迁移，不得提前写成当前技术基线。
+当前架构事实以 [架构文档](architecture/README.md) 为准。Gin、Eino、前端 OpenAPI 生成客户端、TODO 9 的 Testcontainers 测试工厂与 Atlas 唯一迁移事实源均已交付；TODO 10 的 GORM 实现、入口接线与本地定向验收已完成，代码已提交并推送到 `origin/dev`。部署与历史升级限制见 [GORM 发布与回滚](architecture/runbooks/gorm-persistence-rollout.md)。`gin-contrib/sessions` 仍待评估。
 
 ## 当前交付收口（未完成）
 
@@ -25,13 +25,13 @@ flowchart LR
     Eino["Eino 通用 AI 能力（已交付）"] --> WorkspaceAgent["受限 Workspace Agent"]
     Spectral["Spectral + oasdiff（已交付）"] --> GeneratedClient["OpenAPI Generator + Zod（已交付）"]
     Testcontainers["Testcontainers-Go（已交付）"] --> Atlas["Atlas 唯一 Schema 迁移（已交付）"]
-    Atlas --> GORM["GORM 数据访问迁移"]
+    Atlas --> GORM["GORM 数据访问迁移（开发完成）"]
     Testcontainers --> GORM
     Gin["Gin HTTP 基线（已交付）"] --> Sessions["gin-contrib/sessions 评估（deferred）"]
     GORM --> Sessions
 ```
 
-数据库方向的 Testcontainers 与 Atlas 前置均已交付，GORM 正在其上分批推进。OpenAPI 门禁与生成客户端已按依赖顺序交付。受限 Workspace Agent 依赖已交付的 Eino AI Runtime 基线，并继续拥有自身产品与安全门禁。Gin 已交付；Session 框架评估仍晚于 GORM 收口。
+数据库方向的 Testcontainers 与 Atlas 前置均已交付，GORM 全部 30 个子任务已完成本地开发与定向验收。OpenAPI 门禁与生成客户端已按依赖顺序交付。受限 Workspace Agent 依赖已交付的 Eino AI Runtime 基线，并继续拥有自身产品与安全门禁。Gin 已交付；Session 框架评估仍待单独推进。
 
 ## 3. 产品方向
 
@@ -115,20 +115,23 @@ flowchart LR
 ### 5.1 已交付 TODO 9：使用 Testcontainers-Go 管理数据库集成测试（2026-08-26）
 
 - **结果**：提交 `109d2cb4` 已交付 `internal/platform/testdb` 的 Testcontainers-Go 工厂，归档任务 [`08-25-gorm-prerequisites`](../.trellis/tasks/archive/2026-08/08-25-gorm-prerequisites/) 记录了真实 PostgreSQL/pgvector、迁移、共享 `platformpostgres.Pool`、并行隔离和清理证据。
-- **后续边界**：工厂只提供环境生命周期。每个 TODO 10 child 仍须在既有 integration fixture 中自行证明 legacy/GORM 等价、事务、锁、失败和性能门禁；TODO 9 的完成不等同于任何业务模块的 GORM 回归完成。
+- **后续边界**：工厂只提供环境生命周期。TODO 10 各模块已在既有 fixture 中完成核心真实 PostgreSQL 与相关事务/锁/恢复验证，具体范围见下方验收记录；后续修改仍须按风险验证，不能用测试工厂交付代替业务回归。
 - **边界**：单一工厂负责健康等待、正式迁移、数据库/端口/容器命名、并行隔离、日志摘要和失败销毁；业务测试不得复制容器管理。保留显式外部 DSN 用于性能、故障注入和远程 CI，但两种模式不能竞争同一数据库，并应执行同一迁移和核心断言。
 - **失败语义**：Docker 不可用时由开发者选择的集成测试明确 skip 或报可操作错误，不得伪装数据库测试通过；日志不得包含密码或完整 DSN。
 
-### 5.2 TODO 10：将应用数据访问层全面迁移到 GORM
+### 5.2 已完成开发 TODO 10：应用数据访问层全面迁移到 GORM（2026-09-08）
 
 - **优先级/初估**：P0、高风险，80–120 人天；Testcontainers 与 Atlas 前置均已交付。
-- **目标**：让应用 PostgreSQL Repository 与事务统一经过 GORM 边界，消除普通业务代码对 pgx Pool/Tx 的直接耦合。
+- **代码状态**：最终实现 [cb935655](https://github.com/CodeZen-Lizhi/zhixu/commit/cb93565561498674cda1dc1230fed587fba66075) 已提交并推送到 `origin/dev`；父任务和 30 个子任务均为 `completed`，已归档。尚未部署。
+- **结果**：全部 30 个子任务（Foundation、28 个模块、Final）完成，覆盖 30 个持久化 owner。API、Worker 和六个相关 CLI 统一使用 GORM/批准的底层入口；业务事务经单一 Pool 与 `foundation.TransactionScope` 组合，legacy pgx 仓储和运行时过渡接口已清理。逐项证据见 [最终验收记录](../.trellis/tasks/archive/2026-09/08-19-gorm-composition-pgx-convergence/research/final-acceptance.md)。
 - **模型边界**：Persistence Model 与领域实体分离，显式表/列/nullable 映射；禁止 `gorm.Model`、隐式复数表名、软删除、自动时间戳、关联级联或 Hook 改变现有语义。
 - **SQL 边界**：常规 CRUD/分页/批量使用 GORM；复杂 CTE、窗口、图、pgvector、`FOR UPDATE SKIP LOCKED`、advisory lock 和性能 SQL 使用受控 Raw/Exec/Clauses，但仍由 Repository 管理。
 - **事务边界**：项目自有 Unit of Work 保持隔离级别、只读事务、Savepoint、跨 Repository 原子提交、Outbox 和 response-loss replay；GORM 类型不进入 Domain/Application。
-- **pgx allowlist**：只允许 GORM PostgreSQL Driver、River、Atlas/迁移、连接级 lock、COPY/类型注册等经证据证明的底层能力；每个例外有接口、理由和测试。
+- **pgx allowlist**：只允许 GORM PostgreSQL Driver、River、Atlas/迁移、连接级 lock、COPY/类型注册及 credential bootstrap 等经证据证明的底层能力；精确清单由 `cmd/persistencecheck` 保护，每个例外有接口、理由和验证依据。
 - **配置边界**：Logger、NamingStrategy、PrepareStmt、SkipDefaultTransaction、NowFunc、连接池和错误翻译必须显式，不依赖会改变 SQL、事务、时间或脱敏语义的框架默认值。
-- **门禁**：现有 Workspace/权限、分页、幂等、乐观锁、唯一约束、错误码不变；真实 PostgreSQL 覆盖事务、锁、Outbox、Workflow/River 和 response-loss replay，复杂查询通过 EXPLAIN/容量门禁；无 N+1、隐式预加载、无界查询或逐条写入退化；日志不得泄露 Credential、正文、完整 DSN、绝对路径或高敏参数。按简单只读→单聚合写→批量/分页→跨 Repository 事务→Workflow/Graph/pgvector/锁分批切换和回滚。
+- **兼容边界**：保持现有 Workspace/权限、分页、幂等、乐观锁、唯一约束和错误码；禁止 N+1、隐式预加载、无界查询、逐条写入退化及日志泄露 Credential、正文、完整 DSN 或高敏参数。
+- **验证**：各模块核心 PostgreSQL 与相关事务/锁/River/恢复场景、受影响入口构建、定向 unit/race/vet、Go/SQL 与 credential 安全审查已完成；静态门禁通过 30 个 owner、1,788 个 Go 文件。完整容量、网络故障和外部发布矩阵未执行，具体覆盖以验收记录为准。
+- **发布与回滚**：Atlas Schema、历史迁移、checksum 和依赖文件未改；目标环境部署未执行。M9 追加历史升级用例在 GORM 构造前因既有 82 回填与 62 trigger 冲突失败，对应旧库升级仍是发布阻断。发布顺序和按依赖闭包回滚见 [Runbook](architecture/runbooks/gorm-persistence-rollout.md)。
 
 ### 5.3 TODO 11：评估并接入 gin-contrib/sessions
 

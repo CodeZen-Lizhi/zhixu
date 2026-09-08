@@ -135,8 +135,8 @@ Safe Writeback 的 WorkspaceStore 与 GitRepository 不是通用文件/Git 工�
 | 能力 | 当前选择 | 边界 |
 |---|---|---|
 | 后端 | Go；Gin v1.12.0 + `net/http` 兼容边界 | Gin 负责 API、Middleware、REST 与 SSE；标准库 `http.Handler` 仅在框架边界适配，Domain/Application 不依赖 Gin |
-| 数据访问 | pgx 参数化手写 SQL | sqlc 尚未配置；Repository 通过模块 Interface 隔离 |
-| Migration/Job | Atlas + River/riverpgxv5 | Atlas 是唯一前向迁移事实源（无 Down，fix-forward），PostgreSQL Job 与 Worker；选择理由见 [ADR-0015](adr/0015-river-goose-runtime.md) 与 [ADR-0029](adr/0029-atlas-sole-schema-migration.md) |
+| 数据访问 | GORM + 共享 PostgreSQL Pool / UoW | Repository 隔离 Persistence Model；跨模块使用 Foundation TransactionScope，复杂查询保留参数化 Raw/Exec；[持久化契约](../../.trellis/spec/backend/gorm-persistence.md) |
+| Migration/Job | Atlas + River | Atlas 是唯一前向 Schema 事实源（无 Down，fix-forward）；同一物理池上使用官方 database/sql driver 原子入队、pgx driver 运行 Worker/listener；见 [ADR-0015](adr/0015-river-goose-runtime.md) 与 [ADR-0029](adr/0029-atlas-sole-schema-migration.md) |
 | 数据 | PostgreSQL + pgvector + FTS | exact vector scan 为基线；固定维度容量证据后才使用部分 HNSW |
 | 图谱 | canonical Relation + PostgreSQL 查询投影 | v1 不引入图数据库，见 [ADR-0005](adr/0005-no-graph-database-v1.md) |
 | 内容 | goldmark、go-readability Adapter、pdftotext/Poppler Adapter、SHA-256 | 外部 Parser 只经 Adapter；HTML 安全文本使用标准 parser，不用正则清洗 |

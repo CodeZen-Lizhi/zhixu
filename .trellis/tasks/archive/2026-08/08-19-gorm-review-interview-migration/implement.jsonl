@@ -1,8 +1,8 @@
-{"file":".trellis/spec/backend/database-guidelines.md","reason":"Interview Session/Turn、completion reservation/two holds、shared Path view、锁/CAS、DB time 与 PostgreSQL 契约"}
-{"file":".trellis/spec/backend/error-handling.md","reason":"保持 no-row、context cause、SQLSTATE、幂等、CAS、response-loss 与 retryability"}
-{"file":".trellis/spec/backend/logging-guidelines.md","reason":"约束 GORM logger、答案/证据/报告/receipt/Artifact、SQL 参数与 DSN 脱敏"}
-{"file":".trellis/spec/backend/quality-guidelines.md","reason":"应用 M8 Interview 并发、reservation、恢复、真实数据库和独立审查门禁"}
-{"file":".trellis/tasks/08-18-gorm-data-access-migration/prd.md","reason":"父任务 staged 边界、TODO 9/TODO 3 门禁、Final wiring 与完成语义"}
-{"file":".trellis/tasks/archive/2026-08/08-19-gorm-platform-transaction-foundation/research/static-validation.md","reason":"共享 Pool.GORM、Unit of Work、logger 与 TODO 9 剩余限制"}
-{"file":".trellis/tasks/08-19-gorm-review-interview-migration/research/baseline.md","reason":"本模块方法、Schema、锁序、调用点、测试与 dirty-worktree 基线"}
-{"file":".trellis/tasks/08-19-gorm-review-interview-migration/research/implementation-contract.md","reason":"冻结 staged 边界、completion/hold、view、carrier、错误和完成门禁"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Interview Session/Turn、completion reservation/two holds、shared Path view、锁/CAS、DB time 与 PostgreSQL 契约"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "保持 no-row、context cause、SQLSTATE、幂等、CAS、response-loss 与 retryability"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "约束 GORM logger、答案/证据/报告/receipt/Artifact、SQL 参数与 DSN 脱敏"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "应用 M8 Interview 并发、reservation、恢复、真实数据库和独立审查门禁"}
+{"file": ".trellis/tasks/archive/2026-09/08-18-gorm-data-access-migration/prd.md", "reason": "父任务 staged 边界、TODO 9/TODO 3 门禁、Final wiring 与完成语义"}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-platform-transaction-foundation/research/static-validation.md", "reason": "共享 Pool.GORM、Unit of Work、logger 与 TODO 9 剩余限制"}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-review-interview-migration/research/baseline.md", "reason": "本模块方法、Schema、锁序、调用点、测试与 dirty-worktree 基线"}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-review-interview-migration/research/implementation-contract.md", "reason": "冻结 staged 边界、completion/hold、view、carrier、错误和完成门禁"}

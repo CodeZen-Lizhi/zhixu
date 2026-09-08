@@ -1,5 +1,8 @@
 # Workspace Repository 迁移到 GORM
 
+> **当前交付状态（2026-09-08）**：`completed`，已归档；最终代码 [cb935655](https://github.com/CodeZen-Lizhi/zhixu/commit/cb93565561498674cda1dc1230fed587fba66075) 已推送至 `origin/dev`，尚未部署。
+> TODO 10 全部 30 个子任务已完成，最新实现与验证见 [Final 验收记录](../08-19-gorm-composition-pgx-convergence/research/final-acceptance.md)。下文 staged、待 Final 或未提交的描述保留其原阶段事实，现存 M9 历史升级限制仍有效。
+
 ## Goal
 
 在不改变 Workspace 对外契约、Schema 或生产接线的前提下，新增完整的 staged GORM Repository，保持 Workspace/Source、Registry、Control、Runtime、Git capture、root grant 和 root rebind Audit 的事务、锁序、CAS、幂等与防伪造语义。TODO 9 真实 PostgreSQL 门禁通过后，才允许 Capture 和 Final 切换共享事务与生产 Composition。

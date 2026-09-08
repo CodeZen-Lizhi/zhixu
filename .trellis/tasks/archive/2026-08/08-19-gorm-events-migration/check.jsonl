@@ -1,9 +1,9 @@
-{"file":".trellis/spec/backend/index.md","reason":"后端质量门禁和模块边界"}
-{"file":".trellis/spec/backend/directory-structure.md","reason":"依赖方向与生产 Composition 检查"}
-{"file":".trellis/spec/backend/database-guidelines.md","reason":"SSE 数据、事务、索引和真实 PostgreSQL 审查"}
-{"file":".trellis/spec/backend/error-handling.md","reason":"错误分类、取消 cause 和安全输出审查"}
-{"file":".trellis/spec/backend/logging-guidelines.md","reason":"摘要、错误与敏感数据脱敏审查"}
-{"file":".trellis/spec/backend/quality-guidelines.md","reason":"跨层、race、integration 和独立 review 门禁"}
-{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Store/HTTP/consumer 数据流一致性检查"}
-{"file":".trellis/tasks/08-19-gorm-events-migration/research/baseline.md","reason":"代码、接线和现有证据清单"}
-{"file":".trellis/tasks/08-19-gorm-events-migration/research/sql-schema.md","reason":"SQL/Schema/retention/TODO9 审查基线"}
+{"file": ".trellis/spec/backend/index.md", "reason": "后端质量门禁和模块边界"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "依赖方向与生产 Composition 检查"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "SSE 数据、事务、索引和真实 PostgreSQL 审查"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "错误分类、取消 cause 和安全输出审查"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "摘要、错误与敏感数据脱敏审查"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "跨层、race、integration 和独立 review 门禁"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Store/HTTP/consumer 数据流一致性检查"}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-events-migration/research/baseline.md", "reason": "代码、接线和现有证据清单"}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-events-migration/research/sql-schema.md", "reason": "SQL/Schema/retention/TODO9 审查基线"}

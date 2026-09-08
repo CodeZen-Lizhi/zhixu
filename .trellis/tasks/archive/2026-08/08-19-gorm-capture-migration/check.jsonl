@@ -1,13 +1,13 @@
-{"file":".trellis/spec/backend/index.md","reason":"后端质量门禁与 owner/Composition 审查"}
-{"file":".trellis/spec/backend/database-guidelines.md","reason":"事务、锁、参数化、性能、SQLSTATE 和真实数据库审查"}
-{"file":".trellis/spec/backend/capture-profile-contract.md","reason":"Capture/Profile 状态、跨 owner 原子性和验收审查"}
-{"file":".trellis/spec/backend/logging-guidelines.md","reason":"敏感正文、URL、locator、SQL 与 Secret 脱敏审查"}
-{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Workspace/Capture/Agent/Workflow/Filesystem 完整数据流审查"}
-{"file":".trellis/tasks/08-18-gorm-data-access-migration/research/repository-inventory.md","reason":"模块依赖、production wiring 与 Final 边界"}
-{"file":".trellis/tasks/08-19-gorm-workspace-migration/research/baseline.md","reason":"ScopedSourceWriter 下游契约和 legacy Capture 兼容审查"}
-{"file":".trellis/tasks/08-19-gorm-capture-migration/research/baseline.md","reason":"代码面、构造点和现有验证资产清单"}
-{"file":".trellis/tasks/08-19-gorm-capture-migration/research/sql-schema.md","reason":"SQL/Schema/锁/事务/性能/TODO9 审查基线"}
-{"file":".trellis/tasks/08-19-gorm-capture-migration/research/spec-contracts.md","reason":"Go/SQL/Trellis Review 不变量"}
-{"file":".trellis/tasks/08-19-gorm-capture-migration/research/planning-review.md","reason":"最终 Review 发现、修复和残余限制"}
-{"file":".trellis/tasks/08-19-gorm-capture-migration/research/baseline-validation.md","reason":"已执行命令与 TODO9 盲区证据"}
-{"file":".trellis/tasks/08-19-gorm-capture-migration/research/static-validation.md","reason":"Capture Core 实施、Review 修复、静态门禁与剩余 TODO9 证据"}
+{"file": ".trellis/spec/backend/index.md", "reason": "后端质量门禁与 owner/Composition 审查"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "事务、锁、参数化、性能、SQLSTATE 和真实数据库审查"}
+{"file": ".trellis/spec/backend/capture-profile-contract.md", "reason": "Capture/Profile 状态、跨 owner 原子性和验收审查"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "敏感正文、URL、locator、SQL 与 Secret 脱敏审查"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Workspace/Capture/Agent/Workflow/Filesystem 完整数据流审查"}
+{"file": ".trellis/tasks/archive/2026-09/08-18-gorm-data-access-migration/research/repository-inventory.md", "reason": "模块依赖、production wiring 与 Final 边界"}
+{"file": ".trellis/tasks/archive/2026-09/08-19-gorm-workspace-migration/research/baseline.md", "reason": "ScopedSourceWriter 下游契约和 legacy Capture 兼容审查"}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-capture-migration/research/baseline.md", "reason": "代码面、构造点和现有验证资产清单"}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-capture-migration/research/sql-schema.md", "reason": "SQL/Schema/锁/事务/性能/TODO9 审查基线"}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-capture-migration/research/spec-contracts.md", "reason": "Go/SQL/Trellis Review 不变量"}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-capture-migration/research/planning-review.md", "reason": "最终 Review 发现、修复和残余限制"}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-capture-migration/research/baseline-validation.md", "reason": "已执行命令与 TODO9 盲区证据"}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-capture-migration/research/static-validation.md", "reason": "Capture Core 实施、Review 修复、静态门禁与剩余 TODO9 证据"}

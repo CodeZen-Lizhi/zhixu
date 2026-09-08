@@ -1,0 +1,15 @@
+{"file":".trellis/spec/backend/index.md","reason":"Workflow GORM staged implementation must follow backend package and persistence guidance."}
+{"file": ".trellis/tasks/archive/2026-09/08-19-gorm-workflow-migration/research/quality-gates.md", "reason": "Complete task-specific transaction, error, resource and verification gates without context truncation."}
+{"file":".trellis/spec/backend/workspace-analysis-contract.md","reason":"Defines cross-owner Workflow/Agent execution fence and lock-order constraints."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Required for scoped application ports and adapter composition changes."}
+{"file": ".trellis/tasks/archive/2026-09/08-19-gorm-workflow-migration/design.md", "reason": "Approved technical design and staged production boundary."}
+{"file": ".trellis/tasks/archive/2026-09/08-19-gorm-workflow-migration/implement.md", "reason": "Execution checklist and TODO 9 completion gates."}
+{"file": ".trellis/tasks/archive/2026-09/08-19-gorm-workflow-migration/research/baseline.md", "reason": "Current public surface, consumers and pgx-only hook inventory."}
+{"file": ".trellis/tasks/archive/2026-09/08-19-gorm-workflow-migration/research/sql-schema.md", "reason": "Schema, lock order, CAS and DB-time facts."}
+{"file": ".trellis/tasks/archive/2026-09/08-19-gorm-workflow-migration/research/river-transaction.md", "reason": "Scoped producer, pgx worker compatibility and enqueue fence blocker."}
+{"file": ".trellis/tasks/archive/2026-09/08-19-gorm-workflow-migration/research/test-wiring.md", "reason": "Reusable tests, fixture design and production wiring gates."}
+{"file": ".trellis/tasks/archive/2026-09/08-19-gorm-workflow-migration/research/planning-review.md", "reason": "Resolved Go, SQL and Trellis planning findings plus approval boundary."}
+{"file": ".trellis/tasks/archive/2026-09/08-19-gorm-tools-migration/design.md", "reason": "Defines the Workflow-owned policy snapshot and recovery fence consumed by Tools."}
+{"file": ".trellis/tasks/archive/2026-09/08-19-gorm-tools-migration/research/sql-transaction-schema.md", "reason": "Freezes legacy Tool policy and stale recovery SQL, lock order, DB time and owner boundaries."}
+{"file": ".trellis/tasks/archive/2026-09/08-18-gorm-data-access-migration/research/lean-test-policy-2026-09-01.md", "reason": "Overrides historical full-matrix checks with targeted real-PostgreSQL evidence and keeps Final ownership explicit."}
+{"file": ".trellis/tasks/archive/2026-09/08-19-gorm-workflow-migration/final-handoff.md", "reason": "Current GORM runtime evidence, resolved scoped fence prerequisite, constructor map and Final legacy cleanup boundary."}

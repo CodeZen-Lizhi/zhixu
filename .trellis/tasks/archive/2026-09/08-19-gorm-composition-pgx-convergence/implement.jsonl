@@ -1,0 +1,7 @@
+{"file": ".trellis/tasks/archive/2026-09/08-18-gorm-data-access-migration/prd.md", "reason": "父任务统一模型、事务和迁移边界"}
+{"file": ".trellis/tasks/archive/2026-09/08-18-gorm-data-access-migration/design.md", "reason": "同一物理 Pool、scoped Port 与 Final 收口设计"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "数据库、参数化 SQL、事务、Atlas 和 Testcontainers"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "错误分类、取消及重试契约"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "日志及审计脱敏"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "跨模块数据流与调用方检查"}
+{"file": ".trellis/spec/backend/gorm-persistence.md", "reason": "Final 单池、scoped 事务、GORM/pgx 边界、错误与生命周期可执行契约"}

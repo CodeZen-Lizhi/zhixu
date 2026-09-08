@@ -1,9 +1,9 @@
-{"file":".trellis/spec/backend/index.md","reason":"后端模块边界、开发前检查和质量入口"}
-{"file":".trellis/spec/backend/authoring-contract.md","reason":"Draft/Freeze/Publication/Restore 的产品与数据库不变量"}
-{"file":".trellis/spec/backend/directory-structure.md","reason":"Application/Adapter/Composition 依赖方向"}
-{"file":".trellis/spec/backend/logging-guidelines.md","reason":"SQL 参数、正文、路径、DSN 和 Secret 脱敏"}
-{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"API/Worker/ChangeControl/Artifact/Organizing 调用链检查"}
-{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"复用 Foundation 与纯 mapper，避免双实现规则漂移"}
-{"file":".trellis/tasks/08-19-gorm-authoring-migration/research/baseline.md","reason":"Owner、事务、生产接线与现有测试基线"}
-{"file":".trellis/tasks/08-19-gorm-authoring-migration/research/sql-schema.md","reason":"Schema、锁序、SQLSTATE、array 与 TODO9 SQL 门禁"}
-{"file":".trellis/tasks/08-19-gorm-authoring-migration/research/spec-contracts.md","reason":"大型规范的 Authoring 相关实施摘要"}
+{"file": ".trellis/spec/backend/index.md", "reason": "后端模块边界、开发前检查和质量入口"}
+{"file": ".trellis/spec/backend/authoring-contract.md", "reason": "Draft/Freeze/Publication/Restore 的产品与数据库不变量"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Application/Adapter/Composition 依赖方向"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "SQL 参数、正文、路径、DSN 和 Secret 脱敏"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "API/Worker/ChangeControl/Artifact/Organizing 调用链检查"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "复用 Foundation 与纯 mapper，避免双实现规则漂移"}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-authoring-migration/research/baseline.md", "reason": "Owner、事务、生产接线与现有测试基线"}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-authoring-migration/research/sql-schema.md", "reason": "Schema、锁序、SQLSTATE、array 与 TODO9 SQL 门禁"}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-authoring-migration/research/spec-contracts.md", "reason": "大型规范的 Authoring 相关实施摘要"}

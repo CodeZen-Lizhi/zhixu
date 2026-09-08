@@ -1,8 +1,8 @@
-{"file":".trellis/tasks/08-19-gorm-review-learningpath-migration/prd.md","reason":"核对全部需求、验收条件、范围和 TODO 9/Final 完成门禁"}
-{"file":".trellis/tasks/08-19-gorm-review-learningpath-migration/design.md","reason":"复核 staged 架构、事务锁序、模型/SQL、错误、测试和回滚设计"}
-{"file":".trellis/spec/backend/database-guidelines.md","reason":"检查 shared Path、reservation/hold、CAS、唯一/历史约束、DB time 与 maintenance"}
-{"file":".trellis/spec/backend/error-handling.md","reason":"检查 no-row、context cause、SQLSTATE、错误码和 retryability 对等"}
-{"file":".trellis/spec/backend/logging-guidelines.md","reason":"检查 Review 数据、SQL/参数、GORM logger 与 DSN 脱敏"}
-{"file":".trellis/spec/backend/quality-guidelines.md","reason":"检查 M8 并发/恢复门禁、局部验证和真实 PostgreSQL 剩余风险"}
-{"file":".trellis/tasks/08-18-gorm-data-access-migration/research/repository-inventory.md","reason":"确认修改限定于 Learning Path owner，生产 wiring 与跨模块门禁留给 Final/父任务"}
-{"file":".trellis/tasks/08-19-gorm-review-learningpath-migration/research/baseline.md","reason":"按冻结的方法、Schema、调用方、测试和 dirty 基线审查实现"}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-review-learningpath-migration/prd.md", "reason": "核对全部需求、验收条件、范围和 TODO 9/Final 完成门禁"}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-review-learningpath-migration/design.md", "reason": "复核 staged 架构、事务锁序、模型/SQL、错误、测试和回滚设计"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "检查 shared Path、reservation/hold、CAS、唯一/历史约束、DB time 与 maintenance"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "检查 no-row、context cause、SQLSTATE、错误码和 retryability 对等"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "检查 Review 数据、SQL/参数、GORM logger 与 DSN 脱敏"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "检查 M8 并发/恢复门禁、局部验证和真实 PostgreSQL 剩余风险"}
+{"file": ".trellis/tasks/archive/2026-09/08-18-gorm-data-access-migration/research/repository-inventory.md", "reason": "确认修改限定于 Learning Path owner，生产 wiring 与跨模块门禁留给 Final/父任务"}
+{"file": ".trellis/tasks/archive/2026-08/08-19-gorm-review-learningpath-migration/research/baseline.md", "reason": "按冻结的方法、Schema、调用方、测试和 dirty 基线审查实现"}
