@@ -701,3 +701,74 @@ Eino/eino-ext 已成为生产唯一 AI Runtime，旧 direct 实现已删除并�
 ### Status
 
 [OK] **Completed**
+
+
+## Session 76: TODO 10 全部子任务开发完成
+
+**Date**: 2026-09-08
+**Task**: TODO 10 全部子任务开发完成
+**Branch**: `dev`
+
+### Summary
+
+完成 TODO 10 的 30 个子任务与 30 个持久化 owner 的 GORM 收口；剩余七模块、Final 和父任务均已归档。交付为本地代码与验收记录，未提交、推送或部署。
+
+### Main Changes
+
+- 统一 API/Worker/六 CLI 的单池 GORM/scoped 接线，清除普通仓储 legacy pgx；修复审批并发、Reindex、ACL 和启动/关闭依赖释放问题。
+- 同步数据库/GORM 规范、架构、路线图与发布回滚说明；最终证据见 [验收记录](../../tasks/archive/2026-09/08-19-gorm-composition-pgx-convergence/research/final-acceptance.md)。
+
+### Git Commits
+
+本轮未提交；代码开发与本地验收已完成。
+
+### Testing
+
+- [OK] 最终 API/Worker/相关 CLI 构建、模块核心 PostgreSQL 与相关原子性/恢复用例、定向 race/unit/vet 通过；独立 Go/SQL/security/Trellis review 问题已修复复验。
+- [OK] 数据访问门禁通过 30 个 owner、1788 个 Go 文件；31 个归档任务 validate、30/30 child completed 唯一性、150 个本地文档链接与 git diff --check 通过。28 个 task 保留大型 spec 自动注入截断警告，实际相关规范已分段读取。
+- [FAIL] M9 历史升级用例仍 FAIL：既有 82 指针回填与 62 trigger 冲突，发生在 GORM 构造前。未改 Atlas/Schema/依赖文件，未新增测试文件；完整全仓、容量、真实网络故障和目标环境发布矩阵未执行。
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- 实际发布前由 Atlas/Proposal Revision owner 处理对应旧库升级阻断，再按 GORM 发布回滚 Runbook 做目标环境验证。本轮专用 PostgreSQL、凭据/元数据和构建产物已清理。
+
+
+## Session 77: TODO 10 提交推送与状态同步
+
+**Date**: 2026-09-08
+**Task**: TODO 10 提交推送与状态同步
+**Branch**: `dev`
+
+### Summary
+
+按用户后续授权完成 GORM 代码提交并推送，同步 TODO 10 需求清单、父任务与 30 个 child 的当前状态，以及架构和发布文档；目标环境部署未执行。
+
+### Main Changes
+
+- 代码与规范提交 cb935655 已推送 origin/dev，并用远端 refs/heads/dev 核对；纳入全部迁移实现、必要替代文件与单池接线，排除无关 .workbuddy/ 文件。
+- 文档与归档提交 bf2def71：31 个任务保持 completed，补充最终代码 SHA、committed_and_pushed/not_deployed 元数据与 PRD 当前状态；修正 Events 旧 in_progress 备注、Model Settings staged 规范和父/Final 旧授权说明。
+- 需求清单、GORM Runbook 与 [最终验收](../../tasks/archive/2026-09/08-19-gorm-composition-pgx-convergence/research/final-acceptance.md) 已同步；历史研究、验证和前一开发阶段未提交记录保留原事实。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `cb93565561498674cda1dc1230fed587fba66075` | (see git log) |
+| `bf2def7172ab1b19966556951d8c0eee12d4167c` | (see git log) |
+
+### Testing
+
+- [OK] 独立 trellis-check 的提交范围、必要依赖、关键修复和状态一致性复核通过；复用冻结代码已有构建/实库/race/vet 证据，未重复完整业务矩阵。
+- [OK] 31/31 task validate、状态/提交元数据和新增 PRD 验收链接检查通过；归档 PRD 的 3 处空行尾随空格已修复，暂存区 git diff --check 通过。
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- 目标环境发布前处理 M9 既有 82 回填与 62 trigger 冲突；本轮未修改历史迁移，不将该 FAIL 或未执行的外部验证记为通过。
