@@ -54,6 +54,60 @@
 - 正式 v1 不强制分区；只有 Node Run、Tool Call、Audit 等达到文档规定的容量或查询退化条件后才评估按月归档/分区。
 - Embedding、FTS 等可重建投影不作为永久备份最低要求；Proposal、Approval、Confirmed Relation、Workflow、Audit、Review 等运行/决策数据必须备份。
 
+## Scenario: M9 历史 Proposal Revision 回填兼容
+
+### 1. Scope / Trigger
+
+含历史 Proposal 的数据库执行 `00082_proposal_revision_three_way_merge.sql` 时，旧 `00062`
+transition guard 会拒绝只改 `current_revision_id` 的回填；既有延迟 reindex completion 事件还会阻止后续添加外键。
+本场景由 Atlas runner 的受限兼容步骤处理，永久 Schema 和已发布迁移原文不变。
+
+### 2. Signatures
+
+- `executeAtlasFile(ctx, sqlDB, driver, dir, file, options) error`：每文件事务及 Atlas revision 的唯一提交边界。
+- `proposalRevisionBackfillCompatibility(dir, file) (migrate.File, error)`：仅为精确文件名 `00082_proposal_revision_three_way_merge.sql` 选择 `00093_proposal_revision_backfill_compatibility.sql`。
+- `executeProposalRevisionCompatibility(ctx, tx, file) error`：使用 Atlas `StmtDecls()`，在同一个 `*sql.Tx` 内前置执行兼容 SQL、后置验证正式 guard。
+
+### 3. Contracts
+
+- `00093` 仍属于唯一 Atlas 目录和 `atlas.sum`；前置执行不提前写它的 revision，正常版本顺序到达它时才记录。
+- 临时 guard 只允许本次服务器事务把 NULL pointer 指向同一 Proposal 按 `revision_no DESC, id DESC` 排序的最新 Revision；其余字段（含 status、version、updated_at）必须完全一致。
+- 回填期间对 Proposal / Revision 表取事务级排他锁；沿用生产入口 `zhixu:migrate` advisory lock，禁止把兼容步骤拆到其他连接或单独提交。
+- 先验证已知旧 transition / completion guard 的源码及 trigger 结构；completion trigger 必须启用且为 `DEFERRABLE INITIALLY DEFERRED`。临时 guard 绑定服务器分配的 transaction ID，不使用调用方可设置的 GUC 或通用角色豁免。
+- 在回填前将 `proposal_verify_reindex_completion` 改为 `IMMEDIATE`，实际执行约束检查；`00082` 完成后恢复 `DEFERRED` 并验证正式 guard，不能禁用 trigger 来避开排队事件。
+- 已升级数据库正常执行 `00093` 时仅核对完成标记并返回，不重写业务数据或固定后续合法 guard。兼容步骤、历史 SQL、DDL 和 `00082` revision 必须一起提交或回滚。
+
+### 4. Validation & Error Matrix
+
+| 场景 | 结果 |
+| --- | --- |
+| `00082` 声明 `txmode none` | `MIGRATION_PROPOSAL_REVISION_BACKFILL_REQUIRES_TRANSACTION`，不执行迁移 |
+| 兼容文件缺失、名称不符或 `txmode none` | `MIGRATION_PROPOSAL_REVISION_BACKFILL_COMPATIBILITY_MISSING` |
+| 历史 Schema、guard 或 trigger 不匹配 | `55000 / MIGRATION_PROPOSAL_REVISION_BACKFILL_UNEXPECTED_SCHEMA` |
+| 回填试图改业务字段、使用非本事务或指向其他 Revision | 临时 guard 以 `23514` 拒绝 |
+| Proposal 没有任何 Revision | 原 `00082` 以 `23514` 拒绝；不能制造历史 Revision 让迁移假成功 |
+| 正式 guard 未恢复或事务标记不一致 | `55000 / MIGRATION_PROPOSAL_REVISION_BACKFILL_FINAL_GUARD_MISMATCH`，整笔回滚 |
+
+### 5. Good / Base / Bad Cases
+
+- Good：已有多个 Revision 的旧 Proposal 升级后指向最新的所属 Revision，其余业务字段与历史事实不变。
+- Base：空库完整 Up、已升级库的 `00093` 和重复 Up 成功；不留下临时 guard 或临时标记。
+- Bad：未知旧 guard、缺 Revision 或中途 SQL 失败时保留失败证据，回滚到迁移前状态后才允许修正数据来源并重试。
+
+### 6. Tests Required
+
+复用 `TestM9BusinessContractHardeningMigrationBackfillConstraints` 的真实旧库升级；另以必要的隔离 PostgreSQL 回归验证
+最新 Revision 选择、字段不变、重复 Up、失败回滚和恢复后重试、未知 guard 拒绝、约束仍生效及正式 Schema 无漂移。
+执行 Atlas lint / hash / validate，并确认历史文件及其校验和不变；成功证据记录在任务 research，不回写旧 FAIL 为 PASS。
+
+### 7. Wrong vs Correct
+
+- Wrong：改写已发布 `00062/00082`、单独递增 version、禁用 trigger，或只在迁移末尾放一条永远到不了的修复 SQL。
+- Correct：保持 `executor.Execute(ctx, file)` 执行原历史文件，在它的同一事务内执行受约束的兼容步骤及恢复验证；任意失败整笔回滚。
+
+实现见 [`proposal_revision_compatibility.go`](../../../internal/platform/migration/proposal_revision_compatibility.go)；
+发布边界见 [GORM / M9 Runbook](../../../docs/architecture/runbooks/gorm-persistence-rollout.md)。
+
 ## 命名与约束
 
 - SQL 表名、列名和索引名采用小写 snake_case；同一业务对象沿用 `workspace_id`、`version`、`status`、`created_at` 等统一语义。命名和字段约束以 Atlas 迁移为准，GORM 必须显式映射。

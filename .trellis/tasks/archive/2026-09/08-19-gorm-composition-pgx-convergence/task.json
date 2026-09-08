@@ -21,7 +21,7 @@
   "children": [],
   "parent": "08-18-gorm-data-access-migration",
   "relatedFiles": [],
-  "notes": "2026-09-08：本任务已完成并归档，TODO 10 全部 30 个子任务已完成。最终 GORM/scoped 实现、API/Worker/CLI 接线与 legacy pgx 清理已随 cb935655 提交并推送到 origin/dev。核心实库、相关原子性/恢复、构建及独立 Go/SQL/security review 以 Final 验收记录为准。尚未部署；既有 M9 的 82 回填/62 trigger 冲突仍阻断对应旧库升级。早期 staged/等待 Final 的描述只表示历史阶段。",
+  "notes": "2026-09-08：本任务已完成并归档，TODO 10 全部 30 个子任务已完成。最终 GORM/scoped 实现、API/Worker/CLI 接线与 legacy pgx 清理已随 cb935655 提交并推送到 origin/dev。核心实库、相关原子性/恢复、构建及独立 Go/SQL/security review 以 Final 验收记录为准。尚未部署；M9 原历史升级 FAIL 保留，后续已通过 00093/Atlas runner 兼容修复及必要实库回归，详见 meta.m9_legacy_upgrade。早期 staged/等待 Final 的描述只表示历史阶段。",
   "meta": {
     "local_development_completed": "2026-09-08",
     "final_acceptance": ".trellis/tasks/archive/2026-09/08-19-gorm-composition-pgx-convergence/research/final-acceptance.md",
@@ -31,6 +31,13 @@
     "code_delivery_status": "committed_and_pushed",
     "code_delivery_branch": "origin/dev",
     "code_delivery_updated_at": "2026-09-08",
-    "deployment_status": "not_deployed"
+    "deployment_status": "not_deployed",
+    "m9_legacy_upgrade": {
+      "status": "completed",
+      "completedAt": "2026-09-08",
+      "evidence": ".trellis/tasks/07-16-product-delivery/research/m9-legacy-upgrade-2026-09-08.md",
+      "validation": "M9 原失败用例、历史保持、重复升级、失败回滚重试、拒绝场景、单连接 race、Go/vet 与 Atlas 校验通过；独立 Go/SQL 审查无阻断",
+      "deployment": "not_performed"
+    }
   }
 }

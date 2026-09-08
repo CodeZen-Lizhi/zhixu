@@ -35,7 +35,7 @@ func TestWorkspaceAnalysisToolRefusalMigrationPrecedesSnapshotGuardFix(t *testin
 			latest = version
 		}
 	}
-	if !found || latest != 92 {
+	if !found || latest != 93 {
 		t.Fatalf("workspace analysis tool refusal migration found=%t latest=%d", found, latest)
 	}
 }

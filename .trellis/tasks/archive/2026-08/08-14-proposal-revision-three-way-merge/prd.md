@@ -1,5 +1,7 @@
 # Proposal Revision 编辑与三方合并
 
+> **M9 历史升级修复（2026-09-08）**：已补 00093/Atlas runner 兼容，原失败回归、最新所属 Revision、历史保持、重复升级、失败回滚重试及非法回填拒绝均已通过。后续结果见 [M9 修复记录](../../../07-16-product-delivery/research/m9-legacy-upgrade-2026-09-08.md)；早期规划与未执行的其他矩阵保留各自事实。
+
 ## Goal
 
 补齐正式文件 Proposal 在审批期间发生目标漂移后的可恢复流程：用户能够同时核对生成提案时的基线、Workspace 当前内容和提案建议，解决冲突并创建新的不可变 Proposal Revision，再重新完成证据校验、审批、预检查和 Safe Writeback，而不是只能放弃并重新生成整个提案。

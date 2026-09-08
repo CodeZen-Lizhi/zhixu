@@ -218,7 +218,7 @@ func TestAtlasAdoptionFullGooseHistory(t *testing.T) {
 	if err := runner.Up(ctx); err != nil {
 		t.Fatalf("atlas adoption Up: %v", err)
 	}
-	assertAtlasTerminalState(t, ctx, adoptedPool, runner, 92)
+	assertAtlasTerminalState(t, ctx, adoptedPool, runner, 93)
 
 	referenceDSN, referenceCleanup := spikePostgreSQL(t, ctx)
 	defer referenceCleanup()
@@ -244,7 +244,7 @@ func TestAtlasAdoptionPartialGooseHistory(t *testing.T) {
 	if err := runner.Up(ctx); err != nil {
 		t.Fatalf("atlas adoption Up: %v", err)
 	}
-	assertAtlasTerminalState(t, ctx, pool, runner, 92)
+	assertAtlasTerminalState(t, ctx, pool, runner, 93)
 
 	referenceDSN, referenceCleanup := spikePostgreSQL(t, ctx)
 	defer referenceCleanup()
@@ -275,7 +275,7 @@ func TestAtlasAdoptionShellRunnerLegacy(t *testing.T) {
 	if err := runner.Up(ctx); err != nil {
 		t.Fatalf("atlas legacy adoption Up: %v", err)
 	}
-	assertAtlasTerminalState(t, ctx, pool, runner, 92)
+	assertAtlasTerminalState(t, ctx, pool, runner, 93)
 	var firstType int64
 	if err := pool.QueryRow(ctx,
 		"SELECT type FROM atlas_schema_revisions.atlas_schema_revisions WHERE version='00001'").Scan(&firstType); err != nil {
@@ -313,7 +313,7 @@ func TestAtlasAdoptionEinoCollision(t *testing.T) {
 	if err := runner.Up(ctx); err != nil {
 		t.Fatalf("atlas collision adoption Up: %v", err)
 	}
-	assertAtlasTerminalState(t, ctx, pool, runner, 92)
+	assertAtlasTerminalState(t, ctx, pool, runner, 93)
 
 	referenceDSN, referenceCleanup := spikePostgreSQL(t, ctx)
 	defer referenceCleanup()
@@ -359,7 +359,7 @@ func TestAtlasAdoptionEinoCollisionResumesAfterAdoption(t *testing.T) {
 	if err := runner.Up(ctx); err != nil {
 		t.Fatalf("resume atlas collision adoption: %v", err)
 	}
-	assertAtlasTerminalState(t, ctx, pool, runner, 92)
+	assertAtlasTerminalState(t, ctx, pool, runner, 93)
 }
 
 // TestAtlasAdoptionRejectsUnknownVersion refuses a database whose Goose
@@ -424,5 +424,5 @@ func TestAtlasAdoptionEmptyGooseHistory(t *testing.T) {
 	if err := runner.Up(ctx); err != nil {
 		t.Fatalf("atlas Up with empty goose history: %v", err)
 	}
-	assertAtlasTerminalState(t, ctx, pool, runner, 92)
+	assertAtlasTerminalState(t, ctx, pool, runner, 93)
 }

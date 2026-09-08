@@ -1,5 +1,7 @@
 # ZHIXU 当前发布收口
 
+> **M9 历史升级修复（2026-09-08）**：`00093` 与 Atlas runner 已修复旧库升级，原失败用例、历史保持、重复 Up、回滚重试及非法回填拒绝已通过；验收见 [M9 修复记录](research/m9-legacy-upgrade-2026-09-08.md)。本次独立修复会话已获提交/push 授权，其他产品收尾与 M11 保持各自范围。
+
 ## Goal
 
 在既有产品实现基础上关闭仍未完成的 M9、M10、M11 发布缺口，并用当前需求、生产装配、直接自动化证据和最终发布门禁证明 ZHIXU 可交付。
@@ -27,7 +29,7 @@
 | 范围 | 当前判断 | 仍需关闭 |
 |---|---|---|
 | M8-03 Learning / Memory | 已完成当前稳定范围 | Guarded Down、Review Path 并发/ABANDONED reopen 和 Conversation RAG attempt-scoped Memory 已有代码与归档证据；全局 Memory 注入不是目标实现 |
-| M9-02 Proposal Diff / Merge | 部分完成 | 已有双向 Diff、审批、preflight 和 base-hash 冲突阻断；Proposal Revision 编辑与真正的 base/current/proposed 三方合并尚未实现，AC-13 未关闭 |
+| M9-02 Proposal Revision / Merge | 功能已实现，历史升级兼容修复及必要实库回归已通过 | 验收见 [M9 修复记录](research/m9-legacy-upgrade-2026-09-08.md)；完整浏览器/资源矩阵不在此次修复范围，未执行不记 PASS |
 | M9-03 Export | 当前范围完成 | Collection Markdown、Metadata JSON 与 Workspace Attachments ZIP 已交付；`EVALUATION_JSON`、`AUDIT_JSON`、CSV/XLSX 已移出当前需求，不作为发布缺口 |
 | M10-01 Observability / Audit | 部分完成 | slog、Secret Redaction、OTel、API/Worker Prometheus 和 append-only Audit 基础已交付；跨业务审计覆盖、查询、留存/归档与演练仍缺 |
 | M10-02 Auth / Security | 完成 | 当前生产装配、负测、PostgreSQL/Compose 与归档验收证据支持完成判断 |

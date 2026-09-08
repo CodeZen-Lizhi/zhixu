@@ -78,8 +78,8 @@ func TestAtlasSpikeFullApplyFreshDatabase(t *testing.T) {
 	if err := pool.QueryRow(ctx, "SELECT count(*) FROM atlas_schema_revisions.atlas_schema_revisions").Scan(&revisions); err != nil {
 		t.Fatalf("count revisions: %v", err)
 	}
-	if revisions != 92 {
-		t.Fatalf("revisions=%d, want 92", revisions)
+	if revisions != 93 {
+		t.Fatalf("revisions=%d, want 93", revisions)
 	}
 	for _, object := range []string{
 		"core.workspace",
@@ -118,8 +118,8 @@ func TestAtlasSpikeFullApplyFreshDatabase(t *testing.T) {
 	if err := pool.QueryRow(ctx, "SELECT count(*) FROM atlas_schema_revisions.atlas_schema_revisions").Scan(&revisions); err != nil {
 		t.Fatalf("recount revisions: %v", err)
 	}
-	if revisions != 92 {
-		t.Fatalf("revisions after repeat=%d, want 92", revisions)
+	if revisions != 93 {
+		t.Fatalf("revisions after repeat=%d, want 93", revisions)
 	}
 
 	assertAtlasTxModeNoneResume(t, ctx, pool)
@@ -129,7 +129,7 @@ func TestAtlasSpikeFullApplyFreshDatabase(t *testing.T) {
 // applied statement hashes and resumes after the failed statement on retry.
 func assertAtlasTxModeNoneResume(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	t.Helper()
-	file := migrate.NewLocalFile("00093_txmode_resume_probe.sql", []byte(`-- atlas:txmode none
+	file := migrate.NewLocalFile("00094_txmode_resume_probe.sql", []byte(`-- atlas:txmode none
 
 CREATE TABLE public.atlas_txmode_resume_probe (id integer PRIMARY KEY);
 INSERT INTO public.atlas_txmode_resume_probe (id) VALUES (1);
@@ -151,7 +151,7 @@ CREATE INDEX CONCURRENTLY atlas_txmode_resume_probe_id_idx
 
 	var applied, total, partialHashes int
 	if err := pool.QueryRow(ctx, `SELECT applied,total,COALESCE(jsonb_array_length(partial_hashes), 0)
-		FROM atlas_schema_revisions.atlas_schema_revisions WHERE version='00093'`).Scan(
+		FROM atlas_schema_revisions.atlas_schema_revisions WHERE version='00094'`).Scan(
 		&applied, &total, &partialHashes,
 	); err != nil {
 		t.Fatalf("read partial txmode revision: %v", err)
@@ -170,7 +170,7 @@ CREATE INDEX CONCURRENTLY atlas_txmode_resume_probe_id_idx
 	var rows int
 	var errorText *string
 	if err := pool.QueryRow(ctx, `SELECT applied,total,COALESCE(jsonb_array_length(partial_hashes), 0),error
-		FROM atlas_schema_revisions.atlas_schema_revisions WHERE version='00093'`).Scan(
+		FROM atlas_schema_revisions.atlas_schema_revisions WHERE version='00094'`).Scan(
 		&applied, &total, &partialHashes, &errorText,
 	); err != nil {
 		t.Fatalf("read completed txmode revision: %v", err)

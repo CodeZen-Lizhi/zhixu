@@ -57,6 +57,14 @@
   ],
   "parent": null,
   "relatedFiles": [],
-  "notes": "",
-  "meta": {}
+  "notes": "M9 历史升级修复（2026-09-08）已完成：00093/Atlas runner 保留已发布迁移与历史数据，原失败回归、回滚重试及独立审查通过。详情见 meta.m9_legacy_upgrade；目标环境未部署。",
+  "meta": {
+    "m9_legacy_upgrade": {
+      "status": "completed",
+      "completedAt": "2026-09-08",
+      "evidence": ".trellis/tasks/07-16-product-delivery/research/m9-legacy-upgrade-2026-09-08.md",
+      "validation": "M9 原失败用例、历史保持、重复升级、失败回滚重试、拒绝场景、单连接 race、Go/vet 与 Atlas 校验通过；独立 Go/SQL 审查无阻断",
+      "deployment": "not_performed"
+    }
+  }
 }

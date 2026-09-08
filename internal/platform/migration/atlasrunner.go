@@ -134,6 +134,10 @@ func applyAtlasPending(ctx context.Context, sqlDB *sql.DB, dir *migrate.MemDir, 
 // atlas:txmode none, in which case statements run without a transaction so
 // CREATE INDEX CONCURRENTLY stays legal and partial progress can resume.
 func executeAtlasFile(ctx context.Context, sqlDB *sql.DB, driver migrate.Driver, dir *migrate.MemDir, file migrate.File, options []migrate.ExecutorOption) error {
+	compatibility, err := proposalRevisionBackfillCompatibility(dir, file)
+	if err != nil {
+		return err
+	}
 	if atlasFileTxModeNone(file) {
 		executor, err := migrate.NewExecutor(driver, dir, newAtlasRevisionStore(sqlDB), options...)
 		if err != nil {
@@ -149,6 +153,11 @@ func executeAtlasFile(ctx context.Context, sqlDB *sql.DB, driver migrate.Driver,
 		return fmt.Errorf("begin transaction for atlas migration %s: %w", file.Name(), err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if compatibility != nil {
+		if err := executeProposalRevisionCompatibility(ctx, tx, compatibility); err != nil {
+			return err
+		}
+	}
 	txDriver, err := atlaspostgres.Open(tx)
 	if err != nil {
 		_ = tx.Rollback()
@@ -162,6 +171,13 @@ func executeAtlasFile(ctx context.Context, sqlDB *sql.DB, driver migrate.Driver,
 	if err := executor.Execute(ctx, file); err != nil {
 		_ = tx.Rollback()
 		return fmt.Errorf("apply atlas migration %s: %w", file.Name(), err)
+	}
+	if compatibility != nil {
+		// The same SQL verifies that 00082 restored its permanent guards before
+		// either the backfill or its Atlas revision becomes visible.
+		if err := executeProposalRevisionCompatibility(ctx, tx, compatibility); err != nil {
+			return err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit atlas migration %s: %w", file.Name(), err)

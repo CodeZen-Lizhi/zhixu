@@ -131,7 +131,7 @@ flowchart LR
 - **配置边界**：Logger、NamingStrategy、PrepareStmt、SkipDefaultTransaction、NowFunc、连接池和错误翻译必须显式，不依赖会改变 SQL、事务、时间或脱敏语义的框架默认值。
 - **兼容边界**：保持现有 Workspace/权限、分页、幂等、乐观锁、唯一约束和错误码；禁止 N+1、隐式预加载、无界查询、逐条写入退化及日志泄露 Credential、正文、完整 DSN 或高敏参数。
 - **验证**：各模块核心 PostgreSQL 与相关事务/锁/River/恢复场景、受影响入口构建、定向 unit/race/vet、Go/SQL 与 credential 安全审查已完成；静态门禁通过 30 个 owner、1,788 个 Go 文件。完整容量、网络故障和外部发布矩阵未执行，具体覆盖以验收记录为准。
-- **发布与回滚**：Atlas Schema、历史迁移、checksum 和依赖文件未改；目标环境部署未执行。M9 追加历史升级用例在 GORM 构造前因既有 82 回填与 62 trigger 冲突失败，对应旧库升级仍是发布阻断。发布顺序和按依赖闭包回滚见 [Runbook](architecture/runbooks/gorm-persistence-rollout.md)。
+- **发布与回滚**：TODO 10 未改永久 Schema、历史迁移或依赖；后续 M9 以 `00093` 和 Atlas runner 兼容修复了旧库的指针回填/延迟约束冲突，原失败实库用例、历史保持、重复升级和失败回滚重试已通过。升级须使用包含兼容 runner 的构建，前 92 个迁移及其校验和不变；目标环境尚未部署。验收见 [M9 修复记录](../.trellis/tasks/07-16-product-delivery/research/m9-legacy-upgrade-2026-09-08.md)，步骤见 [Runbook](architecture/runbooks/gorm-persistence-rollout.md)。
 
 ### 5.3 TODO 11：评估并接入 gin-contrib/sessions
 

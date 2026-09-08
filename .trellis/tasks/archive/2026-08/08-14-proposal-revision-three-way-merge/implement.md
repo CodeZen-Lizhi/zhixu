@@ -1,5 +1,7 @@
 # Proposal Revision 编辑与三方合并实施清单
 
+> **M9 历史升级修复（2026-09-08）**：已补 00093/Atlas runner 兼容，原失败回归、最新所属 Revision、历史保持、重复升级、失败回滚重试及非法回填拒绝均已通过。后续结果见 [M9 修复记录](../../../07-16-product-delivery/research/m9-legacy-upgrade-2026-09-08.md)；早期规划与未执行的其他矩阵保留各自事实。
+
 > 状态：主要代码路径已实现并完成局部门禁；真实 PostgreSQL 迁移/并发验证、目标镜像资源基准和浏览器链路尚未执行，因此任务仍保持 `in_progress`。本清单只把有直接证据的部分标为完成。
 
 ## 1. Delivery Order

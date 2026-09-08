@@ -38,3 +38,18 @@ status: accepted
 - 历史 Down 不可再执行；数据库回滚一律 Expand → Backfill → Contract 与 fix-forward，升级前备份成为唯一向后恢复手段。
 - 新迁移只追加到 `atlas/migrations/`，同步更新 `atlas/schema.sql` 并重跑 hash；`migrations/` 目录与 `internal/platform/migration` 的 Goose 兼容层（`legacyfs.go`、guarded-down 守卫、转换工具）全部删除。
 - ADR-0015 的 River 部分继续有效；其 Goose 相关决策由本 ADR 取代。
+
+## 00082 历史数据升级兼容（2026-09-08）
+
+`00082` 在替换 transition guard 前回填 Proposal pointer，旧 guard 的业务版本/状态校验拒绝该操作；回填产生的延迟
+reindex completion 事件又会阻止随后添加外键。保留全部已发布迁移与校验和，以新增 `00093` 保存兼容 SQL，
+由既有 runner 在执行 `00082` 的同一 `sql.Tx` 内前置执行、后置验证。`00093` 的 Atlas revision 仍在正常版本顺序中写入。
+
+复用 Atlas v1.2.2 的 `Executor`、`StmtDecls()` 和标准库事务，不引入第二迁移器或通用 hook 框架。自定义部分只处理
+这一个已发布文件：核对历史 guard 指纹，绑定服务器事务，只允许所属最新 Revision 的空指针回填；既有 completion
+约束立即执行，正式 guard 恢复后恢复延迟模式。成功与失败均不得留下临时规则。后续正常执行 `00093` 不固定未来合法 guard。
+
+修改历史 SQL 会破坏已应用 revision 校验；仅追加末尾修复到不了失败的 `00082`；禁用 guard 会失去数据约束，因此均不采用。
+此兼容入口只在仍支持升级前 `00082` 历史库时保留；将来取消该支持范围必须先明确最低升级版本，不能静默删除入口。
+维护与验证合同见 [M9 历史回填规范](../../../.trellis/spec/backend/database-guidelines.md#scenario-m9-历史-proposal-revision-回填兼容)。
+最终不新增永久数据库对象，因此 `atlas/schema.sql` 保留原基线，并通过升级后的 Schema / guard 校验确认一致。

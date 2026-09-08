@@ -1,5 +1,7 @@
 # Change Control 最终 GORM fixture 收敛
 
+> **M9 历史升级跟进（2026-09-08）**：后续已补 `00093` / Atlas runner 兼容，原失败实库用例及历史保持、重复 Up、失败回滚重试回归已通过；当前验收与审查见 [M9 修复记录](../../../../07-16-product-delivery/research/m9-legacy-upgrade-2026-09-08.md)。本文原始 FAIL 保留为 TODO 10 当时的事实，不能视为新版本仍未修复。
+
 日期：2026-09-08。范围：本任务 TODO 10 的 Change Control 测试，以及追加授权的 M9 单文件迁移测试。产品代码由主会话维护。
 
 ## 变更

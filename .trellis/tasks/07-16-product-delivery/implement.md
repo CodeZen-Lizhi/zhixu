@@ -22,7 +22,7 @@
 ## 当前发布收口状态
 
 - 当前登记的 33 个 child 均已归档；该计数只表示 `33/33 children done`，不表示父任务完成。
-- M9-02、M10-01、M10-03、M10-04、M11-01、M11-02、M11-03 均为部分完成，剩余边界见本表状态列与 `prd.md`。
+- M10-01、M10-03、M10-04、M11-01、M11-02、M11-03 均为部分完成，剩余边界见本表状态列与 `prd.md`。
 - M10-02 已完成；M9-03 已满足当前导出范围，`EVALUATION_JSON`/`AUDIT_JSON` 不再作为缺口。
 - 最终验收以 `docs/requirements.md` AC-01..AC-41 和 `prd.md#final-demonstration` 的 14 步演示为准。
 
@@ -64,7 +64,7 @@
 | M8-02 | M8 | 实现 Review Deck/Card、Evidence 绑定、多维评分和 FSRS Adapter | `internal/review/**`, `internal/platform/scheduler/**` | M5-05,M6-02,M8-01 | 卡片失效、答题幂等、评分解释、schedule 同事务 | 复习错误知识 | 子 Agent | 已完成：Review-only Session、Deck/Card/Schedule、可信评分与冻结 Scorer/FSRS version、HMAC `question_ref`、Answer/Schedule/receipt 原子提交、legacy quarantine/失效投影及严格 API/Web/SSE 已交付；动态补验通过 Review PostgreSQL 全包、并发 race、M8/Review 迁移 race、前端 69/69 文件共 746/746 测试，以及真实 API/Worker/Vite 的桌面与 390x844 浏览器闭环。 |
 | M8-03 | M8 | 实现 Interview Session、知识缺口、共享 Learning Path 和 Memory 生命周期 | `internal/review/**`, `internal/memory/**`, `internal/agent/**` | M8-02,M7-04 | 面试报告、只记录明确确认 Memory、可编辑删除 | 隐式长期记忆 | 子 Agent | 已完成：真实 PostgreSQL Guarded Down、Review Learning Path reservation/hold 并发与 ABANDONED reopen/fencing，以及 Conversation RAG attempt-scoped 非证据 Memory snapshot 均已交付并有代码/归档测试证据。全局 Agent/ChatModel Memory 注入是禁止的实现方式；`last_used_at`、recent-use UI 和自动类型转化不在当前稳定需求范围。 |
 | M9-01 | M9 | 实现 Dashboard/Inbox/Documents/Proposals/Workflows/Settings | `web/src/features/**`, `web/src/routes/**` | M1-02,M1-04,M5-02,M5-03 | route integration、空/错/恢复状态、a11y | 页面先于契约漂移 | 子 Agent | 已完成：真实 Workspace 列表/API、响应式 shadcn open-code 工作台、严格状态与桌面/移动 smoke 已交付 |
-| M9-02 | M9 | 实现 Diff、证据、审批、冲突和版本合并 UI | `internal/changecontrol/**`, `web/src/features/business/**`, `api/openapi/**` | M5-03,M5-04 | 逐项 accept/reject/edit、ETag 冲突合并 | 误导性 Diff | 子 Agent | 部分完成，AC-13 未关闭：File/Relation 双向 Diff、Evidence/Rollback、approve/reject、base-hash 冲突阻断和 preflight 已交付；Proposal Revision 编辑与真正的 base/current/proposed 三方合并尚未实现，当前 UI 只阻断批准并要求重新生成 Revision。 |
+| M9-02 | M9 | Proposal Revision 编辑、三方合并、历史和重新审批 | `internal/changecontrol/**`, `web/src/features/business/**`, `api/openapi/**` | M5-03,M5-04 | 复用已有 merge/domain/HTTP/组件验证；本轮定向修复旧库升级 | 历史数据升级失败 | 子 Agent | 功能已实现；旧库迁移兼容、历史保持、重复升级、失败回滚重试与非法回填拒绝已通过必要实库回归，见 [M9 修复记录](research/m9-legacy-upgrade-2026-09-08.md)。完整浏览器/资源/并发矩阵不在此次修复范围，未执行不记 PASS。 |
 | M9-03 | M9 | 实现异步导出任务、脱敏、权限/过期和结果追踪 | `internal/export/**`, `web/src/features/{collections,settings}/**` | M7-03,M1-04 | Markdown/JSON/附件导出、权限/过期、任务恢复；复用已交付 Collection 三视图 | 擅自引入 XLSX/CSV | 子 Agent | 当前范围完成：Collection `MARKDOWN|METADATA_JSON` 与 Workspace `ATTACHMENTS_ZIP` 已交付，AC-33 已关闭。`EVALUATION_JSON`、`AUDIT_JSON`、CSV/XLSX 已移出当前产品范围，不作为 M9 残留。 |
 | M9-04 | M9 | 实现统一 SSE Event Store、重连、查询失效和异步 UX | `web/src/events/**`, `internal/presentation/sse/**` | M1-04,M4-02 | Last-Event-ID、超窗重查、页面刷新恢复 | SSE 被当事实源 | 子 Agent | 已完成：Workspace 唯一连接、Last-Event-ID、权威回查、定向失效、切换清理和 RAG 迁移已交付 |
 | M10-01 | M10 | 实现 slog/OTel/Metrics/append-only Audit/Secret Redaction | `internal/audit/**`, `internal/platform/observability/**` | M4-01,M5-03,M6-03 | correlation、重试不重复审计、敏感字段扫描 | 日志泄密 | 子 Agent | 部分完成：slog/Secret Redaction、OTel exporter、API/Worker Prometheus 与 append-only Audit store/部分生产者已交付；跨领域生产者覆盖、查询、留存/归档和恢复演练仍待完成。 |

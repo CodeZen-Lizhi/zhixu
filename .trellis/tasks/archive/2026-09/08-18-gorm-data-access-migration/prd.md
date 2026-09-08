@@ -1,7 +1,9 @@
 # TODO 10：应用数据访问层迁移到 GORM
 
+> **M9 历史升级跟进（2026-09-08）**：后续已补 `00093` / Atlas runner 兼容，原失败实库用例及历史保持、重复 Up、失败回滚重试回归已通过；当前验收与审查见 [M9 修复记录](../../../07-16-product-delivery/research/m9-legacy-upgrade-2026-09-08.md)。本文原始 FAIL 保留为 TODO 10 当时的事实，不能视为新版本仍未修复。
+
 > **当前交付状态（2026-09-08）**：`completed`，已归档；最终代码 [cb935655](https://github.com/CodeZen-Lizhi/zhixu/commit/cb93565561498674cda1dc1230fed587fba66075) 已推送至 `origin/dev`，尚未部署。
-> TODO 10 全部 30 个子任务已完成，最新实现与验证见 [Final 验收记录](../08-19-gorm-composition-pgx-convergence/research/final-acceptance.md)。下文 staged、待 Final 或未提交的描述保留其原阶段事实，现存 M9 历史升级限制仍有效。
+> TODO 10 全部 30 个子任务已完成，最新实现与验证见 [Final 验收记录](../08-19-gorm-composition-pgx-convergence/research/final-acceptance.md)。下文 staged、待 Final 或未提交的描述保留其原阶段事实，M9 原失败记录保留，后续修复状态以上方跟进为准。
 
 ## Goal
 

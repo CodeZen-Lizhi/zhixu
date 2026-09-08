@@ -106,3 +106,39 @@ func TestValidateAtlasGooseTransition(t *testing.T) {
 		})
 	}
 }
+
+func TestProposalRevisionCompatibilityRequiresExactTransactionalFiles(t *testing.T) {
+	historical := migrate.NewLocalFile(proposalRevisionMigrationName, []byte("SELECT 1;"))
+	compatibility := migrate.NewLocalFile(proposalRevisionCompatibilityName, []byte("SELECT 1;"))
+	for _, test := range []struct {
+		name      string
+		file      migrate.File
+		files     []migrate.File
+		wantFile  bool
+		wantError string
+	}{
+		{name: "unrelated migration", file: migrate.NewLocalFile("00081_other.sql", nil)},
+		{name: "exact transaction pair", file: historical, files: []migrate.File{compatibility}, wantFile: true},
+		{name: "missing compatibility", file: historical, wantError: "COMPATIBILITY_MISSING"},
+		{name: "wrong compatibility name", file: historical, files: []migrate.File{migrate.NewLocalFile("00093_other.sql", nil)}, wantError: "COMPATIBILITY_MISSING"},
+		{name: "nontransactional historical file", file: migrate.NewLocalFile(proposalRevisionMigrationName, []byte("-- atlas:txmode none\n\nSELECT 1;")), wantError: "REQUIRES_TRANSACTION"},
+		{name: "nontransactional compatibility", file: historical, files: []migrate.File{migrate.NewLocalFile(proposalRevisionCompatibilityName, []byte("-- atlas:txmode none\n\nSELECT 1;"))}, wantError: "COMPATIBILITY_MISSING"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := &migrate.MemDir{}
+			if err := dir.CopyFiles(test.files); err != nil {
+				t.Fatal(err)
+			}
+			got, err := proposalRevisionBackfillCompatibility(dir, test.file)
+			if test.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantError) {
+					t.Fatalf("error=%v, want %s", err, test.wantError)
+				}
+				return
+			}
+			if err != nil || (got != nil) != test.wantFile {
+				t.Fatalf("compatibility=%v error=%v", got, err)
+			}
+		})
+	}
+}
