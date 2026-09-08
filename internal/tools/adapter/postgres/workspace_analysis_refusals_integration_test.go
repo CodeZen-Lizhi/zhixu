@@ -24,7 +24,6 @@ import (
 	eventsdomain "github.com/CodeZen-Lizhi/zhixu/internal/events/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
-	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	"github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/catalog"
 	toolsapplication "github.com/CodeZen-Lizhi/zhixu/internal/tools/application"
 	toolsdomain "github.com/CodeZen-Lizhi/zhixu/internal/tools/domain"
@@ -271,8 +270,6 @@ func TestWorkspaceAnalysisToolOperationEventFailureRollsBackAllOwnersIntegration
 			err: errors.New("workspace analysis requested event failed"),
 		}
 		switch repository := harness.repository.(type) {
-		case *Repository:
-			repository.events = failure
 		case *GORMWorkspaceAnalysisRepository:
 			repository.events = failure
 		default:
@@ -304,14 +301,6 @@ func TestWorkspaceAnalysisToolOperationEventFailureRollsBackAllOwnersIntegration
 }
 
 type workspaceAnalysisToolOperationFailingEventAppender struct{ err error }
-
-func (appender *workspaceAnalysisToolOperationFailingEventAppender) AppendTx(
-	context.Context,
-	any,
-	eventsdomain.AppendRequest,
-) (eventsdomain.ServerEvent, bool, error) {
-	return eventsdomain.ServerEvent{}, false, appender.err
-}
 
 func (appender *workspaceAnalysisToolOperationFailingEventAppender) AppendScoped(
 	context.Context,
@@ -377,55 +366,14 @@ func testWorkspaceAnalysisToolRefusalVariants(
 ) {
 	t.Helper()
 	variants := []workspaceAnalysisToolRefusalIntegrationVariant{
-		{name: "legacy", open: openLegacyWorkspaceAnalysisToolRefusalIntegration},
+
 		{name: "gorm", open: openGORMWorkspaceAnalysisToolRefusalIntegration},
 	}
 	for _, variant := range variants {
 		t.Run(variant.name, func(t *testing.T) {
-			fixture := testdb.Require(t, testdb.Config{Availability: testdb.FailWhenUnavailable, MaxConns: 16})
-			platform := fixture.Pool()
-			test(t, platform, context.Background(), variant.open(t, platform, commitResponseLoss))
+			platform, ctx := newToolRepositoryIntegrationPlatform(t)
+			test(t, platform, ctx, variant.open(t, platform, commitResponseLoss))
 		})
-	}
-}
-
-func openLegacyWorkspaceAnalysisToolRefusalIntegration(
-	t *testing.T,
-	platform *platformpostgres.Pool,
-	commitResponseLoss bool,
-) workspaceAnalysisToolRefusalIntegrationHarness {
-	t.Helper()
-	pool := platform.DB()
-	events, err := eventspostgres.NewStore(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
-	auditStore, err := auditpostgres.NewStore(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
-	auditRecorder, err := auditapplication.NewRecorder(auditStore)
-	if err != nil {
-		t.Fatal(err)
-	}
-	database := transactionStarter(pool)
-	if commitResponseLoss {
-		database = &commitResponseLossDB{pool: pool}
-	}
-	repository, err := NewRepositoryWithWorkspaceAnalysisEventsAndAudit(database, events, auditRecorder)
-	if err != nil {
-		t.Fatal(err)
-	}
-	agentRepository, err := agentpostgres.NewGORMRepository(platform)
-	if err != nil {
-		t.Fatal(err)
-	}
-	unitOfWork, err := platform.UnitOfWork()
-	if err != nil {
-		t.Fatal(err)
-	}
-	return workspaceAnalysisToolRefusalIntegrationHarness{
-		repository: repository, audit: auditStore, authority: agentRepository, unitOfWork: unitOfWork,
 	}
 }
 
@@ -468,7 +416,7 @@ func openGORMWorkspaceAnalysisToolRefusalIntegration(
 		t.Fatal(err)
 	}
 	if commitResponseLoss {
-		fault := &workspaceAnalysisToolRefusalPostCommitUnitOfWork{
+		fault := &toolRepositoryPostCommitUnitOfWork{
 			inner: repository.unitOfWork,
 			err:   errors.New("workspace analysis refusal commit response lost"),
 		}
@@ -485,7 +433,7 @@ func openGORMWorkspaceAnalysisToolRefusalIntegration(
 	}
 }
 
-type workspaceAnalysisToolRefusalPostCommitUnitOfWork struct {
+type toolRepositoryPostCommitUnitOfWork struct {
 	inner foundation.UnitOfWork
 	err   error
 	armed atomic.Bool
@@ -493,7 +441,7 @@ type workspaceAnalysisToolRefusalPostCommitUnitOfWork struct {
 	skip  atomic.Int64
 }
 
-func (unitOfWork *workspaceAnalysisToolRefusalPostCommitUnitOfWork) Within(
+func (unitOfWork *toolRepositoryPostCommitUnitOfWork) Within(
 	ctx context.Context,
 	options foundation.TransactionOptions,
 	work foundation.TransactionFunc,
@@ -562,7 +510,7 @@ func seedWorkspaceAnalysisToolRefusalRuntime(
 	}
 	if _, err := tx.Exec(ctx, `
 	INSERT INTO agent.conversation(id,workspace_id,status,title,version,last_activity_at,created_at,updated_at,idempotency_key,request_hash)
-	VALUES ('92000000-0000-4000-8000-000000000002','92000000-0000-4000-8000-000000000001','open','Workspace refusal',1,clock_timestamp(),clock_timestamp(),clock_timestamp(),'wa-refusal-conversation',repeat('a',64))`); err != nil {
+VALUES ('92000000-0000-4000-8000-000000000002','92000000-0000-4000-8000-000000000001','open','Workspace refusal',1,statement_timestamp(),statement_timestamp(),statement_timestamp(),'wa-refusal-conversation',repeat('a',64))`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := tx.Exec(ctx, `

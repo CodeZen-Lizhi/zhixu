@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"time"
@@ -9,17 +10,10 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	healthapp "github.com/CodeZen-Lizhi/zhixu/internal/health/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/health/domain"
-	"github.com/jackc/pgx/v5"
 )
 
-// ReadDB 是 Health read adapter 所需的只读 PostgreSQL 查询边界。
-type ReadDB interface {
-	Query(context.Context, string, ...any) (pgx.Rows, error)
-	QueryRow(context.Context, string, ...any) pgx.Row
-}
-
 // ReadRepository 提供 Issue 列表、详情和 Summary 的 Workspace-scoped 读取。
-type ReadRepository struct{ db ReadDB }
+type ReadRepository struct{ db healthReadDB }
 
 type currentEvidenceRecord struct {
 	RefType string `json:"ref_type"`
@@ -73,16 +67,13 @@ func (repository *IssueRepository) GetHealthSummary(ctx context.Context, workspa
 	return (&ReadRepository{db: repository.db}).GetHealthSummary(ctx, workspaceID)
 }
 
-// NewReadRepository 构造只读 Health repository。
-func NewReadRepository(db ReadDB) (*ReadRepository, error) {
+// newReadRepository 构造只读 Health repository。
+func newReadRepository(db healthReadDB) (*ReadRepository, error) {
 	if db == nil {
 		return nil, errors.New("health read database is nil")
 	}
 	return &ReadRepository{db: db}, nil
 }
-
-// NewIssueReadRepository 是 NewReadRepository 的语义化别名，便于 HTTP composition 注入。
-func NewIssueReadRepository(db ReadDB) (*ReadRepository, error) { return NewReadRepository(db) }
 
 // ListIssues 使用 (updated_at DESC,id DESC) keyset 查询，SQL 始终绑定 Workspace。
 func (repository *ReadRepository) ListIssues(ctx context.Context, request healthapp.IssueListQuery) (healthapp.IssueListResult, error) {
@@ -148,7 +139,7 @@ func (repository *ReadRepository) GetIssue(ctx context.Context, workspaceID, iss
 		return healthapp.IssueSnapshot{}, err
 	}
 	if !found {
-		return healthapp.IssueSnapshot{}, foundation.NewError(foundation.ErrorNotFound, "HEALTH_NOT_FOUND", false, pgx.ErrNoRows)
+		return healthapp.IssueSnapshot{}, foundation.NewError(foundation.ErrorNotFound, "HEALTH_NOT_FOUND", false, sql.ErrNoRows)
 	}
 	return snapshot, nil
 }
@@ -189,7 +180,7 @@ WHERE issue.workspace_id=$1 AND issue.id=$2`, string(workspaceID), string(issueI
 		&observationID, &observationIssueVersion, &observationScanID, &observationDetectorVersion, &observationFingerprint, &observationEvidenceFingerprint, &observationTargetVersions, &observationSeverity, &observationAt,
 		&observationEvidence,
 	)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, sql.ErrNoRows) {
 		return healthapp.IssueSnapshot{}, false, nil
 	}
 	if err != nil {
@@ -461,7 +452,7 @@ ORDER BY utc_days.day`, string(workspaceID), healthapp.HealthTrendDays)
 func (repository *ReadRepository) loadLatestScan(ctx context.Context, workspaceID foundation.ID) (*healthapp.ScanSummary, error) {
 	var scan domain.Scan
 	err := scanHealthScan(repository.db.QueryRow(ctx, scanSelectSQL+` WHERE workspace_id=$1 ORDER BY created_at DESC,id DESC LIMIT 1`, string(workspaceID)), &scan)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {

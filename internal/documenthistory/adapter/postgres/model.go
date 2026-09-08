@@ -92,3 +92,22 @@ func (record commitMappingRecord) toDomain() domain.CommitMapping {
 	}
 	return mapping
 }
+
+func validateCommitMappingRequest(workspaceID, documentID foundation.ID, targetPath string, commits []string) ([]string, error) {
+	if !domain.ValidID(workspaceID) || !domain.ValidID(documentID) || !domain.ValidPath(targetPath) || len(commits) > domain.MaxHistoryLimit {
+		return nil, invalid("commit mapping request is invalid")
+	}
+	values := make([]string, len(commits))
+	seen := make(map[string]struct{}, len(commits))
+	for index, commit := range commits {
+		if !domain.ValidObjectID(commit) {
+			return nil, invalid("commit mapping contains an invalid object id")
+		}
+		if _, duplicate := seen[commit]; duplicate {
+			return nil, invalid("commit mapping contains duplicate object ids")
+		}
+		seen[commit] = struct{}{}
+		values[index] = commit
+	}
+	return values, nil
+}

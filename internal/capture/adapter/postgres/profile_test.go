@@ -14,27 +14,30 @@ import (
 	captureapp "github.com/CodeZen-Lizhi/zhixu/internal/capture/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/capture/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 )
 
 var profileRepositoryTestNow = time.Date(2026, 8, 2, 14, 0, 0, 0, time.UTC)
 
-func TestNewProfileRepositoryRequiresDatabaseAndAgentFinalizer(t *testing.T) {
+func TestNewGORMProfileRepositoryRequiresDatabaseAndAgentFinalizer(t *testing.T) {
 	finalizer := profileFinalizerFake{}
-	if _, err := NewProfileRepository(nil, finalizer); profileRepositoryErrorCode(err) != "CAPTURE_PROFILE_REPOSITORY_UNAVAILABLE" {
-		t.Fatalf("NewProfileRepository(nil) error = %#v", err)
+	if _, err := NewGORMProfileRepository(nil, finalizer); profileRepositoryErrorCode(err) != "CAPTURE_PROFILE_REPOSITORY_UNAVAILABLE" {
+		t.Fatalf("NewGORMProfileRepository(nil) error = %#v", err)
 	}
-	if _, err := NewProfileRepository(&pgxpool.Pool{}, nil); profileRepositoryErrorCode(err) != "CAPTURE_PROFILE_REPOSITORY_UNAVAILABLE" {
-		t.Fatalf("NewProfileRepository(nil finalizer) error = %#v", err)
+	pool := profileRepositoryTestPool(t)
+	if _, err := NewGORMProfileRepository(pool, nil); profileRepositoryErrorCode(err) != "CAPTURE_PROFILE_REPOSITORY_UNAVAILABLE" {
+		t.Fatalf("NewGORMProfileRepository(nil finalizer) error = %#v", err)
 	}
-	if repository, err := NewProfileRepository(&pgxpool.Pool{}, finalizer); err != nil || repository == nil {
-		t.Fatalf("NewProfileRepository() = %#v, %v", repository, err)
+	if repository, err := NewGORMProfileRepository(pool, finalizer); err != nil || repository == nil {
+		t.Fatalf("NewGORMProfileRepository() = %#v, %v", repository, err)
 	}
 }
 
 func TestGetProfilesRejectsInvalidBatchBeforeDatabase(t *testing.T) {
-	repository := &ProfileRepository{db: &pgxpool.Pool{}}
+	repository, err := NewGORMProfileRepository(profileRepositoryTestPool(t), profileFinalizerFake{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	workspaceID := profileRepositoryTestID(1)
 	validSourceID := profileRepositoryTestID(2)
 	tests := map[string]captureapp.ProfileBatchQuery{
@@ -194,7 +197,7 @@ func TestProfileTerminalFailureReplayRequiresExactDurableResult(t *testing.T) {
 }
 
 func TestProfileCASNoRowsIsVersionConflict(t *testing.T) {
-	err := profileCASFailure(pgx.ErrNoRows, profileVersionConflictCode, "profile changed")
+	err := gormProfileCASFailure(context.Background(), sql.ErrNoRows, profileVersionConflictCode, "profile changed")
 	var classified *foundation.Error
 	if !errors.As(err, &classified) || classified.Kind != foundation.ErrorVersionConflict || !classified.Retryable {
 		t.Fatalf("CAS no-row error = %#v", err)
@@ -236,20 +239,26 @@ func validProfileCompletionCommand(t *testing.T) captureapp.CompleteProfileComma
 
 type profileFinalizerFake struct{}
 
-func (profileFinalizerFake) GetModelRunTx(context.Context, any, foundation.ID, foundation.ID, bool) (agentdomain.ModelRun, error) {
+func (profileFinalizerFake) GetModelRunScoped(context.Context, foundation.TransactionScope, foundation.ID, foundation.ID, bool) (agentdomain.ModelRun, error) {
 	return agentdomain.ModelRun{}, errors.New("unused")
 }
 
-func (profileFinalizerFake) GetModelRunRecordTx(context.Context, any, foundation.ID, foundation.ID, bool) (agentapp.ModelRunRecord, error) {
+func (profileFinalizerFake) GetModelRunRecordScoped(context.Context, foundation.TransactionScope, foundation.ID, foundation.ID, bool) (agentapp.ModelRunRecord, error) {
 	return agentapp.ModelRunRecord{}, errors.New("unused")
 }
 
-func (profileFinalizerFake) GetModelRunByAttemptTx(context.Context, any, foundation.ID, foundation.ID, bool) (agentdomain.ModelRun, bool, error) {
+func (profileFinalizerFake) FinalizeModelRunScoped(context.Context, foundation.TransactionScope, agentapp.FinalizeModelRunCommand) (agentdomain.ModelRun, bool, error) {
 	return agentdomain.ModelRun{}, false, errors.New("unused")
 }
 
-func (profileFinalizerFake) FinalizeModelRunTx(context.Context, any, agentapp.FinalizeModelRunCommand) (agentdomain.ModelRun, bool, error) {
-	return agentdomain.ModelRun{}, false, errors.New("unused")
+func profileRepositoryTestPool(t *testing.T) *platformpostgres.Pool {
+	t.Helper()
+	pool, err := platformpostgres.Open(t.Context(), "postgres://postgres@127.0.0.1:1/capture_constructor?sslmode=disable&pool_min_conns=0", 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	return pool
 }
 
 func profileRepositoryTestID(value int) foundation.ID {
@@ -268,4 +277,4 @@ func profileRepositoryErrorCode(err error) string {
 	return ""
 }
 
-var _ agentapp.ModelRunTxFinalizer = profileFinalizerFake{}
+var _ agentapp.ScopedModelRunFinalizer = profileFinalizerFake{}

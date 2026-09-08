@@ -2,46 +2,21 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"errors"
-	"fmt"
+	"maps"
 	"sort"
 	"strings"
 
 	collectionapp "github.com/CodeZen-Lizhi/zhixu/internal/collection/application"
 	collectiondomain "github.com/CodeZen-Lizhi/zhixu/internal/collection/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	"github.com/jackc/pgx/v5"
+	"github.com/lib/pq"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
-var _ collectionapp.DurableScanRepository = (*Repository)(nil)
-
-// PlanDurableScan 在一个只读快照中冻结 Collection 定义、read model revision 与精确成员数。
-func (r *Repository) PlanDurableScan(ctx context.Context, workspaceID, collectionID foundation.ID) (collectionapp.DurableScanBinding, error) {
-	if r == nil || r.db == nil || r.beginner == nil {
-		return collectionapp.DurableScanBinding{}, unavailable(errors.New("collection durable scan repository is unavailable"))
-	}
-	if ctx == nil || !validID(workspaceID) || !validID(collectionID) {
-		return collectionapp.DurableScanBinding{}, requestInvalid(errors.New("collection durable scan identity is invalid"))
-	}
-	tx, err := r.beginner.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
-	if err != nil {
-		return collectionapp.DurableScanBinding{}, classify(err)
-	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
-	if err := configureCollectionStatementTimeout(ctx, tx, defaultCollectionStatementTimeout); err != nil {
-		return collectionapp.DurableScanBinding{}, classify(err)
-	}
-	binding, err := planDurableScanSnapshot(ctx, tx, workspaceID, collectionID)
-	if err != nil {
-		return collectionapp.DurableScanBinding{}, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return collectionapp.DurableScanBinding{}, classify(err)
-	}
-	return binding, nil
-}
-
-func planDurableScanSnapshot(ctx context.Context, db DB, workspaceID, collectionID foundation.ID) (collectionapp.DurableScanBinding, error) {
+func planDurableScanSnapshot(ctx context.Context, db *gorm.DB, workspaceID, collectionID foundation.ID) (collectionapp.DurableScanBinding, error) {
 	collection, plan, where, args, err := loadDurableScanPlan(ctx, db, workspaceID, collectionID)
 	if err != nil {
 		return collectionapp.DurableScanBinding{}, err
@@ -67,56 +42,6 @@ func planDurableScanSnapshot(ctx context.Context, db DB, workspaceID, collection
 	}, nil
 }
 
-// ReadDurableScanPage 在固定 binding 下读取一个结构化 keyset 页面和有界后继 pair。
-func (r *Repository) ReadDurableScanPage(ctx context.Context, request collectionapp.DurableScanPageRequest) (collectionapp.DurableScanPage, error) {
-	if r == nil || r.db == nil || r.beginner == nil {
-		return collectionapp.DurableScanPage{}, unavailable(errors.New("collection durable scan repository is unavailable"))
-	}
-	if ctx == nil || !validDurableScanRequest(request) {
-		return collectionapp.DurableScanPage{}, requestInvalid(errors.New("collection durable scan page request is invalid"))
-	}
-	tx, err := r.beginner.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
-	if err != nil {
-		return collectionapp.DurableScanPage{}, classify(err)
-	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
-	if err := configureCollectionStatementTimeout(ctx, tx, defaultCollectionStatementTimeout); err != nil {
-		return collectionapp.DurableScanPage{}, classify(err)
-	}
-	page, err := readDurableScanPageSnapshot(ctx, tx, request)
-	if err != nil {
-		return collectionapp.DurableScanPage{}, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return collectionapp.DurableScanPage{}, classify(err)
-	}
-	return page, nil
-}
-
-// VerifyDurableScanRevision 复核 Collection 定义与 read-model revision。
-// exact_count 已在 durable binding 规划/start 事务中校验；跨页不重复扫描成员集合计数。
-func (r *Repository) VerifyDurableScanRevision(ctx context.Context, binding collectionapp.DurableScanBinding) error {
-	if r == nil || r.db == nil || r.beginner == nil {
-		return unavailable(errors.New("collection durable scan repository is unavailable"))
-	}
-	if ctx == nil || !validDurableScanBinding(binding) {
-		return requestInvalid(errors.New("collection durable scan binding is invalid"))
-	}
-	tx, err := r.beginner.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
-	if err != nil {
-		return classify(err)
-	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
-	if err := configureCollectionStatementTimeout(ctx, tx, defaultCollectionStatementTimeout); err != nil {
-		return classify(err)
-	}
-	collection, plan, _, _, err := loadDurableScanPlan(ctx, tx, binding.WorkspaceID, binding.CollectionID)
-	if err != nil {
-		return err
-	}
-	return validateDurableScanRevision(ctx, tx, binding, collection, plan)
-}
-
 func validDurableScanRequest(request collectionapp.DurableScanPageRequest) bool {
 	binding := request.Binding
 	if !validID(binding.WorkspaceID) || !validID(binding.CollectionID) || binding.CollectionVersion < 1 || !isHash(binding.QueryHash) || !isHash(binding.ReadModelRevision) || binding.ExactCount < 0 || request.Limit < 1 || request.Limit > 100 || request.PairTargetLimit < 0 || request.PairTargetLimit > 100 {
@@ -125,10 +50,10 @@ func validDurableScanRequest(request collectionapp.DurableScanPageRequest) bool 
 	return request.After == nil || ((request.After.ObjectType == "CLAIM" || request.After.ObjectType == "TOPIC") && validID(request.After.ID))
 }
 
-func readDurableScanPageSnapshot(ctx context.Context, db DB, request collectionapp.DurableScanPageRequest) (collectionapp.DurableScanPage, error) {
+func readDurableScanPageSnapshot(ctx context.Context, db *gorm.DB, request collectionapp.DurableScanPageRequest) (collectionapp.DurableScanPage, error) {
 	binding := request.Binding
 	var where string
-	var args []any
+	var args map[string]any
 	var err error
 	if request.After == nil {
 		_, _, where, args, err = verifyDurableScanBindingSnapshot(ctx, db, binding, false)
@@ -173,17 +98,7 @@ func readDurableScanPageSnapshot(ctx context.Context, db DB, request collectiona
 	return page, nil
 }
 
-// VerifyDurableScanBinding 在调用方拥有的 start transaction 中原子复核冻结 binding。
-// 调用方必须使用 repeatable-read，并在同一事务中紧接着写入 scan/runtime 事实。
-func VerifyDurableScanBinding(ctx context.Context, tx pgx.Tx, binding collectionapp.DurableScanBinding) error {
-	if ctx == nil || tx == nil || !validDurableScanBinding(binding) {
-		return requestInvalid(errors.New("collection durable scan binding verification request is invalid"))
-	}
-	_, _, _, _, err := verifyDurableScanBindingSnapshot(ctx, tx, binding, true)
-	return err
-}
-
-func verifyDurableScanBindingSnapshot(ctx context.Context, db DB, binding collectionapp.DurableScanBinding, lockCollection bool) (collectionapp.Collection, collectionapp.QueryPlan, string, []any, error) {
+func verifyDurableScanBindingSnapshot(ctx context.Context, db *gorm.DB, binding collectionapp.DurableScanBinding, lockCollection bool) (collectionapp.Collection, collectionapp.QueryPlan, string, map[string]any, error) {
 	collection, plan, where, args, err := loadDurableScanPlanWithLock(ctx, db, binding.WorkspaceID, binding.CollectionID, lockCollection)
 	if err != nil {
 		return collectionapp.Collection{}, collectionapp.QueryPlan{}, "", nil, err
@@ -201,7 +116,7 @@ func verifyDurableScanBindingSnapshot(ctx context.Context, db DB, binding collec
 	return collection, plan, where, args, nil
 }
 
-func verifyDurableScanRevisionSnapshot(ctx context.Context, db DB, binding collectionapp.DurableScanBinding) (collectionapp.Collection, collectionapp.QueryPlan, string, []any, error) {
+func verifyDurableScanRevisionSnapshot(ctx context.Context, db *gorm.DB, binding collectionapp.DurableScanBinding) (collectionapp.Collection, collectionapp.QueryPlan, string, map[string]any, error) {
 	collection, plan, where, args, err := loadDurableScanDefinitionSnapshot(ctx, db, binding)
 	if err != nil {
 		return collectionapp.Collection{}, collectionapp.QueryPlan{}, "", nil, err
@@ -216,7 +131,7 @@ func verifyDurableScanRevisionSnapshot(ctx context.Context, db DB, binding colle
 	return collection, plan, where, args, nil
 }
 
-func loadDurableScanDefinitionSnapshot(ctx context.Context, db DB, binding collectionapp.DurableScanBinding) (collectionapp.Collection, collectionapp.QueryPlan, string, []any, error) {
+func loadDurableScanDefinitionSnapshot(ctx context.Context, db *gorm.DB, binding collectionapp.DurableScanBinding) (collectionapp.Collection, collectionapp.QueryPlan, string, map[string]any, error) {
 	collection, plan, where, args, err := loadDurableScanPlan(ctx, db, binding.WorkspaceID, binding.CollectionID)
 	if err != nil {
 		return collectionapp.Collection{}, collectionapp.QueryPlan{}, "", nil, err
@@ -227,7 +142,7 @@ func loadDurableScanDefinitionSnapshot(ctx context.Context, db DB, binding colle
 	return collection, plan, where, args, nil
 }
 
-func validateDurableScanRevision(ctx context.Context, db DB, binding collectionapp.DurableScanBinding, collection collectionapp.Collection, plan collectionapp.QueryPlan) error {
+func validateDurableScanRevision(ctx context.Context, db *gorm.DB, binding collectionapp.DurableScanBinding, collection collectionapp.Collection, plan collectionapp.QueryPlan) error {
 	if collection.Status != collectionapp.CollectionStatusActive || collection.Version != binding.CollectionVersion || collection.QueryHash != binding.QueryHash || plan.Canonical.Hash != binding.QueryHash {
 		return durableScanStale("collection durable scan definition changed")
 	}
@@ -241,23 +156,19 @@ func validateDurableScanRevision(ctx context.Context, db DB, binding collectiona
 	return nil
 }
 
-func loadDurableScanPlan(ctx context.Context, db DB, workspaceID, collectionID foundation.ID) (collectionapp.Collection, collectionapp.QueryPlan, string, []any, error) {
+func loadDurableScanPlan(ctx context.Context, db *gorm.DB, workspaceID, collectionID foundation.ID) (collectionapp.Collection, collectionapp.QueryPlan, string, map[string]any, error) {
 	return loadDurableScanPlanWithLock(ctx, db, workspaceID, collectionID, false)
 }
 
-func loadDurableScanPlanWithLock(ctx context.Context, db DB, workspaceID, collectionID foundation.ID, lockCollection bool) (collectionapp.Collection, collectionapp.QueryPlan, string, []any, error) {
+func loadDurableScanPlanWithLock(ctx context.Context, db *gorm.DB, workspaceID, collectionID foundation.ID, lockCollection bool) (collectionapp.Collection, collectionapp.QueryPlan, string, map[string]any, error) {
 	var collection collectionapp.Collection
 	var err error
 	if lockCollection {
-		query := collectionSelect + ` WHERE workspace_id=$1 AND id=$2 FOR SHARE`
-		var row pgx.Row
-		if database, ok := db.(*gormDB); ok {
-			row = database.collectionRow(ctx, query, string(workspaceID), string(collectionID))
-		} else {
-			row = db.QueryRow(ctx, query, string(workspaceID), string(collectionID))
-		}
+		row := db.WithContext(ctx).Model(&collectionModel{}).Select(collectionColumns).
+			Where("workspace_id = ? AND id = ?", string(workspaceID), string(collectionID)).
+			Clauses(clause.Locking{Strength: "SHARE"}).Row()
 		collection, err = scanCollection(row)
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, sql.ErrNoRows) {
 			err = notFound(errors.New("collection not found"))
 		}
 	} else {
@@ -273,15 +184,14 @@ func loadDurableScanPlanWithLock(ctx context.Context, db DB, workspaceID, collec
 	if plan.Canonical.Hash != collection.QueryHash {
 		return collectionapp.Collection{}, collectionapp.QueryPlan{}, "", nil, inconsistent(errors.New("collection durable scan query hash is inconsistent"))
 	}
-	where, args := shiftWhere(plan.Where, append([]any{string(workspaceID)}, plan.Args...))
-	return collection, plan, where, args, nil
+	return collection, plan, plan.Where, collectionQueryArguments(workspaceID, plan.Args), nil
 }
 
 func validDurableScanBinding(binding collectionapp.DurableScanBinding) bool {
 	return validID(binding.WorkspaceID) && validID(binding.CollectionID) && binding.CollectionVersion > 0 && isHash(binding.QueryHash) && isHash(binding.ReadModelRevision) && binding.ExactCount >= 0
 }
 
-func readDurableScanRevision(ctx context.Context, db DB, workspaceID foundation.ID, plan collectionapp.QueryPlan) (string, error) {
+func readDurableScanRevision(ctx context.Context, db *gorm.DB, workspaceID foundation.ID, plan collectionapp.QueryPlan) (string, error) {
 	return readModelRevisionWithOptions(ctx, db, workspaceID, revisionOptions{
 		includeHealthIssues: queryPlanReferencesField(plan, "health_issue_type"),
 	})
@@ -311,40 +221,36 @@ func queryReferencesField(clause collectiondomain.Clause, field string) bool {
 	return false
 }
 
-func countDurableScanMembers(ctx context.Context, db DB, where string, args []any) (int64, error) {
+func countDurableScanMembers(ctx context.Context, db *gorm.DB, where string, args map[string]any) (int64, error) {
 	query := "SELECT count(*) FROM (" + unifiedItemCTE + "SELECT 1 FROM item WHERE " + where + ") counted"
 	var count int64
-	if err := db.QueryRow(ctx, query, args...).Scan(&count); err != nil {
+	if err := db.WithContext(ctx).Raw(query, args).Row().Scan(&count); err != nil {
 		return 0, classify(err)
 	}
 	return count, nil
 }
 
-func durableScanMemberExists(ctx context.Context, db DB, where string, args []any, key collectionapp.DurableScanKey) (bool, error) {
-	objectTypeArg := len(args) + 1
-	idArg := objectTypeArg + 1
-	query := unifiedItemCTE + "SELECT EXISTS(SELECT 1 FROM item WHERE " + where + fmt.Sprintf(" AND item.object_type=$%d AND item.id=$%d)", objectTypeArg, idArg)
-	queryArgs := append(append([]any(nil), args...), key.ObjectType, string(key.ID))
+func durableScanMemberExists(ctx context.Context, db *gorm.DB, where string, args map[string]any, key collectionapp.DurableScanKey) (bool, error) {
+	query := unifiedItemCTE + "SELECT EXISTS(SELECT 1 FROM item WHERE " + where + " AND item.object_type=@member_type AND item.id=@member_id)"
+	queryArgs := maps.Clone(args)
+	queryArgs["member_type"], queryArgs["member_id"] = key.ObjectType, string(key.ID)
 	var exists bool
-	if err := db.QueryRow(ctx, query, queryArgs...).Scan(&exists); err != nil {
+	if err := db.WithContext(ctx).Raw(query, queryArgs).Row().Scan(&exists); err != nil {
 		return false, classify(err)
 	}
 	return exists, nil
 }
 
-func loadDurableScanItems(ctx context.Context, db DB, workspaceID foundation.ID, where string, args []any, after *collectionapp.DurableScanKey, limit int) ([]collectionapp.CollectionItem, bool, error) {
+func loadDurableScanItems(ctx context.Context, db *gorm.DB, workspaceID foundation.ID, where string, args map[string]any, after *collectionapp.DurableScanKey, limit int) ([]collectionapp.CollectionItem, bool, error) {
 	pageWhere := where
-	pageArgs := append([]any(nil), args...)
+	pageArgs := maps.Clone(args)
 	if after != nil {
-		objectTypeArg := len(pageArgs) + 1
-		idArg := objectTypeArg + 1
-		pageWhere += fmt.Sprintf(" AND (item.object_type,item.id)>($%d::text,$%d::text)", objectTypeArg, idArg)
-		pageArgs = append(pageArgs, after.ObjectType, string(after.ID))
+		pageWhere += " AND (item.object_type,item.id)>((@after_type)::text,(@after_id)::text)"
+		pageArgs["after_type"], pageArgs["after_id"] = after.ObjectType, string(after.ID)
 	}
-	limitArg := len(pageArgs) + 1
-	query := unifiedItemCTE + "SELECT * FROM item WHERE " + pageWhere + fmt.Sprintf(" ORDER BY item.object_type,item.id LIMIT $%d", limitArg)
-	pageArgs = append(pageArgs, limit+1)
-	rows, err := db.Query(ctx, query, pageArgs...)
+	query := unifiedItemCTE + "SELECT " + collectionItemColumns + " FROM item WHERE " + pageWhere + " ORDER BY item.object_type,item.id LIMIT @limit"
+	pageArgs["limit"] = limit + 1
+	rows, err := db.WithContext(ctx).Raw(query, pageArgs).Rows()
 	if err != nil {
 		return nil, false, classify(err)
 	}
@@ -370,7 +276,7 @@ func loadDurableScanItems(ctx context.Context, db DB, workspaceID foundation.ID,
 	return items, hasMore, nil
 }
 
-func loadDurableScanPairs(ctx context.Context, db DB, where string, args []any, sources []collectionapp.CollectionItem, targetLimit int) ([]collectionapp.DurableScanPair, error) {
+func loadDurableScanPairs(ctx context.Context, db *gorm.DB, where string, args map[string]any, sources []collectionapp.CollectionItem, targetLimit int) ([]collectionapp.DurableScanPair, error) {
 	if len(sources) == 0 || targetLimit == 0 {
 		return nil, nil
 	}
@@ -379,14 +285,11 @@ func loadDurableScanPairs(ctx context.Context, db DB, where string, args []any, 
 	for index, source := range sources {
 		objectTypes[index], ids[index] = source.ObjectType, string(source.ID)
 	}
-	objectTypesArg := len(args) + 1
-	idsArg := objectTypesArg + 1
-	limitArg := idsArg + 1
 	query := unifiedItemCTE + `, filtered AS (
 	SELECT item.object_type,item.id FROM item WHERE ` + where + `
 ), source AS (
 	SELECT input.object_type,input.id,input.ordinality
-	FROM unnest($` + fmt.Sprint(objectTypesArg) + `::text[],$` + fmt.Sprint(idsArg) + `::uuid[]) WITH ORDINALITY AS input(object_type,id,ordinality)
+	FROM unnest((@source_types)::text[],(@source_ids)::uuid[]) WITH ORDINALITY AS input(object_type,id,ordinality)
 )
 SELECT source.object_type,source.id::text,target.object_type,target.id
 FROM source
@@ -395,11 +298,12 @@ CROSS JOIN LATERAL (
 	FROM filtered
 	WHERE (filtered.object_type,filtered.id)>(source.object_type,source.id::text)
 	ORDER BY filtered.object_type,filtered.id
-	LIMIT $` + fmt.Sprint(limitArg) + `
+	LIMIT @target_limit
 ) target
 ORDER BY source.ordinality,target.object_type,target.id`
-	queryArgs := append(append([]any(nil), args...), objectTypes, ids, targetLimit)
-	rows, err := db.Query(ctx, query, queryArgs...)
+	queryArgs := maps.Clone(args)
+	queryArgs["source_types"], queryArgs["source_ids"], queryArgs["target_limit"] = pq.Array(objectTypes), pq.Array(ids), targetLimit
+	rows, err := db.WithContext(ctx).Raw(query, queryArgs).Rows()
 	if err != nil {
 		return nil, classify(err)
 	}
@@ -436,13 +340,13 @@ ORDER BY source.ordinality,target.object_type,target.id`
 
 const durableScanNodeSQL = `WITH requested AS (
 	SELECT input.object_type,input.id,input.ordinality
-	FROM unnest($2::text[],$3::uuid[]) WITH ORDINALITY AS input(object_type,id,ordinality)
+	FROM unnest((@object_types)::text[],(@ids)::uuid[]) WITH ORDINALITY AS input(object_type,id,ordinality)
 ), topic_aliases_ranked AS (
 	SELECT a.topic_id AS id,a.alias,a.normalized_alias,a.id AS alias_id,
 		row_number() OVER (PARTITION BY a.topic_id ORDER BY a.normalized_alias,a.id) AS row_number
 	FROM core.topic_alias a
 	JOIN requested q ON q.object_type='TOPIC' AND q.id=a.topic_id
-	WHERE a.workspace_id=$1
+	WHERE a.workspace_id=@workspace
 ), topic_aliases AS (
 	SELECT id,COALESCE(array_agg(alias ORDER BY normalized_alias,alias_id),'{}'::text[]) AS aliases
 	FROM topic_aliases_ranked
@@ -453,7 +357,7 @@ const durableScanNodeSQL = `WITH requested AS (
 		COALESCE(array_agg(DISTINCT r.target_node_id::text ORDER BY r.target_node_id::text),'{}'::text[]) AS topic_ids
 	FROM core.relation r
 	JOIN requested q ON q.object_type='CLAIM' AND q.id=r.source_node_id
-	WHERE r.workspace_id=$1 AND r.source_node_type='CLAIM' AND r.target_node_type='TOPIC'
+	WHERE r.workspace_id=@workspace AND r.source_node_type='CLAIM' AND r.target_node_type='TOPIC'
 	  AND r.relation_type='BELONGS_TO' AND r.status='CONFIRMED'
 	GROUP BY r.source_node_id
 ), claim_sources AS (
@@ -461,7 +365,7 @@ const durableScanNodeSQL = `WITH requested AS (
 		COALESCE(array_agg(DISTINCT cs.source_version_id::text ORDER BY cs.source_version_id::text),'{}'::text[]) AS source_version_ids
 	FROM core.claim_source cs
 	JOIN requested q ON q.object_type='CLAIM' AND q.id=cs.claim_id
-	WHERE cs.workspace_id=$1
+	WHERE cs.workspace_id=@workspace
 	GROUP BY cs.claim_id
 )
 SELECT q.object_type,q.id::text,
@@ -469,18 +373,18 @@ SELECT q.object_type,q.id::text,
 	CASE WHEN q.object_type='TOPIC' THEN t.status ELSE c.status END AS status,
 	CASE WHEN q.object_type='TOPIC' THEN t.name ELSE c.statement END AS title,
 	CASE WHEN q.object_type='TOPIC' THEN COALESCE(NULLIF(t.description,''),t.name) ELSE c.statement END AS summary,
-	COALESCE(topic_aliases.aliases,'{}'::text[]),
-	COALESCE(claim_topics.topic_ids,'{}'::text[]),
-	COALESCE(claim_sources.source_version_ids,'{}'::text[])
+	COALESCE(topic_aliases.aliases,'{}'::text[])::text,
+	COALESCE(claim_topics.topic_ids,'{}'::text[])::text,
+	COALESCE(claim_sources.source_version_ids,'{}'::text[])::text
 FROM requested q
-LEFT JOIN core.topic t ON q.object_type='TOPIC' AND t.workspace_id=$1 AND t.id=q.id
-LEFT JOIN core.claim c ON q.object_type='CLAIM' AND c.workspace_id=$1 AND c.id=q.id
+LEFT JOIN core.topic t ON q.object_type='TOPIC' AND t.workspace_id=@workspace AND t.id=q.id
+LEFT JOIN core.claim c ON q.object_type='CLAIM' AND c.workspace_id=@workspace AND c.id=q.id
 LEFT JOIN topic_aliases ON topic_aliases.id=q.id
 LEFT JOIN claim_topics ON claim_topics.id=q.id
 LEFT JOIN claim_sources ON claim_sources.id=q.id
 ORDER BY q.object_type,q.id`
 
-func loadDurableScanNodes(ctx context.Context, db DB, workspaceID foundation.ID, pairs []collectionapp.DurableScanPair) ([]collectionapp.DurableScanNode, error) {
+func loadDurableScanNodes(ctx context.Context, db *gorm.DB, workspaceID foundation.ID, pairs []collectionapp.DurableScanPair) ([]collectionapp.DurableScanNode, error) {
 	if len(pairs) == 0 {
 		return nil, nil
 	}
@@ -501,13 +405,9 @@ func loadDurableScanNodes(ctx context.Context, db DB, workspaceID foundation.ID,
 	for index, key := range keys {
 		objectTypes[index], ids[index] = key.ObjectType, string(key.ID)
 	}
-	var rows pgx.Rows
-	var err error
-	if database, ok := db.(*gormDB); ok {
-		rows, err = database.durableNodeRows(ctx, durableScanNodeSQL, string(workspaceID), objectTypes, ids)
-	} else {
-		rows, err = db.Query(ctx, durableScanNodeSQL, string(workspaceID), objectTypes, ids)
-	}
+	rows, err := db.WithContext(ctx).Raw(durableScanNodeSQL, map[string]any{
+		"workspace": string(workspaceID), "object_types": pq.Array(objectTypes), "ids": pq.Array(ids),
+	}).Rows()
 	if err != nil {
 		return nil, classify(err)
 	}
@@ -518,12 +418,12 @@ func loadDurableScanNodes(ctx context.Context, db DB, workspaceID foundation.ID,
 		var objectType, id string
 		var version *int64
 		var status, title, summary *string
-		var aliases, topicIDs, sourceVersionIDs []string
+		var aliases, topicIDs, sourceVersionIDs pq.StringArray
 		if err := rows.Scan(&objectType, &id, &version, &status, &title, &summary, &aliases, &topicIDs, &sourceVersionIDs); err != nil {
 			return nil, classify(err)
 		}
 		key := collectionapp.DurableScanKey{ObjectType: objectType, ID: foundation.ID(id)}
-		if !validDurableScanKey(key) || version == nil || status == nil || title == nil || summary == nil || *version < 1 || *status == "" || *title == "" {
+		if !validDurableScanKey(key) || version == nil || status == nil || title == nil || summary == nil || *version < 1 || *status == "" || *title == "" || aliases == nil || topicIDs == nil || sourceVersionIDs == nil {
 			return nil, inconsistent(errors.New("collection durable scan node is missing"))
 		}
 		if _, expected := set[key]; !expected {

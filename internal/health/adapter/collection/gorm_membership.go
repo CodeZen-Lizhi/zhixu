@@ -11,9 +11,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/health/domain"
 )
 
-// ScopedBindingVerifier is the GORM migration seam for Collection binding
-// checks. It is intentionally separate from the legacy pgx verifier so Health
-// can join a caller-owned UnitOfWork without opening another transaction.
+// ScopedBindingVerifier 在 Health 调用方的同一事务内复核 Collection binding。
 type ScopedBindingVerifier struct {
 	verifier collectionapplication.ScopedDurableScanBindingVerifier
 }

@@ -31,7 +31,7 @@ func TestRiverInsertionSurfaceIsTransactionOnly(t *testing.T) {
 		}
 	}
 
-	dispatcherFiles := []string{"dispatcher.go", "gorm_dispatcher.go"}
+	dispatcherFiles := []string{"gorm_dispatcher.go"}
 	constructors := make([]string, 0, len(dispatcherFiles))
 	for _, name := range dispatcherFiles {
 		dispatcherFile := parseGoFile(t, filepath.Join(packageDir, name))
@@ -44,7 +44,7 @@ func TestRiverInsertionSurfaceIsTransactionOnly(t *testing.T) {
 		}
 	}
 	slices.Sort(constructors)
-	wantConstructors := []string{"NewGORMTransactionalDispatcher", "NewTransactionalDispatcher"}
+	wantConstructors := []string{"NewGORMTransactionalDispatcher"}
 	if !slices.Equal(constructors, wantConstructors) {
 		t.Fatalf("export River dispatcher constructors = %v, want %v", constructors, wantConstructors)
 	}

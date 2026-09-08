@@ -32,13 +32,14 @@ import (
 )
 
 func TestRepositoryPostgreSQLWorkingDraftCASReplayFreezeAndWorkspaceScope(t *testing.T) {
-	runAuthoringIntegrationVariants(t, testRepositoryPostgreSQLWorkingDraftCASReplayFreezeAndWorkspaceScope)
+	runAuthoringIntegration(t, testRepositoryPostgreSQLWorkingDraftCASReplayFreezeAndWorkspaceScope)
 }
 
-func testRepositoryPostgreSQLWorkingDraftCASReplayFreezeAndWorkspaceScope(t *testing.T, variant authoringIntegrationVariant) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+func testRepositoryPostgreSQLWorkingDraftCASReplayFreezeAndWorkspaceScope(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
-	repository, pool := variant.open(t)
+	repository, platform := openAuthoringIntegration(t)
+	pool := platform.DB()
 	statementCounter := installAuthoringStatementCounter(t, repository)
 	workspaceA := authoringIntegrationID(1)
 	workspaceB := authoringIntegrationID(2)
@@ -241,13 +242,14 @@ func testRepositoryPostgreSQLWorkingDraftCASReplayFreezeAndWorkspaceScope(t *tes
 }
 
 func TestRepositoryPostgreSQLListsWorkingAndDocumentDraftsByWorkspaceKeyset(t *testing.T) {
-	runAuthoringIntegrationVariants(t, testRepositoryPostgreSQLListsWorkingAndDocumentDraftsByWorkspaceKeyset)
+	runAuthoringIntegration(t, testRepositoryPostgreSQLListsWorkingAndDocumentDraftsByWorkspaceKeyset)
 }
 
-func testRepositoryPostgreSQLListsWorkingAndDocumentDraftsByWorkspaceKeyset(t *testing.T, variant authoringIntegrationVariant) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+func testRepositoryPostgreSQLListsWorkingAndDocumentDraftsByWorkspaceKeyset(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
-	repository, pool := variant.open(t)
+	repository, platform := openAuthoringIntegration(t)
+	pool := platform.DB()
 	statementCounter := installAuthoringStatementCounter(t, repository)
 	workspaceA := authoringIntegrationID(930)
 	workspaceB := authoringIntegrationID(931)
@@ -313,7 +315,7 @@ func testRepositoryPostgreSQLListsWorkingAndDocumentDraftsByWorkspaceKeyset(t *t
 	}
 	assertAuthoringStatementCount(t, statementCounter, 1, "document terminal page")
 
-	assertAuthoringListCancellationAndPoolReuse(t, ctx, variant, repository, pool, workspaceA)
+	assertAuthoringListCancellationAndPoolReuse(t, ctx, repository, pool, workspaceA)
 
 	corruptDocumentID := authoringIntegrationID(940)
 	if _, err := pool.Exec(ctx, `INSERT INTO core.document(
@@ -332,13 +334,14 @@ func testRepositoryPostgreSQLListsWorkingAndDocumentDraftsByWorkspaceKeyset(t *t
 }
 
 func TestRepositoryPostgreSQLPathConflictAndConcurrentCommandSerialization(t *testing.T) {
-	runAuthoringIntegrationVariants(t, testRepositoryPostgreSQLPathConflictAndConcurrentCommandSerialization)
+	runAuthoringIntegration(t, testRepositoryPostgreSQLPathConflictAndConcurrentCommandSerialization)
 }
 
-func testRepositoryPostgreSQLPathConflictAndConcurrentCommandSerialization(t *testing.T, variant authoringIntegrationVariant) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+func testRepositoryPostgreSQLPathConflictAndConcurrentCommandSerialization(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
-	repository, pool := variant.open(t)
+	repository, platform := openAuthoringIntegration(t)
+	pool := platform.DB()
 	workspaceID := authoringIntegrationID(100)
 	seedAuthoringWorkspace(t, ctx, pool, workspaceID, "authoring-concurrency")
 	now := time.Date(2026, 8, 3, 9, 0, 0, 0, time.UTC)
@@ -450,18 +453,19 @@ func testRepositoryPostgreSQLPathConflictAndConcurrentCommandSerialization(t *te
 }
 
 func TestRepositoryPostgreSQLTerminalProposalClosesPublicationAndReleasesDocument(t *testing.T) {
-	runAuthoringIntegrationVariants(t, testRepositoryPostgreSQLTerminalProposalClosesPublicationAndReleasesDocument)
+	runAuthoringIntegration(t, testRepositoryPostgreSQLTerminalProposalClosesPublicationAndReleasesDocument)
 }
 
-func testRepositoryPostgreSQLTerminalProposalClosesPublicationAndReleasesDocument(t *testing.T, variant authoringIntegrationVariant) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+func testRepositoryPostgreSQLTerminalProposalClosesPublicationAndReleasesDocument(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
-	repository, pool := variant.open(t)
+	repository, platform := openAuthoringIntegration(t)
+	pool := platform.DB()
 	workspaceID := authoringIntegrationID(300)
 	seedAuthoringWorkspace(t, ctx, pool, workspaceID, "authoring-publication-terminal")
 	now := time.Date(2026, 8, 3, 11, 0, 0, 0, time.UTC)
 	targets := &authoringIntegrationTargetReader{}
-	service := newAuthoringPublicationIntegrationService(t, repository, pool, targets, now, 310, 410)
+	service := newAuthoringPublicationIntegrationService(t, repository, platform, targets, now, 310, 410)
 
 	draft, err := service.CreateWorkingDraft(ctx, authoringapp.CreateCommand{
 		WorkspaceID: workspaceID, IdempotencyKey: "terminal-create",
@@ -554,19 +558,20 @@ func testRepositoryPostgreSQLTerminalProposalClosesPublicationAndReleasesDocumen
 }
 
 func TestRepositoryPostgreSQLCreateOnlyProvesAbsenceBeforeProposalPersistence(t *testing.T) {
-	runAuthoringIntegrationVariants(t, testRepositoryPostgreSQLCreateOnlyProvesAbsenceBeforeProposalPersistence)
+	runAuthoringIntegration(t, testRepositoryPostgreSQLCreateOnlyProvesAbsenceBeforeProposalPersistence)
 }
 
-func testRepositoryPostgreSQLCreateOnlyProvesAbsenceBeforeProposalPersistence(t *testing.T, variant authoringIntegrationVariant) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+func testRepositoryPostgreSQLCreateOnlyProvesAbsenceBeforeProposalPersistence(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
-	repository, pool := variant.open(t)
+	repository, platform := openAuthoringIntegration(t)
+	pool := platform.DB()
 	workspaceID := authoringIntegrationID(500)
 	seedAuthoringWorkspace(t, ctx, pool, workspaceID, "authoring-create-only-proof")
 	now := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
 	absenceErr := errors.New("target exists")
 	targets := &authoringIntegrationTargetReader{absenceErr: absenceErr}
-	service := newAuthoringPublicationIntegrationService(t, repository, pool, targets, now, 510, 610)
+	service := newAuthoringPublicationIntegrationService(t, repository, platform, targets, now, 510, 610)
 
 	draft, err := service.CreateWorkingDraft(ctx, authoringapp.CreateCommand{
 		WorkspaceID: workspaceID, IdempotencyKey: "proof-create",
@@ -608,20 +613,21 @@ func testRepositoryPostgreSQLCreateOnlyProvesAbsenceBeforeProposalPersistence(t 
 }
 
 func TestRepositoryPostgreSQLAbandonsDeterministicPreProposalFailure(t *testing.T) {
-	runAuthoringIntegrationVariants(t, testRepositoryPostgreSQLAbandonsDeterministicPreProposalFailure)
+	runAuthoringIntegration(t, testRepositoryPostgreSQLAbandonsDeterministicPreProposalFailure)
 }
 
-func testRepositoryPostgreSQLAbandonsDeterministicPreProposalFailure(t *testing.T, variant authoringIntegrationVariant) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+func testRepositoryPostgreSQLAbandonsDeterministicPreProposalFailure(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
-	repository, pool := variant.open(t)
+	repository, platform := openAuthoringIntegration(t)
+	pool := platform.DB()
 	workspaceID := authoringIntegrationID(540)
 	seedAuthoringWorkspace(t, ctx, pool, workspaceID, "authoring-abandoned-reservation")
 	now := time.Date(2026, 8, 3, 12, 30, 0, 0, time.UTC)
 	targets := &authoringIntegrationTargetReader{
 		absenceErr: foundation.NewError(foundation.ErrorNotFound, authoringapp.ErrorCodePublicationTargetParentNotFound, false, errors.New("missing parent")),
 	}
-	service := newAuthoringPublicationIntegrationService(t, repository, pool, targets, now, 550, 650)
+	service := newAuthoringPublicationIntegrationService(t, repository, platform, targets, now, 550, 650)
 
 	draft, err := service.CreateWorkingDraft(ctx, authoringapp.CreateCommand{WorkspaceID: workspaceID, IdempotencyKey: "abandon-create"})
 	if err != nil {
@@ -740,13 +746,14 @@ func testRepositoryPostgreSQLAbandonsDeterministicPreProposalFailure(t *testing.
 }
 
 func TestRepositoryPostgreSQLPublishedDocumentPathCannotDrift(t *testing.T) {
-	runAuthoringIntegrationVariants(t, testRepositoryPostgreSQLPublishedDocumentPathCannotDrift)
+	runAuthoringIntegration(t, testRepositoryPostgreSQLPublishedDocumentPathCannotDrift)
 }
 
-func testRepositoryPostgreSQLPublishedDocumentPathCannotDrift(t *testing.T, variant authoringIntegrationVariant) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+func testRepositoryPostgreSQLPublishedDocumentPathCannotDrift(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
-	repository, pool := variant.open(t)
+	repository, platform := openAuthoringIntegration(t)
+	pool := platform.DB()
 	workspaceID := authoringIntegrationID(700)
 	seedAuthoringWorkspace(t, ctx, pool, workspaceID, "authoring-published-path")
 	var now time.Time
@@ -796,7 +803,7 @@ func testRepositoryPostgreSQLPublishedDocumentPathCannotDrift(t *testing.T, vari
 	if err != nil {
 		t.Fatal(err)
 	}
-	proposal := seedAuthoringPublicationProposal(t, ctx, pool, preparation.Reservation, frozen.Revision.Content,
+	proposal := seedAuthoringPublicationProposal(t, ctx, platform, preparation.Reservation, frozen.Revision.Content,
 		authoringIntegrationID(721), authoringIntegrationID(722), now.Add(3*time.Second))
 	if _, err := repository.CompletePublication(ctx, authoringapp.CompletePublicationRecord{
 		Binding: binding, ReservationID: preparation.Reservation.ID, PublicationID: authoringIntegrationID(723),
@@ -804,7 +811,7 @@ func testRepositoryPostgreSQLPublishedDocumentPathCannotDrift(t *testing.T, vari
 	}); err != nil {
 		t.Fatal(err)
 	}
-	gitCommit := seedAuthoringProposalCommit(t, ctx, pool, proposal, preparation.Reservation,
+	gitCommit := seedAuthoringProposalCommit(t, ctx, platform, proposal, preparation.Reservation,
 		frozen.Revision.Content, 730, now.Add(5*time.Second))
 	advanced, err := repository.ReconcilePublications(ctx, authoringapp.ReconcileQuery{
 		WorkspaceID: workspaceID, ProposalID: proposal.ID, ProposalRevisionID: proposal.Revision.ID,
@@ -833,7 +840,7 @@ func testRepositoryPostgreSQLPublishedDocumentPathCannotDrift(t *testing.T, vari
 }
 
 func TestDocumentDraftAuthoringMigrationConstraints(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
 	pool := newAuthoringIntegrationDatabase(t, ctx)
 	var bodyConstraint string
@@ -866,7 +873,7 @@ func TestDocumentDraftAuthoringMigrationConstraints(t *testing.T) {
 }
 
 func TestGORMRepositoryPostgreSQLCommitFailureAndResponseLoss(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
 	fixture := testdb.Require(t, testdb.Config{MaxConns: 16, Availability: testdb.FailWhenUnavailable})
 	platform := fixture.Pool()
@@ -934,7 +941,7 @@ func TestGORMRepositoryPostgreSQLCommitFailureAndResponseLoss(t *testing.T) {
 	}
 
 	documentID, revisionID, _, gitCommit := seedAuthoringPendingPublicationWithCommit(
-		t, ctx, platform.DB(), normalRepository, workspaceID, 1700, "gorm-deferred-commit", now.Add(time.Minute),
+		t, ctx, platform, normalRepository, workspaceID, 1700, "gorm-deferred-commit", now.Add(time.Minute),
 	)
 	var deferredMutationCompleted atomic.Bool
 	failingRepository := *normalRepository
@@ -992,7 +999,7 @@ func TestGORMRepositoryPostgreSQLCommitFailureAndResponseLoss(t *testing.T) {
 }
 
 func TestAuthoringPostgreSQLKeyQueryPlans(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
 	pool := newAuthoringIntegrationDatabase(t, ctx)
 	workspaceID := authoringIntegrationID(49000)
@@ -1146,44 +1153,26 @@ type authoringIntegrationRepository interface {
 	FinalizeRestorePublication(context.Context, authoringapp.RestorePublicationRecord) (bool, error)
 }
 
-type authoringIntegrationVariant struct {
-	name string
-}
-
-func runAuthoringIntegrationVariants(
+func runAuthoringIntegration(
 	t *testing.T,
-	scenario func(*testing.T, authoringIntegrationVariant),
+	scenario func(*testing.T),
 ) {
 	t.Helper()
-	for _, name := range []string{"legacy-pgx", "gorm"} {
-		variant := authoringIntegrationVariant{name: name}
-		t.Run(name, func(t *testing.T) {
-			scenario(t, variant)
-		})
-	}
+	t.Run("gorm", scenario)
 }
 
-func (variant authoringIntegrationVariant) open(t *testing.T) (authoringIntegrationRepository, *pgxpool.Pool) {
+func openAuthoringIntegration(t *testing.T) (authoringIntegrationRepository, *platformpostgres.Pool) {
 	t.Helper()
 	fixture := testdb.Require(t, testdb.Config{MaxConns: 16, Availability: testdb.FailWhenUnavailable})
 	platform := fixture.Pool()
 	if platform == nil || platform.DB() == nil {
 		t.Fatal("shared PostgreSQL fixture did not provide a platform pool")
 	}
-	var repository authoringIntegrationRepository
-	var err error
-	switch variant.name {
-	case "legacy-pgx":
-		repository, err = NewRepository(platform.DB())
-	case "gorm":
-		repository, err = NewGORMRepository(platform)
-	default:
-		t.Fatalf("unknown Authoring integration variant %q", variant.name)
-	}
+	repository, err := NewGORMRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return repository, platform.DB()
+	return repository, platform
 }
 
 type authoringCommitResponseLossUnitOfWork struct {
@@ -1259,15 +1248,10 @@ func (counter *authoringStatementCounter) Trace(context.Context, time.Time, func
 }
 
 func (counter *authoringStatementCounter) reset() {
-	if counter != nil {
-		counter.count.Store(0)
-	}
+	counter.count.Store(0)
 }
 
 func (counter *authoringStatementCounter) statements() int64 {
-	if counter == nil {
-		return 0
-	}
 	return counter.count.Load()
 }
 
@@ -1275,7 +1259,7 @@ func installAuthoringStatementCounter(t *testing.T, repository authoringIntegrat
 	t.Helper()
 	gormRepository, ok := repository.(*GORMRepository)
 	if !ok {
-		return nil
+		t.Fatalf("Authoring integration repository has unexpected type %T", repository)
 	}
 	if gormRepository.database == nil || gormRepository.database.Config == nil {
 		t.Fatal("Authoring GORM repository has no logger configuration")
@@ -1291,7 +1275,7 @@ func installAuthoringStatementCounter(t *testing.T, repository authoringIntegrat
 
 func assertAuthoringStatementCount(t *testing.T, counter *authoringStatementCounter, want int64, operation string) {
 	t.Helper()
-	if counter != nil && counter.statements() != want {
+	if counter.statements() != want {
 		t.Fatalf("%s GORM statements=%d, want %d", operation, counter.statements(), want)
 	}
 }
@@ -1299,7 +1283,6 @@ func assertAuthoringStatementCount(t *testing.T, counter *authoringStatementCoun
 func assertAuthoringListCancellationAndPoolReuse(
 	t *testing.T,
 	ctx context.Context,
-	variant authoringIntegrationVariant,
 	repository authoringIntegrationRepository,
 	pool *pgxpool.Pool,
 	workspaceID foundation.ID,
@@ -1339,7 +1322,7 @@ func assertAuthoringListCancellationAndPoolReuse(
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("blocked Authoring list cancellation error=%v", err)
 		}
-		if variant.name == "gorm" && !errors.Is(err, cancelCause) {
+		if !errors.Is(err, cancelCause) {
 			t.Fatalf("blocked GORM Authoring list did not preserve cancellation cause: %v", err)
 		}
 	case <-time.After(3 * time.Second):
@@ -1531,14 +1514,14 @@ func (authoringIntegrationProposalCreator) CreatePublicationProposal(
 func newAuthoringPublicationIntegrationService(
 	t *testing.T,
 	repository authoringIntegrationRepository,
-	pool *pgxpool.Pool,
+	platform *platformpostgres.Pool,
 	targets *authoringIntegrationTargetReader,
 	now time.Time,
 	authoringIDStart int,
 	changeControlIDStart int,
 ) *authoringapp.Service {
 	t.Helper()
-	proposalRepository, err := changecontrolpostgres.NewRepository(pool)
+	proposalRepository, err := changecontrolpostgres.NewGORMRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}

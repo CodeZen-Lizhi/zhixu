@@ -48,6 +48,8 @@ type hotControllerTestStore struct {
 	heartbeatStarted   chan<- struct{}
 	heartbeatRelease   <-chan struct{}
 	heartbeatErr       error
+	onHeartbeatReturn  func()
+	onSnapshotReturn   func()
 	snapshotBarrier    *hotControllerSnapshotBarrier
 	restoreCommands    []modelsettingsapplication.RestoreRuntimeAvailabilityCommand
 }
@@ -72,7 +74,11 @@ func (store *hotControllerTestStore) Snapshot(ctx context.Context) (modelsetting
 	store.mu.Lock()
 	snapshot := store.snapshotLocked()
 	barrier := store.snapshotBarrier
+	onReturn := store.onSnapshotReturn
 	store.mu.Unlock()
+	if onReturn != nil {
+		defer onReturn()
+	}
 	if barrier != nil {
 		select {
 		case barrier.arrived <- struct{}{}:
@@ -134,7 +140,11 @@ func (store *hotControllerTestStore) HeartbeatRuntime(
 	started := store.heartbeatStarted
 	release := store.heartbeatRelease
 	configuredErr := store.heartbeatErr
+	onReturn := store.onHeartbeatReturn
 	store.mu.Unlock()
+	if onReturn != nil {
+		defer onReturn()
+	}
 	if started != nil {
 		select {
 		case started <- struct{}{}:
@@ -1158,6 +1168,16 @@ func TestActivationCoordinatorCancellationDoesNotFailDurableActivation(t *testin
 	if snapshot = store.currentSnapshot(); snapshot.Rollout.Phase != modelsettingsdomain.RolloutPhaseArming {
 		t.Fatalf("replacement coordinator phase = %q, want arming", snapshot.Rollout.Phase)
 	}
+
+	t.Run("cancellation preserves a concurrent fatal failure", func(t *testing.T) {
+		store := newHotControllerTestStore(0, modelsettingsdomain.RolloutState{Phase: "corrupt"})
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		store.onSnapshotReturn = cancel
+		coordinator := newHotControllerTestCoordinator(t, store)
+		err := coordinator.Run(ctx)
+		assertHotControllerErrorCode(t, err, modelsettingsdomain.ErrorCodeCorrupt)
+	})
 }
 
 func TestHotRuntimeControllerInitialPhaseAndActiveSignal(t *testing.T) {
@@ -1259,35 +1279,85 @@ func TestHotRuntimeControllerInitialReconcileFencesActivatingBeforeActiveSignal(
 }
 
 func TestHotRuntimeControllerStopsOnRuntimeOwnershipLoss(t *testing.T) {
-	store := newHotControllerTestStore(0, modelsettingsdomain.RolloutState{Phase: modelsettingsdomain.RolloutPhaseIdle})
-	started := make(chan struct{}, 1)
-	release := make(chan struct{})
-	store.heartbeatStarted = started
-	store.heartbeatRelease = release
-	store.heartbeatErr = hotControllerOwnershipLost("runtime owner was replaced")
-	factory := newRuntimeHostTestFactory()
-	initial := &runtimeHostTestGeneration{revision: 0}
-	host := newHotControllerTestHostWithValue(t, factory, RuntimeRoleWorker, hotControllerTestWorkerID, initial)
-	controller, err := NewHotRuntimeController(HotRuntimeControllerOptions[*runtimeHostTestGeneration]{
-		Host: host, Activation: store, Revisions: store, Runtime: store,
-		PollInterval: 100 * time.Millisecond, HeartbeatInterval: time.Millisecond, StaleAfter: time.Second,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	result := make(chan error, 1)
-	go func() { result <- controller.Run(context.Background()) }()
-	waitHotControllerSignal(t, controller.Active(), "runtime registration")
-	waitHotControllerSignal(t, started, "runtime heartbeat")
-	close(release)
-	select {
-	case err := <-result:
-		assertHotControllerErrorCode(t, err, modelsettingsdomain.ErrorCodeRuntimeOwnershipLost)
-	case <-time.After(time.Second):
-		t.Fatal("controller did not stop after ownership loss")
-	}
-	if factory.closeCount(initial) != 1 {
-		t.Fatalf("owned generation close count = %d", factory.closeCount(initial))
+	for _, test := range []struct {
+		name   string
+		fatal  bool
+		cancel bool
+	}{
+		{name: "ownership loss", fatal: true},
+		{name: "normal cancellation", cancel: true},
+		{name: "ownership loss during cancellation", fatal: true, cancel: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := newHotControllerTestStore(0, modelsettingsdomain.RolloutState{Phase: modelsettingsdomain.RolloutPhaseIdle})
+			started := make(chan struct{}, 1)
+			release := make(chan struct{})
+			store.heartbeatStarted = started
+			store.heartbeatRelease = release
+			if test.fatal {
+				store.heartbeatErr = hotControllerOwnershipLost("runtime owner was replaced")
+			}
+			cleanupStarted := make(chan struct{})
+			cleanupRelease := make(chan struct{})
+			cleanupReleased := false
+			defer func() {
+				if !cleanupReleased {
+					close(cleanupRelease)
+				}
+			}()
+			store.onHeartbeatReturn = func() {
+				close(cleanupStarted)
+				<-cleanupRelease
+			}
+			factory := newRuntimeHostTestFactory()
+			initial := &runtimeHostTestGeneration{revision: 0}
+			host := newHotControllerTestHostWithValue(t, factory, RuntimeRoleWorker, hotControllerTestWorkerID, initial)
+			controller, err := NewHotRuntimeController(HotRuntimeControllerOptions[*runtimeHostTestGeneration]{
+				Host: host, Activation: store, Revisions: store, Runtime: store,
+				PollInterval: 100 * time.Millisecond, HeartbeatInterval: time.Millisecond, StaleAfter: time.Second,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			result := make(chan error, 1)
+			go func() { result <- controller.Run(ctx) }()
+			waitHotControllerSignal(t, controller.Active(), "runtime registration")
+			waitHotControllerSignal(t, started, "runtime heartbeat")
+			if test.fatal {
+				close(release)
+			} else {
+				cancel()
+			}
+			waitHotControllerSignal(t, cleanupStarted, "heartbeat cleanup")
+			if test.cancel {
+				cancel()
+			}
+			select {
+			case err := <-result:
+				t.Fatalf("controller returned before heartbeat cleanup: %v", err)
+			case <-time.After(20 * time.Millisecond):
+			}
+			if factory.closeCount(initial) != 0 {
+				t.Fatal("host released its generation before the heartbeat stopped")
+			}
+			close(cleanupRelease)
+			cleanupReleased = true
+			select {
+			case err := <-result:
+				if test.fatal {
+					assertHotControllerErrorCode(t, err, modelsettingsdomain.ErrorCodeRuntimeOwnershipLost)
+				} else if err != nil {
+					t.Fatalf("normal cancellation returned a fatal error: %v", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("controller did not finish after heartbeat cleanup")
+			}
+			if factory.closeCount(initial) != 1 {
+				t.Fatalf("owned generation close count = %d", factory.closeCount(initial))
+			}
+		})
 	}
 }
 

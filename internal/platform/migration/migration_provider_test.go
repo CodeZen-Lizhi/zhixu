@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"testing"
 
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -22,6 +23,23 @@ func migrationProvider(t *testing.T, pool *pgxpool.Pool) *migrationTestProvider 
 		t.Fatal("migration test pool is nil")
 	}
 	return &migrationTestProvider{pool: pool}
+}
+
+// openMigrationRuntimePool switches the migrated fixture to the application's
+// shared pool. Callers defer Close after the database cleanup and use DB for
+// subsequent seeds/assertions; the migration-only pool is no longer usable.
+func openMigrationRuntimePool(t *testing.T, ctx context.Context, pool *pgxpool.Pool) *platformpostgres.Pool {
+	t.Helper()
+	if pool == nil {
+		t.Fatal("migration test pool is nil")
+	}
+	config := pool.Config()
+	pool.Close()
+	runtime, err := platformpostgres.Open(ctx, config.ConnString(), config.MaxConns, config.MinConns)
+	if err != nil {
+		t.Fatalf("open migrated application pool: %v", err)
+	}
+	return runtime
 }
 
 // UpTo applies pending migrations up to and including version.

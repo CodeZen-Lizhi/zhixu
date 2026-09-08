@@ -1,6 +1,6 @@
 //go:build integration
 
-package migration
+package migration_test
 
 import (
 	"context"
@@ -14,6 +14,9 @@ import (
 	memorypostgres "github.com/CodeZen-Lizhi/zhixu/internal/memory/adapter/postgres"
 	memoryapp "github.com/CodeZen-Lizhi/zhixu/internal/memory/application"
 	memorydomain "github.com/CodeZen-Lizhi/zhixu/internal/memory/domain"
+	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	interviewpostgres "github.com/CodeZen-Lizhi/zhixu/internal/review/interview/adapter/postgres"
 	interviewapp "github.com/CodeZen-Lizhi/zhixu/internal/review/interview/application"
 	interviewdomain "github.com/CodeZen-Lizhi/zhixu/internal/review/interview/domain"
@@ -21,30 +24,34 @@ import (
 )
 
 func TestM8InterviewHistoryHardeningMigrationSupportsRepeatedUp(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := newMigrationTestDatabase(t, ctx)
-	defer cleanup()
-	provider := migrationProvider(t, pool)
-	if err := provider.UpTo(ctx, 50); err != nil {
+	ctx := t.Context()
+	pool := newM8HistoryPlatform(t).DB()
+	if err := platformmigration.MigrateAtlasToVersion(ctx, pool, 50); err != nil {
 		t.Fatalf("00050 up: %v", err)
 	}
-	if err := provider.UpTo(ctx, 50); err != nil {
+	if err := platformmigration.MigrateAtlasToVersion(ctx, pool, 50); err != nil {
 		t.Fatalf("00050 repeated up: %v", err)
 	}
-	assertMigrationVersion(t, ctx, pool, 50)
+	var version int64
+	if err := pool.QueryRow(ctx, `SELECT COALESCE(max(version),'0')::bigint
+		FROM atlas_schema_revisions.atlas_schema_revisions`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != 50 {
+		t.Fatalf("migration version=%d want=50", version)
+	}
 	assertM8HistoryHardeningShape(t, ctx, pool)
-	if err := provider.UpTo(ctx, 50); err != nil {
+	if err := platformmigration.MigrateAtlasToVersion(ctx, pool, 50); err != nil {
 		t.Fatalf("00050 re-up: %v", err)
 	}
 	assertM8HistoryHardeningShape(t, ctx, pool)
 }
 
 func TestM8InterviewHistoryHardeningRejectsMutationAndPreservesExactReplay(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := newMigrationTestDatabase(t, ctx)
-	defer cleanup()
-	provider := migrationProvider(t, pool)
-	if err := provider.UpTo(ctx, 50); err != nil {
+	ctx := t.Context()
+	platform := newM8HistoryPlatform(t)
+	pool := platform.DB()
+	if err := platformmigration.MigrateAtlasToVersion(ctx, pool, 50); err != nil {
 		t.Fatalf("00050 up: %v", err)
 	}
 	fixture := seedM8RetainedHistory(t, ctx, pool)
@@ -102,7 +109,15 @@ func TestM8InterviewHistoryHardeningRejectsMutationAndPreservesExactReplay(t *te
 		assertPostgresCode(t, err, "55000")
 	}
 
-	memoryRepository, err := memorypostgres.NewRepository(pool)
+	database, err := platform.GORM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	unitOfWork, err := platform.UnitOfWork()
+	if err != nil {
+		t.Fatal(err)
+	}
+	memoryRepository, err := memorypostgres.NewGORMRepository(database, unitOfWork)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +125,7 @@ func TestM8InterviewHistoryHardeningRejectsMutationAndPreservesExactReplay(t *te
 	if err != nil || !found || !memoryReplay.Replayed || memoryReplay.Memory.ID != fixture.memoryID || string(memoryReplay.Memory.Content) != `{"style":"concise"}` {
 		t.Fatalf("memory exact replay=%+v found=%t err=%v", memoryReplay, found, err)
 	}
-	interviewRepository, err := interviewpostgres.NewRepository(pool)
+	interviewRepository, err := interviewpostgres.NewGORMRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,6 +133,18 @@ func TestM8InterviewHistoryHardeningRejectsMutationAndPreservesExactReplay(t *te
 	if err != nil || !found || !interviewReplay.Replayed || interviewReplay.Session.ID != fixture.sessionID || len(interviewReplay.Questions) != 2 || interviewReplay.Questions[0].Status != interviewdomain.QuestionStatusPending {
 		t.Fatalf("interview exact replay=%+v found=%t err=%v", interviewReplay, found, err)
 	}
+}
+
+func newM8HistoryPlatform(t *testing.T) *platformpostgres.Pool {
+	t.Helper()
+	fixture := testdb.Require(t, testdb.Config{
+		MaxConns:     16,
+		Availability: testdb.FailWhenUnavailable,
+		Migrate: func(ctx context.Context, pool *pgxpool.Pool) error {
+			return platformmigration.MigrateAtlasToVersion(ctx, pool, 49)
+		},
+	})
+	return fixture.Pool()
 }
 
 type m8RetainedHistoryFixture struct {

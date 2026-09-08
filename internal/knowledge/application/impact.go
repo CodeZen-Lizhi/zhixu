@@ -25,28 +25,16 @@ type ImpactRepository interface {
 	ImpactAnalysisReady(context.Context, foundation.ID) (bool, error)
 	ListImpactObjects(context.Context, domain.KnowledgeEvent) ([]domain.ImpactObject, error)
 	SaveImpactReport(context.Context, domain.ImpactReport) (domain.ImpactReport, bool, error)
-	// SaveImpactReportWithAudit 在同一事务中保存首次报告并追加请求审计。
-	SaveImpactReportWithAudit(context.Context, domain.ImpactReport, string, ImpactAuditPort) (domain.ImpactReport, bool, error)
 	GetImpactReportByID(context.Context, foundation.ID, foundation.ID) (domain.ImpactReport, error)
 }
 
-// ScopedImpactRepository 是 GORM 迁移路径使用的原子报告+审计边界。
-// legacy Repository 继续实现 ImpactRepository，Final 通过专用构造选择该能力。
+// ScopedImpactRepository 在同一事务内保存报告并追加审计。
 type ScopedImpactRepository interface {
 	ImpactRepository
 	SaveImpactReportWithScopedAudit(context.Context, domain.ImpactReport, string, ScopedImpactAuditPort) (domain.ImpactReport, bool, error)
 }
 
-// ImpactAuditPort 是 Impact Analysis 使用的最小审计适配接口。
-// Application 不依赖具体 Audit 类型，避免 Timeline 与审计形成第二套历史事实。
-type ImpactAuditPort interface {
-	RecordImpactAnalysis(context.Context, ImpactAuditRecord) error
-	// RecordImpactAnalysisTx 在调用方事务中追加审计，不提交或回滚事务。
-	RecordImpactAnalysisTx(context.Context, any, ImpactAuditRecord) error
-}
-
-// ScopedImpactAuditPort 是 GORM 迁移路径使用的 opaque transaction 审计能力。
-// legacy pgx Repository 继续使用 ImpactAuditPort，直到 Final 统一切换。
+// ScopedImpactAuditPort 是 Impact Analysis 使用的 opaque transaction 审计能力。
 type ScopedImpactAuditPort interface {
 	// RecordImpactAnalysisScoped 在调用方 scope 中追加审计，不提交或回滚事务。
 	RecordImpactAnalysisScoped(context.Context, foundation.TransactionScope, ImpactAuditRecord) error
@@ -84,24 +72,18 @@ type ImpactService struct {
 	scopedRepository ScopedImpactRepository
 	ids              foundation.IDGenerator
 	clock            foundation.Clock
-	audit            ImpactAuditPort
 	scopedAudit      ScopedImpactAuditPort
 }
 
 // NewImpactService 构造不带审计适配器的只读 Impact 服务。
 func NewImpactService(repository ImpactRepository, ids foundation.IDGenerator, clock foundation.Clock) (*ImpactService, error) {
-	return NewImpactServiceWithAudit(repository, ids, clock, nil)
-}
-
-// NewImpactServiceWithAudit 构造带可选审计适配器的只读 Impact 服务。
-func NewImpactServiceWithAudit(repository ImpactRepository, ids foundation.IDGenerator, clock foundation.Clock, audit ImpactAuditPort) (*ImpactService, error) {
 	if isNil(repository) || isNil(ids) || isNil(clock) {
 		return nil, foundation.NewError(foundation.ErrorDependencyUnavailable, domain.ErrorCodeImpactUnavailable, true, errors.New("impact analysis dependencies are unavailable"))
 	}
-	return &ImpactService{repository: repository, ids: ids, clock: clock, audit: audit}, nil
+	return &ImpactService{repository: repository, ids: ids, clock: clock}, nil
 }
 
-// NewScopedImpactServiceWithAudit 构造 GORM 路径的原子 Impact+Audit 服务。
+// NewScopedImpactServiceWithAudit 构造原子 Impact+Audit 服务。
 // scoped Repository 与 Audit 的方法签名在编译期禁止具体事务类型泄漏。
 func NewScopedImpactServiceWithAudit(repository ScopedImpactRepository, ids foundation.IDGenerator, clock foundation.Clock, audit ScopedImpactAuditPort) (*ImpactService, error) {
 	if isNil(repository) || isNil(ids) || isNil(clock) || isNil(audit) {
@@ -203,10 +185,8 @@ func (service *ImpactService) Analyze(ctx context.Context, request ImpactAnalysi
 			return ImpactAnalysisResult{}, impactUnavailable("scoped impact persistence is unavailable")
 		}
 		persisted, replayed, err = service.scopedRepository.SaveImpactReportWithScopedAudit(ctx, report, request.IdempotencyKey, service.scopedAudit)
-	} else if isNil(service.audit) {
-		persisted, replayed, err = service.repository.SaveImpactReport(ctx, report)
 	} else {
-		persisted, replayed, err = service.repository.SaveImpactReportWithAudit(ctx, report, request.IdempotencyKey, service.audit)
+		persisted, replayed, err = service.repository.SaveImpactReport(ctx, report)
 	}
 	if err != nil {
 		return ImpactAnalysisResult{}, err
@@ -280,12 +260,6 @@ func (service *ImpactService) replayImpactReport(ctx context.Context, request Im
 		replayedReport = persisted
 	}
 	result := ImpactAnalysisResult{Report: replayedReport, ProposalDrafts: draftsForReport(replayedReport), Replayed: true}
-	if !isNil(service.scopedRepository) {
-		return result, nil
-	}
-	if err := service.recordAudit(ctx, result, request.IdempotencyKey); err != nil {
-		return ImpactAnalysisResult{}, err
-	}
 	return result, nil
 }
 
@@ -372,17 +346,6 @@ func validateImpactReportIntegrity(report domain.ImpactReport) error {
 		return errors.New("impact report fingerprint does not match its source and objects")
 	}
 	return nil
-}
-
-func (service *ImpactService) recordAudit(ctx context.Context, result ImpactAnalysisResult, idempotencyKey string) error {
-	if isNil(service.audit) {
-		return nil
-	}
-	record, err := BuildImpactAuditRecord(result.Report, idempotencyKey, result.Replayed)
-	if err != nil {
-		return err
-	}
-	return service.audit.RecordImpactAnalysis(ctx, record)
 }
 
 // BuildImpactAuditRecord 为持久报告和 HTTP 幂等键构造稳定、脱敏的 Audit 记录。

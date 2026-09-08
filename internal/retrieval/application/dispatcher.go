@@ -35,48 +35,9 @@ type JobReceipt struct {
 	Duplicate bool
 }
 
-// JobInserter 在调用方数据库事务中插入一个 Reindex transport Job。
-type JobInserter interface {
-	InsertTx(context.Context, any, ReindexJob) (JobReceipt, error)
-}
-
-// DispatcherStore 每次调用只派发一条记录，并拥有对应短事务。
-type DispatcherStore interface {
-	DispatchOne(context.Context, DispatchPath, JobInserter) (bool, error)
-}
-
 // BatchDispatcher 是 Runner 使用的最小批量派发契约。
 type BatchDispatcher interface {
 	DispatchBatch(context.Context, int) error
-}
-
-// Dispatcher 在 first/retry 两条互斥领取路径间公平交替。
-type Dispatcher struct {
-	store DispatcherStore
-	jobs  JobInserter
-
-	mu   sync.Mutex
-	next DispatchPath
-}
-
-var _ BatchDispatcher = (*Dispatcher)(nil)
-
-// NewDispatcher 创建事务型 Reindex Dispatcher。
-func NewDispatcher(store DispatcherStore, jobs JobInserter) (*Dispatcher, error) {
-	if nilDispatcherDependency(store) || nilDispatcherDependency(jobs) {
-		return nil, dispatcherError(foundation.ErrorDependencyUnavailable, "REINDEX_DISPATCHER_DEPENDENCY_UNAVAILABLE", true, errors.New("dispatcher store or job inserter is nil"))
-	}
-	return &Dispatcher{store: store, jobs: jobs, next: DispatchPathFirst}, nil
-}
-
-// DispatchBatch 最多派发 batch 条记录；每条记录由 Store 使用独立短事务提交。
-func (d *Dispatcher) DispatchBatch(ctx context.Context, batch int) error {
-	if d == nil || nilDispatcherDependency(d.store) || nilDispatcherDependency(d.jobs) {
-		return dispatcherError(foundation.ErrorDependencyUnavailable, "REINDEX_DISPATCHER_DEPENDENCY_UNAVAILABLE", true, errors.New("dispatcher is not initialized"))
-	}
-	return dispatchBatch(ctx, batch, &d.mu, &d.next, func(ctx context.Context, path DispatchPath) (bool, error) {
-		return d.store.DispatchOne(ctx, path, d.jobs)
-	})
 }
 
 type dispatchOneFunc func(context.Context, DispatchPath) (bool, error)

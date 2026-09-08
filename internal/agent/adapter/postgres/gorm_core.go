@@ -9,20 +9,17 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
 )
 
-// GORMRepository is the staged Agent persistence implementation. Production
-// composition remains on Repository until the PostgreSQL parity gate passes.
+// GORMRepository persists Agent facts through the shared platform Pool.
 type GORMRepository struct {
 	database   *gorm.DB
 	unitOfWork foundation.UnitOfWork
 }
 
 // NewGORMRepository derives the GORM root and transaction boundary from one
-// platform Pool so staged operations cannot accidentally use a second pool.
+// platform Pool so operations cannot accidentally use a second pool.
 func NewGORMRepository(pool *platformpostgres.Pool) (*GORMRepository, error) {
 	if pool == nil {
 		return nil, gormUnavailable(errors.New("agent PostgreSQL pool is unavailable"))
@@ -149,7 +146,7 @@ func gormRawRows(database *gorm.DB, query string, arguments ...any) (*sql.Rows, 
 }
 
 func gormNoRows(err error) bool {
-	return errors.Is(err, sql.ErrNoRows) || errors.Is(err, pgx.ErrNoRows) || errors.Is(err, gorm.ErrRecordNotFound)
+	return errors.Is(err, sql.ErrNoRows) || errors.Is(err, gorm.ErrRecordNotFound)
 }
 
 func classifyGORM(ctx context.Context, cause error) error {
@@ -166,16 +163,13 @@ func classifyGORM(ctx context.Context, cause error) error {
 		}
 		return foundation.NewError(foundation.ErrorRetryableFailure, "AGENT_DATABASE_TIMEOUT", true, contextCause)
 	}
-	var postgresError *pgconn.PgError
-	if errors.As(cause, &postgresError) {
-		switch postgresError.Code {
-		case "40001", "40P01", "55P03":
-			return foundation.NewError(foundation.ErrorRetryableFailure, ErrorCodeDatabaseUnavailable, true, cause)
-		case "23505":
-			return foundation.NewError(foundation.ErrorVersionConflict, ErrorCodeRuntimeReplayConflict, false, cause)
-		case "23503", "23514", "55000":
-			return foundation.NewError(foundation.ErrorConsistencyViolation, ErrorCodeRuntimeConsistency, false, cause)
-		}
+	switch platformpostgres.SQLState(cause) {
+	case "40001", "40P01", "55P03":
+		return foundation.NewError(foundation.ErrorRetryableFailure, ErrorCodeDatabaseUnavailable, true, cause)
+	case "23505":
+		return foundation.NewError(foundation.ErrorVersionConflict, ErrorCodeRuntimeReplayConflict, false, cause)
+	case "23503", "23514", "55000":
+		return foundation.NewError(foundation.ErrorConsistencyViolation, ErrorCodeRuntimeConsistency, false, cause)
 	}
 	if errors.Is(cause, sql.ErrTxDone) {
 		return foundation.NewError(foundation.ErrorDependencyUnavailable, ErrorCodeDatabaseUnavailable, true, cause)

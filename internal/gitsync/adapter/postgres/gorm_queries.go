@@ -1,7 +1,6 @@
 package postgres
 
-// These projections intentionally mirror the legacy repository's explicit
-// column lists.  Every value is bound through GORM's parameter variables.
+// These projections use explicit column lists and bind every value through GORM.
 const (
 	gormConfigColumns = `workspace_id::text,configured,COALESCE(normalized_url,''),COALESCE(branch,''),
 	auto_sync,token_configured,revision,created_at,updated_at`

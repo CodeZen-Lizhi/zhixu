@@ -4,6 +4,7 @@ package workflowpostgres
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,37 +15,34 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/capability"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	modelsettingsapplication "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/application"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestRuntimeStateClaimHeartbeatCompleteAndReplay(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := newRuntimeTestDatabase(t, ctx)
+	ctx := t.Context()
+	platformPool, cleanup := newGORMRuntimeTestDatabase(t, ctx)
 	defer cleanup()
+	pool := platformPool.DB()
 	workspaceID := foundation.ID("a1000000-0000-4000-8000-000000000001")
 	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-state',$2,$2,CURRENT_TIMESTAMP,'active',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-state"); err != nil {
 		t.Fatal(err)
 	}
-	client, err := riveradapter.NewClient(pool, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	inserter, err := riveradapter.NewJobInserter(client)
-	if err != nil {
-		t.Fatal(err)
-	}
-	hook := &terminalHookRecorder{inspect: func(ctx context.Context, tx pgx.Tx, event application.WorkflowNodeTerminalEvent) error {
-		var runStatus domain.RunStatus
-		var nodeStatus domain.NodeStatus
-		if err := tx.QueryRow(ctx, `SELECT status FROM workflow.run WHERE id=$1`, string(event.WorkflowRunID)).Scan(&runStatus); err != nil {
+	hook := &terminalHookRecorder{inspectScoped: func(ctx context.Context, scope foundation.TransactionScope, event application.WorkflowNodeTerminalEvent) error {
+		transaction, err := platformpostgres.GORMTransaction(scope)
+		if err != nil {
 			return err
 		}
-		if err := tx.QueryRow(ctx, `SELECT status FROM workflow.node_run WHERE id=$1`, string(event.NodeRunID)).Scan(&nodeStatus); err != nil {
+		var runStatus domain.RunStatus
+		var nodeStatus domain.NodeStatus
+		if err := transaction.WithContext(ctx).Raw(`SELECT status FROM workflow.run WHERE id=?`, string(event.WorkflowRunID)).Row().Scan(&runStatus); err != nil {
+			return err
+		}
+		if err := transaction.WithContext(ctx).Raw(`SELECT status FROM workflow.node_run WHERE id=?`, string(event.NodeRunID)).Row().Scan(&nodeStatus); err != nil {
 			return err
 		}
 		if runStatus != domain.RunStatusSucceeded || nodeStatus != domain.NodeStatusSucceeded {
@@ -52,10 +50,7 @@ func TestRuntimeStateClaimHeartbeatCompleteAndReplay(t *testing.T) {
 		}
 		return nil
 	}}
-	repository, err := NewRuntimeRepositoryWithHooks(pool, inserter, RuntimeRepositoryHooks{Terminal: hook})
-	if err != nil {
-		t.Fatal(err)
-	}
+	repository := newGORMRuntimeTestRepository(t, platformPool, GORMRuntimeRepositoryHooks{Terminal: hook})
 	request := runtimeStateStartFixture(workspaceID, "state-complete", domain.RetryPolicy{MaxRetries: 0, BaseDelay: time.Nanosecond, MaxDelay: time.Second})
 	started, err := repository.Start(ctx, request)
 	if err != nil {
@@ -117,24 +112,14 @@ func TestRuntimeStateClaimHeartbeatCompleteAndReplay(t *testing.T) {
 
 func TestRuntimeStateClaimPersistsStaticModelRuntimeAsNull(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := newRuntimeTestDatabase(t, ctx)
+	platformPool, cleanup := newGORMRuntimeTestDatabase(t, ctx)
+	pool := platformPool.DB()
 	defer cleanup()
 	workspaceID := foundation.ID("a1100000-0000-4000-8000-000000000001")
 	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-static-model',$2,$2,CURRENT_TIMESTAMP,'active',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-static-model"); err != nil {
 		t.Fatal(err)
 	}
-	client, err := riveradapter.NewClient(pool, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	inserter, err := riveradapter.NewJobInserter(client)
-	if err != nil {
-		t.Fatal(err)
-	}
-	repository, err := NewRuntimeRepository(pool, inserter)
-	if err != nil {
-		t.Fatal(err)
-	}
+	repository := newGORMRuntimeTestRepository(t, platformPool, GORMRuntimeRepositoryHooks{})
 	started, err := repository.Start(ctx, runtimeStateStartFixture(workspaceID, "state-static-model", domain.RetryPolicy{MaxRetries: 0, BaseDelay: time.Nanosecond, MaxDelay: time.Second}))
 	if err != nil {
 		t.Fatal(err)
@@ -204,6 +189,8 @@ clock_timestamp(),clock_timestamp(),clock_timestamp())`, "a1200000-0000-4000-800
 	}
 	assertAttemptModelRuntimeBinding(t, preparingClaim.Attempt, 0, fixture.workerInstanceID)
 
+	// Managed admission pauses new jobs in arming; seed the queued job before cutover.
+	blockedStart := fixture.start(t, "managed-blocked", "c")
 	setHotActivationPhase(t, fixture.ctx, fixture.pool, "arming")
 	replayed, err := fixture.repository.Claim(fixture.ctx, command)
 	if err != nil || replayed.Attempt.ID != claimed.Attempt.ID {
@@ -211,7 +198,6 @@ clock_timestamp(),clock_timestamp(),clock_timestamp())`, "a1200000-0000-4000-800
 	}
 	assertAttemptModelRuntimeBinding(t, replayed.Attempt, 0, fixture.workerInstanceID)
 
-	blockedStart := fixture.start(t, "managed-blocked", "c")
 	blockedCommand := application.ClaimCommand{
 		NodeRunID: blockedStart.FirstNode.ID, DispatchNo: 1, DeliveryID: "managed-blocked-delivery",
 		RiverJobID: blockedStart.Job.JobID, ModelRuntimeInstanceID: &fixture.workerInstanceID,
@@ -417,7 +403,7 @@ func assertRuntimePostgresCode(t *testing.T, err error, expected string) {
 type managedClaimFixture struct {
 	ctx              context.Context
 	pool             *pgxpool.Pool
-	repository       *RuntimeRepository
+	repository       *GORMRuntimeRepository
 	workspaceID      foundation.ID
 	workerInstanceID foundation.ID
 	rolloutID        foundation.ID
@@ -430,7 +416,8 @@ func newManagedClaimFixture(t *testing.T, name string, withWorker bool) *managed
 func newManagedClaimFixtureWithFreshness(t *testing.T, name string, withWorker bool, freshness time.Duration) *managedClaimFixture {
 	t.Helper()
 	ctx := context.Background()
-	pool, cleanup := newRuntimeTestDatabase(t, ctx)
+	platformPool, cleanup := newGORMRuntimeTestDatabase(t, ctx)
+	pool := platformPool.DB()
 	t.Cleanup(cleanup)
 	fixture := &managedClaimFixture{
 		ctx: ctx, pool: pool,
@@ -448,18 +435,7 @@ VALUES('worker',$1::uuid,0,NULL,'active',clock_timestamp(),clock_timestamp())`, 
 			t.Fatal(err)
 		}
 	}
-	client, err := riveradapter.NewClient(pool, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	inserter, err := riveradapter.NewJobInserter(client)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fixture.repository, err = NewRuntimeRepositoryWithHooks(pool, inserter, RuntimeRepositoryHooks{ModelRuntimeFreshWithin: freshness})
-	if err != nil {
-		t.Fatal(err)
-	}
+	fixture.repository = newGORMRuntimeTestRepository(t, platformPool, GORMRuntimeRepositoryHooks{ModelRuntimeFreshWithin: freshness})
 	return fixture
 }
 
@@ -666,25 +642,15 @@ func postgresErrorCode(err *pgconn.PgError) string {
 
 func TestRuntimeStateRetrySchedulesOneBusinessGeneration(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := newRuntimeTestDatabase(t, ctx)
+	platformPool, cleanup := newGORMRuntimeTestDatabase(t, ctx)
+	pool := platformPool.DB()
 	defer cleanup()
 	workspaceID := foundation.ID("a2000000-0000-4000-8000-000000000001")
 	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-retry',$2,$2,CURRENT_TIMESTAMP,'active',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-retry"); err != nil {
 		t.Fatal(err)
 	}
-	client, err := riveradapter.NewClient(pool, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	inserter, err := riveradapter.NewJobInserter(client)
-	if err != nil {
-		t.Fatal(err)
-	}
 	hook := &terminalHookRecorder{}
-	repository, err := NewRuntimeRepositoryWithHooks(pool, inserter, RuntimeRepositoryHooks{Terminal: hook})
-	if err != nil {
-		t.Fatal(err)
-	}
+	repository := newGORMRuntimeTestRepository(t, platformPool, GORMRuntimeRepositoryHooks{Terminal: hook})
 	request := runtimeStateStartFixture(workspaceID, "state-retry", domain.RetryPolicy{MaxRetries: 1, BaseDelay: time.Nanosecond, MaxDelay: time.Second})
 	started, err := repository.Start(ctx, request)
 	if err != nil {
@@ -755,24 +721,17 @@ func TestRuntimeStateRetrySchedulesOneBusinessGeneration(t *testing.T) {
 
 func TestRuntimeStatePauseResumeAndCancelAreIdempotent(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := newRuntimeTestDatabase(t, ctx)
+	platformPool, cleanup := newGORMRuntimeTestDatabase(t, ctx)
+	pool := platformPool.DB()
 	defer cleanup()
 	workspaceID := foundation.ID("a3000000-0000-4000-8000-000000000001")
 	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-control',$2,$2,CURRENT_TIMESTAMP,'active',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-control"); err != nil {
 		t.Fatal(err)
 	}
-	client, err := riveradapter.NewClient(pool, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	inserter, err := riveradapter.NewJobInserter(client)
-	if err != nil {
-		t.Fatal(err)
-	}
 	hook := &terminalHookRecorder{}
-	controlHook := &workflowControlHookRecorder{inspect: func(ctx context.Context, tx pgx.Tx, event application.WorkflowControlEvent) error {
+	controlHook := &workflowControlHookRecorder{inspect: func(ctx context.Context, tx *sql.Tx, event application.WorkflowControlEvent) error {
 		var commandCount int
-		if err := tx.QueryRow(ctx, `SELECT count(*) FROM workflow.control_command WHERE run_id=$1 AND command=$2 AND idempotency_key=$3`,
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM workflow.control_command WHERE run_id=$1 AND command=$2 AND idempotency_key=$3`,
 			string(event.WorkflowRunID), string(event.Action), event.IdempotencyKey,
 		).Scan(&commandCount); err != nil {
 			return err
@@ -782,10 +741,7 @@ func TestRuntimeStatePauseResumeAndCancelAreIdempotent(t *testing.T) {
 		}
 		return nil
 	}}
-	repository, err := NewRuntimeRepositoryWithHooks(pool, inserter, RuntimeRepositoryHooks{Terminal: hook, Control: controlHook})
-	if err != nil {
-		t.Fatal(err)
-	}
+	repository := newGORMRuntimeTestRepository(t, platformPool, GORMRuntimeRepositoryHooks{Terminal: hook, Control: controlHook})
 	request := runtimeStateStartFixture(workspaceID, "state-control", domain.RetryPolicy{MaxRetries: 0, BaseDelay: time.Nanosecond, MaxDelay: time.Second})
 	started, err := repository.Start(ctx, request)
 	if err != nil {
@@ -827,13 +783,13 @@ func TestRuntimeStatePauseResumeAndCancelAreIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	hook.inspect = func(ctx context.Context, tx pgx.Tx, event application.WorkflowNodeTerminalEvent) error {
+	hook.inspect = func(ctx context.Context, tx *sql.Tx, event application.WorkflowNodeTerminalEvent) error {
 		var runStatus domain.RunStatus
 		var nodeStatus domain.NodeStatus
-		if err := tx.QueryRow(ctx, `SELECT status FROM workflow.run WHERE id=$1`, string(event.WorkflowRunID)).Scan(&runStatus); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT status FROM workflow.run WHERE id=$1`, string(event.WorkflowRunID)).Scan(&runStatus); err != nil {
 			return err
 		}
-		if err := tx.QueryRow(ctx, `SELECT status FROM workflow.node_run WHERE id=$1`, string(event.NodeRunID)).Scan(&nodeStatus); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT status FROM workflow.node_run WHERE id=$1`, string(event.NodeRunID)).Scan(&nodeStatus); err != nil {
 			return err
 		}
 		if runStatus != domain.RunStatusCancelled || nodeStatus != domain.NodeStatusCancelled {
@@ -889,24 +845,14 @@ func TestRuntimeStatePauseResumeAndCancelAreIdempotent(t *testing.T) {
 
 func TestRuntimeStateControlAuthorizesBeforeMutationAndReplay(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := newRuntimeTestDatabase(t, ctx)
+	platformPool, cleanup := newGORMRuntimeTestDatabase(t, ctx)
+	pool := platformPool.DB()
 	defer cleanup()
 	workspaceID := foundation.ID("a3500000-0000-4000-8000-000000000001")
 	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-control-auth',$2,$2,CURRENT_TIMESTAMP,'active',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-control-auth"); err != nil {
 		t.Fatal(err)
 	}
-	client, err := riveradapter.NewClient(pool, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	inserter, err := riveradapter.NewJobInserter(client)
-	if err != nil {
-		t.Fatal(err)
-	}
-	repository, err := NewRuntimeRepository(pool, inserter)
-	if err != nil {
-		t.Fatal(err)
-	}
+	repository := newGORMRuntimeTestRepository(t, platformPool, GORMRuntimeRepositoryHooks{})
 	request := runtimeStateStartFixtureWithPermissions(t, workspaceID, "state-control-auth", domain.RetryPolicy{MaxRetries: 0, BaseDelay: time.Nanosecond, MaxDelay: time.Second}, capability.GitWrite, capability.WriteKnowledge)
 	started, err := repository.Start(ctx, request)
 	if err != nil {
@@ -953,25 +899,15 @@ func TestRuntimeStateControlAuthorizesBeforeMutationAndReplay(t *testing.T) {
 
 func TestRuntimeStateRunningPauseAndCancelConvergeAtDeliveryCheckpoint(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := newRuntimeTestDatabase(t, ctx)
+	platformPool, cleanup := newGORMRuntimeTestDatabase(t, ctx)
+	pool := platformPool.DB()
 	defer cleanup()
 	workspaceID := foundation.ID("a4000000-0000-4000-8000-000000000001")
 	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-checkpoint',$2,$2,CURRENT_TIMESTAMP,'active',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-checkpoint"); err != nil {
 		t.Fatal(err)
 	}
-	client, err := riveradapter.NewClient(pool, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	inserter, err := riveradapter.NewJobInserter(client)
-	if err != nil {
-		t.Fatal(err)
-	}
 	hook := &terminalHookRecorder{}
-	repository, err := NewRuntimeRepositoryWithHooks(pool, inserter, RuntimeRepositoryHooks{Terminal: hook})
-	if err != nil {
-		t.Fatal(err)
-	}
+	repository := newGORMRuntimeTestRepository(t, platformPool, GORMRuntimeRepositoryHooks{Terminal: hook})
 	coordinator, err := application.NewRuntimeCoordinator(repository)
 	if err != nil {
 		t.Fatal(err)
@@ -1059,24 +995,14 @@ func TestRuntimeStateRunningPauseAndCancelConvergeAtDeliveryCheckpoint(t *testin
 
 func TestRuntimeStateHumanWaitSubmitCompletesNodeAndReplaysDecision(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := newRuntimeTestDatabase(t, ctx)
+	platformPool, cleanup := newGORMRuntimeTestDatabase(t, ctx)
+	pool := platformPool.DB()
 	defer cleanup()
 	workspaceID := foundation.ID("a6000000-0000-4000-8000-000000000001")
 	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-human',$2,$2,CURRENT_TIMESTAMP,'inactive',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-human"); err != nil {
 		t.Fatal(err)
 	}
-	client, err := riveradapter.NewClient(pool, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	inserter, err := riveradapter.NewJobInserter(client)
-	if err != nil {
-		t.Fatal(err)
-	}
-	repository, err := NewRuntimeRepository(pool, inserter)
-	if err != nil {
-		t.Fatal(err)
-	}
+	repository := newGORMRuntimeTestRepository(t, platformPool, GORMRuntimeRepositoryHooks{})
 	request := runtimeStateStartFixtureWithPermissions(t, workspaceID, "state-human", domain.RetryPolicy{MaxRetries: 0, BaseDelay: time.Nanosecond, MaxDelay: time.Second}, capability.GitWrite, capability.WriteKnowledge)
 	started, err := repository.Start(ctx, request)
 	if err != nil {
@@ -1097,7 +1023,7 @@ func TestRuntimeStateHumanWaitSubmitCompletesNodeAndReplaysDecision(t *testing.T
 	if waited.Task.Status != domain.HumanTaskPending || waited.Run.Status != domain.RunStatusWaitingForHuman || waited.Node.Status != domain.NodeStatusWaitingForHuman || waited.Attempt.Status != domain.AttemptStatusWaitingForHuman || waited.Attempt.LeaseOwner != "" {
 		t.Fatalf("waited=%+v", waited)
 	}
-	queryRepository, err := NewRepository(pool)
+	queryRepository, err := NewGORMRepository(platformPool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1150,25 +1076,15 @@ func TestRuntimeStateHumanWaitSubmitCompletesNodeAndReplaysDecision(t *testing.T
 
 func TestRuntimeStateControlDirectCancelWaitingHumanUsesExistingAttempt(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := newRuntimeTestDatabase(t, ctx)
+	platformPool, cleanup := newGORMRuntimeTestDatabase(t, ctx)
+	pool := platformPool.DB()
 	defer cleanup()
 	workspaceID := foundation.ID("a6500000-0000-4000-8000-000000000001")
 	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-human-cancel',$2,$2,CURRENT_TIMESTAMP,'active',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-human-cancel"); err != nil {
 		t.Fatal(err)
 	}
-	client, err := riveradapter.NewClient(pool, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	inserter, err := riveradapter.NewJobInserter(client)
-	if err != nil {
-		t.Fatal(err)
-	}
 	hook := &terminalHookRecorder{}
-	repository, err := NewRuntimeRepositoryWithHooks(pool, inserter, RuntimeRepositoryHooks{Terminal: hook})
-	if err != nil {
-		t.Fatal(err)
-	}
+	repository := newGORMRuntimeTestRepository(t, platformPool, GORMRuntimeRepositoryHooks{Terminal: hook})
 	started, err := repository.Start(ctx, runtimeStateStartFixture(workspaceID, "state-human-cancel", domain.RetryPolicy{MaxRetries: 0, BaseDelay: time.Nanosecond, MaxDelay: time.Second}))
 	if err != nil {
 		t.Fatal(err)
@@ -1227,26 +1143,16 @@ func TestRuntimeStateControlDirectCancelWaitingHumanUsesExistingAttempt(t *testi
 }
 
 func TestRuntimeTerminalHookFailureRollsBackDeliveryAndControl(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := newRuntimeTestDatabase(t, ctx)
+	ctx := t.Context()
+	platformPool, cleanup := newGORMRuntimeTestDatabase(t, ctx)
 	defer cleanup()
+	pool := platformPool.DB()
 	workspaceID := foundation.ID("a6800000-0000-4000-8000-000000000001")
 	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-terminal-rollback',$2,$2,CURRENT_TIMESTAMP,'active',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-terminal-rollback"); err != nil {
 		t.Fatal(err)
 	}
-	client, err := riveradapter.NewClient(pool, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	inserter, err := riveradapter.NewJobInserter(client)
-	if err != nil {
-		t.Fatal(err)
-	}
 	hook := &terminalHookRecorder{}
-	repository, err := NewRuntimeRepositoryWithHooks(pool, inserter, RuntimeRepositoryHooks{Terminal: hook})
-	if err != nil {
-		t.Fatal(err)
-	}
+	repository := newGORMRuntimeTestRepository(t, platformPool, GORMRuntimeRepositoryHooks{Terminal: hook})
 	started, err := repository.Start(ctx, runtimeStateStartFixture(workspaceID, "terminal-hook-delivery", domain.RetryPolicy{MaxRetries: 0, BaseDelay: time.Nanosecond, MaxDelay: time.Second}))
 	if err != nil {
 		t.Fatal(err)
@@ -1324,24 +1230,14 @@ func TestRuntimeTerminalHookFailureRollsBackDeliveryAndControl(t *testing.T) {
 
 func TestRuntimeStateLeaseChecksUseDatabaseTimeAfterLockWait(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := newRuntimeTestDatabase(t, ctx)
+	platformPool, cleanup := newGORMRuntimeTestDatabase(t, ctx)
+	pool := platformPool.DB()
 	defer cleanup()
 	workspaceID := foundation.ID("a6f00000-0000-4000-8000-000000000001")
 	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-lease-clock',$2,$2,CURRENT_TIMESTAMP,'active',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-lease-clock"); err != nil {
 		t.Fatal(err)
 	}
-	client, err := riveradapter.NewClient(pool, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	inserter, err := riveradapter.NewJobInserter(client)
-	if err != nil {
-		t.Fatal(err)
-	}
-	repository, err := NewRuntimeRepository(pool, inserter)
-	if err != nil {
-		t.Fatal(err)
-	}
+	repository := newGORMRuntimeTestRepository(t, platformPool, GORMRuntimeRepositoryHooks{})
 	human, err := application.NewRuntimeHumanCoordinator(repository)
 	if err != nil {
 		t.Fatal(err)
@@ -1513,25 +1409,15 @@ func TestRuntimeStateLeaseChecksUseDatabaseTimeAfterLockWait(t *testing.T) {
 }
 
 func TestRuntimeStateConcurrentClaimAndLeaseReclaimFenceOldOwner(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := newRuntimeTestDatabase(t, ctx)
+	ctx := t.Context()
+	platformPool, cleanup := newGORMRuntimeTestDatabase(t, ctx)
 	defer cleanup()
+	pool := platformPool.DB()
 	workspaceID := foundation.ID("a7000000-0000-4000-8000-000000000001")
 	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-claim',$2,$2,CURRENT_TIMESTAMP,'active',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-claim"); err != nil {
 		t.Fatal(err)
 	}
-	client, err := riveradapter.NewClient(pool, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	inserter, err := riveradapter.NewJobInserter(client)
-	if err != nil {
-		t.Fatal(err)
-	}
-	repository, err := NewRuntimeRepository(pool, inserter)
-	if err != nil {
-		t.Fatal(err)
-	}
+	repository := newGORMRuntimeTestRepository(t, platformPool, GORMRuntimeRepositoryHooks{})
 	started, err := repository.Start(ctx, runtimeStateStartFixture(workspaceID, "state-claim", domain.RetryPolicy{MaxRetries: 0, BaseDelay: time.Millisecond, MaxDelay: time.Second}))
 	if err != nil {
 		t.Fatal(err)
@@ -1589,24 +1475,14 @@ func TestRuntimeStateConcurrentClaimAndLeaseReclaimFenceOldOwner(t *testing.T) {
 
 func TestRuntimeStateHigherRiverAttemptWaitsForActiveLeaseThenReclaims(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := newRuntimeTestDatabase(t, ctx)
+	platformPool, cleanup := newGORMRuntimeTestDatabase(t, ctx)
+	pool := platformPool.DB()
 	defer cleanup()
 	workspaceID := foundation.ID("a9100000-0000-4000-8000-000000000001")
 	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-transport-retry',$2,$2,CURRENT_TIMESTAMP,'active',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-transport-retry"); err != nil {
 		t.Fatal(err)
 	}
-	client, err := riveradapter.NewClient(pool, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	inserter, err := riveradapter.NewJobInserter(client)
-	if err != nil {
-		t.Fatal(err)
-	}
-	repository, err := NewRuntimeRepository(pool, inserter)
-	if err != nil {
-		t.Fatal(err)
-	}
+	repository := newGORMRuntimeTestRepository(t, platformPool, GORMRuntimeRepositoryHooks{})
 	started, err := repository.Start(ctx, runtimeStateStartFixture(workspaceID, "transport-retry", domain.RetryPolicy{MaxRetries: 0, BaseDelay: time.Millisecond, MaxDelay: time.Second}))
 	if err != nil {
 		t.Fatal(err)
@@ -1629,25 +1505,15 @@ func TestRuntimeStateHigherRiverAttemptWaitsForActiveLeaseThenReclaims(t *testin
 
 func TestRuntimeStateRetryExhaustionFailsWithoutNewJob(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := newRuntimeTestDatabase(t, ctx)
+	platformPool, cleanup := newGORMRuntimeTestDatabase(t, ctx)
+	pool := platformPool.DB()
 	defer cleanup()
 	workspaceID := foundation.ID("a8000000-0000-4000-8000-000000000001")
 	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-exhaust',$2,$2,CURRENT_TIMESTAMP,'active',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-exhaust"); err != nil {
 		t.Fatal(err)
 	}
-	client, err := riveradapter.NewClient(pool, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	inserter, err := riveradapter.NewJobInserter(client)
-	if err != nil {
-		t.Fatal(err)
-	}
 	hook := &terminalHookRecorder{}
-	repository, err := NewRuntimeRepositoryWithHooks(pool, inserter, RuntimeRepositoryHooks{Terminal: hook})
-	if err != nil {
-		t.Fatal(err)
-	}
+	repository := newGORMRuntimeTestRepository(t, platformPool, GORMRuntimeRepositoryHooks{Terminal: hook})
 	started, err := repository.Start(ctx, runtimeStateStartFixture(workspaceID, "state-exhaust", domain.RetryPolicy{MaxRetries: 0, BaseDelay: time.Millisecond, MaxDelay: time.Second}))
 	if err != nil {
 		t.Fatal(err)
@@ -1703,24 +1569,14 @@ func TestRuntimeStateRetryExhaustionFailsWithoutNewJob(t *testing.T) {
 
 func TestRuntimeStateActivatesJoinSuccessorOnceAfterAllPredecessors(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := newRuntimeTestDatabase(t, ctx)
+	platformPool, cleanup := newGORMRuntimeTestDatabase(t, ctx)
+	pool := platformPool.DB()
 	defer cleanup()
 	workspaceID := foundation.ID("a5000000-0000-4000-8000-000000000001")
 	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'runtime-dag',$2,$2,CURRENT_TIMESTAMP,'active',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "/tmp/runtime-dag"); err != nil {
 		t.Fatal(err)
 	}
-	client, err := riveradapter.NewClient(pool, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	inserter, err := riveradapter.NewJobInserter(client)
-	if err != nil {
-		t.Fatal(err)
-	}
-	repository, err := NewRuntimeRepository(pool, inserter)
-	if err != nil {
-		t.Fatal(err)
-	}
+	repository := newGORMRuntimeTestRepository(t, platformPool, GORMRuntimeRepositoryHooks{})
 	request := runtimeStateStartFixture(workspaceID, "state-dag", domain.RetryPolicy{MaxRetries: 0, BaseDelay: time.Millisecond, MaxDelay: time.Second})
 	request.Definition.Graph, _ = json.Marshal(domain.CanonicalGraph{Nodes: []domain.NodeDefinition{
 		{Key: "a", Kind: application.CanonicalJSONHashNodeKind, InputSchemaVersion: 1, OutputSchemaVersion: 1},
@@ -1734,22 +1590,23 @@ func TestRuntimeStateActivatesJoinSuccessorOnceAfterAllPredecessors(t *testing.T
 		t.Fatal(err)
 	}
 	bID := foundation.ID("a5000000-0000-4000-8000-000000000014")
-	tx, err := pool.Begin(ctx)
+	var bJob riveradapter.JobReceipt
+	err = repository.unitOfWork.Within(ctx, foundation.TransactionOptions{}, func(callbackCtx context.Context, scope foundation.TransactionScope) error {
+		tx, err := platformpostgres.SQLTransaction(scope)
+		if err != nil {
+			return err
+		}
+		var databaseTimestamp time.Time
+		if err := tx.QueryRowContext(callbackCtx, `SELECT CURRENT_TIMESTAMP`).Scan(&databaseTimestamp); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(callbackCtx, `INSERT INTO workflow.node_run(id,run_id,node_key,node_type,status,attempt,input,version,created_at,updated_at,idempotency_key,input_schema_version,output_schema_version,dispatch_no,retry_no) VALUES($1,$2,'b',$3,'pending',0,'{}',1,$4,$4,'node-start-state-dag-b',1,1,1,0)`, string(bID), string(started.Run.ID), application.CanonicalJSONHashNodeKind, databaseTimestamp); err != nil {
+			return err
+		}
+		bJob, err = repository.jobs.InsertTx(callbackCtx, scope, riveradapter.NodeJobArgs{SchemaVersion: riveradapter.NodeJobSchemaVersion, NodeRunID: bID, DispatchNo: 1}, riveradapter.InsertOptions{})
+		return err
+	})
 	if err != nil {
-		t.Fatal(err)
-	}
-	var databaseTimestamp time.Time
-	if err := tx.QueryRow(ctx, `SELECT CURRENT_TIMESTAMP`).Scan(&databaseTimestamp); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tx.Exec(ctx, `INSERT INTO workflow.node_run(id,run_id,node_key,node_type,status,attempt,input,version,created_at,updated_at,idempotency_key,input_schema_version,output_schema_version,dispatch_no,retry_no) VALUES($1,$2,'b',$3,'pending',0,'{}',1,$4,$4,'node-start-state-dag-b',1,1,1,0)`, string(bID), string(started.Run.ID), application.CanonicalJSONHashNodeKind, databaseTimestamp); err != nil {
-		t.Fatal(err)
-	}
-	bJob, err := inserter.InsertTx(ctx, tx, riveradapter.NodeJobArgs{SchemaVersion: riveradapter.NodeJobSchemaVersion, NodeRunID: bID, DispatchNo: 1}, riveradapter.InsertOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
 	claimA, err := repository.Claim(ctx, application.ClaimCommand{NodeRunID: started.FirstNode.ID, DispatchNo: 1, DeliveryID: "dag-a", RiverJobID: started.Job.JobID, LeaseOwner: "worker-a", LeaseDuration: time.Minute})
@@ -1803,21 +1660,22 @@ func runtimeStateStartFixtureWithPermissions(t *testing.T, workspaceID foundatio
 }
 
 type terminalHookRecorder struct {
-	events  []application.WorkflowNodeTerminalEvent
-	inspect func(context.Context, pgx.Tx, application.WorkflowNodeTerminalEvent) error
-	err     error
+	events        []application.WorkflowNodeTerminalEvent
+	inspect       func(context.Context, *sql.Tx, application.WorkflowNodeTerminalEvent) error
+	inspectScoped func(context.Context, foundation.TransactionScope, application.WorkflowNodeTerminalEvent) error
+	err           error
 }
 
 type workflowControlHookRecorder struct {
 	events  []application.WorkflowControlEvent
-	inspect func(context.Context, pgx.Tx, application.WorkflowControlEvent) error
+	inspect func(context.Context, *sql.Tx, application.WorkflowControlEvent) error
 	err     error
 }
 
-func (hook *workflowControlHookRecorder) OnWorkflowControl(ctx context.Context, transaction any, event application.WorkflowControlEvent) error {
-	tx, ok := transaction.(pgx.Tx)
-	if !ok {
-		return errors.New("control hook transaction is not pgx.Tx")
+func (hook *workflowControlHookRecorder) OnWorkflowControlScoped(ctx context.Context, scope foundation.TransactionScope, event application.WorkflowControlEvent) error {
+	tx, err := platformpostgres.SQLTransaction(scope)
+	if err != nil {
+		return err
 	}
 	hook.events = append(hook.events, event)
 	if hook.inspect != nil {
@@ -1828,14 +1686,22 @@ func (hook *workflowControlHookRecorder) OnWorkflowControl(ctx context.Context, 
 	return hook.err
 }
 
-func (hook *terminalHookRecorder) OnWorkflowNodeTerminal(ctx context.Context, transaction any, event application.WorkflowNodeTerminalEvent) error {
-	tx, ok := transaction.(pgx.Tx)
-	if !ok {
-		return errors.New("terminal hook transaction is not pgx.Tx")
+func (hook *terminalHookRecorder) OnWorkflowNodeTerminalScoped(ctx context.Context, scope foundation.TransactionScope, event application.WorkflowNodeTerminalEvent) error {
+	if _, err := platformpostgres.GORMTransaction(scope); err != nil {
+		return err
 	}
 	hook.events = append(hook.events, event)
 	if hook.inspect != nil {
+		tx, err := platformpostgres.SQLTransaction(scope)
+		if err != nil {
+			return err
+		}
 		if err := hook.inspect(ctx, tx, event); err != nil {
+			return err
+		}
+	}
+	if hook.inspectScoped != nil {
+		if err := hook.inspectScoped(ctx, scope, event); err != nil {
 			return err
 		}
 	}

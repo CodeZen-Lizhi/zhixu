@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -15,333 +16,14 @@ import (
 	collectionapp "github.com/CodeZen-Lizhi/zhixu/internal/collection/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/collection/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/lib/pq"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
-
-// DB 是 Collection PostgreSQL adapter 所需的最小参数化查询边界。
-type DB interface {
-	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
-	Query(context.Context, string, ...any) (pgx.Rows, error)
-	QueryRow(context.Context, string, ...any) pgx.Row
-}
-
-type transactionBeginner interface {
-	Begin(context.Context) (pgx.Tx, error)
-	BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, error)
-}
-
-type nestedTransactionBeginner struct {
-	tx pgx.Tx
-}
-
-func (beginner nestedTransactionBeginner) Begin(ctx context.Context) (pgx.Tx, error) {
-	return beginner.tx.Begin(ctx)
-}
-
-func (beginner nestedTransactionBeginner) BeginTx(ctx context.Context, _ pgx.TxOptions) (pgx.Tx, error) {
-	// PostgreSQL cannot change isolation/access mode inside a transaction. This
-	// path is used when a caller deliberately supplies an existing transaction,
-	// so preserve that transaction's snapshot and create a savepoint.
-	return beginner.tx.Begin(ctx)
-}
-
-// Repository 持久化 Smart Collection 聚合与命令 receipt。
-type Repository struct {
-	db       DB
-	beginner transactionBeginner
-	cursor   *collectionapp.CursorCodec
-}
-
-// NewRepository 创建 Collection PostgreSQL adapter。
-func NewRepository(db DB) (*Repository, error) {
-	if db == nil {
-		return nil, unavailable(errors.New("collection database is nil"))
-	}
-	beginner, ok := db.(transactionBeginner)
-	if !ok {
-		tx, isTransaction := db.(pgx.Tx)
-		if !isTransaction {
-			return nil, unavailable(errors.New("collection database does not support transactions"))
-		}
-		beginner = nestedTransactionBeginner{tx: tx}
-	}
-	cursor, err := collectionapp.NewRandomCursorCodec()
-	if err != nil {
-		return nil, unavailable(err)
-	}
-	return &Repository{db: db, beginner: beginner, cursor: cursor}, nil
-}
 
 const collectionColumns = `id::text,workspace_id::text,name,normalized_name,description,
 	query_schema_version,query_version,query_definition,query_hash,view_type,view_config,status,
 	cached_result_version,last_executed_at,version,created_at,updated_at`
-
-const collectionSelect = `SELECT ` + collectionColumns + ` FROM learning.smart_collection`
-
-// CreateCollection 在单事务中写入集合与 create receipt。
-func (r *Repository) CreateCollection(ctx context.Context, record collectionapp.CreateRecord) (collectionapp.CommandResult, error) {
-	if r == nil || r.db == nil {
-		return collectionapp.CommandResult{}, unavailable(errors.New("collection repository is unavailable"))
-	}
-	if err := validateCreateRecord(record); err != nil {
-		return collectionapp.CommandResult{}, err
-	}
-	return writeTx(ctx, r, func(tx DB) (collectionapp.CommandResult, error) {
-		if err := lockWorkspace(ctx, tx, record.Collection.WorkspaceID); err != nil {
-			return collectionapp.CommandResult{}, err
-		}
-		if receipt, found, err := loadCommand(ctx, tx, record.Collection.WorkspaceID, record.IdempotencyKey); err != nil {
-			return collectionapp.CommandResult{}, err
-		} else if found {
-			if receipt.requestHash != record.RequestHash || receipt.commandType != "CREATE" {
-				return collectionapp.CommandResult{}, idempotencyConflict(errors.New("collection idempotency key is bound to another request"))
-			}
-			return commandResult(receipt.collection, receipt, true), nil
-		}
-		if _, err := tx.Exec(ctx, `INSERT INTO learning.smart_collection(`+collectionColumnsForInsert+`) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`, collectionArgs(record.Collection)...); err != nil {
-			return collectionapp.CommandResult{}, classify(err)
-		}
-		if _, err := tx.Exec(ctx, `INSERT INTO learning.smart_collection_command(workspace_id,idempotency_key,request_hash,command_type,collection_id,collection_version,receipt,created_at) VALUES($1,$2,$3,'CREATE',$4,$5,$6,$7)`, string(record.Collection.WorkspaceID), record.IdempotencyKey, record.RequestHash, string(record.Collection.ID), record.Collection.Version, commandReceiptJSON(record.Collection, record.IdempotencyKey, "CREATE", record.RequestHash), record.Collection.CreatedAt.UTC()); err != nil {
-			return collectionapp.CommandResult{}, classify(err)
-		}
-		receipt := commandReceipt{workspaceID: record.Collection.WorkspaceID, idempotencyKey: record.IdempotencyKey, requestHash: record.RequestHash, commandType: "CREATE", collectionID: record.Collection.ID, collectionVersion: record.Collection.Version}
-		return commandResult(record.Collection, receipt, false), nil
-	})
-}
-
-// UpdateCollection 在单事务中执行名称、查询、视图和描述的替换。
-func (r *Repository) UpdateCollection(ctx context.Context, record collectionapp.UpdateRecord) (collectionapp.CommandResult, error) {
-	if r == nil || r.db == nil {
-		return collectionapp.CommandResult{}, unavailable(errors.New("collection repository is unavailable"))
-	}
-	if err := validateUpdateRecord(record); err != nil {
-		return collectionapp.CommandResult{}, err
-	}
-	return writeTx(ctx, r, func(tx DB) (collectionapp.CommandResult, error) {
-		if err := lockWorkspace(ctx, tx, record.WorkspaceID); err != nil {
-			return collectionapp.CommandResult{}, err
-		}
-		if receipt, found, err := loadCommand(ctx, tx, record.WorkspaceID, record.IdempotencyKey); err != nil {
-			return collectionapp.CommandResult{}, err
-		} else if found {
-			if receipt.requestHash != record.RequestHash || receipt.commandType != "UPDATE" || receipt.collectionID != record.CollectionID {
-				return collectionapp.CommandResult{}, idempotencyConflict(errors.New("collection idempotency key is bound to another request"))
-			}
-			return commandResult(receipt.collection, receipt, true), nil
-		}
-		current, err := loadCollection(ctx, tx, record.WorkspaceID, record.CollectionID, true)
-		if err != nil {
-			return collectionapp.CommandResult{}, err
-		}
-		if current.Status == collectionapp.CollectionStatusArchived {
-			return collectionapp.CommandResult{}, archivedImmutable(errors.New("archived collection cannot be updated"))
-		}
-		if current.Version != record.ExpectedVersion {
-			return collectionapp.CommandResult{}, versionConflict(collectionapp.ErrorCodeVersionConflict, errors.New("collection expected version mismatch"))
-		}
-		now := record.At.UTC()
-		if now.IsZero() {
-			now = record.Collection.UpdatedAt.UTC()
-		}
-		if now.Before(current.UpdatedAt) {
-			now = current.UpdatedAt
-		}
-		queryVersion := current.QueryVersion
-		if current.QueryHash != record.Collection.QueryHash {
-			queryVersion++
-		}
-		if _, err := tx.Exec(ctx, `UPDATE learning.smart_collection SET name=$3,normalized_name=$4,description=$5,query_schema_version=$6,query_version=$7,query_definition=$8,query_hash=$9,view_type=$10,view_config=$11,status='ACTIVE',version=version+1,updated_at=$12 WHERE workspace_id=$1 AND id=$2 AND version=$13`, string(record.WorkspaceID), string(record.CollectionID), record.Collection.Name, record.Collection.NormalizedName, record.Collection.Description, record.Collection.QuerySchemaVersion, queryVersion, queryDefinition(record.Collection), record.Collection.QueryHash, string(record.Collection.ViewType), viewConfig(record.Collection), now, record.ExpectedVersion); err != nil {
-			return collectionapp.CommandResult{}, classify(err)
-		}
-		updated := record.Collection
-		updated.QueryVersion = queryVersion
-		updated.Version = record.ExpectedVersion + 1
-		updated.Status = collectionapp.CollectionStatusActive
-		updated.CreatedAt = current.CreatedAt
-		updated.UpdatedAt = now
-		updated.CachedResultVersion = current.CachedResultVersion
-		updated.LastExecutedAt = current.LastExecutedAt
-		// The receipt must contain the exact aggregate that was committed, not
-		// the caller's partial update payload.
-		if _, err := tx.Exec(ctx, `INSERT INTO learning.smart_collection_command(workspace_id,idempotency_key,request_hash,command_type,collection_id,collection_version,receipt,created_at) VALUES($1,$2,$3,'UPDATE',$4,$5,$6,$7)`, string(record.WorkspaceID), record.IdempotencyKey, record.RequestHash, string(record.CollectionID), updated.Version, commandReceiptJSON(updated, record.IdempotencyKey, "UPDATE", record.RequestHash), now); err != nil {
-			return collectionapp.CommandResult{}, classify(err)
-		}
-		receipt := commandReceipt{workspaceID: record.WorkspaceID, idempotencyKey: record.IdempotencyKey, requestHash: record.RequestHash, commandType: "UPDATE", collectionID: record.CollectionID, collectionVersion: updated.Version}
-		return commandResult(updated, receipt, false), nil
-	})
-}
-
-// ArchiveCollection 在单事务中将集合转为不可变归档状态。
-func (r *Repository) ArchiveCollection(ctx context.Context, record collectionapp.ArchiveRecord) (collectionapp.CommandResult, error) {
-	if r == nil || r.db == nil {
-		return collectionapp.CommandResult{}, unavailable(errors.New("collection repository is unavailable"))
-	}
-	if err := validateArchiveRecord(record); err != nil {
-		return collectionapp.CommandResult{}, err
-	}
-	return writeTx(ctx, r, func(tx DB) (collectionapp.CommandResult, error) {
-		if err := lockWorkspace(ctx, tx, record.WorkspaceID); err != nil {
-			return collectionapp.CommandResult{}, err
-		}
-		if receipt, found, err := loadCommand(ctx, tx, record.WorkspaceID, record.IdempotencyKey); err != nil {
-			return collectionapp.CommandResult{}, err
-		} else if found {
-			if receipt.requestHash != record.RequestHash || receipt.commandType != "ARCHIVE" || receipt.collectionID != record.CollectionID {
-				return collectionapp.CommandResult{}, idempotencyConflict(errors.New("collection idempotency key is bound to another request"))
-			}
-			return commandResult(receipt.collection, receipt, true), nil
-		}
-		current, err := loadCollection(ctx, tx, record.WorkspaceID, record.CollectionID, true)
-		if err != nil {
-			return collectionapp.CommandResult{}, err
-		}
-		if current.Status == collectionapp.CollectionStatusArchived {
-			return collectionapp.CommandResult{}, archivedImmutable(errors.New("collection is already archived"))
-		}
-		if current.Version != record.ExpectedVersion {
-			return collectionapp.CommandResult{}, versionConflict(collectionapp.ErrorCodeVersionConflict, errors.New("collection expected version mismatch"))
-		}
-		now := record.At.UTC()
-		if now.IsZero() {
-			now = time.Now().UTC()
-		}
-		if now.Before(current.UpdatedAt) {
-			now = current.UpdatedAt
-		}
-		if _, err := tx.Exec(ctx, `UPDATE learning.smart_collection SET status='ARCHIVED',version=version+1,updated_at=$3 WHERE workspace_id=$1 AND id=$2 AND version=$4`, string(record.WorkspaceID), string(record.CollectionID), now, record.ExpectedVersion); err != nil {
-			return collectionapp.CommandResult{}, classify(err)
-		}
-		current.Status = collectionapp.CollectionStatusArchived
-		current.Version = record.ExpectedVersion + 1
-		current.UpdatedAt = now
-		if _, err := tx.Exec(ctx, `INSERT INTO learning.smart_collection_command(workspace_id,idempotency_key,request_hash,command_type,collection_id,collection_version,receipt,created_at) VALUES($1,$2,$3,'ARCHIVE',$4,$5,$6,$7)`, string(record.WorkspaceID), record.IdempotencyKey, record.RequestHash, string(record.CollectionID), current.Version, commandReceiptJSON(current, record.IdempotencyKey, "ARCHIVE", record.RequestHash), now); err != nil {
-			return collectionapp.CommandResult{}, classify(err)
-		}
-		receipt := commandReceipt{workspaceID: record.WorkspaceID, idempotencyKey: record.IdempotencyKey, requestHash: record.RequestHash, commandType: "ARCHIVE", collectionID: record.CollectionID, collectionVersion: current.Version}
-		return commandResult(current, receipt, false), nil
-	})
-}
-
-// GetCollection 按 Workspace 与 ID 读取集合。
-func (r *Repository) GetCollection(ctx context.Context, workspaceID, collectionID foundation.ID) (collectionapp.Collection, error) {
-	if r == nil || r.db == nil {
-		return collectionapp.Collection{}, unavailable(errors.New("collection repository is unavailable"))
-	}
-	return loadCollection(ctx, r.db, workspaceID, collectionID, false)
-}
-
-// ListCollections 返回稳定排序的有界集合列表。
-func (r *Repository) ListCollections(ctx context.Context, query collectionapp.ListQuery) (collectionapp.CollectionListPage, error) {
-	if r == nil || r.db == nil {
-		return collectionapp.CollectionListPage{}, unavailable(errors.New("collection repository is unavailable"))
-	}
-	tx, err := r.beginner.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
-	if err != nil {
-		return collectionapp.CollectionListPage{}, classify(err)
-	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
-	if err := configureCollectionStatementTimeout(ctx, tx, defaultCollectionStatementTimeout); err != nil {
-		return collectionapp.CollectionListPage{}, classify(err)
-	}
-	values := canonicalCollectionStatuses(query.Statuses)
-	statusParts := append([]string{"collection-list-status/v1"}, values...)
-	statusHash := collectionListHash(statusParts...)
-	sortHash := collectionListHash("collection-list-sort/v1", "updated_at:desc", "id:desc")
-	revisionHash, err := collectionListRevision(ctx, tx, query.WorkspaceID, values)
-	if err != nil {
-		return collectionapp.CollectionListPage{}, err
-	}
-	args := []any{string(query.WorkspaceID), values}
-	where := ` WHERE workspace_id=$1 AND status=ANY($2::text[])`
-	if query.Cursor != "" {
-		cursor, decodeErr := r.cursor.Decode(query.Cursor, collectionapp.CursorBinding{
-			Scope: collectionapp.CursorScopeList, WorkspaceID: query.WorkspaceID,
-			QueryHash: statusHash, SortHash: sortHash, Limit: query.Limit, RevisionHash: revisionHash,
-		})
-		if decodeErr != nil {
-			return collectionapp.CollectionListPage{}, decodeErr
-		}
-		lastUpdatedAt, parseErr := time.Parse(time.RFC3339Nano, *cursor.LastSortValues[0])
-		if parseErr != nil || *cursor.LastSortValues[1] != string(cursor.LastID) {
-			return collectionapp.CollectionListPage{}, foundation.NewError(foundation.ErrorInvalidInput, collectionapp.ErrorCodeCursorInvalid, false, errors.New("collection list cursor key is invalid"))
-		}
-		where += ` AND (updated_at < $3 OR (updated_at = $3 AND id < $4::uuid))`
-		args = append(args, lastUpdatedAt.UTC(), string(cursor.LastID))
-	}
-	limitPosition := len(args) + 1
-	args = append(args, query.Limit+1)
-	rows, err := tx.Query(ctx, collectionSelect+where+fmt.Sprintf(` ORDER BY updated_at DESC,id DESC LIMIT $%d`, limitPosition), args...)
-	if err != nil {
-		return collectionapp.CollectionListPage{}, classify(err)
-	}
-	defer rows.Close()
-	result := make([]collectionapp.Collection, 0, query.Limit+1)
-	for rows.Next() {
-		item, err := scanCollection(rows)
-		if err != nil {
-			return collectionapp.CollectionListPage{}, err
-		}
-		result = append(result, item)
-	}
-	if err := rows.Err(); err != nil {
-		return collectionapp.CollectionListPage{}, classify(err)
-	}
-	page := collectionapp.CollectionListPage{Items: result}
-	if len(result) > query.Limit {
-		last := result[query.Limit-1]
-		page.Items = result[:query.Limit]
-		updatedAt := last.UpdatedAt.UTC().Format(time.RFC3339Nano)
-		id := string(last.ID)
-		page.NextCursor, err = r.cursor.Encode(collectionapp.ResultCursor{
-			Scope: collectionapp.CursorScopeList, WorkspaceID: query.WorkspaceID,
-			QueryHash: statusHash, SortHash: sortHash, Limit: query.Limit, RevisionHash: revisionHash,
-			LastObjectType: "COLLECTION", LastID: last.ID, LastSortValues: []*string{&updatedAt, &id},
-		})
-		if err != nil {
-			return collectionapp.CollectionListPage{}, err
-		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return collectionapp.CollectionListPage{}, classify(err)
-	}
-	return page, nil
-}
-
-// SearchCollections searches active Smart Collections within one Workspace and a strict result bound.
-func (r *Repository) SearchCollections(ctx context.Context, query collectionapp.CollectionSearchQuery) ([]collectionapp.Collection, error) {
-	if r == nil || r.db == nil {
-		return nil, unavailable(errors.New("collection repository is unavailable"))
-	}
-	if !validID(query.WorkspaceID) || query.Query == "" || query.Limit < 1 || query.Limit > collectionapp.MaxCollectionSearchLimit {
-		return nil, requestInvalid(errors.New("collection search request is invalid"))
-	}
-	rows, err := r.db.Query(ctx, collectionSelect+`
-		WHERE workspace_id=$1 AND status='ACTIVE'
-		  AND (position($2 in normalized_name)>0 OR position($2 in lower(description))>0)
-		ORDER BY CASE
-			WHEN normalized_name=$2 THEN 0
-			WHEN position($2 in normalized_name)=1 THEN 1
-			ELSE 2 END,
-			updated_at DESC,id DESC
-		LIMIT $3`, string(query.WorkspaceID), query.Query, query.Limit)
-	if err != nil {
-		return nil, classify(err)
-	}
-	defer rows.Close()
-	items := make([]collectionapp.Collection, 0, query.Limit)
-	for rows.Next() {
-		item, scanErr := scanCollection(rows)
-		if scanErr != nil {
-			return nil, scanErr
-		}
-		items = append(items, item)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, classify(err)
-	}
-	return items, nil
-}
 
 func canonicalCollectionStatuses(statuses []collectionapp.CollectionStatus) []string {
 	if len(statuses) == 0 {
@@ -359,11 +41,11 @@ func canonicalCollectionStatuses(statuses []collectionapp.CollectionStatus) []st
 	return values
 }
 
-func collectionListRevision(ctx context.Context, db DB, workspaceID foundation.ID, statuses []string) (string, error) {
+func collectionListRevision(ctx context.Context, db *gorm.DB, workspaceID foundation.ID, statuses []string) (string, error) {
 	var count int64
 	var updatedAt *time.Time
 	var digest string
-	if err := db.QueryRow(ctx, `SELECT count(*),max(updated_at),md5(COALESCE(string_agg(id::text || ':' || version::text || ':' || status, E'\n' ORDER BY id),'')) FROM learning.smart_collection WHERE workspace_id=$1 AND status=ANY($2::text[])`, string(workspaceID), statuses).Scan(&count, &updatedAt, &digest); err != nil {
+	if err := db.WithContext(ctx).Raw(`SELECT count(*),max(updated_at),md5(COALESCE(string_agg(id::text || ':' || version::text || ':' || status, E'\n' ORDER BY id),'')) FROM learning.smart_collection WHERE workspace_id=? AND status=ANY(?::text[])`, string(workspaceID), pq.Array(statuses)).Row().Scan(&count, &updatedAt, &digest); err != nil {
 		return "", classify(err)
 	}
 	updated := ""
@@ -393,19 +75,16 @@ func commandResult(collection collectionapp.Collection, receipt commandReceipt, 
 	return collectionapp.CommandResult{Collection: collection, CommandVersion: receipt.collectionVersion, RequestHash: receipt.requestHash, CommandType: receipt.commandType, Replayed: replayed}
 }
 
-func loadCommand(ctx context.Context, db DB, workspaceID foundation.ID, key string) (commandReceipt, bool, error) {
+func loadCommand(ctx context.Context, db *gorm.DB, workspaceID foundation.ID, key string) (commandReceipt, bool, error) {
 	var receipt commandReceipt
 	var workspace, collectionID string
-	var receiptRaw []byte
-	query := `SELECT workspace_id::text,request_hash,command_type,collection_id::text,collection_version,receipt FROM learning.smart_collection_command WHERE workspace_id=$1 AND idempotency_key=$2 FOR UPDATE`
-	var row pgx.Row
-	if database, ok := db.(*gormDB); ok {
-		row = database.receiptRow(ctx, query, string(workspaceID), key)
-	} else {
-		row = db.QueryRow(ctx, query, string(workspaceID), key)
-	}
+	var receiptRaw collectionJSONB
+	row := db.WithContext(ctx).Model(&collectionCommandModel{}).
+		Select("workspace_id::text,request_hash,command_type,collection_id::text,collection_version,receipt").
+		Where("workspace_id = ? AND idempotency_key = ?", string(workspaceID), key).
+		Clauses(clause.Locking{Strength: "UPDATE"}).Row()
 	err := row.Scan(&workspace, &receipt.requestHash, &receipt.commandType, &collectionID, &receipt.collectionVersion, &receiptRaw)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, sql.ErrNoRows) {
 		return commandReceipt{}, false, nil
 	}
 	if err != nil {
@@ -427,10 +106,10 @@ func loadCommand(ctx context.Context, db DB, workspaceID foundation.ID, key stri
 	return receipt, true, nil
 }
 
-func lockWorkspace(ctx context.Context, db DB, workspaceID foundation.ID) error {
+func lockWorkspace(ctx context.Context, db *gorm.DB, workspaceID foundation.ID) error {
 	var id string
-	err := db.QueryRow(ctx, `SELECT id::text FROM core.workspace WHERE id=$1 FOR UPDATE`, string(workspaceID)).Scan(&id)
-	if errors.Is(err, pgx.ErrNoRows) {
+	err := db.WithContext(ctx).Table("core.workspace").Select("id::text").Where("id = ?", string(workspaceID)).Clauses(clause.Locking{Strength: "UPDATE"}).Row().Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
 		return notFound(errors.New("collection workspace not found"))
 	}
 	if err != nil {
@@ -439,19 +118,15 @@ func lockWorkspace(ctx context.Context, db DB, workspaceID foundation.ID) error 
 	return nil
 }
 
-func loadCollection(ctx context.Context, db DB, workspaceID, collectionID foundation.ID, forUpdate bool) (collectionapp.Collection, error) {
-	query := collectionSelect + ` WHERE workspace_id=$1 AND id=$2`
+func loadCollection(ctx context.Context, db *gorm.DB, workspaceID, collectionID foundation.ID, forUpdate bool) (collectionapp.Collection, error) {
+	query := db.WithContext(ctx).Model(&collectionModel{}).Select(collectionColumns).
+		Where("workspace_id = ? AND id = ?", string(workspaceID), string(collectionID))
 	if forUpdate {
-		query += ` FOR UPDATE`
+		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
 	}
-	var row pgx.Row
-	if database, ok := db.(*gormDB); ok {
-		row = database.collectionRow(ctx, query, string(workspaceID), string(collectionID))
-	} else {
-		row = db.QueryRow(ctx, query, string(workspaceID), string(collectionID))
-	}
+	row := query.Row()
 	item, err := scanCollection(row)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, sql.ErrNoRows) {
 		return collectionapp.Collection{}, notFound(errors.New("collection not found"))
 	}
 	if err == nil && (item.WorkspaceID != workspaceID || item.ID != collectionID) {
@@ -463,9 +138,9 @@ func loadCollection(ctx context.Context, db DB, workspaceID, collectionID founda
 func scanCollection(row rowScanner) (collectionapp.Collection, error) {
 	var item collectionapp.Collection
 	var id, workspace, schema, viewType, status string
-	var queryRaw, viewRaw []byte
+	var queryRaw, viewRaw collectionJSONB
 	if err := row.Scan(&id, &workspace, &item.Name, &item.NormalizedName, &item.Description, &schema, &item.QueryVersion, &queryRaw, &item.QueryHash, &viewType, &viewRaw, &status, &item.CachedResultVersion, &item.LastExecutedAt, &item.Version, &item.CreatedAt, &item.UpdatedAt); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, sql.ErrNoRows) {
 			return collectionapp.Collection{}, err
 		}
 		return collectionapp.Collection{}, classify(err)
@@ -513,28 +188,6 @@ func isJSONObject(raw []byte) bool {
 
 type rowScanner interface{ Scan(...any) error }
 
-func writeTx[T any](ctx context.Context, repository *Repository, fn func(DB) (T, error)) (T, error) {
-	var zero T
-	tx, err := repository.beginner.Begin(ctx)
-	if err != nil {
-		return zero, classify(err)
-	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
-	result, err := fn(tx)
-	if err != nil {
-		return zero, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return zero, classify(err)
-	}
-	return result, nil
-}
-
-const collectionColumnsForInsert = `id,workspace_id,name,normalized_name,description,query_schema_version,query_version,query_definition,query_hash,view_type,view_config,status,cached_result_version,last_executed_at,version,created_at,updated_at`
-
-func collectionArgs(c collectionapp.Collection) []any {
-	return []any{string(c.ID), string(c.WorkspaceID), c.Name, c.NormalizedName, c.Description, c.QuerySchemaVersion, c.QueryVersion, queryDefinition(c), c.QueryHash, string(c.ViewType), viewConfig(c), string(c.Status), c.CachedResultVersion, c.LastExecutedAt, c.Version, c.CreatedAt.UTC(), c.UpdatedAt.UTC()}
-}
 func queryDefinition(c collectionapp.Collection) []byte {
 	value, _ := json.Marshal(c.Query)
 	return value

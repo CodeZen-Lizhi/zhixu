@@ -18,9 +18,6 @@ import (
 
 func TestStartWorkerRuntimeFreshQueueStartsBeforeResume(t *testing.T) {
 	baseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
-	if baseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a PostgreSQL admin database")
-	}
 	pool := newMigratedWorkerTestPool(t, baseURL)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -31,12 +28,12 @@ func TestStartWorkerRuntimeFreshQueueStartsBeforeResume(t *testing.T) {
 	if err := riveradapter.AddWorkerSafely(workers, &startupQueueProbeWorker{}); err != nil {
 		t.Fatal(err)
 	}
-	client, err := riveradapter.NewClientWithOptions(pool, workers, options)
+	client, err := riveradapter.NewClientWithOptions(pool.DB(), workers, options)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var queueRows int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM workflow.river_queue WHERE name=$1`, options.Queue).Scan(&queueRows); err != nil {
+	if err := pool.DB().QueryRow(ctx, `SELECT count(*) FROM workflow.river_queue WHERE name=$1`, options.Queue).Scan(&queueRows); err != nil {
 		t.Fatal(err)
 	}
 	if queueRows != 0 {
@@ -47,11 +44,11 @@ func TestStartWorkerRuntimeFreshQueueStartsBeforeResume(t *testing.T) {
 		t.Fatal(err)
 	}
 	readiness := workflowruntime.NewReadiness()
-	if err := startWorkerRuntime(
+	if stopped, err := startWorkerRuntime(
 		ctx, true, 5*time.Second, 5*time.Second,
 		lifecycle, client, readiness, startupQueueIntegrationHealth{},
-	); err != nil {
-		t.Fatal(err)
+	); err != nil || stopped {
+		t.Fatalf("started runtime stopped=%t err=%v", stopped, err)
 	}
 	t.Cleanup(func() {
 		shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
@@ -61,7 +58,7 @@ func TestStartWorkerRuntimeFreshQueueStartsBeforeResume(t *testing.T) {
 		}
 	})
 
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM workflow.river_queue WHERE name=$1 AND paused_at IS NULL`, options.Queue).Scan(&queueRows); err != nil {
+	if err := pool.DB().QueryRow(ctx, `SELECT count(*) FROM workflow.river_queue WHERE name=$1 AND paused_at IS NULL`, options.Queue).Scan(&queueRows); err != nil {
 		t.Fatal(err)
 	}
 	if queueRows != 1 || !readiness.Snapshot().RiverStarted {
@@ -71,9 +68,6 @@ func TestStartWorkerRuntimeFreshQueueStartsBeforeResume(t *testing.T) {
 
 func TestStartWorkerRuntimeNonTerminalRolloutRejectsMissingPausedQueue(t *testing.T) {
 	baseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
-	if baseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a PostgreSQL admin database")
-	}
 	pool := newMigratedWorkerTestPool(t, baseURL)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -84,7 +78,7 @@ func TestStartWorkerRuntimeNonTerminalRolloutRejectsMissingPausedQueue(t *testin
 	if err := riveradapter.AddWorkerSafely(workers, &startupQueueProbeWorker{}); err != nil {
 		t.Fatal(err)
 	}
-	client, err := riveradapter.NewClientWithOptions(pool, workers, options)
+	client, err := riveradapter.NewClientWithOptions(pool.DB(), workers, options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,15 +87,15 @@ func TestStartWorkerRuntimeNonTerminalRolloutRejectsMissingPausedQueue(t *testin
 		t.Fatal(err)
 	}
 	readiness := workflowruntime.NewReadiness()
-	err = startWorkerRuntime(
+	stopped, err := startWorkerRuntime(
 		ctx, false, 5*time.Second, 5*time.Second,
 		lifecycle, client, readiness, startupQueueIntegrationHealth{},
 	)
-	if !errors.Is(err, rivertype.ErrNotFound) {
-		t.Fatalf("startup error=%v", err)
+	if !errors.Is(err, rivertype.ErrNotFound) || !stopped {
+		t.Fatalf("unstarted runtime stopped=%t error=%v", stopped, err)
 	}
 	var queueRows int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM workflow.river_queue WHERE name=$1`, options.Queue).Scan(&queueRows); err != nil {
+	if err := pool.DB().QueryRow(ctx, `SELECT count(*) FROM workflow.river_queue WHERE name=$1`, options.Queue).Scan(&queueRows); err != nil {
 		t.Fatal(err)
 	}
 	if queueRows != 0 || readiness.Snapshot().RiverStarted || client.Started() {

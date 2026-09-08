@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	"github.com/CodeZen-Lizhi/zhixu/internal/retrieval/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -402,7 +403,7 @@ func seedSnapshotWorkspace(t *testing.T, ctx context.Context, database *pgxpool.
 	root := fmt.Sprintf("/tmp/reindex-snapshot-%d", ordinal)
 	if _, err := database.Exec(ctx, `INSERT INTO core.workspace(
 		id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at
-	) VALUES($1,$2,$3,$3,$4,'active',1,$4,$4)`, string(workspaceID), fmt.Sprintf("snapshot-%d", ordinal), root, now); err != nil {
+	) VALUES($1,$2,$3,$3,$4,'inactive',1,$4,$4)`, string(workspaceID), fmt.Sprintf("snapshot-%d", ordinal), root, now); err != nil {
 		t.Fatal(err)
 	}
 	return workspaceID
@@ -598,7 +599,7 @@ func seedSnapshotChunkWithStrategy(
 func mustCreateAndActivateSnapshot(
 	t *testing.T,
 	ctx context.Context,
-	repository *Repository,
+	repository application.Store,
 	command domain.WorkspaceSnapshotCommand,
 	activationOrdinal int,
 	at time.Time,

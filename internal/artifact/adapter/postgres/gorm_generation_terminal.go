@@ -24,7 +24,7 @@ type GORMSectionGenerationTerminalHook struct {
 	profile  agentdomain.ModelProfileRef
 }
 
-// NewGORMSectionGenerationTerminalHook constructs the staged scoped hook from
+// NewGORMSectionGenerationTerminalHook constructs the scoped hook from
 // the same platform pool used by Workflow and Agent composition.
 func NewGORMSectionGenerationTerminalHook(
 	pool *platformpostgres.Pool,

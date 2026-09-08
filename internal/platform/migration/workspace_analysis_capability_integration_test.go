@@ -12,7 +12,7 @@ import (
 	agentpostgres "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/postgres"
 	agentapplication "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	"github.com/jackc/pgx/v5/pgxpool"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 )
 
 func TestWorkspaceAnalysisWorkerCapabilityPersistenceContract(t *testing.T) {
@@ -24,7 +24,10 @@ func TestWorkspaceAnalysisWorkerCapabilityPersistenceContract(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	repository, err := agentpostgres.NewRepository(pool)
+	runtime := openMigrationRuntimePool(t, ctx, pool)
+	defer runtime.Close()
+	pool = runtime.DB()
+	repository, err := agentpostgres.NewGORMRepository(runtime)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,13 +50,13 @@ func TestWorkspaceAnalysisWorkerCapabilityPersistenceContract(t *testing.T) {
 		heartbeated.LeaseUntil.Sub(heartbeated.HeartbeatAt) != first.LeaseDuration {
 		t.Fatalf("heartbeat=%#v err=%v", heartbeated, err)
 	}
-	if err := workspaceAnalysisCapabilityRequireReady(ctx, pool, repository, contract); err != nil {
+	if err := workspaceAnalysisCapabilityRequireReady(ctx, runtime, repository, contract); err != nil {
 		t.Fatalf("exact ready check: %v", err)
 	}
 
 	drifted := contract
 	drifted.ToolCatalogHash = strings.Repeat("c", 64)
-	if err := workspaceAnalysisCapabilityRequireReady(ctx, pool, repository, drifted); !workspaceAnalysisCapabilityUnavailableError(err) {
+	if err := workspaceAnalysisCapabilityRequireReady(ctx, runtime, repository, drifted); !workspaceAnalysisCapabilityUnavailableError(err) {
 		t.Fatalf("catalog drift ready error=%#v", err)
 	}
 	drifted = contract
@@ -63,7 +66,7 @@ func TestWorkspaceAnalysisWorkerCapabilityPersistenceContract(t *testing.T) {
 	}
 	drifted = contract
 	drifted.ConfigRevision++
-	if err := workspaceAnalysisCapabilityRequireReady(ctx, pool, repository, drifted); !workspaceAnalysisCapabilityUnavailableError(err) {
+	if err := workspaceAnalysisCapabilityRequireReady(ctx, runtime, repository, drifted); !workspaceAnalysisCapabilityUnavailableError(err) {
 		t.Fatalf("config drift ready error=%#v", err)
 	}
 
@@ -73,13 +76,13 @@ func TestWorkspaceAnalysisWorkerCapabilityPersistenceContract(t *testing.T) {
 	if _, err := repository.ReleaseWorkspaceAnalysisWorker(ctx, first); err != nil {
 		t.Fatalf("release first worker: %v", err)
 	}
-	if err := workspaceAnalysisCapabilityRequireReady(ctx, pool, repository, contract); err != nil {
+	if err := workspaceAnalysisCapabilityRequireReady(ctx, runtime, repository, contract); err != nil {
 		t.Fatalf("second fresh worker did not keep readiness: %v", err)
 	}
 	if _, err := repository.ReleaseWorkspaceAnalysisWorker(ctx, second); err != nil {
 		t.Fatalf("release second worker: %v", err)
 	}
-	if err := workspaceAnalysisCapabilityRequireReady(ctx, pool, repository, contract); !workspaceAnalysisCapabilityUnavailableError(err) {
+	if err := workspaceAnalysisCapabilityRequireReady(ctx, runtime, repository, contract); !workspaceAnalysisCapabilityUnavailableError(err) {
 		t.Fatalf("all released ready error=%#v", err)
 	}
 
@@ -120,7 +123,7 @@ FROM clock`)
 			t.Fatalf("expired worker heartbeat error=%#v", err)
 		}
 	}
-	if err := workspaceAnalysisCapabilityRequireReady(ctx, pool, repository, contract); !workspaceAnalysisCapabilityUnavailableError(err) {
+	if err := workspaceAnalysisCapabilityRequireReady(ctx, runtime, repository, contract); !workspaceAnalysisCapabilityUnavailableError(err) {
 		t.Fatalf("expired capability ready error=%#v", err)
 	}
 	_, err = pool.Exec(ctx, `TRUNCATE agent.workspace_analysis_worker_capability`)
@@ -129,19 +132,17 @@ FROM clock`)
 
 func workspaceAnalysisCapabilityRequireReady(
 	ctx context.Context,
-	pool *pgxpool.Pool,
-	repository *agentpostgres.Repository,
+	pool *platformpostgres.Pool,
+	repository agentapplication.ScopedWorkspaceAnalysisReadiness,
 	contract agentapplication.WorkspaceAnalysisCapabilityContract,
 ) error {
-	tx, err := pool.Begin(ctx)
+	unitOfWork, err := pool.UnitOfWork()
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if err := repository.RequireWorkspaceAnalysisWorkerReadyTx(ctx, tx, contract); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
+	return unitOfWork.Within(ctx, foundation.TransactionOptions{}, func(callbackCtx context.Context, scope foundation.TransactionScope) error {
+		return repository.RequireWorkspaceAnalysisWorkerReadyScoped(callbackCtx, scope, contract)
+	})
 }
 
 func workspaceAnalysisCapabilityIntegrationContract(definition, catalog byte, revision int64) agentapplication.WorkspaceAnalysisCapabilityContract {

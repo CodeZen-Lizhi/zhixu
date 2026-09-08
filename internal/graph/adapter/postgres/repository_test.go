@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
-	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
@@ -13,13 +12,16 @@ import (
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	graphdomain "github.com/CodeZen-Lizhi/zhixu/internal/graph/domain"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/lib/pq"
+	gormpostgres "gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
 
-func TestNewRepositoryFailsClosedWithoutDatabase(t *testing.T) {
-	repository, err := NewRepository(nil)
+func TestNewGORMRepositoryFailsClosedWithoutDatabase(t *testing.T) {
+	repository, err := NewGORMRepository(nil)
 	if repository != nil {
 		t.Fatal("nil database unexpectedly created repository")
 	}
@@ -29,8 +31,8 @@ func TestNewRepositoryFailsClosedWithoutDatabase(t *testing.T) {
 	}
 }
 
-func TestNewRepositoryRejectsDatabaseWithoutOwnedTransactions(t *testing.T) {
-	repository, err := NewRepository(nonTransactionalDB{})
+func TestNewGORMRepositoryRejectsIncompletePool(t *testing.T) {
+	repository, err := NewGORMRepository(&platformpostgres.Pool{})
 	var classified *foundation.Error
 	if repository != nil || !errors.As(err, &classified) || classified.Code != graphdomain.ErrorCodeDependencyUnavailable {
 		t.Fatalf("repository=%#v err=%v", repository, err)
@@ -77,88 +79,68 @@ func TestRelationEvidenceHrefCarriesWorkspaceScope(t *testing.T) {
 	}
 }
 
-func TestRenderGORMPositional(t *testing.T) {
+func TestGORMNamedArgumentsPreserveRepeatedBindings(t *testing.T) {
 	tests := []struct {
 		name      string
 		query     string
 		arguments []any
 		wantQuery string
 		wantArgs  []any
-		wantError bool
 	}{
-		{name: "repeated and out of order", query: `SELECT $2,$1,$2`, arguments: []any{"first", "second"}, wantQuery: `SELECT ?,?,?`, wantArgs: []any{"second", "first", "second"}},
-		{name: "multi digit", query: `SELECT $10,$1,$2,$3,$4,$5,$6,$7,$8,$9`, arguments: []any{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, wantQuery: `SELECT ?,?,?,?,?,?,?,?,?,?`, wantArgs: []any{10, 1, 2, 3, 4, 5, 6, 7, 8, 9}},
-		{name: "single quotes", query: `SELECT '$2',E'it\'s $3',$1`, arguments: []any{"value"}, wantQuery: `SELECT '$2',E'it\'s $3',?`, wantArgs: []any{"value"}},
-		{name: "double quotes", query: `SELECT "$2","a""$3",$1`, arguments: []any{"value"}, wantQuery: `SELECT "$2","a""$3",?`, wantArgs: []any{"value"}},
-		{name: "line comment", query: "SELECT $1 -- $2\n", arguments: []any{"value"}, wantQuery: "SELECT ? -- $2\n", wantArgs: []any{"value"}},
-		{name: "nested block comment", query: `SELECT /* $2 /* $3 */ still */ $1`, arguments: []any{"value"}, wantQuery: `SELECT /* $2 /* $3 */ still */ ?`, wantArgs: []any{"value"}},
-		{name: "dollar quotes", query: `SELECT $$ $2 $$,$tag$ $3 $tag$,$1`, arguments: []any{"value"}, wantQuery: `SELECT $$ $2 $$,$tag$ $3 $tag$,?`, wantArgs: []any{"value"}},
-		{name: "zero marker", query: `SELECT $0`, arguments: []any{"value"}, wantError: true},
-		{name: "out of range", query: `SELECT $2`, arguments: []any{"value"}, wantError: true},
-		{name: "named marker", query: `SELECT $name`, wantError: true},
-		{name: "dangling marker", query: `SELECT $`, wantError: true},
-		{name: "raw GORM marker", query: `SELECT '?',$1`, arguments: []any{"value"}, wantError: true},
-		{name: "marker identifier suffix", query: `SELECT $1suffix`, arguments: []any{"value"}, wantError: true},
-		{name: "unused argument", query: `SELECT $1`, arguments: []any{"value", "unused"}, wantError: true},
-		{name: "unterminated single quote", query: `SELECT '$1`, wantError: true},
-		{name: "unterminated double quote", query: `SELECT "$1`, wantError: true},
-		{name: "unterminated block comment", query: `SELECT /* $1`, wantError: true},
-		{name: "unterminated dollar quote", query: `SELECT $tag$ $1`, wantError: true},
+		{name: "repeated and out of order", query: `SELECT (@second),(@first),(@second)`, arguments: []any{sql.Named("first", "first"), sql.Named("second", "second")}, wantQuery: `SELECT ($1),($2),($3)`, wantArgs: []any{"second", "first", "second"}},
+		{name: "cast boundary", query: `SELECT (@value)::uuid,(@value)::text`, arguments: []any{sql.Named("value", "10000000-0000-4000-8000-000000000001")}, wantQuery: `SELECT ($1)::uuid,($2)::text`, wantArgs: []any{"10000000-0000-4000-8000-000000000001", "10000000-0000-4000-8000-000000000001"}},
+		{name: "SQL literals and comments", query: "SELECT '$2',\"$3\",$$ $4 $$,(@value) /* $5 */ -- $6\n", arguments: []any{sql.Named("value", "value")}, wantQuery: "SELECT '$2',\"$3\",$$ $4 $$,($1) /* $5 */ -- $6\n", wantArgs: []any{"value"}},
 	}
-
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			query, arguments, err := renderGORMPositional(test.query, test.arguments)
-			if test.wantError {
-				if err == nil {
-					t.Fatalf("renderGORMPositional() query=%q args=%#v, want error", query, arguments)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("renderGORMPositional() error = %v", err)
-			}
-			if query != test.wantQuery || !reflect.DeepEqual(arguments, test.wantArgs) {
-				t.Fatalf("renderGORMPositional() = (%q, %#v), want (%q, %#v)", query, arguments, test.wantQuery, test.wantArgs)
+			statement := graphNamedStatement(test.query, test.arguments...)
+			if statement.SQL.String() != test.wantQuery || !reflect.DeepEqual(statement.Vars, test.wantArgs) {
+				t.Fatalf("named statement = (%q, %#v), want (%q, %#v)", statement.SQL.String(), statement.Vars, test.wantQuery, test.wantArgs)
 			}
 		})
 	}
 }
 
-func TestRenderGORMPositionalUsesSingleValueCarriers(t *testing.T) {
-	query, arguments, err := renderGORMPositional(`SELECT $1::text[],$2::uuid[],$3::int[],$4::jsonb`, []any{
-		[]string{"alpha", "beta"},
-		[]foundation.ID{"10000000-0000-4000-8000-000000000001"},
-		[]int{1, 2},
-		json.RawMessage(`{"key":"value"}`),
-	})
-	if err != nil {
-		t.Fatalf("renderGORMPositional() error = %v", err)
+func TestGORMNamedArgumentsUseSingleValueCarriers(t *testing.T) {
+	statement := graphNamedStatement(`SELECT (@strings)::text[],(@ids)::uuid[],(@numbers)::int[],(@document)::jsonb`,
+		sql.Named("strings", pq.Array([]string{"alpha", "beta"})),
+		sql.Named("ids", pq.Array([]string{"10000000-0000-4000-8000-000000000001"})),
+		sql.Named("numbers", pq.Array([]int{1, 2})),
+		sql.Named("document", graphJSONB(`{"key":"value"}`)),
+	)
+	if statement.SQL.String() != `SELECT ($1)::text[],($2)::uuid[],($3)::int[],($4)::jsonb` || len(statement.Vars) != 4 {
+		t.Fatalf("named statement = (%q, %#v)", statement.SQL.String(), statement.Vars)
 	}
-	if query != `SELECT ?::text[],?::uuid[],?::int[],?::jsonb` || len(arguments) != 4 {
-		t.Fatalf("renderGORMPositional() = (%q, %#v)", query, arguments)
-	}
-	for index, argument := range arguments {
+	for index, argument := range statement.Vars {
 		valuer, ok := argument.(driver.Valuer)
 		if !ok {
 			t.Fatalf("argument %d type = %T, want driver.Valuer", index, argument)
 		}
-		value, valueErr := valuer.Value()
-		if valueErr != nil {
-			t.Fatalf("argument %d Value() error = %v", index, valueErr)
+		value, err := valuer.Value()
+		if err != nil {
+			t.Fatalf("argument %d Value() error = %v", index, err)
 		}
 		if _, ok := value.(string); !ok {
 			t.Fatalf("argument %d Value() type = %T, want string", index, value)
 		}
 	}
-	if _, _, err := renderGORMPositional(`SELECT $1`, []any{[]byte(`{"key":"value"}`)}); err == nil {
-		t.Fatal("raw byte slice unexpectedly accepted")
+	if _, err := graphJSONB(`{"invalid"`).Value(); err == nil {
+		t.Fatal("invalid JSON carrier unexpectedly accepted")
 	}
-	var absentJSON *graphJSONB
-	_, nullableArguments, err := renderGORMPositional(`SELECT $1::jsonb`, []any{absentJSON})
-	if err != nil || len(nullableArguments) != 1 || nullableArguments[0] != nil {
-		t.Fatalf("typed nil carrier = (%#v, %v), want one nil binding", nullableArguments, err)
+	empty := graphNamedStatement(`SELECT (@values)::uuid[]`, sql.Named("values", pq.Array([]string{})))
+	if len(empty.Vars) != 1 {
+		t.Fatalf("empty array expanded into %d arguments", len(empty.Vars))
 	}
+	value, err := empty.Vars[0].(driver.Valuer).Value()
+	if err != nil || value != "{}" {
+		t.Fatalf("empty array carrier = (%#v, %v)", value, err)
+	}
+}
+
+func graphNamedStatement(query string, arguments ...any) *gorm.Statement {
+	database := &gorm.DB{Config: &gorm.Config{Dialector: gormpostgres.New(gormpostgres.Config{})}}
+	database.Statement = &gorm.Statement{DB: database}
+	return database.Raw(query, arguments...).Statement
 }
 
 func TestClassifyGORMPreservesCancellationCause(t *testing.T) {
@@ -185,15 +167,3 @@ func TestGORMGraphNoRowsRecognizesDatabaseBoundaries(t *testing.T) {
 		t.Fatal("gormGraphNoRows() accepted an unrelated error")
 	}
 }
-
-type nonTransactionalDB struct{}
-
-func (nonTransactionalDB) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
-	return pgconn.CommandTag{}, nil
-}
-
-func (nonTransactionalDB) Query(context.Context, string, ...any) (pgx.Rows, error) {
-	return nil, nil
-}
-
-func (nonTransactionalDB) QueryRow(context.Context, string, ...any) pgx.Row { return nil }

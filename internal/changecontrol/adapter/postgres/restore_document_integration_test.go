@@ -14,8 +14,9 @@ import (
 )
 
 func TestRepositoryCreatesReplaysAndReadsTypedRestoreDocumentProposal(t *testing.T) {
-	pool, ctx := newChangeControlMigrationTestPool(t)
-	repository, err := NewRepository(pool)
+	platform, ctx := newChangeControlMigrationTestPool(t)
+	pool := platform.DB()
+	repository, err := NewGORMRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}

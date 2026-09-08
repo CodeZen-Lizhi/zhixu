@@ -12,14 +12,16 @@ import (
 
 	agentapplication "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	"github.com/jackc/pgx/v5"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 func TestDraftStreamRepositoryFencesLeaseAndKeepsOrderedChunks(t *testing.T) {
-	conversationRepository, pool, ctx := newConversationTestRepository(t)
-	repository, err := NewDraftStreamRepository(pool)
+	conversationRepository, shared, pool, ctx := newConversationTestRepository(t)
+	repository, err := NewGORMDraftStreamRepository(shared)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,24 +82,21 @@ func TestDraftStreamRepositoryFencesLeaseAndKeepsOrderedChunks(t *testing.T) {
 		SET expires_at=clock_timestamp()+interval '1 minute' WHERE id=$1`, string(session.ID)); err != nil {
 		t.Fatal(err)
 	}
-	claimTx, err := pool.Begin(ctx)
+	err = withinConversationTransaction(ctx, repository.uow, foundation.TransactionOptions{}, func(ctx context.Context, claimTx *gorm.DB, _ foundation.TransactionScope) error {
+		if _, err := gormLockDraftRuntimeClaim(ctx, claimTx, binding); err != nil {
+			return err
+		}
+		reclaimCtx, cancelReclaim := context.WithTimeout(ctx, 75*time.Millisecond)
+		_, reclaimErr := pool.Exec(reclaimCtx, `UPDATE workflow.node_run
+			SET status='retry_wait',lease_owner=NULL,lease_until=NULL,version=version+1,updated_at=clock_timestamp()
+			WHERE id=$1`, string(binding.NodeRunID))
+		cancelReclaim()
+		if !errors.Is(reclaimCtx.Err(), context.DeadlineExceeded) || reclaimErr == nil {
+			t.Fatalf("runtime claim lock did not fence reclaim: ctx=%v err=%v", reclaimCtx.Err(), reclaimErr)
+		}
+		return nil
+	})
 	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := lockDraftRuntimeClaim(ctx, claimTx, binding); err != nil {
-		_ = claimTx.Rollback(ctx)
-		t.Fatal(err)
-	}
-	reclaimCtx, cancelReclaim := context.WithTimeout(ctx, 75*time.Millisecond)
-	_, reclaimErr := pool.Exec(reclaimCtx, `UPDATE workflow.node_run
-		SET status='retry_wait',lease_owner=NULL,lease_until=NULL,version=version+1,updated_at=clock_timestamp()
-		WHERE id=$1`, string(binding.NodeRunID))
-	cancelReclaim()
-	if !errors.Is(reclaimCtx.Err(), context.DeadlineExceeded) || reclaimErr == nil {
-		_ = claimTx.Rollback(ctx)
-		t.Fatalf("runtime claim lock did not fence reclaim: ctx=%v err=%v", reclaimCtx.Err(), reclaimErr)
-	}
-	if err := claimTx.Rollback(ctx); err != nil {
 		t.Fatal(err)
 	}
 
@@ -111,28 +110,25 @@ func TestDraftStreamRepositoryFencesLeaseAndKeepsOrderedChunks(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE workflow.node_attempt SET lease_until=$2,heartbeat_at=clock_timestamp() WHERE id=$1`, string(binding.NodeAttemptID), shortLease); err != nil {
 		t.Fatal(err)
 	}
-	claimTx, err = pool.Begin(ctx)
+	err = withinConversationTransaction(ctx, repository.uow, foundation.TransactionOptions{}, func(ctx context.Context, claimTx *gorm.DB, _ foundation.TransactionScope) error {
+		leaseUntil, err := gormLockDraftRuntimeClaim(ctx, claimTx, binding)
+		if err != nil {
+			return err
+		}
+		if err := claimTx.WithContext(ctx).Exec(`SELECT pg_sleep(0.15)`).Error; err != nil {
+			return err
+		}
+		_, expiredLeaseErr := gormValidateDraftClaimLease(ctx, claimTx, leaseUntil)
+		var expiredLease *foundation.Error
+		if !errors.As(expiredLeaseErr, &expiredLease) || expiredLease.Code != ErrorCodeDraftStreamConflict {
+			t.Fatalf("expired long-transaction claim error = %v", expiredLeaseErr)
+		}
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	leaseUntil, err := lockDraftRuntimeClaim(ctx, claimTx, binding)
-	if err != nil {
-		_ = claimTx.Rollback(ctx)
-		t.Fatal(err)
-	}
-	if _, err := claimTx.Exec(ctx, `SELECT pg_sleep(0.15)`); err != nil {
-		_ = claimTx.Rollback(ctx)
-		t.Fatal(err)
-	}
-	_, expiredLeaseErr := validateDraftClaimLease(ctx, claimTx, leaseUntil)
-	var expiredLease *foundation.Error
-	if !errors.As(expiredLeaseErr, &expiredLease) || expiredLease.Code != ErrorCodeDraftStreamConflict {
-		_ = claimTx.Rollback(ctx)
-		t.Fatalf("expired long-transaction claim error = %v", expiredLeaseErr)
-	}
-	if err := claimTx.Rollback(ctx); err != nil {
-		t.Fatal(err)
-	}
+
 	if _, err := pool.Exec(ctx, `UPDATE workflow.node_run SET lease_until=clock_timestamp()+interval '5 minutes',updated_at=clock_timestamp() WHERE id=$1`, string(binding.NodeRunID)); err != nil {
 		t.Fatal(err)
 	}
@@ -219,10 +215,11 @@ func TestDraftStreamRepositoryFencesLeaseAndKeepsOrderedChunks(t *testing.T) {
 	release := make(chan struct{})
 	var releaseOnce sync.Once
 	defer releaseOnce.Do(func() { close(release) })
-	lockedReader, err := NewDraftStreamRepository(&draftReadLockDB{DB: pool, selected: selected, release: release})
+	lockedReader, err := NewGORMDraftStreamRepository(shared)
 	if err != nil {
 		t.Fatal(err)
 	}
+	lockedReader.uow = &draftReadLockDB{UnitOfWork: lockedReader.uow, Interface: logger.Discard, selected: selected, release: release}
 	readDone := make(chan error, 1)
 	go func() {
 		page, readErr := lockedReader.ReadDraftStream(ctx, agentapplication.DraftStreamReadQuery{WorkspaceID: workspaceID, AnswerID: binding.AnswerID, Limit: 10})
@@ -309,44 +306,37 @@ func assertForeignKeyViolation(t *testing.T, err error, scenario string) {
 }
 
 type draftReadLockDB struct {
-	DB
-	selected chan struct{}
-	release  <-chan struct{}
+	foundation.UnitOfWork
+	logger.Interface
+	selected     chan struct{}
+	release      <-chan struct{}
+	selectedOnce sync.Once
 }
 
-func (db *draftReadLockDB) Begin(ctx context.Context) (pgx.Tx, error) {
-	tx, err := db.DB.Begin(ctx)
-	if err != nil {
-		return nil, err
+func (db *draftReadLockDB) Within(ctx context.Context, options foundation.TransactionOptions, work foundation.TransactionFunc) error {
+	return db.UnitOfWork.Within(ctx, options, func(ctx context.Context, scope foundation.TransactionScope) error {
+		tx, err := platformpostgres.GORMTransaction(scope)
+		if err != nil {
+			return err
+		}
+		original := tx.Config
+		config := *original
+		config.Logger = db
+		tx.Config = &config
+		defer func() { tx.Config = original }()
+		return work(ctx, scope)
+	})
+}
+
+func (db *draftReadLockDB) Trace(ctx context.Context, _ time.Time, query func() (string, int64), err error) {
+	sql, _ := query()
+	if err != nil || !strings.Contains(sql, "FROM workflow.node_attempt AS attempt") {
+		return
 	}
-	return &draftReadLockTx{Tx: tx, selected: db.selected, release: db.release}, nil
-}
-
-type draftReadLockTx struct {
-	pgx.Tx
-	selected chan struct{}
-	release  <-chan struct{}
-}
-
-func (tx *draftReadLockTx) QueryRow(ctx context.Context, query string, args ...any) pgx.Row {
-	row := tx.Tx.QueryRow(ctx, query, args...)
-	if !strings.Contains(query, "ORDER BY session.generation DESC LIMIT 1 FOR SHARE") {
-		return row
+	// The lease query follows the session Scan, so its FOR SHARE lock is already held.
+	db.selectedOnce.Do(func() { close(db.selected) })
+	select {
+	case <-db.release:
+	case <-ctx.Done():
 	}
-	return &draftReadLockRow{Row: row, selected: tx.selected, release: tx.release}
-}
-
-type draftReadLockRow struct {
-	pgx.Row
-	selected chan struct{}
-	release  <-chan struct{}
-}
-
-func (row *draftReadLockRow) Scan(dest ...any) error {
-	if err := row.Row.Scan(dest...); err != nil {
-		return err
-	}
-	close(row.selected)
-	<-row.release
-	return nil
 }

@@ -69,19 +69,19 @@ func TestWorkspaceAnalysisCapabilityCheckedRunStarterChecksReadyInCallerTransact
 	transaction := &workspaceAnalysisRunTransaction{}
 	readiness := &workspaceAnalysisCapabilityRepositoryFake{}
 	delegate := &workspaceAnalysisCapabilityRunStarterFake{run: domain.WorkspaceAnalysisRun{ID: workspaceAnalysisRunApplicationID(30)}}
-	starter, err := NewWorkspaceAnalysisCapabilityCheckedRunStarter(readiness, delegate, workspaceAnalysisCapabilityTestAdvertisement().Contract)
+	starter, err := NewScopedWorkspaceAnalysisCapabilityCheckedRunStarter(readiness, delegate, workspaceAnalysisCapabilityTestAdvertisement().Contract)
 	if err != nil {
 		t.Fatal(err)
 	}
 	command := workspaceAnalysisRunStartTestCommand(false)
-	run, err := starter.StartWorkspaceAnalysisRunTx(context.Background(), transaction, command)
+	run, err := starter.StartWorkspaceAnalysisRunScoped(context.Background(), transaction, command)
 	if err != nil || run.ID != delegate.run.ID || readiness.readyCalls != 1 || readiness.transaction != transaction ||
 		delegate.calls != 1 || delegate.transaction != transaction {
 		t.Fatalf("run=%#v err=%v readiness=%#v delegate=%#v", run, err, readiness, delegate)
 	}
 
 	readiness.readyErr = workspaceAnalysisCapabilityUnavailable(errors.New("not ready"))
-	_, err = starter.StartWorkspaceAnalysisRunTx(context.Background(), transaction, command)
+	_, err = starter.StartWorkspaceAnalysisRunScoped(context.Background(), transaction, command)
 	if !workspaceAnalysisCapabilityHasError(err, foundation.ErrorDependencyUnavailable, ErrorCodeWorkspaceAnalysisCapabilityUnavailable) || delegate.calls != 1 {
 		t.Fatalf("unavailable err=%#v delegate=%#v", err, delegate)
 	}
@@ -109,7 +109,7 @@ type workspaceAnalysisCapabilityRepositoryFake struct {
 	releaseCalls   int
 	readyCalls     int
 	last           WorkspaceAnalysisWorkerAdvertisement
-	transaction    any
+	transaction    foundation.TransactionScope
 	readyErr       error
 }
 
@@ -131,7 +131,7 @@ func (repository *workspaceAnalysisCapabilityRepositoryFake) ReleaseWorkspaceAna
 	return WorkspaceAnalysisWorkerCapability{WorkspaceAnalysisWorkerAdvertisement: advertisement, Version: 3}, nil
 }
 
-func (repository *workspaceAnalysisCapabilityRepositoryFake) RequireWorkspaceAnalysisWorkerReadyTx(_ context.Context, transaction any, _ WorkspaceAnalysisCapabilityContract) error {
+func (repository *workspaceAnalysisCapabilityRepositoryFake) RequireWorkspaceAnalysisWorkerReadyScoped(_ context.Context, transaction foundation.TransactionScope, _ WorkspaceAnalysisCapabilityContract) error {
 	repository.readyCalls++
 	repository.transaction = transaction
 	return repository.readyErr
@@ -140,10 +140,10 @@ func (repository *workspaceAnalysisCapabilityRepositoryFake) RequireWorkspaceAna
 type workspaceAnalysisCapabilityRunStarterFake struct {
 	run         domain.WorkspaceAnalysisRun
 	calls       int
-	transaction any
+	transaction foundation.TransactionScope
 }
 
-func (starter *workspaceAnalysisCapabilityRunStarterFake) StartWorkspaceAnalysisRunTx(_ context.Context, transaction any, _ WorkspaceAnalysisRunStartCommand) (domain.WorkspaceAnalysisRun, error) {
+func (starter *workspaceAnalysisCapabilityRunStarterFake) StartWorkspaceAnalysisRunScoped(_ context.Context, transaction foundation.TransactionScope, _ WorkspaceAnalysisRunStartCommand) (domain.WorkspaceAnalysisRun, error) {
 	starter.calls++
 	starter.transaction = transaction
 	return starter.run, nil

@@ -1,7 +1,6 @@
 package postgres
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,10 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	"github.com/CodeZen-Lizhi/zhixu/internal/retrieval/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
-	"github.com/jackc/pgx/v5"
-	"github.com/pgvector/pgvector-go"
 )
 
 const (
@@ -21,148 +17,6 @@ const (
 	searchRerankCharacterLimit  = domain.MaxRerankTextBytes
 	searchTrigramThreshold      = "0.3"
 )
-
-// SearchDB 是检索查询所需的最小只读 PostgreSQL 边界。
-type SearchDB interface {
-	QueryRow(context.Context, string, ...any) pgx.Row
-	Query(context.Context, string, ...any) (pgx.Rows, error)
-	Begin(context.Context) (pgx.Tx, error)
-}
-
-// SearchRepository 只读取 Workspace 当前 Active Index 的检索投影。
-type SearchRepository struct {
-	db SearchDB
-}
-
-var _ application.SearchStore = (*SearchRepository)(nil)
-
-// NewSearchRepository 创建独立于索引构建 Repository 的只读检索 Store。
-func NewSearchRepository(db SearchDB) (*SearchRepository, error) {
-	if db == nil {
-		return nil, dependency("RETRIEVAL_SEARCH_DATABASE_UNAVAILABLE", errors.New("search database is nil"))
-	}
-	return &SearchRepository{db: db}, nil
-}
-
-// LoadActiveSearchIndex 读取指定 Workspace 当前唯一 Active Index 及其持久检索配置。
-func (r *SearchRepository) LoadActiveSearchIndex(ctx context.Context, workspaceID foundation.ID) (application.SearchIndex, error) {
-	canonicalWorkspaceID, err := foundation.ParseID(string(workspaceID))
-	if err != nil || canonicalWorkspaceID != workspaceID {
-		return application.SearchIndex{}, searchInvalid("RETRIEVAL_SEARCH_WORKSPACE_INVALID", errors.New("workspace id is invalid"))
-	}
-	index, err := scanIndex(r.db.QueryRow(ctx, `SELECT `+indexColumns+`
-		FROM retrieval.index_version WHERE workspace_id=$1 AND status='active'`, string(workspaceID)))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return application.SearchIndex{}, notFound("RETRIEVAL_ACTIVE_SEARCH_INDEX_NOT_FOUND", err)
-	}
-	if err != nil {
-		return application.SearchIndex{}, classify(err, "RETRIEVAL_ACTIVE_SEARCH_INDEX_QUERY_FAILED")
-	}
-	result := application.SearchIndex{Index: index}
-	if index.EmbeddingVersionID == nil {
-		return result, nil
-	}
-	embedding, err := scanEmbedding(r.db.QueryRow(ctx, `SELECT `+embeddingColumns+`
-		FROM retrieval.embedding_version WHERE id=$1`, string(*index.EmbeddingVersionID)))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return application.SearchIndex{}, consistency("RETRIEVAL_ACTIVE_SEARCH_EMBEDDING_MISSING", err)
-	}
-	if err != nil {
-		return application.SearchIndex{}, classify(err, "RETRIEVAL_ACTIVE_SEARCH_EMBEDDING_QUERY_FAILED")
-	}
-	fusion, err := domain.DecodeRRFConfig(index.FusionConfig)
-	if err != nil {
-		return application.SearchIndex{}, consistency("RETRIEVAL_ACTIVE_SEARCH_FUSION_INVALID", err)
-	}
-	result.EmbeddingVersion = &embedding
-	result.Fusion = &fusion
-	return result, nil
-}
-
-// SearchLexical 使用同一过滤集合执行 websearch FTS 与 trigram 候选查询。
-func (r *SearchRepository) SearchLexical(ctx context.Context, query application.LexicalSearchQuery) ([]domain.SearchCandidate, error) {
-	canonicalFilter, err := validateSearchQuery(query.WorkspaceID, query.IndexVersionID, query.Query, query.Filter, query.Limit)
-	if err != nil {
-		return nil, err
-	}
-	arguments := []any{
-		string(query.WorkspaceID), string(query.IndexVersionID), strings.TrimSpace(query.Query), query.Limit,
-		domain.MaxEvidenceProvenance,
-	}
-	filterSQL := appendSearchFilter(&arguments, canonicalFilter)
-	tx, err := r.db.Begin(ctx)
-	if err != nil {
-		return nil, classify(err, "RETRIEVAL_LEXICAL_SEARCH_TRANSACTION_FAILED")
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := tx.Exec(ctx, `SELECT set_config('pg_trgm.similarity_threshold',$1,true)`, searchTrigramThreshold); err != nil {
-		return nil, classify(err, "RETRIEVAL_LEXICAL_SEARCH_CONFIG_FAILED")
-	}
-	rows, err := tx.Query(ctx, fmt.Sprintf(
-		lexicalCandidateSQL, filterSQL, searchSnippetCharacterLimit, searchRerankCharacterLimit,
-	), arguments...)
-	if err != nil {
-		return nil, classify(err, "RETRIEVAL_LEXICAL_SEARCH_QUERY_FAILED")
-	}
-	candidates, err := scanLexicalCandidates(rows)
-	rows.Close()
-	if err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, classify(err, "RETRIEVAL_LEXICAL_SEARCH_COMMIT_FAILED")
-	}
-	return candidates, nil
-}
-
-// SearchVector 使用 Embedding Version 持久 distance metric 对应的固定 operator 执行 exact scan。
-func (r *SearchRepository) SearchVector(ctx context.Context, query application.VectorSearchQuery) ([]domain.SearchCandidate, error) {
-	canonicalFilter, err := validateSearchQuery(query.WorkspaceID, query.IndexVersionID, "vector", query.Filter, query.Limit)
-	if err != nil {
-		return nil, err
-	}
-	if err := domain.ValidateEmbeddingVector(query.EmbeddingVersion, query.QueryEmbedding); err != nil {
-		return nil, err
-	}
-	persistedEmbedding, err := scanEmbedding(r.db.QueryRow(ctx, `SELECT `+embeddingColumns+`
-		FROM retrieval.embedding_version WHERE id=$1`, string(query.EmbeddingVersion.ID)))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, consistency("RETRIEVAL_VECTOR_EMBEDDING_MISSING", err)
-	}
-	if err != nil {
-		return nil, classify(err, "RETRIEVAL_VECTOR_EMBEDDING_QUERY_FAILED")
-	}
-	if persistedEmbedding.ID != query.EmbeddingVersion.ID || !domain.SameEmbeddingBinding(persistedEmbedding, query.EmbeddingVersion) {
-		return nil, consistency("RETRIEVAL_VECTOR_EMBEDDING_BINDING_INVALID", errors.New("query embedding version differs from persisted binding"))
-	}
-	distanceExpression, ok := vectorDistanceExpression(persistedEmbedding.DistanceMetric, persistedEmbedding.Dimensions)
-	if !ok {
-		return nil, searchInvalid("RETRIEVAL_VECTOR_DISTANCE_INVALID", errors.New("unsupported vector distance metric"))
-	}
-	arguments := []any{
-		string(query.WorkspaceID), string(query.IndexVersionID), string(query.EmbeddingVersion.ID),
-		pgvector.NewVector(query.QueryEmbedding), query.Limit, domain.MaxEvidenceProvenance,
-	}
-	filterSQL := appendSearchFilter(&arguments, canonicalFilter)
-	nearestEligibilitySQL := ""
-	if filterSQL != "" {
-		nearestEligibilitySQL = ` AND projection.chunk_id IN (
-			SELECT matched_chunks.chunk_id
-			FROM matched_chunks
-			WHERE matched_chunks.index_version_id=active_index.id
-			OFFSET 0
-		)`
-	}
-	rows, err := r.db.Query(ctx, fmt.Sprintf(
-		vectorCandidateSQL, filterSQL, distanceExpression, persistedEmbedding.Dimensions, nearestEligibilitySQL, distanceExpression,
-		searchSnippetCharacterLimit, searchRerankCharacterLimit,
-	), arguments...)
-	if err != nil {
-		return nil, classify(err, "RETRIEVAL_VECTOR_SEARCH_QUERY_FAILED")
-	}
-	defer rows.Close()
-	return scanVectorCandidates(rows)
-}
 
 func validateSearchQuery(
 	workspaceID foundation.ID,
@@ -269,10 +123,6 @@ type searchCandidateRows interface {
 
 type searchCandidateErrorClassifier func(error, string) error
 
-func scanLexicalCandidates(rows searchCandidateRows) ([]domain.SearchCandidate, error) {
-	return scanLexicalCandidatesWithClassifier(rows, classify)
-}
-
 func scanLexicalCandidatesWithClassifier(rows searchCandidateRows, classifyError searchCandidateErrorClassifier) ([]domain.SearchCandidate, error) {
 	result := make([]domain.SearchCandidate, 0)
 	for rows.Next() {
@@ -304,10 +154,6 @@ func scanLexicalCandidatesWithClassifier(rows searchCandidateRows, classifyError
 		return nil, classifyError(err, "RETRIEVAL_LEXICAL_SEARCH_QUERY_FAILED")
 	}
 	return result, nil
-}
-
-func scanVectorCandidates(rows searchCandidateRows) ([]domain.SearchCandidate, error) {
-	return scanVectorCandidatesWithClassifier(rows, classify)
 }
 
 func scanVectorCandidatesWithClassifier(rows searchCandidateRows, classifyError searchCandidateErrorClassifier) ([]domain.SearchCandidate, error) {

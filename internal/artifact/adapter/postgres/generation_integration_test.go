@@ -20,14 +20,13 @@ import (
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	workflowpostgres "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/postgres"
 	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestSectionGenerationPostgreSQLStartReplayConflictAndContextRebase(t *testing.T) {
 	ctx := context.Background()
-	artifactRepository, pool := newArtifactIntegrationRepository(t, ctx)
+	artifactRepository, platformPool := newArtifactIntegrationGORMRepository(t, ctx)
+	pool := platformPool.DB()
 	workspaceA := artifactIntegrationID(301)
 	workspaceB := artifactIntegrationID(302)
 	seedArtifactWorkspace(t, ctx, pool, workspaceA, "artifact-generation-a")
@@ -35,7 +34,7 @@ func TestSectionGenerationPostgreSQLStartReplayConflictAndContextRebase(t *testi
 
 	now := time.Date(2026, 7, 26, 14, 0, 0, 0, time.UTC)
 	source := seedGeneratingArtifact(t, artifactRepository, workspaceA, 310, now)
-	coordinator, _ := newGenerationIntegrationCoordinator(t, pool, now.Add(10*time.Minute), &generationCitationVerifierFake{})
+	coordinator, _ := newGenerationIntegrationCoordinator(t, platformPool, now.Add(10*time.Minute), &generationCitationVerifierFake{})
 	command := artifactapplication.StartSectionGenerationCommand{
 		WorkspaceID: workspaceA, ArtifactID: source.Artifact.ID, ExpectedVersion: source.Artifact.Version,
 		SectionKey: "second", IdempotencyKey: "generate-second",
@@ -102,12 +101,13 @@ func TestSectionGenerationPostgreSQLStartReplayConflictAndContextRebase(t *testi
 
 func TestSectionGenerationPostgreSQLStartRespectsTerminalSourceSlotOwnership(t *testing.T) {
 	ctx := context.Background()
-	artifactRepository, pool := newArtifactIntegrationRepository(t, ctx)
+	artifactRepository, platformPool := newArtifactIntegrationGORMRepository(t, ctx)
+	pool := platformPool.DB()
 	workspaceID := artifactIntegrationID(451)
 	seedArtifactWorkspace(t, ctx, pool, workspaceID, "artifact-generation-source-slot")
 	now := time.Date(2026, 7, 26, 15, 0, 0, 0, time.UTC)
 	source := seedGeneratingArtifact(t, artifactRepository, workspaceID, 460, now)
-	coordinator, _ := newGenerationIntegrationCoordinator(t, pool, now.Add(10*time.Minute), &generationCitationVerifierFake{})
+	coordinator, _ := newGenerationIntegrationCoordinator(t, platformPool, now.Add(10*time.Minute), &generationCitationVerifierFake{})
 	command := artifactapplication.StartSectionGenerationCommand{
 		WorkspaceID: workspaceID, ArtifactID: source.Artifact.ID, ExpectedVersion: source.Artifact.Version,
 		SectionKey: "second", IdempotencyKey: "source-slot-first",
@@ -164,7 +164,8 @@ func TestSectionGenerationPostgreSQLStartRespectsTerminalSourceSlotOwnership(t *
 
 func TestSectionGenerationPostgreSQLReadSnapshotRecoversAuthoritativeCurrentOutline(t *testing.T) {
 	ctx := context.Background()
-	artifactRepository, pool := newArtifactIntegrationRepository(t, ctx)
+	artifactRepository, platformPool := newArtifactIntegrationGORMRepository(t, ctx)
+	pool := platformPool.DB()
 	workspaceID := artifactIntegrationID(1701)
 	otherWorkspaceID := artifactIntegrationID(1702)
 	seedArtifactWorkspace(t, ctx, pool, workspaceID, "artifact-generation-read")
@@ -172,17 +173,18 @@ func TestSectionGenerationPostgreSQLReadSnapshotRecoversAuthoritativeCurrentOutl
 	now := time.Date(2026, 7, 26, 15, 30, 0, 0, time.UTC)
 	source := seedGeneratingArtifact(t, artifactRepository, workspaceID, 1710, now)
 
-	readDB := &generationReadOptionsDB{Pool: pool}
-	readRepository, err := NewRepository(readDB)
+	readRepository, err := NewGORMRepository(platformPool)
 	if err != nil {
 		t.Fatal(err)
 	}
+	readOptions := &generationReadOptionsUnitOfWork{inner: readRepository.unitOfWork}
+	readRepository.unitOfWork = readOptions
 	empty, err := readRepository.ListSectionGenerations(ctx, workspaceID, source.Artifact.ID)
 	if err != nil || empty.Items == nil || len(empty.Items) != 0 || empty.State.Revision.ID != source.Revision.ID {
 		t.Fatalf("empty snapshot=%#v err=%v", empty, err)
 	}
-	if len(readDB.options) != 1 || readDB.options[0].IsoLevel != pgx.RepeatableRead || readDB.options[0].AccessMode != pgx.ReadOnly {
-		t.Fatalf("snapshot options=%#v", readDB.options)
+	if len(readOptions.options) != 1 || readOptions.options[0].Isolation != foundation.TransactionIsolationRepeatableRead || !readOptions.options[0].ReadOnly {
+		t.Fatalf("snapshot options=%#v", readOptions.options)
 	}
 	for _, lookup := range []struct {
 		workspaceID foundation.ID
@@ -196,7 +198,7 @@ func TestSectionGenerationPostgreSQLReadSnapshotRecoversAuthoritativeCurrentOutl
 		}
 	}
 
-	coordinator, _ := newGenerationIntegrationCoordinator(t, pool, now.Add(10*time.Minute), &generationCitationVerifierFake{})
+	coordinator, _ := newGenerationIntegrationCoordinator(t, platformPool, now.Add(10*time.Minute), &generationCitationVerifierFake{})
 	start := func(sectionKey, key string) artifactapplication.SectionGeneration {
 		t.Helper()
 		result, startErr := coordinator.StartSectionGeneration(ctx, artifactapplication.StartSectionGenerationCommand{
@@ -259,12 +261,13 @@ func TestSectionGenerationPostgreSQLReadSnapshotRecoversAuthoritativeCurrentOutl
 
 func TestSectionGenerationPostgreSQLFinalizeReplayAndCrossAttemptLookup(t *testing.T) {
 	ctx := context.Background()
-	artifactRepository, pool := newArtifactIntegrationRepository(t, ctx)
+	artifactRepository, platformPool := newArtifactIntegrationGORMRepository(t, ctx)
+	pool := platformPool.DB()
 	workspaceID := artifactIntegrationID(501)
 	seedArtifactWorkspace(t, ctx, pool, workspaceID, "artifact-generation-finalize")
 	now := time.Date(2026, 7, 26, 16, 0, 0, 0, time.UTC)
 	source := seedGeneratingArtifact(t, artifactRepository, workspaceID, 510, now)
-	coordinator, agentRepository := newGenerationIntegrationCoordinator(t, pool, now.Add(10*time.Minute), &generationCitationVerifierFake{})
+	coordinator, agentRepository := newGenerationIntegrationCoordinator(t, platformPool, now.Add(10*time.Minute), &generationCitationVerifierFake{})
 	started, err := coordinator.StartSectionGeneration(ctx, artifactapplication.StartSectionGenerationCommand{
 		WorkspaceID: workspaceID, ArtifactID: source.Artifact.ID, ExpectedVersion: source.Artifact.Version,
 		SectionKey: "second", IdempotencyKey: "finalize-second",
@@ -750,14 +753,15 @@ func TestGORMSectionGenerationPostgreSQLEvidenceVerificationReleasesLocks(t *tes
 
 func TestSectionGenerationPostgreSQLRejectsForgedEvidenceWithoutSplitState(t *testing.T) {
 	ctx := context.Background()
-	artifactRepository, pool := newArtifactIntegrationRepository(t, ctx)
+	artifactRepository, platformPool := newArtifactIntegrationGORMRepository(t, ctx)
+	pool := platformPool.DB()
 	workspaceID := artifactIntegrationID(601)
 	seedArtifactWorkspace(t, ctx, pool, workspaceID, "artifact-generation-evidence")
 	now := time.Date(2026, 7, 26, 17, 0, 0, 0, time.UTC)
 	source := seedGeneratingArtifact(t, artifactRepository, workspaceID, 610, now)
 	provenance := seedArtifactCitationProvenance(t, ctx, pool, workspaceID, 738)
 	verifier := &generationCitationVerifierFake{}
-	coordinator, agentRepository := newGenerationIntegrationCoordinator(t, pool, now.Add(10*time.Minute), verifier)
+	coordinator, agentRepository := newGenerationIntegrationCoordinator(t, platformPool, now.Add(10*time.Minute), verifier)
 	started, err := coordinator.StartSectionGeneration(ctx, artifactapplication.StartSectionGenerationCommand{
 		WorkspaceID: workspaceID, ArtifactID: source.Artifact.ID, ExpectedVersion: source.Artifact.Version,
 		SectionKey: "second", IdempotencyKey: "evidence-second",
@@ -835,7 +839,7 @@ func TestSectionGenerationPostgreSQLRejectsForgedEvidenceWithoutSplitState(t *te
 	if err != nil || pendingRun.Run.Status != agentdomain.ModelRunRunning {
 		t.Fatalf("model run changed after rejected finalization run=%#v err=%v", pendingRun, err)
 	}
-	generation, found, err := loadSectionGenerationByKey(ctx, pool, workspaceID, "evidence-second", false)
+	generation, found, err := gormLoadGenerationByKey(ctx, artifactRepository.database, workspaceID, "evidence-second", false)
 	if err != nil || !found || generation.Status != artifactapplication.SectionGenerationPending {
 		t.Fatalf("generation changed after rejected finalization generation=%#v found=%t err=%v", generation, found, err)
 	}
@@ -863,7 +867,8 @@ func TestSectionGenerationPostgreSQLRejectsForgedEvidenceWithoutSplitState(t *te
 
 func TestSectionGenerationPostgreSQLEvidenceVerificationDoesNotHoldFinalizationRows(t *testing.T) {
 	ctx := context.Background()
-	artifactRepository, pool := newArtifactIntegrationRepository(t, ctx)
+	artifactRepository, platformPool := newArtifactIntegrationGORMRepository(t, ctx)
+	pool := platformPool.DB()
 	workspaceID := artifactIntegrationID(651)
 	seedArtifactWorkspace(t, ctx, pool, workspaceID, "artifact-generation-verifier-locks")
 	now := time.Date(2026, 7, 26, 17, 30, 0, 0, time.UTC)
@@ -878,7 +883,7 @@ func TestSectionGenerationPostgreSQLEvidenceVerificationDoesNotHoldFinalizationR
 		}
 	}()
 	verifier := &generationCitationVerifierFake{entered: entered, release: release}
-	coordinator, agentRepository := newGenerationIntegrationCoordinator(t, pool, now.Add(10*time.Minute), verifier)
+	coordinator, agentRepository := newGenerationIntegrationCoordinator(t, platformPool, now.Add(10*time.Minute), verifier)
 	started, err := coordinator.StartSectionGeneration(ctx, artifactapplication.StartSectionGenerationCommand{
 		WorkspaceID: workspaceID, ArtifactID: source.Artifact.ID, ExpectedVersion: source.Artifact.Version,
 		SectionKey: "second", IdempotencyKey: "verifier-locks-second",
@@ -970,12 +975,13 @@ func TestSectionGenerationPostgreSQLEvidenceVerificationDoesNotHoldFinalizationR
 
 func TestSectionGenerationPostgreSQLRebasesTwoSectionsFinalizedInReverseOrder(t *testing.T) {
 	ctx := context.Background()
-	artifactRepository, pool := newArtifactIntegrationRepository(t, ctx)
+	artifactRepository, platformPool := newArtifactIntegrationGORMRepository(t, ctx)
+	pool := platformPool.DB()
 	workspaceID := artifactIntegrationID(701)
 	seedArtifactWorkspace(t, ctx, pool, workspaceID, "artifact-generation-rebase")
 	now := time.Date(2026, 7, 26, 18, 0, 0, 0, time.UTC)
 	source := seedGeneratingArtifact(t, artifactRepository, workspaceID, 710, now)
-	coordinator, agentRepository := newGenerationIntegrationCoordinator(t, pool, now.Add(10*time.Minute), &generationCitationVerifierFake{})
+	coordinator, agentRepository := newGenerationIntegrationCoordinator(t, platformPool, now.Add(10*time.Minute), &generationCitationVerifierFake{})
 
 	start := func(key string) artifactapplication.SectionGeneration {
 		result, err := coordinator.StartSectionGeneration(ctx, artifactapplication.StartSectionGenerationCommand{
@@ -1037,12 +1043,13 @@ func TestSectionGenerationPostgreSQLRebasesTwoSectionsFinalizedInReverseOrder(t 
 func TestSectionGenerationPostgreSQLRejectsMissingSuccessfulCallAndTargetDrift(t *testing.T) {
 	t.Run("missing successful call", func(t *testing.T) {
 		ctx := context.Background()
-		artifactRepository, pool := newArtifactIntegrationRepository(t, ctx)
+		artifactRepository, platformPool := newArtifactIntegrationGORMRepository(t, ctx)
+		pool := platformPool.DB()
 		workspaceID := artifactIntegrationID(801)
 		seedArtifactWorkspace(t, ctx, pool, workspaceID, "artifact-generation-no-call")
 		now := time.Date(2026, 7, 26, 19, 0, 0, 0, time.UTC)
 		source := seedGeneratingArtifact(t, artifactRepository, workspaceID, 810, now)
-		coordinator, agentRepository := newGenerationIntegrationCoordinator(t, pool, now.Add(10*time.Minute), &generationCitationVerifierFake{})
+		coordinator, agentRepository := newGenerationIntegrationCoordinator(t, platformPool, now.Add(10*time.Minute), &generationCitationVerifierFake{})
 		started, err := coordinator.StartSectionGeneration(ctx, artifactapplication.StartSectionGenerationCommand{
 			WorkspaceID: workspaceID, ArtifactID: source.Artifact.ID, ExpectedVersion: source.Artifact.Version,
 			SectionKey: "second", IdempotencyKey: "no-call-second",
@@ -1062,12 +1069,13 @@ func TestSectionGenerationPostgreSQLRejectsMissingSuccessfulCallAndTargetDrift(t
 
 	t.Run("target section drift", func(t *testing.T) {
 		ctx := context.Background()
-		artifactRepository, pool := newArtifactIntegrationRepository(t, ctx)
+		artifactRepository, platformPool := newArtifactIntegrationGORMRepository(t, ctx)
+		pool := platformPool.DB()
 		workspaceID := artifactIntegrationID(901)
 		seedArtifactWorkspace(t, ctx, pool, workspaceID, "artifact-generation-target-drift")
 		now := time.Date(2026, 7, 26, 20, 0, 0, 0, time.UTC)
 		source := seedGeneratingArtifact(t, artifactRepository, workspaceID, 910, now)
-		coordinator, agentRepository := newGenerationIntegrationCoordinator(t, pool, now.Add(10*time.Minute), &generationCitationVerifierFake{})
+		coordinator, agentRepository := newGenerationIntegrationCoordinator(t, platformPool, now.Add(10*time.Minute), &generationCitationVerifierFake{})
 		started, err := coordinator.StartSectionGeneration(ctx, artifactapplication.StartSectionGenerationCommand{
 			WorkspaceID: workspaceID, ArtifactID: source.Artifact.ID, ExpectedVersion: source.Artifact.Version,
 			SectionKey: "second", IdempotencyKey: "drift-second",
@@ -1090,7 +1098,7 @@ func TestSectionGenerationPostgreSQLRejectsMissingSuccessfulCallAndTargetDrift(t
 		if err != nil || persisted.Revision.ID != drifted.Revision.ID || persisted.Artifact.Version != drifted.Artifact.Version {
 			t.Fatalf("drifted state changed persisted=%#v err=%v", persisted, err)
 		}
-		generation, found, err := loadSectionGenerationByKey(ctx, pool, workspaceID, started.Generation.IdempotencyKey, false)
+		generation, found, err := gormLoadGenerationByKey(ctx, artifactRepository.database, workspaceID, started.Generation.IdempotencyKey, false)
 		if err != nil || !found || generation.Status != artifactapplication.SectionGenerationPending {
 			t.Fatalf("drifted generation=%#v found=%t err=%v", generation, found, err)
 		}
@@ -1103,15 +1111,16 @@ func TestSectionGenerationPostgreSQLRejectsMissingSuccessfulCallAndTargetDrift(t
 
 func TestSectionGenerationPostgreSQLRecoversStartAndFinalizeCommitResponseLoss(t *testing.T) {
 	ctx := context.Background()
-	artifactRepository, pool := newArtifactIntegrationRepository(t, ctx)
+	artifactRepository, platformPool := newArtifactIntegrationGORMRepository(t, ctx)
+	pool := platformPool.DB()
 	workspaceID := artifactIntegrationID(1001)
 	seedArtifactWorkspace(t, ctx, pool, workspaceID, "artifact-generation-commit-loss")
 	now := time.Date(2026, 7, 26, 21, 0, 0, 0, time.UTC)
 	source := seedGeneratingArtifact(t, artifactRepository, workspaceID, 1010, now)
-	lossDB := generationCommitResponseLossDB{Pool: pool}
-	lossCoordinator, agentRepository := newGenerationIntegrationCoordinatorWithDB(
-		t, pool, lossDB, now.Add(10*time.Minute), &generationCitationVerifierFake{},
+	lossCoordinator, agentRepository := newGenerationIntegrationCoordinator(
+		t, platformPool, now.Add(10*time.Minute), &generationCitationVerifierFake{},
 	)
+	lossCoordinator.uow = generationGORMCommitResponseLossUoW{inner: lossCoordinator.uow}
 	startCommand := artifactapplication.StartSectionGenerationCommand{
 		WorkspaceID: workspaceID, ArtifactID: source.Artifact.ID, ExpectedVersion: source.Artifact.Version,
 		SectionKey: "second", IdempotencyKey: "commit-loss-second",
@@ -1120,7 +1129,7 @@ func TestSectionGenerationPostgreSQLRecoversStartAndFinalizeCommitResponseLoss(t
 	if err != nil || started.Replayed || started.Generation.Status != artifactapplication.SectionGenerationPending {
 		t.Fatalf("recovered start=%#v err=%v", started, err)
 	}
-	normalCoordinator, _ := newGenerationIntegrationCoordinator(t, pool, now.Add(11*time.Minute), &generationCitationVerifierFake{})
+	normalCoordinator, _ := newGenerationIntegrationCoordinator(t, platformPool, now.Add(11*time.Minute), &generationCitationVerifierFake{})
 	replayedStart, err := normalCoordinator.StartSectionGeneration(ctx, startCommand)
 	if err != nil || !replayedStart.Replayed || replayedStart.Generation.ID != started.Generation.ID {
 		t.Fatalf("replayed recovered start=%#v err=%v", replayedStart, err)
@@ -1151,45 +1160,12 @@ func TestSectionGenerationPostgreSQLRecoversStartAndFinalizeCommitResponseLoss(t
 
 func newGenerationIntegrationCoordinator(
 	t *testing.T,
-	pool *pgxpool.Pool,
+	pool *platformpostgres.Pool,
 	now time.Time,
 	verifier artifactapplication.CitationVerifier,
-) (*SectionGenerationRepository, *agentpostgres.Repository) {
-	return newGenerationIntegrationCoordinatorWithDB(t, pool, pool, now, verifier)
-}
-
-func newGenerationIntegrationCoordinatorWithDB(
-	t *testing.T,
-	pool *pgxpool.Pool,
-	db DB,
-	now time.Time,
-	verifier artifactapplication.CitationVerifier,
-) (*SectionGenerationRepository, *agentpostgres.Repository) {
+) (*GORMSectionGenerationRepository, *agentpostgres.GORMRepository) {
 	t.Helper()
-	client, err := riveradapter.NewClient(pool, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	inserter, err := riveradapter.NewJobInserter(client)
-	if err != nil {
-		t.Fatal(err)
-	}
-	runtime, err := workflowpostgres.NewRuntimeRepository(pool, inserter)
-	if err != nil {
-		t.Fatal(err)
-	}
-	agentRepository, err := agentpostgres.NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
-	coordinator, err := NewSectionGenerationRepository(
-		db, runtime, agentRepository, verifier,
-		&generationIntegrationIDs{next: 400}, foundation.FixedClock{Value: now}, generationIntegrationProfile(),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return coordinator, agentRepository
+	return newGORMGenerationIntegrationCoordinator(t, pool, now, verifier, 400)
 }
 
 func newGORMGenerationIntegrationCoordinator(
@@ -1198,12 +1174,12 @@ func newGORMGenerationIntegrationCoordinator(
 	now time.Time,
 	verifier artifactapplication.CitationVerifier,
 	nextID int,
-) (*GORMSectionGenerationRepository, *agentpostgres.Repository) {
+) (*GORMSectionGenerationRepository, *agentpostgres.GORMRepository) {
 	t.Helper()
 	runtime, err := workflowpostgres.NewGORMRuntimeRepositoryWithHooks(
 		pool,
 		riveradapter.DefaultOptions(),
-		generationScopedEnqueueFence{},
+		riveradapter.NewStaticScopedEnqueueFence(),
 		workflowpostgres.GORMRuntimeRepositoryHooks{},
 	)
 	if err != nil {
@@ -1214,10 +1190,6 @@ func newGORMGenerationIntegrationCoordinator(
 		t.Fatal(err)
 	}
 	gormAgent, err := agentpostgres.NewGORMRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
-	agentRepository, err := agentpostgres.NewRepository(pool.DB())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1234,13 +1206,7 @@ func newGORMGenerationIntegrationCoordinator(
 	if err != nil {
 		t.Fatal(err)
 	}
-	return coordinator, agentRepository
-}
-
-type generationScopedEnqueueFence struct{}
-
-func (generationScopedEnqueueFence) CheckEnqueue(context.Context, foundation.TransactionScope) error {
-	return nil
+	return coordinator, gormAgent
 }
 
 type generationGORMCommitResponseLossUoW struct {
@@ -1261,69 +1227,18 @@ func (uow generationGORMCommitResponseLossUoW) Within(
 	return errors.New("simulated GORM commit response loss")
 }
 
-type generationCommitResponseLossDB struct{ Pool *pgxpool.Pool }
-
-type generationReadOptionsDB struct {
-	Pool    *pgxpool.Pool
-	options []pgx.TxOptions
+type generationReadOptionsUnitOfWork struct {
+	inner   foundation.UnitOfWork
+	options []foundation.TransactionOptions
 }
 
-func (db *generationReadOptionsDB) Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error) {
-	return db.Pool.Exec(ctx, sql, arguments...)
-}
-
-func (db *generationReadOptionsDB) Query(ctx context.Context, sql string, arguments ...any) (pgx.Rows, error) {
-	return db.Pool.Query(ctx, sql, arguments...)
-}
-
-func (db *generationReadOptionsDB) QueryRow(ctx context.Context, sql string, arguments ...any) pgx.Row {
-	return db.Pool.QueryRow(ctx, sql, arguments...)
-}
-
-func (db *generationReadOptionsDB) Begin(ctx context.Context) (pgx.Tx, error) {
-	return db.Pool.Begin(ctx)
-}
-
-func (db *generationReadOptionsDB) BeginTx(ctx context.Context, options pgx.TxOptions) (pgx.Tx, error) {
-	db.options = append(db.options, options)
-	return db.Pool.BeginTx(ctx, options)
-}
-
-func (db generationCommitResponseLossDB) Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error) {
-	return db.Pool.Exec(ctx, sql, arguments...)
-}
-
-func (db generationCommitResponseLossDB) Query(ctx context.Context, sql string, arguments ...any) (pgx.Rows, error) {
-	return db.Pool.Query(ctx, sql, arguments...)
-}
-
-func (db generationCommitResponseLossDB) QueryRow(ctx context.Context, sql string, arguments ...any) pgx.Row {
-	return db.Pool.QueryRow(ctx, sql, arguments...)
-}
-
-func (db generationCommitResponseLossDB) Begin(ctx context.Context) (pgx.Tx, error) {
-	tx, err := db.Pool.Begin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return generationCommitResponseLossTx{Tx: tx}, nil
-}
-
-func (db generationCommitResponseLossDB) BeginTx(ctx context.Context, options pgx.TxOptions) (pgx.Tx, error) {
-	tx, err := db.Pool.BeginTx(ctx, options)
-	if err != nil {
-		return nil, err
-	}
-	return generationCommitResponseLossTx{Tx: tx}, nil
-}
-
-type generationCommitResponseLossTx struct{ pgx.Tx }
-
-func (tx generationCommitResponseLossTx) Commit(ctx context.Context) error {
-	if err := tx.Tx.Commit(ctx); err != nil {
-		return err
-	}
-	return errors.New("simulated commit response loss")
+func (uow *generationReadOptionsUnitOfWork) Within(
+	ctx context.Context,
+	options foundation.TransactionOptions,
+	work foundation.TransactionFunc,
+) error {
+	uow.options = append(uow.options, options)
+	return uow.inner.Within(ctx, options, work)
 }
 
 type generationArtifactRepository interface {
@@ -1410,8 +1325,8 @@ func assertGenerationStillPending(
 	t *testing.T,
 	ctx context.Context,
 	pool *pgxpool.Pool,
-	artifactRepository *Repository,
-	agentRepository *agentpostgres.Repository,
+	artifactRepository *GORMRepository,
+	agentRepository *agentpostgres.GORMRepository,
 	source artifactapplication.State,
 	generation artifactapplication.SectionGeneration,
 	run agentdomain.ModelRun,
@@ -1421,7 +1336,7 @@ func assertGenerationStillPending(
 	if err != nil || persisted.Revision.ID != source.Revision.ID || persisted.Artifact.Version != source.Artifact.Version {
 		t.Fatalf("artifact changed after rejected finalization persisted=%#v err=%v", persisted, err)
 	}
-	loadedGeneration, found, err := loadSectionGenerationByKey(ctx, pool, source.Artifact.WorkspaceID, generation.IdempotencyKey, false)
+	loadedGeneration, found, err := gormLoadGenerationByKey(ctx, artifactRepository.database, source.Artifact.WorkspaceID, generation.IdempotencyKey, false)
 	if err != nil || !found || loadedGeneration.Status != artifactapplication.SectionGenerationPending {
 		t.Fatalf("generation changed after rejected finalization generation=%#v found=%t err=%v", loadedGeneration, found, err)
 	}
@@ -1549,7 +1464,7 @@ func seedGenerationModelRun(
 	t *testing.T,
 	ctx context.Context,
 	pool *pgxpool.Pool,
-	repository *agentpostgres.Repository,
+	repository *agentpostgres.GORMRepository,
 	generation artifactapplication.SectionGeneration,
 	attemptID, runID, callID foundation.ID,
 	at time.Time,
@@ -1586,7 +1501,7 @@ func seedGenerationRunningModelRun(
 	t *testing.T,
 	ctx context.Context,
 	pool *pgxpool.Pool,
-	repository *agentpostgres.Repository,
+	repository *agentpostgres.GORMRepository,
 	generation artifactapplication.SectionGeneration,
 	attemptID, runID foundation.ID,
 	at time.Time,

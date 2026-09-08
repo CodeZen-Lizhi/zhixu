@@ -2,6 +2,7 @@ package workspacepostgres
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -180,4 +181,48 @@ func nullableFoundationID(value *foundation.ID) any {
 		return nil
 	}
 	return string(*value)
+}
+
+type lockedSwitch struct {
+	State     domain.ControlState
+	Operation domain.SwitchOperation
+	Gate      mutationGate
+	Now       time.Time
+}
+
+func equalOptionalIDs(left, right *foundation.ID) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
+}
+
+func validateControlSnapshot(snapshot domain.ControlSnapshot) error {
+	state := snapshot.State
+	if state.OperationID == nil {
+		if snapshot.Operation != nil || state.OperationPhase != "" || state.TargetWorkspaceID != nil ||
+			state.PreviousActiveWorkspaceID != nil || state.ControllerLeaseOwnerID != nil {
+			return controlCorrupt(errors.New("idle workspace control state retains operation ownership"))
+		}
+	} else {
+		if snapshot.Operation == nil || snapshot.Operation.Result != "" || snapshot.Operation.ID != *state.OperationID ||
+			state.OperationPhase != snapshot.Operation.Phase || state.TargetWorkspaceID == nil ||
+			*state.TargetWorkspaceID != snapshot.Operation.TargetWorkspaceID ||
+			!equalOptionalIDs(state.PreviousActiveWorkspaceID, snapshot.Operation.PreviousWorkspaceID) ||
+			state.ControllerLeaseOwnerID == nil || snapshot.Operation.LeaseOwnerID == nil ||
+			*state.ControllerLeaseOwnerID != *snapshot.Operation.LeaseOwnerID {
+			return controlCorrupt(errors.New("workspace control operation projection is inconsistent"))
+		}
+	}
+	if state.GrantGeneration > 0 && snapshot.Active != nil {
+		if snapshot.Active.Status != domain.WorkspaceStatusActive ||
+			snapshot.Active.Availability != domain.WorkspaceAvailabilityAvailable || !snapshot.Active.RemovedAt.IsZero() {
+			return controlCorrupt(errors.New("active workspace Registry row is not grantable"))
+		}
+	}
+	return nil
+}
+
+func sameOptionalID(candidate *foundation.ID, expected foundation.ID) bool {
+	return candidate != nil && *candidate == expected
 }

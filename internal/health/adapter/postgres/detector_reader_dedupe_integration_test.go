@@ -23,7 +23,8 @@ import (
 // both object types survive a page boundary when they share one UUID.
 func TestFactReaderEvidenceDetectorsDeduplicateAndPageByTypedKey(t *testing.T) {
 	ctx := context.Background()
-	pool := newHealthIntegrationPool(t)
+	platform := requireHealthIntegrationPlatform(t)
+	pool := platform.DB()
 	fixture, err := graphfixture.SeedFunctional(ctx, pool)
 	if err != nil {
 		t.Fatal(err)
@@ -63,7 +64,7 @@ func TestFactReaderEvidenceDetectorsDeduplicateAndPageByTypedKey(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reader, err := NewFactReader(pool)
+	reader, err := NewGORMFactReader(platform)
 	if err != nil {
 		t.Fatal(err)
 	}

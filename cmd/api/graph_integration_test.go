@@ -24,11 +24,14 @@ import (
 	graphdomain "github.com/CodeZen-Lizhi/zhixu/internal/graph/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/graph/testfixture"
 	knowledge "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestGraphPublicHTTPIntegration(t *testing.T) {
-	pool := graphHTTPIntegrationPool(t)
+	database := graphHTTPIntegrationPool(t)
+	pool := database.DB()
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
@@ -45,7 +48,7 @@ func TestGraphPublicHTTPIntegration(t *testing.T) {
 	})
 	isolationWorkspaceID := seedGraphIsolationWorkspace(t, ctx, pool)
 
-	server := newGraphHTTPIntegrationServer(t, pool, 2*time.Second)
+	server := newGraphHTTPIntegrationServer(t, database, 2*time.Second)
 	client := server.Client()
 
 	globalBody := mustGraphJSON(t, map[string]any{
@@ -141,7 +144,7 @@ func TestGraphPublicHTTPIntegration(t *testing.T) {
 	stale := postGraphResponse[graphProblemWire](t, client, server.URL+"/api/v1/graph/global", secondGlobalBody, http.StatusConflict)
 	assertGraphProblem(t, stale.Value, graphdomain.ErrorCodeCursorStale, false)
 
-	timeoutServer := newGraphHTTPIntegrationServer(t, pool, time.Nanosecond)
+	timeoutServer := newGraphHTTPIntegrationServer(t, database, time.Nanosecond)
 	var stableTimeoutCode string
 	for attempt := 0; attempt < 3; attempt++ {
 		problem := postGraphResponse[graphProblemWire](t, timeoutServer.Client(), timeoutServer.URL+"/api/v1/graph/global", globalBody, http.StatusServiceUnavailable)
@@ -298,24 +301,12 @@ type graphProblemWire struct {
 	Details       map[string]json.RawMessage `json:"details,omitempty"`
 }
 
-func graphHTTPIntegrationPool(t *testing.T) *pgxpool.Pool {
+func graphHTTPIntegrationPool(t *testing.T) *platformpostgres.Pool {
 	t.Helper()
-	databaseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL for Graph public HTTP integration tests")
-	}
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
-	return pool
+	return testdb.Require(t, testdb.Config{
+		ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
+		MaxConns:         8,
+	}).Pool()
 }
 
 func seedGraphIsolationWorkspace(t *testing.T, ctx context.Context, pool *pgxpool.Pool) foundation.ID {
@@ -328,20 +319,14 @@ func seedGraphIsolationWorkspace(t *testing.T, ctx context.Context, pool *pgxpoo
 	root := "/tmp/graph-http-isolation-" + string(workspaceID)
 	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(
 		id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at
-	) VALUES($1,$2,$3,$3,$4,'test',1,$4,$4)`, string(workspaceID), "graph-http-isolation", root, now); err != nil {
+	) VALUES($1,$2,$3,$3,$4,'inactive',1,$4,$4)`, string(workspaceID), "graph-http-isolation", root, now); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if _, cleanupErr := pool.Exec(cleanupCtx, `DELETE FROM core.workspace WHERE id=$1`, string(workspaceID)); cleanupErr != nil {
-			t.Errorf("cleanup graph isolation workspace: %v", cleanupErr)
-		}
-	})
+	// testdb removes the isolated database; Workspace identities are retained rows.
 	return workspaceID
 }
 
-func newGraphHTTPIntegrationServer(t *testing.T, pool *pgxpool.Pool, timeout time.Duration) *httptest.Server {
+func newGraphHTTPIntegrationServer(t *testing.T, pool *platformpostgres.Pool, timeout time.Duration) *httptest.Server {
 	t.Helper()
 	handler, err := newGraphHandler(pool, timeout)
 	if err != nil {

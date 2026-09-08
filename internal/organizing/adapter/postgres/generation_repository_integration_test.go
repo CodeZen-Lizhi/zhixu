@@ -155,8 +155,8 @@ func TestGenerationRepositoryEnforcesRuntimeAtEveryPersistenceBoundary(t *testin
 type generationRepositoryIntegrationFixture struct {
 	ctx          context.Context
 	pool         *pgxpool.Pool
-	agent        *agentpostgres.Repository
-	generations  *GenerationRepository
+	agent        *agentpostgres.GORMRepository
+	generations  *GORMGenerationRepository
 	workspaceID  foundation.ID
 	snapshotID   foundation.ID
 	workflowRun  foundation.ID
@@ -167,10 +167,11 @@ type generationRepositoryIntegrationFixture struct {
 
 func newGenerationRepositoryIntegrationFixture(t *testing.T, ctx context.Context) *generationRepositoryIntegrationFixture {
 	t.Helper()
-	pool := newOrganizingIntegrationDatabase(t, ctx)
+	platform := newOrganizingIntegrationPlatform(t, ctx)
+	pool := platform.DB()
 	workspaceID := organizingIntegrationID(2100)
 	seedOrganizingWorkspace(t, ctx, pool, workspaceID, "organizing-generation-runtime")
-	organizingRepository, err := NewRepository(pool)
+	organizingRepository, err := NewGORMRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,11 +224,11 @@ func newGenerationRepositoryIntegrationFixture(t *testing.T, ctx context.Context
 		organizingIntegrationHash("organizing-generation-manifest"), logicalClock); err != nil {
 		t.Fatal(err)
 	}
-	agentRepository, err := agentpostgres.NewRepository(pool)
+	agentRepository, err := agentpostgres.NewGORMRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
-	generationRepository, err := NewGenerationRepository(pool, agentRepository)
+	generationRepository, err := NewGORMGenerationRepository(platform, agentRepository)
 	if err != nil {
 		t.Fatal(err)
 	}

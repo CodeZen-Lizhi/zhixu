@@ -10,91 +10,99 @@ import (
 	"testing"
 	"time"
 
+	ccpostgres "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/retrieval/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"gorm.io/gorm"
 )
 
 func TestCompleteReindexTxAtomicallyActivatesAndReplaysAfterResponseLoss(t *testing.T) {
-	repository, database, ctx := newRetrievalTestRepository(t)
-	fixture := seedCompletionFixture(t, ctx, repository, database.DB(), 700)
-	satisfyCompletionGates(t, ctx, database.DB(), fixture)
+	for _, implementation := range []string{"gorm"} {
+		t.Run(implementation, func(t *testing.T) {
+			repository, database, ctx := newRetrievalTestStore(t, implementation)
+			completion := newCompletionTestStore(t, database, repository)
+			fixture := seedCompletionFixture(t, ctx, repository, database, 700)
+			satisfyCompletionGates(t, ctx, database.DB(), fixture)
 
-	lossRepository, err := NewRepository(&completionResponseLossDB{pool: database.DB(), lose: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := lossRepository.CompleteReindexTx(ctx, fixture.Command); completionErrorCode(err) != "REINDEX_COMPLETION_COMMIT_FAILED" {
-		var classified *foundation.Error
-		_ = errors.As(err, &classified)
-		t.Fatalf("response loss error=%v classified=%#v cause=%v", err, classified, classified.Cause)
-	}
-	assertCompletionCommitted(t, ctx, database.DB(), fixture)
+			loss := *completion.(*GORMCompletionRepository)
+			loss.unitOfWork = &completionResponseLossDB{UnitOfWork: loss.unitOfWork, lose: true}
+			lossRepository := &loss
+			if _, err := lossRepository.CompleteReindexTx(ctx, fixture.Command); completionErrorCode(err) != "REINDEX_COMPLETION_COMMIT_FAILED" {
+				t.Fatalf("response loss error=%v cause=%v", err, errors.Unwrap(err))
+			}
+			assertCompletionCommitted(t, ctx, database.DB(), fixture)
 
-	replayCommand := fixture.Command
-	replayCommand.ActivationID = snapshotID(799_999)
-	replayed, err := repository.CompleteReindexTx(ctx, replayCommand)
-	if err != nil || !replayed.Replayed || replayed.Activation.ID != fixture.Command.ActivationID ||
-		replayed.ActiveIndexVersion.ID != fixture.TargetIndexID || replayed.PreviousIndexVersion == nil ||
-		replayed.PreviousIndexVersion.ID != fixture.OldActiveID {
-		t.Fatalf("replay=%#v err=%v", replayed, err)
-	}
-	assertCompletionCommitted(t, ctx, database.DB(), fixture)
+			replayCommand := fixture.Command
+			replayCommand.ActivationID = snapshotID(799_999)
+			replayed, err := completion.CompleteReindexTx(ctx, replayCommand)
+			if err != nil || !replayed.Replayed || replayed.Activation.ID != fixture.Command.ActivationID ||
+				replayed.ActiveIndexVersion.ID != fixture.TargetIndexID || replayed.PreviousIndexVersion == nil ||
+				replayed.PreviousIndexVersion.ID != fixture.OldActiveID {
+				t.Fatalf("replay=%#v err=%v", replayed, err)
+			}
+			assertCompletionCommitted(t, ctx, database.DB(), fixture)
 
-	chunk := loadCompletionManifestChunk(t, ctx, database.DB(), fixture.TargetIndexID)
-	currentTarget, err := repository.GetIndex(ctx, fixture.WorkspaceID, fixture.TargetIndexID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	laterBase := time.Now().UTC()
-	laterReady := createReadyIndex(t, ctx, repository, fixture.WorkspaceID, chunk, string(snapshotID(799_990)),
-		"completion-later-"+string(fixture.DeliveryID), laterBase)
-	if _, err := repository.Activate(ctx, domain.ActivationCommand{
-		ActivationID: snapshotID(799_991), WorkspaceID: fixture.WorkspaceID,
-		TargetIndexVersionID: laterReady.ID, ExpectedTargetVersion: laterReady.Version,
-		ExpectedCurrentIndexVersionID: &currentTarget.ID, ExpectedCurrentVersion: &currentTarget.Version,
-		IdempotencyKey: "completion-later-activate-" + string(fixture.DeliveryID),
-		ReasonCode:     "BUILD_VERIFIED", At: laterBase.Add(3 * time.Second),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	historicalReplay, err := repository.CompleteReindexTx(ctx, replayCommand)
-	if err != nil || !historicalReplay.Replayed || historicalReplay.ActiveIndexVersion.ID != fixture.TargetIndexID ||
-		historicalReplay.ActiveIndexVersion.Status != domain.IndexStatusActive {
-		t.Fatalf("historical replay=%#v err=%v", historicalReplay, err)
-	}
-	actualTarget, err := repository.GetIndex(ctx, fixture.WorkspaceID, fixture.TargetIndexID)
-	if err != nil || actualTarget.Status != domain.IndexStatusRetiring {
-		t.Fatalf("actual historical target=%#v err=%v", actualTarget, err)
+			chunk := loadCompletionManifestChunk(t, ctx, database.DB(), fixture.TargetIndexID)
+			currentTarget, err := repository.GetIndex(ctx, fixture.WorkspaceID, fixture.TargetIndexID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			laterBase := time.Now().UTC()
+			laterReady := createReadyIndex(t, ctx, repository, fixture.WorkspaceID, chunk, string(snapshotID(799_990)),
+				"completion-later-"+string(fixture.DeliveryID), laterBase)
+			if _, err := repository.Activate(ctx, domain.ActivationCommand{
+				ActivationID: snapshotID(799_991), WorkspaceID: fixture.WorkspaceID,
+				TargetIndexVersionID: laterReady.ID, ExpectedTargetVersion: laterReady.Version,
+				ExpectedCurrentIndexVersionID: &currentTarget.ID, ExpectedCurrentVersion: &currentTarget.Version,
+				IdempotencyKey: "completion-later-activate-" + string(fixture.DeliveryID),
+				ReasonCode:     "BUILD_VERIFIED", At: laterBase.Add(3 * time.Second),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			historicalReplay, err := completion.CompleteReindexTx(ctx, replayCommand)
+			if err != nil || !historicalReplay.Replayed || historicalReplay.ActiveIndexVersion.ID != fixture.TargetIndexID ||
+				historicalReplay.ActiveIndexVersion.Status != domain.IndexStatusActive {
+				t.Fatalf("historical replay=%#v err=%v", historicalReplay, err)
+			}
+			actualTarget, err := repository.GetIndex(ctx, fixture.WorkspaceID, fixture.TargetIndexID)
+			if err != nil || actualTarget.Status != domain.IndexStatusRetiring {
+				t.Fatalf("actual historical target=%#v err=%v", actualTarget, err)
+			}
+		})
 	}
 }
 
 func TestCompleteReindexTxRequiresCleanupAndSucceededWorkflowWithoutMutatingIndexes(t *testing.T) {
-	repository, database, ctx := newRetrievalTestRepository(t)
-	fixture := seedCompletionFixture(t, ctx, repository, database.DB(), 710)
-	if _, err := repository.CompleteReindexTx(ctx, fixture.Command); !completionPrerequisitePendingError(err) {
-		t.Fatalf("gate error=%v", err)
-	}
-	assertCompletionRolledBack(t, ctx, database.DB(), fixture)
+	for _, implementation := range []string{"gorm"} {
+		t.Run(implementation, func(t *testing.T) {
+			repository, database, ctx := newRetrievalTestStore(t, implementation)
+			completion := newCompletionTestStore(t, database, repository)
+			fixture := seedCompletionFixture(t, ctx, repository, database, 710)
+			if _, err := completion.CompleteReindexTx(ctx, fixture.Command); !completionPrerequisitePendingError(err) {
+				t.Fatalf("gate error=%v", err)
+			}
+			assertCompletionRolledBack(t, ctx, database.DB(), fixture)
 
-	if _, err := database.DB().Exec(ctx, `UPDATE change_control.writeback_execution SET
-		cleanup_completed_at=CURRENT_TIMESTAMP,version=version+1,updated_at=CURRENT_TIMESTAMP
-		WHERE id=$1 AND status='verifying'`, string(fixture.ExecutionID)); err != nil {
-		t.Fatal(err)
+			if _, err := database.DB().Exec(ctx, `UPDATE change_control.writeback_execution SET
+				cleanup_completed_at=CURRENT_TIMESTAMP,version=version+1,updated_at=CURRENT_TIMESTAMP
+				WHERE id=$1 AND status='verifying'`, string(fixture.ExecutionID)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := completion.CompleteReindexTx(ctx, fixture.Command); !completionPrerequisitePendingError(err) {
+				t.Fatalf("workflow gate error=%v", err)
+			}
+			assertCompletionRolledBack(t, ctx, database.DB(), fixture)
+		})
 	}
-	if _, err := repository.CompleteReindexTx(ctx, fixture.Command); !completionPrerequisitePendingError(err) {
-		t.Fatalf("workflow gate error=%v", err)
-	}
-	assertCompletionRolledBack(t, ctx, database.DB(), fixture)
 }
 
 func TestCompleteReindexTxSupportsV2HybridAndRejectsVersionKindMismatch(t *testing.T) {
 	t.Run("v2 hybrid", func(t *testing.T) {
 		repository, database, ctx := newRetrievalTestRepository(t)
-		fixture := seedCompletionFixture(t, ctx, repository, database.DB(), 712)
+		fixture := seedCompletionFixture(t, ctx, repository, database, 712)
 		upgradeCompletionFixtureToHybrid(t, ctx, database.DB(), fixture, 712)
 		satisfyCompletionGates(t, ctx, database.DB(), fixture)
 		result, err := repository.CompleteReindexTx(ctx, fixture.Command)
@@ -106,7 +114,7 @@ func TestCompleteReindexTxSupportsV2HybridAndRejectsVersionKindMismatch(t *testi
 
 	t.Run("v2 cannot complete fts only", func(t *testing.T) {
 		repository, database, ctx := newRetrievalTestRepository(t)
-		fixture := seedCompletionFixture(t, ctx, repository, database.DB(), 713)
+		fixture := seedCompletionFixture(t, ctx, repository, database, 713)
 		withReplicaRole(t, ctx, database.DB(), func(connection *pgxpool.Conn) {
 			if _, err := connection.Exec(ctx, `UPDATE retrieval.reindex_delivery SET regression_code=$2 WHERE id=$1`,
 				string(fixture.DeliveryID), domain.RegressionCodeSnapshotStructureV2); err != nil {
@@ -122,7 +130,7 @@ func TestCompleteReindexTxSupportsV2HybridAndRejectsVersionKindMismatch(t *testi
 
 	t.Run("v1 cannot complete hybrid", func(t *testing.T) {
 		repository, database, ctx := newRetrievalTestRepository(t)
-		fixture := seedCompletionFixture(t, ctx, repository, database.DB(), 714)
+		fixture := seedCompletionFixture(t, ctx, repository, database, 714)
 		upgradeCompletionFixtureToHybrid(t, ctx, database.DB(), fixture, 714)
 		withReplicaRole(t, ctx, database.DB(), func(connection *pgxpool.Conn) {
 			if _, err := connection.Exec(ctx, `UPDATE retrieval.reindex_delivery SET regression_code=$2 WHERE id=$1`,
@@ -140,7 +148,7 @@ func TestCompleteReindexTxSupportsV2HybridAndRejectsVersionKindMismatch(t *testi
 
 func TestCompleteReindexTxRequiresLatestFullFenceAndLiveDatabaseLease(t *testing.T) {
 	repository, database, ctx := newRetrievalTestRepository(t)
-	fixture := seedCompletionFixture(t, ctx, repository, database.DB(), 715)
+	fixture := seedCompletionFixture(t, ctx, repository, database, 715)
 	satisfyCompletionGates(t, ctx, database.DB(), fixture)
 	var unrelatedActivationID foundation.ID
 	if err := database.QueryRow(ctx, `SELECT id::text FROM retrieval.index_activation
@@ -172,60 +180,63 @@ func TestCompleteReindexTxRequiresLatestFullFenceAndLiveDatabaseLease(t *testing
 }
 
 func TestCompleteReindexTxRechecksLeaseAfterWorkspaceLockWait(t *testing.T) {
-	repository, database, ctx := newRetrievalTestRepository(t)
-	fixture := seedCompletionFixture(t, ctx, repository, database.DB(), 716)
-	satisfyCompletionGates(t, ctx, database.DB(), fixture)
-	withReplicaRole(t, ctx, database.DB(), func(connection *pgxpool.Conn) {
-		if _, err := connection.Exec(ctx, `UPDATE retrieval.reindex_delivery_attempt
-			SET lease_until=clock_timestamp() + interval '150 milliseconds' WHERE id=$1`, string(fixture.AttemptID)); err != nil {
-			t.Fatal(err)
-		}
-	})
-	lockTx, err := database.DB().Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
+	for _, implementation := range []string{"gorm"} {
+		t.Run(implementation, func(t *testing.T) {
+			repository, database, ctx := newRetrievalTestStore(t, implementation)
+			completion := newCompletionTestStore(t, database, repository)
+			fixture := seedCompletionFixture(t, ctx, repository, database, 716)
+			satisfyCompletionGates(t, ctx, database.DB(), fixture)
+			withReplicaRole(t, ctx, database.DB(), func(connection *pgxpool.Conn) {
+				if _, err := connection.Exec(ctx, `UPDATE retrieval.reindex_delivery_attempt
+					SET lease_until=clock_timestamp() + interval '150 milliseconds' WHERE id=$1`, string(fixture.AttemptID)); err != nil {
+					t.Fatal(err)
+				}
+			})
+			lockTx, err := database.DB().Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = lockTx.Rollback(ctx) }()
+			if _, err := lockTx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, string(fixture.WorkspaceID)); err != nil {
+				t.Fatal(err)
+			}
+			result := make(chan error, 1)
+			go func() {
+				_, completeErr := completion.CompleteReindexTx(ctx, fixture.Command)
+				result <- completeErr
+			}()
+			time.Sleep(250 * time.Millisecond)
+			if err := lockTx.Commit(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if err := <-result; completionErrorCode(err) != "REINDEX_LEASE_EXPIRED" {
+				t.Fatalf("completion after lock wait error=%v", err)
+			}
+			assertCompletionRolledBack(t, ctx, database.DB(), fixture)
+		})
 	}
-	defer func() { _ = lockTx.Rollback(ctx) }()
-	if _, err := lockTx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, string(fixture.WorkspaceID)); err != nil {
-		t.Fatal(err)
-	}
-	result := make(chan error, 1)
-	go func() {
-		_, completeErr := repository.CompleteReindexTx(ctx, fixture.Command)
-		result <- completeErr
-	}()
-	time.Sleep(250 * time.Millisecond)
-	if err := lockTx.Commit(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err := <-result; completionErrorCode(err) != "REINDEX_LEASE_EXPIRED" {
-		t.Fatalf("completion after lock wait error=%v", err)
-	}
-	assertCompletionRolledBack(t, ctx, database.DB(), fixture)
 }
 
 func TestCompleteReindexTxRechecksLeaseAtFinalMutation(t *testing.T) {
-	_, database, ctx := newRetrievalTestRepository(t)
-	baseRepository, err := NewRepository(database.DB())
-	if err != nil {
-		t.Fatal(err)
-	}
-	fixture := seedCompletionFixture(t, ctx, baseRepository, database.DB(), 717)
+	repository, database, ctx := newRetrievalTestRepository(t)
+	fixture := seedCompletionFixture(t, ctx, repository, database, 717)
 	satisfyCompletionGates(t, ctx, database.DB(), fixture)
 	withReplicaRole(t, ctx, database.DB(), func(connection *pgxpool.Conn) {
 		if _, err := connection.Exec(ctx, `UPDATE retrieval.reindex_delivery_attempt
-			SET lease_until=clock_timestamp() + interval '150 milliseconds' WHERE id=$1`, string(fixture.AttemptID)); err != nil {
+            SET lease_until=clock_timestamp() + interval '150 milliseconds' WHERE id=$1`, string(fixture.AttemptID)); err != nil {
 			t.Fatal(err)
 		}
 	})
-	delayedRepository, err := NewRepository(&completionDelayDB{
-		pool: database.DB(), match: "UPDATE retrieval.reindex_delivery_attempt", delay: 250 * time.Millisecond,
+	delayed := false
+	interceptCompletionMutation(t, database, "UPDATE retrieval.reindex_delivery_attempt", "", func(*gorm.DB) {
+		delayed = true
+		time.Sleep(250 * time.Millisecond)
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := delayedRepository.CompleteReindexTx(ctx, fixture.Command); completionErrorCode(err) != "REINDEX_LEASE_EXPIRED" {
+	if _, err := repository.CompleteReindexTx(ctx, fixture.Command); completionErrorCode(err) != "REINDEX_LEASE_EXPIRED" {
 		t.Fatalf("completion after mutation delay error=%v", err)
+	}
+	if !delayed {
+		t.Fatal("completion did not reach the final mutation delay")
 	}
 	assertCompletionRolledBack(t, ctx, database.DB(), fixture)
 }
@@ -234,26 +245,39 @@ func TestCompleteReindexTxFaultInjectionRollsBackEveryMutationStage(t *testing.T
 	stages := []struct {
 		name  string
 		match string
+		table string
+		owner bool
 	}{
-		{"activation receipt", "INSERT INTO retrieval.index_activation"},
-		{"previous retire", "UPDATE retrieval.index_version SET status='retiring'"},
-		{"target activate", "UPDATE retrieval.index_version SET status='active'"},
-		{"attempt succeeded", "UPDATE retrieval.reindex_delivery_attempt"},
-		{"delivery succeeded", "UPDATE retrieval.reindex_delivery SET"},
-		{"execution completed", "UPDATE change_control.writeback_execution SET"},
-		{"proposal completed", "UPDATE change_control.proposal SET"},
+		{name: "activation receipt", match: "INSERT INTO retrieval.index_activation"},
+		{name: "previous retire", match: "UPDATE retrieval.index_version SET status='retiring'"},
+		{name: "target activate", match: "UPDATE retrieval.index_version SET status='active'"},
+		{name: "attempt succeeded", match: "UPDATE retrieval.reindex_delivery_attempt"},
+		{name: "delivery succeeded", match: "UPDATE retrieval.reindex_delivery SET"},
+		{name: "execution completed", table: "writeback_execution"},
+		{name: "proposal completed", table: "proposal"},
+		{name: "gorm owner rollback", owner: true},
 	}
 	for index, stage := range stages {
 		t.Run(stage.name, func(t *testing.T) {
-			repository, database, ctx := newRetrievalTestRepository(t)
-			fixture := seedCompletionFixture(t, ctx, repository, database.DB(), 720+index)
+			repository, database, ctx := newRetrievalTestStore(t, "gorm")
+			fixture := seedCompletionFixture(t, ctx, repository, database, 720+index)
 			satisfyCompletionGates(t, ctx, database.DB(), fixture)
-			faultRepository, err := NewRepository(&completionFaultDB{pool: database.DB(), match: stage.match})
-			if err != nil {
-				t.Fatal(err)
+			completion := newCompletionTestStore(t, database, repository).(*GORMCompletionRepository)
+			fault := &completionFaultDB{ScopedReindexCompletion: completion.completion}
+			triggered := false
+			if stage.owner {
+				completion.completion = fault
+			} else {
+				interceptCompletionMutation(t, database, stage.match, stage.table, func(transaction *gorm.DB) {
+					triggered = true
+					transaction.AddError(errors.New("injected completion fault"))
+				})
 			}
-			if _, err := faultRepository.CompleteReindexTx(ctx, fixture.Command); err == nil {
+			if _, err := completion.CompleteReindexTx(ctx, fixture.Command); err == nil {
 				t.Fatal("fault injection must fail")
+			}
+			if stage.owner && !fault.ownerCompleted || !stage.owner && !triggered {
+				t.Fatal("completion failed before the requested mutation injection")
 			}
 			assertCompletionRolledBack(t, ctx, database.DB(), fixture)
 		})
@@ -273,6 +297,19 @@ type completionFixture struct {
 	OldActiveID   foundation.ID
 }
 
+func newCompletionTestStore(t *testing.T, pool *platformpostgres.Pool, _ retrievalTestStore) application.CompletionStore {
+	t.Helper()
+	owner, err := ccpostgres.NewGORMRepository(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completion, err := NewGORMCompletionRepository(pool, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return completion
+}
+
 func loadCompletionManifestChunk(t *testing.T, ctx context.Context, database *pgxpool.Pool, indexID foundation.ID) domain.ManifestChunk {
 	t.Helper()
 	var chunk domain.ManifestChunk
@@ -287,24 +324,17 @@ func loadCompletionManifestChunk(t *testing.T, ctx context.Context, database *pg
 	return chunk
 }
 
-func seedCompletionFixture(t *testing.T, ctx context.Context, repository *Repository, database *pgxpool.Pool, ordinal int) completionFixture {
+func seedCompletionFixture(t *testing.T, ctx context.Context, repository retrievalTestStore, pool *platformpostgres.Pool, ordinal int) completionFixture {
 	t.Helper()
-	writeback := seedDispatcherWriteback(t, ctx, database, "", "complete-"+string(rune(ordinal)))
+	database := pool.DB()
+	writeback := seedDispatcherWriteback(t, ctx, pool, "", "complete-"+string(rune(ordinal)))
 	var runID, nodeID, proposalID foundation.ID
 	var resultHash string
 	if err := database.QueryRow(ctx, `SELECT workflow_run_id::text,node_run_id::text,proposal_id::text,result_hash
 		FROM change_control.writeback_execution WHERE id=$1`, string(writeback.ExecutionID)).Scan(&runID, &nodeID, &proposalID, &resultHash); err != nil {
 		t.Fatal(err)
 	}
-	withReplicaRole(t, ctx, database, func(connection *pgxpool.Conn) {
-		if _, err := connection.Exec(ctx, `UPDATE change_control.proposal SET workflow_run_id=$2 WHERE id=$1`, string(proposalID), string(runID)); err != nil {
-			t.Fatal(err)
-		}
-	})
-	dispatcher, err := NewDispatcher(database, foundation.NewUUIDGenerator(nil), &dispatcherInserterFake{})
-	if err != nil {
-		t.Fatal(err)
-	}
+	dispatcher := newGORMTestDispatcher(t, pool, nil)
 	if err := dispatcher.DispatchBatch(ctx, 1); err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +342,8 @@ func seedCompletionFixture(t *testing.T, ctx context.Context, repository *Reposi
 	if err := database.QueryRow(ctx, `SELECT id::text FROM retrieval.reindex_delivery WHERE outbox_event_id=$1`, string(writeback.EventID)).Scan(&deliveryID); err != nil {
 		t.Fatal(err)
 	}
-	deliveryRepository, err := NewDeliveryRepository(database, &deliveryRuntimeIDs{values: []foundation.ID{snapshotID(ordinal + 100_000)}})
+	ids := &deliveryRuntimeIDs{values: []foundation.ID{snapshotID(ordinal + 100_000)}}
+	deliveryRepository, err := NewGORMDeliveryRepository(pool, ids)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -320,8 +351,12 @@ func seedCompletionFixture(t *testing.T, ctx context.Context, repository *Reposi
 	if err != nil {
 		t.Fatal(err)
 	}
+	var riverJobID int64
+	if err := database.QueryRow(ctx, `SELECT id FROM workflow.river_job WHERE args->>'delivery_id'=$1`, string(deliveryID)).Scan(&riverJobID); err != nil {
+		t.Fatal(err)
+	}
 	claimed, err := runtime.Claim(ctx, application.DeliveryClaimCommand{
-		DeliveryID: deliveryID, DispatchNo: 1, RiverJobID: int64(ordinal + 1), RiverAttempt: 1,
+		DeliveryID: deliveryID, DispatchNo: 1, RiverJobID: riverJobID, RiverAttempt: 1,
 		DeliveryKey: "completion-delivery-" + string(deliveryID), LeaseOwner: "completion-worker", LeaseDuration: 10 * time.Minute,
 	})
 	if err != nil {
@@ -529,95 +564,70 @@ func assertCompletionRolledBack(t *testing.T, ctx context.Context, database *pgx
 }
 
 type completionFaultDB struct {
-	pool  *pgxpool.Pool
-	match string
+	application.ScopedReindexCompletion
+	ownerCompleted bool
 }
 
-type completionDelayDB struct {
-	pool  *pgxpool.Pool
-	match string
-	delay time.Duration
+// owner 的两次 CAS 已执行后再失败，验证 Activation、Delivery 与两个 owner 写入共同回滚。
+func (database *completionFaultDB) CompleteReindexScoped(ctx context.Context, scope foundation.TransactionScope, transition application.ReindexCompletionTransition) error {
+	if err := database.ScopedReindexCompletion.CompleteReindexScoped(ctx, scope, transition); err != nil {
+		return err
+	}
+	database.ownerCompleted = true
+	return errors.New("injected completion fault")
 }
 
-func (database *completionDelayDB) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
-	return database.pool.QueryRow(ctx, sql, args...)
-}
-
-func (database *completionDelayDB) Begin(ctx context.Context) (pgx.Tx, error) {
-	tx, err := database.pool.Begin(ctx)
+// 每个测试有独立 GORM root，拦截真实 mutation，清理时移除 callback。
+func interceptCompletionMutation(t *testing.T, pool *platformpostgres.Pool, match, table string, inject func(*gorm.DB)) {
+	t.Helper()
+	root, err := pool.GORM()
 	if err != nil {
-		return nil, err
+		t.Fatal(err)
 	}
-	return &completionDelayTx{Tx: tx, match: database.match, delay: database.delay}, nil
-}
-
-type completionDelayTx struct {
-	pgx.Tx
-	match string
-	delay time.Duration
-}
-
-func (tx *completionDelayTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
-	if strings.Contains(sql, tx.match) {
-		time.Sleep(tx.delay)
+	intercept := func(transaction *gorm.DB) {
+		query := strings.Join(strings.Fields(transaction.Statement.SQL.String()), " ")
+		if match != "" && strings.Contains(query, match) {
+			inject(transaction)
+		}
 	}
-	return tx.Tx.QueryRow(ctx, sql, args...)
-}
-
-func (database *completionFaultDB) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
-	return database.pool.QueryRow(ctx, sql, args...)
-}
-
-func (database *completionFaultDB) Begin(ctx context.Context) (pgx.Tx, error) {
-	tx, err := database.pool.Begin(ctx)
-	if err != nil {
-		return nil, err
+	interceptUpdate := func(transaction *gorm.DB) {
+		if table != "" && transaction.Statement.Table == table {
+			inject(transaction)
+		}
 	}
-	return &completionFaultTx{Tx: tx, match: database.match}, nil
-}
-
-type completionFaultTx struct {
-	pgx.Tx
-	match string
-}
-
-func (tx *completionFaultTx) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
-	if strings.Contains(sql, tx.match) {
-		return pgconn.CommandTag{}, errors.New("injected completion fault")
+	const name = "retrieval_test_completion_mutation"
+	if err := root.Callback().Row().Before("gorm:row").Register(name, intercept); err != nil {
+		t.Fatal(err)
 	}
-	return tx.Tx.Exec(ctx, sql, args...)
-}
-
-func (tx *completionFaultTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
-	if strings.Contains(sql, tx.match) {
-		return completionFaultRow{}
+	if err := root.Callback().Raw().Before("gorm:raw").Register(name, intercept); err != nil {
+		t.Fatal(err)
 	}
-	return tx.Tx.QueryRow(ctx, sql, args...)
+	if err := root.Callback().Update().Before("gorm:update").Register(name, interceptUpdate); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		for _, err := range []error{root.Callback().Row().Remove(name), root.Callback().Raw().Remove(name), root.Callback().Update().Remove(name)} {
+			if err != nil {
+				t.Errorf("remove completion mutation callback: %v", err)
+			}
+		}
+	})
 }
-
-type completionFaultRow struct{}
-
-func (completionFaultRow) Scan(...any) error { return errors.New("injected completion fault") }
 
 type completionResponseLossDB struct {
-	pool *pgxpool.Pool
+	foundation.UnitOfWork
 	lose bool
 }
 
-func (database *completionResponseLossDB) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
-	return database.pool.QueryRow(ctx, sql, args...)
-}
-
-func (database *completionResponseLossDB) Begin(ctx context.Context) (pgx.Tx, error) {
-	tx, err := database.pool.Begin(ctx)
-	if err != nil {
-		return nil, err
+func (database *completionResponseLossDB) Within(ctx context.Context, options foundation.TransactionOptions, work foundation.TransactionFunc) error {
+	if err := database.UnitOfWork.Within(ctx, options, work); err != nil {
+		return err
 	}
 	if database.lose {
 		database.lose = false
-		return &responseLossTx{Tx: tx}, nil
+		return errors.New("commit response lost")
 	}
-	return tx, nil
+	return nil
 }
 
 func completionErrorCode(err error) string {

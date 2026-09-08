@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/app"
+	changecontrolpostgres "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	ingestionpostgres "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/adapter/postgres"
 	ingestionworkspace "github.com/CodeZen-Lizhi/zhixu/internal/ingestion/adapter/workspace"
@@ -29,12 +30,14 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/gitcli"
 	platformmodels "github.com/CodeZen-Lizhi/zhixu/internal/platform/models"
 	platformparser "github.com/CodeZen-Lizhi/zhixu/internal/platform/parser"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	retrievalpostgres "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/adapter/postgres"
 	reindexriver "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/adapter/river"
 	retrievalworkspace "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/adapter/workspace"
 	retrievalapplication "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/application"
 	retrievaldomain "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
 	retrievalhttp "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/http"
+	workflowpostgres "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/postgres"
 	workflowriver "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
 	workspacepostgres "github.com/CodeZen-Lizhi/zhixu/internal/workspace/adapter/postgres"
 	workspaceapplication "github.com/CodeZen-Lizhi/zhixu/internal/workspace/application"
@@ -50,10 +53,11 @@ const (
 func runReindexRiverFaultSmoke(
 	t *testing.T,
 	ctx context.Context,
-	pool *pgxpool.Pool,
-	workspaceRepository *workspacepostgres.Repository,
+	platform *platformpostgres.Pool,
+	workspaceRepository *workspacepostgres.GORMRepository,
+	changeRepository *changecontrolpostgres.GORMRepository,
 	committedGit *gitcli.WritebackClient,
-	insertClient *workflowriver.Client,
+	enqueueFence workflowriver.ScopedEnqueueFence,
 	workspaceID foundation.ID,
 	executionID foundation.ID,
 	root string,
@@ -61,6 +65,11 @@ func runReindexRiverFaultSmoke(
 	approvedContent string,
 ) {
 	t.Helper()
+	pool := platform.DB()
+	database, err := platform.GORM()
+	if err != nil {
+		t.Fatal(err)
+	}
 	driftContent := []byte("# Approval River Smoke\n\nworktree drift after committed writeback\n")
 	if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(targetPath)), driftContent, 0o644); err != nil {
 		t.Fatal(err)
@@ -72,7 +81,7 @@ func runReindexRiverFaultSmoke(
 	workspaceService := workspaceapplication.NewService(workspaceapplication.Dependencies{
 		Repository: workspaceRepository, CommittedFiles: files, CommittedGit: committedGit, IDs: ids, Clock: clock,
 	})
-	ingestionRepository, err := ingestionpostgres.NewRepository(pool)
+	ingestionRepository, err := ingestionpostgres.NewGORMRepository(database)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +102,7 @@ func runReindexRiverFaultSmoke(
 	if err != nil {
 		t.Fatal(err)
 	}
-	retrievalRepository, err := retrievalpostgres.NewRepository(pool)
+	retrievalRepository, err := retrievalpostgres.NewGORMRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +143,7 @@ func runReindexRiverFaultSmoke(
 	embeddingVersionID := registered.EmbeddingVersion.ID
 	processorOptions.EmbeddingVersionID = &embeddingVersionID
 	processorOptions.FusionConfig = fusion
-	deliveryRepository, err := retrievalpostgres.NewDeliveryRepository(pool, ids)
+	deliveryRepository, err := retrievalpostgres.NewGORMDeliveryRepository(platform, ids)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,17 +160,22 @@ func runReindexRiverFaultSmoke(
 	if err != nil {
 		t.Fatal(err)
 	}
-	completionService, err := retrievalapplication.NewCompletionService(retrievalRepository, ids, 100*time.Millisecond)
+	completionRepository, err := retrievalpostgres.NewGORMCompletionRepository(platform, changeRepository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completionService, err := retrievalapplication.NewCompletionService(completionRepository, ids, 100*time.Millisecond)
 	if err != nil {
 		t.Fatal(err)
 	}
 	faultCompletion := &reindexCompletionResponseLoss{service: completionService, lose: true}
 
-	reindexInserter, err := reindexriver.NewInserter(insertClient)
+	outbox, err := workflowpostgres.NewGORMReindexOutbox(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
-	dispatcher, err := retrievalpostgres.NewDispatcher(pool, ids, reindexInserter)
+	riverOptions := workflowriver.DefaultOptions()
+	dispatcher, err := retrievalpostgres.NewGORMDispatcher(platform, ids, riverOptions, enqueueFence, outbox, changeRepository)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,8 +199,7 @@ func runReindexRiverFaultSmoke(
 		if err := reindexriver.AddWorkerSafely(workers, worker); err != nil {
 			t.Fatal(err)
 		}
-		options := workflowriver.DefaultOptions()
-		options.Queue = insertClient.Queue()
+		options := riverOptions
 		options.MaxWorkers = 1
 		options.JobTimeout = 20 * time.Second
 		options.RescueStuckJobsAfter = 30 * time.Second
@@ -232,7 +245,7 @@ func runReindexRiverFaultSmoke(
 	waitForReindexCompletion(t, waitContext, pool, deliveryID, jobID)
 	assertReindexFaultSmokePayloadsClean(t, ctx, pool, deliveryID, jobID, logs.String(), root, targetPath, approvedContent)
 	assertReindexFaultSmokeFacts(t, ctx, pool, workspaceID, executionID, deliveryID, root, targetPath, approvedContent, driftContent)
-	assertHybridReindexAndSearchSmoke(t, ctx, pool, embedder, workspaceID, deliveryID, registered.EmbeddingVersion.ID, providerCalls)
+	assertHybridReindexAndSearchSmoke(t, ctx, platform, embedder, workspaceID, deliveryID, registered.EmbeddingVersion.ID, providerCalls)
 }
 
 func newReindexFaultSmokeWorker(
@@ -649,7 +662,7 @@ func newReindexSmokeEmbedder(t *testing.T) (retrievalapplication.Embedder, func(
 func assertHybridReindexAndSearchSmoke(
 	t *testing.T,
 	ctx context.Context,
-	pool *pgxpool.Pool,
+	platform *platformpostgres.Pool,
 	embedder retrievalapplication.Embedder,
 	workspaceID foundation.ID,
 	deliveryID foundation.ID,
@@ -657,6 +670,7 @@ func assertHybridReindexAndSearchSmoke(
 	providerCalls *atomic.Int32,
 ) {
 	t.Helper()
+	pool := platform.DB()
 	var indexID, persistedEmbeddingID foundation.ID
 	var degraded, regressionCode string
 	var readyVectors, cacheRows int64
@@ -678,7 +692,7 @@ func assertHybridReindexAndSearchSmoke(
 		t.Fatalf("hybrid index=%s embedding=%s degraded=%s regression=%s vectors=%d cache=%d",
 			indexID, persistedEmbeddingID, degraded, regressionCode, readyVectors, cacheRows)
 	}
-	searchRepository, err := retrievalpostgres.NewSearchRepository(pool)
+	searchRepository, err := retrievalpostgres.NewGORMSearchRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -686,7 +700,7 @@ func assertHybridReindexAndSearchSmoke(
 	if err != nil {
 		t.Fatal(err)
 	}
-	workspaceRepository, err := workspacepostgres.NewRepository(pool)
+	workspaceRepository, err := workspacepostgres.NewGORMRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}

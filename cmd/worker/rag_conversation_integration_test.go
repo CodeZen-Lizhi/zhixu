@@ -39,15 +39,14 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	knowledgepostgres "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/adapter/postgres"
 	knowledgeapplication "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/application"
-	memorypostgres "github.com/CodeZen-Lizhi/zhixu/internal/memory/adapter/postgres"
 	memoryapplication "github.com/CodeZen-Lizhi/zhixu/internal/memory/application"
 	memorydomain "github.com/CodeZen-Lizhi/zhixu/internal/memory/domain"
 	platformfilesystem "github.com/CodeZen-Lizhi/zhixu/internal/platform/filesystem"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	retrievalpostgres "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/adapter/postgres"
 	retrievalworkspace "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/adapter/workspace"
 	retrievalapplication "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/application"
 	toolcatalog "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/catalog"
-	toolpostgres "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/postgres"
 	toolretrieval "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/retrieval"
 	toolsapplication "github.com/CodeZen-Lizhi/zhixu/internal/tools/application"
 	toolsdomain "github.com/CodeZen-Lizhi/zhixu/internal/tools/domain"
@@ -81,9 +80,6 @@ const (
 // TestPublicConversationRunsThroughRiverRAGAndFeedback proves the full durable product path without bypassing the finalizer.
 func TestPublicConversationRunsThroughRiverRAGAndFeedback(t *testing.T) {
 	baseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
-	if baseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL for the RAG Conversation integration gate")
-	}
 	runRAGConversationIntegration(t, baseURL, newRAGIntegrationScenario(t))
 }
 
@@ -124,11 +120,12 @@ func runRAGConversationIntegration(
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
-	pool := newMigratedWorkerTestPool(t, baseURL)
-	seedRAGConversationKnowledge(t, ctx, pool, t.TempDir())
+	database := newMigratedWorkerTestPool(t, baseURL)
+	pool := database.DB()
+	seedRAGConversationKnowledge(t, ctx, database, t.TempDir())
 
 	model := &ragRequestAwareModel{}
-	router, workerClient, runtimeWorker, eventStore := newRAGConversationIntegrationRuntime(t, pool, model, scenario)
+	router, workerClient, runtimeWorker, eventStore := newRAGConversationIntegrationRuntime(t, database, model, scenario)
 	server := httptest.NewServer(router)
 	defer server.Close()
 	if err := workerClient.Start(ctx); err != nil {
@@ -225,27 +222,24 @@ func (scheduler *ragIntegrationTrackingRAGScheduler) Schedule(ctx context.Contex
 
 func newRAGConversationIntegrationRuntime(
 	t *testing.T,
-	pool *pgxpool.Pool,
+	pool *platformpostgres.Pool,
 	model *ragRequestAwareModel,
 	scenario ragIntegrationScenario,
-) (http.Handler, *riveradapter.Client, *riveradapter.RuntimeNodeWorker, *eventspostgres.Store) {
+) (http.Handler, *riveradapter.Client, *riveradapter.RuntimeNodeWorker, *eventspostgres.GORMStore) {
 	t.Helper()
-	events, err := eventspostgres.NewStore(pool)
+	events, err := eventspostgres.NewGORMStore(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
-	conversationRepository, err := conversationpostgres.NewRepository(pool, events)
+	conversationRepository, err := conversationpostgres.NewGORMRepository(pool, events)
 	if err != nil {
 		t.Fatal(err)
 	}
-	agentRepository, err := agentpostgres.NewRepository(pool)
+	agentRepository, err := agentpostgres.NewGORMRepository(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
-	memoryRepository, err := memorypostgres.NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
+	memoryRepository := newWorkerTestMemoryRepository(t, pool)
 	memoryService, err := memoryapplication.NewService(memoryapplication.Dependencies{
 		Repository: memoryRepository,
 		IDs:        foundation.NewUUIDGenerator(nil),
@@ -259,7 +253,7 @@ func newRAGConversationIntegrationRuntime(
 	if err != nil {
 		t.Fatal(err)
 	}
-	knowledgeRepository, err := knowledgepostgres.NewRepository(pool)
+	knowledgeRepository, err := knowledgepostgres.NewGORMRepository(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,11 +269,11 @@ func newRAGConversationIntegrationRuntime(
 	if err != nil {
 		t.Fatal(err)
 	}
-	workspaceRepository, err := workspacepostgres.NewRepository(pool)
+	workspaceRepository, err := workspacepostgres.NewGORMRepository(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
-	searchRepository, err := retrievalpostgres.NewSearchRepository(pool)
+	searchRepository, err := retrievalpostgres.NewGORMSearchRepository(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -307,11 +301,11 @@ func newRAGConversationIntegrationRuntime(
 	if err != nil {
 		t.Fatal(err)
 	}
-	finalizer, err := conversationpostgres.NewAnswerFinalizer(pool, agentRepository, events, foundation.SystemClock{})
+	finalizer, err := conversationpostgres.NewGORMAnswerFinalizer(pool, agentRepository, events, foundation.SystemClock{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	progress, err := agentpostgres.NewRAGProgressStore(pool, events)
+	progress, err := agentpostgres.NewGORMRAGProgressStore(pool, events)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -320,7 +314,7 @@ func newRAGConversationIntegrationRuntime(
 	if err != nil {
 		t.Fatal(err)
 	}
-	draftStreams, err := conversationpostgres.NewDraftStreamRepository(pool)
+	draftStreams, err := conversationpostgres.NewGORMDraftStreamRepository(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -366,10 +360,7 @@ func newRAGConversationIntegrationRuntime(
 	if err := executionRegistry.Freeze(); err != nil {
 		t.Fatal(err)
 	}
-	toolRepository, err := toolpostgres.NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
+	toolRepository := newWorkerTestToolRepository(t, pool)
 	toolExecution, err := toolsapplication.NewExecutionService(
 		executionRegistry, toolRepository, toolRepository, foundation.NewUUIDGenerator(nil), foundation.SystemClock{},
 	)
@@ -403,15 +394,9 @@ func newRAGConversationIntegrationRuntime(
 	if err := executors.Freeze(); err != nil {
 		t.Fatal(err)
 	}
-	insertClient, err := riveradapter.NewClient(pool, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	inserter, err := riveradapter.NewJobInserter(insertClient)
-	if err != nil {
-		t.Fatal(err)
-	}
-	runtimeRepository, err := workflowpostgres.NewRuntimeRepository(pool, inserter)
+	runtimeRepository, err := workflowpostgres.NewGORMRuntimeRepositoryWithHooks(
+		pool, riveradapter.DefaultOptions(), riveradapter.NewStaticScopedEnqueueFence(), workflowpostgres.GORMRuntimeRepositoryHooks{},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -427,11 +412,11 @@ func newRAGConversationIntegrationRuntime(
 	if err := riveradapter.AddRuntimeWorkerSafely(workers, runtimeWorker); err != nil {
 		t.Fatal(err)
 	}
-	workerClient, err := riveradapter.NewClient(pool, workers)
+	workerClient, err := riveradapter.NewClient(pool.DB(), workers)
 	if err != nil {
 		t.Fatal(err)
 	}
-	dispatcher, err := conversationpostgres.NewQuestionDispatcher(pool, runtimeRepository, events, foundation.NewUUIDGenerator(nil), foundation.SystemClock{})
+	dispatcher, err := conversationpostgres.NewGORMQuestionDispatcher(pool, runtimeRepository, events, foundation.NewUUIDGenerator(nil), foundation.SystemClock{})
 	if err != nil {
 		t.Fatal(err)
 	}

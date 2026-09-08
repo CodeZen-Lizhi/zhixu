@@ -2,7 +2,6 @@ package postgres
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,66 +13,13 @@ import (
 	artifactapp "github.com/CodeZen-Lizhi/zhixu/internal/artifact/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/artifact/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	"github.com/jackc/pgx/v5"
 )
-
-const stateSelect = `SELECT
-	a.id::text,a.workspace_id::text,a.artifact_type,a.title,a.status,a.scope_definition,a.source_coverage,a.current_revision_id::text,a.version,a.created_at,a.updated_at,
-	r.id::text,r.artifact_id::text,r.revision_no,r.outline,r.sections,r.created_by_type,r.generation_metadata,r.content_hash,r.created_at,r.coverage,r.missing,r.conflicts,r.content_markdown,r.provenance
-	FROM learning.artifact a
-	JOIN learning.artifact_revision r ON r.id=a.current_revision_id AND r.workspace_id=a.workspace_id AND r.artifact_id=a.id`
 
 const revisionSelect = `SELECT
 	r.id::text,r.artifact_id::text,r.revision_no,r.outline,r.sections,r.created_by_type,r.generation_metadata,r.content_hash,r.created_at,r.coverage,r.missing,r.conflicts,r.content_markdown,r.provenance
 	FROM learning.artifact_revision r`
 
-type queryer interface {
-	QueryRow(context.Context, string, ...any) pgx.Row
-}
-
 type stateScanner interface{ Scan(...any) error }
-
-func loadState(ctx context.Context, db queryer, workspaceID, artifactID foundation.ID, lock bool) (artifactapp.State, error) {
-	return loadStateWithVisibility(ctx, db, workspaceID, artifactID, lock, false)
-}
-
-func loadVisibleState(ctx context.Context, db queryer, workspaceID, artifactID foundation.ID) (artifactapp.State, error) {
-	return loadStateWithVisibility(ctx, db, workspaceID, artifactID, false, true)
-}
-
-func loadStateWithVisibility(ctx context.Context, db queryer, workspaceID, artifactID foundation.ID, lock, hideHeld bool) (artifactapp.State, error) {
-	sql := stateSelect + ` WHERE a.workspace_id=$1 AND a.id=$2 AND a.domain_schema_version='artifact/v1' AND r.domain_schema_version IN ('artifact-revision/v1','artifact-revision/v2')`
-	if hideHeld {
-		sql += ` AND NOT EXISTS (
-			SELECT 1 FROM learning.artifact_visibility_hold h
-			WHERE h.workspace_id=a.workspace_id AND h.artifact_id=a.id
-		)`
-	}
-	if lock {
-		sql += ` FOR UPDATE OF a`
-	}
-	state, err := scanState(db.QueryRow(ctx, sql, string(workspaceID), string(artifactID)))
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return artifactapp.State{}, err
-		}
-		return artifactapp.State{}, classify(err)
-	}
-	return state, nil
-}
-
-func loadRevision(ctx context.Context, db queryer, workspaceID, artifactID, revisionID foundation.ID) (domain.Revision, error) {
-	revision, err := scanRevision(db.QueryRow(ctx, revisionSelect+`
-		WHERE r.workspace_id=$1 AND r.artifact_id=$2 AND r.id=$3 AND r.domain_schema_version IN ('artifact-revision/v1','artifact-revision/v2')`,
-		string(workspaceID), string(artifactID), string(revisionID)))
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return domain.Revision{}, err
-		}
-		return domain.Revision{}, classify(err)
-	}
-	return revision, nil
-}
 
 type persistedRevision struct {
 	revision                              domain.Revision
@@ -233,71 +179,9 @@ func marshalJSON(value any) []byte {
 	return encoded
 }
 
-func insertRevision(ctx context.Context, tx pgx.Tx, workspaceID foundation.ID, revision domain.Revision) error {
-	coverage := coverageFromSections(revision.Sections)
-	metadata := any(nil)
-	if revision.Metadata != nil {
-		metadata = marshalJSON(revision.Metadata)
-	}
-	schemaVersion, err := domain.RevisionSchemaVersion(revision)
-	if err != nil {
-		return inconsistent(fmt.Errorf("select artifact revision schema: %w", err))
-	}
-	_, err = tx.Exec(ctx, `
-		INSERT INTO learning.artifact_revision(
-			id,artifact_id,workspace_id,revision_no,status,outline,sections,coverage,missing,conflicts,content_markdown,provenance,
-			domain_schema_version,content_hash,created_by_type,generation_metadata,created_at
-		) VALUES($1,$2,$3,$4,'SNAPSHOT',$5,$6,$7,'[]'::jsonb,'[]'::jsonb,$8,$9,$10,$11,$12,$13,$14)`,
-		string(revision.ID), string(revision.ArtifactID), string(workspaceID), revision.RevisionNo, marshalJSON(revision.Outline), marshalJSON(revision.Sections), marshalJSON(coverage), markdownFromSections(revision.Sections), marshalJSON(map[string]string{"schema_version": schemaVersion}), schemaVersion, revision.ContentHash, string(revision.CreatedBy), metadata, revision.CreatedAt.UTC())
-	if err != nil {
-		return classify(err)
-	}
-	return insertRevisionCitationSelectors(ctx, tx, workspaceID, revision)
-}
-
 type revisionCitationSelector struct {
 	sourceVersionID foundation.ID
 	sourceSpanID    foundation.ID
-}
-
-func insertRevisionCitationSelectors(ctx context.Context, tx pgx.Tx, workspaceID foundation.ID, revision domain.Revision) error {
-	var enabled bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(
-		SELECT 1 FROM core.schema_meta WHERE key='timeline_impact' AND value='m7-v2'
-	)`).Scan(&enabled); err != nil {
-		return classify(err)
-	}
-	if !enabled {
-		return nil
-	}
-
-	selectors := revisionCitationSelectors(revision)
-	if len(selectors) > 0 {
-		sourceVersionIDs := make([]string, len(selectors))
-		sourceSpanIDs := make([]string, len(selectors))
-		for index, selector := range selectors {
-			sourceVersionIDs[index] = string(selector.sourceVersionID)
-			sourceSpanIDs[index] = string(selector.sourceSpanID)
-		}
-		_, err := tx.Exec(ctx, `INSERT INTO learning.artifact_revision_citation_selector(
-			workspace_id,artifact_id,revision_id,source_version_id,source_span_id
-		)
-		SELECT $1,$2,$3,citation.source_version_id,citation.source_span_id
-		FROM unnest($4::uuid[],$5::uuid[]) AS citation(source_version_id,source_span_id)
-		ON CONFLICT (workspace_id,revision_id,source_version_id,source_span_id) DO NOTHING`,
-			string(workspaceID), string(revision.ArtifactID), string(revision.ID), sourceVersionIDs, sourceSpanIDs)
-		if err != nil {
-			return classify(err)
-		}
-	}
-	validated, err := validateRevisionCitationSelectors(ctx, tx, workspaceID, []domain.Revision{revision})
-	if err != nil {
-		return err
-	}
-	if validated != len(selectors) {
-		return inconsistent(errors.New("artifact citation selector insert count is inconsistent"))
-	}
-	return nil
 }
 
 func revisionCitationSelectors(revision domain.Revision) []revisionCitationSelector {
@@ -325,49 +209,6 @@ func revisionCitationSelectors(revision domain.Revision) []revisionCitationSelec
 		selectors[index] = selectorsByKey[key]
 	}
 	return selectors
-}
-
-func validateRevisionCitationSelectors(ctx context.Context, tx pgx.Tx, workspaceID foundation.ID, revisions []domain.Revision) (int, error) {
-	expected := make(map[string]struct{})
-	revisionIDs := make([]string, len(revisions))
-	for index, revision := range revisions {
-		revisionIDs[index] = string(revision.ID)
-		for _, selector := range revisionCitationSelectors(revision) {
-			expected[citationSelectorIdentity(revision.ArtifactID, revision.ID, selector.sourceVersionID, selector.sourceSpanID)] = struct{}{}
-		}
-	}
-	rows, err := tx.Query(ctx, `SELECT artifact_id::text,revision_id::text,source_version_id::text,source_span_id::text
-		FROM learning.artifact_revision_citation_selector
-		WHERE workspace_id=$1 AND revision_id=ANY($2::uuid[])
-		ORDER BY artifact_id,revision_id,source_version_id,source_span_id`, string(workspaceID), revisionIDs)
-	if err != nil {
-		return 0, classify(err)
-	}
-	defer rows.Close()
-	actual := make(map[string]struct{}, len(expected))
-	for rows.Next() {
-		var artifactID, revisionID, sourceVersionID, sourceSpanID string
-		if err := rows.Scan(&artifactID, &revisionID, &sourceVersionID, &sourceSpanID); err != nil {
-			return 0, classify(err)
-		}
-		key := citationSelectorIdentity(foundation.ID(artifactID), foundation.ID(revisionID), foundation.ID(sourceVersionID), foundation.ID(sourceSpanID))
-		if _, duplicate := actual[key]; duplicate {
-			return 0, inconsistent(errors.New("artifact citation selector validation found a duplicate"))
-		}
-		actual[key] = struct{}{}
-	}
-	if err := rows.Err(); err != nil {
-		return 0, classify(err)
-	}
-	if len(actual) != len(expected) {
-		return 0, inconsistent(fmt.Errorf("artifact citation selector validation count mismatch: expected %d, got %d", len(expected), len(actual)))
-	}
-	for key := range expected {
-		if _, found := actual[key]; !found {
-			return 0, inconsistent(errors.New("artifact citation selector validation found a binding mismatch"))
-		}
-	}
-	return len(expected), nil
 }
 
 func citationSelectorIdentity(artifactID, revisionID, sourceVersionID, sourceSpanID foundation.ID) string {
@@ -398,29 +239,6 @@ type commandReceipt struct {
 	CommandType     artifactapp.CommandType   `json:"command_type"`
 	ExpectedVersion int64                     `json:"expected_version"`
 	Result          artifactapp.CommandResult `json:"result"`
-}
-
-type receiptDB interface {
-	QueryRow(context.Context, string, ...any) pgx.Row
-}
-
-func loadReceipt(ctx context.Context, db receiptDB, workspaceID foundation.ID, key string) (commandReceipt, bool, error) {
-	var raw []byte
-	err := db.QueryRow(ctx, `SELECT response FROM learning.artifact_command WHERE workspace_id=$1 AND idempotency_key=$2`, string(workspaceID), key).Scan(&raw)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return commandReceipt{}, false, nil
-	}
-	if err != nil {
-		return commandReceipt{}, false, classify(err)
-	}
-	var receipt commandReceipt
-	if err := decodeJSON(raw, &receipt); err != nil {
-		return commandReceipt{}, false, inconsistent(fmt.Errorf("decode artifact command receipt: %w", err))
-	}
-	if err := receipt.validate(); err != nil {
-		return commandReceipt{}, false, err
-	}
-	return receipt, true, nil
 }
 
 func (receipt commandReceipt) matches(binding artifactapp.CommandBinding) error {
@@ -454,32 +272,4 @@ func (receipt commandReceipt) validate() error {
 
 func commandResult(state artifactapp.State, binding artifactapp.CommandBinding, export *artifactapp.ExportRecord, publication *artifactapp.PublicationRecord) artifactapp.CommandResult {
 	return artifactapp.CommandResult{State: state, CommandVersion: state.Artifact.Version, RequestHash: binding.RequestHash, CommandType: binding.CommandType, Export: export, Publication: publication}
-}
-
-func insertReceipt(ctx context.Context, tx pgx.Tx, binding artifactapp.CommandBinding, result artifactapp.CommandResult) (artifactapp.CommandResult, error) {
-	receipt := commandReceipt{SchemaVersion: artifactReceiptSchemaVersion, WorkspaceID: binding.WorkspaceID, ArtifactID: result.State.Artifact.ID, IdempotencyKey: binding.IdempotencyKey, RequestHash: binding.RequestHash, CommandType: binding.CommandType, ExpectedVersion: binding.ExpectedVersion, Result: result}
-	if err := receipt.validate(); err != nil {
-		return artifactapp.CommandResult{}, err
-	}
-	_, err := tx.Exec(ctx, `INSERT INTO learning.artifact_command(workspace_id,idempotency_key,request_hash,command_type,artifact_id,artifact_version,response,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, string(binding.WorkspaceID), binding.IdempotencyKey, binding.RequestHash, string(binding.CommandType), string(result.State.Artifact.ID), result.CommandVersion, marshalJSON(receipt), result.State.Artifact.UpdatedAt.UTC())
-	if err != nil {
-		return artifactapp.CommandResult{}, classify(err)
-	}
-	return result, nil
-}
-
-func insertExport(ctx context.Context, tx pgx.Tx, record artifactapp.ExportRecord) error {
-	_, err := tx.Exec(ctx, `INSERT INTO learning.artifact_export(id,workspace_id,artifact_id,revision_id,artifact_version,revision_no,revision_hash,output_path,output_hash,output_size,exported_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, string(record.ID), string(record.WorkspaceID), string(record.ArtifactID), string(record.RevisionID), record.ArtifactVersion, record.RevisionNo, record.RevisionHash, record.OutputPath, record.OutputHash, record.OutputSize, record.ExportedAt.UTC())
-	if err != nil {
-		return classify(err)
-	}
-	return nil
-}
-
-func insertPublication(ctx context.Context, tx pgx.Tx, record artifactapp.PublicationRecord) error {
-	_, err := tx.Exec(ctx, `INSERT INTO learning.artifact_publication(artifact_id,workspace_id,revision_id,artifact_version,revision_no,content_hash,proposal_id,idempotency_key,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, string(record.ArtifactID), string(record.WorkspaceID), string(record.RevisionID), record.ArtifactVersion, record.RevisionNo, record.ContentHash, string(record.ProposalID), record.IdempotencyKey, record.CreatedAt.UTC())
-	if err != nil {
-		return classify(err)
-	}
-	return nil
 }

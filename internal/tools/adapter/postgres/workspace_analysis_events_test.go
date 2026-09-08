@@ -6,18 +6,20 @@ import (
 	"testing"
 	"time"
 
+	agentdomain "github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
 	eventsdomain "github.com/CodeZen-Lizhi/zhixu/internal/events/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/tools/domain"
 )
 
-func TestNewRepositoryWithWorkspaceAnalysisEventsRejectsNilAppender(t *testing.T) {
-	database := &nilDatabase{}
-	if _, err := NewRepositoryWithWorkspaceAnalysisEvents(database, nil); errorCodeForUnit(err) != ErrorCodeDatabaseUnavailable {
+func TestWorkspaceAnalysisEventsRejectsNilAppender(t *testing.T) {
+	repository := &GORMWorkspaceAnalysisRepository{}
+	if err := repository.appendRequested(context.Background(), &workspaceAnalysisToolEventScope{}, agentdomain.WorkspaceAnalysisOperation{}, domain.ToolCall{}, false); errorCodeForUnit(err) != ErrorCodeDatabaseUnavailable {
 		t.Fatalf("nil event appender error=%v", err)
 	}
 	var appender *workspaceAnalysisToolEventCapture
-	if _, err := NewRepositoryWithWorkspaceAnalysisEvents(database, appender); errorCodeForUnit(err) != ErrorCodeDatabaseUnavailable {
+	repository.events = appender
+	if err := repository.appendRequested(context.Background(), &workspaceAnalysisToolEventScope{}, agentdomain.WorkspaceAnalysisOperation{}, domain.ToolCall{}, false); errorCodeForUnit(err) != ErrorCodeDatabaseUnavailable {
 		t.Fatalf("typed nil event appender error=%v", err)
 	}
 }
@@ -29,25 +31,25 @@ func TestWorkspaceAnalysisToolEventsUseOnlyStableProjectionAndExactReplay(t *tes
 		WorkspaceID: "95000000-0000-4000-8000-000000000001", WorkflowRunID: workflowRunID,
 		StartedAt: now,
 	}
-	operation := receiptOperation{
-		id: "95000000-0000-4000-8000-000000000003", analysisRunID: "95000000-0000-4000-8000-000000000004",
-		nodeKey: "retrieve_evidence",
+	operation := agentdomain.WorkspaceAnalysisOperation{
+		ID: "95000000-0000-4000-8000-000000000003", AnalysisRunID: "95000000-0000-4000-8000-000000000004",
+		NodeKey: "retrieve_evidence",
 	}
 	capture := &workspaceAnalysisToolEventCapture{}
-	repository := &Repository{events: capture}
-	if err := repository.appendWorkspaceAnalysisToolRequested(context.Background(), nil, operation, call, false); err != nil {
+	repository := &GORMWorkspaceAnalysisRepository{events: capture}
+	if err := repository.appendRequested(context.Background(), &workspaceAnalysisToolEventScope{}, operation, call, false); err != nil {
 		t.Fatalf("append requested: %v", err)
 	}
 	if len(capture.requests) != 1 {
 		t.Fatalf("request count=%d", len(capture.requests))
 	}
 	request := capture.requests[0]
-	if request.Type != workspaceAnalysisToolRequestedEvent ||
-		request.ResourceRef != "workspace_analysis:"+string(operation.analysisRunID) || request.ResourceVersion != 1 ||
-		request.SourceEventRef != "workspace_analysis.tool_requested:"+string(operation.id)+":v1" ||
+	if request.Type != gormWorkspaceAnalysisToolRequestedEvent ||
+		request.ResourceRef != "workspace_analysis:"+string(operation.AnalysisRunID) || request.ResourceVersion != 1 ||
+		request.SourceEventRef != "workspace_analysis.tool_requested:"+string(operation.ID)+":v1" ||
 		request.OccurredAt != now || request.WorkflowRunID == nil || *request.WorkflowRunID != workflowRunID ||
 		request.PayloadSummary.WorkflowRunID == nil || *request.PayloadSummary.WorkflowRunID != workflowRunID ||
-		request.PayloadSummary.Stage != operation.nodeKey || request.PayloadSummary.Status != "started" {
+		request.PayloadSummary.Stage != string(operation.NodeKey) || request.PayloadSummary.Status != "started" {
 		t.Fatalf("requested event=%#v", request)
 	}
 	if request.PayloadSummary.ConversationID != nil || request.PayloadSummary.QuestionID != nil ||
@@ -59,35 +61,35 @@ func TestWorkspaceAnalysisToolEventsUseOnlyStableProjectionAndExactReplay(t *tes
 	completedAt := now.Add(3 * time.Second)
 	call.CompletedAt = &completedAt
 	capture.replayed = true
-	if err := repository.appendWorkspaceAnalysisToolCompleted(context.Background(), nil, operation, call, "succeeded", true); err != nil {
+	if err := repository.appendCompleted(context.Background(), &workspaceAnalysisToolEventScope{}, operation, call, "succeeded", true); err != nil {
 		t.Fatalf("append completion replay: %v", err)
 	}
 	completed := capture.requests[1]
-	if completed.Type != workspaceAnalysisToolCompletedEvent ||
-		completed.SourceEventRef != "workspace_analysis.tool_completed:"+string(operation.id)+":v1" ||
+	if completed.Type != gormWorkspaceAnalysisToolCompletedEvent ||
+		completed.SourceEventRef != "workspace_analysis.tool_completed:"+string(operation.ID)+":v1" ||
 		completed.OccurredAt != completedAt || completed.PayloadSummary.Status != "succeeded" {
 		t.Fatalf("completed event=%#v", completed)
 	}
 
 	capture.replayed = false
-	if err := repository.appendWorkspaceAnalysisToolCompleted(context.Background(), nil, operation, call, "succeeded", true); errorCodeForUnit(err) != ErrorCodePersistenceConsistency {
+	if err := repository.appendCompleted(context.Background(), &workspaceAnalysisToolEventScope{}, operation, call, "succeeded", true); errorCodeForUnit(err) != ErrorCodePersistenceConsistency {
 		t.Fatalf("replay drift error=%v", err)
 	}
-	if err := repository.appendWorkspaceAnalysisToolEvent(context.Background(), nil, operation, call, workspaceAnalysisToolCompletedEvent, "started", completedAt, false); errorCodeForUnit(err) != ErrorCodePersistenceConsistency {
+	if err := repository.appendEvent(context.Background(), &workspaceAnalysisToolEventScope{}, operation, call, gormWorkspaceAnalysisToolCompletedEvent, "started", completedAt, false); errorCodeForUnit(err) != ErrorCodePersistenceConsistency {
 		t.Fatalf("invalid terminal status error=%v", err)
 	}
 	capture.err = errors.New("event store unavailable")
-	if err := repository.appendWorkspaceAnalysisToolCompleted(context.Background(), nil, operation, call, "failed", false); !errors.Is(err, capture.err) {
+	if err := repository.appendCompleted(context.Background(), &workspaceAnalysisToolEventScope{}, operation, call, "failed", false); !errors.Is(err, capture.err) {
 		t.Fatalf("appender error=%v", err)
 	}
 }
 
-func TestWorkspaceAnalysisToolEventsLegacyRepositorySkipsEventRequirement(t *testing.T) {
-	repository := &Repository{}
+func TestWorkspaceAnalysisToolEventsRequireAppender(t *testing.T) {
+	repository := &GORMWorkspaceAnalysisRepository{}
 	call := domain.ToolCall{WorkspaceID: "95000000-0000-4000-8000-000000000001", WorkflowRunID: "95000000-0000-4000-8000-000000000002", StartedAt: time.Now().UTC()}
-	operation := receiptOperation{id: "95000000-0000-4000-8000-000000000003", analysisRunID: "95000000-0000-4000-8000-000000000004", nodeKey: "inspect_workspace"}
-	if err := repository.appendWorkspaceAnalysisToolRequested(context.Background(), nil, operation, call, false); err != nil {
-		t.Fatalf("legacy repository event skip: %v", err)
+	operation := agentdomain.WorkspaceAnalysisOperation{ID: "95000000-0000-4000-8000-000000000003", AnalysisRunID: "95000000-0000-4000-8000-000000000004", NodeKey: "inspect_workspace"}
+	if err := repository.appendRequested(context.Background(), &workspaceAnalysisToolEventScope{}, operation, call, false); errorCodeForUnit(err) != ErrorCodeDatabaseUnavailable {
+		t.Fatalf("missing event appender: %v", err)
 	}
 }
 
@@ -97,7 +99,7 @@ type workspaceAnalysisToolEventCapture struct {
 	err      error
 }
 
-func (capture *workspaceAnalysisToolEventCapture) AppendTx(_ context.Context, _ any, request eventsdomain.AppendRequest) (eventsdomain.ServerEvent, bool, error) {
+func (capture *workspaceAnalysisToolEventCapture) AppendScoped(_ context.Context, _ foundation.TransactionScope, request eventsdomain.AppendRequest) (eventsdomain.ServerEvent, bool, error) {
 	if capture == nil {
 		return eventsdomain.ServerEvent{}, false, errors.New("capture is nil")
 	}
@@ -107,3 +109,7 @@ func (capture *workspaceAnalysisToolEventCapture) AppendTx(_ context.Context, _ 
 	capture.requests = append(capture.requests, request)
 	return eventsdomain.ServerEvent{}, capture.replayed, nil
 }
+
+type workspaceAnalysisToolEventScope struct{}
+
+func (*workspaceAnalysisToolEventScope) TransactionScope() {}

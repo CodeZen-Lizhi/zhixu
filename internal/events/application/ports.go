@@ -18,14 +18,7 @@ type Store interface {
 	ListAfter(context.Context, foundation.ID, int64, int) ([]domain.ServerEvent, error)
 }
 
-// Appender 在调用方拥有的数据库事务内追加或精确重放一个 Server Event。
-type Appender interface {
-	// AppendTx 不提交或回滚 transaction；返回值中的 bool 表示 exact replay。
-	AppendTx(context.Context, any, domain.AppendRequest) (domain.ServerEvent, bool, error)
-}
-
-// ScopedAppender 是 GORM 迁移路径使用的 opaque transaction 追加边界。
-// legacy pgx 调用方继续使用 Appender，直到各自模块完成迁移。
+// ScopedAppender 在调用方拥有的事务内追加或精确重放一个 Server Event。
 type ScopedAppender interface {
 	// AppendScoped 不提交或回滚 scope；返回值中的 bool 表示 exact replay。
 	AppendScoped(context.Context, foundation.TransactionScope, domain.AppendRequest) (domain.ServerEvent, bool, error)

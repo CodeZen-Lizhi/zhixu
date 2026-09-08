@@ -7,7 +7,7 @@ import (
 
 	collectionapp "github.com/CodeZen-Lizhi/zhixu/internal/collection/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	"github.com/jackc/pgx/v5/pgconn"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 )
 
 func requestInvalid(err error) error {
@@ -46,11 +46,10 @@ func classify(err error) error {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return foundation.NewError(foundation.ErrorDependencyUnavailable, collectionapp.ErrorCodeQueryTimeout, true, err)
 	}
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) {
-		switch pgErr.Code {
+	if state := platformpostgres.SQLState(err); state != "" {
+		switch state {
 		case "23505":
-			if strings.Contains(pgErr.ConstraintName, "active_name") {
+			if strings.Contains(platformpostgres.ConstraintName(err), "active_name") {
 				return versionConflict("COLLECTION_NAME_CONFLICT", err)
 			}
 			return idempotencyConflict(err)

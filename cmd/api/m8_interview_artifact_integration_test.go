@@ -20,7 +20,8 @@ import (
 )
 
 func TestInterviewProductionServiceCreatesVerifiedDraftsPostgreSQL(t *testing.T) {
-	pool := newArtifactHTTPTestDatabase(t)
+	database := newArtifactHTTPTestDatabase(t)
+	pool := database.DB()
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
 
@@ -28,14 +29,14 @@ func TestInterviewProductionServiceCreatesVerifiedDraftsPostgreSQL(t *testing.T)
 	evidence := seedArtifactHTTPEvidenceIndex(t, ctx, pool, workspace, []artifactHTTPEvidenceSpec{{
 		label: "interview-evidence", content: []byte("Confirmed local knowledge supports the Interview completion artifacts."),
 	}})[0]
-	claimID := seedArtifactHTTPConfirmedClaim(t, ctx, pool, evidence)
+	claimID := seedArtifactHTTPConfirmedClaim(t, ctx, database, evidence)
 
-	workspaces, err := workspacepostgres.NewRepository(pool)
+	workspaces, err := workspacepostgres.NewGORMRepository(database)
 	if err != nil {
 		t.Fatal(err)
 	}
 	files := filesystem.Scanner{Options: filesystem.ScanOptions{MaxBytes: filesystem.DefaultMaxBytes}}
-	service, err := newInterviewService(pool, workspaces, files)
+	service, err := newInterviewService(database, workspaces, files)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +67,7 @@ func TestInterviewProductionServiceCreatesVerifiedDraftsPostgreSQL(t *testing.T)
 	completeCommand := interviewapplication.CompleteCommand{
 		WorkspaceID: workspace.id, SessionID: started.Session.ID, IdempotencyKey: "interview-production-complete",
 	}
-	repository, err := artifactpostgres.NewRepository(pool)
+	repository, err := artifactpostgres.NewGORMRepository(database)
 	if err != nil {
 		t.Fatal(err)
 	}

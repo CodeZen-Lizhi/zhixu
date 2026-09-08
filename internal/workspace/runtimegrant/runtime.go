@@ -214,13 +214,25 @@ func processRuntime(records []workspacedomain.RuntimeRecord, role workspacedomai
 	return workspacedomain.RuntimeRecord{}, false
 }
 
-// Close stops heartbeats and marks this exact process owner unavailable.
+// Close 在调用方期限内等待心跳停止，再把当前精确进程 owner 标为 unavailable。
+// 等待超时不释放仍在使用的依赖；调用方必须保留它们或等待进程退出。
 func (lease *Lease) Close(ctx context.Context) error {
 	if lease == nil {
 		return nil
 	}
+	if ctx == nil {
+		return errors.New("workspace runtime shutdown context is nil")
+	}
 	lease.cancel()
-	<-lease.done
+	select {
+	case <-lease.done:
+	default:
+		select {
+		case <-lease.done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	lease.mu.Lock()
 	defer lease.mu.Unlock()
 	if lease.record.Phase == workspacedomain.RuntimePhaseUnavailable {

@@ -11,17 +11,19 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/authoring/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestRepositoryPostgreSQLHardeningRejectsForgedPublicationFacts(t *testing.T) {
-	runAuthoringIntegrationVariants(t, testRepositoryPostgreSQLHardeningRejectsForgedPublicationFacts)
+	runAuthoringIntegration(t, testRepositoryPostgreSQLHardeningRejectsForgedPublicationFacts)
 }
 
-func testRepositoryPostgreSQLHardeningRejectsForgedPublicationFacts(t *testing.T, variant authoringIntegrationVariant) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+func testRepositoryPostgreSQLHardeningRejectsForgedPublicationFacts(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
-	repository, pool := variant.open(t)
+	repository, platform := openAuthoringIntegration(t)
+	pool := platform.DB()
 	workspaceID := authoringIntegrationID(900)
 	documentID := authoringIntegrationID(901)
 	revisionID := authoringIntegrationID(902)
@@ -38,7 +40,7 @@ func testRepositoryPostgreSQLHardeningRejectsForgedPublicationFacts(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	proposal := seedAuthoringPublicationProposal(t, ctx, pool, preparation.Reservation, content+"\nforged",
+	proposal := seedAuthoringPublicationProposal(t, ctx, platform, preparation.Reservation, content+"\nforged",
 		authoringIntegrationID(904), authoringIntegrationID(905), now.Add(2*time.Second))
 	_, err = pool.Exec(ctx, `INSERT INTO authoring.document_publication_binding(
 		id,reservation_id,workspace_id,document_id,article_revision_id,proposal_id,
@@ -140,7 +142,7 @@ func testRepositoryPostgreSQLHardeningRejectsForgedPublicationFacts(t *testing.T
 	}
 	wrongKeyReservation := wrongKeyPreparation.Reservation
 	wrongKeyReservation.ProposalIdempotencyKey = "intentionally-different-proposal-key"
-	wrongKeyProposal := seedAuthoringPublicationProposal(t, ctx, pool, wrongKeyReservation, wrongKeyContent,
+	wrongKeyProposal := seedAuthoringPublicationProposal(t, ctx, platform, wrongKeyReservation, wrongKeyContent,
 		authoringIntegrationID(913), authoringIntegrationID(914), now.Add(12*time.Second))
 	_, err = pool.Exec(ctx, `INSERT INTO authoring.document_publication_binding(
 		id,reservation_id,workspace_id,document_id,article_revision_id,proposal_id,
@@ -169,7 +171,7 @@ func testRepositoryPostgreSQLHardeningRejectsForgedPublicationFacts(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	terminalProposal := seedAuthoringPublicationProposal(t, ctx, pool, terminalPreparation.Reservation, terminalContent,
+	terminalProposal := seedAuthoringPublicationProposal(t, ctx, platform, terminalPreparation.Reservation, terminalContent,
 		authoringIntegrationID(923), authoringIntegrationID(924), now.Add(22*time.Second))
 	terminalResult, err := repository.CompletePublication(ctx, authoringapp.CompletePublicationRecord{
 		Binding: terminalBinding, ReservationID: terminalPreparation.Reservation.ID,
@@ -206,14 +208,15 @@ func testRepositoryPostgreSQLHardeningRejectsForgedPublicationFacts(t *testing.T
 }
 
 func TestRepositoryPostgreSQLDeferredPublicationClosureRejectsPartialTransactions(t *testing.T) {
-	runAuthoringIntegrationVariants(t, testRepositoryPostgreSQLDeferredPublicationClosureRejectsPartialTransactions)
+	runAuthoringIntegration(t, testRepositoryPostgreSQLDeferredPublicationClosureRejectsPartialTransactions)
 }
 
-func testRepositoryPostgreSQLDeferredPublicationClosureRejectsPartialTransactions(t *testing.T, variant authoringIntegrationVariant) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+func testRepositoryPostgreSQLDeferredPublicationClosureRejectsPartialTransactions(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
 	workspaceID := authoringIntegrationID(1000)
-	repository, pool := variant.open(t)
+	repository, platform := openAuthoringIntegration(t)
+	pool := platform.DB()
 	seedAuthoringWorkspace(t, ctx, pool, workspaceID, "authoring-deferred-closure")
 	var now time.Time
 	if err := pool.QueryRow(ctx, `SELECT CURRENT_TIMESTAMP - INTERVAL '1 hour'`).Scan(&now); err != nil {
@@ -223,7 +226,7 @@ func testRepositoryPostgreSQLDeferredPublicationClosureRejectsPartialTransaction
 
 	t.Run("revision-only", func(t *testing.T) {
 		documentID, revisionID, _, gitCommit := seedAuthoringPendingPublicationWithCommit(
-			t, ctx, pool, repository, workspaceID, 1010, "revision-only", now)
+			t, ctx, platform, repository, workspaceID, 1010, "revision-only", now)
 		tx, err := pool.Begin(ctx)
 		if err != nil {
 			t.Fatal(err)
@@ -243,7 +246,7 @@ func testRepositoryPostgreSQLDeferredPublicationClosureRejectsPartialTransaction
 
 	t.Run("revision-and-document-without-binding", func(t *testing.T) {
 		documentID, revisionID, _, gitCommit := seedAuthoringPendingPublicationWithCommit(
-			t, ctx, pool, repository, workspaceID, 1110, "revision-document-only", now.Add(time.Minute))
+			t, ctx, platform, repository, workspaceID, 1110, "revision-document-only", now.Add(time.Minute))
 		tx, err := pool.Begin(ctx)
 		if err != nil {
 			t.Fatal(err)
@@ -274,7 +277,7 @@ func testRepositoryPostgreSQLDeferredPublicationClosureRejectsPartialTransaction
 		targetRevisionID := authoringIntegrationID(1212)
 		previousContent := "# Deferred replace\n\nOne."
 		targetContent := "# Deferred replace\n\nTwo."
-		seedAuthoringPublishedDocumentRevisions(t, ctx, pool, workspaceID, documentID,
+		seedAuthoringPublishedDocumentRevisions(t, ctx, platform, workspaceID, documentID,
 			previousRevisionID, targetRevisionID, "notes/deferred-replace.md",
 			previousContent, targetContent, 1220, now.Add(2*time.Minute))
 		binding := authoringPublishBinding(t, workspaceID, documentID, targetRevisionID, "deferred-replace")
@@ -284,7 +287,7 @@ func testRepositoryPostgreSQLDeferredPublicationClosureRejectsPartialTransaction
 		if err != nil {
 			t.Fatal(err)
 		}
-		proposal := seedAuthoringPublicationProposal(t, ctx, pool, preparation.Reservation, targetContent,
+		proposal := seedAuthoringPublicationProposal(t, ctx, platform, preparation.Reservation, targetContent,
 			authoringIntegrationID(1241), authoringIntegrationID(1242), now.Add(122*time.Second))
 		if _, err := repository.CompletePublication(ctx, authoringapp.CompletePublicationRecord{
 			Binding: binding, ReservationID: preparation.Reservation.ID, PublicationID: authoringIntegrationID(1243),
@@ -292,7 +295,7 @@ func testRepositoryPostgreSQLDeferredPublicationClosureRejectsPartialTransaction
 		}); err != nil {
 			t.Fatal(err)
 		}
-		seedAuthoringProposalCommit(t, ctx, pool, proposal, preparation.Reservation, targetContent,
+		seedAuthoringProposalCommit(t, ctx, platform, proposal, preparation.Reservation, targetContent,
 			1250, now.Add(124*time.Second))
 		tx, err := pool.Begin(ctx)
 		if err != nil {
@@ -314,7 +317,7 @@ func testRepositoryPostgreSQLDeferredPublicationClosureRejectsPartialTransaction
 func seedAuthoringPendingPublicationWithCommit(
 	t *testing.T,
 	ctx context.Context,
-	pool *pgxpool.Pool,
+	platform *platformpostgres.Pool,
 	repository authoringIntegrationRepository,
 	workspaceID foundation.ID,
 	idStart int,
@@ -322,6 +325,7 @@ func seedAuthoringPendingPublicationWithCommit(
 	createdAt time.Time,
 ) (foundation.ID, foundation.ID, foundation.ID, string) {
 	t.Helper()
+	pool := platform.DB()
 	documentID := authoringIntegrationID(idStart)
 	revisionID := authoringIntegrationID(idStart + 1)
 	content := "# " + name + "\n\nFrozen content."
@@ -334,7 +338,7 @@ func seedAuthoringPendingPublicationWithCommit(
 	if err != nil {
 		t.Fatal(err)
 	}
-	proposal := seedAuthoringPublicationProposal(t, ctx, pool, preparation.Reservation, content,
+	proposal := seedAuthoringPublicationProposal(t, ctx, platform, preparation.Reservation, content,
 		authoringIntegrationID(idStart+3), authoringIntegrationID(idStart+4), createdAt.Add(2*time.Second))
 	if _, err := repository.CompletePublication(ctx, authoringapp.CompletePublicationRecord{
 		Binding: binding, ReservationID: preparation.Reservation.ID, PublicationID: authoringIntegrationID(idStart + 5),
@@ -342,13 +346,13 @@ func seedAuthoringPendingPublicationWithCommit(
 	}); err != nil {
 		t.Fatal(err)
 	}
-	gitCommit := seedAuthoringProposalCommit(t, ctx, pool, proposal, preparation.Reservation, content,
+	gitCommit := seedAuthoringProposalCommit(t, ctx, platform, proposal, preparation.Reservation, content,
 		idStart+10, createdAt.Add(4*time.Second))
 	return documentID, revisionID, preparation.Reservation.ID, gitCommit
 }
 
 func TestDocumentDraftAuthoringHardeningMigrationRejectsLegacyProposalKeyDrift(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
 	pool := newAuthoringIntegrationDatabaseToVersion(t, ctx, 70)
 	workspaceID := authoringIntegrationID(1300)
@@ -447,7 +451,7 @@ func TestDocumentDraftAuthoringHardeningMigrationRejectsLegacyProposalKeyDrift(t
 }
 
 func TestDocumentDraftAuthoringTerminalMigrationRejectsLegacyNullableCommand(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
 	pool := newAuthoringIntegrationDatabaseToVersion(t, ctx, 72)
 	workspaceID := authoringIntegrationID(1400)

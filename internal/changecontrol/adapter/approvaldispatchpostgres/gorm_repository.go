@@ -19,8 +19,7 @@ import (
 
 var errGORMApprovalDispatchReplay = errors.New("approval dispatch replay requires rollback")
 
-// GORMApprovalDispatchRepository is the staged Approval Dispatch implementation.
-// Production composition remains on ApprovalDispatchRepository until TODO 9 passes.
+// GORMApprovalDispatchRepository persists Approval and Workflow dispatch in one scope.
 type GORMApprovalDispatchRepository struct {
 	database   *gorm.DB
 	unitOfWork foundation.UnitOfWork
@@ -242,8 +241,9 @@ func (repository *GORMApprovalDispatchRepository) persistRejectedScoped(ctx cont
 	}
 	if _, err := gormApprovalDispatchExec(ctx, transaction, `
 		INSERT INTO change_control.approval(id,proposal_id,revision_id,change_hash,decision,approved_git_head,decided_at)
-		VALUES(?::uuid,?::uuid,?::uuid,?,'REJECTED',NULL,?)`,
-		string(command.Approval.ID), string(command.Approval.ProposalID), string(command.Approval.RevisionID), command.Approval.ChangeHash, command.Approval.DecidedAt.UTC()); err != nil {
+		VALUES(?::uuid,?::uuid,?::uuid,?,?,NULL,?)`,
+		string(command.Approval.ID), string(command.Approval.ProposalID), string(command.Approval.RevisionID), command.Approval.ChangeHash,
+		string(domain.DecisionRejected), command.Approval.DecidedAt.UTC()); err != nil {
 		return changedispatch.Result{}, false, classifyGORMApprovalDispatch(ctx, err, "APPROVAL_CREATE_FAILED")
 	}
 	changed, err := gormApprovalDispatchExec(ctx, transaction, `
@@ -361,21 +361,35 @@ func (value gormApprovalDispatchProposal) validate(command changedispatch.Comman
 
 func gormApprovalDispatchLockProposalRevision(ctx context.Context, database *gorm.DB, proposalID, revisionID foundation.ID) (gormApprovalDispatchProposal, error) {
 	row, err := gormApprovalDispatchRawRow(ctx, database, `
-		SELECT p.workspace_id::text,p.proposal_type,p.status,p.version,p.workflow_run_id::text,d.workflow_run_id::text,
+		SELECT p.workspace_id::text,p.proposal_type,p.status,p.version,p.workflow_run_id::text,
 		       r.change_hash,r.target_path,r.target_mode,r.base_hash,
 		       r.restore_document_id::text,r.restore_expected_head,r.restore_expected_document_version,r.restore_current_content_hash
 		  FROM change_control.proposal AS p
 		  JOIN change_control.proposal_revision AS r ON r.proposal_id=p.id AND r.id=?::uuid
-		  LEFT JOIN change_control.proposal_revision_dispatch AS d ON d.proposal_id=p.id AND d.revision_id=r.id
 		 WHERE p.id=?::uuid AND (p.current_revision_id=r.id OR p.current_revision_id IS NULL)
 		 FOR UPDATE OF p,r`, string(revisionID), string(proposalID))
 	if err != nil {
 		return gormApprovalDispatchProposal{}, err
 	}
 	var value gormApprovalDispatchProposal
-	err = row.Scan(&value.workspaceID, &value.proposalType, &value.status, &value.version, &value.legacyWorkflowRunID, &value.revisionWorkflowRunID,
+	err = row.Scan(&value.workspaceID, &value.proposalType, &value.status, &value.version, &value.legacyWorkflowRunID,
 		&value.revisionHash, &value.targetPath, &value.targetMode, &value.baseHash, &value.restoreDocumentID, &value.restoreExpectedHead,
 		&value.restoreExpectedDocumentVersion, &value.restoreCurrentContentHash)
+	if err != nil {
+		return gormApprovalDispatchProposal{}, err
+	}
+	// 在持有 Proposal/Revision 锁后重新读取派发事实。READ COMMITTED 等锁后，
+	// 同一条 LEFT JOIN 的可空侧仍可能是旧快照，不能据此判断并发 winner 尚未派发。
+	row, err = gormApprovalDispatchRawRow(ctx, database, `
+		SELECT workflow_run_id::text FROM change_control.proposal_revision_dispatch
+		WHERE proposal_id=?::uuid AND revision_id=?::uuid`, string(proposalID), string(revisionID))
+	if err != nil {
+		return gormApprovalDispatchProposal{}, err
+	}
+	err = row.Scan(&value.revisionWorkflowRunID)
+	if gormApprovalDispatchNoRows(err) {
+		return value, nil
+	}
 	return value, err
 }
 

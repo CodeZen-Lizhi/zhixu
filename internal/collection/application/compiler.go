@@ -16,7 +16,7 @@ import (
 type QueryPlan struct {
 	Canonical domain.CanonicalQuery
 	Where     string
-	Args      []any
+	Args      map[string]any
 	Sort      []SortExpression
 }
 
@@ -36,7 +36,7 @@ func CompileQuery(query domain.Query) (QueryPlan, error) {
 	if err != nil {
 		return QueryPlan{}, err
 	}
-	compiler := queryCompiler{}
+	compiler := queryCompiler{args: make(map[string]any)}
 	where, err := compiler.clause(canonical.Definition.Root)
 	if err != nil {
 		return QueryPlan{}, err
@@ -56,7 +56,7 @@ func CompileQuery(query domain.Query) (QueryPlan, error) {
 	return QueryPlan{Canonical: canonical, Where: where, Args: compiler.args, Sort: sortExpressions}, nil
 }
 
-type queryCompiler struct{ args []any }
+type queryCompiler struct{ args map[string]any }
 
 func (compiler *queryCompiler) clause(clause domain.Clause) (string, error) {
 	switch clause.Kind {
@@ -210,8 +210,7 @@ func (compiler *queryCompiler) addValue(field string, raw json.RawMessage) (stri
 	if err != nil {
 		return "", err
 	}
-	compiler.args = append(compiler.args, value)
-	return "$" + strconv.Itoa(len(compiler.args)), nil
+	return compiler.addArgument(value), nil
 }
 
 func (compiler *queryCompiler) addLikeValue(field string, raw json.RawMessage) (string, error) {
@@ -227,13 +226,18 @@ func (compiler *queryCompiler) addLikeValue(field string, raw json.RawMessage) (
 	if strings.EqualFold(strings.TrimSpace(field), "text") {
 		text = strings.ToLower(text)
 	}
-	compiler.args = append(compiler.args, text)
-	return "$" + strconv.Itoa(len(compiler.args)), nil
+	return compiler.addArgument(text), nil
 }
 
 func (compiler *queryCompiler) addArray(values any) string {
-	compiler.args = append(compiler.args, values)
-	return "$" + strconv.Itoa(len(compiler.args))
+	return compiler.addArgument(values)
+}
+
+// 参数名只来自编译器序号；括号将名称与 PostgreSQL cast 明确分隔。
+func (compiler *queryCompiler) addArgument(value any) string {
+	name := "query" + strconv.Itoa(len(compiler.args)+1)
+	compiler.args[name] = value
+	return "(@" + name + ")"
 }
 
 func predicateColumn(field string) (string, bool) {

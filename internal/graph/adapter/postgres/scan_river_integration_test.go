@@ -12,25 +12,24 @@ import (
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/capability"
+	collectionpostgres "github.com/CodeZen-Lizhi/zhixu/internal/collection/adapter/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	graphworkflow "github.com/CodeZen-Lizhi/zhixu/internal/graph/adapter/workflow"
 	graphapp "github.com/CodeZen-Lizhi/zhixu/internal/graph/application"
 	graphdomain "github.com/CodeZen-Lizhi/zhixu/internal/graph/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/graph/testfixture"
 	knowledge "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
-	workflowpostgres "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/postgres"
 	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
 	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
 	workflowdomain "github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/rivertype"
 )
 
 func TestSemanticLinkTopicScanRunsThroughRealRiverToCandidate(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	pool := newSemanticLinkScanTestPool(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
-	pool := newSemanticLinkScanTestPool(t, ctx)
 	workspaceID, topicID := seedSemanticLinkRiverFixture(t, ctx, pool)
 	command, registry, coordinator := newSemanticLinkRiverRuntime(t, pool)
 
@@ -42,7 +41,7 @@ func TestSemanticLinkTopicScanRunsThroughRealRiverToCandidate(t *testing.T) {
 	if err := riveradapter.AddRuntimeWorkerSafely(workers, runtimeWorker); err != nil {
 		t.Fatal(err)
 	}
-	workerClient, err := riveradapter.NewClient(pool, workers)
+	workerClient, err := riveradapter.NewClient(pool.Pool, workers)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,10 +77,10 @@ func TestSemanticLinkTopicScanRunsThroughRealRiverToCandidate(t *testing.T) {
 }
 
 func TestSemanticLinkBrowserFixtureCleanupRemovesScanWorkflowAndRiverFacts(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	pool := newSemanticLinkScanTestPool(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
 	defer cancel()
-	pool := newSemanticLinkScanTestPool(t, ctx)
-	fixture, err := testfixture.SeedSemanticLinkBrowser(ctx, pool)
+	fixture, err := testfixture.SeedSemanticLinkBrowser(ctx, pool.Pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +91,7 @@ func TestSemanticLinkBrowserFixtureCleanupRemovesScanWorkflowAndRiverFacts(t *te
 		}
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cleanupCancel()
-		if cleanupErr := testfixture.CleanupSemanticLinkBrowser(cleanupCtx, pool, fixture.WorkspaceID); cleanupErr != nil {
+		if cleanupErr := testfixture.CleanupSemanticLinkBrowser(cleanupCtx, pool.Pool, fixture.WorkspaceID); cleanupErr != nil {
 			t.Errorf("cleanup semantic-link browser fixture: %v", cleanupErr)
 		}
 	})
@@ -135,11 +134,11 @@ func TestSemanticLinkBrowserFixtureCleanupRemovesScanWorkflowAndRiverFacts(t *te
 		t.Fatal("semantic-link browser fixture produced no candidates")
 	}
 
-	if err := testfixture.CleanupSemanticLinkBrowser(ctx, pool, fixture.WorkspaceID); err != nil {
+	if err := testfixture.CleanupSemanticLinkBrowser(ctx, pool.Pool, fixture.WorkspaceID); err != nil {
 		t.Fatal(err)
 	}
 	fixtureCleaned = true
-	if err := testfixture.CleanupSemanticLinkBrowser(ctx, pool, fixture.WorkspaceID); err != nil {
+	if err := testfixture.CleanupSemanticLinkBrowser(ctx, pool.Pool, fixture.WorkspaceID); err != nil {
 		t.Fatalf("semantic-link browser cleanup must be idempotent: %v", err)
 	}
 
@@ -165,9 +164,9 @@ func TestSemanticLinkBrowserFixtureCleanupRemovesScanWorkflowAndRiverFacts(t *te
 }
 
 func TestSemanticLinkTopicScanReplaysAfterWorkflowCompletionResponseLoss(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	pool := newSemanticLinkScanTestPool(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
-	pool := newSemanticLinkScanTestPool(t, ctx)
 	workspaceID, topicID := seedSemanticLinkRiverFixture(t, ctx, pool)
 	command, registry, coordinator := newSemanticLinkRiverRuntime(t, pool)
 
@@ -216,9 +215,9 @@ func TestSemanticLinkTopicScanReplaysAfterWorkflowCompletionResponseLoss(t *test
 }
 
 func TestSemanticLinkTopicScanCancellationConvergesWithWorkflow(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	pool := newSemanticLinkScanTestPool(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
-	pool := newSemanticLinkScanTestPool(t, ctx)
 	workspaceID, topicID := seedSemanticLinkRiverFixture(t, ctx, pool)
 	blocking := &blockingSemanticLinkPageSource{entered: make(chan struct{})}
 	command, registry, coordinator := newSemanticLinkRiverRuntime(t, pool, func(delegate graphapp.SemanticLinkTopicScanPageSource) graphapp.SemanticLinkTopicScanPageSource {
@@ -234,7 +233,7 @@ func TestSemanticLinkTopicScanCancellationConvergesWithWorkflow(t *testing.T) {
 	if err := riveradapter.AddRuntimeWorkerSafely(workers, runtimeWorker); err != nil {
 		t.Fatal(err)
 	}
-	workerClient, err := riveradapter.NewClient(pool, workers)
+	workerClient, err := riveradapter.NewClient(pool.Pool, workers)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,9 +276,9 @@ func TestSemanticLinkTopicScanCancellationConvergesWithWorkflow(t *testing.T) {
 }
 
 func TestSemanticLinkTopicScanRiverRecoversFromRetryablePageFault(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	pool := newSemanticLinkScanTestPool(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
-	pool := newSemanticLinkScanTestPool(t, ctx)
 	workspaceID, topicID := seedSemanticLinkRiverFixture(t, ctx, pool)
 	faulting := &faultingSemanticLinkPageSource{remainingFailures: 1}
 	command, registry, coordinator := newSemanticLinkRiverRuntime(t, pool, func(delegate graphapp.SemanticLinkTopicScanPageSource) graphapp.SemanticLinkTopicScanPageSource {
@@ -305,9 +304,9 @@ func TestSemanticLinkTopicScanRiverRecoversFromRetryablePageFault(t *testing.T) 
 }
 
 func TestSemanticLinkTopicScanRiverPersistsFaultAfterRetryBudget(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	pool := newSemanticLinkScanTestPool(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
-	pool := newSemanticLinkScanTestPool(t, ctx)
 	workspaceID, topicID := seedSemanticLinkRiverFixture(t, ctx, pool)
 	faulting := &faultingSemanticLinkPageSource{alwaysFail: true}
 	command, registry, coordinator := newSemanticLinkRiverRuntime(t, pool, func(delegate graphapp.SemanticLinkTopicScanPageSource) graphapp.SemanticLinkTopicScanPageSource {
@@ -336,21 +335,14 @@ func TestSemanticLinkTopicScanRiverPersistsFaultAfterRetryBudget(t *testing.T) {
 	}
 }
 
-func newSemanticLinkRiverRuntime(t *testing.T, pool *pgxpool.Pool, wrappers ...func(graphapp.SemanticLinkTopicScanPageSource) graphapp.SemanticLinkTopicScanPageSource) (*graphapp.SemanticLinkScanCommandService, *workflowapplication.ExecutorRegistry, *workflowapplication.RuntimeCoordinator) {
+func newSemanticLinkRiverRuntime(t *testing.T, pool *graphTestPool, wrappers ...func(graphapp.SemanticLinkTopicScanPageSource) graphapp.SemanticLinkTopicScanPageSource) (*graphapp.SemanticLinkScanCommandService, *workflowapplication.ExecutorRegistry, *workflowapplication.RuntimeCoordinator) {
 	t.Helper()
-	insertClient, err := riveradapter.NewClient(pool, nil)
+	runtimeRepository := newGraphRuntimeForTest(t, pool.platform)
+	collections, err := collectionpostgres.NewGORMRepository(pool.platform)
 	if err != nil {
 		t.Fatal(err)
 	}
-	inserter, err := riveradapter.NewJobInserter(insertClient)
-	if err != nil {
-		t.Fatal(err)
-	}
-	runtimeRepository, err := workflowpostgres.NewRuntimeRepository(pool, inserter, NewSemanticLinkScanCancellationGuard())
-	if err != nil {
-		t.Fatal(err)
-	}
-	scanRepository, err := NewSemanticLinkScanRepository(pool, runtimeRepository, foundation.NewUUIDGenerator(nil), foundation.SystemClock{})
+	scanRepository, err := NewGORMSemanticLinkScanRepository(pool.platform, runtimeRepository, collections, foundation.NewUUIDGenerator(nil), foundation.SystemClock{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -358,7 +350,7 @@ func newSemanticLinkRiverRuntime(t *testing.T, pool *pgxpool.Pool, wrappers ...f
 	if err != nil {
 		t.Fatal(err)
 	}
-	planner, err := NewSemanticLinkTopicScanPlanner(pool)
+	planner, err := NewGORMSemanticLinkTopicScanPlanner(pool.platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -366,11 +358,11 @@ func newSemanticLinkRiverRuntime(t *testing.T, pool *pgxpool.Pool, wrappers ...f
 	if err != nil {
 		t.Fatal(err)
 	}
-	graphRepository, err := NewRepository(pool)
+	graphRepository, err := NewGORMRepository(pool.platform)
 	if err != nil {
 		t.Fatal(err)
 	}
-	pageSource, err := NewSemanticLinkTopicScanPageRepository(pool)
+	pageSource, err := NewGORMSemanticLinkTopicScanPageRepository(pool.platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -381,7 +373,7 @@ func newSemanticLinkRiverRuntime(t *testing.T, pool *pgxpool.Pool, wrappers ...f
 	if len(wrappers) == 1 {
 		source = wrappers[0](source)
 	}
-	writer, err := NewSemanticLinkDiscoveryCandidateWriter(pool, graphRepository, foundation.NewUUIDGenerator(nil), foundation.SystemClock{})
+	writer, err := NewGORMSemanticLinkDiscoveryCandidateWriter(graphRepository, foundation.NewUUIDGenerator(nil), foundation.SystemClock{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -414,7 +406,7 @@ func newSemanticLinkRiverRuntime(t *testing.T, pool *pgxpool.Pool, wrappers ...f
 	return command, registry, coordinator
 }
 
-func seedSemanticLinkRiverFixture(t *testing.T, ctx context.Context, pool *pgxpool.Pool) (foundation.ID, foundation.ID) {
+func seedSemanticLinkRiverFixture(t *testing.T, ctx context.Context, pool *graphTestPool) (foundation.ID, foundation.ID) {
 	t.Helper()
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -439,7 +431,7 @@ func seedSemanticLinkRiverFixture(t *testing.T, ctx context.Context, pool *pgxpo
 	return workspaceID, topicID
 }
 
-func waitForSemanticLinkRiverScan(ctx context.Context, pool *pgxpool.Pool, scanID foundation.ID, scanWant graphdomain.SemanticLinkScanStatus, runWant workflowdomain.RunStatus) error {
+func waitForSemanticLinkRiverScan(ctx context.Context, pool *graphTestPool, scanID foundation.ID, scanWant graphdomain.SemanticLinkScanStatus, runWant workflowdomain.RunStatus) error {
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -469,7 +461,7 @@ func waitForSemanticLinkRiverScan(ctx context.Context, pool *pgxpool.Pool, scanI
 	}
 }
 
-func assertSemanticLinkRiverFacts(t *testing.T, ctx context.Context, pool *pgxpool.Pool, workspaceID, scanID foundation.ID, wantCandidates int, wantProcessed int64) {
+func assertSemanticLinkRiverFacts(t *testing.T, ctx context.Context, pool *graphTestPool, workspaceID, scanID foundation.ID, wantCandidates int, wantProcessed int64) {
 	t.Helper()
 	var candidates, formalRelations int
 	var output []byte
@@ -552,7 +544,7 @@ func (source *faultingSemanticLinkPageSource) callCount() int {
 	return source.calls
 }
 
-func startSemanticLinkTestWorker(t *testing.T, ctx context.Context, pool *pgxpool.Pool, registry *workflowapplication.ExecutorRegistry, coordinator *workflowapplication.RuntimeCoordinator, owner string) *riveradapter.Client {
+func startSemanticLinkTestWorker(t *testing.T, ctx context.Context, pool *graphTestPool, registry *workflowapplication.ExecutorRegistry, coordinator *workflowapplication.RuntimeCoordinator, owner string) *riveradapter.Client {
 	t.Helper()
 	runtimeWorker, err := riveradapter.NewRuntimeNodeWorker(registry, coordinator, owner, 10*time.Second, time.Second)
 	if err != nil {
@@ -562,7 +554,7 @@ func startSemanticLinkTestWorker(t *testing.T, ctx context.Context, pool *pgxpoo
 	if err := riveradapter.AddRuntimeWorkerSafely(workers, runtimeWorker); err != nil {
 		t.Fatal(err)
 	}
-	client, err := riveradapter.NewClient(pool, workers)
+	client, err := riveradapter.NewClient(pool.Pool, workers)
 	if err != nil {
 		t.Fatal(err)
 	}

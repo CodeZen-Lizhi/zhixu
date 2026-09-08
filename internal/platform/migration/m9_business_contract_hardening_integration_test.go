@@ -189,11 +189,21 @@ func TestM9BusinessContractHardeningMigrationBackfillConstraints(t *testing.T) {
 		workspaceID, otherDefinitionID, now)
 	assertPostgresCode(t, err, "23503")
 
+	// The M9 no-revision backfill assertion is complete. Later migrations require
+	// every proposal to have a revision before the current repository can read it.
+	if _, err := pool.Exec(ctx, `INSERT INTO change_control.proposal_revision(
+		id,proposal_id,revision_no,target_path,base_hash,content,evidence_summary,risk,rollback_plan,change_hash,created_at
+	) VALUES('b9200000-0000-4000-8000-000000000009',$1,1,'docs/repaired-history.md',repeat('b',64),'content','evidence','HIGH','rollback',repeat('c',64),$2)`,
+		noRevisionID, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
 	// The current repository reads fields added after the M9-only migration assertions above.
 	if err := provider.Up(ctx); err != nil {
 		t.Fatal(err)
 	}
-	repository, err := changecontrolpostgres.NewRepository(pool)
+	platform := openMigrationRuntimePool(t, ctx, pool)
+	defer platform.Close()
+	repository, err := changecontrolpostgres.NewGORMRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}

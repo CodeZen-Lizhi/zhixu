@@ -4,6 +4,7 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"testing"
@@ -11,11 +12,14 @@ import (
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	graphapp "github.com/CodeZen-Lizhi/zhixu/internal/graph/application"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	"github.com/jackc/pgx/v5"
+	"github.com/lib/pq"
+	"gorm.io/gorm"
 )
 
 func TestGraphAdjacencyAndEvidencePlansUseKnowledgeIndexes(t *testing.T) {
-	_, tx, ctx := graphIntegrationRepository(t)
+	repository, tx, ctx := graphIntegrationRepository(t)
 	fixture := seedGraphFixture(t, ctx, tx)
 	var sourceVersionID, sourceSpanID string
 	var applicability []byte
@@ -41,8 +45,9 @@ func TestGraphAdjacencyAndEvidencePlansUseKnowledgeIndexes(t *testing.T) {
 			targetID := topics[(sourceIndex+offset)%len(topics)]
 			relationID := graphTestID(t)
 			relationIDs = append(relationIDs, relationID)
-			relationBatch.Queue(`INSERT INTO core.relation(id,workspace_id,source_node_type,source_node_id,target_node_type,target_node_id,relation_type,status,confidence_score,fingerprint,evidence_fingerprint,confirmation_method,confirmation_ref,version,created_at,updated_at) VALUES($1,$2,'TOPIC',$3,'TOPIC',$4,'IMPACTS','CONFIRMED',0.9,$5,$6,'SOURCE_DERIVED','plan fixture',1,$7,$7)`, string(relationID), string(fixture.workspaceID), string(sourceID), string(targetID), graphHash("plan-relation-"+string(relationID)), graphHash("plan-evidence-"+string(relationID)), now)
+			relationBatch.Queue(`INSERT INTO core.relation(id,workspace_id,source_node_type,source_node_id,target_node_type,target_node_id,relation_type,status,confidence_score,fingerprint,evidence_fingerprint,confirmation_method,confirmation_ref,version,created_at,updated_at) VALUES($1,$2,'TOPIC',$3,'TOPIC',$4,'IMPACTS','SUGGESTED',0.9,$5,$6,NULL,NULL,1,$7,$7)`, string(relationID), string(fixture.workspaceID), string(sourceID), string(targetID), graphHash("plan-relation-"+string(relationID)), graphHash("plan-evidence-"+string(relationID)), now)
 			relationBatch.Queue(`INSERT INTO core.relation_evidence(id,workspace_id,relation_id,source_version_id,source_span_id,reason,evidence_hash,applicability,applicability_schema_version,applicability_hash,confirmation_method,confirmed_by,created_at) VALUES($1,$2,$3,$4,$5,'plan evidence',$6,$7,$8,$9,'SOURCE_DERIVED','plan fixture',$10)`, string(graphTestID(t)), string(fixture.workspaceID), string(relationID), sourceVersionID, sourceSpanID, graphHash("plan-evidence-row-"+string(relationID)), applicability, schemaVersion, applicabilityHash, now)
+			relationBatch.Queue(`UPDATE core.relation SET status='CONFIRMED',confirmation_method='SOURCE_DERIVED',confirmation_ref='plan fixture',version=version+1 WHERE workspace_id=$1 AND id=$2`, string(fixture.workspaceID), string(relationID))
 		}
 	}
 	if err := tx.SendBatch(ctx, relationBatch).Close(); err != nil {
@@ -52,34 +57,34 @@ func TestGraphAdjacencyAndEvidencePlansUseKnowledgeIndexes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	assertPlanUsesIndexWithoutRelationScan(t, ctx, tx,
-		`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, COSTS OFF) SELECT id FROM core.relation WHERE workspace_id=$1 AND source_node_type='TOPIC' AND source_node_id=$2 AND status='CONFIRMED' ORDER BY relation_type,id LIMIT 501`,
-		[]any{string(fixture.workspaceID), string(topics[0])}, "idx_knowledge_relation_source", "relation")
-	assertPlanUsesIndexWithoutRelationScan(t, ctx, tx,
-		`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, COSTS OFF) SELECT id FROM core.relation WHERE workspace_id=$1 AND target_node_type='TOPIC' AND target_node_id=$2 AND status='CONFIRMED' ORDER BY relation_type,id LIMIT 501`,
-		[]any{string(fixture.workspaceID), string(topics[10])}, "idx_knowledge_relation_target", "relation")
-	assertPlanUsesIndexWithoutRelationScan(t, ctx, tx,
-		`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, COSTS OFF) SELECT id FROM core.relation_evidence WHERE workspace_id=$1 AND relation_id=$2 ORDER BY created_at,id LIMIT 501`,
-		[]any{string(fixture.workspaceID), string(relationIDs[0])}, "idx_knowledge_relation_evidence_owner", "relation_evidence")
+	assertPlanUsesIndexWithoutRelationScan(t, ctx, repository.database,
+		`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, COSTS OFF) SELECT id FROM core.relation WHERE workspace_id=(@p1) AND source_node_type='TOPIC' AND source_node_id=(@p2) AND status='CONFIRMED' ORDER BY relation_type,id LIMIT 501`,
+		[]any{sql.Named("p1", string(fixture.workspaceID)), sql.Named("p2", string(topics[0]))}, "idx_knowledge_relation_source", "relation")
+	assertPlanUsesIndexWithoutRelationScan(t, ctx, repository.database,
+		`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, COSTS OFF) SELECT id FROM core.relation WHERE workspace_id=(@p1) AND target_node_type='TOPIC' AND target_node_id=(@p2) AND status='CONFIRMED' ORDER BY relation_type,id LIMIT 501`,
+		[]any{sql.Named("p1", string(fixture.workspaceID)), sql.Named("p2", string(topics[10]))}, "idx_knowledge_relation_target", "relation")
+	assertPlanUsesIndexWithoutRelationScan(t, ctx, repository.database,
+		`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, COSTS OFF) SELECT id FROM core.relation_evidence WHERE workspace_id=(@p1) AND relation_id=(@p2) ORDER BY created_at,id LIMIT 501`,
+		[]any{sql.Named("p1", string(fixture.workspaceID)), sql.Named("p2", string(relationIDs[0]))}, "idx_knowledge_relation_evidence_owner", "relation_evidence")
 
-	assertGraphPlan(t, ctx, tx, `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, COSTS OFF) `+neighborhoodDepthOneSQL,
-		[]any{string(fixture.workspaceID), "TOPIC", string(topics[10]), "BOTH", []string{"CONFIRMED"}, []string{"IMPACTS"}, (*float64)(nil), (*time.Time)(nil), []string{"TOPIC"}, []string{}, []string{"CONFIRMED", "DISPUTED"}, (*float64)(nil), 501},
+	assertGraphPlan(t, ctx, repository.database, `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, COSTS OFF) `+neighborhoodDepthOneSQL,
+		[]any{sql.Named("p1", string(fixture.workspaceID)), sql.Named("p2", "TOPIC"), sql.Named("p3", string(topics[10])), sql.Named("p4", "BOTH"), sql.Named("p5", pq.Array([]string{"CONFIRMED"})), sql.Named("p6", pq.Array([]string{"IMPACTS"})), sql.Named("p7", (*float64)(nil)), sql.Named("p8", (*time.Time)(nil)), sql.Named("p9", pq.Array([]string{"TOPIC"})), sql.Named("p10", pq.Array([]string{})), sql.Named("p11", pq.Array([]string{"CONFIRMED", "DISPUTED"})), sql.Named("p12", (*float64)(nil)), sql.Named("p13", 501)},
 		[]string{"idx_knowledge_relation_source", "idx_knowledge_relation_target", "idx_knowledge_relation_evidence_owner"})
-	assertGraphPlan(t, ctx, tx, `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, COSTS OFF) `+neighborhoodFrontierSQL,
-		[]any{string(fixture.workspaceID), []string{"TOPIC", "TOPIC"}, []string{string(topics[10]), string(topics[11])}, "BOTH", []string{}, []string{"CONFIRMED"}, []string{"IMPACTS"}, (*float64)(nil), (*time.Time)(nil), []string{"TOPIC"}, []string{}, []string{"CONFIRMED", "DISPUTED"}, (*float64)(nil), 1001},
+	assertGraphPlan(t, ctx, repository.database, `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, COSTS OFF) `+neighborhoodFrontierSQL,
+		[]any{sql.Named("p1", string(fixture.workspaceID)), sql.Named("p2", pq.Array([]string{"TOPIC", "TOPIC"})), sql.Named("p3", pq.Array([]string{string(topics[10]), string(topics[11])})), sql.Named("p4", "BOTH"), sql.Named("p5", pq.Array([]string{})), sql.Named("p6", pq.Array([]string{"CONFIRMED"})), sql.Named("p7", pq.Array([]string{"IMPACTS"})), sql.Named("p8", (*float64)(nil)), sql.Named("p9", (*time.Time)(nil)), sql.Named("p10", pq.Array([]string{"TOPIC"})), sql.Named("p11", pq.Array([]string{})), sql.Named("p12", pq.Array([]string{"CONFIRMED", "DISPUTED"})), sql.Named("p13", (*float64)(nil)), sql.Named("p14", 1001)},
 		[]string{"idx_knowledge_relation_source", "idx_knowledge_relation_target", "idx_knowledge_relation_evidence_owner"})
-	assertGraphPlan(t, ctx, tx, `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, COSTS OFF) `+pathFrontierSQL,
-		[]any{string(fixture.workspaceID), []string{"TOPIC"}, []string{string(topics[10])}, "BOTH", []string{"IMPACTS"}, 1001},
+	assertGraphPlan(t, ctx, repository.database, `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, COSTS OFF) `+pathFrontierSQL,
+		[]any{sql.Named("p1", string(fixture.workspaceID)), sql.Named("p2", pq.Array([]string{"TOPIC"})), sql.Named("p3", pq.Array([]string{string(topics[10])})), sql.Named("p4", "BOTH"), sql.Named("p5", pq.Array([]string{"IMPACTS"})), sql.Named("p6", 1001)},
 		[]string{"idx_knowledge_relation_source", "idx_knowledge_relation_target"})
-	assertGraphPlan(t, ctx, tx, `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, COSTS OFF) `+relationEvidenceWindowSQL,
-		[]any{string(fixture.workspaceID), string(relationIDs[0]), 501},
+	assertGraphPlan(t, ctx, repository.database, `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, COSTS OFF) `+relationEvidenceWindowSQL,
+		[]any{sql.Named("p1", string(fixture.workspaceID)), sql.Named("p2", string(relationIDs[0])), sql.Named("p3", 501)},
 		[]string{"idx_knowledge_relation_evidence_owner"})
 }
 
-func assertPlanUsesIndexWithoutRelationScan(t *testing.T, ctx context.Context, db DB, query string, args []any, indexName, relationName string) {
+func assertPlanUsesIndexWithoutRelationScan(t *testing.T, ctx context.Context, db *gorm.DB, query string, args []any, indexName, relationName string) {
 	t.Helper()
 	var raw []byte
-	if err := db.QueryRow(ctx, query, args...).Scan(&raw); err != nil {
+	if err := gormQueryRow(ctx, db, query, args...).Scan(&raw); err != nil {
 		t.Fatal(err)
 	}
 	var documents []map[string]any
@@ -88,7 +93,7 @@ func assertPlanUsesIndexWithoutRelationScan(t *testing.T, ctx context.Context, d
 	}
 	foundIndex, foundSequentialScan := false, false
 	visitPlanNodes(documents[0]["Plan"], func(node map[string]any) {
-		if node["Index Name"] == indexName {
+		if actual, ok := node["Index Name"].(string); ok && graphEquivalentQueryIndex(indexName, actual) {
 			foundIndex = true
 		}
 		if node["Node Type"] == "Seq Scan" && node["Relation Name"] == relationName {
@@ -100,17 +105,25 @@ func assertPlanUsesIndexWithoutRelationScan(t *testing.T, ctx context.Context, d
 	}
 }
 
-func assertSemanticLinkTopicPairPlan(t *testing.T, ctx context.Context, db DB, workspaceID, topicID foundation.ID, sourceIDs []string) {
+func assertSemanticLinkTopicPairPlan(t *testing.T, ctx context.Context, pool *platformpostgres.Pool, workspaceID, topicID foundation.ID, sourceIDs []string) {
 	t.Helper()
-	if _, err := db.Exec(ctx, `SET enable_seqscan = off`); err != nil {
+	unit, err := pool.UnitOfWork()
+	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		_, _ = db.Exec(context.Background(), `RESET enable_seqscan`)
-	})
 	var raw []byte
-	if err := db.QueryRow(ctx, `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, COSTS OFF) `+semanticLinkTopicClaimPairsSQL,
-		string(workspaceID), string(topicID), sourceIDs, graphapp.MaxSemanticLinkScanPagePairsPerNode).Scan(&raw); err != nil {
+	err = unit.Within(ctx, foundation.TransactionOptions{ReadOnly: true}, func(callbackCtx context.Context, scope foundation.TransactionScope) error {
+		database, err := platformpostgres.GORMTransaction(scope)
+		if err != nil {
+			return err
+		}
+		if err := database.WithContext(callbackCtx).Exec(`SET LOCAL enable_seqscan = off`).Error; err != nil {
+			return err
+		}
+		return gormQueryRow(callbackCtx, database, `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, COSTS OFF) `+semanticLinkTopicClaimPairsSQL,
+			sql.Named("p1", string(workspaceID)), sql.Named("p2", string(topicID)), sql.Named("p3", pq.Array(sourceIDs)), sql.Named("p4", graphapp.MaxSemanticLinkScanPagePairsPerNode)).Scan(&raw)
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 	var documents []map[string]any
@@ -148,10 +161,10 @@ func visitPlanNodes(value any, visit func(map[string]any)) {
 	}
 }
 
-func assertGraphPlan(t *testing.T, ctx context.Context, db DB, query string, args []any, expectedIndexes []string) {
+func assertGraphPlan(t *testing.T, ctx context.Context, db *gorm.DB, query string, args []any, expectedIndexes []string) {
 	t.Helper()
 	var raw []byte
-	if err := db.QueryRow(ctx, query, args...).Scan(&raw); err != nil {
+	if err := gormQueryRow(ctx, db, query, args...).Scan(&raw); err != nil {
 		t.Fatal(err)
 	}
 	var documents []map[string]any
@@ -169,11 +182,37 @@ func assertGraphPlan(t *testing.T, ctx context.Context, db DB, query string, arg
 		}
 	})
 	for _, indexName := range expectedIndexes {
-		if !found[indexName] {
+		if !graphPlanHasIndex(found, indexName) {
 			t.Fatalf("plan misses index %s: %s", indexName, raw)
 		}
 	}
 	if sequentialRelationScan {
 		t.Fatalf("graph plan contains relation full scan: %s", raw)
 	}
+}
+
+// Atlas 00026 added status-covering adjacency indexes with the same Workspace
+// and endpoint prefix as 00017. Either serves the original bounded lookup;
+// relation/evidence sequential scans remain forbidden independently.
+func graphEquivalentQueryIndex(required, actual string) bool {
+	if required == actual {
+		return true
+	}
+	switch required {
+	case "idx_knowledge_relation_source":
+		return actual == "idx_knowledge_relation_workspace_source_status_type"
+	case "idx_knowledge_relation_target":
+		return actual == "idx_knowledge_relation_workspace_target_status_type"
+	default:
+		return false
+	}
+}
+
+func graphPlanHasIndex(found map[string]bool, required string) bool {
+	for actual := range found {
+		if graphEquivalentQueryIndex(required, actual) {
+			return true
+		}
+	}
+	return false
 }

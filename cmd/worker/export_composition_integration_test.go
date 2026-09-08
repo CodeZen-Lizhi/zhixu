@@ -14,9 +14,6 @@ import (
 
 func TestWorkerExportCompositionRegistersWorkerAndMaintenanceService(t *testing.T) {
 	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a PostgreSQL admin database")
-	}
 	pool := newMigratedWorkerTestPool(t, databaseURL)
 	components, err := newWorkerComponents(
 		pool,

@@ -592,7 +592,7 @@ func scanGORMHuman(database *gorm.DB, query string, arguments ...any) (domain.Hu
 	return scanGORMHumanRow(row)
 }
 
-func scanGORMHumanRow(row gormRuntimeStartScanner) (domain.HumanTask, error) {
+func scanGORMHumanRow(row workflowRowScanner) (domain.HumanTask, error) {
 	var task domain.HumanTask
 	var id, runID, nodeRunID, status string
 	var expectedInput workflowJSONB

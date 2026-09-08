@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
@@ -34,8 +35,8 @@ func (repository *GORMRepository) SafeToCancelWorkflowNodeScoped(ctx context.Con
 		SELECT scan.id::text,scan.workspace_id::text,scan.status,scan.version
 		FROM graph.semantic_link_scan scan
 		JOIN workflow.node_run node ON node.run_id=scan.workflow_run_id
-		WHERE node.id=$1
-		FOR UPDATE OF scan`, string(nodeRunID))
+		WHERE node.id=(@p1)
+		FOR UPDATE OF scan`, sql.Named("p1", string(nodeRunID)))
 	if err != nil {
 		return false, classifyGORMScan(ctx, err, "GRAPH_SEMANTIC_LINK_SCAN_CANCEL_QUERY_FAILED")
 	}
@@ -58,8 +59,8 @@ func (repository *GORMRepository) SafeToCancelWorkflowNodeScoped(ctx context.Con
 			UPDATE graph.semantic_link_scan
 			SET status='CANCELLED',last_error=NULL,version=version+1,
 			    updated_at=CURRENT_TIMESTAMP,completed_at=CURRENT_TIMESTAMP
-			WHERE id=$1 AND workspace_id=$2 AND version=$3 AND status IN ('PENDING','RUNNING')
-			RETURNING status`, scanID, workspaceID, version)
+			WHERE id=(@p1) AND workspace_id=(@p2) AND version=(@p3) AND status IN ('PENDING','RUNNING')
+			RETURNING status`, sql.Named("p1", scanID), sql.Named("p2", workspaceID), sql.Named("p3", version))
 		if err != nil {
 			return false, classifyGORMScan(ctx, err, "GRAPH_SEMANTIC_LINK_SCAN_CANCEL_FAILED")
 		}

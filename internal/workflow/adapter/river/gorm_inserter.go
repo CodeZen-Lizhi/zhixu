@@ -11,8 +11,7 @@ import (
 	"github.com/riverqueue/river/rivertype"
 )
 
-// ScopedJobInserter is the transaction-safe Node job port for GORM-backed
-// adapters. Unlike the legacy port, it cannot accept an arbitrary transaction.
+// ScopedJobInserter inserts Node jobs in the caller-owned transaction scope.
 type ScopedJobInserter interface {
 	InsertTx(context.Context, foundation.TransactionScope, NodeJobArgs, InsertOptions) (JobReceipt, error)
 }
@@ -44,7 +43,7 @@ func NewScopedTypedJobInserter[T riverlib.JobArgs](database *platformpostgres.Po
 	if database == nil {
 		return nil, jobError(foundation.ErrorDependencyUnavailable, "WORKFLOW_RIVER_DATABASE_MISSING", errors.New("PostgreSQL database is nil"))
 	}
-	if client == nil || isNilRiverDependency(client.insert) || client.Queue() == "" || client.Schema() == "" {
+	if client == nil || isNilRiverDependency(client.lifecycle) || client.Queue() == "" || client.Schema() == "" {
 		return nil, jobError(foundation.ErrorDependencyUnavailable, "WORKFLOW_RIVER_CLIENT_MISSING", errors.New("River client is nil"))
 	}
 	if validate == nil {
@@ -127,6 +126,9 @@ func NewScopedJobInserter(database *platformpostgres.Pool, client *Client, fence
 
 // InsertTx inserts one validated Node job through the opaque transaction scope.
 func (i *ScopedRiverJobInserter) InsertTx(ctx context.Context, scope foundation.TransactionScope, args NodeJobArgs, options InsertOptions) (JobReceipt, error) {
+	if err := ValidateNodeJobArgs(args); err != nil {
+		return JobReceipt{}, err
+	}
 	if i == nil || i.typed == nil {
 		return JobReceipt{}, jobError(foundation.ErrorDependencyUnavailable, "WORKFLOW_RIVER_INSERTER_MISSING", errors.New("River job inserter is nil"))
 	}

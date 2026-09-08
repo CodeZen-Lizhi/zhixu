@@ -15,9 +15,8 @@ import (
 	"gorm.io/gorm"
 )
 
-// gormCitationBackfillRunner isolates the staged bounded backfill flow from
-// the main Artifact repository methods. The legacy pgx Repository remains the
-// production implementation until the migration parity gate is complete.
+// gormCitationBackfillRunner advances bounded backfill batches through the
+// Artifact repository's shared database and transaction boundary.
 type gormCitationBackfillRunner struct {
 	database   *gorm.DB
 	unitOfWork foundation.UnitOfWork
@@ -25,8 +24,7 @@ type gormCitationBackfillRunner struct {
 
 var _ artifactapp.CitationBackfillPort = (*GORMRepository)(nil)
 
-// BackfillCitationSelectors lets the staged Artifact GORM repository expose
-// the additive backfill port without changing its production constructor.
+// BackfillCitationSelectors advances one bounded batch of citation selectors.
 func (repository *GORMRepository) BackfillCitationSelectors(ctx context.Context, limit int) (artifactapp.CitationBackfillResult, bool, error) {
 	if repository == nil {
 		return artifactapp.CitationBackfillResult{}, false, unavailable(errors.New("artifact citation backfill GORM repository is unavailable"))

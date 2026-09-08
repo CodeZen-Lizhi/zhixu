@@ -7,8 +7,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,8 +23,8 @@ import (
 	knowledgeapplication "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/application"
 	knowledgedomain "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
 	platformfilesystem "github.com/CodeZen-Lizhi/zhixu/internal/platform/filesystem"
-	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	retrievalpostgres "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/adapter/postgres"
 	retrievalworkspace "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/adapter/workspace"
 	retrievalapplication "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/application"
@@ -37,9 +35,10 @@ import (
 )
 
 func TestExecutorPersistsRealPostgresModelRunAndCallForWorkflowAttempt(t *testing.T) {
-	pool, ctx := newAgentWorkflowIntegrationPool(t)
-	seedAgentWorkflowRuntime(t, ctx, pool)
-	repository, err := agentpostgres.NewRepository(pool)
+	platform, ctx := newAgentWorkflowIntegrationPool(t)
+	pool := platform.DB()
+	seedAgentWorkflowRuntime(t, ctx, pool, t.TempDir())
+	repository, err := agentpostgres.NewGORMRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +51,7 @@ func TestExecutorPersistsRealPostgresModelRunAndCallForWorkflowAttempt(t *testin
 		t.Fatal(err)
 	}
 	executor, err := NewExecutor(ExecutorDependencies{
-		Model: model, Catalog: catalog, Repository: repository, Knowledge: workflowKnowledgePort{}, Evidence: workflowEvidenceOpener{},
+		Model: model, Scheduler: newTrackingEinoStructuredScheduler(t), Catalog: catalog, Repository: repository, Knowledge: workflowKnowledgePort{}, Evidence: workflowEvidenceOpener{},
 		IDs:   &workflowIDs{values: []foundation.ID{testModelRunID, testCallID, testCallID2, testCallID3}},
 		Clock: &workflowClock{next: time.Date(2026, 7, 19, 2, 0, 0, 0, time.UTC)}, Budget: agentapplication.DefaultRunBudget(),
 	})
@@ -91,15 +90,17 @@ func TestExecutorPersistsRealPostgresModelRunAndCallForWorkflowAttempt(t *testin
 }
 
 func TestExecutorLoadsDisputedExistingClaimAndDisclosureThroughProductionAdapters(t *testing.T) {
-	pool, ctx := newAgentWorkflowIntegrationPool(t)
-	seedAgentWorkflowRuntime(t, ctx, pool)
-	fixture := seedAgentRelationEvidence(t, ctx, pool, t.TempDir())
+	platform, ctx := newAgentWorkflowIntegrationPool(t)
+	pool := platform.DB()
+	workspaceRoot := t.TempDir()
+	seedAgentWorkflowRuntime(t, ctx, pool, workspaceRoot)
+	fixture := seedAgentRelationEvidence(t, ctx, pool, workspaceRoot)
 
-	agentRepository, err := agentpostgres.NewRepository(pool)
+	agentRepository, err := agentpostgres.NewGORMRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
-	knowledgeRepository, err := knowledgepostgres.NewRepository(pool)
+	knowledgeRepository, err := knowledgepostgres.NewGORMRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +117,7 @@ func TestExecutorLoadsDisputedExistingClaimAndDisclosureThroughProductionAdapter
 		t.Fatal(err)
 	}
 
-	searchRepository, err := retrievalpostgres.NewSearchRepository(pool)
+	searchRepository, err := retrievalpostgres.NewGORMSearchRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +125,7 @@ func TestExecutorLoadsDisputedExistingClaimAndDisclosureThroughProductionAdapter
 	if err != nil {
 		t.Fatal(err)
 	}
-	workspaceRepository, err := workspacepostgres.NewRepository(pool)
+	workspaceRepository, err := workspacepostgres.NewGORMRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +157,7 @@ func TestExecutorLoadsDisputedExistingClaimAndDisclosureThroughProductionAdapter
 		t.Fatal(err)
 	}
 	executor, err := NewExecutor(ExecutorDependencies{
-		Model: model, Catalog: catalog, Repository: agentRepository, Knowledge: knowledgeAdapter, Evidence: retrievalAdapter,
+		Model: model, Scheduler: newTrackingEinoStructuredScheduler(t), Catalog: catalog, Repository: agentRepository, Knowledge: knowledgeAdapter, Evidence: retrievalAdapter,
 		IDs:   &workflowIDs{values: []foundation.ID{testModelRunID, testCallID, testCallID2, testCallID3}},
 		Clock: &workflowClock{next: time.Date(2026, 7, 19, 5, 0, 0, 0, time.UTC)}, Budget: agentapplication.DefaultRunBudget(),
 	})
@@ -201,9 +202,10 @@ func TestExecutorLoadsDisputedExistingClaimAndDisclosureThroughProductionAdapter
 }
 
 func TestRecordingReviewPersistsPostgresCallMetricsWithoutSensitiveBodies(t *testing.T) {
-	pool, ctx := newAgentWorkflowIntegrationPool(t)
-	seedAgentWorkflowRuntime(t, ctx, pool)
-	repository, err := agentpostgres.NewRepository(pool)
+	platform, ctx := newAgentWorkflowIntegrationPool(t)
+	pool := platform.DB()
+	seedAgentWorkflowRuntime(t, ctx, pool, t.TempDir())
+	repository, err := agentpostgres.NewGORMRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -373,9 +375,6 @@ type agentCitationSeed struct {
 func seedAgentRelationEvidence(t *testing.T, ctx context.Context, pool *pgxpool.Pool, workspaceRoot string) agentRelationEvidenceFixture {
 	t.Helper()
 	now := time.Date(2026, 7, 19, 4, 0, 0, 0, time.UTC)
-	if _, err := pool.Exec(ctx, `UPDATE core.workspace SET root_path=$1,git_repository_path=$1 WHERE id=$2`, workspaceRoot, string(testWorkspaceID)); err != nil {
-		t.Fatal(err)
-	}
 	candidate := agentCitationSeed{
 		sourceID: "82000000-0000-4000-8000-000000000020", artifactID: "82000000-0000-4000-8000-000000000021",
 		sourceVersionID: testSourceID, projectionID: "82000000-0000-4000-8000-000000000022",
@@ -612,7 +611,7 @@ func testSHA256(value []byte) string {
 	return hex.EncodeToString(digest[:])
 }
 
-func seedAgentWorkflowRuntime(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+func seedAgentWorkflowRuntime(t *testing.T, ctx context.Context, pool *pgxpool.Pool, workspaceRoot string) {
 	t.Helper()
 	definitionID := foundation.ID("82000000-0000-4000-8000-000000000030")
 	queries := []struct {
@@ -620,7 +619,7 @@ func seedAgentWorkflowRuntime(t *testing.T, ctx context.Context, pool *pgxpool.P
 		args []any
 	}{
 		{`INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,created_at,updated_at)
-		 VALUES($1,'agent-workflow','/tmp/agent-workflow','/tmp/agent-workflow',now(),'active',now(),now())`, []any{string(testWorkspaceID)}},
+		 VALUES($1,'agent-workflow',$2,$2,now(),'active',now(),now())`, []any{string(testWorkspaceID), workspaceRoot}},
 		{`INSERT INTO workflow.definition(id,workspace_id,key,version,graph,created_at)
 		 VALUES($1,$2,'agent-relation-assessment',1,'{"nodes":[]}',now())`, []any{string(definitionID), string(testWorkspaceID)}},
 		{`INSERT INTO workflow.run(id,workspace_id,definition_id,status,input,version,created_at,updated_at)
@@ -643,51 +642,10 @@ func seedAgentWorkflowRuntime(t *testing.T, ctx context.Context, pool *pgxpool.P
 	}
 }
 
-func newAgentWorkflowIntegrationPool(t *testing.T) (*pgxpool.Pool, context.Context) {
+func newAgentWorkflowIntegrationPool(t *testing.T) (*platformpostgres.Pool, context.Context) {
 	t.Helper()
-	baseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
-	if baseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL for Agent Workflow integration tests")
-	}
-	ctx := context.Background()
-	parsed, err := url.Parse(baseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	admin, err := pgxpool.New(ctx, baseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	name := fmt.Sprintf("zhixu_agent_workflow_%d", time.Now().UnixNano())
-	identifier := pgx.Identifier{name}.Sanitize()
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+identifier); err != nil {
-		admin.Close()
-		t.Fatal(err)
-	}
-	parsed.Path = "/" + name
-	databaseURL := parsed.String()
-	migrationPool, err := platformpostgres.OpenMigration(ctx, databaseURL, 4, 0)
-	if err == nil {
-		err = platformmigration.MigrateAtlas(ctx, migrationPool.DB())
-		migrationPool.Close()
-	}
-	if err != nil {
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-		t.Fatal(err)
-	}
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		pool.Close()
-		_, _ = admin.Exec(context.Background(), "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-	})
-	return pool, ctx
+	fixture := testdb.Require(t, testdb.Config{Availability: testdb.FailWhenUnavailable, MaxConns: 16})
+	return fixture.Pool(), t.Context()
 }
 
 var _ workflowapplication.Executor = (*Executor)(nil)

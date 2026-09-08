@@ -34,8 +34,8 @@ func NewGORMToolExecutionPolicySnapshot(pool *platformpostgres.Pool) (*GORMToolE
 	return &GORMToolExecutionPolicySnapshot{database: database}, nil
 }
 
-// LockToolExecutionPolicyScoped takes the legacy-equivalent shared locks and
-// returns the resulting raw Workflow facts.
+// LockToolExecutionPolicyScoped holds shared locks while reading Workflow facts
+// in the caller's transaction.
 func (reader *GORMToolExecutionPolicySnapshot) LockToolExecutionPolicyScoped(
 	ctx context.Context,
 	scope foundation.TransactionScope,

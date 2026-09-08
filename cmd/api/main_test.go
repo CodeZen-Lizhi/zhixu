@@ -21,6 +21,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	modelsettingsruntime "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/runtime"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	retrievaldomain "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
 	toolcatalog "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/catalog"
 	toolworkflow "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/workflow"
@@ -28,7 +29,6 @@ import (
 	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
 	workspacedomain "github.com/CodeZen-Lizhi/zhixu/internal/workspace/domain"
 	"github.com/gin-gonic/gin"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestNewWorkflowServiceRequiresDatabase(t *testing.T) {
@@ -256,14 +256,14 @@ func TestNewGraphHandlerRequiresDatabase(t *testing.T) {
 }
 
 func TestNewGraphHandlerComposesProductionDependencies(t *testing.T) {
-	handler, err := newGraphHandler(&pgxpool.Pool{}, time.Second)
+	handler, err := newGraphHandler(apiConstructorPool(t), time.Second)
 	if err != nil || handler == nil || !handler.Available() {
 		t.Fatalf("handler=%#v err=%v", handler, err)
 	}
 }
 
 func TestNewConversationHandlersKeepReadFeedbackAndSSECompositionWhenChatDisabled(t *testing.T) {
-	conversationHandler, eventsHandler, err := newConversationHandlers(&pgxpool.Pool{}, nil, false)
+	conversationHandler, eventsHandler, err := newConversationHandlers(apiConstructorPool(t), nil, false)
 	if err != nil || conversationHandler == nil || eventsHandler == nil {
 		t.Fatalf("disabled conversation=%#v events=%#v err=%v", conversationHandler, eventsHandler, err)
 	}
@@ -279,7 +279,7 @@ func TestNewConversationHandlersKeepReadFeedbackAndSSECompositionWhenChatDisable
 		t.Fatalf("disabled question status=%d body=%s", response.Code, response.Body.String())
 	}
 
-	if handler, stream, enabledErr := newConversationHandlers(&pgxpool.Pool{}, nil, true); enabledErr == nil || handler != nil || stream != nil {
+	if handler, stream, enabledErr := newConversationHandlers(apiConstructorPool(t), nil, true); enabledErr == nil || handler != nil || stream != nil {
 		t.Fatalf("enabled missing runtime conversation=%#v events=%#v err=%v", handler, stream, enabledErr)
 	}
 }
@@ -288,7 +288,7 @@ func TestNewDraftStreamHandlerRequiresDatabaseAndComposesRepository(t *testing.T
 	if handler, err := newDraftStreamHandler(nil); err == nil || handler != nil {
 		t.Fatalf("nil database handler=%#v err=%v", handler, err)
 	}
-	handler, err := newDraftStreamHandler(&pgxpool.Pool{})
+	handler, err := newDraftStreamHandler(apiConstructorPool(t))
 	if err != nil || handler == nil {
 		t.Fatalf("configured handler=%#v err=%v", handler, err)
 	}
@@ -315,7 +315,7 @@ func TestQuestionDispatchRequiresEnabledAndFullyInitializedRAG(t *testing.T) {
 }
 
 func TestNewRetrievalHandlerComposesDisabledAndEnabledEmbedderWithoutSecretLeak(t *testing.T) {
-	pool := &pgxpool.Pool{}
+	pool := apiConstructorPool(t)
 	repository := fakeSourceMaterialRepository{}
 	files := fakeFileScanner{}
 
@@ -490,4 +490,15 @@ func (fakeFileScanner) Capture(context.Context, string, workspacedomain.ScannedF
 
 func (fakeFileScanner) ReadArtifact(context.Context, string, workspacedomain.ContentArtifact) ([]byte, error) {
 	return nil, nil
+}
+
+// apiConstructorPool initializes the shared GORM boundary without contacting a database.
+func apiConstructorPool(t *testing.T) *platformpostgres.Pool {
+	t.Helper()
+	pool, err := platformpostgres.Open(t.Context(), "postgres://postgres@127.0.0.1:1/api_constructor?sslmode=disable", 2, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	return pool
 }

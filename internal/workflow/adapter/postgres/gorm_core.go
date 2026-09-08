@@ -12,20 +12,16 @@ import (
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
 )
 
-// GORMRepository is the staged implementation of the legacy-compatible
-// Workflow repository surface. Production composition remains on Repository.
+// GORMRepository persists Workflow facts through the shared GORM connection.
 type GORMRepository struct {
 	database   *gorm.DB
 	unitOfWork foundation.UnitOfWork
 }
 
-// GORMRuntimeRepositoryHooks contains only scoped lifecycle hooks. Legacy
-// pgx-backed hooks are intentionally not accepted by the GORM runtime.
+// GORMRuntimeRepositoryHooks contains transaction-scoped lifecycle hooks.
 type GORMRuntimeRepositoryHooks struct {
 	CancellationSafety      application.ScopedCancellationSafetyGuard
 	Terminal                application.ScopedWorkflowTerminalHook
@@ -33,7 +29,7 @@ type GORMRuntimeRepositoryHooks struct {
 	ModelRuntimeFreshWithin time.Duration
 }
 
-// GORMRuntimeRepository is the staged GORM Runtime state machine.
+// GORMRuntimeRepository persists the Workflow Runtime state machine.
 type GORMRuntimeRepository struct {
 	database                *gorm.DB
 	unitOfWork              foundation.UnitOfWork
@@ -63,9 +59,6 @@ func NewGORMRuntimeRepositoryWithHooks(
 ) (*GORMRuntimeRepository, error) {
 	if pool == nil || pool.DB() == nil {
 		return nil, gormWorkflowUnavailable("WORKFLOW_RUNTIME_DATABASE_UNAVAILABLE", errors.New("workflow PostgreSQL pool is unavailable"))
-	}
-	if riverOptions.EnqueueFence != nil {
-		return nil, foundation.NewError(foundation.ErrorInvalidInput, "WORKFLOW_RIVER_OPTIONS_INVALID", false, errors.New("legacy and scoped enqueue fences cannot be mixed"))
 	}
 	if nilGORMWorkflowDependency(enqueueFence) {
 		return nil, foundation.NewError(foundation.ErrorDependencyUnavailable, "WORKFLOW_SCOPED_ENQUEUE_FENCE_MISSING", true, errors.New("workflow scoped enqueue fence is unavailable"))
@@ -228,7 +221,7 @@ func gormWorkflowRawRows(database *gorm.DB, query string, arguments ...any) (*sq
 }
 
 func gormWorkflowNoRows(err error) bool {
-	return errors.Is(err, sql.ErrNoRows) || errors.Is(err, pgx.ErrNoRows) || errors.Is(err, gorm.ErrRecordNotFound)
+	return errors.Is(err, sql.ErrNoRows) || errors.Is(err, gorm.ErrRecordNotFound)
 }
 
 func classifyGORMWorkflow(ctx context.Context, cause error, code string) error {
@@ -245,19 +238,15 @@ func classifyGORMWorkflow(ctx context.Context, cause error, code string) error {
 		}
 		return foundation.NewError(foundation.ErrorRetryableFailure, code, true, contextCause)
 	}
-	var postgresError *pgconn.PgError
-	if errors.As(cause, &postgresError) {
-		switch postgresError.Code {
-		case "23505":
-			return foundation.NewError(foundation.ErrorVersionConflict, "WORKFLOW_CONFLICT", false, cause)
-		case "23503":
-			return foundation.NewError(foundation.ErrorConsistencyViolation, "WORKFLOW_REFERENCE_INVALID", false, cause)
-		case "23514", "22P02":
-			return foundation.NewError(foundation.ErrorInvalidInput, "WORKFLOW_DATA_INVALID", false, cause)
-		case "40001", "40P01":
-			return foundation.NewError(foundation.ErrorRetryableFailure, code, true, cause)
-		}
-		return gormWorkflowUnavailable(code, cause)
+	switch platformpostgres.SQLState(cause) {
+	case "23505":
+		return foundation.NewError(foundation.ErrorVersionConflict, "WORKFLOW_CONFLICT", false, cause)
+	case "23503":
+		return foundation.NewError(foundation.ErrorConsistencyViolation, "WORKFLOW_REFERENCE_INVALID", false, cause)
+	case "23514", "22P02":
+		return foundation.NewError(foundation.ErrorInvalidInput, "WORKFLOW_DATA_INVALID", false, cause)
+	case "40001", "40P01":
+		return foundation.NewError(foundation.ErrorRetryableFailure, code, true, cause)
 	}
 	if errors.Is(cause, sql.ErrTxDone) {
 		return foundation.NewError(foundation.ErrorDependencyUnavailable, code, true, cause)

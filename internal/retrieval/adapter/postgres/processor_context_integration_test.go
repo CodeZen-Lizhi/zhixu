@@ -15,39 +15,43 @@ import (
 )
 
 func TestProcessorContextLoaderReturnsStrictReadyCheckpointContext(t *testing.T) {
-	repository, database, ctx := newRetrievalTestRepository(t)
-	fixture := seedCompletionFixture(t, ctx, repository, database.DB(), 610_000)
-	loader, err := NewDeliveryRepository(database.DB(), foundation.NewUUIDGenerator(nil))
-	if err != nil {
-		t.Fatal(err)
-	}
+	for _, implementation := range []string{"gorm"} {
+		t.Run(implementation, func(t *testing.T) {
+			repository, database, ctx := newRetrievalTestStore(t, implementation)
+			fixture := seedCompletionFixture(t, ctx, repository, database, 610_000)
+			loader, err := NewGORMDeliveryRepository(database, foundation.NewUUIDGenerator(nil))
+			if err != nil {
+				t.Fatal(err)
+			}
 
-	loaded, err := loader.LoadProcessorContext(ctx, fixture.Command.Fence)
-	if err != nil {
-		t.Fatal(err)
-	}
-	contextValue := loaded.Context
-	if loaded.Disposition != application.ProcessorContextCurrent ||
-		contextValue.Delivery.ID != fixture.DeliveryID || contextValue.Attempt.ID != fixture.AttemptID ||
-		contextValue.Request.WorkspaceID != fixture.WorkspaceID || contextValue.Request.WritebackExecutionID != fixture.ExecutionID ||
-		contextValue.Binding.WorkspaceID != fixture.WorkspaceID || contextValue.Binding.WritebackExecutionID != fixture.ExecutionID ||
-		contextValue.TargetSourceID == "" || contextValue.IngestionAttempt == nil ||
-		contextValue.Attempt.IngestionAttemptID == nil || contextValue.IngestionAttempt.ID != *contextValue.Attempt.IngestionAttemptID ||
-		contextValue.IndexVersion == nil || contextValue.IndexVersion.ID != fixture.TargetIndexID ||
-		contextValue.IndexVersion.Status != domain.IndexStatusReady || contextValue.Delivery.Regression == nil {
-		t.Fatalf("loaded context = %#v", loaded)
-	}
-	if contextValue.IngestionAttempt.Status != "chunked" || contextValue.IngestionAttempt.SecurityStatus != "passed" ||
-		contextValue.IngestionAttempt.ParseProjectionID == nil || contextValue.Delivery.ParseProjectionID == nil ||
-		*contextValue.IngestionAttempt.ParseProjectionID != *contextValue.Delivery.ParseProjectionID {
-		t.Fatalf("ingestion evidence = %#v", contextValue.IngestionAttempt)
+			loaded, err := loader.LoadProcessorContext(ctx, fixture.Command.Fence)
+			if err != nil {
+				t.Fatal(err)
+			}
+			contextValue := loaded.Context
+			if loaded.Disposition != application.ProcessorContextCurrent ||
+				contextValue.Delivery.ID != fixture.DeliveryID || contextValue.Attempt.ID != fixture.AttemptID ||
+				contextValue.Request.WorkspaceID != fixture.WorkspaceID || contextValue.Request.WritebackExecutionID != fixture.ExecutionID ||
+				contextValue.Binding.WorkspaceID != fixture.WorkspaceID || contextValue.Binding.WritebackExecutionID != fixture.ExecutionID ||
+				contextValue.TargetSourceID == "" || contextValue.IngestionAttempt == nil ||
+				contextValue.Attempt.IngestionAttemptID == nil || contextValue.IngestionAttempt.ID != *contextValue.Attempt.IngestionAttemptID ||
+				contextValue.IndexVersion == nil || contextValue.IndexVersion.ID != fixture.TargetIndexID ||
+				contextValue.IndexVersion.Status != domain.IndexStatusReady || contextValue.Delivery.Regression == nil {
+				t.Fatalf("loaded context = %#v", loaded)
+			}
+			if contextValue.IngestionAttempt.Status != "chunked" || contextValue.IngestionAttempt.SecurityStatus != "passed" ||
+				contextValue.IngestionAttempt.ParseProjectionID == nil || contextValue.Delivery.ParseProjectionID == nil ||
+				*contextValue.IngestionAttempt.ParseProjectionID != *contextValue.Delivery.ParseProjectionID {
+				t.Fatalf("ingestion evidence = %#v", contextValue.IngestionAttempt)
+			}
+		})
 	}
 }
 
 func TestProcessorContextLoaderReturnsStaleAndCommittedExplicitly(t *testing.T) {
 	repository, database, ctx := newRetrievalTestRepository(t)
-	fixture := seedCompletionFixture(t, ctx, repository, database.DB(), 620_000)
-	loader, err := NewDeliveryRepository(database.DB(), foundation.NewUUIDGenerator(nil))
+	fixture := seedCompletionFixture(t, ctx, repository, database, 620_000)
+	loader, err := NewGORMDeliveryRepository(database, foundation.NewUUIDGenerator(nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,8 +74,8 @@ func TestProcessorContextLoaderReturnsStaleAndCommittedExplicitly(t *testing.T) 
 
 func TestProcessorContextLoaderRejectsCommitMappingDrift(t *testing.T) {
 	repository, database, ctx := newRetrievalTestRepository(t)
-	fixture := seedCompletionFixture(t, ctx, repository, database.DB(), 630_000)
-	loader, err := NewDeliveryRepository(database.DB(), foundation.NewUUIDGenerator(nil))
+	fixture := seedCompletionFixture(t, ctx, repository, database, 630_000)
+	loader, err := NewGORMDeliveryRepository(database, foundation.NewUUIDGenerator(nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,8 +93,8 @@ func TestProcessorContextLoaderRejectsCommitMappingDrift(t *testing.T) {
 
 func TestProcessorContextLoaderRejectsExpiredLease(t *testing.T) {
 	repository, database, ctx := newRetrievalTestRepository(t)
-	fixture := seedCompletionFixture(t, ctx, repository, database.DB(), 640_000)
-	loader, err := NewDeliveryRepository(database.DB(), foundation.NewUUIDGenerator(nil))
+	fixture := seedCompletionFixture(t, ctx, repository, database, 640_000)
+	loader, err := NewGORMDeliveryRepository(database, foundation.NewUUIDGenerator(nil))
 	if err != nil {
 		t.Fatal(err)
 	}

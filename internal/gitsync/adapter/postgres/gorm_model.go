@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// The staged models deliberately contain only storage fields. They are never
+// These models deliberately contain only storage fields. They are never
 // passed to schema mutation APIs or association saving; the Atlas migration
 // directory remains the sole schema authority.
 

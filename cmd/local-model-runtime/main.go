@@ -154,7 +154,7 @@ func managedReconciler(ctx context.Context, manager *localmodelruntime.Manager) 
 	if err != nil {
 		return nil, nil, fmt.Errorf("open local model runtime database: %w", err)
 	}
-	store, err := localmodelruntime.NewPostgresStore(database.DB())
+	store, err := localmodelruntime.NewGORMStore(database)
 	if err != nil {
 		database.Close()
 		return nil, nil, err

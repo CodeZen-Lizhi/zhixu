@@ -87,7 +87,8 @@ func TestGORMRepositoryPostgreSQLVisibilityHoldFailsClosed(t *testing.T) {
 
 func TestRepositoryPostgreSQLVisibilityHoldHidesPublicReadsAndKeepsCommandsRecoverable(t *testing.T) {
 	ctx := context.Background()
-	repository, pool := newArtifactIntegrationRepository(t, ctx)
+	repository, platformPool := newArtifactIntegrationGORMRepository(t, ctx)
+	pool := platformPool.DB()
 	workspaceID := artifactIntegrationID(600)
 	sessionID := artifactIntegrationID(601)
 	attemptDigest := strings.Repeat("b", 64)

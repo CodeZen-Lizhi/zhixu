@@ -2,12 +2,12 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"testing"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/review/interview/domain"
-	"github.com/jackc/pgx/v5"
 )
 
 func TestEncodeJSONReturnsPersistenceError(t *testing.T) {
@@ -31,13 +31,13 @@ func TestLoadSessionClassifiesRowErrors(t *testing.T) {
 		rowError error
 		wantCode string
 	}{
-		{name: "not found", rowError: pgx.ErrNoRows, wantCode: domain.ErrorCodeSessionNotFound},
+		{name: "not found", rowError: sql.ErrNoRows, wantCode: domain.ErrorCodeSessionNotFound},
 		{name: "dependency unavailable", rowError: errors.New("database unavailable"), wantCode: domain.ErrorCodeDependencyUnavailable},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := loadSession(context.Background(), sessionErrorQueryer{err: test.rowError}, foundation.ID("00000000-0000-0000-0000-000000000001"), foundation.ID("00000000-0000-0000-0000-000000000002"), false)
+			_, err := gormInterviewReadSession(context.Background(), sessionErrorRow{err: test.rowError})
 			var typed *foundation.Error
 			if !errors.As(err, &typed) {
 				t.Fatalf("loadSession error type = %T, want *foundation.Error", err)
@@ -47,12 +47,6 @@ func TestLoadSessionClassifiesRowErrors(t *testing.T) {
 			}
 		})
 	}
-}
-
-type sessionErrorQueryer struct{ err error }
-
-func (queryer sessionErrorQueryer) QueryRow(context.Context, string, ...any) pgx.Row {
-	return sessionErrorRow{err: queryer.err}
 }
 
 type sessionErrorRow struct{ err error }

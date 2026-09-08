@@ -11,13 +11,10 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/events/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
 )
 
-// GORMStore is the staged GORM implementation of the Server Event Store.
-// Production composition remains on Store until the TODO 9 gate passes.
+// GORMStore persists and replays Server Events through the shared GORM connection.
 type GORMStore struct {
 	database *gorm.DB
 }
@@ -188,16 +185,13 @@ func classifyGORMAppendFailure(ctx context.Context, err error) error {
 	if contextError := gormEventContextError(ctx, err); contextError != nil {
 		return contextError
 	}
-	var postgresError *pgconn.PgError
-	if errors.As(err, &postgresError) {
-		switch postgresError.Code {
-		case "23503", "23514":
-			return foundation.NewError(foundation.ErrorConsistencyViolation, domain.ErrorCodeAppendBindingInvalid, false, err)
-		case "23505":
-			return appendConflict()
-		case "40001", "40P01":
-			return foundation.NewError(foundation.ErrorRetryableFailure, domain.ErrorCodeStoreUnavailable, true, err)
-		}
+	switch platformpostgres.SQLState(err) {
+	case "23503", "23514":
+		return foundation.NewError(foundation.ErrorConsistencyViolation, domain.ErrorCodeAppendBindingInvalid, false, err)
+	case "23505":
+		return appendConflict()
+	case "40001", "40P01":
+		return foundation.NewError(foundation.ErrorRetryableFailure, domain.ErrorCodeStoreUnavailable, true, err)
 	}
 	return eventStoreUnavailable(fmt.Errorf("SSE database operation failed: %T", err))
 }
@@ -239,7 +233,7 @@ func gormEventContextError(ctx context.Context, err error) error {
 }
 
 func eventNoRows(err error) bool {
-	return errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows) || errors.Is(err, gorm.ErrRecordNotFound)
+	return errors.Is(err, sql.ErrNoRows) || errors.Is(err, gorm.ErrRecordNotFound)
 }
 
 func eventStoreUnavailable(cause error) error {

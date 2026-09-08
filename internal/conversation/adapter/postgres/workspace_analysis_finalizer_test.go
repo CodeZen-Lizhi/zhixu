@@ -239,7 +239,7 @@ func TestWorkspaceAnalysisDraftAndEventTerminalContracts(t *testing.T) {
 	}
 
 	appender := &workspaceAnalysisEventCapture{}
-	finalizer := &WorkspaceAnalysisFinalizer{events: appender}
+	finalizer := &GORMWorkspaceAnalysisFinalizer{events: appender}
 	answerID := workspaceAnalysisFinalizerAdapterTestID(51)
 	answer := conversationdomain.Answer{
 		ID: answerID, WorkspaceID: workspaceAnalysisFinalizerAdapterTestID(52),
@@ -279,9 +279,9 @@ type workspaceAnalysisEventCapture struct {
 	replay   bool
 }
 
-func (capture *workspaceAnalysisEventCapture) AppendTx(
+func (capture *workspaceAnalysisEventCapture) AppendScoped(
 	_ context.Context,
-	_ any,
+	_ foundation.TransactionScope,
 	request eventsdomain.AppendRequest,
 ) (eventsdomain.ServerEvent, bool, error) {
 	capture.requests = append(capture.requests, request)

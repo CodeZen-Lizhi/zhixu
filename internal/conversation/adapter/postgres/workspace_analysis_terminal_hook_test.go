@@ -13,13 +13,13 @@ import (
 )
 
 func TestWorkspaceAnalysisCancellationTerminalHookIgnoresUnownedAndNonCancellationEvents(t *testing.T) {
-	var hook *WorkspaceAnalysisCancellationTerminalHook
-	if err := hook.OnWorkflowNodeTerminal(context.Background(), nil, workflowapplication.WorkflowNodeTerminalEvent{
+	var hook *GORMWorkspaceAnalysisCancellationTerminalHook
+	if err := hook.OnWorkflowNodeTerminalScoped(context.Background(), nil, workflowapplication.WorkflowNodeTerminalEvent{
 		NodeKind: "other.workflow.node", Outcome: workflowapplication.WorkflowTerminalOutcomeCancelled,
 	}); err != nil {
 		t.Fatalf("unowned event: %v", err)
 	}
-	if err := hook.OnWorkflowNodeTerminal(context.Background(), nil, workflowapplication.WorkflowNodeTerminalEvent{
+	if err := hook.OnWorkflowNodeTerminalScoped(context.Background(), nil, workflowapplication.WorkflowNodeTerminalEvent{
 		NodeKind: conversationworkflow.RegisteredWorkspaceAnalysisDefinition().Graph.Nodes[0].Kind,
 		Outcome:  workflowapplication.WorkflowTerminalOutcomeSucceeded,
 	}); err != nil {
@@ -29,10 +29,10 @@ func TestWorkspaceAnalysisCancellationTerminalHookIgnoresUnownedAndNonCancellati
 
 func TestNewWorkspaceAnalysisCancellationTerminalHookRejectsMissingDependencies(t *testing.T) {
 	var events *workspaceAnalysisEventCapture
-	if _, err := NewWorkspaceAnalysisCancellationTerminalHook(events, foundation.NewUUIDGenerator(nil)); err == nil {
+	if _, err := NewGORMWorkspaceAnalysisCancellationTerminalHook(events, foundation.NewUUIDGenerator(nil)); err == nil {
 		t.Fatal("typed-nil event appender was accepted")
 	}
-	if _, err := NewWorkspaceAnalysisCancellationTerminalHook(&workspaceAnalysisEventCapture{}, nil); err == nil {
+	if _, err := NewGORMWorkspaceAnalysisCancellationTerminalHook(&workspaceAnalysisEventCapture{}, nil); err == nil {
 		t.Fatal("nil ID generator was accepted")
 	}
 }
@@ -94,4 +94,4 @@ func workspaceAnalysisCancellationEventFixture() workflowapplication.WorkflowNod
 	}
 }
 
-var _ eventsapplication.Appender = (*workspaceAnalysisEventCapture)(nil)
+var _ eventsapplication.ScopedAppender = (*workspaceAnalysisEventCapture)(nil)

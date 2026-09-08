@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"sort"
 
@@ -9,6 +10,7 @@ import (
 	graphapp "github.com/CodeZen-Lizhi/zhixu/internal/graph/application"
 	graphdomain "github.com/CodeZen-Lizhi/zhixu/internal/graph/domain"
 	knowledge "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
+	"github.com/lib/pq"
 	"gorm.io/gorm"
 )
 
@@ -60,10 +62,10 @@ func gormNeighborhoodWindow(ctx context.Context, database *gorm.DB, request grap
 		probeLimit = graphapp.MaxResultWindowItems + 1
 	}
 	rows, err := gormGraphRawRows(ctx, database, neighborhoodDepthOneSQL,
-		string(request.WorkspaceID), string(request.Center.Type), string(request.Center.ID), string(request.Direction),
-		stringsOf(relationStatuses), stringsOf(request.Filter.RelationTypes), request.Filter.RelationMinConfidence,
-		request.Filter.UpdatedAfter, stringsOf(request.Filter.NodeTypes), ids(request.Filter.TopicIDs),
-		stringsOf(claimStatuses), request.Filter.ClaimMinConfidence, probeLimit,
+		sql.Named("p1", string(request.WorkspaceID)), sql.Named("p2", string(request.Center.Type)), sql.Named("p3", string(request.Center.ID)), sql.Named("p4", string(request.Direction)),
+		sql.Named("p5", pq.Array(stringsOf(relationStatuses))), sql.Named("p6", pq.Array(stringsOf(request.Filter.RelationTypes))), sql.Named("p7", request.Filter.RelationMinConfidence),
+		sql.Named("p8", request.Filter.UpdatedAfter), sql.Named("p9", pq.Array(stringsOf(request.Filter.NodeTypes))), sql.Named("p10", pq.Array(ids(request.Filter.TopicIDs))),
+		sql.Named("p11", pq.Array(stringsOf(claimStatuses))), sql.Named("p12", request.Filter.ClaimMinConfidence), sql.Named("p13", probeLimit),
 	)
 	if err != nil {
 		return graphdomain.Neighborhood{}, classifyGORM(ctx, err)
@@ -214,10 +216,10 @@ func gormQueryFrontierEdges(ctx context.Context, database *gorm.DB, request grap
 		claimStatuses = []knowledge.ClaimStatus{knowledge.ClaimStatusConfirmed, knowledge.ClaimStatusDisputed}
 	}
 	rows, err := gormGraphRawRows(ctx, database, neighborhoodFrontierSQL,
-		string(request.WorkspaceID), frontierTypes, frontierIDs, string(request.Direction), ids(seenIDs),
-		stringsOf(relationStatuses), stringsOf(request.Filter.RelationTypes), request.Filter.RelationMinConfidence,
-		request.Filter.UpdatedAfter, stringsOf(request.Filter.NodeTypes), ids(request.Filter.TopicIDs),
-		stringsOf(claimStatuses), request.Filter.ClaimMinConfidence, limit,
+		sql.Named("p1", string(request.WorkspaceID)), sql.Named("p2", pq.Array(frontierTypes)), sql.Named("p3", pq.Array(frontierIDs)), sql.Named("p4", string(request.Direction)), sql.Named("p5", pq.Array(ids(seenIDs))),
+		sql.Named("p6", pq.Array(stringsOf(relationStatuses))), sql.Named("p7", pq.Array(stringsOf(request.Filter.RelationTypes))), sql.Named("p8", request.Filter.RelationMinConfidence),
+		sql.Named("p9", request.Filter.UpdatedAfter), sql.Named("p10", pq.Array(stringsOf(request.Filter.NodeTypes))), sql.Named("p11", pq.Array(ids(request.Filter.TopicIDs))),
+		sql.Named("p12", pq.Array(stringsOf(claimStatuses))), sql.Named("p13", request.Filter.ClaimMinConfidence), sql.Named("p14", limit),
 	)
 	if err != nil {
 		return nil, classifyGORM(ctx, err)
@@ -311,7 +313,7 @@ func gormHydrateTopics(ctx context.Context, database *gorm.DB, workspaceID found
 	if len(topicIDs) == 0 {
 		return nil
 	}
-	rows, err := gormGraphRawRows(ctx, database, `SELECT id::text,workspace_id::text,name,description,status,version,updated_at FROM core.topic WHERE workspace_id=$1 AND id=ANY($2::uuid[])`, string(workspaceID), ids(topicIDs))
+	rows, err := gormGraphRawRows(ctx, database, `SELECT id::text,workspace_id::text,name,description,status,version,updated_at FROM core.topic WHERE workspace_id=(@p1) AND id=ANY((@p2)::uuid[])`, sql.Named("p1", string(workspaceID)), sql.Named("p2", pq.Array(ids(topicIDs))))
 	if err != nil {
 		return classifyGORM(ctx, err)
 	}
@@ -333,7 +335,7 @@ func gormHydrateClaims(ctx context.Context, database *gorm.DB, workspaceID found
 	if len(claimIDs) == 0 {
 		return nil
 	}
-	rows, err := gormGraphRawRows(ctx, database, `SELECT id::text,workspace_id::text,statement,applicability,applicability_schema_version,applicability_hash,status,confidence_score,version,updated_at FROM core.claim WHERE workspace_id=$1 AND id=ANY($2::uuid[])`, string(workspaceID), ids(claimIDs))
+	rows, err := gormGraphRawRows(ctx, database, `SELECT id::text,workspace_id::text,statement,applicability,applicability_schema_version,applicability_hash,status,confidence_score,version,updated_at FROM core.claim WHERE workspace_id=(@p1) AND id=ANY((@p2)::uuid[])`, sql.Named("p1", string(workspaceID)), sql.Named("p2", pq.Array(ids(claimIDs))))
 	if err != nil {
 		return classifyGORM(ctx, err)
 	}

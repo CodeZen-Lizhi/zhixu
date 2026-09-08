@@ -38,11 +38,13 @@ func TestWorkspaceAnalysisTimelineProjectsAuthoritativeSafeSnapshot(t *testing.T
 		t.Fatal(err)
 	}
 
-	events, err := eventspostgres.NewStore(pool)
+	runtime := openMigrationRuntimePool(t, ctx, pool)
+	defer runtime.Close()
+	events, err := eventspostgres.NewGORMStore(runtime)
 	if err != nil {
 		t.Fatal(err)
 	}
-	repository, err := conversationpostgres.NewRepository(pool, events)
+	repository, err := conversationpostgres.NewGORMRepository(runtime, events)
 	if err != nil {
 		t.Fatal(err)
 	}

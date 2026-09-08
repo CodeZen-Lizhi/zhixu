@@ -9,7 +9,6 @@ import (
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
-	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -26,18 +25,7 @@ func TestGORMWorkspaceAnalysisExecutionFenceLocksExecutionWithPostgres(t *testin
 		string(workspaceID)); err != nil {
 		t.Fatal(err)
 	}
-	client, err := riveradapter.NewClient(pool, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	inserter, err := riveradapter.NewJobInserter(client)
-	if err != nil {
-		t.Fatal(err)
-	}
-	runtime, err := NewRuntimeRepository(pool, inserter)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime := newGORMRuntimeTestRepository(t, platformPool, GORMRuntimeRepositoryHooks{})
 	primary := seedGORMToolFenceExecution(t, ctx, runtime, workspaceID, "gorm-execution-fence-primary", "9")
 	other := seedGORMToolFenceExecution(t, ctx, runtime, workspaceID, "gorm-execution-fence-other", "a")
 	fence, err := NewGORMWorkspaceAnalysisExecutionFence(platformPool)

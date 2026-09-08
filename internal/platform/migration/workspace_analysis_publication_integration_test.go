@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	toolspostgres "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/postgres"
 	toolsretrieval "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/retrieval"
 	toolsapplication "github.com/CodeZen-Lizhi/zhixu/internal/tools/application"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -215,10 +214,10 @@ func TestWorkspaceAnalysisPublicationProofCompletesOnlyAuthoritativeProjection(t
 		applyWorkspaceAnalysisPublicationMigration(t, ctx, pool)
 		insertWorkspaceAnalysisPublicationReadyFixture(t, ctx, pool)
 
-		repository, err := toolspostgres.NewRepository(pool)
-		if err != nil {
-			t.Fatal(err)
-		}
+		runtime := openMigrationRuntimePool(t, ctx, pool)
+		defer runtime.Close()
+		pool = runtime.DB()
+		repository := newWorkspaceAnalysisMigrationToolsRepository(t, runtime)
 		workspaceID := foundation.ID("83000000-0000-4000-8000-000000000001")
 		workflowRunID := foundation.ID("83000000-0000-4000-8000-000000000012")
 		searchReceipt, err := repository.LoadSearchKnowledgeV2Receipt(ctx, workspaceID, workflowRunID)

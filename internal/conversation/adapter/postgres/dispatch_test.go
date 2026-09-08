@@ -16,9 +16,9 @@ import (
 	eventsapplication "github.com/CodeZen-Lizhi/zhixu/internal/events/application"
 	eventsdomain "github.com/CodeZen-Lizhi/zhixu/internal/events/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	retrievaldomain "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
 	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
@@ -55,8 +55,8 @@ func TestQuestionWorkflowDispatchPlanSelectsCanonicalModeWithoutChangingRAG(t *t
 }
 
 func TestQuestionDispatcherRejectsWorkspaceAnalysisBeforeOpeningTransactionWhenCapabilityIsOff(t *testing.T) {
-	dispatcher, err := NewQuestionDispatcher(
-		&questionConstructorDB{}, &questionConstructorRuntime{}, &questionConstructorAppender{},
+	dispatcher, err := NewGORMQuestionDispatcher(
+		questionConstructorPool(t), &questionConstructorRuntime{}, &questionConstructorAppender{},
 		foundation.NewUUIDGenerator(nil), foundation.SystemClock{},
 	)
 	if err != nil {
@@ -86,7 +86,7 @@ func TestQuestionDispatcherRejectsWorkspaceAnalysisBeforeOpeningTransactionWhenC
 
 func TestQuestionDispatcherWorkspaceAnalysisStartedEventIsExactAndReplayBound(t *testing.T) {
 	appender := &workspaceAnalysisEventCapture{}
-	dispatcher := &QuestionDispatcher{events: appender}
+	dispatcher := &GORMQuestionDispatcher{events: appender}
 	run := agentdomain.WorkspaceAnalysisRun{
 		ID:             "8c000000-0000-4000-8000-000000000011",
 		WorkspaceID:    "8c000000-0000-4000-8000-000000000012",
@@ -138,8 +138,8 @@ func TestQuestionDispatcherWorkspaceAnalysisStartedEventIsExactAndReplayBound(t 
 
 func TestNewQuestionDispatcherWithWorkspaceAnalysisRejectsTypedNilStarter(t *testing.T) {
 	var starter *questionAnalysisRunStarter
-	_, err := NewQuestionDispatcherWithWorkspaceAnalysis(
-		&questionConstructorDB{}, &questionConstructorRuntime{}, &questionConstructorAppender{},
+	_, err := NewGORMQuestionDispatcherWithWorkspaceAnalysis(
+		questionConstructorPool(t), &questionConstructorRuntime{}, &questionConstructorAppender{},
 		foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, starter,
 	)
 	var classified *foundation.Error
@@ -149,20 +149,20 @@ func TestNewQuestionDispatcherWithWorkspaceAnalysisRejectsTypedNilStarter(t *tes
 }
 
 func TestNewQuestionDispatcherRejectsTypedNilDependencies(t *testing.T) {
-	db := &questionConstructorDB{}
+	db := questionConstructorPool(t)
 	runtime := &questionConstructorRuntime{}
 	events := &questionConstructorAppender{}
 	ids := foundation.NewUUIDGenerator(nil)
 	clock := foundation.SystemClock{}
 
-	var nilDB *questionConstructorDB
+	var nilDB *platformpostgres.Pool
 	var nilRuntime *questionConstructorRuntime
 	var nilEvents *questionConstructorAppender
 	tests := []struct {
 		name    string
-		db      DB
-		runtime questionRuntimeStarter
-		events  eventsapplication.Appender
+		db      *platformpostgres.Pool
+		runtime workflowapplication.ScopedRuntimeStarter
+		events  eventsapplication.ScopedAppender
 		kind    foundation.ErrorKind
 		code    string
 	}{
@@ -172,18 +172,18 @@ func TestNewQuestionDispatcherRejectsTypedNilDependencies(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := NewQuestionDispatcher(test.db, test.runtime, test.events, ids, clock)
+			_, err := NewGORMQuestionDispatcher(test.db, test.runtime, test.events, ids, clock)
 			var classified *foundation.Error
 			if !errors.As(err, &classified) || classified.Kind != test.kind || classified.Code != test.code {
-				t.Fatalf("NewQuestionDispatcher() error = %#v", err)
+				t.Fatalf("NewGORMQuestionDispatcher() error = %#v", err)
 			}
 		})
 	}
 }
 
 func TestNewQuestionDispatcherUsesRegisteredV2Definition(t *testing.T) {
-	dispatcher, err := NewQuestionDispatcher(
-		&questionConstructorDB{},
+	dispatcher, err := NewGORMQuestionDispatcher(
+		questionConstructorPool(t),
 		&questionConstructorRuntime{},
 		&questionConstructorAppender{},
 		foundation.NewUUIDGenerator(nil),
@@ -232,7 +232,7 @@ func TestClassifyQuestionAnswerInsertFailureUsesTriggerContractCodes(t *testing.
 }
 
 func TestNewQuestionDispatcherRejectsTypedNilIdentityAndClockDependencies(t *testing.T) {
-	db := &questionConstructorDB{}
+	db := questionConstructorPool(t)
 	runtime := &questionConstructorRuntime{}
 	events := &questionConstructorAppender{}
 	var nilIDs *questionConstructorIDs
@@ -247,41 +247,41 @@ func TestNewQuestionDispatcherRejectsTypedNilIdentityAndClockDependencies(t *tes
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := NewQuestionDispatcher(db, runtime, events, test.ids, test.clock)
+			_, err := NewGORMQuestionDispatcher(db, runtime, events, test.ids, test.clock)
 			var classified *foundation.Error
 			if !errors.As(err, &classified) || classified.Kind != foundation.ErrorDependencyUnavailable ||
 				classified.Code != ErrorCodeQuestionDispatchUnavailable {
-				t.Fatalf("NewQuestionDispatcher() error = %#v", err)
+				t.Fatalf("NewGORMQuestionDispatcher() error = %#v", err)
 			}
 		})
 	}
 }
 
-type questionConstructorDB struct{}
-
-func (*questionConstructorDB) Begin(context.Context) (pgx.Tx, error) {
-	return nil, errors.New("unused")
+func questionConstructorPool(t *testing.T) *platformpostgres.Pool {
+	t.Helper()
+	pool, err := platformpostgres.Open(t.Context(), "postgres://postgres@127.0.0.1:1/conversation_constructor?sslmode=disable", 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	return pool
 }
-func (*questionConstructorDB) Query(context.Context, string, ...any) (pgx.Rows, error) {
-	return nil, errors.New("unused")
-}
-func (*questionConstructorDB) QueryRow(context.Context, string, ...any) pgx.Row { return nil }
 
 type questionConstructorRuntime struct{}
 
-func (*questionConstructorRuntime) StartTx(context.Context, pgx.Tx, workflowapplication.RuntimeStartRequest) (workflowapplication.RuntimeStartResult, error) {
+func (*questionConstructorRuntime) StartScoped(context.Context, foundation.TransactionScope, workflowapplication.RuntimeStartRequest) (workflowapplication.RuntimeStartResult, error) {
 	return workflowapplication.RuntimeStartResult{}, errors.New("unused")
 }
 
 type questionAnalysisRunStarter struct{}
 
-func (*questionAnalysisRunStarter) StartWorkspaceAnalysisRunTx(context.Context, any, agentapplication.WorkspaceAnalysisRunStartCommand) (agentdomain.WorkspaceAnalysisRun, error) {
+func (*questionAnalysisRunStarter) StartWorkspaceAnalysisRunScoped(context.Context, foundation.TransactionScope, agentapplication.WorkspaceAnalysisRunStartCommand) (agentdomain.WorkspaceAnalysisRun, error) {
 	return agentdomain.WorkspaceAnalysisRun{}, errors.New("unused")
 }
 
 type questionConstructorAppender struct{}
 
-func (*questionConstructorAppender) AppendTx(context.Context, any, eventsdomain.AppendRequest) (eventsdomain.ServerEvent, bool, error) {
+func (*questionConstructorAppender) AppendScoped(context.Context, foundation.TransactionScope, eventsdomain.AppendRequest) (eventsdomain.ServerEvent, bool, error) {
 	return eventsdomain.ServerEvent{}, false, errors.New("unused")
 }
 

@@ -8,10 +8,10 @@ import (
 
 func TestWorkspaceAnalysisCapabilitySQLUsesDatabaseClockAndExactContract(t *testing.T) {
 	for name, statement := range map[string]string{
-		"advertise": workspaceAnalysisCapabilityAdvertiseSQL,
-		"heartbeat": workspaceAnalysisCapabilityHeartbeatSQL,
-		"release":   workspaceAnalysisCapabilityReleaseSQL,
-		"ready":     workspaceAnalysisCapabilityReadySQL,
+		"advertise": gormWorkspaceAnalysisCapabilityAdvertiseSQL,
+		"heartbeat": gormWorkspaceAnalysisCapabilityHeartbeatSQL,
+		"release":   gormWorkspaceAnalysisCapabilityReleaseSQL,
+		"ready":     gormWorkspaceAnalysisCapabilityReadySQL,
 	} {
 		if !strings.Contains(statement, "clock_timestamp()") {
 			t.Fatalf("%s statement does not use database time: %s", name, statement)
@@ -20,7 +20,7 @@ func TestWorkspaceAnalysisCapabilitySQLUsesDatabaseClockAndExactContract(t *test
 	for _, required := range []string{
 		"definition_hash", "tool_catalog_hash", "policy_version", "config_revision", "released_at IS NULL",
 	} {
-		if !strings.Contains(workspaceAnalysisCapabilityReadySQL, required) {
+		if !strings.Contains(gormWorkspaceAnalysisCapabilityReadySQL, required) {
 			t.Fatalf("readiness SQL is missing %q", required)
 		}
 	}

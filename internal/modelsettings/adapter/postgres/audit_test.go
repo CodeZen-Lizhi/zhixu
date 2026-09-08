@@ -11,28 +11,34 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/domain"
-	"github.com/jackc/pgx/v5"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 )
 
-func TestNewRepositoryRequiresSecretAndAuditBoundaries(t *testing.T) {
-	_, err := NewRepository(constructorDB{})
+func TestNewGORMRepositoryRequiresSecretAndAuditBoundaries(t *testing.T) {
+	// Pool construction is lazy; the constructor must not issue any query.
+	pool, err := platformpostgres.Open(context.Background(), "postgres://constructor@127.0.0.1:1/modelsettings_constructor?sslmode=disable&pool_min_conns=0", 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	_, err = NewGORMRepository(pool)
 	assertModelSettingsUnitErrorCode(t, err, domain.ErrorCodeUnavailable)
-	repository, err := NewRepository(constructorDB{}, WithSecretSealer(modelSettingsFormatSealer{}), WithAuditAppender(noopAuditAppender{}))
+	repository, err := NewGORMRepository(pool, WithGORMSecretSealer(modelSettingsFormatSealer{}), WithGORMAuditAppender(noopAuditAppender{}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if repository == nil {
 		t.Fatal("repository is nil")
 	}
-	_, err = NewRepository(constructorDB{},
-		WithSecretSealer(modelSettingsFormatSealer{}), WithSecretSealer(modelSettingsFormatSealer{}), WithAuditAppender(noopAuditAppender{}),
+	_, err = NewGORMRepository(pool,
+		WithGORMSecretSealer(modelSettingsFormatSealer{}), WithGORMSecretSealer(modelSettingsFormatSealer{}), WithGORMAuditAppender(noopAuditAppender{}),
 	)
 	assertModelSettingsUnitErrorCode(t, err, domain.ErrorCodeInvalid)
 }
 
 func TestRepositoryFormattingDoesNotExpandSecretDependencies(t *testing.T) {
 	const canary = "repository-format-secret-canary"
-	repository := Repository{
+	repository := GORMRepository{
 		sealer: modelSettingsFormatSealer{canary: canary},
 		audit:  modelSettingsFormatAudit{canary: canary},
 	}
@@ -123,12 +129,12 @@ func TestValidModelSettingsChangeRejectsSecretProviderMismatch(t *testing.T) {
 	}
 }
 
-func TestSettingsAuditAppenderRequiresPGXTransaction(t *testing.T) {
-	adapter, err := NewSettingsAuditAppender(noopAuditAppender{})
+func TestSettingsAuditAppenderRequiresTransactionScope(t *testing.T) {
+	adapter, err := NewGORMSettingsAuditAppender(noopAuditAppender{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = adapter.AppendModelSettingsChangeTx(context.Background(), struct{}{}, application.ModelSettingsChange{
+	err = adapter.AppendModelSettingsChangeScoped(context.Background(), nil, application.ModelSettingsChange{
 		Action: application.ModelSettingsAuditActionUpdated, Revision: 1,
 		ChatProvider: domain.ChatProviderDisabled, ChatAPIStyle: domain.ChatAPIStyleChatCompletions, EmbeddingProvider: domain.EmbeddingProviderDisabled,
 	})
@@ -137,7 +143,7 @@ func TestSettingsAuditAppenderRequiresPGXTransaction(t *testing.T) {
 
 type noopAuditAppender struct{}
 
-func (noopAuditAppender) AppendTx(context.Context, any, auditdomain.Event) (auditdomain.Event, bool, error) {
+func (noopAuditAppender) AppendScoped(context.Context, foundation.TransactionScope, auditdomain.Event) (auditdomain.Event, bool, error) {
 	return auditdomain.Event{}, false, nil
 }
 
@@ -153,16 +159,8 @@ func (modelSettingsFormatSealer) Open(domain.EncryptedSecret, domain.SecretConte
 
 type modelSettingsFormatAudit struct{ canary string }
 
-func (modelSettingsFormatAudit) AppendModelSettingsChangeTx(context.Context, any, application.ModelSettingsChange) error {
+func (modelSettingsFormatAudit) AppendModelSettingsChangeScoped(context.Context, foundation.TransactionScope, application.ModelSettingsChange) error {
 	return nil
-}
-
-type constructorDB struct{}
-
-func (constructorDB) QueryRow(context.Context, string, ...any) pgx.Row { panic("unexpected query") }
-func (constructorDB) Begin(context.Context) (pgx.Tx, error)            { panic("unexpected begin") }
-func (constructorDB) BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, error) {
-	panic("unexpected begin tx")
 }
 
 func assertModelSettingsUnitErrorCode(t *testing.T, err error, code string) {

@@ -7,9 +7,8 @@ import (
 	"testing"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	workflowriver "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river/rivertype"
 )
 
@@ -32,22 +31,22 @@ func TestExportDispatchUniquenessAllowsRecoveryAfterCompletedNoOp(t *testing.T) 
 	}
 }
 
-func TestTransactionalDispatcherRequiresDatabaseAndClient(t *testing.T) {
+func TestGORMDispatcherRequiresDatabaseAndClient(t *testing.T) {
 	t.Parallel()
 
-	if _, err := NewTransactionalDispatcher(nil, nil); exportDispatcherErrorCode(err) != "EXPORT_RIVER_DATABASE_UNAVAILABLE" {
+	if _, err := NewGORMTransactionalDispatcher(nil, nil, nil); exportDispatcherErrorCode(err) != "EXPORT_RIVER_DATABASE_UNAVAILABLE" {
 		t.Fatalf("nil database error = %v", err)
 	}
-	if _, err := NewTransactionalDispatcher(&pgxpool.Pool{}, nil); exportDispatcherErrorCode(err) != "EXPORT_RIVER_DISPATCHER_UNAVAILABLE" {
+	if _, err := NewGORMTransactionalDispatcher(&platformpostgres.Pool{}, nil, nil); exportDispatcherErrorCode(err) != "EXPORT_RIVER_DISPATCHER_UNAVAILABLE" {
 		t.Fatalf("nil client error = %v", err)
 	}
 }
 
-func TestTransactionalDispatcherFailsClosedWhenPartiallyConstructed(t *testing.T) {
+func TestGORMDispatcherFailsClosedWhenPartiallyConstructed(t *testing.T) {
 	t.Parallel()
 
 	tx := &dispatcherTx{}
-	dispatcher := &Dispatcher{database: transactionBeginnerFunc(func(context.Context) (pgx.Tx, error) { return tx, nil })}
+	dispatcher := &GORMDispatcher{unitOfWork: tx}
 	err := dispatcher.Dispatch(context.Background(), foundation.ID("10000000-0000-4000-8000-000000000001"), foundation.ID("20000000-0000-4000-8000-000000000002"))
 	if exportDispatcherErrorCode(err) != "EXPORT_RIVER_TRANSACTIONAL_DISPATCHER_UNAVAILABLE" {
 		t.Fatalf("partial dispatcher error = %v", err)
@@ -57,14 +56,14 @@ func TestTransactionalDispatcherFailsClosedWhenPartiallyConstructed(t *testing.T
 	}
 }
 
-func TestTransactionalDispatcherCommitsFencedInsertWithExportUniqueness(t *testing.T) {
+func TestGORMDispatcherCommitsFencedInsertWithExportUniqueness(t *testing.T) {
 	t.Parallel()
 
 	tx := &dispatcherTx{}
 	var gotOptions workflowriver.InsertOptions
-	dispatcher := &Dispatcher{
-		database: transactionBeginnerFunc(func(context.Context) (pgx.Tx, error) { return tx, nil }),
-		inserter: exportJobInserterFunc(func(_ context.Context, gotTransaction any, args Args, options workflowriver.InsertOptions) (workflowriver.JobReceipt, error) {
+	dispatcher := &GORMDispatcher{
+		unitOfWork: tx,
+		inserter: scopedExportJobInserterFunc(func(_ context.Context, gotTransaction foundation.TransactionScope, args Args, options workflowriver.InsertOptions) (workflowriver.JobReceipt, error) {
 			if gotTransaction != tx {
 				t.Fatalf("transaction = %#v", gotTransaction)
 			}
@@ -78,7 +77,7 @@ func TestTransactionalDispatcherCommitsFencedInsertWithExportUniqueness(t *testi
 	if err := dispatcher.Dispatch(context.Background(), foundation.ID("10000000-0000-4000-8000-000000000001"), foundation.ID("20000000-0000-4000-8000-000000000002")); err != nil {
 		t.Fatal(err)
 	}
-	if !tx.committed || !tx.rolledBack {
+	if !tx.committed || tx.rolledBack {
 		t.Fatalf("transaction committed=%t rolled_back=%t", tx.committed, tx.rolledBack)
 	}
 	if !slices.Equal(gotOptions.UniqueStates, exportUniqueOpts().ByState) {
@@ -86,14 +85,14 @@ func TestTransactionalDispatcherCommitsFencedInsertWithExportUniqueness(t *testi
 	}
 }
 
-func TestTransactionalDispatcherDoesNotCommitRejectedInsert(t *testing.T) {
+func TestGORMDispatcherDoesNotCommitRejectedInsert(t *testing.T) {
 	t.Parallel()
 
 	tx := &dispatcherTx{}
 	wantErr := errors.New("rollout is draining")
-	dispatcher := &Dispatcher{
-		database: transactionBeginnerFunc(func(context.Context) (pgx.Tx, error) { return tx, nil }),
-		inserter: exportJobInserterFunc(func(context.Context, any, Args, workflowriver.InsertOptions) (workflowriver.JobReceipt, error) {
+	dispatcher := &GORMDispatcher{
+		unitOfWork: tx,
+		inserter: scopedExportJobInserterFunc(func(context.Context, foundation.TransactionScope, Args, workflowriver.InsertOptions) (workflowriver.JobReceipt, error) {
 			return workflowriver.JobReceipt{}, wantErr
 		}),
 	}
@@ -103,17 +102,17 @@ func TestTransactionalDispatcherDoesNotCommitRejectedInsert(t *testing.T) {
 	}
 }
 
-func TestTransactionalDispatcherClassifiesTransactionFailures(t *testing.T) {
+func TestGORMDispatcherClassifiesTransactionFailures(t *testing.T) {
 	t.Parallel()
 
 	workspaceID := foundation.ID("10000000-0000-4000-8000-000000000001")
 	exportID := foundation.ID("20000000-0000-4000-8000-000000000002")
 	t.Run("begin", func(t *testing.T) {
-		dispatcher := &Dispatcher{
-			database: transactionBeginnerFunc(func(context.Context) (pgx.Tx, error) {
-				return nil, errors.New("database unavailable")
+		dispatcher := &GORMDispatcher{
+			unitOfWork: dispatcherUnitOfWorkFunc(func(context.Context, foundation.TransactionOptions, foundation.TransactionFunc) error {
+				return errors.New("database unavailable")
 			}),
-			inserter: exportJobInserterFunc(func(context.Context, any, Args, workflowriver.InsertOptions) (workflowriver.JobReceipt, error) {
+			inserter: scopedExportJobInserterFunc(func(context.Context, foundation.TransactionScope, Args, workflowriver.InsertOptions) (workflowriver.JobReceipt, error) {
 				t.Fatal("inserter called after transaction begin failure")
 				return workflowriver.JobReceipt{}, nil
 			}),
@@ -125,9 +124,9 @@ func TestTransactionalDispatcherClassifiesTransactionFailures(t *testing.T) {
 
 	t.Run("commit", func(t *testing.T) {
 		tx := &dispatcherTx{commitErr: errors.New("commit result unknown")}
-		dispatcher := &Dispatcher{
-			database: transactionBeginnerFunc(func(context.Context) (pgx.Tx, error) { return tx, nil }),
-			inserter: exportJobInserterFunc(func(context.Context, any, Args, workflowriver.InsertOptions) (workflowriver.JobReceipt, error) {
+		dispatcher := &GORMDispatcher{
+			unitOfWork: tx,
+			inserter: scopedExportJobInserterFunc(func(context.Context, foundation.TransactionScope, Args, workflowriver.InsertOptions) (workflowriver.JobReceipt, error) {
 				return workflowriver.JobReceipt{JobID: 72}, nil
 			}),
 		}
@@ -261,31 +260,24 @@ type dispatcherScope struct{}
 
 func (*dispatcherScope) TransactionScope() {}
 
-type transactionBeginnerFunc func(context.Context) (pgx.Tx, error)
-
-func (fn transactionBeginnerFunc) Begin(ctx context.Context) (pgx.Tx, error) { return fn(ctx) }
-
-type exportJobInserterFunc func(context.Context, any, Args, workflowriver.InsertOptions) (workflowriver.JobReceipt, error)
-
-func (fn exportJobInserterFunc) InsertTx(ctx context.Context, transaction any, args Args, options workflowriver.InsertOptions) (workflowriver.JobReceipt, error) {
-	return fn(ctx, transaction, args, options)
-}
-
 type dispatcherTx struct {
-	pgx.Tx
 	committed  bool
 	commitErr  error
 	rolledBack bool
 }
 
-func (tx *dispatcherTx) Commit(context.Context) error {
-	tx.committed = true
-	return tx.commitErr
-}
+func (*dispatcherTx) TransactionScope() {}
 
-func (tx *dispatcherTx) Rollback(context.Context) error {
-	tx.rolledBack = true
-	return nil
+func (tx *dispatcherTx) Within(ctx context.Context, _ foundation.TransactionOptions, work foundation.TransactionFunc) error {
+	if err := work(ctx, tx); err != nil {
+		tx.rolledBack = true
+		return err
+	}
+	tx.committed = true
+	if tx.commitErr != nil {
+		tx.rolledBack = true
+	}
+	return tx.commitErr
 }
 
 func exportDispatcherErrorCode(err error) string {

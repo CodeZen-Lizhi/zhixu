@@ -13,7 +13,6 @@ import (
 	collectionapp "github.com/CodeZen-Lizhi/zhixu/internal/collection/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/collection/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	"github.com/jackc/pgx/v5"
 )
 
 func TestCollectionDurableScanRestartsWithStructuredKeysetAndFailsClosedOnDrift(t *testing.T) {
@@ -247,14 +246,6 @@ func testCollectionDurableScanIgnoresOwnHealthOutputsUnlessHealthDefinesMembersh
 
 func verifyCollectionDurableBinding(t *testing.T, testCase collectionIntegrationCase, binding collectionapp.DurableScanBinding) error {
 	t.Helper()
-	if testCase.name == "legacy" {
-		transaction, err := testCase.pool.BeginTx(testCase.context, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
-		if err != nil {
-			return err
-		}
-		defer func() { _ = transaction.Rollback(context.Background()) }()
-		return VerifyDurableScanBinding(testCase.context, transaction, binding)
-	}
 	verifier, ok := testCase.repository.(collectionapp.ScopedDurableScanBindingVerifier)
 	if !ok {
 		return errors.New("Collection GORM repository does not implement scoped durable binding verification")
@@ -270,20 +261,6 @@ func verifyCollectionDurableBinding(t *testing.T, testCase collectionIntegration
 
 func verifyCollectionDurableBindingRollbackOwnership(t *testing.T, testCase collectionIntegrationCase, binding collectionapp.DurableScanBinding) {
 	t.Helper()
-	if testCase.name == "legacy" {
-		transaction, err := testCase.pool.BeginTx(testCase.context, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := VerifyDurableScanBinding(testCase.context, transaction, binding); err != nil {
-			_ = transaction.Rollback(context.Background())
-			t.Fatal(err)
-		}
-		if err := transaction.Rollback(testCase.context); err != nil {
-			t.Fatal(err)
-		}
-		return
-	}
 	verifier, ok := testCase.repository.(collectionapp.ScopedDurableScanBindingVerifier)
 	if !ok {
 		t.Fatal("Collection GORM repository does not implement scoped durable binding verification")

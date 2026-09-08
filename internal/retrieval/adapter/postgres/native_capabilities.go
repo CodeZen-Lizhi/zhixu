@@ -11,9 +11,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// These interfaces are the complete pgx allowlist for the staged Retrieval
-// repository. Each operation depends on either COPY or physical session
-// identity and therefore cannot safely run through database/sql.
+// 这三个端口覆盖 Retrieval 的全部 native 能力；metadata/COPY 同事务及
+// 快照、刷新 lease 的物理会话身份由专用实现持有，普通仓储只持有这些端口。
 type retrievalManifestCopier interface {
 	BeginIndex(context.Context, domain.IndexBuild) (domain.IndexVersionResult, error)
 }

@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"reflect"
 	"strings"
@@ -11,12 +12,10 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	healthapp "github.com/CodeZen-Lizhi/zhixu/internal/health/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/health/domain"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func TestNewReadRepositoryRejectsNilDatabase(t *testing.T) {
-	if _, err := NewReadRepository(nil); err == nil {
+	if _, err := NewGORMReadRepository(nil); err == nil {
 		t.Fatal("expected nil database rejection")
 	}
 }
@@ -29,7 +28,7 @@ func TestStringSlicePreservesEnumValues(t *testing.T) {
 }
 
 func TestReadRepositoryClassifiesMissingIssueWithoutLeakingWorkspaceExistence(t *testing.T) {
-	repository, err := NewReadRepository(missingIssueReadDB{})
+	repository, err := newReadRepository(missingIssueReadDB{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +37,7 @@ func TestReadRepositoryClassifiesMissingIssueWithoutLeakingWorkspaceExistence(t 
 		foundation.ID("10000000-0000-4000-8000-000000000002"),
 	)
 	var classified *foundation.Error
-	if !errors.As(err, &classified) || classified.Kind != foundation.ErrorNotFound || classified.Code != "HEALTH_NOT_FOUND" || classified.Retryable || !errors.Is(err, pgx.ErrNoRows) {
+	if !errors.As(err, &classified) || classified.Kind != foundation.ErrorNotFound || classified.Code != "HEALTH_NOT_FOUND" || classified.Retryable || !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("missing issue error=%v", err)
 	}
 }
@@ -55,8 +54,8 @@ func TestReadRepositoryObservationPageTrimsSentinelBeforeEvidenceBatch(t *testin
 		observationRow(secondID, now.Add(-time.Minute)),
 		observationRow(sentinelID, now.Add(-2*time.Minute)),
 	}}
-	database := &scriptedReadDB{rows: []pgx.Rows{observationRows, &scriptedRows{}}}
-	repository, err := NewReadRepository(database)
+	database := &scriptedReadDB{rows: []healthRows{observationRows, &scriptedRows{}}}
+	repository, err := newReadRepository(database)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,8 +85,8 @@ func TestReadRepositoryDecisionPageUsesMixedDirectionKeyset(t *testing.T) {
 	workspaceID := foundation.ID("10000000-0000-4000-8000-000000000001")
 	issueID := foundation.ID("20000000-0000-4000-8000-000000000001")
 	position := healthapp.IssueHistoryPosition{At: time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC), ID: foundation.ID("30000000-0000-4000-8000-000000000001")}
-	database := &scriptedReadDB{rows: []pgx.Rows{&scriptedRows{}}}
-	repository, err := NewReadRepository(database)
+	database := &scriptedReadDB{rows: []healthRows{&scriptedRows{}}}
+	repository, err := newReadRepository(database)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,25 +114,25 @@ func observationRow(id string, observedAt time.Time) []any {
 
 type missingIssueReadDB struct{}
 
-func (missingIssueReadDB) Query(context.Context, string, ...any) (pgx.Rows, error) {
+func (missingIssueReadDB) Query(context.Context, string, ...any) (healthRows, error) {
 	return nil, errors.New("unexpected query")
 }
 
-func (missingIssueReadDB) QueryRow(context.Context, string, ...any) pgx.Row {
+func (missingIssueReadDB) QueryRow(context.Context, string, ...any) healthRow {
 	return missingIssueRow{}
 }
 
 type missingIssueRow struct{}
 
-func (missingIssueRow) Scan(...any) error { return pgx.ErrNoRows }
+func (missingIssueRow) Scan(...any) error { return sql.ErrNoRows }
 
 type scriptedReadDB struct {
 	queries []string
 	args    [][]any
-	rows    []pgx.Rows
+	rows    []healthRows
 }
 
-func (database *scriptedReadDB) Query(_ context.Context, query string, args ...any) (pgx.Rows, error) {
+func (database *scriptedReadDB) Query(_ context.Context, query string, args ...any) (healthRows, error) {
 	database.queries = append(database.queries, query)
 	database.args = append(database.args, append([]any(nil), args...))
 	index := len(database.queries) - 1
@@ -143,7 +142,7 @@ func (database *scriptedReadDB) Query(_ context.Context, query string, args ...a
 	return database.rows[index], nil
 }
 
-func (*scriptedReadDB) QueryRow(context.Context, string, ...any) pgx.Row { return missingIssueRow{} }
+func (*scriptedReadDB) QueryRow(context.Context, string, ...any) healthRow { return missingIssueRow{} }
 
 type scriptedRows struct {
 	rows   [][]any
@@ -151,11 +150,9 @@ type scriptedRows struct {
 	closed bool
 }
 
-func (rows *scriptedRows) Close()                                  { rows.closed = true }
-func (*scriptedRows) Err() error                                   { return nil }
-func (*scriptedRows) CommandTag() pgconn.CommandTag                { return pgconn.CommandTag{} }
-func (*scriptedRows) FieldDescriptions() []pgconn.FieldDescription { return nil }
-func (rows *scriptedRows) Next() bool                              { return rows.index < len(rows.rows) }
+func (rows *scriptedRows) Close()     { rows.closed = true }
+func (*scriptedRows) Err() error      { return nil }
+func (rows *scriptedRows) Next() bool { return rows.index < len(rows.rows) }
 func (rows *scriptedRows) Scan(destinations ...any) error {
 	if rows.index >= len(rows.rows) {
 		return errors.New("no current row")
@@ -183,6 +180,3 @@ func (rows *scriptedRows) Scan(destinations ...any) error {
 	}
 	return nil
 }
-func (*scriptedRows) Values() ([]any, error) { return nil, errors.New("values are unavailable") }
-func (*scriptedRows) RawValues() [][]byte    { return nil }
-func (*scriptedRows) Conn() *pgx.Conn        { return nil }

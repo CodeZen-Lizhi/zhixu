@@ -13,9 +13,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// GORMDeliveryRepository is the staged GORM implementation of the Reindex
-// delivery lease and checkpoint state machine. Production remains on the pgx
-// repository until the PostgreSQL parity gate passes.
+// GORMDeliveryRepository persists the Reindex delivery lease and checkpoint state machine.
 type GORMDeliveryRepository struct {
 	database   *gorm.DB
 	unitOfWork foundation.UnitOfWork
@@ -300,7 +298,7 @@ func (repository *GORMDeliveryRepository) Fail(ctx context.Context, command appl
 		row, err = gormRetrievalRawRow(callbackCtx, tx, `UPDATE retrieval.reindex_delivery SET status=?,
 			next_attempt_at=CASE WHEN ?='retry_wait' THEN ?::timestamptz + (? * interval '1 microsecond') ELSE NULL END,
 			failure_class=?,error_kind=?,error_code=?,error_summary=?,
-			manual_recovery_required=(?='manual_recovery'),completed_at=CASE WHEN ? IN ('failed','succeeded') THEN ? ELSE NULL END,
+			manual_recovery_required=(?='manual_recovery'),completed_at=CASE WHEN ? IN ('failed','succeeded') THEN ?::timestamptz ELSE NULL END,
 			version=version+1,updated_at=? WHERE id=? AND status='processing' RETURNING `+deliveryColumns,
 			status, status, endedAt, command.RetryDelay.Microseconds(), string(command.Failure.Class), string(command.Failure.ErrorKind),
 			command.Failure.Code, command.Failure.Summary, status, status, endedAt, endedAt, string(delivery.ID))

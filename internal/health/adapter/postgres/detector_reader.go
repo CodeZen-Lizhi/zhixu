@@ -11,7 +11,6 @@ import (
 	healthapp "github.com/CodeZen-Lizhi/zhixu/internal/health/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/health/detector"
 	"github.com/CodeZen-Lizhi/zhixu/internal/health/domain"
-	"github.com/jackc/pgx/v5"
 )
 
 const (
@@ -70,19 +69,14 @@ func validDetectorTargetType(value string) bool {
 	}
 }
 
-// DB 是 detector 只读 adapter 所需的最小 PostgreSQL 查询边界。
-type DB interface {
-	Query(context.Context, string, ...any) (pgx.Rows, error)
-}
-
 // FactReader 从 Knowledge、Ingestion 和 Retrieval canonical 表批量读取 detector facts。
 type FactReader struct {
-	db         DB
+	db         healthQuery
 	membership healthapp.SmartCollectionMembershipPort
 }
 
-// NewFactReader 构造 detector reader；不会在 Health 模块创建知识写入路径。
-func NewFactReader(db DB, memberships ...healthapp.SmartCollectionMembershipPort) (*FactReader, error) {
+// newFactReader 构造 detector reader；不会在 Health 模块创建知识写入路径。
+func newFactReader(db healthQuery, memberships ...healthapp.SmartCollectionMembershipPort) (*FactReader, error) {
 	if db == nil {
 		return nil, errors.New("health detector database is nil")
 	}
@@ -167,7 +161,7 @@ func (reader *FactReader) Find(ctx context.Context, detectorID string, request h
 	return page, nil
 }
 
-// foundationID 避免在 SQL adapter 中泄漏 pgx 类型；UUID 规范由 domain observation 校验。
+// foundationID 的 UUID 规范由 domain observation 校验。
 func foundationID(value string) foundation.ID { return foundation.ID(value) }
 
 func detectorQuery(id string, request healthapp.PageRequest, memberships ...scanScopeMembership) (string, []any, error) {

@@ -19,6 +19,8 @@ import (
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 )
@@ -191,7 +193,7 @@ func TestRepositoryAttemptProjectionLifecycle(t *testing.T) {
 }
 
 func TestRepositoryConcurrentCreateAttemptIdempotency(t *testing.T) {
-	for _, variant := range []string{"legacy", "gorm"} {
+	for _, variant := range []string{"gorm"} {
 		t.Run(variant, func(t *testing.T) {
 			ctx := context.Background()
 			fixture := testdb.Require(t, testdb.Config{Availability: testdb.FailWhenUnavailable, MaxConns: 16})
@@ -252,7 +254,7 @@ func TestRepositoryConcurrentCreateAttemptIdempotency(t *testing.T) {
 }
 
 func TestRepositoryConcurrentTransitionAttemptCAS(t *testing.T) {
-	for _, variant := range []string{"legacy", "gorm"} {
+	for _, variant := range []string{"gorm"} {
 		t.Run(variant, func(t *testing.T) {
 			ctx := context.Background()
 			fixture := testdb.Require(t, testdb.Config{Availability: testdb.FailWhenUnavailable, MaxConns: 16})
@@ -323,7 +325,7 @@ func TestRepositoryConcurrentTransitionAttemptCAS(t *testing.T) {
 }
 
 func TestRepositoryConcurrentSaveProjectionIdempotency(t *testing.T) {
-	for _, variant := range []string{"legacy", "gorm"} {
+	for _, variant := range []string{"gorm"} {
 		t.Run(variant, func(t *testing.T) {
 			ctx := context.Background()
 			fixture := testdb.Require(t, testdb.Config{Availability: testdb.FailWhenUnavailable, MaxConns: 16})
@@ -951,50 +953,28 @@ func seedIngestionStatementBoundsFixture(t *testing.T, ctx context.Context, pool
 	return workspaceID, artifactID, versionID
 }
 
-func integrationRepository(t *testing.T) (*Repository, pgx.Tx, context.Context) {
+func integrationRepository(t *testing.T) (*GORMRepository, *pgxpool.Pool, context.Context) {
 	t.Helper()
-	ctx := context.Background()
+	ctx := t.Context()
 	fixture := testdb.Require(t, testdb.Config{Availability: testdb.FailWhenUnavailable, MaxConns: 16})
 	pool := fixture.Pool()
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := tx.Rollback(ctx); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
-			t.Errorf("rollback legacy integration transaction: %v", err)
-		}
-	})
-	repository, err := NewRepository(tx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return repository, tx, ctx
+	return integrationRepositoryForVariant(t, "gorm", pool).(*GORMRepository), pool.DB(), ctx
 }
 
 func integrationRepositoryForVariant(t *testing.T, variant string, pool *platformpostgres.Pool) domain.Repository {
 	t.Helper()
-	switch variant {
-	case "legacy":
-		repository, err := NewRepository(pool.DB())
-		if err != nil {
-			t.Fatal(err)
-		}
-		return repository
-	case "gorm":
-		root, err := pool.GORM()
-		if err != nil {
-			t.Fatal(err)
-		}
-		repository, err := NewGORMRepository(root)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return repository
-	default:
+	if variant != "gorm" {
 		t.Fatalf("unknown repository variant %q", variant)
-		return nil
 	}
+	root, err := pool.GORM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := NewGORMRepository(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return repository
 }
 
 func seedCommittedSourceVersion(t *testing.T, ctx context.Context, pool *platformpostgres.Pool, prefix, hashCharacter string) (foundation.ID, foundation.ID, foundation.ID) {
@@ -1046,84 +1026,36 @@ type ingestionCount func(context.Context, string, ...any) (int, error)
 
 func runIngestionRepositoryVariants(t *testing.T, scenario func(*testing.T, domain.Repository, ingestionExec, ingestionCount, context.Context)) {
 	t.Helper()
-	for _, variant := range []string{"legacy", "gorm"} {
-		t.Run(variant, func(t *testing.T) {
-			ctx := context.Background()
-			fixture := testdb.Require(t, testdb.Config{Availability: testdb.FailWhenUnavailable, MaxConns: 16})
-			pool := fixture.Pool()
-			var repository domain.Repository
-			var exec ingestionExec
-			var count ingestionCount
-			var rollback func()
-			switch variant {
-			case "legacy":
-				tx, err := pool.Begin(ctx)
-				if err != nil {
-					t.Fatal(err)
-				}
-				repository, err = NewRepository(tx)
-				if err != nil {
-					t.Fatal(err)
-				}
-				exec = func(execCtx context.Context, query string, args ...any) error {
-					_, err := tx.Exec(execCtx, rebindIngestionQuery(query), args...)
-					return err
-				}
-				count = func(queryCtx context.Context, query string, args ...any) (int, error) {
-					var result int
-					err := tx.QueryRow(queryCtx, rebindIngestionQuery(query), args...).Scan(&result)
-					return result, err
-				}
-				rollback = func() {
-					if err := tx.Rollback(ctx); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
-						t.Errorf("rollback legacy integration transaction: %v", err)
-					}
-				}
-			case "gorm":
-				root, err := pool.GORM()
-				if err != nil {
-					t.Fatal(err)
-				}
-				gormTx := root.WithContext(ctx).Begin()
-				if gormTx.Error != nil {
-					t.Fatal(gormTx.Error)
-				}
-				repository, err = NewGORMRepository(gormTx)
-				if err != nil {
-					t.Fatal(err)
-				}
-				exec = func(execCtx context.Context, query string, args ...any) error {
-					return gormTx.WithContext(execCtx).Exec(query, args...).Error
-				}
-				count = func(queryCtx context.Context, query string, args ...any) (int, error) {
-					var result int
-					err := gormTx.WithContext(queryCtx).Raw(query, args...).Scan(&result).Error
-					return result, err
-				}
-				rollback = func() {
-					if err := gormTx.Rollback().Error; err != nil {
-						t.Errorf("rollback GORM integration transaction: %v", err)
-					}
-				}
-			}
-			t.Cleanup(rollback)
-			scenario(t, repository, exec, count, ctx)
-		})
-	}
-}
-
-func rebindIngestionQuery(query string) string {
-	var builder strings.Builder
-	argument := 1
-	for _, character := range query {
-		if character == '?' {
-			_, _ = fmt.Fprintf(&builder, "$%d", argument)
-			argument++
-			continue
+	t.Run("gorm", func(t *testing.T) {
+		ctx := t.Context()
+		fixture := testdb.Require(t, testdb.Config{Availability: testdb.FailWhenUnavailable, MaxConns: 16})
+		root, err := fixture.Pool().GORM()
+		if err != nil {
+			t.Fatal(err)
 		}
-		builder.WriteRune(character)
-	}
-	return builder.String()
+		transaction := root.WithContext(ctx).Begin()
+		if transaction.Error != nil {
+			t.Fatal(transaction.Error)
+		}
+		defer func() {
+			if err := transaction.Rollback().Error; err != nil {
+				t.Errorf("rollback GORM integration transaction: %v", err)
+			}
+		}()
+		repository, err := NewGORMRepository(transaction)
+		if err != nil {
+			t.Fatal(err)
+		}
+		exec := func(ctx context.Context, query string, args ...any) error {
+			return transaction.WithContext(ctx).Exec(query, args...).Error
+		}
+		count := func(ctx context.Context, query string, args ...any) (int, error) {
+			var value int
+			err := transaction.WithContext(ctx).Raw(query, args...).Scan(&value).Error
+			return value, err
+		}
+		scenario(t, repository, exec, count, ctx)
+	})
 }
 
 func seedWorkflowExec(t *testing.T, ctx context.Context, exec ingestionExec, workspaceID, definitionID, workflowRunID foundation.ID, now time.Time) {
@@ -1167,7 +1099,9 @@ func seedSourceVersionExec(t *testing.T, ctx context.Context, exec ingestionExec
 	return workspaceID, artifactID, versionID
 }
 
-func seedSourceVersion(t *testing.T, ctx context.Context, tx pgx.Tx, prefix, hashCharacter string) (foundation.ID, foundation.ID, foundation.ID) {
+func seedSourceVersion(t *testing.T, ctx context.Context, tx interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}, prefix, hashCharacter string) (foundation.ID, foundation.ID, foundation.ID) {
 	t.Helper()
 	workspaceID := mustID(t, prefix+"-0000-4000-8000-000000000001")
 	artifactID := mustID(t, prefix+"-0000-4000-8000-000000000002")

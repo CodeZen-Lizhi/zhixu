@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,8 +17,86 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/graph/candidateconfirm"
 	graphdomain "github.com/CodeZen-Lizhi/zhixu/internal/graph/domain"
 	knowledge "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
-	"github.com/jackc/pgx/v5"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
+	"gorm.io/gorm"
 )
+
+func assertGORMCandidateConfirmAtomicity(t *testing.T, ctx context.Context, platform *platformpostgres.Pool, candidate graphdomain.SemanticLinkCandidate, now time.Time) {
+	t.Helper()
+	proposals, err := changecontrolpostgres.NewGORMRepository(platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirmer, err := NewGORMCandidateConfirmRepository(platform, proposals, foundation.NewUUIDGenerator(nil), foundation.FixedClock{Value: now.Add(time.Second)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := candidateconfirm.Command{
+		WorkspaceID: candidate.WorkspaceID, CandidateID: candidate.ID, ExpectedVersion: candidate.Version,
+		IdempotencyKey: "gorm-confirm-atomic", Action: graphdomain.SemanticLinkCandidateDecisionConfirm,
+		RiskLevel: candidateconfirm.ProposalRiskLevel,
+		Risk:      "Creates a Relation only after explicit approval", RollbackPlan: "Create a corrective Relation Proposal",
+	}
+
+	// Fail after all writes, including the Candidate CAS, so an independent
+	// Change Control transaction would leave an observable orphan Proposal.
+	injected := errors.New("injected Graph transaction rollback")
+	unitOfWork := confirmer.repository.unitOfWork
+	confirmer.repository.unitOfWork = graphRollbackUnitOfWork{delegate: unitOfWork, err: injected}
+	if _, err := confirmer.Confirm(ctx, command); !errors.Is(err, injected) {
+		t.Fatalf("confirm rollback error=%v", err)
+	}
+	assertNoCandidateConfirmPartialRows(t, ctx, platform.DB(), candidate.WorkspaceID, candidate.ID)
+	confirmer.repository.unitOfWork = unitOfWork
+
+	confirmed, err := confirmer.Confirm(ctx, command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCandidateConfirmResult(t, confirmed, candidate, candidate.SuggestedRelationType, false)
+	assertCandidateConfirmV2Binding(t, ctx, platform.DB(), command, confirmed)
+	if confirmed.Proposal.CurrentRevisionID != confirmed.Proposal.Revision.ID {
+		t.Fatal("GORM confirmation did not bind the initial Revision")
+	}
+	replayed, err := confirmer.Confirm(ctx, command)
+	if err != nil || !replayed.Replayed || replayed.Proposal.ID != confirmed.Proposal.ID || replayed.DecisionID != confirmed.DecisionID || replayed.Proposal.Revision.ID != confirmed.Proposal.Revision.ID {
+		t.Fatalf("GORM confirmation replay err=%v replayed=%t", err, replayed.Replayed)
+	}
+	conflict := command
+	conflict.Risk = "different risk"
+	if _, err := confirmer.Confirm(ctx, conflict); !hasCandidateConfirmCode(err, "RELATION_PROPOSAL_CONFIRM_CONFLICT") {
+		t.Fatalf("GORM confirmation conflicting replay error=%v", err)
+	}
+
+	var proposalsCount, revisions, decisions, relations int
+	var currentRevision string
+	if err := platform.DB().QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM change_control.proposal WHERE workspace_id=$1),
+		(SELECT count(*) FROM change_control.proposal_revision r JOIN change_control.proposal p ON p.id=r.proposal_id WHERE p.workspace_id=$1),
+		(SELECT count(*) FROM graph.semantic_link_candidate_decision WHERE workspace_id=$1),
+		(SELECT count(*) FROM core.relation WHERE workspace_id=$1),
+		(SELECT current_revision_id::text FROM change_control.proposal WHERE workspace_id=$1 AND id=$2)`,
+		string(candidate.WorkspaceID), string(confirmed.Proposal.ID)).Scan(&proposalsCount, &revisions, &decisions, &relations, &currentRevision); err != nil {
+		t.Fatal(err)
+	}
+	if proposalsCount != 1 || revisions != 1 || decisions != 1 || relations != 0 || currentRevision != string(confirmed.Proposal.Revision.ID) {
+		t.Fatalf("GORM confirm facts proposals=%d revisions=%d decisions=%d relations=%d current_revision=%s", proposalsCount, revisions, decisions, relations, currentRevision)
+	}
+}
+
+type graphRollbackUnitOfWork struct {
+	delegate foundation.UnitOfWork
+	err      error
+}
+
+func (unit graphRollbackUnitOfWork) Within(ctx context.Context, options foundation.TransactionOptions, work foundation.TransactionFunc) error {
+	return unit.delegate.Within(ctx, options, func(callbackCtx context.Context, scope foundation.TransactionScope) error {
+		if err := work(callbackCtx, scope); err != nil {
+			return err
+		}
+		return unit.err
+	})
+}
 
 func TestCandidateConfirmCreatesIndependentTypedProposalsAndExactlyReplays(t *testing.T) {
 	repository, tx, ctx := graphIntegrationRepository(t)
@@ -36,7 +115,7 @@ func TestCandidateConfirmCreatesIndependentTypedProposalsAndExactlyReplays(t *te
 	if _, err := repository.UpsertSemanticLinkCandidate(ctx, typedCandidate); err != nil {
 		t.Fatal(err)
 	}
-	confirmer, err := NewCandidateConfirmRepository(tx, foundation.NewUUIDGenerator(nil), foundation.FixedClock{Value: now.Add(time.Second)})
+	confirmer, err := newCandidateConfirmTestRepository(tx.platform, foundation.NewUUIDGenerator(nil), foundation.FixedClock{Value: now.Add(time.Second)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +163,7 @@ func TestCandidateConfirmCreatesIndependentTypedProposalsAndExactlyReplays(t *te
 	if _, err := confirmer.Confirm(ctx, conflict); !hasCandidateConfirmCode(err, "RELATION_PROPOSAL_CONFIRM_CONFLICT") {
 		t.Fatalf("same-key different payload error = %v", err)
 	}
-	changeControlRepository, err := changecontrolpostgres.NewRepository(tx)
+	changeControlRepository, err := changecontrolpostgres.NewGORMRepository(tx.platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,16 +221,22 @@ func TestCandidateConfirmRollsBackProposalWhenDecisionFails(t *testing.T) {
 		Risk:      "medium relation change", RollbackPlan: "create a corrective relation proposal",
 	}
 	injected := errors.New("injected candidate decision failure")
-	failing, err := NewCandidateConfirmRepository(candidateConfirmFailBeginner{Tx: tx, err: injected}, foundation.NewUUIDGenerator(nil), foundation.FixedClock{Value: now.Add(time.Second)})
+	failing, err := newCandidateConfirmTestRepository(tx.platform, foundation.NewUUIDGenerator(nil), foundation.FixedClock{Value: now.Add(time.Second)})
 	if err != nil {
 		t.Fatal(err)
 	}
+	stopFailure := graphRowHook(t, tx.platform, false, func(statement *gorm.DB) {
+		if strings.Contains(statement.Statement.SQL.String(), "INSERT INTO graph.semantic_link_candidate_decision") {
+			statement.AddError(injected)
+		}
+	})
 	if _, err := failing.Confirm(ctx, command); !errors.Is(err, injected) {
 		t.Fatalf("confirm failure = %v", err)
 	}
 	assertNoCandidateConfirmPartialRows(t, ctx, tx, workspaceID, candidate.ID)
+	stopFailure()
 
-	normal, err := NewCandidateConfirmRepository(tx, foundation.NewUUIDGenerator(nil), foundation.FixedClock{Value: now.Add(2 * time.Second)})
+	normal, err := newCandidateConfirmTestRepository(tx.platform, foundation.NewUUIDGenerator(nil), foundation.FixedClock{Value: now.Add(2 * time.Second)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,10 +265,11 @@ func TestCandidateConfirmRecoversCommitResponseLossByExactReceipt(t *testing.T) 
 		Risk:      "medium relation change", RollbackPlan: "create a corrective relation proposal",
 	}
 	injected := errors.New("injected commit response loss")
-	lost, err := NewCandidateConfirmRepository(candidateConfirmCommitLossBeginner{Tx: tx, err: injected}, foundation.NewUUIDGenerator(nil), foundation.FixedClock{Value: now.Add(time.Second)})
+	lost, err := newCandidateConfirmTestRepository(tx.platform, foundation.NewUUIDGenerator(nil), foundation.FixedClock{Value: now.Add(time.Second)})
 	if err != nil {
 		t.Fatal(err)
 	}
+	lost.repository.unitOfWork = &graphCommitLossUnitOfWork{delegate: lost.repository.unitOfWork, err: injected}
 	if _, err := lost.Confirm(ctx, command); !errors.Is(err, injected) {
 		t.Fatalf("commit response loss error = %v", err)
 	}
@@ -192,7 +278,7 @@ func TestCandidateConfirmRecoversCommitResponseLossByExactReceipt(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	normal, err := NewCandidateConfirmRepository(tx, foundation.NewUUIDGenerator(nil), foundation.FixedClock{Value: now.Add(2 * time.Second)})
+	normal, err := newCandidateConfirmTestRepository(tx.platform, foundation.NewUUIDGenerator(nil), foundation.FixedClock{Value: now.Add(2 * time.Second)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -333,7 +419,7 @@ func assertCandidateConfirmResult(t *testing.T, result candidateconfirm.Result, 
 	}
 }
 
-func assertCandidateConfirmV2Binding(t *testing.T, ctx context.Context, tx pgx.Tx, command candidateconfirm.Command, result candidateconfirm.Result) {
+func assertCandidateConfirmV2Binding(t *testing.T, ctx context.Context, tx graphSeedDB, command candidateconfirm.Command, result candidateconfirm.Result) {
 	t.Helper()
 	commandHash, err := candidateconfirm.RequestHash(command)
 	if err != nil {
@@ -364,7 +450,7 @@ func assertCandidateConfirmV2Binding(t *testing.T, ctx context.Context, tx pgx.T
 	}
 }
 
-func candidateConfirmReplayFixture(t *testing.T, label string) (*CandidateConfirmRepository, pgx.Tx, context.Context, graphdomain.SemanticLinkCandidate, candidateconfirm.Command) {
+func candidateConfirmReplayFixture(t *testing.T, label string) (*GORMCandidateConfirmRepository, *graphTestPool, context.Context, graphdomain.SemanticLinkCandidate, candidateconfirm.Command) {
 	t.Helper()
 	repository, tx, ctx := graphIntegrationRepository(t)
 	now := time.Now().UTC().Truncate(time.Microsecond)
@@ -376,7 +462,7 @@ func candidateConfirmReplayFixture(t *testing.T, label string) (*CandidateConfir
 	if _, err := repository.UpsertSemanticLinkCandidate(ctx, candidate); err != nil {
 		t.Fatal(err)
 	}
-	confirmer, err := NewCandidateConfirmRepository(tx, foundation.NewUUIDGenerator(nil), foundation.FixedClock{Value: now.Add(2 * time.Second)})
+	confirmer, err := newCandidateConfirmTestRepository(tx.platform, foundation.NewUUIDGenerator(nil), foundation.FixedClock{Value: now.Add(2 * time.Second)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -390,8 +476,13 @@ func candidateConfirmReplayFixture(t *testing.T, label string) (*CandidateConfir
 	return confirmer, tx, ctx, candidate, command
 }
 
-func seedCandidateConfirmRecord(t *testing.T, ctx context.Context, tx pgx.Tx, candidate graphdomain.SemanticLinkCandidate, command candidateconfirm.Command, legacy bool, persistedRiskLevel changecontroldomain.ProposalRiskLevel, persistedRiskDescription string) (foundation.ID, foundation.ID, foundation.ID) {
+func seedCandidateConfirmRecord(t *testing.T, ctx context.Context, pool *graphTestPool, candidate graphdomain.SemanticLinkCandidate, command candidateconfirm.Command, legacy bool, persistedRiskLevel changecontroldomain.ProposalRiskLevel, persistedRiskDescription string) (foundation.ID, foundation.ID, foundation.ID) {
 	t.Helper()
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
 	change, err := buildKnowledgeChange(candidate, candidate.SuggestedRelationType)
 	if err != nil {
 		t.Fatal(err)
@@ -422,10 +513,10 @@ func seedCandidateConfirmRecord(t *testing.T, ctx context.Context, tx pgx.Tx, ca
 	createdAt := candidate.UpdatedAt.Add(time.Second).UTC()
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO change_control.proposal(
-			id,workspace_id,proposal_type,idempotency_key,request_hash,risk_level,status,version,created_at,updated_at
-		) VALUES($1,$2,'knowledge_change',$3,$4,$5,'ready_for_review',1,$6,$6)`,
+			id,workspace_id,proposal_type,idempotency_key,request_hash,risk_level,status,version,created_at,updated_at,current_revision_id
+		) VALUES($1,$2,'knowledge_change',$3,$4,$5,'ready_for_review',1,$6,$6,$7)`,
 		string(proposalID), string(command.WorkspaceID), proposalKeyPrefix+commandHash, proposalHash, string(persistedRiskLevel),
-		createdAt); err != nil {
+		createdAt, string(revisionID)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := tx.Exec(ctx, `
@@ -439,14 +530,18 @@ func seedCandidateConfirmRecord(t *testing.T, ctx context.Context, tx pgx.Tx, ca
 		change.SchemaVersion, createdAt); err != nil {
 		t.Fatal(err)
 	}
-	inserted, err := insertDecision(ctx, tx, candidateDecisionRow{
-		id: decisionID, workspaceID: command.WorkspaceID, candidateID: command.CandidateID,
-		candidateVersion: command.ExpectedVersion, proposalID: &proposalID,
-		idempotencyKey: command.IdempotencyKey, requestHash: commandHash,
-		action: command.Action, relationType: command.RelationType, createdAt: createdAt,
-	})
-	if err != nil || !inserted {
-		t.Fatalf("seed decision inserted=%v err=%v", inserted, err)
+	var insertedID string
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO graph.semantic_link_candidate_decision(
+			id,workspace_id,candidate_id,candidate_version,proposal_id,idempotency_key,request_hash,action,relation_type,created_at
+		) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id::text`,
+		string(decisionID), string(command.WorkspaceID), string(command.CandidateID), command.ExpectedVersion,
+		string(proposalID), command.IdempotencyKey, commandHash, decisionActionWire(command.Action),
+		optionalRelationType(command.RelationType), createdAt).Scan(&insertedID); err != nil {
+		t.Fatal(err)
+	}
+	if insertedID != string(decisionID) {
+		t.Fatalf("seed decision id=%s, want %s", insertedID, decisionID)
 	}
 	updated, err := tx.Exec(ctx, `
 		UPDATE graph.semantic_link_candidate
@@ -458,6 +553,9 @@ func seedCandidateConfirmRecord(t *testing.T, ctx context.Context, tx pgx.Tx, ca
 	}
 	if updated.RowsAffected() != 1 {
 		t.Fatalf("seed candidate rows = %d", updated.RowsAffected())
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
 	}
 	return proposalID, revisionID, decisionID
 }
@@ -471,7 +569,7 @@ func mustMarshalCandidateConfirm(t *testing.T, value any) []byte {
 	return encoded
 }
 
-func assertCandidateConfirmRiskFacts(t *testing.T, ctx context.Context, tx pgx.Tx, proposalID foundation.ID, expectedLevel changecontroldomain.ProposalRiskLevel, expectedDescription string) {
+func assertCandidateConfirmRiskFacts(t *testing.T, ctx context.Context, tx graphSeedDB, proposalID foundation.ID, expectedLevel changecontroldomain.ProposalRiskLevel, expectedDescription string) {
 	t.Helper()
 	var riskLevel, description string
 	if err := tx.QueryRow(ctx, `
@@ -486,7 +584,7 @@ func assertCandidateConfirmRiskFacts(t *testing.T, ctx context.Context, tx pgx.T
 	}
 }
 
-func assertNoCandidateConfirmPartialRows(t *testing.T, ctx context.Context, tx pgx.Tx, workspaceID, candidateID foundation.ID) {
+func assertNoCandidateConfirmPartialRows(t *testing.T, ctx context.Context, tx graphSeedDB, workspaceID, candidateID foundation.ID) {
 	t.Helper()
 	var proposalCount, revisionCount, decisionCount int
 	var status string
@@ -514,56 +612,27 @@ func hasCandidateConfirmCode(err error, code string) bool {
 	return errors.As(err, &classified) && classified.Code == code
 }
 
-type candidateConfirmFailBeginner struct {
-	pgx.Tx
-	err error
-}
-
-func (beginner candidateConfirmFailBeginner) Begin(ctx context.Context) (pgx.Tx, error) {
-	tx, err := beginner.Tx.Begin(ctx)
+func newCandidateConfirmTestRepository(pool *platformpostgres.Pool, ids foundation.IDGenerator, clock foundation.Clock) (*GORMCandidateConfirmRepository, error) {
+	proposals, err := changecontrolpostgres.NewGORMRepository(pool)
 	if err != nil {
 		return nil, err
 	}
-	return &candidateConfirmFailTx{Tx: tx, err: beginner.err}, nil
+	return NewGORMCandidateConfirmRepository(pool, proposals, ids, clock)
 }
 
-type candidateConfirmFailTx struct {
-	pgx.Tx
-	err error
+// Commit is real. Only the first successful result is lost, so an exact replay
+// must recover committed identities rather than repeat business writes.
+type graphCommitLossUnitOfWork struct {
+	delegate foundation.UnitOfWork
+	err      error
+	once     sync.Once
 }
 
-func (tx *candidateConfirmFailTx) QueryRow(ctx context.Context, query string, args ...any) pgx.Row {
-	if strings.Contains(query, "INSERT INTO graph.semantic_link_candidate_decision") {
-		return candidateConfirmErrorRow{err: tx.err}
-	}
-	return tx.Tx.QueryRow(ctx, query, args...)
-}
-
-type candidateConfirmCommitLossBeginner struct {
-	pgx.Tx
-	err error
-}
-
-func (beginner candidateConfirmCommitLossBeginner) Begin(ctx context.Context) (pgx.Tx, error) {
-	tx, err := beginner.Tx.Begin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return &candidateConfirmCommitLossTx{Tx: tx, err: beginner.err}, nil
-}
-
-type candidateConfirmCommitLossTx struct {
-	pgx.Tx
-	err error
-}
-
-func (tx *candidateConfirmCommitLossTx) Commit(ctx context.Context) error {
-	if err := tx.Tx.Commit(ctx); err != nil {
+func (unit *graphCommitLossUnitOfWork) Within(ctx context.Context, options foundation.TransactionOptions, work foundation.TransactionFunc) error {
+	if err := unit.delegate.Within(ctx, options, work); err != nil {
 		return err
 	}
-	return tx.err
+	var err error
+	unit.once.Do(func() { err = unit.err })
+	return err
 }
-
-type candidateConfirmErrorRow struct{ err error }
-
-func (row candidateConfirmErrorRow) Scan(...any) error { return row.err }

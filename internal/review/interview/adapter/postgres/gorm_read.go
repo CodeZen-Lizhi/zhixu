@@ -187,7 +187,7 @@ func (repository *GORMRepository) Get(ctx context.Context, workspaceID, sessionI
 	return gormInterviewLoadSnapshot(ctx, repository.database, workspaceID, sessionID, false)
 }
 
-// List returns a Workspace-scoped page ordered by the legacy Session keyset.
+// List returns a Workspace-scoped page ordered by the stable Session keyset.
 func (repository *GORMRepository) List(ctx context.Context, query interviewapp.SessionListQuery) (interviewapp.SessionListPage, error) {
 	if err := repository.ready(ctx); err != nil {
 		return interviewapp.SessionListPage{}, err
@@ -309,6 +309,10 @@ func gormInterviewLoadSession(ctx context.Context, database *gorm.DB, workspaceI
 	if err != nil {
 		return domain.Session{}, gormInterviewClassify(ctx, err, domain.ErrorCodeDependencyUnavailable)
 	}
+	return gormInterviewReadSession(ctx, row)
+}
+
+func gormInterviewReadSession(ctx context.Context, row interface{ Scan(...any) error }) (domain.Session, error) {
 	session, err := gormInterviewScanSession(row)
 	if gormInterviewNoRows(err) {
 		return domain.Session{}, domain.NotFoundError(domain.ErrorCodeSessionNotFound, "interview session was not found")

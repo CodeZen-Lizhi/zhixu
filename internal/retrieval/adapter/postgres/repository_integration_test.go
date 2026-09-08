@@ -6,15 +6,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	"github.com/CodeZen-Lizhi/zhixu/internal/retrieval/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
 	"github.com/jackc/pgx/v5"
@@ -24,161 +23,169 @@ import (
 )
 
 func TestRepositoryFTSOnlyBuildReadyActivateAndReplay(t *testing.T) {
-	repository, database, ctx := newRetrievalTestRepository(t)
-	now := time.Date(2026, 7, 17, 10, 0, 0, 0, time.UTC)
-	workspaceID, chunk := seedRetrievalChunk(t, ctx, database.DB(), "81000000", false, now)
-	build := retrievalBuild(t, workspaceID, "82000000-0000-4000-8000-000000000001", nil, "fts-build", chunk, now)
+	for _, implementation := range []string{"gorm"} {
+		t.Run(implementation, func(t *testing.T) {
+			repository, database, ctx := newRetrievalTestStore(t, implementation)
+			now := time.Date(2026, 7, 17, 10, 0, 0, 0, time.UTC)
+			workspaceID, chunk := seedRetrievalChunk(t, ctx, database.DB(), "81000000", false, now)
+			build := retrievalBuild(t, workspaceID, "82000000-0000-4000-8000-000000000001", nil, "fts-build", chunk, now)
 
-	created, err := repository.BeginIndex(ctx, build)
-	if err != nil || !created.Created {
-		t.Fatalf("BeginIndex() = %#v, %v", created, err)
-	}
-	replayBuild := retrievalBuild(t, workspaceID, "82000000-0000-4000-8000-000000000002", nil, "fts-build", chunk, now.Add(time.Second))
-	replayed, err := repository.BeginIndex(ctx, replayBuild)
-	if err != nil || !replayed.Replayed || replayed.IndexVersion.ID != created.IndexVersion.ID {
-		t.Fatalf("BeginIndex(replay) = %#v, %v", replayed, err)
-	}
+			created, err := repository.BeginIndex(ctx, build)
+			if err != nil || !created.Created {
+				t.Fatalf("BeginIndex() = %#v, %v", created, err)
+			}
+			replayBuild := retrievalBuild(t, workspaceID, "82000000-0000-4000-8000-000000000002", nil, "fts-build", chunk, now.Add(time.Second))
+			replayed, err := repository.BeginIndex(ctx, replayBuild)
+			if err != nil || !replayed.Replayed || replayed.IndexVersion.ID != created.IndexVersion.ID {
+				t.Fatalf("BeginIndex(replay) = %#v, %v", replayed, err)
+			}
 
-	lexicalCommand := domain.LexicalBuildCommand{
-		WorkspaceID: workspaceID, IndexVersionID: created.IndexVersion.ID,
-		ExpectedIndexVersion: 1, At: now.Add(2 * time.Second),
-	}
-	lexical, err := repository.BuildLexical(ctx, lexicalCommand)
-	if err != nil || lexical.InsertedCount != 1 || lexical.ReplayedCount != 0 {
-		t.Fatalf("BuildLexical() = %#v, %v", lexical, err)
-	}
-	lexicalReplay, err := repository.BuildLexical(ctx, lexicalCommand)
-	if err != nil || lexicalReplay.InsertedCount != 0 || lexicalReplay.ReplayedCount != 1 {
-		t.Fatalf("BuildLexical(replay) = %#v, %v", lexicalReplay, err)
-	}
+			lexicalCommand := domain.LexicalBuildCommand{
+				WorkspaceID: workspaceID, IndexVersionID: created.IndexVersion.ID,
+				ExpectedIndexVersion: 1, At: now.Add(2 * time.Second),
+			}
+			lexical, err := repository.BuildLexical(ctx, lexicalCommand)
+			if err != nil || lexical.InsertedCount != 1 || lexical.ReplayedCount != 0 {
+				t.Fatalf("BuildLexical() = %#v, %v", lexical, err)
+			}
+			lexicalReplay, err := repository.BuildLexical(ctx, lexicalCommand)
+			if err != nil || lexicalReplay.InsertedCount != 0 || lexicalReplay.ReplayedCount != 1 {
+				t.Fatalf("BuildLexical(replay) = %#v, %v", lexicalReplay, err)
+			}
 
-	service, err := application.NewService(application.Dependencies{
-		Store: repository, IDs: foundation.NewUUIDGenerator(nil),
-		Clock: foundation.FixedClock{Value: now.Add(3 * time.Second)},
-	})
-	if err != nil {
-		t.Fatal(err)
+			service, err := application.NewService(application.Dependencies{
+				Store: repository, IDs: foundation.NewUUIDGenerator(nil),
+				Clock: foundation.FixedClock{Value: now.Add(3 * time.Second)},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ready, err := service.Ready(ctx, application.TransitionRequest{
+				WorkspaceID: workspaceID, IndexVersionID: created.IndexVersion.ID, ExpectedVersion: 1,
+			})
+			if err != nil || ready.Status != domain.IndexStatusReady || ready.Version != 2 {
+				t.Fatalf("Ready() = %#v, %v", ready, err)
+			}
+			activationService, err := application.NewService(application.Dependencies{
+				Store: repository,
+				IDs: &retrievalSequenceIDs{values: []foundation.ID{
+					"83000000-0000-4000-8000-000000000001",
+					"83000000-0000-4000-8000-000000000002",
+				}},
+				Clock: foundation.FixedClock{Value: now.Add(4 * time.Second)},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			activateRequest := application.ActivateRequest{
+				WorkspaceID: workspaceID, TargetIndexVersionID: ready.ID, ExpectedTargetVersion: ready.Version,
+				IdempotencyKey: "activate-fts", ReasonCode: "BUILD_VERIFIED",
+			}
+			activated, err := activationService.Activate(ctx, activateRequest)
+			if err != nil || activated.ActiveIndexVersion.Status != domain.IndexStatusActive || activated.Replayed {
+				t.Fatalf("Activate() = %#v, %v", activated, err)
+			}
+			activationReplay, err := activationService.Activate(ctx, activateRequest)
+			if err != nil || !activationReplay.Replayed || activationReplay.Activation.ID != activated.Activation.ID {
+				t.Fatalf("Activate(replay) = %#v, %v", activationReplay, err)
+			}
+			active, err := repository.GetActive(ctx, workspaceID)
+			if err != nil || active.ID != ready.ID || active.Version != 3 {
+				t.Fatalf("GetActive() = %#v, %v", active, err)
+			}
+			assertExplainUsesIndex(t, ctx, database.DB(), "idx_retrieval_projection_search_vector",
+				`SELECT chunk_id FROM retrieval.chunk_projection WHERE search_vector @@ plainto_tsquery('simple','alpha')`)
+			assertExplainUsesIndex(t, ctx, database.DB(), "idx_ingestion_canonical_chunk_content_trgm",
+				`SELECT id FROM ingestion.canonical_chunk WHERE content % 'alpha'`)
+			assertExplainUsesIndex(t, ctx, database.DB(), "uq_retrieval_index_version_active",
+				`SELECT id FROM retrieval.index_version WHERE workspace_id=$1 AND status='active'`, string(workspaceID))
+		})
 	}
-	ready, err := service.Ready(ctx, application.TransitionRequest{
-		WorkspaceID: workspaceID, IndexVersionID: created.IndexVersion.ID, ExpectedVersion: 1,
-	})
-	if err != nil || ready.Status != domain.IndexStatusReady || ready.Version != 2 {
-		t.Fatalf("Ready() = %#v, %v", ready, err)
-	}
-	activationService, err := application.NewService(application.Dependencies{
-		Store: repository,
-		IDs: &retrievalSequenceIDs{values: []foundation.ID{
-			"83000000-0000-4000-8000-000000000001",
-			"83000000-0000-4000-8000-000000000002",
-		}},
-		Clock: foundation.FixedClock{Value: now.Add(4 * time.Second)},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	activateRequest := application.ActivateRequest{
-		WorkspaceID: workspaceID, TargetIndexVersionID: ready.ID, ExpectedTargetVersion: ready.Version,
-		IdempotencyKey: "activate-fts", ReasonCode: "BUILD_VERIFIED",
-	}
-	activated, err := activationService.Activate(ctx, activateRequest)
-	if err != nil || activated.ActiveIndexVersion.Status != domain.IndexStatusActive || activated.Replayed {
-		t.Fatalf("Activate() = %#v, %v", activated, err)
-	}
-	activationReplay, err := activationService.Activate(ctx, activateRequest)
-	if err != nil || !activationReplay.Replayed || activationReplay.Activation.ID != activated.Activation.ID {
-		t.Fatalf("Activate(replay) = %#v, %v", activationReplay, err)
-	}
-	active, err := repository.GetActive(ctx, workspaceID)
-	if err != nil || active.ID != ready.ID || active.Version != 3 {
-		t.Fatalf("GetActive() = %#v, %v", active, err)
-	}
-	assertExplainUsesIndex(t, ctx, database.DB(), "idx_retrieval_projection_search_vector",
-		`SELECT chunk_id FROM retrieval.chunk_projection WHERE search_vector @@ plainto_tsquery('simple','alpha')`)
-	assertExplainUsesIndex(t, ctx, database.DB(), "idx_ingestion_canonical_chunk_content_trgm",
-		`SELECT id FROM ingestion.canonical_chunk WHERE content % 'alpha'`)
-	assertExplainUsesIndex(t, ctx, database.DB(), "uq_retrieval_index_version_active",
-		`SELECT id FROM retrieval.index_version WHERE workspace_id=$1 AND status='active'`, string(workspaceID))
 }
 
 func TestRepositoryHybridVectorBatchReadyAndReplay(t *testing.T) {
-	repository, database, ctx := newRetrievalTestRepository(t)
-	now := time.Date(2026, 7, 17, 11, 0, 0, 0, time.UTC)
-	workspaceID, chunk := seedRetrievalChunk(t, ctx, database.DB(), "84000000", false, now)
-	embeddingID := foundation.ID("85000000-0000-4000-8000-000000000001")
-	embedding, err := repository.RegisterEmbeddingVersion(ctx, domain.EmbeddingVersion{
-		ID: embeddingID, Provider: "openai", AdapterName: "compatible", AdapterVersion: "v1",
-		Model: "embed-test", Dimensions: 3, Normalization: domain.NormalizationL2,
-		DistanceMetric: domain.DistanceCosine, ConfigHash: strings.Repeat("a", 64), CreatedAt: now,
-	})
-	if err != nil || !embedding.Created {
-		t.Fatalf("RegisterEmbeddingVersion() = %#v, %v", embedding, err)
-	}
-	build := retrievalBuild(t, workspaceID, "86000000-0000-4000-8000-000000000001", &embeddingID, "hybrid-build", chunk, now)
-	created, err := repository.BeginIndex(ctx, build)
-	if err != nil {
-		t.Fatal(err)
-	}
-	command := domain.LexicalBuildCommand{
-		WorkspaceID: workspaceID, IndexVersionID: created.IndexVersion.ID,
-		ExpectedIndexVersion: 1, At: now.Add(time.Second),
-	}
-	if _, err := repository.BuildLexical(ctx, command); err != nil {
-		t.Fatal(err)
-	}
-	var tokenCount int32
-	if err := database.QueryRow(ctx, `SELECT token_count FROM retrieval.chunk_projection WHERE index_version_id=$1 AND chunk_id=$2`, string(created.IndexVersion.ID), string(chunk.ChunkID)).Scan(&tokenCount); err != nil {
-		t.Fatal(err)
-	}
-	_, err = database.DB().Exec(ctx, `UPDATE retrieval.chunk_projection
-		SET embedding=$1,vector_status='ready',updated_at=$2
-		WHERE index_version_id=$3 AND chunk_id=$4`, pgvector.NewVector([]float32{1, 2}), now.Add(2*time.Second), string(created.IndexVersion.ID), string(chunk.ChunkID))
-	var pgErr *pgconn.PgError
-	if err == nil || !errors.As(err, &pgErr) || pgErr.Code != "23514" {
-		t.Fatalf("dimension constraint error=%v", err)
-	}
-	batch := domain.VectorProjectionBatch{
-		WorkspaceID: workspaceID, IndexVersionID: created.IndexVersion.ID, EmbeddingVersionID: embeddingID,
-		ExpectedIndexVersion: 1, At: now.Add(2 * time.Second),
-		Projections: []domain.VectorProjectionWrite{{
-			ChunkID: chunk.ChunkID, Embedding: []float32{1, 0, 0}, TokenCount: tokenCount,
-			VectorStatus: domain.VectorStatusReady,
-		}},
-	}
-	skipped := batch
-	skipped.Projections = []domain.VectorProjectionWrite{{
-		ChunkID: chunk.ChunkID, TokenCount: tokenCount, VectorStatus: domain.VectorStatusSkippedOversized,
-		FailureCode: "VECTOR_INPUT_OVERSIZED",
-	}}
-	if _, err := repository.SaveVectorBatch(ctx, skipped); !retrievalErrorKind(err, foundation.ErrorConsistencyViolation) {
-		t.Fatalf("non-oversized skip error=%#v", err)
-	}
-	vector, err := repository.SaveVectorBatch(ctx, batch)
-	if err != nil || vector.InsertedCount != 1 || vector.ReplayedCount != 0 {
-		t.Fatalf("SaveVectorBatch() = %#v, %v", vector, err)
-	}
-	vectorReplay, err := repository.SaveVectorBatch(ctx, batch)
-	if err != nil || vectorReplay.InsertedCount != 0 || vectorReplay.ReplayedCount != 1 {
-		t.Fatalf("SaveVectorBatch(replay) = %#v, %v", vectorReplay, err)
-	}
-	if lexicalReplay, err := repository.BuildLexical(ctx, command); err != nil || lexicalReplay.ReplayedCount != 1 {
-		t.Fatalf("BuildLexical(after vector) = %#v, %v", lexicalReplay, err)
-	}
-	batch.Projections[0].TokenCount++
-	if _, err := repository.SaveVectorBatch(ctx, batch); !retrievalErrorKind(err, foundation.ErrorVersionConflict) {
-		t.Fatalf("token count conflict = %#v", err)
-	}
-	service, err := application.NewService(application.Dependencies{
-		Store: repository, IDs: foundation.NewUUIDGenerator(nil),
-		Clock: foundation.FixedClock{Value: now.Add(3 * time.Second)},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ready, err := service.Ready(ctx, application.TransitionRequest{
-		WorkspaceID: workspaceID, IndexVersionID: created.IndexVersion.ID, ExpectedVersion: 1,
-	})
-	if err != nil || ready.Status != domain.IndexStatusReady || len(ready.DegradedCapabilities) != 0 {
-		t.Fatalf("Ready(hybrid) = %#v, %v", ready, err)
+	for _, implementation := range []string{"gorm"} {
+		t.Run(implementation, func(t *testing.T) {
+			repository, database, ctx := newRetrievalTestStore(t, implementation)
+			now := time.Date(2026, 7, 17, 11, 0, 0, 0, time.UTC)
+			workspaceID, chunk := seedRetrievalChunk(t, ctx, database.DB(), "84000000", false, now)
+			embeddingID := foundation.ID("85000000-0000-4000-8000-000000000001")
+			embedding, err := repository.RegisterEmbeddingVersion(ctx, domain.EmbeddingVersion{
+				ID: embeddingID, Provider: "openai", AdapterName: "compatible", AdapterVersion: "v1",
+				Model: "embed-test", Dimensions: 3, Normalization: domain.NormalizationL2,
+				DistanceMetric: domain.DistanceCosine, ConfigHash: strings.Repeat("a", 64), CreatedAt: now,
+			})
+			if err != nil || !embedding.Created {
+				t.Fatalf("RegisterEmbeddingVersion() = %#v, %v", embedding, err)
+			}
+			build := retrievalBuild(t, workspaceID, "86000000-0000-4000-8000-000000000001", &embeddingID, "hybrid-build", chunk, now)
+			created, err := repository.BeginIndex(ctx, build)
+			if err != nil {
+				t.Fatal(err)
+			}
+			command := domain.LexicalBuildCommand{
+				WorkspaceID: workspaceID, IndexVersionID: created.IndexVersion.ID,
+				ExpectedIndexVersion: 1, At: now.Add(time.Second),
+			}
+			if _, err := repository.BuildLexical(ctx, command); err != nil {
+				t.Fatal(err)
+			}
+			var tokenCount int32
+			if err := database.QueryRow(ctx, `SELECT token_count FROM retrieval.chunk_projection WHERE index_version_id=$1 AND chunk_id=$2`, string(created.IndexVersion.ID), string(chunk.ChunkID)).Scan(&tokenCount); err != nil {
+				t.Fatal(err)
+			}
+			_, err = database.DB().Exec(ctx, `UPDATE retrieval.chunk_projection
+				SET embedding=$1,vector_status='ready',updated_at=$2
+				WHERE index_version_id=$3 AND chunk_id=$4`, pgvector.NewVector([]float32{1, 2}), now.Add(2*time.Second), string(created.IndexVersion.ID), string(chunk.ChunkID))
+			var pgErr *pgconn.PgError
+			if err == nil || !errors.As(err, &pgErr) || pgErr.Code != "23514" {
+				t.Fatalf("dimension constraint error=%v", err)
+			}
+			batch := domain.VectorProjectionBatch{
+				WorkspaceID: workspaceID, IndexVersionID: created.IndexVersion.ID, EmbeddingVersionID: embeddingID,
+				ExpectedIndexVersion: 1, At: now.Add(2 * time.Second),
+				Projections: []domain.VectorProjectionWrite{{
+					ChunkID: chunk.ChunkID, Embedding: []float32{1, 0, 0}, TokenCount: tokenCount,
+					VectorStatus: domain.VectorStatusReady,
+				}},
+			}
+			skipped := batch
+			skipped.Projections = []domain.VectorProjectionWrite{{
+				ChunkID: chunk.ChunkID, TokenCount: tokenCount, VectorStatus: domain.VectorStatusSkippedOversized,
+				FailureCode: "VECTOR_INPUT_OVERSIZED",
+			}}
+			if _, err := repository.SaveVectorBatch(ctx, skipped); !retrievalErrorKind(err, foundation.ErrorConsistencyViolation) {
+				t.Fatalf("non-oversized skip error=%#v", err)
+			}
+			vector, err := repository.SaveVectorBatch(ctx, batch)
+			if err != nil || vector.InsertedCount != 1 || vector.ReplayedCount != 0 {
+				t.Fatalf("SaveVectorBatch() = %#v, %v", vector, err)
+			}
+			vectorReplay, err := repository.SaveVectorBatch(ctx, batch)
+			if err != nil || vectorReplay.InsertedCount != 0 || vectorReplay.ReplayedCount != 1 {
+				t.Fatalf("SaveVectorBatch(replay) = %#v, %v", vectorReplay, err)
+			}
+			if lexicalReplay, err := repository.BuildLexical(ctx, command); err != nil || lexicalReplay.ReplayedCount != 1 {
+				t.Fatalf("BuildLexical(after vector) = %#v, %v", lexicalReplay, err)
+			}
+			batch.Projections[0].TokenCount++
+			if _, err := repository.SaveVectorBatch(ctx, batch); !retrievalErrorKind(err, foundation.ErrorVersionConflict) {
+				t.Fatalf("token count conflict = %#v", err)
+			}
+			service, err := application.NewService(application.Dependencies{
+				Store: repository, IDs: foundation.NewUUIDGenerator(nil),
+				Clock: foundation.FixedClock{Value: now.Add(3 * time.Second)},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ready, err := service.Ready(ctx, application.TransitionRequest{
+				WorkspaceID: workspaceID, IndexVersionID: created.IndexVersion.ID, ExpectedVersion: 1,
+			})
+			if err != nil || ready.Status != domain.IndexStatusReady || len(ready.DegradedCapabilities) != 0 {
+				t.Fatalf("Ready(hybrid) = %#v, %v", ready, err)
+			}
+		})
 	}
 }
 
@@ -516,67 +523,43 @@ func TestRepositoryDatabaseValidatesActivationReceiptReplayAndInitialBinding(t *
 	}
 }
 
-func newRetrievalTestRepository(t *testing.T) (*Repository, *platformpostgres.Pool, context.Context) {
+type retrievalTestRepository struct {
+	*GORMRepository
+	*GORMCompletionRepository
+}
+
+func newRetrievalTestRepository(t *testing.T, connectionLimits ...int32) (*retrievalTestRepository, *platformpostgres.Pool, context.Context) {
 	t.Helper()
-	baseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
-	if baseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL for Retrieval integration tests")
+	maxConnections := int32(8)
+	if len(connectionLimits) > 0 {
+		maxConnections = connectionLimits[0]
 	}
-	ctx := context.Background()
-	parsed, err := url.Parse(baseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	admin, err := pgxpool.New(ctx, baseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	name := fmt.Sprintf("zhixu_retrieval_%d", time.Now().UnixNano())
-	identifier := pgx.Identifier{name}.Sanitize()
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+identifier); err != nil {
-		admin.Close()
-		t.Fatal(err)
-	}
-	parsed.Path = "/" + name
-	databaseURL := parsed.String()
-	migrationPool, err := platformpostgres.OpenMigration(ctx, databaseURL, 4, 0)
-	if err != nil {
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-		t.Fatal(err)
-	}
-	runner, err := platformmigration.NewAtlasEmbeddedRunner(migrationPool.DB())
-	if err == nil {
-		err = runner.Up(ctx)
-	}
-	migrationPool.Close()
-	if err != nil {
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-		t.Fatal(err)
-	}
-	database, err := platformpostgres.Open(ctx, databaseURL, 8, 0)
-	if err != nil {
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-		t.Fatal(err)
-	}
-	if err := database.Ping(ctx); err != nil {
-		database.Close()
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		database.Close()
-		_, _ = admin.Exec(context.Background(), "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
+	fixture := testdb.Require(t, testdb.Config{
+		ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
+		Availability:     testdb.FailWhenUnavailable, MaxConns: maxConnections,
 	})
-	repository, err := NewRepository(database.DB())
+	database := fixture.Pool()
+	repository, err := NewGORMRepository(database)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return repository, database, ctx
+	completion := newCompletionTestStore(t, database, repository).(*GORMCompletionRepository)
+	return &retrievalTestRepository{GORMRepository: repository, GORMCompletionRepository: completion}, database, t.Context()
+}
+
+type retrievalTestStore interface {
+	application.Store
+	application.VectorBuildStore
+	application.RegressionStore
+}
+
+func newRetrievalTestStore(t *testing.T, implementation string, connectionLimits ...int32) (retrievalTestStore, *platformpostgres.Pool, context.Context) {
+	t.Helper()
+	if implementation != "gorm" {
+		t.Fatalf("unsupported retrieval implementation %q", implementation)
+	}
+	repository, database, ctx := newRetrievalTestRepository(t, connectionLimits...)
+	return repository.GORMRepository, database, ctx
 }
 
 func seedRetrievalChunk(t *testing.T, ctx context.Context, database *pgxpool.Pool, prefix string, oversized bool, now time.Time) (foundation.ID, domain.ManifestChunk) {
@@ -591,7 +574,7 @@ func seedRetrievalChunk(t *testing.T, ctx context.Context, database *pgxpool.Poo
 	contentHash := strings.Repeat("c", 64)
 	batch := &pgx.Batch{}
 	batch.Queue(`INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at)
-		VALUES($1,$2,$3,$3,$4,'test',1,$4,$4)`, string(workspaceID), "retrieval-"+prefix, "/tmp/retrieval-"+prefix, now)
+		VALUES($1,$2,$3,$3,$4,'inactive',1,$4,$4)`, string(workspaceID), "retrieval-"+prefix, "/tmp/retrieval-"+prefix, now)
 	batch.Queue(`INSERT INTO core.content_artifact(id,workspace_id,content_hash,byte_size,managed_location,created_at)
 		VALUES($1,$2,$3,$4,'.knowledge/sources/' || $3,$5)`, string(artifactID), string(workspaceID), artifactHash, int64(len(content)), now)
 	batch.Queue(`INSERT INTO ingestion.parse_projection(id,workspace_id,content_artifact_id,parser_id,parser_version,parser_config_hash,schema_version,normalized_content_hash,created_at)
@@ -665,7 +648,7 @@ func seedAdditionalRetrievalChunk(t *testing.T, ctx context.Context, database *p
 	}
 }
 
-func createReadyIndex(t *testing.T, ctx context.Context, repository *Repository, workspaceID foundation.ID, chunk domain.ManifestChunk, indexID, key string, now time.Time) domain.IndexVersion {
+func createReadyIndex(t *testing.T, ctx context.Context, repository application.Store, workspaceID foundation.ID, chunk domain.ManifestChunk, indexID, key string, now time.Time) domain.IndexVersion {
 	t.Helper()
 	created, err := repository.BeginIndex(ctx, retrievalBuild(t, workspaceID, indexID, nil, key, chunk, now))
 	if err != nil {

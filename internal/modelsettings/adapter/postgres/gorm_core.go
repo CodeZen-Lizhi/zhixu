@@ -12,13 +12,10 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/domain"
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
 )
 
-// GORMOption configures the staged GORM repository without changing the
-// legacy pgx construction path.
+// GORMOption configures the shared-pool model settings repository.
 type GORMOption func(*GORMRepository) error
 
 // WithGORMSecretSealer configures the revision-bound credential envelope.
@@ -65,8 +62,7 @@ func WithGORMScopedLocalModelLifecycle(lifecycle localmodelruntime.ScopedTxLifec
 	}
 }
 
-// GORMRepository is the staged database/sql-backed implementation. Production
-// composition remains on Repository until the Final migration owns the cutover.
+// GORMRepository is the shared-pool atomic boundary for model settings.
 type GORMRepository struct {
 	database       *gorm.DB
 	unitOfWork     foundation.UnitOfWork
@@ -86,7 +82,7 @@ func (repository GORMRepository) String() string {
 // GoString uses the same safe dependency-only summary.
 func (repository GORMRepository) GoString() string { return repository.String() }
 
-// NewGORMRepository builds the staged repository from one shared platform
+// NewGORMRepository builds the repository from one shared platform
 // Pool. It opens no connection and performs no schema mutation.
 func NewGORMRepository(pool *platformpostgres.Pool, options ...GORMOption) (*GORMRepository, error) {
 	if pool == nil {
@@ -198,7 +194,7 @@ func gormRawRows(ctx context.Context, database *gorm.DB, query string, arguments
 }
 
 func gormNoRows(err error) bool {
-	return errors.Is(err, sql.ErrNoRows) || errors.Is(err, pgx.ErrNoRows) || errors.Is(err, gorm.ErrRecordNotFound)
+	return errors.Is(err, sql.ErrNoRows) || errors.Is(err, gorm.ErrRecordNotFound)
 }
 
 func gormLoadState(ctx context.Context, database *gorm.DB, suffix string) (stateRecord, error) {
@@ -262,14 +258,11 @@ func classifyGORM(ctx context.Context, err error) error {
 		}
 		return foundation.NewError(foundation.ErrorRetryableFailure, domain.ErrorCodeUnavailable, true, cause)
 	}
-	var postgresError *pgconn.PgError
-	if errors.As(err, &postgresError) {
-		switch postgresError.Code {
-		case "40001", "40P01", "55P03":
-			return foundation.NewError(foundation.ErrorRetryableFailure, domain.ErrorCodeUnavailable, true, err)
-		case "23502", "23503", "23505", "23514", "55000":
-			return corrupt(err)
-		}
+	switch platformpostgres.SQLState(err) {
+	case "40001", "40P01", "55P03":
+		return foundation.NewError(foundation.ErrorRetryableFailure, domain.ErrorCodeUnavailable, true, err)
+	case "23502", "23503", "23505", "23514", "55000":
+		return corrupt(err)
 	}
 	if errors.Is(err, sql.ErrTxDone) {
 		return unavailable(err)

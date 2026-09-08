@@ -19,15 +19,15 @@ import (
 
 func TestSemanticLinkPairExclusionsMatchEndpointTypeAndID(t *testing.T) {
 	ctx := context.Background()
-	pool := newSemanticLinkScanTestPool(t, ctx)
-	fixture, err := graphtestfixture.SeedFunctional(ctx, pool)
+	pool := newSemanticLinkScanTestPool(t)
+	fixture, err := graphtestfixture.SeedFunctional(ctx, pool.Pool)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
-		if err := graphtestfixture.Cleanup(cleanupCtx, pool, fixture.WorkspaceID); err != nil {
+		if err := graphtestfixture.Cleanup(cleanupCtx, pool.Pool, fixture.WorkspaceID); err != nil {
 			t.Errorf("cleanup graph fixture: %v", err)
 		}
 	})
@@ -55,7 +55,14 @@ func TestSemanticLinkPairExclusionsMatchEndpointTypeAndID(t *testing.T) {
 		exclusionPair(workspaceID, knowledge.NodeTypeTopic, fixture.PrimaryTopicID, knowledge.NodeTypeClaim, fixture.FirstClaimID),
 		exclusionPair(workspaceID, knowledge.NodeTypeClaim, fixture.SecondClaimID, knowledge.NodeTypeTopic, proposalTopicID),
 	}
-	exclusions, err := loadTopicPairExclusions(ctx, tx, workspaceID, pairs)
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	database, err := pool.platform.GORM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	exclusions, err := gormLoadPairExclusions(ctx, database, workspaceID, pairs, gormPairExclusionQueryTopic)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,9 +88,9 @@ func insertTypedExclusionProposal(t *testing.T, ctx context.Context, tx pgx.Tx, 
 	t.Helper()
 	proposalID, revisionID := graphTestID(t), graphTestID(t)
 	if _, err := tx.Exec(ctx, `INSERT INTO change_control.proposal(
-		id,workspace_id,proposal_type,risk_level,status,idempotency_key,request_hash,version,created_at,updated_at)
-		VALUES($1,$2,'knowledge_change','HIGH','ready_for_review',$3,$4,1,$5,$5)`,
-		string(proposalID), string(workspaceID), "typed-exclusion-"+key, graphHash("proposal-"+key), now); err != nil {
+		id,workspace_id,proposal_type,risk_level,status,idempotency_key,request_hash,version,created_at,updated_at,current_revision_id)
+		VALUES($1,$2,'knowledge_change','HIGH','ready_for_review',$3,$4,1,$5,$5,$6)`,
+		string(proposalID), string(workspaceID), "typed-exclusion-"+key, graphHash("proposal-"+key), now, string(revisionID)); err != nil {
 		t.Fatal(err)
 	}
 	changeSet, err := json.Marshal(changecontroldomain.KnowledgeChangeSet{

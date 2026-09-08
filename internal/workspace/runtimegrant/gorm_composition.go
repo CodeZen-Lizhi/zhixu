@@ -12,7 +12,7 @@ import (
 	workspacedomain "github.com/CodeZen-Lizhi/zhixu/internal/workspace/domain"
 )
 
-// GORMRepositoryPort is the stable Workspace boundary exposed by the staged
+// GORMRepositoryPort is the stable Workspace boundary exposed by the process
 // composition. It deliberately excludes the concrete GORM adapter type.
 type GORMRepositoryPort interface {
 	workspacedomain.Repository
@@ -25,8 +25,8 @@ type GORMRepositoryPort interface {
 	workspaceapplication.ScopedSourceWriter
 }
 
-// GORMProcessComposition owns one staged GORM resolver, Workspace port, and
-// optional managed runtime lease. It is not wired into production commands.
+// GORMProcessComposition owns one GORM resolver, Workspace port, and
+// optional managed runtime lease.
 type GORMProcessComposition struct {
 	Repository GORMRepositoryPort
 	Control    *workspaceapplication.ControlService
@@ -36,9 +36,8 @@ type GORMProcessComposition struct {
 	Lease      *Lease
 }
 
-// NewGORMProcessComposition assembles all staged Workspace dependencies from
-// the same complete platform Pool. It retains the legacy ProcessComposition
-// and command wiring as the active production path.
+// NewGORMProcessComposition assembles all Workspace dependencies from
+// the same complete platform Pool.
 func NewGORMProcessComposition(
 	ctx context.Context,
 	pool *platformpostgres.Pool,
@@ -114,18 +113,15 @@ func (composition *GORMProcessComposition) SetQuiescenceHooks(hooks QuiescenceHo
 	return composition.Lease.SetQuiescenceHooks(hooks)
 }
 
-// Close releases runtime ownership before the opened root anchor.
+// Close 先释放 runtime owner；心跳未退出或持久释放失败时保留 root anchor。
 func (composition *GORMProcessComposition) Close(ctx context.Context) error {
 	if composition == nil {
 		return nil
 	}
-	var leaseErr error
 	if composition.Lease != nil {
-		leaseErr = composition.Lease.Close(ctx)
+		if err := composition.Lease.Close(ctx); err != nil {
+			return err
+		}
 	}
-	resolverErr := composition.Resolver.Close()
-	if leaseErr != nil {
-		return leaseErr
-	}
-	return resolverErr
+	return composition.Resolver.Close()
 }

@@ -12,12 +12,10 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	graphdomain "github.com/CodeZen-Lizhi/zhixu/internal/graph/domain"
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
-	"github.com/jackc/pgx/v5"
 	"gorm.io/gorm"
 )
 
-// GORMRepository is the staged Graph persistence boundary. Production
-// composition remains on Repository until the real PostgreSQL parity gate.
+// GORMRepository 从共享 Pool 读取 canonical Knowledge 并持久化 Graph 事实。
 type GORMRepository struct {
 	database         *gorm.DB
 	unitOfWork       foundation.UnitOfWork
@@ -99,29 +97,6 @@ func (repository *GORMRepository) within(
 	return classifier(ctx, err, stage)
 }
 
-// withinDB preserves the shared transaction boundary while adapting the live
-// GORM transaction to Graph's private database/sql-backed query interface.
-func (repository *GORMRepository) withinDB(
-	ctx context.Context,
-	options foundation.TransactionOptions,
-	classifier gormGraphErrorClassifier,
-	work func(context.Context, foundation.TransactionScope, *gormDB) error,
-) error {
-	if err := repository.ready(ctx); err != nil {
-		return err
-	}
-	if work == nil {
-		return graphGORMInvalid(errors.New("graph GORM database callback is nil"))
-	}
-	return repository.within(ctx, options, classifier, func(callbackCtx context.Context, scope foundation.TransactionScope, transaction *gorm.DB) error {
-		database, err := newGORMDB(transaction)
-		if err != nil {
-			return err
-		}
-		return work(callbackCtx, scope, database)
-	})
-}
-
 // gormReadSnapshot executes a complete Graph query in one repeatable-read,
 // read-only transaction with the legacy transaction-local timeout.
 func (repository *GORMRepository) gormReadSnapshot(ctx context.Context, work func(context.Context, *gorm.DB) error) error {
@@ -142,30 +117,12 @@ func (repository *GORMRepository) gormReadSnapshot(ctx context.Context, work fun
 			return classifyGORM(classifierCtx, cause)
 		},
 		func(callbackCtx context.Context, _ foundation.TransactionScope, transaction *gorm.DB) error {
-			if _, execErr := gormGraphExec(callbackCtx, transaction, setLocalStatementTimeoutSQL, timeout); execErr != nil {
+			if _, execErr := gormGraphExec(callbackCtx, transaction, setLocalStatementTimeoutSQL, sql.Named("p1", timeout)); execErr != nil {
 				return execErr
 			}
 			return work(callbackCtx, transaction)
 		},
 	)
-}
-
-// readSnapshot is the private-DB compatibility form of gormReadSnapshot. It
-// deliberately delegates snapshot ownership and timeout setup to that helper.
-func (repository *GORMRepository) readSnapshot(ctx context.Context, work func(context.Context, *gormDB) error) error {
-	if err := repository.ready(ctx); err != nil {
-		return err
-	}
-	if work == nil {
-		return graphGORMInvalid(errors.New("graph GORM database read callback is nil"))
-	}
-	return repository.gormReadSnapshot(ctx, func(callbackCtx context.Context, transaction *gorm.DB) error {
-		database, err := newGORMDB(transaction)
-		if err != nil {
-			return err
-		}
-		return work(callbackCtx, database)
-	})
 }
 
 func graphGORMStatementTimeout(timeout time.Duration) (string, error) {
@@ -194,7 +151,7 @@ func nilGraphGORMDependency(value any) bool {
 }
 
 func gormGraphNoRows(err error) bool {
-	return errors.Is(err, sql.ErrNoRows) || errors.Is(err, pgx.ErrNoRows) || errors.Is(err, gorm.ErrRecordNotFound)
+	return errors.Is(err, sql.ErrNoRows) || errors.Is(err, gorm.ErrRecordNotFound)
 }
 
 func classifyGORM(ctx context.Context, err error) error {

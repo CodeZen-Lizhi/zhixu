@@ -71,15 +71,9 @@ type MaterialCandidate struct {
 	Score        float64
 }
 
-// FrozenMaterialFence revalidates frozen owner facts inside the caller-owned confirmation transaction.
-// The transaction remains opaque so the application layer does not depend on pgx.
-type FrozenMaterialFence interface {
-	VerifyFrozen(context.Context, any, foundation.ID, []domain.MaterialRef) error
-}
-
 // MaterialResolver resolves identities in bounded batches and revalidates exact refs for confirmation.
 type MaterialResolver interface {
-	FrozenMaterialFence
+	ScopedFrozenMaterialFence
 	Resolve(context.Context, foundation.ID, []MaterialSelector) ([]MaterialCandidate, error)
 	Freeze(context.Context, foundation.ID, []domain.MaterialRef) ([]domain.MaterialRef, error)
 }
@@ -225,7 +219,7 @@ type ReplaceMaterialsRecord struct {
 // ConfirmRecord atomically writes Draft terminal state, Snapshot materials, receipt and Start Outbox.
 type ConfirmRecord struct {
 	Binding             CommandBinding
-	Fence               FrozenMaterialFence
+	Fence               ScopedFrozenMaterialFence
 	SnapshotID          foundation.ID
 	SnapshotMaterialIDs []foundation.ID
 	OutboxID            foundation.ID

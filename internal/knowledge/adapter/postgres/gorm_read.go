@@ -7,11 +7,13 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	knowledgeapplication "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	"github.com/lib/pq"
 	"gorm.io/gorm"
 )
 
 var _ knowledgeapplication.ClaimQueryRepository = (*GORMRepository)(nil)
+var _ knowledgeapplication.ScopedClaimReader = (*GORMRepository)(nil)
 
 // BatchGetClaims loads bounded Claim aggregates from one repeatable, read-only
 // snapshot so aggregate rows and their sources cannot be mixed across commits.
@@ -27,46 +29,70 @@ func (repository *GORMRepository) BatchGetClaims(ctx context.Context, query doma
 	}
 	var result []domain.ClaimWithSources
 	err := repository.gormReadSnapshot(ctx, func(callbackCtx context.Context, transaction *gorm.DB) error {
-		rows, err := gormKnowledgeRawRows(callbackCtx, transaction, claimSelect+`
+		var err error
+		result, err = gormKnowledgeBatchGetClaims(callbackCtx, transaction, query)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// BatchGetClaimsScoped 在调用方快照内读取 Claim 与 Sources，不另开事务。
+func (repository *GORMRepository) BatchGetClaimsScoped(ctx context.Context, scope foundation.TransactionScope, query domain.BatchGetClaimsQuery) ([]domain.ClaimWithSources, error) {
+	if err := repository.ready(ctx); err != nil {
+		return nil, err
+	}
+	if err := domain.ValidateBatchQuery(query.WorkspaceID, query.IDs, query.Limit); err != nil {
+		return nil, err
+	}
+	if err := validateClaimStatuses(query.Statuses); err != nil {
+		return nil, err
+	}
+	transaction, err := platformpostgres.GORMTransaction(scope)
+	if err != nil {
+		return nil, knowledgeGORMUnavailable(err)
+	}
+	return gormKnowledgeBatchGetClaims(ctx, transaction, query)
+}
+
+func gormKnowledgeBatchGetClaims(ctx context.Context, transaction *gorm.DB, query domain.BatchGetClaimsQuery) ([]domain.ClaimWithSources, error) {
+	rows, err := gormKnowledgeRawRows(ctx, transaction, claimSelect+`
 			WHERE workspace_id=?
 			  AND (cardinality(?::uuid[])=0 OR id=ANY(?::uuid[]))
 			  AND (cardinality(?::text[])=0 OR status=ANY(?::text[]))
 			ORDER BY updated_at DESC,id
 			LIMIT ?`, string(query.WorkspaceID), pq.Array(idsAsStrings(query.IDs)), pq.Array(idsAsStrings(query.IDs)), pq.Array(statusStrings(query.Statuses)), pq.Array(statusStrings(query.Statuses)), query.Limit)
-		if err != nil {
-			return classifyGORMKnowledge(callbackCtx, err, errorCodeDatabaseUnavailable)
-		}
-		defer rows.Close()
-		claims := make([]domain.Claim, 0, query.Limit)
-		for rows.Next() {
-			claim, scanErr := scanClaim(rows)
-			if scanErr != nil {
-				return consistency(domain.ErrorCodeClaimInvalid, scanErr)
-			}
-			claims = append(claims, claim)
-		}
-		if err := rows.Err(); err != nil {
-			return classifyGORMKnowledge(callbackCtx, err, errorCodeDatabaseUnavailable)
-		}
-		claimIDs := make([]foundation.ID, len(claims))
-		for index := range claims {
-			claimIDs[index] = claims[index].ID
-		}
-		sources, err := gormKnowledgeReadClaimSources(callbackCtx, transaction, query.WorkspaceID, claimIDs)
-		if err != nil {
-			return classifyGORMKnowledge(callbackCtx, err, errorCodeDatabaseUnavailable)
-		}
-		result = make([]domain.ClaimWithSources, len(claims))
-		for index, claim := range claims {
-			if err := domain.ValidateClaimAggregate(claim, sources[claim.ID]); err != nil {
-				return consistency(domain.ErrorCodeClaimInvalid, err)
-			}
-			result[index] = domain.ClaimWithSources{Claim: claim, Sources: sources[claim.ID]}
-		}
-		return nil
-	})
 	if err != nil {
-		return nil, err
+		return nil, classifyGORMKnowledge(ctx, err, errorCodeDatabaseUnavailable)
+	}
+	defer rows.Close()
+	claims := make([]domain.Claim, 0, query.Limit)
+	for rows.Next() {
+		claim, scanErr := scanClaim(rows)
+		if scanErr != nil {
+			return nil, consistency(domain.ErrorCodeClaimInvalid, scanErr)
+		}
+		claims = append(claims, claim)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, classifyGORMKnowledge(ctx, err, errorCodeDatabaseUnavailable)
+	}
+	claimIDs := make([]foundation.ID, len(claims))
+	for index := range claims {
+		claimIDs[index] = claims[index].ID
+	}
+	sources, err := gormKnowledgeReadClaimSources(ctx, transaction, query.WorkspaceID, claimIDs)
+	if err != nil {
+		return nil, classifyGORMKnowledge(ctx, err, errorCodeDatabaseUnavailable)
+	}
+	result := make([]domain.ClaimWithSources, len(claims))
+	for index, claim := range claims {
+		if err := domain.ValidateClaimAggregate(claim, sources[claim.ID]); err != nil {
+			return nil, consistency(domain.ErrorCodeClaimInvalid, err)
+		}
+		result[index] = domain.ClaimWithSources{Claim: claim, Sources: sources[claim.ID]}
 	}
 	return result, nil
 }

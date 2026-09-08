@@ -13,6 +13,12 @@ import (
 	"gorm.io/gorm"
 )
 
+const (
+	workspaceRootRebindAuditAction       = "workspace.root.rebound"
+	workspaceRootRebindAuditResourceType = "workspace_root_binding"
+	workspaceRootRebindReason            = "WORKSPACE_ROOT_IDENTITY_CHANGED"
+)
+
 // RebindWorkspace performs the only supported root identity mutation. All
 // control references are cleared first, stale runtime rows are made explicit,
 // and the history row plus Registry update commit in one PostgreSQL transaction.

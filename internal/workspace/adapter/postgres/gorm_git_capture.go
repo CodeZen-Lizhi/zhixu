@@ -14,7 +14,7 @@ import (
 )
 
 // ApplyGitCaptureBatch fences commit order and applies Source changes in one
-// shared GORM transaction. It does not use the legacy pgx TransactionWriter.
+// shared GORM transaction.
 func (repository *GORMRepository) ApplyGitCaptureBatch(ctx context.Context, batch domain.GitCaptureBatch) (domain.GitCaptureBatchResult, error) {
 	if err := repository.ready(ctx); err != nil {
 		return domain.GitCaptureBatchResult{}, err

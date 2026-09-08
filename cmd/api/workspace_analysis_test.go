@@ -5,13 +5,13 @@ import (
 	"testing"
 
 	eventspostgres "github.com/CodeZen-Lizhi/zhixu/internal/events/adapter/postgres"
+	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestAPIWorkspaceAnalysisRuntimeHooksComposeWithArtifactRuntime(t *testing.T) {
-	pool := &pgxpool.Pool{}
-	events, err := eventspostgres.NewStore(pool)
+	pool := apiConstructorPool(t)
+	events, err := eventspostgres.NewGORMStore(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -24,16 +24,16 @@ func TestAPIWorkspaceAnalysisRuntimeHooksComposeWithArtifactRuntime(t *testing.T
 	}
 
 	var calls []string
-	artifact := apiTerminalHookFunc(func(context.Context, any, workflowapplication.WorkflowNodeTerminalEvent) error {
+	artifact := apiTerminalHookFunc(func(context.Context, foundation.TransactionScope, workflowapplication.WorkflowNodeTerminalEvent) error {
 		calls = append(calls, "artifact")
 		return nil
 	})
-	analysis := apiTerminalHookFunc(func(context.Context, any, workflowapplication.WorkflowNodeTerminalEvent) error {
+	analysis := apiTerminalHookFunc(func(context.Context, foundation.TransactionScope, workflowapplication.WorkflowNodeTerminalEvent) error {
 		calls = append(calls, "workspace-analysis")
 		return nil
 	})
 	controlCalled := false
-	control := apiControlHookFunc(func(context.Context, any, workflowapplication.WorkflowControlEvent) error {
+	control := apiControlHookFunc(func(context.Context, foundation.TransactionScope, workflowapplication.WorkflowControlEvent) error {
 		controlCalled = true
 		return nil
 	})
@@ -45,13 +45,13 @@ func TestAPIWorkspaceAnalysisRuntimeHooksComposeWithArtifactRuntime(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := terminal.OnWorkflowNodeTerminal(context.Background(), nil, workflowapplication.WorkflowNodeTerminalEvent{}); err != nil {
+	if err := terminal.OnWorkflowNodeTerminalScoped(context.Background(), nil, workflowapplication.WorkflowNodeTerminalEvent{}); err != nil {
 		t.Fatal(err)
 	}
 	if len(calls) != 2 || calls[0] != "artifact" || calls[1] != "workspace-analysis" {
 		t.Fatalf("terminal hook calls=%v", calls)
 	}
-	if err := composedControl.OnWorkflowControl(context.Background(), nil, workflowapplication.WorkflowControlEvent{}); err != nil {
+	if err := composedControl.OnWorkflowControlScoped(context.Background(), nil, workflowapplication.WorkflowControlEvent{}); err != nil {
 		t.Fatal(err)
 	}
 	if !controlCalled {
@@ -61,7 +61,7 @@ func TestAPIWorkspaceAnalysisRuntimeHooksComposeWithArtifactRuntime(t *testing.T
 
 func TestAPIWorkflowRuntimeHooksKeepArtifactOnlyWhenWorkspaceAnalysisIsDisabled(t *testing.T) {
 	var calls int
-	artifact := apiTerminalHookFunc(func(context.Context, any, workflowapplication.WorkflowNodeTerminalEvent) error {
+	artifact := apiTerminalHookFunc(func(context.Context, foundation.TransactionScope, workflowapplication.WorkflowNodeTerminalEvent) error {
 		calls++
 		return nil
 	})
@@ -72,7 +72,7 @@ func TestAPIWorkflowRuntimeHooksKeepArtifactOnlyWhenWorkspaceAnalysisIsDisabled(
 	if control != nil {
 		t.Fatalf("control hook=%#v", control)
 	}
-	if err := terminal.OnWorkflowNodeTerminal(context.Background(), nil, workflowapplication.WorkflowNodeTerminalEvent{}); err != nil {
+	if err := terminal.OnWorkflowNodeTerminalScoped(context.Background(), nil, workflowapplication.WorkflowNodeTerminalEvent{}); err != nil {
 		t.Fatal(err)
 	}
 	if calls != 1 {
@@ -80,21 +80,21 @@ func TestAPIWorkflowRuntimeHooksKeepArtifactOnlyWhenWorkspaceAnalysisIsDisabled(
 	}
 }
 
-type apiTerminalHookFunc func(context.Context, any, workflowapplication.WorkflowNodeTerminalEvent) error
+type apiTerminalHookFunc func(context.Context, foundation.TransactionScope, workflowapplication.WorkflowNodeTerminalEvent) error
 
-func (hook apiTerminalHookFunc) OnWorkflowNodeTerminal(
+func (hook apiTerminalHookFunc) OnWorkflowNodeTerminalScoped(
 	ctx context.Context,
-	transaction any,
+	transaction foundation.TransactionScope,
 	event workflowapplication.WorkflowNodeTerminalEvent,
 ) error {
 	return hook(ctx, transaction, event)
 }
 
-type apiControlHookFunc func(context.Context, any, workflowapplication.WorkflowControlEvent) error
+type apiControlHookFunc func(context.Context, foundation.TransactionScope, workflowapplication.WorkflowControlEvent) error
 
-func (hook apiControlHookFunc) OnWorkflowControl(
+func (hook apiControlHookFunc) OnWorkflowControlScoped(
 	ctx context.Context,
-	transaction any,
+	transaction foundation.TransactionScope,
 	event workflowapplication.WorkflowControlEvent,
 ) error {
 	return hook(ctx, transaction, event)

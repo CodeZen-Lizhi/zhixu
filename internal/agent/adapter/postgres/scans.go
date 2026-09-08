@@ -1,22 +1,13 @@
 package postgres
 
 import (
-	"context"
-	"errors"
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	"github.com/jackc/pgx/v5"
 )
 
 type rowScanner interface{ Scan(...any) error }
-type rowQueryer interface {
-	Query(context.Context, string, ...any) (pgx.Rows, error)
-}
-type queryRower interface {
-	QueryRow(context.Context, string, ...any) pgx.Row
-}
 
 func scanModelRun(row rowScanner) (domain.ModelRun, error) {
 	var run domain.ModelRun
@@ -121,60 +112,6 @@ func scanModelCall(row rowScanner) (domain.ModelCall, error) {
 	}
 	return call, nil
 }
-
-func loadModelRunByAttempt(ctx context.Context, queryer queryRower, attemptID foundation.ID) (domain.ModelRun, error) {
-	return scanModelRun(queryer.QueryRow(ctx, modelRunSelect+` WHERE node_attempt_id=$1`, string(attemptID)))
-}
-
-func loadModelRunByID(ctx context.Context, queryer queryRower, workspaceID, runID foundation.ID) (domain.ModelRun, error) {
-	return scanModelRun(queryer.QueryRow(ctx, modelRunSelect+` WHERE workspace_id=$1 AND id=$2`, string(workspaceID), string(runID)))
-}
-
-func loadModelCalls(ctx context.Context, queryer rowQueryer, workspaceID, runID foundation.ID) ([]domain.ModelCall, error) {
-	rows, err := queryer.Query(ctx, modelCallSelect+`
-		JOIN agent.model_run run ON run.id=call.model_run_id
-		WHERE run.workspace_id=$1 AND call.model_run_id=$2
-		ORDER BY call.call_no,call.id`, string(workspaceID), string(runID))
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	result := make([]domain.ModelCall, 0)
-	previous := 0
-	for rows.Next() {
-		call, err := scanModelCall(rows)
-		if err != nil {
-			return nil, err
-		}
-		if call.CallNo <= previous {
-			return nil, consistency(errors.New("model calls are not stably ordered"))
-		}
-		previous = call.CallNo
-		result = append(result, call)
-	}
-	return result, rows.Err()
-}
-
-const modelRunSelect = `
-	SELECT id::text,workspace_id::text,workflow_run_id::text,node_run_id::text,node_attempt_id::text,
-		model_settings_revision,
-		adapter_name,adapter_version,model_id,model_version,profile_id,profile_version,
-		prompt_template_id,prompt_template_version,output_schema_id,output_schema_version,
-		reduced_schema_id,reduced_schema_version,
-		retrieval_index_version_id::text,embedding_version_id::text,rerank_model_version,
-		memory_snapshot_id::text,memory_context_schema_version,memory_context_digest,memory_context_item_count,memory_context_bytes,
-		status,final_result_type,error_code,version,started_at,updated_at,completed_at
-	FROM agent.model_run`
-
-const modelCallSelect = `
-	SELECT call.id::text,call.model_run_id::text,call.call_no,call.phase,
-		call.adapter_name,call.adapter_version,call.model_id,call.model_version,
-		call.profile_id,call.profile_version,call.prompt_template_id,call.prompt_template_version,
-		call.output_schema_id,call.output_schema_version,call.max_output_tokens,
-		call.request_hash,call.response_hash,
-		call.request_bytes,call.response_bytes,call.input_tokens,call.output_tokens,call.latency_ms,
-		call.status,call.error_code,call.version,call.started_at,call.completed_at
-	FROM agent.model_call call `
 
 func sameModelRunBinding(left, right domain.ModelRun) bool {
 	return left.WorkspaceID == right.WorkspaceID && left.WorkflowRunID == right.WorkflowRunID && left.NodeRunID == right.NodeRunID &&

@@ -11,23 +11,24 @@ import (
 	artifactapplication "github.com/CodeZen-Lizhi/zhixu/internal/artifact/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	workspacepostgres "github.com/CodeZen-Lizhi/zhixu/internal/workspace/adapter/postgres"
 	workspacedomain "github.com/CodeZen-Lizhi/zhixu/internal/workspace/domain"
+	workspaceruntimegrant "github.com/CodeZen-Lizhi/zhixu/internal/workspace/runtimegrant"
 	"github.com/gin-gonic/gin"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestNewArtifactHandlerRequiresCoreDependencies(t *testing.T) {
-	pool := &pgxpool.Pool{}
-	workspaces, err := workspacepostgres.NewRepository(pool)
+	pool := apiConstructorPool(t)
+	workspaces, err := workspacepostgres.NewGORMRepository(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	for _, test := range []struct {
 		name       string
-		pool       *pgxpool.Pool
-		workspaces *workspacepostgres.Repository
+		pool       *platformpostgres.Pool
+		workspaces workspaceruntimegrant.GORMRepositoryPort
 		files      workspacedomain.FileScanner
 	}{
 		{name: "database", pool: nil, workspaces: workspaces, files: fakeFileScanner{}},
@@ -44,8 +45,8 @@ func TestNewArtifactHandlerRequiresCoreDependencies(t *testing.T) {
 }
 
 func TestNewArtifactHandlerComposesCoreServicesWithoutPublisher(t *testing.T) {
-	pool := &pgxpool.Pool{}
-	workspaces, err := workspacepostgres.NewRepository(pool)
+	pool := apiConstructorPool(t)
+	workspaces, err := workspacepostgres.NewGORMRepository(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,8 +58,8 @@ func TestNewArtifactHandlerComposesCoreServicesWithoutPublisher(t *testing.T) {
 }
 
 func TestArtifactCompositionKeepsCoreAvailableAndInjectsPersistedGeneration(t *testing.T) {
-	pool := &pgxpool.Pool{}
-	workspaces, err := workspacepostgres.NewRepository(pool)
+	pool := apiConstructorPool(t)
+	workspaces, err := workspacepostgres.NewGORMRepository(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,8 +86,8 @@ func TestArtifactCompositionKeepsCoreAvailableAndInjectsPersistedGeneration(t *t
 }
 
 func TestAPIArtifactWorkflowCompositionUsesOneAuthoritativeRuntime(t *testing.T) {
-	pool := &pgxpool.Pool{}
-	workspaces, err := workspacepostgres.NewRepository(pool)
+	pool := apiConstructorPool(t)
+	workspaces, err := workspacepostgres.NewGORMRepository(pool)
 	if err != nil {
 		t.Fatal(err)
 	}

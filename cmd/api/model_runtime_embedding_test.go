@@ -14,7 +14,6 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
 	retrievalapplication "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/application"
 	retrievaldomain "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestAPIEmbeddingRuntimeAcquirerUsesPersistedContractAndPinsLease(t *testing.T) {
@@ -113,7 +112,7 @@ func TestAPIEmbeddingRuntimeAcquirerFailsClosedWithoutRuntimeLease(t *testing.T)
 }
 
 func TestAPIRetrievalCompositionUsesManagedEmbeddingAcquirerWithoutFixedEmbedder(t *testing.T) {
-	pool := &pgxpool.Pool{}
+	pool := apiConstructorPool(t)
 	managed := apiCompatibleEmbeddingAcquirerFake{}
 	handler, err := newRetrievalHandler(pool, nil, fakeSourceMaterialRepository{}, fakeFileScanner{}, managed)
 	if err != nil || handler == nil {

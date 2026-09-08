@@ -5,6 +5,7 @@ package postgres
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,12 +18,15 @@ import (
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/capacity"
+	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	graphapp "github.com/CodeZen-Lizhi/zhixu/internal/graph/application"
 	graphdomain "github.com/CodeZen-Lizhi/zhixu/internal/graph/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/graph/testfixture"
 	knowledge "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
-	"github.com/jackc/pgx/v5"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/lib/pq"
+	"gorm.io/gorm"
 )
 
 const (
@@ -48,12 +52,25 @@ type graphBenchmarkSample struct {
 
 type graphQueryCounter struct{ count atomic.Int64 }
 
-func (counter *graphQueryCounter) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
-	counter.count.Add(1)
-	return ctx
+// Statement callbacks count executed SQL; the decorated UoW counts the real
+// BEGIN and completed COMMIT/ROLLBACK around the same platform transaction.
+type graphCountingUnitOfWork struct {
+	delegate foundation.UnitOfWork
+	counter  *graphQueryCounter
 }
 
-func (*graphQueryCounter) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+func (unit graphCountingUnitOfWork) Within(ctx context.Context, options foundation.TransactionOptions, work foundation.TransactionFunc) error {
+	opened := false
+	err := unit.delegate.Within(ctx, options, func(callbackCtx context.Context, scope foundation.TransactionScope) error {
+		opened = true
+		unit.counter.count.Add(1)
+		return work(callbackCtx, scope)
+	})
+	if opened {
+		unit.counter.count.Add(1)
+	}
+	return err
+}
 
 func (counter *graphQueryCounter) reset() { counter.count.Store(0) }
 
@@ -215,19 +232,17 @@ func TestGraphCapacityBenchmark(t *testing.T) {
 		_ = started
 	}()
 
-	poolConfig, err := pgxpool.ParseConfig(databaseURL)
-	if err != nil {
-		t.Fatal("parse Graph benchmark database configuration")
-	}
 	queryCounter := &graphQueryCounter{}
-	poolConfig.ConnConfig.Tracer = queryCounter
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
-	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
+	platform, err := platformpostgres.Open(ctx, databaseURL, 0, 0)
 	if err != nil {
 		t.Fatalf("open Graph benchmark database pool: %v", err)
 	}
-	t.Cleanup(pool.Close)
+	t.Cleanup(platform.Close)
+	pool := platform.DB()
+	graphRowHook(t, platform, true, func(*gorm.DB) { queryCounter.count.Add(1) })
+	graphRawHook(t, platform, func(*gorm.DB) { queryCounter.count.Add(1) })
 
 	seedStarted := time.Now()
 	var fixture testfixture.CapacityFixture
@@ -258,10 +273,11 @@ func TestGraphCapacityBenchmark(t *testing.T) {
 		}
 	})
 
-	repository, err := NewRepository(pool)
+	repository, err := NewGORMRepository(platform)
 	if err != nil {
 		t.Fatalf("construct Graph benchmark repository: %v", err)
 	}
+	repository.unitOfWork = graphCountingUnitOfWork{delegate: repository.unitOfWork, counter: queryCounter}
 	cursor, err := graphapp.NewCursorCodec(bytes.Repeat([]byte{0x67}, 32))
 	if err != nil {
 		t.Fatalf("construct Graph benchmark cursor: %v", err)
@@ -363,7 +379,7 @@ func TestGraphCapacityBenchmark(t *testing.T) {
 		t.Fatalf("Graph capacity evidence=%#v err=%v", evidence, err)
 	}
 
-	plans = captureCapacityPlans(t, ctx, pool, fixture)
+	plans = captureCapacityPlans(t, ctx, platform, fixture)
 
 	formal, outcome, failure := summary.Formal, summary.Outcome, summary.Failure
 	summary, err = newGraphBenchmarkSummary(ctx, fixture, seedDuration, pool, memoryBefore, memoryAfter, p50, p95, maximum, pathDuration, path.HopCount, evidenceDuration, len(evidence.Items), plans.metadata)
@@ -408,8 +424,12 @@ type capacityPlans struct {
 	metadata map[string]graphExplainMetadata
 }
 
-func captureCapacityPlans(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fixture testfixture.CapacityFixture) capacityPlans {
+func captureCapacityPlans(t *testing.T, ctx context.Context, pool *platformpostgres.Pool, fixture testfixture.CapacityFixture) capacityPlans {
 	t.Helper()
+	database, err := pool.GORM()
+	if err != nil {
+		t.Fatal(err)
+	}
 	nodeTypes := []string{"TOPIC"}
 	relationTypes := []string{"IMPACTS"}
 	claimStatuses := []string{"CONFIRMED", "DISPUTED"}
@@ -426,24 +446,24 @@ func captureCapacityPlans(t *testing.T, ctx context.Context, pool *pgxpool.Pool,
 	}{
 		{
 			name: "neighborhood", query: `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, COSTS OFF, SETTINGS) ` + neighborhoodDepthOneSQL,
-			args:            []any{string(fixture.WorkspaceID), string(fixture.CenterNodeType), string(fixture.CenterNodeID), "BOTH", []string{"CONFIRMED"}, relationTypes, (*float64)(nil), (*time.Time)(nil), nodeTypes, []string{}, claimStatuses, (*float64)(nil), 500},
+			args:            []any{sql.Named("p1", string(fixture.WorkspaceID)), sql.Named("p2", string(fixture.CenterNodeType)), sql.Named("p3", string(fixture.CenterNodeID)), sql.Named("p4", "BOTH"), sql.Named("p5", pq.Array([]string{"CONFIRMED"})), sql.Named("p6", pq.Array(relationTypes)), sql.Named("p7", (*float64)(nil)), sql.Named("p8", (*time.Time)(nil)), sql.Named("p9", pq.Array(nodeTypes)), sql.Named("p10", pq.Array([]string{})), sql.Named("p11", pq.Array(claimStatuses)), sql.Named("p12", (*float64)(nil)), sql.Named("p13", 500)},
 			requiredIndexes: []string{"idx_knowledge_relation_source", "idx_knowledge_relation_target", "idx_knowledge_relation_evidence_owner"},
 		},
 		{
 			name: "path", query: `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, COSTS OFF, SETTINGS) ` + pathFrontierSQL,
-			args:            []any{string(fixture.WorkspaceID), []string{string(fixture.CenterNodeType)}, []string{string(fixture.CenterNodeID)}, "BOTH", relationTypes, 1001},
+			args:            []any{sql.Named("p1", string(fixture.WorkspaceID)), sql.Named("p2", pq.Array([]string{string(fixture.CenterNodeType)})), sql.Named("p3", pq.Array([]string{string(fixture.CenterNodeID)})), sql.Named("p4", "BOTH"), sql.Named("p5", pq.Array(relationTypes)), sql.Named("p6", 1001)},
 			requiredIndexes: []string{"idx_knowledge_relation_source", "idx_knowledge_relation_target"},
 		},
 		{
 			name: "evidence", query: `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, COSTS OFF, SETTINGS) ` + relationEvidenceWindowSQL,
-			args:            []any{string(fixture.WorkspaceID), string(fixture.EvidenceRelationID), 501},
+			args:            []any{sql.Named("p1", string(fixture.WorkspaceID)), sql.Named("p2", string(fixture.EvidenceRelationID)), sql.Named("p3", 501)},
 			requiredIndexes: []string{"idx_knowledge_relation_evidence_owner"},
 		},
 	}
 	result := capacityPlans{raw: make(map[string]json.RawMessage, len(queries)), metadata: make(map[string]graphExplainMetadata, len(queries))}
 	for _, query := range queries {
 		var raw json.RawMessage
-		if err := pool.QueryRow(ctx, query.query, query.args...).Scan(&raw); err != nil {
+		if err := gormQueryRow(ctx, database, query.query, query.args...).Scan(&raw); err != nil {
 			t.Fatalf("explain Graph capacity %s: %v", query.name, err)
 		}
 		metadata, err := inspectCapacityPlan(raw, query.name+".explain.json", query.requiredIndexes)
@@ -487,7 +507,7 @@ func inspectCapacityPlan(raw json.RawMessage, file string, requiredIndexes []str
 		}
 	})
 	for _, indexName := range requiredIndexes {
-		if !found[indexName] {
+		if !graphPlanHasIndex(found, indexName) {
 			return graphExplainMetadata{}, fmt.Errorf("plan does not use %s", indexName)
 		}
 	}

@@ -13,7 +13,7 @@ import (
 )
 
 // RecordDownload 原子增加统计并追加当前 actor 的 append-only Audit。
-func (repository *Repository) RecordDownload(ctx context.Context, request exportapp.DownloadRecord) (domain.Job, error) {
+func (repository *exportRepository) RecordDownload(ctx context.Context, request exportapp.DownloadRecord) (domain.Job, error) {
 	if repository == nil || isNilDependency(repository.db) || isNilDependency(repository.audit) {
 		return domain.Job{}, unavailable(errors.New("export download audit repository is unavailable"))
 	}
@@ -87,7 +87,7 @@ func (repository *Repository) RecordDownload(ctx context.Context, request export
 	if err != nil {
 		return domain.Job{}, invalid(err)
 	}
-	_, replayed, err := repository.audit.AppendTx(ctx, tx.SideFactTransaction(), auditEvent)
+	_, replayed, err := repository.audit.AppendScoped(ctx, tx.Scope(), auditEvent)
 	if err != nil {
 		return domain.Job{}, err
 	}

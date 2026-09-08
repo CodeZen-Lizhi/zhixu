@@ -15,13 +15,15 @@ import (
 	conversationdomain "github.com/CodeZen-Lizhi/zhixu/internal/conversation/domain"
 	eventspostgres "github.com/CodeZen-Lizhi/zhixu/internal/events/adapter/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	retrievaldomain "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 func TestRepositoryReadsTurnsAnswersAndPublishedContextWithoutCrossWorkspaceLeak(t *testing.T) {
-	repository, pool, ctx := newConversationTestRepository(t)
+	repository, shared, pool, ctx := newConversationTestRepository(t)
 	workspaceA := conversationTurnID(1)
 	workspaceB := conversationTurnID(2)
 	seedConversationWorkspaces(t, ctx, pool, workspaceA, workspaceB)
@@ -41,7 +43,7 @@ func TestRepositoryReadsTurnsAnswersAndPublishedContextWithoutCrossWorkspaceLeak
 	seedRAGStageEvent(t, ctx, pool, workspaceA, &conversationRecord.Conversation.ID, &pendingRunID, fixture.answerID(2), "retrieval.completed", now.Add(6*time.Minute), "pending-retrieval-completed")
 	seedRAGStageEvent(t, ctx, pool, workspaceA, &conversationRecord.Conversation.ID, &completedRunID, fixture.answerID(1), "validation.completed", now.Add(7*time.Minute), "completed-validation")
 
-	counted, counter := countingConversationRepository(t, pool)
+	counted, counter := countingConversationRepository(t, shared)
 	first, err := counted.ListTurns(ctx, conversationapplication.ListTurnsQuery{
 		WorkspaceID: workspaceA, ConversationID: conversationRecord.Conversation.ID, Limit: 2,
 	})
@@ -144,7 +146,7 @@ func seedRAGStageEvent(
 }
 
 func TestRepositoryRejectsMismatchedLatestRAGStageEvent(t *testing.T) {
-	repository, pool, ctx := newConversationTestRepository(t)
+	repository, _, pool, ctx := newConversationTestRepository(t)
 	workspaceID := conversationTurnID(4)
 	seedConversationWorkspaces(t, ctx, pool, workspaceID)
 	now := time.Date(2026, 7, 19, 15, 30, 0, 0, time.UTC)
@@ -178,7 +180,7 @@ func optionalID(value *foundation.ID) any {
 }
 
 func TestRepositoryPublishedContextUsesLatestEightAndThirtyTwoKiBBudget(t *testing.T) {
-	repository, pool, ctx := newConversationTestRepository(t)
+	repository, shared, pool, ctx := newConversationTestRepository(t)
 	workspaceID := conversationTurnID(10)
 	seedConversationWorkspaces(t, ctx, pool, workspaceID)
 	now := time.Date(2026, 7, 19, 16, 0, 0, 0, time.UTC)
@@ -193,7 +195,7 @@ func TestRepositoryPublishedContextUsesLatestEightAndThirtyTwoKiBBudget(t *testi
 		seedPublishedTurn(t, ctx, pool, fixture, ordinal, conversationdomain.AnswerPublicationRefused, questionText, assistantText, now.Add(time.Duration(ordinal)*time.Minute))
 	}
 
-	counted, counter := countingConversationRepository(t, pool)
+	counted, counter := countingConversationRepository(t, shared)
 	turns, err := counted.LoadPublishedContext(ctx, conversationapplication.PublishedContextQuery{
 		WorkspaceID: workspaceID, ConversationID: conversationRecord.Conversation.ID, ThroughOrdinal: 10,
 	})
@@ -213,7 +215,7 @@ func TestRepositoryPublishedContextUsesLatestEightAndThirtyTwoKiBBudget(t *testi
 }
 
 func TestRepositoryListTurnsRejectsQuestionWithoutAnswerSlot(t *testing.T) {
-	repository, pool, ctx := newConversationTestRepository(t)
+	repository, _, pool, ctx := newConversationTestRepository(t)
 	workspaceID := conversationTurnID(20)
 	seedConversationWorkspaces(t, ctx, pool, workspaceID)
 	now := time.Date(2026, 7, 19, 17, 0, 0, 0, time.UTC)
@@ -587,48 +589,30 @@ func mustJSON(t *testing.T, value any) []byte {
 }
 
 type conversationDBCounter struct {
-	pool         *pgxpool.Pool
-	queries      int
-	queryRows    int
-	transactions int
+	logger.Interface
+	queries int
 }
 
-func (counter *conversationDBCounter) Begin(ctx context.Context) (pgx.Tx, error) {
-	counter.transactions++
-	return counter.pool.Begin(ctx)
-}
-
-func (counter *conversationDBCounter) Query(ctx context.Context, sql string, arguments ...any) (pgx.Rows, error) {
+func (counter *conversationDBCounter) Trace(context.Context, time.Time, func() (string, int64), error) {
 	counter.queries++
-	return counter.pool.Query(ctx, sql, arguments...)
 }
 
-func (counter *conversationDBCounter) QueryRow(ctx context.Context, sql string, arguments ...any) pgx.Row {
-	counter.queryRows++
-	return counter.pool.QueryRow(ctx, sql, arguments...)
-}
+func (counter *conversationDBCounter) total() int { return counter.queries }
 
-func (counter *conversationDBCounter) total() int {
-	return counter.queries + counter.queryRows + counter.transactions
-}
+func (counter *conversationDBCounter) reset() { counter.queries = 0 }
 
-func (counter *conversationDBCounter) reset() {
-	counter.queries = 0
-	counter.queryRows = 0
-	counter.transactions = 0
-}
-
-func countingConversationRepository(t *testing.T, pool *pgxpool.Pool) (*Repository, *conversationDBCounter) {
+func countingConversationRepository(t *testing.T, pool *platformpostgres.Pool) (*GORMRepository, *conversationDBCounter) {
 	t.Helper()
-	counter := &conversationDBCounter{pool: pool}
-	events, err := eventspostgres.NewStore(pool)
+	events, err := eventspostgres.NewGORMStore(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
-	repository, err := NewRepository(counter, events)
+	repository, err := NewGORMRepository(pool, events)
 	if err != nil {
 		t.Fatal(err)
 	}
+	counter := &conversationDBCounter{Interface: repository.db.Logger}
+	repository.db = repository.db.Session(&gorm.Session{Logger: counter})
 	return repository, counter
 }
 

@@ -3,6 +3,7 @@
 package workflowpostgres
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,43 +11,30 @@ import (
 	"testing"
 	"time"
 
+	auditpostgres "github.com/CodeZen-Lizhi/zhixu/internal/audit/adapter/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	modelsettingspostgres "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/adapter/postgres"
+	modelcrypto "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/crypto"
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestRuntimeRepositoryStartReplayConflictRollbackAndLegacyGuard(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := newRuntimeTestDatabase(t, ctx)
+	platformPool, cleanup := newGORMRuntimeTestDatabase(t, ctx)
+	pool := platformPool.DB()
 	defer cleanup()
-	outer, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = outer.Rollback(ctx) }()
 	workspaceID := foundation.ID("a0000000-0000-4000-8000-000000000001")
 	now := time.Date(2026, 7, 17, 9, 0, 0, 0, time.UTC)
-	if _, err := outer.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'M4A Runtime',$2,$2,$3,'active',1,$3,$3)`, string(workspaceID), "/tmp/m4a-runtime", now); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'M4A Runtime',$2,$2,$3,'active',1,$3,$3)`, string(workspaceID), "/tmp/m4a-runtime", now); err != nil {
 		t.Fatal(err)
 	}
-	client, err := riveradapter.NewClient(pool, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	inserter, err := riveradapter.NewJobInserter(client)
-	if err != nil {
-		t.Fatal(err)
-	}
-	repository, err := NewRuntimeRepository(outer, inserter)
-	if err != nil {
-		t.Fatal(err)
-	}
+	repository := newGORMRuntimeTestRepository(t, platformPool, GORMRuntimeRepositoryHooks{})
 	request := runtimeStartFixture(workspaceID, now)
 	first, err := repository.Start(ctx, request)
 	if err != nil {
@@ -77,7 +65,7 @@ func TestRuntimeRepositoryStartReplayConflictRollbackAndLegacyGuard(t *testing.T
 		t.Fatalf("idempotency conflict=%v", err)
 	}
 
-	failingRepository, err := NewRuntimeRepository(outer, failingJobInserter{})
+	failingRepository, err := newGORMRuntimeRepository(platformPool, failingJobInserter{}, GORMRuntimeRepositoryHooks{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,17 +80,17 @@ func TestRuntimeRepositoryStartReplayConflictRollbackAndLegacyGuard(t *testing.T
 		t.Fatal("job insertion failure was ignored")
 	}
 	var failedRuns int
-	if err := outer.QueryRow(ctx, `SELECT count(*) FROM workflow.run WHERE id=$1`, string(failed.Run.ID)).Scan(&failedRuns); err != nil || failedRuns != 0 {
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM workflow.run WHERE id=$1`, string(failed.Run.ID)).Scan(&failedRuns); err != nil || failedRuns != 0 {
 		t.Fatalf("failed start persisted run count=%d err=%v", failedRuns, err)
 	}
 
 	legacy := runtimeStartFixture(workspaceID, now.Add(2*time.Minute))
 	remapRuntimeStartIDs(&legacy, "d")
 	legacy.Definition.Key = "m4a-legacy"
-	if _, err := outer.Exec(ctx, `INSERT INTO workflow.definition(id,workspace_id,key,version,graph,created_at) VALUES($1,$2,$3,1,$4,$5)`, string(legacy.Definition.ID), string(workspaceID), legacy.Definition.Key, legacy.Definition.Graph, now); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO workflow.definition(id,workspace_id,key,version,graph,created_at) VALUES($1,$2,$3,1,$4,$5)`, string(legacy.Definition.ID), string(workspaceID), legacy.Definition.Key, legacy.Definition.Graph, now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := outer.Exec(ctx, `INSERT INTO workflow.run(id,workspace_id,definition_id,status,input,version,created_at,updated_at) VALUES($1,$2,$3,'pending','{}',1,$4,$4)`, string(legacy.Run.ID), string(workspaceID), string(legacy.Definition.ID), now); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO workflow.run(id,workspace_id,definition_id,status,input,version,created_at,updated_at) VALUES($1,$2,$3,'pending','{}',1,$4,$4)`, string(legacy.Run.ID), string(workspaceID), string(legacy.Definition.ID), now); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := repository.Start(ctx, legacy); !hasCode(err, "WORKFLOW_LEGACY_RUNTIME_UNSUPPORTED") {
@@ -111,26 +99,16 @@ func TestRuntimeRepositoryStartReplayConflictRollbackAndLegacyGuard(t *testing.T
 }
 
 func TestRuntimeRepositoryConcurrentDuplicateCreatesOneRunNodeOutboxAndJob(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := newRuntimeTestDatabase(t, ctx)
+	ctx := t.Context()
+	platformPool, cleanup := newGORMRuntimeTestDatabase(t, ctx)
 	defer cleanup()
+	pool := platformPool.DB()
 	workspaceID := foundation.ID("e0000000-0000-4000-8000-000000000001")
 	now := time.Date(2026, 7, 17, 10, 0, 0, 0, time.UTC)
 	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'M4A Concurrent',$2,$2,$3,'active',1,$3,$3)`, string(workspaceID), "/tmp/m4a-concurrent", now); err != nil {
 		t.Fatal(err)
 	}
-	client, err := riveradapter.NewClient(pool, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	inserter, err := riveradapter.NewJobInserter(client)
-	if err != nil {
-		t.Fatal(err)
-	}
-	repository, err := NewRuntimeRepository(pool, inserter)
-	if err != nil {
-		t.Fatal(err)
-	}
+	repository := newGORMRuntimeTestRepository(t, platformPool, GORMRuntimeRepositoryHooks{})
 	firstRequest := runtimeStartFixture(workspaceID, now)
 	secondRequest := firstRequest
 	remapRuntimeStartIDs(&secondRequest, "f")
@@ -173,25 +151,16 @@ func TestRuntimeRepositoryConcurrentDuplicateCreatesOneRunNodeOutboxAndJob(t *te
 
 func TestRuntimeRepositoryRecoversCommitResponseLoss(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := newRuntimeTestDatabase(t, ctx)
+	platformPool, cleanup := newGORMRuntimeTestDatabase(t, ctx)
+	pool := platformPool.DB()
 	defer cleanup()
 	workspaceID := foundation.ID("90000000-0000-4000-8000-000000000001")
 	now := time.Date(2026, 7, 17, 11, 0, 0, 0, time.UTC)
 	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'M4A Commit Loss',$2,$2,$3,'active',1,$3,$3)`, string(workspaceID), "/tmp/m4a-commit-loss", now); err != nil {
 		t.Fatal(err)
 	}
-	client, err := riveradapter.NewClient(pool, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	inserter, err := riveradapter.NewJobInserter(client)
-	if err != nil {
-		t.Fatal(err)
-	}
-	repository, err := NewRuntimeRepository(commitResponseLossDB{pool: pool}, inserter)
-	if err != nil {
-		t.Fatal(err)
-	}
+	repository := newGORMRuntimeTestRepository(t, platformPool, GORMRuntimeRepositoryHooks{})
+	repository.unitOfWork = commitResponseLossUnitOfWork{inner: repository.unitOfWork}
 	request := runtimeStartFixture(workspaceID, now)
 	result, err := repository.Start(ctx, request)
 	if err != nil {
@@ -211,63 +180,79 @@ func TestRuntimeRepositoryRecoversCommitResponseLoss(t *testing.T) {
 	}
 }
 
-func TestRuntimeRepositoryStartTxUsesCallerTransactionAndReportsReplay(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := newRuntimeTestDatabase(t, ctx)
+func TestRuntimeRepositoryStartScopedUsesCallerTransactionAndReportsReplay(t *testing.T) {
+	ctx := t.Context()
+	platformPool, cleanup := newGORMRuntimeTestDatabase(t, ctx)
 	defer cleanup()
+	pool := platformPool.DB()
 	workspaceID := foundation.ID("91000000-0000-4000-8000-000000000001")
 	now := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
 	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'M4A StartTx',$2,$2,$3,'active',1,$3,$3)`, string(workspaceID), "/tmp/m4a-start-tx", now); err != nil {
 		t.Fatal(err)
 	}
-	client, err := riveradapter.NewClient(pool, nil)
+	repository := newGORMRuntimeTestRepository(t, platformPool, GORMRuntimeRepositoryHooks{})
+	unitOfWork, err := platformPool.UnitOfWork()
 	if err != nil {
 		t.Fatal(err)
 	}
-	inserter, err := riveradapter.NewJobInserter(client)
-	if err != nil {
-		t.Fatal(err)
-	}
-	repository, err := NewRuntimeRepository(pool, inserter)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
 	request := runtimeStartFixture(workspaceID, now)
-	first, err := repository.StartTx(ctx, tx, request)
-	if err != nil {
-		t.Fatal(err)
+	rollback := errors.New("caller rejects workflow start")
+	var first application.RuntimeStartResult
+	err = unitOfWork.Within(ctx, foundation.TransactionOptions{}, func(callbackCtx context.Context, scope foundation.TransactionScope) error {
+		var startErr error
+		first, startErr = repository.StartScoped(callbackCtx, scope, request)
+		if startErr != nil {
+			return startErr
+		}
+		replay := request
+		remapRuntimeStartIDs(&replay, "8")
+		second, startErr := repository.StartScoped(callbackCtx, scope, replay)
+		if startErr != nil {
+			return startErr
+		}
+		if first.Replayed || first.Job.Duplicate || !second.Replayed || !second.Job.Duplicate || second.Run.ID != first.Run.ID || second.FirstNode.ID != first.FirstNode.ID || second.Job.JobID != first.Job.JobID {
+			t.Fatalf("first=%#v second=%#v", first, second)
+		}
+		transaction, scopeErr := platformpostgres.GORMTransaction(scope)
+		if scopeErr != nil {
+			return scopeErr
+		}
+		var runs, nodes, events, jobs int
+		if queryErr := transaction.Raw(`SELECT
+			(SELECT count(*) FROM workflow.run WHERE id=?),
+			(SELECT count(*) FROM workflow.node_run WHERE id=?),
+			(SELECT count(*) FROM workflow.outbox_event WHERE id=?),
+			(SELECT count(*) FROM workflow.river_job WHERE id=?)`,
+			string(first.Run.ID), string(first.FirstNode.ID), string(request.Event.ID), first.Job.JobID).
+			Row().Scan(&runs, &nodes, &events, &jobs); queryErr != nil {
+			return queryErr
+		}
+		if runs != 1 || nodes != 1 || events != 1 || jobs != 1 {
+			t.Fatalf("caller scope runs=%d nodes=%d events=%d jobs=%d", runs, nodes, events, jobs)
+		}
+		assertPGXWorkflowRowLockUnavailable(t, callbackCtx, pool, `SELECT 1 FROM ops.model_settings_state WHERE singleton=true FOR UPDATE NOWAIT`)
+		return rollback
+	})
+	if !errors.Is(err, rollback) {
+		t.Fatalf("caller rollback err=%v", err)
 	}
-	replay := request
-	remapRuntimeStartIDs(&replay, "8")
-	second, err := repository.StartTx(ctx, tx, replay)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if first.Replayed || first.Job.Duplicate || !second.Replayed || !second.Job.Duplicate || second.Run.ID != first.Run.ID || second.FirstNode.ID != first.FirstNode.ID || second.Job.JobID != first.Job.JobID {
-		t.Fatalf("first=%#v second=%#v", first, second)
-	}
-	var inTransaction int
-	if err := tx.QueryRow(ctx, `SELECT count(*) FROM workflow.run WHERE workspace_id=$1 AND idempotency_key=$2`, string(workspaceID), request.Run.IdempotencyKey).Scan(&inTransaction); err != nil || inTransaction != 1 {
-		t.Fatalf("in-transaction runs=%d err=%v", inTransaction, err)
-	}
-	if err := tx.Rollback(ctx); err != nil {
-		t.Fatal(err)
-	}
-	var runs, jobs int
+	var runs, nodes, events, jobs int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM workflow.run WHERE workspace_id=$1 AND idempotency_key=$2`, string(workspaceID), request.Run.IdempotencyKey).Scan(&runs); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM workflow.node_run WHERE id=$1`, string(first.FirstNode.ID)).Scan(&nodes); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM workflow.outbox_event WHERE id=$1`, string(request.Event.ID)).Scan(&events); err != nil {
 		t.Fatal(err)
 	}
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM workflow.river_job WHERE kind=$1 AND args->>'node_run_id'=$2`, riveradapter.NodeJobKind, string(first.FirstNode.ID)).Scan(&jobs); err != nil {
 		t.Fatal(err)
 	}
-	if runs != 0 || jobs != 0 {
-		t.Fatalf("caller rollback left runs=%d jobs=%d", runs, jobs)
+	if runs != 0 || nodes != 0 || events != 0 || jobs != 0 {
+		t.Fatalf("caller rollback left runs=%d nodes=%d events=%d jobs=%d", runs, nodes, events, jobs)
 	}
+	assertPGXWorkflowRowLockAvailable(t, ctx, pool, `SELECT 1 FROM ops.model_settings_state WHERE singleton=true FOR UPDATE NOWAIT`)
 }
 
 func TestGORMToolExecutionPolicyAndRecoveryFences(t *testing.T) {
@@ -288,18 +273,7 @@ func TestGORMToolExecutionPolicyAndRecoveryFences(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	client, err := riveradapter.NewClient(pool, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	inserter, err := riveradapter.NewJobInserter(client)
-	if err != nil {
-		t.Fatal(err)
-	}
-	runtime, err := NewRuntimeRepository(pool, inserter)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime := newGORMRuntimeTestRepository(t, platformPool, GORMRuntimeRepositoryHooks{})
 	primary := seedGORMToolFenceExecution(t, ctx, runtime, workspaceID, "gorm-tool-fence-primary", "5")
 	other := seedGORMToolFenceExecution(t, ctx, runtime, workspaceID, "gorm-tool-fence-other", "6")
 	policy, err := NewGORMToolExecutionPolicySnapshot(platformPool)
@@ -582,30 +556,16 @@ func TestGORMToolExecutionPolicyAndRecoveryFences(t *testing.T) {
 
 type failingJobInserter struct{}
 
-type commitResponseLossDB struct{ pool *pgxpool.Pool }
+type commitResponseLossUnitOfWork struct{ inner foundation.UnitOfWork }
 
-func (d commitResponseLossDB) QueryRow(ctx context.Context, sql string, arguments ...any) pgx.Row {
-	return d.pool.QueryRow(ctx, sql, arguments...)
-}
-
-func (d commitResponseLossDB) Begin(ctx context.Context) (pgx.Tx, error) {
-	tx, err := d.pool.Begin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return commitResponseLossTx{Tx: tx}, nil
-}
-
-type commitResponseLossTx struct{ pgx.Tx }
-
-func (tx commitResponseLossTx) Commit(ctx context.Context) error {
-	if err := tx.Tx.Commit(ctx); err != nil {
+func (unit commitResponseLossUnitOfWork) Within(ctx context.Context, options foundation.TransactionOptions, work foundation.TransactionFunc) error {
+	if err := unit.inner.Within(ctx, options, work); err != nil {
 		return err
 	}
 	return errors.New("injected commit response loss")
 }
 
-func (failingJobInserter) InsertTx(context.Context, any, riveradapter.NodeJobArgs, riveradapter.InsertOptions) (application.JobReceipt, error) {
+func (failingJobInserter) InsertTx(context.Context, foundation.TransactionScope, riveradapter.NodeJobArgs, riveradapter.InsertOptions) (application.JobReceipt, error) {
 	return application.JobReceipt{}, foundation.NewError(foundation.ErrorRetryableFailure, "WORKFLOW_RIVER_JOB_INSERT_FAILED", true, errors.New("injected job failure"))
 }
 
@@ -627,7 +587,7 @@ func runtimeStartFixture(workspaceID foundation.ID, now time.Time) application.R
 	}
 }
 
-var _ riveradapter.JobInserter = failingJobInserter{}
+var _ riveradapter.ScopedJobInserter = failingJobInserter{}
 
 func remapRuntimeStartIDs(request *application.RuntimeStartRequest, prefix string) {
 	request.Definition.ID = foundation.ID(prefix + string(request.Definition.ID)[1:])
@@ -640,15 +600,31 @@ func remapRuntimeStartIDs(request *application.RuntimeStartRequest, prefix strin
 	request.Event.RunID = &runID
 }
 
-func newRuntimeTestDatabase(t *testing.T, ctx context.Context) (*pgxpool.Pool, func()) {
-	t.Helper()
-	platformPool, cleanup := newRuntimeTestPlatformDatabase(t, ctx)
-	return platformPool.DB(), cleanup
-}
-
 func newGORMRuntimeTestDatabase(t *testing.T, ctx context.Context) (*platformpostgres.Pool, func()) {
 	t.Helper()
 	return newRuntimeTestPlatformDatabase(t, ctx)
+}
+
+func newGORMRuntimeTestRepository(t *testing.T, pool *platformpostgres.Pool, hooks GORMRuntimeRepositoryHooks) *GORMRuntimeRepository {
+	t.Helper()
+	sealer, err := modelcrypto.NewSealer(bytes.Repeat([]byte{0x2a}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	audit, err := auditpostgres.NewGORMStore(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings, err := modelsettingspostgres.NewGORMRepository(pool,
+		modelsettingspostgres.WithGORMSecretSealer(sealer), modelsettingspostgres.WithGORMAuditAppender(audit))
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := NewGORMRuntimeRepositoryWithHooks(pool, riveradapter.DefaultOptions(), settings, hooks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return repository
 }
 
 func newRuntimeTestPlatformDatabase(t *testing.T, ctx context.Context) (*platformpostgres.Pool, func()) {
@@ -669,7 +645,7 @@ type gormToolFenceExecution struct {
 func seedGORMToolFenceExecution(
 	t *testing.T,
 	ctx context.Context,
-	runtime *RuntimeRepository,
+	runtime *GORMRuntimeRepository,
 	workspaceID foundation.ID,
 	key string,
 	idPrefix string,

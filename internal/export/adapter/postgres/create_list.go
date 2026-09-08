@@ -19,7 +19,7 @@ const (
 )
 
 // Create 写入或精确重放任务。既有幂等事实先于当前 Collection 状态读取。
-func (repository *Repository) Create(ctx context.Context, job domain.Job) (domain.Job, bool, error) {
+func (repository *exportRepository) Create(ctx context.Context, job domain.Job) (domain.Job, bool, error) {
 	if repository == nil || isNilDependency(repository.db) {
 		return domain.Job{}, false, unavailable(errors.New("export repository is unavailable"))
 	}
@@ -108,7 +108,7 @@ func (repository *Repository) Create(ctx context.Context, job domain.Job) (domai
 }
 
 // Get 按 Workspace 和 Job ID 读取，并使用数据库时间归约到期任务。
-func (repository *Repository) Get(ctx context.Context, workspaceID, jobID foundation.ID) (domain.Job, error) {
+func (repository *exportRepository) Get(ctx context.Context, workspaceID, jobID foundation.ID) (domain.Job, error) {
 	if repository == nil || isNilDependency(repository.db) {
 		return domain.Job{}, unavailable(errors.New("export repository is unavailable"))
 	}
@@ -142,7 +142,7 @@ func (repository *Repository) Get(ctx context.Context, workspaceID, jobID founda
 }
 
 // List 返回绑定 Workspace、Collection 与 limit 的 created_at/id 倒序 keyset 页面。
-func (repository *Repository) List(ctx context.Context, query exportapp.ListQuery) (exportapp.ListPage, error) {
+func (repository *exportRepository) List(ctx context.Context, query exportapp.ListQuery) (exportapp.ListPage, error) {
 	if repository == nil || isNilDependency(repository.db) {
 		return exportapp.ListPage{}, unavailable(errors.New("export repository is unavailable"))
 	}
@@ -266,7 +266,7 @@ func expirable(status domain.Status) bool {
 	return status == domain.StatusPending || status == domain.StatusRunning || status == domain.StatusSucceeded || status == domain.StatusFailed
 }
 
-func (repository *Repository) expireLocked(ctx context.Context, tx exportTransaction, job domain.Job, now time.Time) (domain.Job, bool, error) {
+func (repository *exportRepository) expireLocked(ctx context.Context, tx exportTransaction, job domain.Job, now time.Time) (domain.Job, bool, error) {
 	if !expirable(job.Status) || job.ExpiresAt.After(now) {
 		return job, false, nil
 	}
@@ -289,7 +289,7 @@ func (repository *Repository) expireLocked(ctx context.Context, tx exportTransac
 	return updated, true, nil
 }
 
-func (repository *Repository) expireIfNowDue(ctx context.Context, tx exportTransaction, job domain.Job) (domain.Job, bool, error) {
+func (repository *exportRepository) expireIfNowDue(ctx context.Context, tx exportTransaction, job domain.Job) (domain.Job, bool, error) {
 	now, err := databaseNow(ctx, tx)
 	if err != nil {
 		return domain.Job{}, false, err

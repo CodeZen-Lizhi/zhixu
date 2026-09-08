@@ -12,8 +12,8 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	modelsettingsruntime "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/runtime"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	toolcatalog "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/catalog"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const workspaceAnalysisCapabilityHeartbeatInterval = 10 * time.Second
@@ -24,7 +24,7 @@ type workerWorkspaceAnalysisCapability struct {
 }
 
 func newWorkerWorkspaceAnalysisCapability(
-	database *pgxpool.Pool,
+	database *platformpostgres.Pool,
 	cfg config.Config,
 	components workerComponents,
 	models *modelsettingsruntime.Models,
@@ -60,7 +60,7 @@ func newWorkerWorkspaceAnalysisCapability(
 	if err != nil {
 		return nil, workerWorkspaceAnalysisCapabilityUnavailable(err)
 	}
-	repository, err := agentpostgres.NewRepository(database)
+	repository, err := agentpostgres.NewGORMRepository(database)
 	if err != nil {
 		return nil, workerWorkspaceAnalysisCapabilityUnavailable(err)
 	}

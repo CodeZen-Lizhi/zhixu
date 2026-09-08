@@ -88,7 +88,7 @@ func TestCompileQueryEscapesLiteralLikeWildcards(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(plan.Where, `ESCAPE '\'`) || len(plan.Args) != 1 || plan.Args[0] != `a\%\_\\b` {
+	if !strings.Contains(plan.Where, `ESCAPE '\'`) || len(plan.Args) != 1 || plan.Args["query1"] != `a\%\_\\b` {
 		t.Fatalf("where=%q args=%#v", plan.Where, plan.Args)
 	}
 }

@@ -14,20 +14,20 @@ type ScopedRuntimeStarter interface {
 	StartScoped(context.Context, foundation.TransactionScope, RuntimeStartRequest) (RuntimeStartResult, error)
 }
 
-// ScopedCancellationSafetyGuard checks external side-effect safety in the
-// current Workflow transaction.
+// ScopedCancellationSafetyGuard 在当前 Workflow 事务中检查副作用的持久取消检查点。
+// 未开始副作用的 Node 返回 true；查询失败返回错误，由 Runtime 拒绝取消。
 type ScopedCancellationSafetyGuard interface {
 	SafeToCancelWorkflowNodeScoped(context.Context, foundation.TransactionScope, foundation.ID) (bool, error)
 }
 
-// ScopedWorkflowTerminalHook synchronizes a node terminal fact in the current
-// Workflow transaction.
+// ScopedWorkflowTerminalHook 在当前 Workflow 事务中同步 Node 终态。
+// 实现方只处理自己拥有的 Node，其他 Node 必须 no-op；不得提交事务或执行事务外副作用。
 type ScopedWorkflowTerminalHook interface {
 	OnWorkflowNodeTerminalScoped(context.Context, foundation.TransactionScope, WorkflowNodeTerminalEvent) error
 }
 
-// ScopedWorkflowControlHook synchronizes a control fact in the current
-// Workflow transaction.
+// ScopedWorkflowControlHook 在当前 Workflow 事务中同步首次持久化的控制命令。
+// 实现方只处理自己拥有的 Run，其他 Run 必须 no-op；不得提交事务或执行事务外副作用。
 type ScopedWorkflowControlHook interface {
 	OnWorkflowControlScoped(context.Context, foundation.TransactionScope, WorkflowControlEvent) error
 }

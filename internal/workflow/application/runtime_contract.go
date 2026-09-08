@@ -56,13 +56,6 @@ type RuntimeStatePort interface {
 	Control(context.Context, ControlTransition) (ControlPersistenceResult, error)
 }
 
-// CancellationSafetyGuard 判断一个 Node 的外部副作用是否已到达可终态取消的持久检查点。
-// transaction 是 Runtime 当前事务的 opaque handle，保证判定与控制状态原子；未开始
-// 副作用的 Node 必须返回 true，查询失败必须返回错误并由 Runtime fail closed。
-type CancellationSafetyGuard interface {
-	SafeToCancelWorkflowNode(context.Context, any, foundation.ID) (bool, error)
-}
-
 // ClaimCommand 只传 lease duration，不允许调用方提交 now 或绝对 lease_until。
 type ClaimCommand struct {
 	NodeRunID       foundation.ID

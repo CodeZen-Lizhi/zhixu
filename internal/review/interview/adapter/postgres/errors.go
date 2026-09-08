@@ -1,4 +1,4 @@
-// Package postgres implements the Interview Store and QuestionSource ports with pgx.
+// Package postgres implements the Interview Store and QuestionSource ports with GORM.
 package postgres
 
 import (
@@ -7,8 +7,8 @@ import (
 	"strings"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/review/interview/domain"
-	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func classify(err error, fallback string) error {
@@ -25,21 +25,19 @@ func classify(err error, fallback string) error {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return foundation.NewError(foundation.ErrorDependencyUnavailable, domain.ErrorCodeDependencyUnavailable, true, err)
 	}
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) {
-		switch pgErr.Code {
-		case "23505":
-			if strings.Contains(pgErr.ConstraintName, "interview_command") || strings.Contains(pgErr.ConstraintName, "interview_turn_idempotency") || strings.Contains(pgErr.ConstraintName, "review_session_key") {
-				return domain.ConflictError(domain.ErrorCodeIdempotencyConflict, "interview idempotency key is already bound")
-			}
-			return domain.ConflictError(domain.ErrorCodeQuestionOrderConflict, "interview state already changed")
-		case "23503", "23514", "23502", "22001", "22P02":
-			return foundation.NewError(foundation.ErrorConsistencyViolation, fallback, false, err)
-		case "40001", "40P01", "55P03", "08000", "08003", "08006", "57P01":
-			return foundation.NewError(foundation.ErrorRetryableFailure, domain.ErrorCodeDependencyUnavailable, true, err)
-		case "57014":
-			return foundation.NewError(foundation.ErrorDependencyUnavailable, domain.ErrorCodeDependencyUnavailable, true, err)
+	switch platformpostgres.SQLState(err) {
+	case "23505":
+		constraint := platformpostgres.ConstraintName(err)
+		if strings.Contains(constraint, "interview_command") || strings.Contains(constraint, "interview_turn_idempotency") || strings.Contains(constraint, "review_session_key") {
+			return foundation.NewError(foundation.ErrorVersionConflict, domain.ErrorCodeIdempotencyConflict, false, err)
 		}
+		return foundation.NewError(foundation.ErrorVersionConflict, domain.ErrorCodeQuestionOrderConflict, false, err)
+	case "23503", "23514", "23502", "22001", "22P02":
+		return foundation.NewError(foundation.ErrorConsistencyViolation, fallback, false, err)
+	case "40001", "40P01", "55P03", "08000", "08003", "08006", "57P01":
+		return foundation.NewError(foundation.ErrorRetryableFailure, domain.ErrorCodeDependencyUnavailable, true, err)
+	case "57014":
+		return foundation.NewError(foundation.ErrorDependencyUnavailable, domain.ErrorCodeDependencyUnavailable, true, err)
 	}
 	return foundation.NewError(foundation.ErrorDependencyUnavailable, fallback, true, err)
 }

@@ -17,7 +17,8 @@ import (
 
 func TestHealthScheduleRepositoryClaimsOnceReclaimsSameDueAndAcknowledges(t *testing.T) {
 	ctx := context.Background()
-	pool := newHealthIntegrationPool(t)
+	platform := requireHealthIntegrationPlatform(t)
+	pool := platform.DB()
 
 	ids := foundation.NewUUIDGenerator(nil)
 	workspaceID, err := ids.New()
@@ -33,7 +34,7 @@ VALUES($1,'health-schedule-delivery',$2,$2,$3,'inactive',1,$3,$3)`, string(works
 	}
 	t.Cleanup(func() { cleanupHealthIntegrationWorkspace(t, pool, workspaceID) })
 
-	repository, err := NewScheduleRepository(pool, ids, 100*time.Millisecond)
+	repository, err := NewGORMScheduleRepository(platform, ids, 100*time.Millisecond)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,11 +221,12 @@ VALUES($1,'schedule-tampered-receipt',repeat('a',64),'CREATE',$2,1,
 	}
 
 	// Commit response-loss 后回查 receipt，不能重复创建第二条 schedule。
-	lossDB := &healthScanCommitLossDB{Pool: pool}
-	lossRepository, err := NewScheduleRepository(lossDB, ids)
+	lossRepository, err := NewGORMScheduleRepository(platform, ids)
 	if err != nil {
 		t.Fatal(err)
 	}
+	lossDB := &healthCommitLossUnitOfWork{UnitOfWork: lossRepository.database.unitOfWork}
+	lossRepository.database.unitOfWork = lossDB
 	lossCurrent, err := repository.Get(ctx, workspaceID, schedule.ID)
 	if err != nil {
 		t.Fatal(err)

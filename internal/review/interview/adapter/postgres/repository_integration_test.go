@@ -363,45 +363,13 @@ func interviewResponseLossRepository(
 	if platform == nil || platform.DB() == nil {
 		return nil, errors.New("Interview response-loss platform is unavailable")
 	}
-	switch variant.name {
-	case "legacy-pgx":
-		return NewRepository(interviewCommitResponseLossDB{DB: platform.DB(), cause: cause})
-	case "gorm":
-		gormRepository, ok := repository.(*GORMRepository)
-		if !ok || gormRepository == nil {
-			return nil, errors.New("Interview GORM response-loss repository has unexpected type")
-		}
-		lossy := *gormRepository
-		lossy.unitOfWork = interviewCommitResponseLossUnitOfWork{delegate: gormRepository.unitOfWork, cause: cause}
-		return &lossy, nil
-	default:
-		return nil, fmt.Errorf("unknown Interview integration variant %q", variant.name)
+	gormRepository, ok := repository.(*GORMRepository)
+	if !ok || gormRepository == nil {
+		return nil, errors.New("Interview GORM response-loss repository has unexpected type")
 	}
-}
-
-type interviewCommitResponseLossDB struct {
-	DB
-	cause error
-}
-
-func (database interviewCommitResponseLossDB) Begin(ctx context.Context) (pgx.Tx, error) {
-	tx, err := database.DB.Begin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return interviewCommitResponseLossTx{Tx: tx, cause: database.cause}, nil
-}
-
-type interviewCommitResponseLossTx struct {
-	pgx.Tx
-	cause error
-}
-
-func (tx interviewCommitResponseLossTx) Commit(ctx context.Context) error {
-	if err := tx.Tx.Commit(ctx); err != nil {
-		return err
-	}
-	return tx.cause
+	lossy := *gormRepository
+	lossy.unitOfWork = interviewCommitResponseLossUnitOfWork{delegate: gormRepository.unitOfWork, cause: cause}
+	return &lossy, nil
 }
 
 type interviewCommitResponseLossUnitOfWork struct {
@@ -463,7 +431,7 @@ func assertInterviewRowsCancellationAndPoolReuse(
 		if !errors.Is(listErr, context.Canceled) {
 			t.Fatalf("blocked Interview list cancellation error=%v", listErr)
 		}
-		if variant.name == "gorm" && !errors.Is(listErr, cancelCause) {
+		if !errors.Is(listErr, cancelCause) {
 			t.Fatalf("blocked GORM Interview list did not preserve cancellation cause: %v", listErr)
 		}
 	case <-time.After(3 * time.Second):
@@ -541,9 +509,6 @@ func assertInterviewSQLTxDoneClassification(
 	workspaceID foundation.ID,
 ) {
 	t.Helper()
-	if variant.name != "gorm" {
-		return
-	}
 	gormRepository, ok := repository.(*GORMRepository)
 	if !ok || gormRepository == nil {
 		t.Fatal("Interview GORM repository has unexpected type")
@@ -603,18 +568,13 @@ type interviewIntegrationRepository interface {
 	AbandonStaleCompletions(context.Context, int) (interviewapp.CompletionMaintenanceResult, error)
 }
 
-type interviewIntegrationVariant struct {
-	name string
-}
+type interviewIntegrationVariant struct{}
 
 func runInterviewIntegrationVariants(t *testing.T, scenario func(*testing.T, interviewIntegrationVariant)) {
 	t.Helper()
-	for _, name := range []string{"legacy-pgx", "gorm"} {
-		variant := interviewIntegrationVariant{name: name}
-		t.Run(name, func(t *testing.T) {
-			scenario(t, variant)
-		})
-	}
+	t.Run("gorm", func(t *testing.T) {
+		scenario(t, interviewIntegrationVariant{})
+	})
 }
 
 func (variant interviewIntegrationVariant) open(t *testing.T) (interviewIntegrationRepository, *platformpostgres.Pool, *pgxpool.Pool) {
@@ -628,18 +588,7 @@ func (variant interviewIntegrationVariant) open(t *testing.T) (interviewIntegrat
 	if platform == nil || platform.DB() == nil {
 		t.Fatal("shared Interview PostgreSQL fixture did not provide a platform pool")
 	}
-	var (
-		repository interviewIntegrationRepository
-		err        error
-	)
-	switch variant.name {
-	case "legacy-pgx":
-		repository, err = NewRepository(platform.DB())
-	case "gorm":
-		repository, err = NewGORMRepository(platform)
-	default:
-		t.Fatalf("unknown Interview integration variant %q", variant.name)
-	}
+	repository, err := NewGORMRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}

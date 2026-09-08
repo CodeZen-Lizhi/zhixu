@@ -126,7 +126,7 @@ func (controller *HotRuntimeController[T]) Active() <-chan struct{} {
 
 // Run registers serving ownership, reconciles local generations, and keeps both
 // the runtime and participant facts fresh until process cancellation.
-func (controller *HotRuntimeController[T]) Run(ctx context.Context) error {
+func (controller *HotRuntimeController[T]) Run(ctx context.Context) (runErr error) {
 	if controller == nil || controller.host == nil {
 		return runtimeNotReadyError(errors.New("hot runtime controller is unavailable"))
 	}
@@ -153,7 +153,7 @@ func (controller *HotRuntimeController[T]) Run(ctx context.Context) error {
 	// admission state. In particular, an activating restart must arm its
 	// target gate before API or River consumers can begin new work.
 	if err := controller.reconcile(runCtx); err != nil {
-		if runCtx.Err() != nil {
+		if runCtx.Err() != nil && errors.Is(err, runCtx.Err()) {
 			return nil
 		}
 		return err
@@ -164,7 +164,22 @@ func (controller *HotRuntimeController[T]) Run(ctx context.Context) error {
 	controller.activeOnce.Do(func() { close(controller.active) })
 
 	heartbeatErrors := make(chan error, 1)
-	go controller.runHeartbeats(runCtx, heartbeatErrors)
+	heartbeatStopped := make(chan struct{})
+	go func() {
+		defer close(heartbeatStopped)
+		controller.runHeartbeats(runCtx, heartbeatErrors)
+	}()
+	defer func() {
+		cancel()
+		// RenewHolds may still be using the durable generation leases. Join it
+		// before host.Close releases those leases; the process owner bounds Run's shutdown wait.
+		<-heartbeatStopped
+		select {
+		case err := <-heartbeatErrors:
+			runErr = errors.Join(runErr, err)
+		default:
+		}
+	}()
 
 	ticker := time.NewTicker(controller.poll)
 	defer ticker.Stop()
@@ -178,7 +193,7 @@ func (controller *HotRuntimeController[T]) Run(ctx context.Context) error {
 			}
 		case <-ticker.C:
 			if err := controller.reconcile(runCtx); err != nil {
-				if runCtx.Err() != nil {
+				if runCtx.Err() != nil && errors.Is(err, runCtx.Err()) {
 					return nil
 				}
 				if hotRuntimeFatal(err) {
@@ -198,11 +213,16 @@ func (controller *HotRuntimeController[T]) runHeartbeats(ctx context.Context, fa
 			return
 		case <-ticker.C:
 		}
+		if ctx.Err() != nil {
+			return
+		}
 		if err := controller.host.RenewHolds(ctx); err != nil {
 			// A lost generation hold means the supervisor may stop the local
 			// child while this process still serves requests. Fail closed instead
 			// of allowing an expired lease to look healthy.
-			sendHotRuntimeFailure(failures, err)
+			if ctx.Err() == nil || !errors.Is(err, ctx.Err()) {
+				sendHotRuntimeFailure(failures, err)
+			}
 			return
 		}
 		if _, err := controller.runtime.HeartbeatRuntime(ctx, modelsettingsapplication.RuntimeHeartbeat{
@@ -824,7 +844,7 @@ func (coordinator *ActivationCoordinator) Run(ctx context.Context) error {
 	defer ticker.Stop()
 	for {
 		if err := coordinator.Reconcile(ctx); err != nil {
-			if ctx.Err() != nil {
+			if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
 				return nil
 			}
 			if hotRuntimeFatal(err) {

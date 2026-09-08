@@ -10,16 +10,16 @@ import (
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	modelsettingsapplication "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/application"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
 type typedNilJobInserter struct{}
 
-func (*typedNilJobInserter) InsertTx(context.Context, any, riveradapter.NodeJobArgs, riveradapter.InsertOptions) (application.JobReceipt, error) {
+func (*typedNilJobInserter) InsertTx(context.Context, foundation.TransactionScope, riveradapter.NodeJobArgs, riveradapter.InsertOptions) (application.JobReceipt, error) {
 	return application.JobReceipt{}, nil
 }
 
@@ -28,7 +28,7 @@ type cancellationSafetyGuardStub struct {
 	err  error
 }
 
-func (g *cancellationSafetyGuardStub) SafeToCancelWorkflowNode(context.Context, any, foundation.ID) (bool, error) {
+func (g *cancellationSafetyGuardStub) SafeToCancelWorkflowNodeScoped(context.Context, foundation.TransactionScope, foundation.ID) (bool, error) {
 	return g.safe, g.err
 }
 
@@ -36,7 +36,7 @@ type workflowTerminalHookStub struct {
 	err error
 }
 
-func (h *workflowTerminalHookStub) OnWorkflowNodeTerminal(context.Context, any, application.WorkflowNodeTerminalEvent) error {
+func (h *workflowTerminalHookStub) OnWorkflowNodeTerminalScoped(context.Context, foundation.TransactionScope, application.WorkflowNodeTerminalEvent) error {
 	return h.err
 }
 
@@ -44,38 +44,38 @@ type workflowControlHookStub struct {
 	err error
 }
 
-func (h *workflowControlHookStub) OnWorkflowControl(context.Context, any, application.WorkflowControlEvent) error {
+func (h *workflowControlHookStub) OnWorkflowControlScoped(context.Context, foundation.TransactionScope, application.WorkflowControlEvent) error {
 	return h.err
 }
 
-func TestNewRuntimeRepositoryRejectsTypedNilJobInserter(t *testing.T) {
+func TestNewGORMRuntimeRepositoryRejectsTypedNilJobInserter(t *testing.T) {
 	var inserter *typedNilJobInserter
-	if _, err := NewRuntimeRepository(fakeDB{}, inserter); err == nil {
+	if _, err := newGORMRuntimeRepository(newRuntimeUnitPool(t), inserter, GORMRuntimeRepositoryHooks{}); err == nil {
 		t.Fatal("typed nil job inserter was accepted")
 	}
 }
 
-func TestNewRuntimeRepositoryValidatesCancellationSafetyGuard(t *testing.T) {
+func TestNewGORMRuntimeRepositoryValidatesCancellationSafetyGuard(t *testing.T) {
 	var guard *cancellationSafetyGuardStub
 	var inserter *typedNilJobInserter
-	if _, err := NewRuntimeRepository(fakeDB{}, inserter, guard); !hasFoundationCode(err, "WORKFLOW_RUNTIME_DATABASE_UNAVAILABLE") {
+	if _, err := newGORMRuntimeRepository(newRuntimeUnitPool(t), inserter, GORMRuntimeRepositoryHooks{CancellationSafety: guard}); !hasFoundationCode(err, "WORKFLOW_RUNTIME_DATABASE_UNAVAILABLE") {
 		t.Fatalf("database dependency error precedence changed: %v", err)
 	}
-	if _, err := NewRuntimeRepository(fakeDB{}, &typedNilJobInserter{}, guard); err == nil {
+	if _, err := newGORMRuntimeRepository(newRuntimeUnitPool(t), &typedNilJobInserter{}, GORMRuntimeRepositoryHooks{CancellationSafety: guard}); err == nil {
 		t.Fatal("typed nil cancellation guard was accepted")
 	}
-	if _, err := NewRuntimeRepository(fakeDB{}, &typedNilJobInserter{}, &cancellationSafetyGuardStub{}, &cancellationSafetyGuardStub{}); err == nil {
-		t.Fatal("multiple cancellation guards were accepted")
+	if _, err := application.NewCompositeScopedCancellationSafetyGuard(&cancellationSafetyGuardStub{}, guard); err == nil {
+		t.Fatal("typed nil member of a cancellation guard composition was accepted")
 	}
-	repository, err := NewRuntimeRepository(fakeDB{}, &typedNilJobInserter{}, &cancellationSafetyGuardStub{safe: false})
+	repository, err := newGORMRuntimeRepository(newRuntimeUnitPool(t), &typedNilJobInserter{}, GORMRuntimeRepositoryHooks{CancellationSafety: &cancellationSafetyGuardStub{safe: false}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if safe, err := repository.safeToCancelWorkflowNode(context.Background(), nil, foundation.ID("node")); err != nil || safe {
+	if safe, err := repository.gormControlSafeToCancel(context.Background(), nil, foundation.ID("node")); err != nil || safe {
 		t.Fatalf("safe=%t err=%v", safe, err)
 	}
 	repository.cancellation = &cancellationSafetyGuardStub{err: errors.New("database unavailable")}
-	if _, err := repository.safeToCancelWorkflowNode(context.Background(), nil, foundation.ID("node")); err == nil {
+	if _, err := repository.gormControlSafeToCancel(context.Background(), nil, foundation.ID("node")); err == nil {
 		t.Fatal("guard error was ignored")
 	} else {
 		var classified *foundation.Error
@@ -90,19 +90,19 @@ func hasFoundationCode(err error, code string) bool {
 	return errors.As(err, &classified) && classified.Code == code
 }
 
-func TestNewRuntimeRepositoryWithHooksValidatesAndInjectsLifecycleHooks(t *testing.T) {
+func TestNewGORMRuntimeRepositoryWithHooksValidatesAndInjectsLifecycleHooks(t *testing.T) {
 	var terminal *workflowTerminalHookStub
-	if _, err := NewRuntimeRepositoryWithHooks(fakeDB{}, &typedNilJobInserter{}, RuntimeRepositoryHooks{Terminal: terminal}); err == nil {
+	if _, err := newGORMRuntimeRepository(newRuntimeUnitPool(t), &typedNilJobInserter{}, GORMRuntimeRepositoryHooks{Terminal: terminal}); err == nil {
 		t.Fatal("typed nil terminal hook was accepted")
 	}
 	var control *workflowControlHookStub
-	if _, err := NewRuntimeRepositoryWithHooks(fakeDB{}, &typedNilJobInserter{}, RuntimeRepositoryHooks{Control: control}); err == nil {
+	if _, err := newGORMRuntimeRepository(newRuntimeUnitPool(t), &typedNilJobInserter{}, GORMRuntimeRepositoryHooks{Control: control}); err == nil {
 		t.Fatal("typed nil control hook was accepted")
 	}
 	cancellation := &cancellationSafetyGuardStub{safe: true}
 	terminal = &workflowTerminalHookStub{}
 	control = &workflowControlHookStub{}
-	repository, err := NewRuntimeRepositoryWithHooks(fakeDB{}, &typedNilJobInserter{}, RuntimeRepositoryHooks{
+	repository, err := newGORMRuntimeRepository(newRuntimeUnitPool(t), &typedNilJobInserter{}, GORMRuntimeRepositoryHooks{
 		CancellationSafety: cancellation,
 		Terminal:           terminal,
 		Control:            control,
@@ -116,14 +116,14 @@ func TestNewRuntimeRepositoryWithHooksValidatesAndInjectsLifecycleHooks(t *testi
 	if repository.modelRuntimeFreshWithin != modelsettingsapplication.DefaultRuntimeFreshWithin {
 		t.Fatalf("default model runtime freshness=%s want=%s", repository.modelRuntimeFreshWithin, modelsettingsapplication.DefaultRuntimeFreshWithin)
 	}
-	custom, err := NewRuntimeRepositoryWithHooks(fakeDB{}, &typedNilJobInserter{}, RuntimeRepositoryHooks{ModelRuntimeFreshWithin: 45 * time.Second})
+	custom, err := newGORMRuntimeRepository(newRuntimeUnitPool(t), &typedNilJobInserter{}, GORMRuntimeRepositoryHooks{ModelRuntimeFreshWithin: 45 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if custom.modelRuntimeFreshWithin != 45*time.Second {
 		t.Fatalf("custom model runtime freshness=%s", custom.modelRuntimeFreshWithin)
 	}
-	if _, err := NewRuntimeRepositoryWithHooks(fakeDB{}, &typedNilJobInserter{}, RuntimeRepositoryHooks{ModelRuntimeFreshWithin: time.Millisecond}); !hasFoundationCode(err, "WORKFLOW_MODEL_RUNTIME_FRESHNESS_INVALID") {
+	if _, err := newGORMRuntimeRepository(newRuntimeUnitPool(t), &typedNilJobInserter{}, GORMRuntimeRepositoryHooks{ModelRuntimeFreshWithin: time.Millisecond}); !hasFoundationCode(err, "WORKFLOW_MODEL_RUNTIME_FRESHNESS_INVALID") {
 		t.Fatalf("invalid model runtime freshness error=%v", err)
 	}
 }
@@ -266,7 +266,13 @@ func assertGORMWorkflowError(t *testing.T, err error, kind foundation.ErrorKind,
 	}
 }
 
-type fakeDB struct{}
-
-func (fakeDB) QueryRow(context.Context, string, ...any) pgx.Row { return nil }
-func (fakeDB) Begin(context.Context) (pgx.Tx, error)            { return nil, nil }
+func newRuntimeUnitPool(t *testing.T) *platformpostgres.Pool {
+	t.Helper()
+	// Constructors are lazy: no connection is opened for these dependency checks.
+	pool, err := platformpostgres.Open(t.Context(), "postgres://127.0.0.1:1/workflow_unit?sslmode=disable", 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	return pool
+}

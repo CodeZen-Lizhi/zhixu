@@ -13,8 +13,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// GORMStore is the staged GORM implementation of the append-only Audit Store.
-// Production composition remains on Store until the TODO 9 gate passes.
+// GORMStore persists append-only Audit facts through the shared GORM connection.
 type GORMStore struct {
 	database   *gorm.DB
 	unitOfWork foundation.UnitOfWork

@@ -5,8 +5,7 @@ import (
 	"database/sql"
 	"errors"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 
 	authoringapp "github.com/CodeZen-Lizhi/zhixu/internal/authoring/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/authoring/domain"
@@ -22,14 +21,13 @@ func classify(err error, fallbackCode string) error {
 	if errors.As(err, &classified) {
 		return err
 	}
-	if errors.Is(err, pgx.ErrNoRows) {
+	if gormNoRows(err) {
 		return notFound(err)
 	}
-	var postgresError *pgconn.PgError
-	if errors.As(err, &postgresError) {
-		switch postgresError.Code {
+	if sqlState := platformpostgres.SQLState(err); sqlState != "" {
+		switch sqlState {
 		case "23505":
-			switch postgresError.ConstraintName {
+			switch platformpostgres.ConstraintName(err) {
 			case "uq_core_document_workspace_path":
 				return foundation.NewError(foundation.ErrorVersionConflict, authoringapp.ErrorCodePathConflict, false, err)
 			case "working_draft_command_pkey":

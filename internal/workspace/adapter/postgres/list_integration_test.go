@@ -17,7 +17,7 @@ import (
 )
 
 func TestRepositoryListSourceVersionsWithPostgres(t *testing.T) {
-	runWorkspaceIntegrationVariants(t, testRepositoryListSourceVersionsWithPostgres)
+	runWorkspaceIntegration(t, testRepositoryListSourceVersionsWithPostgres)
 }
 
 func testRepositoryListSourceVersionsWithPostgres(t *testing.T, platform *platformpostgres.Pool, ctx context.Context, repository workspaceIntegrationRepository) {

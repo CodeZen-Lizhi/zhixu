@@ -16,6 +16,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -147,8 +148,8 @@ func TestCollectionRepositoryLifecycleIdempotencyCASAndWorkspaceIsolation(t *tes
 			t.Fatalf("archived update err=%v", err)
 		}
 		triggerErr := executeCollectionIntegrationStatement(ctx, testCase, `UPDATE learning.smart_collection
-			SET description='trigger mutation',version=version+1,updated_at=$3
-			WHERE workspace_id=$1 AND id=$2`, string(workspaceID), string(collectionID), now.Add(time.Second))
+			SET description='trigger mutation',version=version+1,updated_at=?
+			WHERE workspace_id=? AND id=?`, now.Add(time.Second), string(workspaceID), string(collectionID))
 		var postgresError *pgconn.PgError
 		if !hasCollectionCode(triggerErr, collectionapp.ErrorCodeArchivedImmutable) || !errors.As(triggerErr, &postgresError) || postgresError.Code != "55000" {
 			t.Fatalf("archived trigger SQLSTATE err=%v postgres=%+v", triggerErr, postgresError)
@@ -279,17 +280,16 @@ func hasCollectionCode(err error, code string) bool {
 	return errors.As(err, &classified) && classified.Code == code
 }
 
+// DB is only the seed/inspection surface of the integration fixture.
+type DB interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
 func executeCollectionIntegrationStatement(ctx context.Context, testCase collectionIntegrationCase, query string, args ...any) error {
-	if repository, ok := testCase.repository.(*GORMRepository); ok {
-		database, err := newGORMDB(repository.database.WithContext(ctx))
-		if err != nil {
-			return err
-		}
-		_, err = database.Exec(ctx, query, args...)
-		return err
-	}
-	_, err := testCase.pool.Exec(ctx, query, args...)
-	return classify(err)
+	repository := testCase.repository.(*GORMRepository)
+	return classifyGORM(ctx, repository.database.WithContext(ctx).Exec(query, args...).Error)
 }
 
 type collectionIntegrationRepository interface {
@@ -316,12 +316,11 @@ type collectionIntegrationVariant struct {
 }
 
 // runCollectionRepositoryIntegrationCases provisions one disposable database
-// per implementation. Both constructors still originate from the same shared
-// Pool, while committed seed data makes each implementation own its writes.
+// for the final GORM implementation. Committed seed data lets the repository
+// own its transaction through the shared platform Pool.
 func runCollectionRepositoryIntegrationCases(t *testing.T, test func(*testing.T, collectionIntegrationCase)) {
 	t.Helper()
 	variants := []collectionIntegrationVariant{
-		{name: "legacy", open: openLegacyCollectionIntegrationRepository},
 		{name: "gorm", open: openGORMCollectionIntegrationRepository},
 	}
 	for _, variant := range variants {
@@ -357,15 +356,6 @@ func requireCollectionIntegrationDatabase(t *testing.T, maxConns int32) *testdb.
 		Availability:     testdb.FailWhenUnavailable,
 		MaxConns:         maxConns,
 	})
-}
-
-func openLegacyCollectionIntegrationRepository(t *testing.T, platform *platformpostgres.Pool) collectionIntegrationRepository {
-	t.Helper()
-	repository, err := NewRepository(platform.DB())
-	if err != nil {
-		t.Fatalf("construct legacy Collection repository: %v", err)
-	}
-	return repository
 }
 
 func openGORMCollectionIntegrationRepository(t *testing.T, platform *platformpostgres.Pool) collectionIntegrationRepository {

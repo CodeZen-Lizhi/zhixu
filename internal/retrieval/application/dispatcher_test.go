@@ -11,7 +11,7 @@ import (
 
 func TestDispatcherAlternatesFirstAndRetryWhileBothHaveWork(t *testing.T) {
 	store := &dispatcherStoreFake{available: map[DispatchPath]int{DispatchPathFirst: 3, DispatchPathRetry: 3}}
-	dispatcher, err := NewDispatcher(store, dispatcherJobInserterFake{})
+	dispatcher, err := NewScopedDispatcher(store, dispatcherJobInserterFake{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -26,7 +26,7 @@ func TestDispatcherAlternatesFirstAndRetryWhileBothHaveWork(t *testing.T) {
 
 func TestDispatcherFallsBackWithoutStarvingAvailablePath(t *testing.T) {
 	store := &dispatcherStoreFake{available: map[DispatchPath]int{DispatchPathRetry: 2}}
-	dispatcher, err := NewDispatcher(store, dispatcherJobInserterFake{})
+	dispatcher, err := NewScopedDispatcher(store, dispatcherJobInserterFake{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +40,7 @@ func TestDispatcherFallsBackWithoutStarvingAvailablePath(t *testing.T) {
 
 func TestDispatcherStopsAfterBothPathsAreEmpty(t *testing.T) {
 	store := &dispatcherStoreFake{available: map[DispatchPath]int{}}
-	dispatcher, err := NewDispatcher(store, dispatcherJobInserterFake{})
+	dispatcher, err := NewScopedDispatcher(store, dispatcherJobInserterFake{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,14 +53,14 @@ func TestDispatcherStopsAfterBothPathsAreEmpty(t *testing.T) {
 }
 
 func TestDispatcherRejectsInvalidBatchAndDependencies(t *testing.T) {
-	if _, err := NewDispatcher(nil, dispatcherJobInserterFake{}); dispatcherErrorCode(err) != "REINDEX_DISPATCHER_DEPENDENCY_UNAVAILABLE" {
+	if _, err := NewScopedDispatcher(nil, dispatcherJobInserterFake{}); dispatcherErrorCode(err) != "REINDEX_DISPATCHER_DEPENDENCY_UNAVAILABLE" {
 		t.Fatalf("nil store error=%v", err)
 	}
 	var typedNil *dispatcherJobInserterFake
-	if _, err := NewDispatcher(&dispatcherStoreFake{}, typedNil); dispatcherErrorCode(err) != "REINDEX_DISPATCHER_DEPENDENCY_UNAVAILABLE" {
+	if _, err := NewScopedDispatcher(&dispatcherStoreFake{}, typedNil); dispatcherErrorCode(err) != "REINDEX_DISPATCHER_DEPENDENCY_UNAVAILABLE" {
 		t.Fatalf("typed nil inserter error=%v", err)
 	}
-	dispatcher, err := NewDispatcher(&dispatcherStoreFake{}, dispatcherJobInserterFake{})
+	dispatcher, err := NewScopedDispatcher(&dispatcherStoreFake{}, dispatcherJobInserterFake{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func TestDispatcherRejectsInvalidBatchAndDependencies(t *testing.T) {
 
 func TestDispatcherPropagatesStoreFailure(t *testing.T) {
 	cause := errors.New("store failed")
-	dispatcher, err := NewDispatcher(&dispatcherStoreFake{err: cause}, dispatcherJobInserterFake{})
+	dispatcher, err := NewScopedDispatcher(&dispatcherStoreFake{err: cause}, dispatcherJobInserterFake{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +89,7 @@ type dispatcherStoreFake struct {
 	err        error
 }
 
-func (f *dispatcherStoreFake) DispatchOne(_ context.Context, path DispatchPath, _ JobInserter) (bool, error) {
+func (f *dispatcherStoreFake) DispatchOneScoped(_ context.Context, path DispatchPath, _ ScopedJobInserter) (bool, error) {
 	f.calls = append(f.calls, path)
 	if f.err != nil {
 		return false, f.err
@@ -104,7 +104,7 @@ func (f *dispatcherStoreFake) DispatchOne(_ context.Context, path DispatchPath, 
 
 type dispatcherJobInserterFake struct{}
 
-func (dispatcherJobInserterFake) InsertTx(context.Context, any, ReindexJob) (JobReceipt, error) {
+func (dispatcherJobInserterFake) InsertScoped(context.Context, foundation.TransactionScope, ReindexJob) (JobReceipt, error) {
 	return JobReceipt{JobID: 1}, nil
 }
 

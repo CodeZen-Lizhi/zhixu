@@ -4,17 +4,23 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"reflect"
 
 	auditapplication "github.com/CodeZen-Lizhi/zhixu/internal/audit/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/rootgrant"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workspace/domain"
-	"github.com/jackc/pgx/v5"
 	"gorm.io/gorm"
 )
 
-// GORMRepository is the staged Workspace implementation backed by one shared
-// platform Pool. Production composition remains on Repository until TODO 9.
+// RootGrantResolver is the capability boundary required before a persisted
+// Workspace root can leave this adapter.
+type RootGrantResolver interface {
+	Resolve(context.Context, foundation.ID) (*rootgrant.Capability, error)
+}
+
+// GORMRepository persists Workspace facts through one shared platform Pool.
 type GORMRepository struct {
 	database   *gorm.DB
 	unitOfWork foundation.UnitOfWork
@@ -23,7 +29,7 @@ type GORMRepository struct {
 	managed    bool
 }
 
-// GORMRepositoryOption configures staged process-local Workspace dependencies.
+// GORMRepositoryOption configures process-local Workspace dependencies.
 type GORMRepositoryOption func(*GORMRepository) error
 
 // WithGORMRootGrantResolver gates root-bearing reads through the process grant.
@@ -52,7 +58,7 @@ func WithGORMScopedAuditAppender(appender auditapplication.ScopedAppender) GORMR
 	}
 }
 
-// NewGORMRepository constructs staged Workspace persistence from one Pool.
+// NewGORMRepository constructs Workspace persistence from one Pool.
 func NewGORMRepository(pool *platformpostgres.Pool, options ...GORMRepositoryOption) (*GORMRepository, error) {
 	if pool == nil {
 		return nil, gormWorkspaceUnavailable(errors.New("workspace PostgreSQL pool is unavailable"))
@@ -173,7 +179,7 @@ func classifyGORMWorkspace(ctx context.Context, err error, fallbackCode string) 
 		return foundation.NewError(foundation.ErrorRetryableFailure, fallbackCode, true, err)
 	}
 	if gormWorkspaceNoRows(err) {
-		return classify(pgx.ErrNoRows, fallbackCode)
+		return classify(err, fallbackCode)
 	}
 	if errors.Is(err, sql.ErrTxDone) {
 		return gormWorkspaceUnavailable(errors.New("workspace transaction is no longer active"))
@@ -202,7 +208,7 @@ func classifyGORMControl(ctx context.Context, err error, fallbackCode string) er
 		return foundation.NewError(foundation.ErrorRetryableFailure, fallbackCode, true, err)
 	}
 	if gormWorkspaceNoRows(err) {
-		return classifyControl(pgx.ErrNoRows, fallbackCode)
+		return classifyControl(err, fallbackCode)
 	}
 	if errors.Is(err, sql.ErrTxDone) {
 		return controlUnavailable(errors.New("workspace transaction is no longer active"))
@@ -234,4 +240,17 @@ func gormWorkspaceOptionInvalid(cause error) error {
 
 func gormWorkspaceRequestInvalid(cause error) error {
 	return foundation.NewError(foundation.ErrorInvalidInput, domain.ErrorCodeRegistryInvalid, false, cause)
+}
+
+func nilRepositoryDependency(value any) bool {
+	if value == nil {
+		return true
+	}
+	reflected := reflect.ValueOf(value)
+	switch reflected.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return reflected.IsNil()
+	default:
+		return false
+	}
 }

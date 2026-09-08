@@ -13,7 +13,6 @@ import (
 	healthapp "github.com/CodeZen-Lizhi/zhixu/internal/health/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/health/domain"
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
-	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	workflowpostgres "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/postgres"
 	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
 )
@@ -26,23 +25,11 @@ type healthGORMRecordingScopedVerifier struct {
 	binding healthapp.SmartCollectionBinding
 }
 
-func requireHealthIntegrationPlatform(t *testing.T) *platformpostgres.Pool {
-	t.Helper()
-	fixture := testdb.Require(t, testdb.Config{
-		Availability: testdb.FailWhenUnavailable,
-		MaxConns:     16,
-	})
-	if fixture == nil || fixture.Pool() == nil || fixture.Pool().DB() == nil {
-		t.Fatal("health PostgreSQL fixture did not provide a shared platform pool")
-	}
-	return fixture.Pool()
-}
-
 func (healthGORMAllowEnqueueFence) CheckEnqueue(context.Context, foundation.TransactionScope) error {
 	return nil
 }
 
-// TestGORMHealthAdaptersUseOneRealPostgresPool exercises the staged Health
+// TestGORMHealthAdaptersUseOneRealPostgresPool exercises the Health
 // adapters against a migrated Testcontainers database. The same platform Pool
 // supplies pgx seed queries, GORM transactions, scoped Events and River SQL.
 func TestGORMHealthAdaptersUseOneRealPostgresPool(t *testing.T) {
@@ -179,8 +166,7 @@ func TestGORMHealthAdaptersUseOneRealPostgresPool(t *testing.T) {
 }
 
 // TestGORMScanRepositoryPassesSmartBindingThroughScopedVerifier proves that
-// the staged Health bridge passes the active caller-owned GORM scope to the
-// Collection verifier instead of opening a legacy pgx transaction.
+// Health callback passes the active caller-owned GORM scope to Collection.
 func TestGORMScanRepositoryPassesSmartBindingThroughScopedVerifier(t *testing.T) {
 	platform := requireHealthIntegrationPlatform(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
@@ -217,16 +203,10 @@ func TestGORMScanRepositoryPassesSmartBindingThroughScopedVerifier(t *testing.T)
 		WorkspaceID: workspaceID, CollectionID: collectionID, CollectionVersion: 1,
 		QueryHash: strings.Repeat("a", 64), ReadModelRevision: strings.Repeat("b", 64), ExactCount: 0,
 	}
-	transaction, err := repository.database.Begin(ctx)
-	if err != nil {
-		t.Fatalf("open GORM transaction for scoped verifier: %v", err)
-	}
-	defer func() { _ = transaction.Rollback(context.Background()) }()
-	if err := repository.legacy.verifier.Verify(ctx, transaction, binding); err != nil {
-		t.Fatalf("verify scoped Collection binding: %v", err)
-	}
-	if err := transaction.Commit(ctx); err != nil {
-		t.Fatalf("commit scoped verifier transaction: %v", err)
+	if err := repository.database.Within(ctx, foundation.TransactionOptions{}, func(ctx context.Context, transaction healthTransaction) error {
+		return repository.core.verifier.VerifyBindingScoped(ctx, transaction.scope, binding)
+	}); err != nil {
+		t.Fatalf("verify and commit scoped Collection binding: %v", err)
 	}
 	if verifier.calls != 1 || verifier.scope == nil || verifier.binding != binding {
 		t.Fatalf("scoped verifier calls=%d scope=%T binding=%+v want=%+v", verifier.calls, verifier.scope, verifier.binding, binding)

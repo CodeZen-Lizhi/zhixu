@@ -35,8 +35,8 @@ import (
 	knowledgepostgres "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/adapter/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/gitcli"
-	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	workspacepostgres "github.com/CodeZen-Lizhi/zhixu/internal/workspace/adapter/postgres"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -66,7 +66,7 @@ func TestTimelineImpactPublicHTTPIntegration(t *testing.T) {
 		EventVersion: 1, SchemaVersion: domain.KnowledgeEventSchemaVersion, Summary: "Topic version published",
 		Payload: json.RawMessage(`{}`), OccurredAt: now, CreatedAt: now,
 	}
-	repository, err := knowledgepostgres.NewRepository(pool)
+	repository, err := knowledgepostgres.NewGORMRepository(database)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,12 +74,12 @@ func TestTimelineImpactPublicHTTPIntegration(t *testing.T) {
 		t.Fatalf("append trusted timeline event=%#v replayed=%t err=%v", persisted, replayed, err)
 	}
 
-	handler, err := newKnowledgeHandler(pool, 2*time.Second)
+	handler, err := newKnowledgeHandler(database, 2*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(app.NewRouter(app.Dependencies{
-		Version: "timeline-impact-integration", Database: pool, Knowledge: handler,
+		Version: "timeline-impact-integration", Database: database, Knowledge: handler,
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}))
 	t.Cleanup(server.Close)
@@ -209,7 +209,7 @@ func newTimelineImpactAuthenticatedFixture(t *testing.T) timelineImpactAuthentic
 		EventVersion: 1, SchemaVersion: domain.KnowledgeEventSchemaVersion, Summary: "Authenticated impact analysis",
 		Payload: json.RawMessage(`{}`), OccurredAt: now, CreatedAt: now,
 	}
-	knowledgeRepository, err := knowledgepostgres.NewRepository(pool)
+	knowledgeRepository, err := knowledgepostgres.NewGORMRepository(database)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +217,11 @@ func newTimelineImpactAuthenticatedFixture(t *testing.T) timelineImpactAuthentic
 		t.Fatalf("append authenticated timeline event=%#v replayed=%t err=%v", persisted, replayed, err)
 	}
 
-	authRepository, err := authpostgres.NewRepository(pool)
+	gormDB, err := database.GORM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	authRepository, err := authpostgres.NewGORMRepository(gormDB)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,15 +237,15 @@ func newTimelineImpactAuthenticatedFixture(t *testing.T) timelineImpactAuthentic
 	if err != nil {
 		t.Fatal(err)
 	}
-	knowledgeHandler, err := newKnowledgeHandler(pool, 2*time.Second)
+	knowledgeHandler, err := newKnowledgeHandler(database, 2*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	workspaceRepository, err := workspacepostgres.NewRepository(pool)
+	workspaceRepository, err := workspacepostgres.NewGORMRepository(database)
 	if err != nil {
 		t.Fatal(err)
 	}
-	changeControlRepository, err := changecontrolpostgres.NewRepository(pool)
+	changeControlRepository, err := changecontrolpostgres.NewGORMRepository(database)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,7 +264,7 @@ func newTimelineImpactAuthenticatedFixture(t *testing.T) timelineImpactAuthentic
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(app.NewRouter(app.Dependencies{
-		Version: "timeline-impact-authenticated-integration", Database: pool, Knowledge: knowledgeHandler,
+		Version: "timeline-impact-authenticated-integration", Database: database, Knowledge: knowledgeHandler,
 		ChangeControl: changecontrolhttp.NewHandler(changeControlService), Auth: authHandler, AuthRequired: true,
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}))
@@ -438,6 +442,8 @@ func TestTimelineImpactDownstreamProposalAPICompositionIntegration(t *testing.T)
 	if created.Replayed || created.ProposalType != string(changecontroldomain.ProposalTypeDownstreamUpdate) ||
 		created.WorkspaceID != string(authenticated.workspaceID) || created.Status != string(changecontroldomain.StatusReady) ||
 		created.RiskLevel != string(changecontroldomain.ProposalRiskLevelHigh) || created.Approval != nil ||
+		created.Version != 1 || created.RevisionCapability.Editable ||
+		created.RevisionCapability.Reason != string(changecontroldomain.ProposalRevisionUnsupportedType) ||
 		created.Revision.Update.WorkspaceID != string(authenticated.workspaceID) ||
 		created.Revision.Update.SourceReport.ID != string(downstream.reportID) ||
 		created.Revision.Update.SourceReport.AnalysisVersion != string(domain.ImpactAnalysisVersionV2) ||
@@ -610,18 +616,25 @@ type timelineImpactDownstreamProposalWire struct {
 }
 
 type timelineImpactDownstreamProposalDetailWire struct {
-	ProposalType string                                `json:"proposal_type"`
-	ID           string                                `json:"id"`
-	WorkspaceID  string                                `json:"workspace_id"`
-	Status       string                                `json:"status"`
-	RiskLevel    string                                `json:"risk_level"`
-	Revision     timelineImpactDownstreamRevisionWire  `json:"revision"`
-	Approval     *timelineImpactDownstreamApprovalWire `json:"approval"`
-	CreatedAt    string                                `json:"created_at"`
-	UpdatedAt    string                                `json:"updated_at"`
+	ProposalType       string                                         `json:"proposal_type"`
+	ID                 string                                         `json:"id"`
+	WorkspaceID        string                                         `json:"workspace_id"`
+	Status             string                                         `json:"status"`
+	RiskLevel          string                                         `json:"risk_level"`
+	Version            int64                                          `json:"version"`
+	RevisionCapability timelineImpactDownstreamRevisionCapabilityWire `json:"revision_capability"`
+	Revision           timelineImpactDownstreamRevisionWire           `json:"revision"`
+	Approval           *timelineImpactDownstreamApprovalWire          `json:"approval"`
+	CreatedAt          string                                         `json:"created_at"`
+	UpdatedAt          string                                         `json:"updated_at"`
 }
 
 type timelineImpactDownstreamApprovalWire struct{}
+
+type timelineImpactDownstreamRevisionCapabilityWire struct {
+	Editable bool   `json:"editable"`
+	Reason   string `json:"reason"`
+}
 
 type timelineImpactDownstreamRevisionWire struct {
 	ID           string                             `json:"id"`
@@ -839,7 +852,7 @@ func seedTimelineImpactWorkspace(t *testing.T, ctx context.Context, pool *pgxpoo
 	root := "/tmp/" + label + "-" + string(workspaceID)
 	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(
 		id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at
-	) VALUES($1,$2,$3,$3,$4,'test',1,$4,$4)`, string(workspaceID), label, root, now); err != nil {
+	) VALUES($1,$2,$3,$3,$4,'inactive',1,$4,$4)`, string(workspaceID), label, root, now); err != nil {
 		t.Fatal(err)
 	}
 	return workspaceID
@@ -856,56 +869,8 @@ func mustTimelineImpactID(t *testing.T) foundation.ID {
 
 func newTimelineImpactTestDatabase(t *testing.T) *platformpostgres.Pool {
 	t.Helper()
-	baseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
-	if baseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a PostgreSQL admin database")
-	}
-	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
-	defer cancel()
-	parsed, err := url.Parse(baseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	admin, err := pgxpool.New(ctx, baseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	name := fmt.Sprintf("zhixu_timeline_impact_%d", time.Now().UnixNano())
-	identifier := pgx.Identifier{name}.Sanitize()
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+identifier); err != nil {
-		admin.Close()
-		t.Fatal(err)
-	}
-	parsed.Path = "/" + name
-	databaseURL := parsed.String()
-	migrationPool, err := platformpostgres.OpenMigration(ctx, databaseURL, 4, 0)
-	if err == nil {
-		err = platformmigration.MigrateAtlas(ctx, migrationPool.DB())
-		migrationPool.Close()
-	}
-	if err != nil {
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-		t.Fatal(err)
-	}
-	database, err := platformpostgres.Open(ctx, databaseURL, 4, 0)
-	if err != nil {
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-		t.Fatal(err)
-	}
-	if err := database.Ping(ctx); err != nil {
-		database.Close()
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		database.Close()
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cleanupCancel()
-		_, _ = admin.Exec(cleanupCtx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-	})
-	return database
+	return testdb.Require(t, testdb.Config{
+		ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
+		MaxConns:         4,
+	}).Pool()
 }

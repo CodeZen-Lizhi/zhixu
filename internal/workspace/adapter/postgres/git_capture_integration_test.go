@@ -17,7 +17,7 @@ import (
 )
 
 func TestRepositoryGitCaptureCheckpointReplayOrderAndSourceReappearance(t *testing.T) {
-	runWorkspaceIntegrationVariants(t, testRepositoryGitCaptureCheckpointReplayOrderAndSourceReappearance)
+	runWorkspaceIntegration(t, testRepositoryGitCaptureCheckpointReplayOrderAndSourceReappearance)
 }
 
 func testRepositoryGitCaptureCheckpointReplayOrderAndSourceReappearance(t *testing.T, platform *platformpostgres.Pool, ctx context.Context, repository workspaceIntegrationRepository) {
@@ -87,7 +87,7 @@ func testRepositoryGitCaptureCheckpointReplayOrderAndSourceReappearance(t *testi
 }
 
 func TestRepositoryGitCaptureSerializesConcurrentCheckpointUpdates(t *testing.T) {
-	runWorkspaceIntegrationVariants(t, testRepositoryGitCaptureSerializesConcurrentCheckpointUpdates)
+	runWorkspaceIntegration(t, testRepositoryGitCaptureSerializesConcurrentCheckpointUpdates)
 }
 
 func testRepositoryGitCaptureSerializesConcurrentCheckpointUpdates(t *testing.T, platform *platformpostgres.Pool, ctx context.Context, repository workspaceIntegrationRepository) {

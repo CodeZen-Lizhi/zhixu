@@ -19,15 +19,16 @@ import (
 	artifactapplication "github.com/CodeZen-Lizhi/zhixu/internal/artifact/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/filesystem"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	learningpathartifact "github.com/CodeZen-Lizhi/zhixu/internal/review/learningpath/adapter/artifact"
 	learningpathpostgres "github.com/CodeZen-Lizhi/zhixu/internal/review/learningpath/adapter/postgres"
 	learningpathapplication "github.com/CodeZen-Lizhi/zhixu/internal/review/learningpath/application"
 	workspacepostgres "github.com/CodeZen-Lizhi/zhixu/internal/workspace/adapter/postgres"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestReviewLearningPathProductionCompositionCreatesDraftPostgreSQL(t *testing.T) {
-	pool := newArtifactHTTPTestDatabase(t)
+	database := newArtifactHTTPTestDatabase(t)
+	pool := database.DB()
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
 
@@ -35,14 +36,14 @@ func TestReviewLearningPathProductionCompositionCreatesDraftPostgreSQL(t *testin
 	evidence := seedArtifactHTTPEvidenceIndex(t, ctx, pool, workspace, []artifactHTTPEvidenceSpec{{
 		label: "review-learning-path", content: []byte("Formal evidence supports the Review learning path."),
 	}})[0]
-	claimID := seedArtifactHTTPConfirmedClaim(t, ctx, pool, evidence)
+	claimID := seedArtifactHTTPConfirmedClaim(t, ctx, database, evidence)
 	var evidenceHash string
 	if err := pool.QueryRow(ctx, `SELECT evidence_hash FROM core.claim_source
 		WHERE workspace_id=$1 AND claim_id=$2 AND source_version_id=$3 AND source_span_id=$4`,
 		string(workspace.id), string(claimID), string(evidence.sourceVersionID), string(evidence.sourceSpanID)).Scan(&evidenceHash); err != nil {
 		t.Fatal(err)
 	}
-	server := newReviewLearningPathIntegrationServer(t, pool)
+	server := newReviewLearningPathIntegrationServer(t, database)
 	client := server.Client()
 
 	deck := postArtifactHTTP[map[string]any](t, client, server.URL+"/api/v1/review/decks", "review-path-deck", map[string]any{
@@ -84,7 +85,7 @@ func TestReviewLearningPathProductionCompositionCreatesDraftPostgreSQL(t *testin
 	}, http.StatusCreated, workspace.root)
 	answerID := reviewPathString(t, reviewPathObject(t, answer["answer"], "answer"), "id")
 
-	service := newReviewLearningPathIntegrationService(t, pool)
+	service := newReviewLearningPathIntegrationService(t, database)
 	created, err := service.CreateForReview(ctx, learningpathapplication.CreateReviewCommand{
 		WorkspaceID: workspace.id, ReviewAnswerID: foundation.ID(answerID), IdempotencyKey: "review-path-create",
 	})
@@ -107,7 +108,7 @@ func TestReviewLearningPathProductionCompositionCreatesDraftPostgreSQL(t *testin
 	}
 }
 
-func newReviewLearningPathIntegrationServer(t *testing.T, pool *pgxpool.Pool) *httptest.Server {
+func newReviewLearningPathIntegrationServer(t *testing.T, pool *platformpostgres.Pool) *httptest.Server {
 	t.Helper()
 	review, err := newReviewHandler(pool, 10*time.Second, reviewCompositionQuestionRefKey)
 	if err != nil {
@@ -121,18 +122,18 @@ func newReviewLearningPathIntegrationServer(t *testing.T, pool *pgxpool.Pool) *h
 	return server
 }
 
-func newReviewLearningPathIntegrationService(t *testing.T, pool *pgxpool.Pool) *learningpathapplication.Service {
+func newReviewLearningPathIntegrationService(t *testing.T, pool *platformpostgres.Pool) *learningpathapplication.Service {
 	t.Helper()
-	workspaces, err := workspacepostgres.NewRepository(pool)
+	workspaces, err := workspacepostgres.NewGORMRepository(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
 	files := filesystem.Scanner{Options: filesystem.ScanOptions{MaxBytes: filesystem.DefaultMaxBytes}}
-	repository, err := learningpathpostgres.NewRepository(pool)
+	repository, err := learningpathpostgres.NewGORMRepository(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
-	artifactRepository, err := artifactpostgres.NewRepository(pool)
+	artifactRepository, err := artifactpostgres.NewGORMRepository(pool)
 	if err != nil {
 		t.Fatal(err)
 	}

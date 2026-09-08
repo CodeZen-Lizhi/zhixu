@@ -10,16 +10,15 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/export/domain"
 )
 
-func (repository *Repository) appendLifecycleEvent(ctx context.Context, tx exportTransaction, job domain.Job, stage string) error {
+func (repository *exportRepository) appendLifecycleEvent(ctx context.Context, tx exportTransaction, job domain.Job, stage string) error {
 	if isNilDependency(repository.events) {
 		return nil
 	}
 	stage = strings.ToLower(strings.TrimSpace(stage))
-	var sideFactTransaction any
-	if tx != nil {
-		sideFactTransaction = tx.SideFactTransaction()
+	if isNilDependency(tx) || isNilDependency(tx.Scope()) {
+		return unavailable(errors.New("export lifecycle transaction scope is unavailable"))
 	}
-	_, replayed, err := repository.events.AppendTx(ctx, sideFactTransaction, eventsdomain.AppendRequest{
+	_, replayed, err := repository.events.AppendScoped(ctx, tx.Scope(), eventsdomain.AppendRequest{
 		WorkspaceID: job.WorkspaceID,
 		Type:        "export." + stage,
 		ResourceRef: "export_job:" + string(job.ID), ResourceVersion: job.Version,

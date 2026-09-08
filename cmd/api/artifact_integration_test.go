@@ -14,7 +14,6 @@ import (
 	"mime"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,7 +34,8 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/filesystem"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/gitcli"
-	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	workflowhttp "github.com/CodeZen-Lizhi/zhixu/internal/workflow/http"
 	workspacepostgres "github.com/CodeZen-Lizhi/zhixu/internal/workspace/adapter/postgres"
 	"github.com/jackc/pgx/v5"
@@ -43,7 +43,8 @@ import (
 )
 
 func TestArtifactPublicHTTPPostgreSQLIntegration(t *testing.T) {
-	pool := newArtifactHTTPTestDatabase(t)
+	database := newArtifactHTTPTestDatabase(t)
+	pool := database.DB()
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
 
@@ -56,9 +57,9 @@ func TestArtifactPublicHTTPPostgreSQLIntegration(t *testing.T) {
 	otherEvidence := seedArtifactHTTPEvidenceIndex(t, ctx, pool, other, []artifactHTTPEvidenceSpec{
 		{label: "cross-workspace", content: []byte("This evidence belongs to another workspace.")},
 	})[0]
-	seedArtifactHTTPConfirmedClaim(t, ctx, pool, primaryEvidence[0])
+	seedArtifactHTTPConfirmedClaim(t, ctx, database, primaryEvidence[0])
 
-	server := newArtifactHTTPIntegrationServer(t, pool)
+	server := newArtifactHTTPIntegrationServer(t, database)
 	client := server.Client()
 	documentsBefore := artifactHTTPCount(t, ctx, pool, `SELECT count(*) FROM core.document WHERE workspace_id=$1`, string(primary.id))
 
@@ -184,12 +185,13 @@ func TestArtifactPublicHTTPPostgreSQLIntegration(t *testing.T) {
 }
 
 func TestArtifactGenerationCompositionCancellationPostgreSQLIntegration(t *testing.T) {
-	pool := newArtifactHTTPTestDatabase(t)
+	database := newArtifactHTTPTestDatabase(t)
+	pool := database.DB()
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
 
 	workspace := seedArtifactHTTPWorkspace(t, ctx, pool, "artifact-generation-cancel")
-	server := newArtifactHTTPIntegrationServer(t, pool)
+	server := newArtifactHTTPIntegrationServer(t, database)
 	client := server.Client()
 
 	planned := postArtifactHTTP[artifactHTTPCommandWire](t, client, server.URL+"/api/v1/artifacts", "generation-plan", map[string]any{
@@ -217,12 +219,12 @@ func TestArtifactGenerationCompositionCancellationPostgreSQLIntegration(t *testi
 		t.Fatalf("started generation=%#v", started)
 	}
 
-	run := getArtifactHTTP[artifactHTTPWorkflowRunWire](t, client, server.URL+started.StatusURL, http.StatusOK, workspace.root)
+	run := getArtifactHTTP[artifactHTTPWorkflowRunWire](t, client, server.URL+started.StatusURL, http.StatusOK, workspace.root, workspace.id)
 	if run.ID != started.WorkflowRunID || run.WorkspaceID != string(workspace.id) || run.Status != "pending" || run.Version < 1 {
 		t.Fatalf("pending workflow=%#v generation=%#v", run, started)
 	}
 	cancelled := postArtifactHTTP[artifactHTTPWorkflowControlWire](t, client, server.URL+started.StatusURL+"/cancel", "cancel-generation-workflow",
-		map[string]any{"expected_version": run.Version}, http.StatusOK, workspace.root)
+		map[string]any{"expected_version": run.Version}, http.StatusOK, workspace.root, workspace.id)
 	if cancelled.WorkflowRunID != started.WorkflowRunID || cancelled.Status != "cancelled" || cancelled.Version <= run.Version ||
 		cancelled.StatusURL != started.StatusURL || !cancelled.CancelRequested || cancelled.PauseRequested {
 		t.Fatalf("cancelled workflow=%#v pending=%#v", cancelled, run)
@@ -298,7 +300,7 @@ func seedArtifactHTTPWorkspace(t *testing.T, ctx context.Context, pool *pgxpool.
 	now := time.Now().UTC().Add(-15 * time.Minute).Truncate(time.Microsecond)
 	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(
 		id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at
-	) VALUES($1,$2,$3,$3,$4,'test',1,$4,$4)`, string(workspaceID), name, root.Path(), now); err != nil {
+	) VALUES($1,$2,$3,$3,$4,'inactive',1,$4,$4)`, string(workspaceID), name, root.Path(), now); err != nil {
 		t.Fatal(err)
 	}
 	return artifactHTTPWorkspaceFixture{id: workspaceID, root: root.Path()}
@@ -431,9 +433,9 @@ func seedArtifactHTTPEvidenceIndex(
 	return fixtures
 }
 
-func seedArtifactHTTPConfirmedClaim(t *testing.T, ctx context.Context, pool *pgxpool.Pool, evidence artifactHTTPEvidenceFixture) foundation.ID {
+func seedArtifactHTTPConfirmedClaim(t *testing.T, ctx context.Context, pool *platformpostgres.Pool, evidence artifactHTTPEvidenceFixture) foundation.ID {
 	t.Helper()
-	repository, err := knowledgepostgres.NewRepository(pool)
+	repository, err := knowledgepostgres.NewGORMRepository(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -477,13 +479,13 @@ func seedArtifactHTTPConfirmedClaim(t *testing.T, ctx context.Context, pool *pgx
 	return confirmed.Claim.ID
 }
 
-func newArtifactHTTPIntegrationServer(t *testing.T, pool *pgxpool.Pool) *httptest.Server {
+func newArtifactHTTPIntegrationServer(t *testing.T, pool *platformpostgres.Pool) *httptest.Server {
 	t.Helper()
-	workspaces, err := workspacepostgres.NewRepository(pool)
+	workspaces, err := workspacepostgres.NewGORMRepository(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
-	changeRepository, err := changecontrolpostgres.NewRepository(pool)
+	changeRepository, err := changecontrolpostgres.NewGORMRepository(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -524,52 +526,12 @@ func newArtifactHTTPIntegrationServer(t *testing.T, pool *pgxpool.Pool) *httptes
 	t.Cleanup(server.Close)
 	return server
 }
-func newArtifactHTTPTestDatabase(t *testing.T) *pgxpool.Pool {
+func newArtifactHTTPTestDatabase(t *testing.T) *platformpostgres.Pool {
 	t.Helper()
-	baseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
-	if baseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a PostgreSQL admin database")
-	}
-	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
-	defer cancel()
-	parsed, err := url.Parse(baseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	admin, err := pgxpool.New(ctx, baseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	databaseName := fmt.Sprintf("zhixu_artifact_http_%d", time.Now().UnixNano())
-	identifier := pgx.Identifier{databaseName}.Sanitize()
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+identifier); err != nil {
-		admin.Close()
-		t.Fatal(err)
-	}
-	parsed.Path = "/" + databaseName
-	pool, err := pgxpool.New(ctx, parsed.String())
-	if err != nil {
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		pool.Close()
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 20*time.Second)
-		defer cleanupCancel()
-		if _, cleanupErr := admin.Exec(cleanupCtx, "DROP DATABASE "+identifier+" WITH (FORCE)"); cleanupErr != nil {
-			t.Errorf("drop artifact HTTP test database: %v", cleanupErr)
-		}
-		admin.Close()
-	})
-	runner, err := platformmigration.NewAtlasEmbeddedRunner(pool)
-	if err == nil {
-		err = runner.Up(ctx)
-	}
-	if err != nil {
-		t.Fatal(err)
-	}
-	return pool
+	return testdb.Require(t, testdb.Config{
+		ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
+		MaxConns:         8,
+	}).Pool()
 }
 
 func artifactHTTPSectionBody(
@@ -608,7 +570,7 @@ func cloneArtifactHTTPMap(value map[string]any) map[string]any {
 	return result
 }
 
-func postArtifactHTTP[T any](t *testing.T, client *http.Client, target, key string, body any, wantStatus int, forbiddenRoot string) T {
+func postArtifactHTTP[T any](t *testing.T, client *http.Client, target, key string, body any, wantStatus int, forbiddenRoot string, workspaceIDs ...foundation.ID) T {
 	t.Helper()
 	encoded, err := json.Marshal(body)
 	if err != nil {
@@ -620,20 +582,26 @@ func postArtifactHTTP[T any](t *testing.T, client *http.Client, target, key stri
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Idempotency-Key", key)
-	return doArtifactHTTP[T](t, client, request, wantStatus, forbiddenRoot)
+	return doArtifactHTTP[T](t, client, request, wantStatus, forbiddenRoot, workspaceIDs...)
 }
 
-func getArtifactHTTP[T any](t *testing.T, client *http.Client, target string, wantStatus int, forbiddenRoot string) T {
+func getArtifactHTTP[T any](t *testing.T, client *http.Client, target string, wantStatus int, forbiddenRoot string, workspaceIDs ...foundation.ID) T {
 	t.Helper()
 	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, target, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return doArtifactHTTP[T](t, client, request, wantStatus, forbiddenRoot)
+	return doArtifactHTTP[T](t, client, request, wantStatus, forbiddenRoot, workspaceIDs...)
 }
 
-func doArtifactHTTP[T any](t *testing.T, client *http.Client, request *http.Request, wantStatus int, forbiddenRoot string) T {
+func doArtifactHTTP[T any](t *testing.T, client *http.Client, request *http.Request, wantStatus int, forbiddenRoot string, workspaceIDs ...foundation.ID) T {
 	t.Helper()
+	if len(workspaceIDs) > 1 {
+		t.Fatal("artifact HTTP fixture accepts at most one Workspace header")
+	}
+	if len(workspaceIDs) == 1 {
+		request.Header.Set("X-Workspace-ID", string(workspaceIDs[0]))
+	}
 	response, err := client.Do(request)
 	if err != nil {
 		t.Fatal(err)
@@ -782,18 +750,31 @@ type artifactHTTPGenerationWire struct {
 }
 
 type artifactHTTPWorkflowRunWire struct {
-	ID              string          `json:"id"`
-	WorkspaceID     string          `json:"workspace_id"`
-	DefinitionID    string          `json:"definition_id"`
-	Status          string          `json:"status"`
-	Input           json.RawMessage `json:"input"`
-	Output          json.RawMessage `json:"output,omitempty"`
-	Version         int64           `json:"version"`
-	CreatedAt       string          `json:"created_at"`
-	UpdatedAt       string          `json:"updated_at"`
-	CompletedAt     *string         `json:"completed_at,omitempty"`
-	PauseRequested  bool            `json:"pause_requested"`
-	CancelRequested bool            `json:"cancel_requested"`
+	ID              string                            `json:"id"`
+	WorkspaceID     string                            `json:"workspace_id"`
+	DefinitionID    string                            `json:"definition_id"`
+	Status          string                            `json:"status"`
+	Input           json.RawMessage                   `json:"input"`
+	Output          json.RawMessage                   `json:"output,omitempty"`
+	Version         int64                             `json:"version"`
+	CreatedAt       string                            `json:"created_at"`
+	UpdatedAt       string                            `json:"updated_at"`
+	CompletedAt     *string                           `json:"completed_at,omitempty"`
+	PauseRequested  bool                              `json:"pause_requested"`
+	CancelRequested bool                              `json:"cancel_requested"`
+	HumanTask       *artifactHTTPPendingHumanTaskWire `json:"human_task"`
+}
+
+type artifactHTTPPendingHumanTaskWire struct {
+	ID                  string          `json:"id"`
+	RunID               string          `json:"run_id"`
+	NodeRunID           string          `json:"node_run_id"`
+	Status              string          `json:"status"`
+	ExpectedInputSchema json.RawMessage `json:"expected_input_schema"`
+	TargetVersion       int64           `json:"target_version"`
+	ExpiresAt           *string         `json:"expires_at"`
+	CreatedAt           string          `json:"created_at"`
+	Review              json.RawMessage `json:"review"`
 }
 
 type artifactHTTPWorkflowControlWire struct {
@@ -838,11 +819,12 @@ type artifactHTTPOutlineWire struct {
 }
 
 type artifactHTTPSectionWire struct {
-	Key       string                     `json:"key"`
-	Title     string                     `json:"title"`
-	Content   string                     `json:"content"`
-	Citations []artifactHTTPCitationWire `json:"citations"`
-	Coverage  artifactHTTPCoverageWire   `json:"coverage"`
+	Key             string                           `json:"key"`
+	Title           string                           `json:"title"`
+	Content         string                           `json:"content"`
+	Citations       []artifactHTTPCitationWire       `json:"citations"`
+	DocumentSources []artifactHTTPDocumentSourceWire `json:"document_sources"`
+	Coverage        artifactHTTPCoverageWire         `json:"coverage"`
 }
 
 type artifactHTTPCitationWire struct {
@@ -850,6 +832,14 @@ type artifactHTTPCitationWire struct {
 	SourceSpanID        string `json:"source_span_id"`
 	VerifiedContentHash string `json:"verified_content_hash"`
 	Excerpt             string `json:"excerpt"`
+	Verified            bool   `json:"verified"`
+}
+
+type artifactHTTPDocumentSourceWire struct {
+	DocumentID          string `json:"document_id"`
+	ArticleRevisionID   string `json:"article_revision_id"`
+	RevisionNo          int64  `json:"revision_no"`
+	VerifiedContentHash string `json:"verified_content_hash"`
 	Verified            bool   `json:"verified"`
 }
 

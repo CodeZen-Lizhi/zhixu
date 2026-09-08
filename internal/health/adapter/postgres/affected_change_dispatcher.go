@@ -2,13 +2,13 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	healthapp "github.com/CodeZen-Lizhi/zhixu/internal/health/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/health/domain"
-	"github.com/jackc/pgx/v5"
 )
 
 const defaultAffectedChangeBackoff = time.Minute
@@ -60,27 +60,42 @@ func (repository *AffectedChangeDispatchRepository) DispatchNext(ctx context.Con
 	if ctx == nil {
 		return healthapp.AffectedChangeDispatchResult{}, false, affectedChangeInvalid(errors.New("health affected-change context is nil"))
 	}
-	tx, err := repository.scans.db.Begin(ctx)
-	if err != nil {
-		return healthapp.AffectedChangeDispatchResult{}, false, classifyAffectedChangeError(err, "HEALTH_AFFECTED_BEGIN_FAILED")
+	outcome, err := withHealthTransaction(ctx, repository.scans.db, foundation.TransactionOptions{}, func(ctx context.Context, tx healthTransaction) (affectedChangeDispatch, error) {
+		return repository.dispatchNextTx(ctx, tx)
+	})
+	if healthCommitFailed(err) && outcome.expectation != nil {
+		err = repository.recoverCommitFailure(ctx, err, *outcome.expectation)
 	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
+	if err != nil {
+		return healthapp.AffectedChangeDispatchResult{}, outcome.found, classifyHealthTransactionError(err, "HEALTH_AFFECTED_BEGIN_FAILED", "HEALTH_AFFECTED_COMMIT_FAILED")
+	}
+	return outcome.result, outcome.found, outcome.afterCommitError
+}
 
+// affectedChangeDispatch 将提交后才返回的人工恢复错误与事务失败分开。
+type affectedChangeDispatch struct {
+	result           healthapp.AffectedChangeDispatchResult
+	found            bool
+	expectation      *affectedChangeCommitExpectation
+	afterCommitError error
+}
+
+func (repository *AffectedChangeDispatchRepository) dispatchNextTx(ctx context.Context, tx healthTransaction) (affectedChangeDispatch, error) {
 	now, err := affectedChangeDatabaseTime(ctx, tx)
 	if err != nil {
-		return healthapp.AffectedChangeDispatchResult{}, false, err
+		return affectedChangeDispatch{}, err
 	}
 	row, found, err := claimAffectedChange(ctx, tx, now)
 	if err != nil || !found {
-		return healthapp.AffectedChangeDispatchResult{}, false, err
+		return affectedChangeDispatch{}, err
 	}
 
 	workspaceVersion, sourceMatches, err := verifyAffectedChangeSource(ctx, tx, row.event)
 	if err != nil {
-		return healthapp.AffectedChangeDispatchResult{}, true, err
+		return affectedChangeDispatch{found: true}, err
 	}
 	if !sourceMatches {
-		return repository.poisonAndCommit(ctx, tx, row, now, healthapp.ErrorCodeAffectedChangeSourceBindingInvalid,
+		return repository.poisonAffectedChange(ctx, tx, row, now, healthapp.ErrorCodeAffectedChangeSourceBindingInvalid,
 			errors.New("health affected-change source binding no longer matches"))
 	}
 
@@ -88,26 +103,26 @@ func (repository *AffectedChangeDispatchRepository) DispatchNext(ctx context.Con
 	if err != nil {
 		var classified *foundation.Error
 		if errors.As(err, &classified) && classified.Kind == foundation.ErrorManualRecoveryRequired {
-			return repository.poisonAndCommit(ctx, tx, row, now, classified.Code, err)
+			return repository.poisonAffectedChange(ctx, tx, row, now, classified.Code, err)
 		}
-		return healthapp.AffectedChangeDispatchResult{}, true, err
+		return affectedChangeDispatch{found: true}, err
 	}
 
 	started, err := repository.scans.startOrReplayTx(ctx, tx, request)
 	if err != nil {
 		active, activeErr := activeAffectedWorkspaceScan(ctx, tx, row.event.WorkspaceID)
 		if activeErr != nil {
-			return healthapp.AffectedChangeDispatchResult{}, true, errors.Join(err, activeErr)
+			return affectedChangeDispatch{found: true}, errors.Join(err, activeErr)
 		}
 		if isHealthScanScopeConflict(err) && active {
-			return repository.deferAndCommit(ctx, tx, row, now)
+			return repository.deferAffectedChange(ctx, tx, row, now)
 		}
-		return healthapp.AffectedChangeDispatchResult{}, true, err
+		return affectedChangeDispatch{found: true}, err
 	}
 
 	publishedAt, err := affectedChangeDatabaseTime(ctx, tx)
 	if err != nil {
-		return healthapp.AffectedChangeDispatchResult{}, true, err
+		return affectedChangeDispatch{found: true}, err
 	}
 	result := healthapp.AffectedChangeDispatchResult{
 		EventID:       row.event.ID,
@@ -121,19 +136,16 @@ SET bound_scan_id=$2,bound_workflow_run_id=$3,published_at=$4,last_error_code=NU
 WHERE id=$1 AND version=$5 AND published_at IS NULL AND NOT manual_recovery_required`,
 		string(row.event.ID), string(result.ScanID), string(result.WorkflowRunID), publishedAt, row.version)
 	if err != nil {
-		return healthapp.AffectedChangeDispatchResult{}, true, classifyAffectedChangeError(err, "HEALTH_AFFECTED_PUBLISH_FAILED")
+		return affectedChangeDispatch{found: true}, classifyAffectedChangeError(err, "HEALTH_AFFECTED_PUBLISH_FAILED")
 	}
 	if tag.RowsAffected() != 1 {
-		return healthapp.AffectedChangeDispatchResult{}, true, affectedChangeConsistency(errors.New("health affected-change publish CAS did not match"))
+		return affectedChangeDispatch{found: true}, affectedChangeConsistency(errors.New("health affected-change publish CAS did not match"))
 	}
 	expectation := affectedChangeCommitExpectation{row: row, result: result, request: &request}
-	if err := repository.commitWithRecovery(ctx, tx, expectation); err != nil {
-		return healthapp.AffectedChangeDispatchResult{}, true, err
-	}
-	return result, true, nil
+	return affectedChangeDispatch{result: result, found: true, expectation: &expectation}, nil
 }
 
-func (repository *AffectedChangeDispatchRepository) deferAndCommit(ctx context.Context, tx pgx.Tx, row affectedChangeRow, now time.Time) (healthapp.AffectedChangeDispatchResult, bool, error) {
+func (repository *AffectedChangeDispatchRepository) deferAffectedChange(ctx context.Context, tx healthTransaction, row affectedChangeRow, now time.Time) (affectedChangeDispatch, error) {
 	availableAt := now.Add(repository.backoff)
 	result := healthapp.AffectedChangeDispatchResult{EventID: row.event.ID, Outcome: healthapp.AffectedChangeDispatchDeferred}
 	tag, err := tx.Exec(ctx, `UPDATE ops.health_affected_change_outbox
@@ -141,21 +153,18 @@ SET available_at=$2,last_error_code=$3,attempt_count=attempt_count+1,version=ver
 WHERE id=$1 AND version=$5 AND published_at IS NULL AND NOT manual_recovery_required`,
 		string(row.event.ID), availableAt, healthapp.ErrorCodeAffectedChangeScanActive, now, row.version)
 	if err != nil {
-		return healthapp.AffectedChangeDispatchResult{}, true, classifyAffectedChangeError(err, "HEALTH_AFFECTED_BACKOFF_FAILED")
+		return affectedChangeDispatch{found: true}, classifyAffectedChangeError(err, "HEALTH_AFFECTED_BACKOFF_FAILED")
 	}
 	if tag.RowsAffected() != 1 {
-		return healthapp.AffectedChangeDispatchResult{}, true, affectedChangeConsistency(errors.New("health affected-change backoff CAS did not match"))
+		return affectedChangeDispatch{found: true}, affectedChangeConsistency(errors.New("health affected-change backoff CAS did not match"))
 	}
 	expectation := affectedChangeCommitExpectation{
 		row: row, result: result, availableAt: availableAt, errorCode: healthapp.ErrorCodeAffectedChangeScanActive,
 	}
-	if err := repository.commitWithRecovery(ctx, tx, expectation); err != nil {
-		return healthapp.AffectedChangeDispatchResult{}, true, err
-	}
-	return result, true, nil
+	return affectedChangeDispatch{result: result, found: true, expectation: &expectation}, nil
 }
 
-func (repository *AffectedChangeDispatchRepository) poisonAndCommit(ctx context.Context, tx pgx.Tx, row affectedChangeRow, now time.Time, code string, cause error) (healthapp.AffectedChangeDispatchResult, bool, error) {
+func (repository *AffectedChangeDispatchRepository) poisonAffectedChange(ctx context.Context, tx healthTransaction, row affectedChangeRow, now time.Time, code string, cause error) (affectedChangeDispatch, error) {
 	if code == "" {
 		code = healthapp.ErrorCodeAffectedChangeInvalid
 	}
@@ -166,33 +175,27 @@ SET poisoned_at=$2,manual_recovery_required=true,last_error_code=$3,
 WHERE id=$1 AND version=$4 AND published_at IS NULL AND NOT manual_recovery_required`,
 		string(row.event.ID), now, code, row.version)
 	if err != nil {
-		return healthapp.AffectedChangeDispatchResult{}, true, classifyAffectedChangeError(err, "HEALTH_AFFECTED_POISON_FAILED")
+		return affectedChangeDispatch{found: true}, classifyAffectedChangeError(err, "HEALTH_AFFECTED_POISON_FAILED")
 	}
 	if tag.RowsAffected() != 1 {
-		return healthapp.AffectedChangeDispatchResult{}, true, affectedChangeConsistency(errors.New("health affected-change poison CAS did not match"))
+		return affectedChangeDispatch{found: true}, affectedChangeConsistency(errors.New("health affected-change poison CAS did not match"))
 	}
 	expectation := affectedChangeCommitExpectation{row: row, result: result, errorCode: code}
-	if err := repository.commitWithRecovery(ctx, tx, expectation); err != nil {
-		return healthapp.AffectedChangeDispatchResult{}, true, err
-	}
-	return result, true, foundation.NewError(foundation.ErrorManualRecoveryRequired, code, false, cause)
+	return affectedChangeDispatch{result: result, found: true, expectation: &expectation, afterCommitError: foundation.NewError(foundation.ErrorManualRecoveryRequired, code, false, cause)}, nil
 }
 
-func (repository *AffectedChangeDispatchRepository) commitWithRecovery(ctx context.Context, tx pgx.Tx, expectation affectedChangeCommitExpectation) error {
-	if err := tx.Commit(ctx); err != nil {
-		recoveryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		defer cancel()
-		recovered, recoveryErr := repository.recoverCommittedOutcome(recoveryCtx, expectation)
-		if recovered && recoveryErr == nil {
-			return nil
-		}
-		classified := classifyAffectedChangeError(err, "HEALTH_AFFECTED_COMMIT_FAILED")
-		if recoveryErr != nil {
-			return errors.Join(classified, recoveryErr)
-		}
-		return classified
+func (repository *AffectedChangeDispatchRepository) recoverCommitFailure(ctx context.Context, err error, expectation affectedChangeCommitExpectation) error {
+	recoveryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	recovered, recoveryErr := repository.recoverCommittedOutcome(recoveryCtx, expectation)
+	if recovered && recoveryErr == nil {
+		return nil
 	}
-	return nil
+	classified := classifyAffectedChangeError(err, "HEALTH_AFFECTED_COMMIT_FAILED")
+	if recoveryErr != nil {
+		return errors.Join(classified, recoveryErr)
+	}
+	return classified
 }
 
 func (repository *AffectedChangeDispatchRepository) recoverCommittedOutcome(ctx context.Context, expectation affectedChangeCommitExpectation) (bool, error) {
@@ -205,7 +208,7 @@ func (repository *AffectedChangeDispatchRepository) recoverCommittedOutcome(ctx 
 bound_workflow_run_id::text,published_at,poisoned_at,manual_recovery_required,available_at
 FROM ops.health_affected_change_outbox WHERE id=$1`, string(expectation.row.event.ID)).Scan(
 		&attemptCount, &version, &lastErrorCode, &scanID, &workflowRunID, &publishedAt, &poisonedAt, &manualRecovery, &availableAt)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
@@ -236,7 +239,7 @@ FROM ops.health_affected_change_outbox WHERE id=$1`, string(expectation.row.even
 	}
 }
 
-func claimAffectedChange(ctx context.Context, tx pgx.Tx, now time.Time) (affectedChangeRow, bool, error) {
+func claimAffectedChange(ctx context.Context, tx healthTransaction, now time.Time) (affectedChangeRow, bool, error) {
 	var row affectedChangeRow
 	var id, workspaceID, eventType, sourceKind, aggregateID string
 	var sourceHash, aggregateSubID, changeCode *string
@@ -250,7 +253,7 @@ FOR UPDATE SKIP LOCKED LIMIT 1`, now).Scan(
 		&id, &workspaceID, &row.event.SchemaVersion, &row.event.EventVersion, &eventType,
 		&sourceKind, &row.event.SourceKey, &sourceHash, &row.event.AggregateType, &aggregateID, &aggregateSubID,
 		&row.event.AggregateVersion, &row.event.ChangeStatus, &changeCode, &row.attemptCount, &row.version, &row.availableAt)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, sql.ErrNoRows) {
 		return affectedChangeRow{}, false, nil
 	}
 	if err != nil {
@@ -273,10 +276,10 @@ FOR UPDATE SKIP LOCKED LIMIT 1`, now).Scan(
 	return row, true, nil
 }
 
-func verifyAffectedChangeSource(ctx context.Context, tx pgx.Tx, event healthapp.AffectedChangeEvent) (int64, bool, error) {
+func verifyAffectedChangeSource(ctx context.Context, tx healthTransaction, event healthapp.AffectedChangeEvent) (int64, bool, error) {
 	var workspaceVersion int64
 	if err := tx.QueryRow(ctx, `SELECT version FROM core.workspace WHERE id=$1`, string(event.WorkspaceID)).Scan(&workspaceVersion); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, sql.ErrNoRows) {
 			return 0, false, nil
 		}
 		return 0, false, classifyAffectedChangeError(err, "HEALTH_AFFECTED_WORKSPACE_QUERY_FAILED")
@@ -320,7 +323,7 @@ WHERE projection.index_version_id=$1 AND projection.chunk_id=$2 AND projection.w
 	return workspaceVersion, matches, nil
 }
 
-func activeAffectedWorkspaceScan(ctx context.Context, tx pgx.Tx, workspaceID foundation.ID) (bool, error) {
+func activeAffectedWorkspaceScan(ctx context.Context, tx healthTransaction, workspaceID foundation.ID) (bool, error) {
 	var active bool
 	err := tx.QueryRow(ctx, `SELECT EXISTS (
 SELECT 1 FROM ops.health_scan
@@ -332,7 +335,7 @@ WHERE workspace_id=$1 AND scope_type='WORKSPACE' AND scope_ref=$1
 	return active, nil
 }
 
-func affectedChangeDatabaseTime(ctx context.Context, tx pgx.Tx) (time.Time, error) {
+func affectedChangeDatabaseTime(ctx context.Context, tx healthTransaction) (time.Time, error) {
 	var now time.Time
 	if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&now); err != nil {
 		return time.Time{}, classifyAffectedChangeError(err, "HEALTH_AFFECTED_DB_TIME_UNAVAILABLE")

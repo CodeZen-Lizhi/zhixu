@@ -3,6 +3,7 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	agentpostgres "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/postgres"
 	agentapplication "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
 	agentdomain "github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
+	auditpostgres "github.com/CodeZen-Lizhi/zhixu/internal/audit/adapter/postgres"
 	conversationapplication "github.com/CodeZen-Lizhi/zhixu/internal/conversation/application"
 	conversationdomain "github.com/CodeZen-Lizhi/zhixu/internal/conversation/domain"
 	conversationworkflow "github.com/CodeZen-Lizhi/zhixu/internal/conversation/workflow"
@@ -20,18 +22,20 @@ import (
 	eventsapplication "github.com/CodeZen-Lizhi/zhixu/internal/events/application"
 	eventsdomain "github.com/CodeZen-Lizhi/zhixu/internal/events/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	modelsettingspostgres "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/adapter/postgres"
+	modelcrypto "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/crypto"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	retrievaldomain "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
 	toolcatalog "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/catalog"
 	workflowpostgres "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/postgres"
 	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
 	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
 	workflowdomain "github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestQuestionDispatcherAtomicallyCreatesAndExactlyReplaysQuestionWorkflowAndEvents(t *testing.T) {
-	conversationRepository, pool, ctx := newConversationTestRepository(t)
+	conversationRepository, shared, pool, ctx := newConversationTestRepository(t)
 	workspaceID := conversationPostgresID(100)
 	conversationID := conversationPostgresID(101)
 	seedConversationWorkspaces(t, ctx, pool, workspaceID)
@@ -41,7 +45,7 @@ func TestQuestionDispatcherAtomicallyCreatesAndExactlyReplaysQuestionWorkflowAnd
 	)); err != nil {
 		t.Fatal(err)
 	}
-	dispatcher := newQuestionDispatcherIntegration(t, pool)
+	dispatcher := newQuestionDispatcherIntegration(t, shared)
 	record := questionDispatchRecord(t, workspaceID, conversationID, "What changed in the approved design?", "question-atomic-1")
 
 	created, err := dispatcher.SubmitQuestion(ctx, record)
@@ -127,7 +131,7 @@ func TestQuestionDispatcherAtomicallyCreatesAndExactlyReplaysQuestionWorkflowAnd
 }
 
 func TestQuestionDispatcherWorkspaceAnalysisAtomicallyCreatesAndReplaysFrozenRun(t *testing.T) {
-	conversationRepository, pool, ctx := newConversationTestRepository(t)
+	conversationRepository, shared, pool, ctx := newConversationTestRepository(t)
 	workspaceID := conversationPostgresID(330)
 	conversationID := conversationPostgresID(331)
 	seedConversationWorkspaces(t, ctx, pool, workspaceID)
@@ -137,7 +141,7 @@ func TestQuestionDispatcherWorkspaceAnalysisAtomicallyCreatesAndReplaysFrozenRun
 	)); err != nil {
 		t.Fatal(err)
 	}
-	dispatcher := newWorkspaceAnalysisQuestionDispatcherIntegration(t, pool)
+	dispatcher := newWorkspaceAnalysisQuestionDispatcherIntegration(t, shared)
 	record := workspaceAnalysisQuestionDispatchRecord(
 		t, workspaceID, conversationID, "Inspect the repository and explain the approved evidence.", "workspace-analysis-question-1",
 	)
@@ -277,7 +281,7 @@ func TestQuestionDispatcherWorkspaceAnalysisAtomicallyCreatesAndReplaysFrozenRun
 }
 
 func TestQuestionDispatcherWorkspaceAnalysisRunFailureRollsBackEveryDispatchFact(t *testing.T) {
-	conversationRepository, pool, ctx := newConversationTestRepository(t)
+	conversationRepository, shared, pool, ctx := newConversationTestRepository(t)
 	workspaceID := conversationPostgresID(340)
 	conversationID := conversationPostgresID(341)
 	seedConversationWorkspaces(t, ctx, pool, workspaceID)
@@ -286,9 +290,9 @@ func TestQuestionDispatcherWorkspaceAnalysisRunFailureRollsBackEveryDispatchFact
 	)); err != nil {
 		t.Fatal(err)
 	}
-	runtime, events := newQuestionDispatchDependencies(t, pool)
-	dispatcher, err := NewQuestionDispatcherWithWorkspaceAnalysis(
-		pool, runtime, events, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, &failingWorkspaceAnalysisRunStarter{},
+	runtime, events := newQuestionDispatchDependencies(t, shared)
+	dispatcher, err := NewGORMQuestionDispatcherWithWorkspaceAnalysis(
+		shared, runtime, events, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, &failingWorkspaceAnalysisRunStarter{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -326,7 +330,7 @@ func TestQuestionDispatcherWorkspaceAnalysisRunFailureRollsBackEveryDispatchFact
 }
 
 func TestQuestionDispatcherWorkspaceAnalysisAuditFailureRollsBackEveryDispatchFact(t *testing.T) {
-	conversationRepository, pool, ctx := newConversationTestRepository(t)
+	conversationRepository, shared, pool, ctx := newConversationTestRepository(t)
 	workspaceID := conversationPostgresID(345)
 	conversationID := conversationPostgresID(346)
 	seedConversationWorkspaces(t, ctx, pool, workspaceID)
@@ -337,7 +341,7 @@ func TestQuestionDispatcherWorkspaceAnalysisAuditFailureRollsBackEveryDispatchFa
 	}
 	cause := errors.New("injected workspace analysis audit failure")
 	dispatcher := newWorkspaceAnalysisQuestionDispatcherAtRevisionAndAuditIntegration(
-		t, pool, pool, 1, &workspaceAnalysisAuditCapture{err: cause},
+		t, nil, shared, 1, &workspaceAnalysisAuditCapture{err: cause},
 	)
 	record := workspaceAnalysisQuestionDispatchRecord(
 		t, workspaceID, conversationID, "Inspect atomically with audit", "workspace-analysis-audit-rollback-1",
@@ -378,7 +382,7 @@ func TestQuestionDispatcherWorkspaceAnalysisAuditFailureRollsBackEveryDispatchFa
 }
 
 func TestQuestionDispatcherWorkspaceAnalysisExactlyReplaysCommitResponseLoss(t *testing.T) {
-	conversationRepository, pool, ctx := newConversationTestRepository(t)
+	conversationRepository, shared, pool, ctx := newConversationTestRepository(t)
 	workspaceID := conversationPostgresID(350)
 	conversationID := conversationPostgresID(351)
 	seedConversationWorkspaces(t, ctx, pool, workspaceID)
@@ -387,9 +391,9 @@ func TestQuestionDispatcherWorkspaceAnalysisExactlyReplaysCommitResponseLoss(t *
 	)); err != nil {
 		t.Fatal(err)
 	}
-	auditRecorder, auditStore := newWorkspaceAnalysisAuditIntegration(t, pool)
-	lossDB := &conversationCommitResponseLossDB{Pool: pool, loseNext: true}
-	dispatcher := newWorkspaceAnalysisQuestionDispatcherAtRevisionAndAuditIntegration(t, lossDB, pool, 1, auditRecorder)
+	auditRecorder, auditStore := newWorkspaceAnalysisAuditIntegration(t, shared)
+	lossDB := &conversationCommitResponseLossDB{UnitOfWork: conversationRepository.uow, loseNext: true}
+	dispatcher := newWorkspaceAnalysisQuestionDispatcherAtRevisionAndAuditIntegration(t, lossDB, shared, 1, auditRecorder)
 	record := workspaceAnalysisQuestionDispatchRecord(
 		t, workspaceID, conversationID, "Inspect after the response is lost", "workspace-analysis-response-loss-1",
 	)
@@ -411,7 +415,7 @@ func TestQuestionDispatcherWorkspaceAnalysisExactlyReplaysCommitResponseLoss(t *
 		t.Fatal(err)
 	}
 
-	replayDispatcher := newWorkspaceAnalysisQuestionDispatcherAtRevisionAndAuditIntegration(t, lossDB, pool, 2, auditRecorder)
+	replayDispatcher := newWorkspaceAnalysisQuestionDispatcherAtRevisionAndAuditIntegration(t, lossDB, shared, 2, auditRecorder)
 	replayed, err := replayDispatcher.SubmitQuestion(ctx, record)
 	if err != nil || !replayed.Replayed || string(replayed.Question.ID) != questionID || string(replayed.Answer.ID) != answerID ||
 		string(replayed.Workflow.RunID) != workflowRunID || string(replayed.NodeRunID) != nodeRunID || replayed.JobID != jobID {
@@ -457,7 +461,7 @@ func TestQuestionDispatcherWorkspaceAnalysisExactlyReplaysCommitResponseLoss(t *
 }
 
 func TestQuestionDispatcherWorkspaceAnalysisUsesWallClockAfterTransactionDelay(t *testing.T) {
-	conversationRepository, pool, ctx := newConversationTestRepository(t)
+	conversationRepository, shared, pool, ctx := newConversationTestRepository(t)
 	workspaceID := conversationPostgresID(360)
 	conversationID := conversationPostgresID(361)
 	seedConversationWorkspaces(t, ctx, pool, workspaceID)
@@ -467,8 +471,8 @@ func TestQuestionDispatcherWorkspaceAnalysisUsesWallClockAfterTransactionDelay(t
 	)); err != nil {
 		t.Fatal(err)
 	}
-	delayedDB := &delayedQuestionDispatchDB{Pool: pool}
-	dispatcher := newWorkspaceAnalysisQuestionDispatcherWithDBIntegration(t, delayedDB, pool)
+	delayedDB := &delayedQuestionDispatchDB{UnitOfWork: conversationRepository.uow}
+	dispatcher := newWorkspaceAnalysisQuestionDispatcherWithDBIntegration(t, delayedDB, shared)
 	created, err := dispatcher.SubmitQuestion(ctx, workspaceAnalysisQuestionDispatchRecord(
 		t, workspaceID, conversationID, "Inspect after waiting for the transaction", "workspace-analysis-delayed-1",
 	))
@@ -498,7 +502,7 @@ func TestQuestionDispatcherWorkspaceAnalysisUsesWallClockAfterTransactionDelay(t
 func TestQuestionDispatcherRejectsActiveWorkflowAndAllowsQuestionAfterTerminalRun(t *testing.T) {
 	for index, terminalStatus := range []workflowdomain.RunStatus{workflowdomain.RunStatusFailed, workflowdomain.RunStatusCancelled} {
 		t.Run(string(terminalStatus), func(t *testing.T) {
-			conversationRepository, pool, ctx := newConversationTestRepository(t)
+			conversationRepository, shared, pool, ctx := newConversationTestRepository(t)
 			workspaceID := conversationPostgresID(110 + index*10)
 			conversationID := conversationPostgresID(111 + index*10)
 			seedConversationWorkspaces(t, ctx, pool, workspaceID)
@@ -508,7 +512,7 @@ func TestQuestionDispatcherRejectsActiveWorkflowAndAllowsQuestionAfterTerminalRu
 			)); err != nil {
 				t.Fatal(err)
 			}
-			dispatcher := newQuestionDispatcherIntegration(t, pool)
+			dispatcher := newQuestionDispatcherIntegration(t, shared)
 			firstRecord := questionDispatchRecord(t, workspaceID, conversationID, "First question", "question-terminal-1")
 			first, err := dispatcher.SubmitQuestion(ctx, firstRecord)
 			if err != nil {
@@ -576,7 +580,7 @@ func TestQuestionDispatcherSerializesConcurrentSameAndDifferentKeys(t *testing.T
 	}
 	for index, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			conversationRepository, pool, ctx := newConversationTestRepository(t)
+			conversationRepository, shared, pool, ctx := newConversationTestRepository(t)
 			workspaceID := conversationPostgresID(120 + index*10)
 			conversationID := conversationPostgresID(121 + index*10)
 			seedConversationWorkspaces(t, ctx, pool, workspaceID)
@@ -585,7 +589,7 @@ func TestQuestionDispatcherSerializesConcurrentSameAndDifferentKeys(t *testing.T
 			)); err != nil {
 				t.Fatal(err)
 			}
-			dispatcher := newQuestionDispatcherIntegration(t, pool)
+			dispatcher := newQuestionDispatcherIntegration(t, shared)
 			records := test.records(t, workspaceID, conversationID)
 			type outcome struct {
 				result conversationapplication.SubmitQuestionResult
@@ -666,7 +670,7 @@ func TestQuestionDispatcherRollsBackEveryFactAfterRuntimeOrEventFailure(t *testi
 	}
 	for index, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			conversationRepository, pool, ctx := newConversationTestRepository(t)
+			conversationRepository, shared, pool, ctx := newConversationTestRepository(t)
 			workspaceID := conversationPostgresID(150 + index*10)
 			conversationID := conversationPostgresID(151 + index*10)
 			seedConversationWorkspaces(t, ctx, pool, workspaceID)
@@ -675,17 +679,17 @@ func TestQuestionDispatcherRollsBackEveryFactAfterRuntimeOrEventFailure(t *testi
 			)); err != nil {
 				t.Fatal(err)
 			}
-			runtime, events := newQuestionDispatchDependencies(t, pool)
-			var runtimePort questionRuntimeStarter = runtime
-			var eventPort eventsapplication.Appender = events
+			runtime, events := newQuestionDispatchDependencies(t, shared)
+			var runtimePort workflowapplication.ScopedRuntimeStarter = runtime
+			var eventPort eventsapplication.ScopedAppender = events
 			injected := foundation.NewError(foundation.ErrorDependencyUnavailable, "TEST_QUESTION_DISPATCH_FAILURE", true, errors.New("injected question dispatch failure"))
 			if test.stage == "runtime" {
 				runtimePort = failAfterQuestionRuntime{next: runtime, err: injected}
 			} else {
 				eventPort = failingConversationEventAppender{err: injected}
 			}
-			dispatcher, err := NewQuestionDispatcher(
-				pool, runtimePort, eventPort, foundation.NewUUIDGenerator(nil), foundation.SystemClock{},
+			dispatcher, err := NewGORMQuestionDispatcher(
+				shared, runtimePort, eventPort, foundation.NewUUIDGenerator(nil), foundation.SystemClock{},
 			)
 			if err != nil {
 				t.Fatal(err)
@@ -731,7 +735,7 @@ func TestQuestionDispatcherClassifiesIDGenerationFailureAndRollsBack(t *testing.
 	}
 	for index, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			conversationRepository, pool, ctx := newConversationTestRepository(t)
+			conversationRepository, shared, pool, ctx := newConversationTestRepository(t)
 			workspaceID := conversationPostgresID(220 + index*10)
 			conversationID := conversationPostgresID(221 + index*10)
 			seedConversationWorkspaces(t, ctx, pool, workspaceID)
@@ -740,11 +744,11 @@ func TestQuestionDispatcherClassifiesIDGenerationFailureAndRollsBack(t *testing.
 			)); err != nil {
 				t.Fatal(err)
 			}
-			runtime, events := newQuestionDispatchDependencies(t, pool)
+			runtime, events := newQuestionDispatchDependencies(t, shared)
 			injected := errors.New("injected ID generation failure")
 			ids := &failAtQuestionIDGenerator{next: foundation.NewUUIDGenerator(nil), failAt: test.failAt, err: injected}
-			dispatcher, err := NewQuestionDispatcher(
-				pool, runtime, events, ids, foundation.SystemClock{},
+			dispatcher, err := NewGORMQuestionDispatcher(
+				shared, runtime, events, ids, foundation.SystemClock{},
 			)
 			if err != nil {
 				t.Fatal(err)
@@ -762,7 +766,7 @@ func TestQuestionDispatcherClassifiesIDGenerationFailureAndRollsBack(t *testing.
 }
 
 func TestQuestionDispatcherRejectsInvalidRuntimeResultAndRollsBack(t *testing.T) {
-	conversationRepository, pool, ctx := newConversationTestRepository(t)
+	conversationRepository, shared, pool, ctx := newConversationTestRepository(t)
 	workspaceID := conversationPostgresID(250)
 	conversationID := conversationPostgresID(251)
 	seedConversationWorkspaces(t, ctx, pool, workspaceID)
@@ -771,9 +775,9 @@ func TestQuestionDispatcherRejectsInvalidRuntimeResultAndRollsBack(t *testing.T)
 	)); err != nil {
 		t.Fatal(err)
 	}
-	runtime, events := newQuestionDispatchDependencies(t, pool)
-	dispatcher, err := NewQuestionDispatcher(
-		pool,
+	runtime, events := newQuestionDispatchDependencies(t, shared)
+	dispatcher, err := NewGORMQuestionDispatcher(
+		shared,
 		mutatingQuestionRuntime{
 			next: runtime,
 			mutate: func(result *workflowapplication.RuntimeStartResult) {
@@ -793,7 +797,7 @@ func TestQuestionDispatcherRejectsInvalidRuntimeResultAndRollsBack(t *testing.T)
 }
 
 func TestQuestionDispatcherExactlyReplaysCommitResponseLossAfterEventCleanup(t *testing.T) {
-	conversationRepository, pool, ctx := newConversationTestRepository(t)
+	conversationRepository, shared, pool, ctx := newConversationTestRepository(t)
 	workspaceID := conversationPostgresID(180)
 	conversationID := conversationPostgresID(181)
 	seedConversationWorkspaces(t, ctx, pool, workspaceID)
@@ -802,14 +806,16 @@ func TestQuestionDispatcherExactlyReplaysCommitResponseLossAfterEventCleanup(t *
 	)); err != nil {
 		t.Fatal(err)
 	}
-	runtime, events := newQuestionDispatchDependencies(t, pool)
-	lossDB := &conversationCommitResponseLossDB{Pool: pool, loseNext: true}
-	dispatcher, err := NewQuestionDispatcher(
-		lossDB, runtime, events, foundation.NewUUIDGenerator(nil), foundation.SystemClock{},
+	runtime, events := newQuestionDispatchDependencies(t, shared)
+	lossDB := &conversationCommitResponseLossDB{UnitOfWork: conversationRepository.uow, loseNext: true}
+	dispatcher, err := NewGORMQuestionDispatcher(
+		shared, runtime, events, foundation.NewUUIDGenerator(nil), foundation.SystemClock{},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
+	dispatcher.uow = lossDB
+
 	record := questionDispatchRecord(t, workspaceID, conversationID, "Did the transaction commit?", "question-response-loss-1")
 	if _, err := dispatcher.SubmitQuestion(ctx, record); err == nil {
 		t.Fatal("SubmitQuestion() did not expose the injected commit response loss")
@@ -858,7 +864,7 @@ func TestQuestionDispatcherExactlyReplaysCommitResponseLossAfterEventCleanup(t *
 }
 
 func TestQuestionDispatcherExactlyReplaysAfterWorkflowAdvancesDuringReplay(t *testing.T) {
-	conversationRepository, pool, ctx := newConversationTestRepository(t)
+	conversationRepository, shared, pool, ctx := newConversationTestRepository(t)
 	workspaceID := conversationPostgresID(260)
 	conversationID := conversationPostgresID(261)
 	seedConversationWorkspaces(t, ctx, pool, workspaceID)
@@ -867,9 +873,9 @@ func TestQuestionDispatcherExactlyReplaysAfterWorkflowAdvancesDuringReplay(t *te
 	)); err != nil {
 		t.Fatal(err)
 	}
-	runtime, events := newQuestionDispatchDependencies(t, pool)
-	dispatcher, err := NewQuestionDispatcher(
-		pool, runtime, events, foundation.NewUUIDGenerator(nil), foundation.SystemClock{},
+	runtime, events := newQuestionDispatchDependencies(t, shared)
+	dispatcher, err := NewGORMQuestionDispatcher(
+		shared, runtime, events, foundation.NewUUIDGenerator(nil), foundation.SystemClock{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -883,8 +889,8 @@ func TestQuestionDispatcherExactlyReplaysAfterWorkflowAdvancesDuringReplay(t *te
 	advancingRuntime := &claimBeforeQuestionReplayRuntime{
 		next: runtime, nodeRunID: created.NodeRunID, jobID: created.JobID,
 	}
-	replayDispatcher, err := NewQuestionDispatcher(
-		pool, advancingRuntime, events, foundation.NewUUIDGenerator(nil), foundation.SystemClock{},
+	replayDispatcher, err := NewGORMQuestionDispatcher(
+		shared, advancingRuntime, events, foundation.NewUUIDGenerator(nil), foundation.SystemClock{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -909,7 +915,7 @@ func TestQuestionDispatcherExactlyReplaysAfterWorkflowAdvancesDuringReplay(t *te
 }
 
 func TestQuestionDispatcherScopesExternalIdempotencyKeyToConversation(t *testing.T) {
-	conversationRepository, pool, ctx := newConversationTestRepository(t)
+	conversationRepository, shared, pool, ctx := newConversationTestRepository(t)
 	workspaceID := conversationPostgresID(190)
 	conversationA := conversationPostgresID(191)
 	conversationB := conversationPostgresID(192)
@@ -923,7 +929,7 @@ func TestQuestionDispatcherScopesExternalIdempotencyKeyToConversation(t *testing
 			t.Fatal(err)
 		}
 	}
-	dispatcher := newQuestionDispatcherIntegration(t, pool)
+	dispatcher := newQuestionDispatcherIntegration(t, shared)
 	first, err := dispatcher.SubmitQuestion(ctx, questionDispatchRecord(
 		t, workspaceID, conversationA, "Question in A", "shared-external-question-key",
 	))
@@ -953,7 +959,7 @@ func TestQuestionDispatcherScopesExternalIdempotencyKeyToConversation(t *testing
 }
 
 func TestQuestionDispatcherHidesCrossWorkspaceAndRejectsArchivedConversation(t *testing.T) {
-	conversationRepository, pool, ctx := newConversationTestRepository(t)
+	conversationRepository, shared, pool, ctx := newConversationTestRepository(t)
 	workspaceA := conversationPostgresID(200)
 	workspaceB := conversationPostgresID(201)
 	conversationID := conversationPostgresID(202)
@@ -964,7 +970,7 @@ func TestQuestionDispatcherHidesCrossWorkspaceAndRejectsArchivedConversation(t *
 	)); err != nil {
 		t.Fatal(err)
 	}
-	dispatcher := newQuestionDispatcherIntegration(t, pool)
+	dispatcher := newQuestionDispatcherIntegration(t, shared)
 	_, crossWorkspaceErr := dispatcher.SubmitQuestion(ctx, questionDispatchRecord(
 		t, workspaceB, conversationID, "Cross workspace", "question-cross-workspace",
 	))
@@ -997,7 +1003,7 @@ func TestQuestionDispatcherHidesCrossWorkspaceAndRejectsArchivedConversation(t *
 }
 
 func TestQuestionDispatcherExactlyReplaysExistingQuestionAfterConversationArchived(t *testing.T) {
-	conversationRepository, pool, ctx := newConversationTestRepository(t)
+	conversationRepository, shared, pool, ctx := newConversationTestRepository(t)
 	workspaceID := conversationPostgresID(205)
 	conversationID := conversationPostgresID(206)
 	seedConversationWorkspaces(t, ctx, pool, workspaceID)
@@ -1007,7 +1013,7 @@ func TestQuestionDispatcherExactlyReplaysExistingQuestionAfterConversationArchiv
 	)); err != nil {
 		t.Fatal(err)
 	}
-	dispatcher := newQuestionDispatcherIntegration(t, pool)
+	dispatcher := newQuestionDispatcherIntegration(t, shared)
 	record := questionDispatchRecord(t, workspaceID, conversationID, "Already accepted question", "question-before-archive")
 	created, err := dispatcher.SubmitQuestion(ctx, record)
 	if err != nil {
@@ -1050,7 +1056,7 @@ func TestQuestionDispatcherExactlyReplaysExistingQuestionAfterConversationArchiv
 }
 
 func TestQuestionDispatcherFreezesPublishedContextHashInWorkflowInput(t *testing.T) {
-	conversationRepository, pool, ctx := newConversationTestRepository(t)
+	conversationRepository, shared, pool, ctx := newConversationTestRepository(t)
 	workspaceID := conversationPostgresID(210)
 	conversationID := conversationPostgresID(211)
 	seedConversationWorkspaces(t, ctx, pool, workspaceID)
@@ -1085,7 +1091,7 @@ func TestQuestionDispatcherFreezesPublishedContextHashInWorkflowInput(t *testing
 		t.Fatal(err)
 	}
 
-	dispatcher := newQuestionDispatcherIntegration(t, pool)
+	dispatcher := newQuestionDispatcherIntegration(t, shared)
 	result, err := dispatcher.SubmitQuestion(ctx, questionDispatchRecord(
 		t, workspaceID, conversationID, "Use the frozen conversation context", "question-frozen-context",
 	))
@@ -1113,10 +1119,10 @@ func TestQuestionDispatcherFreezesPublishedContextHashInWorkflowInput(t *testing
 	}
 }
 
-func newQuestionDispatcherIntegration(t *testing.T, pool *pgxpool.Pool) *QuestionDispatcher {
+func newQuestionDispatcherIntegration(t *testing.T, pool *platformpostgres.Pool) *GORMQuestionDispatcher {
 	t.Helper()
 	runtime, events := newQuestionDispatchDependencies(t, pool)
-	dispatcher, err := NewQuestionDispatcher(
+	dispatcher, err := NewGORMQuestionDispatcher(
 		pool, runtime, events, foundation.NewUUIDGenerator(nil), foundation.SystemClock{},
 	)
 	if err != nil {
@@ -1125,28 +1131,28 @@ func newQuestionDispatcherIntegration(t *testing.T, pool *pgxpool.Pool) *Questio
 	return dispatcher
 }
 
-func newWorkspaceAnalysisQuestionDispatcherIntegration(t *testing.T, pool *pgxpool.Pool) *QuestionDispatcher {
-	return newWorkspaceAnalysisQuestionDispatcherWithDBIntegration(t, pool, pool)
+func newWorkspaceAnalysisQuestionDispatcherIntegration(t *testing.T, pool *platformpostgres.Pool) *GORMQuestionDispatcher {
+	return newWorkspaceAnalysisQuestionDispatcherWithDBIntegration(t, nil, pool)
 }
 
-func newWorkspaceAnalysisQuestionDispatcherWithDBIntegration(t *testing.T, db DB, pool *pgxpool.Pool) *QuestionDispatcher {
-	return newWorkspaceAnalysisQuestionDispatcherAtRevisionIntegration(t, db, pool, 1)
+func newWorkspaceAnalysisQuestionDispatcherWithDBIntegration(t *testing.T, uow foundation.UnitOfWork, pool *platformpostgres.Pool) *GORMQuestionDispatcher {
+	return newWorkspaceAnalysisQuestionDispatcherAtRevisionIntegration(t, uow, pool, 1)
 }
 
-func newWorkspaceAnalysisQuestionDispatcherAtRevisionIntegration(t *testing.T, db DB, pool *pgxpool.Pool, configRevision int64) *QuestionDispatcher {
-	return newWorkspaceAnalysisQuestionDispatcherAtRevisionAndAuditIntegration(t, db, pool, configRevision, nil)
+func newWorkspaceAnalysisQuestionDispatcherAtRevisionIntegration(t *testing.T, uow foundation.UnitOfWork, pool *platformpostgres.Pool, configRevision int64) *GORMQuestionDispatcher {
+	return newWorkspaceAnalysisQuestionDispatcherAtRevisionAndAuditIntegration(t, uow, pool, configRevision, nil)
 }
 
 func newWorkspaceAnalysisQuestionDispatcherAtRevisionAndAuditIntegration(
 	t *testing.T,
-	db DB,
-	pool *pgxpool.Pool,
+	uow foundation.UnitOfWork,
+	pool *platformpostgres.Pool,
 	configRevision int64,
-	audit WorkspaceAnalysisAuditRecorder,
-) *QuestionDispatcher {
+	audit ScopedWorkspaceAnalysisAuditRecorder,
+) *GORMQuestionDispatcher {
 	t.Helper()
 	runtime, events := newQuestionDispatchDependencies(t, pool)
-	repository, err := agentpostgres.NewRepository(pool)
+	repository, err := agentpostgres.NewGORMRepository(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1154,7 +1160,7 @@ func newWorkspaceAnalysisQuestionDispatcherAtRevisionAndAuditIntegration(
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := agentapplication.NewWorkspaceAnalysisRunService(
+	service, err := agentapplication.NewScopedWorkspaceAnalysisRunService(
 		repository,
 		foundation.NewUUIDGenerator(nil),
 		agentapplication.WorkspaceAnalysisRunStartConfig{
@@ -1171,18 +1177,21 @@ func newWorkspaceAnalysisQuestionDispatcherAtRevisionAndAuditIntegration(
 	if err != nil {
 		t.Fatal(err)
 	}
-	var dispatcher *QuestionDispatcher
+	var dispatcher *GORMQuestionDispatcher
 	if isNilInterface(audit) {
-		dispatcher, err = NewQuestionDispatcherWithWorkspaceAnalysis(
-			db, runtime, events, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, service,
+		dispatcher, err = NewGORMQuestionDispatcherWithWorkspaceAnalysis(
+			pool, runtime, events, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, service,
 		)
 	} else {
-		dispatcher, err = NewQuestionDispatcherWithWorkspaceAnalysisAndAudit(
-			db, runtime, events, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, service, audit,
+		dispatcher, err = NewGORMQuestionDispatcherWithWorkspaceAnalysisAndAudit(
+			pool, runtime, events, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, service, audit,
 		)
 	}
 	if err != nil {
 		t.Fatal(err)
+	}
+	if uow != nil {
+		dispatcher.uow = uow
 	}
 	return dispatcher
 }
@@ -1195,21 +1204,29 @@ func workspaceAnalysisDispatchTimeouts(snapshot toolcatalog.WorkspaceAnalysisToo
 	}
 }
 
-func newQuestionDispatchDependencies(t *testing.T, pool *pgxpool.Pool) (*workflowpostgres.RuntimeRepository, *eventspostgres.Store) {
+func newQuestionDispatchDependencies(t *testing.T, pool *platformpostgres.Pool, requestedHooks ...workflowpostgres.GORMRuntimeRepositoryHooks) (*workflowpostgres.GORMRuntimeRepository, *eventspostgres.GORMStore) {
 	t.Helper()
-	events, err := eventspostgres.NewStore(pool)
+	events, err := eventspostgres.NewGORMStore(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
-	client, err := riveradapter.NewClient(pool, nil)
+	sealer, err := modelcrypto.NewSealer(bytes.Repeat([]byte{0x2a}, 32))
 	if err != nil {
 		t.Fatal(err)
 	}
-	inserter, err := riveradapter.NewJobInserter(client)
+	audit, err := auditpostgres.NewGORMStore(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtime, err := workflowpostgres.NewRuntimeRepository(pool, inserter)
+	settings, err := modelsettingspostgres.NewGORMRepository(pool, modelsettingspostgres.WithGORMSecretSealer(sealer), modelsettingspostgres.WithGORMAuditAppender(audit))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hooks := workflowpostgres.GORMRuntimeRepositoryHooks{}
+	if len(requestedHooks) > 0 {
+		hooks = requestedHooks[0]
+	}
+	runtime, err := workflowpostgres.NewGORMRuntimeRepositoryWithHooks(pool, riveradapter.DefaultOptions(), settings, hooks)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1258,7 +1275,7 @@ func requireQuestionDispatchError(t *testing.T, err error, kind foundation.Error
 
 type failingWorkspaceAnalysisRunStarter struct{}
 
-func (*failingWorkspaceAnalysisRunStarter) StartWorkspaceAnalysisRunTx(context.Context, any, agentapplication.WorkspaceAnalysisRunStartCommand) (agentdomain.WorkspaceAnalysisRun, error) {
+func (*failingWorkspaceAnalysisRunStarter) StartWorkspaceAnalysisRunScoped(context.Context, foundation.TransactionScope, agentapplication.WorkspaceAnalysisRunStartCommand) (agentdomain.WorkspaceAnalysisRun, error) {
 	return agentdomain.WorkspaceAnalysisRun{}, foundation.NewError(
 		foundation.ErrorDependencyUnavailable,
 		agentapplication.ErrorCodeWorkspaceAnalysisRunStartUnavailable,
@@ -1268,24 +1285,24 @@ func (*failingWorkspaceAnalysisRunStarter) StartWorkspaceAnalysisRunTx(context.C
 }
 
 type delayedQuestionDispatchDB struct {
-	*pgxpool.Pool
+	foundation.UnitOfWork
 	transactionStartedAt time.Time
 }
 
-func (database *delayedQuestionDispatchDB) Begin(ctx context.Context) (pgx.Tx, error) {
-	transaction, err := database.Pool.Begin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if err := transaction.QueryRow(ctx, `SELECT CURRENT_TIMESTAMP`).Scan(&database.transactionStartedAt); err != nil {
-		_ = transaction.Rollback(ctx)
-		return nil, err
-	}
-	if _, err := transaction.Exec(ctx, `SELECT pg_sleep(0.075)`); err != nil {
-		_ = transaction.Rollback(ctx)
-		return nil, err
-	}
-	return transaction, nil
+func (database *delayedQuestionDispatchDB) Within(ctx context.Context, options foundation.TransactionOptions, work foundation.TransactionFunc) error {
+	return database.UnitOfWork.Within(ctx, options, func(ctx context.Context, scope foundation.TransactionScope) error {
+		tx, err := platformpostgres.GORMTransaction(scope)
+		if err != nil {
+			return err
+		}
+		if err := tx.WithContext(ctx).Raw(`SELECT CURRENT_TIMESTAMP`).Row().Scan(&database.transactionStartedAt); err != nil {
+			return err
+		}
+		if err := tx.WithContext(ctx).Exec(`SELECT pg_sleep(0.075)`).Error; err != nil {
+			return err
+		}
+		return work(ctx, scope)
+	})
 }
 
 func assertQuestionDispatchHasNoPartialFacts(t *testing.T, ctx context.Context, pool *pgxpool.Pool, workspaceID, conversationID foundation.ID) {
@@ -1328,12 +1345,12 @@ func (generator *failAtQuestionIDGenerator) New() (foundation.ID, error) {
 }
 
 type mutatingQuestionRuntime struct {
-	next   questionRuntimeStarter
+	next   workflowapplication.ScopedRuntimeStarter
 	mutate func(*workflowapplication.RuntimeStartResult)
 }
 
-func (runtime mutatingQuestionRuntime) StartTx(ctx context.Context, tx pgx.Tx, request workflowapplication.RuntimeStartRequest) (workflowapplication.RuntimeStartResult, error) {
-	result, err := runtime.next.StartTx(ctx, tx, request)
+func (runtime mutatingQuestionRuntime) StartScoped(ctx context.Context, scope foundation.TransactionScope, request workflowapplication.RuntimeStartRequest) (workflowapplication.RuntimeStartResult, error) {
+	result, err := runtime.next.StartScoped(ctx, scope, request)
 	if err == nil && runtime.mutate != nil {
 		runtime.mutate(&result)
 	}
@@ -1341,25 +1358,25 @@ func (runtime mutatingQuestionRuntime) StartTx(ctx context.Context, tx pgx.Tx, r
 }
 
 type failAfterQuestionRuntime struct {
-	next questionRuntimeStarter
+	next workflowapplication.ScopedRuntimeStarter
 	err  error
 }
 
-func (runtime failAfterQuestionRuntime) StartTx(ctx context.Context, tx pgx.Tx, request workflowapplication.RuntimeStartRequest) (workflowapplication.RuntimeStartResult, error) {
-	if _, err := runtime.next.StartTx(ctx, tx, request); err != nil {
+func (runtime failAfterQuestionRuntime) StartScoped(ctx context.Context, scope foundation.TransactionScope, request workflowapplication.RuntimeStartRequest) (workflowapplication.RuntimeStartResult, error) {
+	if _, err := runtime.next.StartScoped(ctx, scope, request); err != nil {
 		return workflowapplication.RuntimeStartResult{}, err
 	}
 	return workflowapplication.RuntimeStartResult{}, runtime.err
 }
 
 type claimBeforeQuestionReplayRuntime struct {
-	next      *workflowpostgres.RuntimeRepository
+	next      *workflowpostgres.GORMRuntimeRepository
 	nodeRunID foundation.ID
 	jobID     int64
 	claimed   bool
 }
 
-func (runtime *claimBeforeQuestionReplayRuntime) StartTx(ctx context.Context, tx pgx.Tx, request workflowapplication.RuntimeStartRequest) (workflowapplication.RuntimeStartResult, error) {
+func (runtime *claimBeforeQuestionReplayRuntime) StartScoped(ctx context.Context, scope foundation.TransactionScope, request workflowapplication.RuntimeStartRequest) (workflowapplication.RuntimeStartResult, error) {
 	claimed, err := runtime.next.Claim(ctx, workflowapplication.ClaimCommand{
 		NodeRunID: runtime.nodeRunID, DispatchNo: questionDispatchNo, DeliveryID: "question-concurrent-replay-delivery",
 		RiverJobID: runtime.jobID, RiverJobAttempt: 1, LeaseOwner: "question-concurrent-replay-worker", LeaseDuration: time.Minute,
@@ -1371,5 +1388,5 @@ func (runtime *claimBeforeQuestionReplayRuntime) StartTx(ctx context.Context, tx
 		return workflowapplication.RuntimeStartResult{}, errors.New("workflow claim did not advance the replayed run")
 	}
 	runtime.claimed = true
-	return runtime.next.StartTx(ctx, tx, request)
+	return runtime.next.StartScoped(ctx, scope, request)
 }

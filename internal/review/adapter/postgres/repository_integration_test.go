@@ -9,7 +9,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -22,9 +21,9 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	reviewapp "github.com/CodeZen-Lizhi/zhixu/internal/review/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/review/domain"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 )
 
@@ -722,8 +721,8 @@ func testReviewRepositoryPostgreSQLTODO9Gate(t *testing.T, variant reviewIntegra
 		t.Logf("GORM due query statements=%d", counter.statements())
 	}
 
-	assertReviewDuePlan(t, ctx, pool, workspaceID, deck.Value.ID, now)
-	assertReviewInvalidationPlan(t, ctx, pool, workspaceID, claimID, sourceVersionID, sourceSpanID, now)
+	assertReviewDuePlan(t, ctx, repository.database, workspaceID, deck.Value.ID, now)
+	assertReviewInvalidationPlan(t, ctx, repository.database, workspaceID, claimID, sourceVersionID, sourceSpanID, now)
 
 	invalidationCases := []struct {
 		name          string
@@ -828,25 +827,25 @@ FROM inserted`
 	}
 }
 
-func assertReviewDuePlan(t *testing.T, ctx context.Context, pool *pgxpool.Pool, workspaceID, deckID foundation.ID, now time.Time) {
+func assertReviewDuePlan(t *testing.T, ctx context.Context, database *gorm.DB, workspaceID, deckID foundation.ID, now time.Time) {
 	t.Helper()
-	if _, err := pool.Exec(ctx, `ANALYZE learning.review_card, learning.review_schedule, learning.review_card_evidence_selector`); err != nil {
+	if err := database.WithContext(ctx).Exec(`ANALYZE learning.review_card, learning.review_schedule, learning.review_card_evidence_selector`).Error; err != nil {
 		t.Fatal(err)
 	}
-	tx, err := pool.Begin(ctx)
-	if err != nil {
+	tx := database.WithContext(ctx).Begin()
+	if err := tx.Error; err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
-	if _, err := tx.Exec(ctx, `SET LOCAL enable_seqscan=off`); err != nil {
+	defer func() { _ = tx.Rollback().Error }()
+	if err := tx.Exec(`SET LOCAL enable_seqscan=off`).Error; err != nil {
 		t.Fatal(err)
 	}
-	plan := explainReviewQuery(t, ctx, tx, rankedDueCardsSQL+`
+	plan := explainReviewQuery(t, ctx, tx, gormRankedDueCardsSQL+`
 SELECT card_id
 FROM due
 WHERE deck_position <= GREATEST(daily_limit-answered_today,0)
 ORDER BY due_at ASC,card_id ASC
-LIMIT $4`, string(workspaceID), now.UTC(), string(deckID), reviewapp.MaxInvalidationBatchSize)
+LIMIT ?::integer`, string(workspaceID), now.UTC(), string(deckID), reviewapp.MaxInvalidationBatchSize)
 	if plan.ActualRows < float64(reviewapp.MaxInvalidationBatchSize) {
 		t.Fatalf("Review due EXPLAIN actual rows=%f, want at least %d", plan.ActualRows, reviewapp.MaxInvalidationBatchSize)
 	}
@@ -854,7 +853,7 @@ LIMIT $4`, string(workspaceID), now.UTC(), string(deckID), reviewapp.MaxInvalida
 		t.Fatalf("Review due EXPLAIN did not use a bounded due/card index: %+v", plan)
 	}
 	t.Logf("Review due EXPLAIN actual_rows=%.0f indexes=%v", plan.ActualRows, reviewPlanIndexNames(plan))
-	if err := tx.Rollback(ctx); err != nil {
+	if err := tx.Rollback().Error; err != nil {
 		t.Fatal(err)
 	}
 }
@@ -862,27 +861,28 @@ LIMIT $4`, string(workspaceID), now.UTC(), string(deckID), reviewapp.MaxInvalida
 func assertReviewInvalidationPlan(
 	t *testing.T,
 	ctx context.Context,
-	pool *pgxpool.Pool,
+	database *gorm.DB,
 	workspaceID, claimID, sourceVersionID, sourceSpanID foundation.ID,
 	now time.Time,
 ) {
 	t.Helper()
-	if _, err := pool.Exec(ctx, `ANALYZE learning.review_card, learning.review_card_evidence_selector`); err != nil {
+	if err := database.WithContext(ctx).Exec(`ANALYZE learning.review_card, learning.review_card_evidence_selector`).Error; err != nil {
 		t.Fatal(err)
 	}
-	tx, err := pool.Begin(ctx)
-	if err != nil {
+	tx := database.WithContext(ctx).Begin()
+	if err := tx.Error; err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
-	if _, err := tx.Exec(ctx, `SET LOCAL enable_seqscan=off; SET LOCAL enable_nestloop=off`); err != nil {
+	defer func() { _ = tx.Rollback().Error }()
+	if err := tx.Exec(`SET LOCAL enable_seqscan=off; SET LOCAL enable_nestloop=off`).Error; err != nil {
 		t.Fatal(err)
 	}
 	plan := explainReviewQuery(t, ctx, tx,
-		invalidationStatementPrefix+invalidationBySourceVersionTargets+invalidationStatementSuffix,
+		gormReviewInvalidationStatementPrefix+gormReviewInvalidationBySourceVersionTargets+gormReviewInvalidationStatementSuffix,
 		string(workspaceID), nil, string(sourceVersionID), nil,
-		reviewapp.MaxInvalidationBatchSize+1, reviewapp.MaxInvalidationBatchSize,
-		"TODO9_EXPLAIN", now.UTC(),
+		reviewapp.MaxInvalidationBatchSize+1,
+		"TODO9_EXPLAIN", now.UTC(), now.UTC(),
+		reviewapp.MaxInvalidationBatchSize, string(workspaceID), reviewapp.MaxInvalidationBatchSize,
 	)
 	if !reviewPlanUsesAnyIndex(plan,
 		"idx_learning_review_card_evidence_selector_lookup",
@@ -891,7 +891,7 @@ func assertReviewInvalidationPlan(
 		t.Fatalf("Review invalidation EXPLAIN did not use a selector lookup index: %+v", plan)
 	}
 	t.Logf("Review invalidation EXPLAIN actual_rows=%.0f indexes=%v", plan.ActualRows, reviewPlanIndexNames(plan))
-	if err := tx.Rollback(ctx); err != nil {
+	if err := tx.Rollback().Error; err != nil {
 		t.Fatal(err)
 	}
 }
@@ -1013,7 +1013,7 @@ func assertReviewRowsCancellationAndPoolReuse(
 		if !errors.Is(listErr, context.Canceled) {
 			t.Fatalf("blocked Review list cancellation error=%v", listErr)
 		}
-		if variant.name == "gorm" && !errors.Is(listErr, cancelCause) {
+		if !errors.Is(listErr, cancelCause) {
 			t.Fatalf("blocked GORM Review list did not preserve cancellation cause: %v", listErr)
 		}
 	case <-time.After(3 * time.Second):
@@ -1092,9 +1092,6 @@ func assertReviewSQLTxDoneClassification(
 	workspaceID, claimID foundation.ID,
 ) {
 	t.Helper()
-	if variant.name != "gorm" {
-		return
-	}
 	gormRepository, ok := repository.(*GORMRepository)
 	if !ok || gormRepository == nil {
 		t.Fatal("Review GORM repository has unexpected type")
@@ -1145,15 +1142,6 @@ type reviewDraftFixture struct {
 	workspaceID foundation.ID
 	card        domain.Card
 	now         time.Time
-}
-
-func createReviewDraftFixture(t *testing.T, ctx context.Context, pool *pgxpool.Pool, keyPrefix string) reviewDraftFixture {
-	t.Helper()
-	repository, err := NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return createReviewDraftFixtureWithRepository(t, ctx, pool, repository, keyPrefix)
 }
 
 func createReviewDraftFixtureForVariant(t *testing.T, ctx context.Context, variant reviewIntegrationVariant, keyPrefix string) reviewDraftFixture {
@@ -1632,22 +1620,6 @@ func testReviewRepositoryRejectsRefutingEvidenceAndSupersededClaim(t *testing.T,
 	}
 }
 
-func newReviewTestDatabase(t *testing.T, ctx context.Context) (*pgxpool.Pool, func()) {
-	t.Helper()
-	fixture := testdb.Require(t, testdb.Config{
-		ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
-		Availability:     testdb.FailWhenUnavailable,
-		MaxConns:         16,
-	})
-	platform := fixture.Pool()
-	if platform == nil || platform.DB() == nil {
-		t.Fatal("shared PostgreSQL fixture did not provide a platform pool")
-	}
-	return platform.DB(), func() {
-		_ = fixture.Close(context.Background())
-	}
-}
-
 func seedReviewEvidence(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	t.Helper()
 	now := time.Date(2026, 7, 23, 8, 0, 0, 0, time.UTC)
@@ -1719,21 +1691,16 @@ type reviewIntegrationRepository interface {
 	reviewapp.EvidenceVerifier
 }
 
-type reviewIntegrationVariant struct {
-	name string
-}
+type reviewIntegrationVariant struct{}
 
 func runReviewIntegrationVariants(t *testing.T, scenario func(*testing.T, reviewIntegrationVariant)) {
 	t.Helper()
-	for _, name := range []string{"legacy-pgx", "gorm"} {
-		variant := reviewIntegrationVariant{name: name}
-		t.Run(name, func(t *testing.T) {
-			scenario(t, variant)
-		})
-	}
+	t.Run("gorm", func(t *testing.T) {
+		scenario(t, reviewIntegrationVariant{})
+	})
 }
 
-func (variant reviewIntegrationVariant) open(t *testing.T) (reviewIntegrationRepository, *platformpostgres.Pool, *pgxpool.Pool) {
+func (variant reviewIntegrationVariant) open(t *testing.T) (*GORMRepository, *platformpostgres.Pool, *pgxpool.Pool) {
 	t.Helper()
 	fixture := testdb.Require(t, testdb.Config{
 		ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
@@ -1744,18 +1711,7 @@ func (variant reviewIntegrationVariant) open(t *testing.T) (reviewIntegrationRep
 	if platform == nil || platform.DB() == nil {
 		t.Fatal("shared PostgreSQL fixture did not provide a platform pool")
 	}
-	var (
-		repository reviewIntegrationRepository
-		err        error
-	)
-	switch variant.name {
-	case "legacy-pgx":
-		repository, err = NewRepository(platform.DB())
-	case "gorm":
-		repository, err = NewGORMRepository(platform)
-	default:
-		t.Fatalf("unknown Review integration variant %q", variant.name)
-	}
+	repository, err := NewGORMRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1773,20 +1729,13 @@ func reviewResponseLossRepository(
 	if platform == nil || platform.DB() == nil {
 		return nil, errors.New("review response-loss platform is unavailable")
 	}
-	switch variant.name {
-	case "legacy-pgx":
-		return NewRepository(commitResponseLossDB{DB: platform.DB()})
-	case "gorm":
-		gormRepository, ok := repository.(*GORMRepository)
-		if !ok || gormRepository == nil {
-			return nil, errors.New("review GORM response-loss repository has unexpected type")
-		}
-		lossy := *gormRepository
-		lossy.unitOfWork = reviewCommitResponseLossUnitOfWork{delegate: gormRepository.unitOfWork, cause: cause}
-		return &lossy, nil
-	default:
-		return nil, fmt.Errorf("unknown Review integration variant %q", variant.name)
+	gormRepository, ok := repository.(*GORMRepository)
+	if !ok || gormRepository == nil {
+		return nil, errors.New("review GORM response-loss repository has unexpected type")
 	}
+	lossy := *gormRepository
+	lossy.unitOfWork = reviewCommitResponseLossUnitOfWork{delegate: gormRepository.unitOfWork, cause: cause}
+	return &lossy, nil
 }
 
 type reviewCommitResponseLossUnitOfWork struct {
@@ -1860,14 +1809,14 @@ type reviewExplainPlan struct {
 	Plans        []reviewExplainPlan `json:"Plans"`
 }
 
-type reviewExplainQuerier interface {
-	QueryRow(context.Context, string, ...any) pgx.Row
-}
-
-func explainReviewQuery(t *testing.T, ctx context.Context, querier reviewExplainQuerier, query string, args ...any) reviewExplainPlan {
+func explainReviewQuery(t *testing.T, ctx context.Context, database *gorm.DB, query string, args ...any) reviewExplainPlan {
 	t.Helper()
+	row, err := gormReviewRawRow(ctx, database, `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, COSTS OFF, SUMMARY OFF, TIMING OFF) `+query, args...)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var raw []byte
-	if err := querier.QueryRow(ctx, `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, COSTS OFF, SUMMARY OFF, TIMING OFF) `+query, args...).Scan(&raw); err != nil {
+	if err := row.Scan(&raw); err != nil {
 		t.Fatal(err)
 	}
 	var documents []struct {
@@ -1904,8 +1853,6 @@ func reviewPlanIndexNames(plan reviewExplainPlan) []string {
 	return indexNames
 }
 
-type commitResponseLossDB struct{ DB }
-
 type answerEligibilityBypassRepository struct{ reviewIntegrationRepository }
 
 type answerABABlockingRepository struct {
@@ -1926,21 +1873,4 @@ func (repository *answerABABlockingRepository) SubmitAnswer(ctx context.Context,
 
 func (*answerEligibilityBypassRepository) CheckAnswerEligibility(context.Context, foundation.ID, foundation.ID, foundation.ID, time.Time) error {
 	return nil
-}
-
-func (database commitResponseLossDB) Begin(ctx context.Context) (pgx.Tx, error) {
-	tx, err := database.DB.Begin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return commitResponseLossTx{Tx: tx}, nil
-}
-
-type commitResponseLossTx struct{ pgx.Tx }
-
-func (tx commitResponseLossTx) Commit(ctx context.Context) error {
-	if err := tx.Tx.Commit(ctx); err != nil {
-		return err
-	}
-	return errors.New("simulated completion response loss")
 }

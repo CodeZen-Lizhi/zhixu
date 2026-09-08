@@ -2,7 +2,7 @@
 
 ## 适用范围
 
-适用于 PostgreSQL、pgvector、Atlas 迁移、pgx 参数化查询、River 任务表以及各领域模块的 Repository/Projection 实现。仓库当前尚未配置 sqlc，Repository 沿用显式列、参数化手写 SQL；若后续引入 sqlc，必须作为独立迁移任务验证生成与兼容性。
+适用于 PostgreSQL、pgvector、Atlas 迁移、GORM Repository、受控参数化 SQL、River 任务表及各领域 Projection。应用持久化统一使用共享 GORM/UoW；完整连接、模型、跨 owner scope、错误和 pgx 例外契约见 [`gorm-persistence.md`](./gorm-persistence.md)。仓库没有配置 sqlc。
 
 ## 已确认事实
 
@@ -11,7 +11,7 @@
 - `workflow.run`、`workflow.node_run`、`workflow.outbox_event` 的 M4-A Runtime identity 字段允许完整 NULL 的 legacy tuple 或完整非 NULL 的 Runtime tuple；active legacy 行由新 Runtime Application/UoW 返回 `WORKFLOW_LEGACY_RUNTIME_UNSUPPORTED`，数据库不猜测回填。
 
 - PostgreSQL 是领域数据、投影和运行数据的主数据库；pgvector 保存向量，PostgreSQL FTS 保存全文索引（依据 [`system-design.md`](../../../docs/architecture/system-design.md)）。
-- PostgreSQL 驱动为 pgx，当前 SQL 访问采用参数化手写查询，迁移采用 Atlas，River 只负责可运行 Job 的投递和 Worker 获取，不是 Workflow 业务事实源（依据 [`system-design.md`](../../../docs/architecture/system-design.md) 与 [`ai-runtime.md`](../../../docs/architecture/ai-runtime.md)）。
+- 底层驱动为 pgx；业务 Repository 使用 GORM，复杂 SQL 在 owner 内通过参数化 Raw/Exec 执行。GORM、River 事务入队与 pgx Worker 共享一个平台 Pool；迁移只由 Atlas/River owner 执行。River 不是 Workflow 业务事实源（依据 [`system-design.md`](../../../docs/architecture/system-design.md) 与 [`ai-runtime.md`](../../../docs/architecture/ai-runtime.md)）。
 - 事务边界由维护不变量的领域模块控制：Proposal/Approval、Workflow Node、Review Answer、Relation Confirm 等在数据库内使用 ACID；文件和 Git 不放入数据库事务。
 - Source Version、Article Revision、Proposal Revision、Workflow Definition/Run、Embedding/Index Version 等必须有版本、哈希或状态约束；重复消息不得创建重复 Node、Tool Call、Answer 或 Health Issue。
 - 查询必须支持稳定排序和 cursor 分页；大集合、图谱邻居和 Collection 结果禁止无分页返回（依据 [`application-contracts.md`](../../../docs/architecture/application-contracts.md)）。
@@ -19,14 +19,14 @@
 ## 目标代码落点（M1 起）
 
 - `atlas/migrations/`：Atlas 前向迁移（无 Down，fix-forward）、约束、索引和必要的数据回填；改动后必须重跑 `make atlas-migrate-hash` 并同步 `atlas/schema.sql`。
-- `internal/platform/postgres/`：pgx 连接池、sqlc 生成代码入口、Repository/Projection Adapter、事务辅助函数。
+- `internal/platform/postgres/`：唯一物理连接池、GORM 与 SQL facade、Foundation UoW/scope、驱动错误投影；业务 Repository 留在各模块 Adapter。
 - `internal/platform/testdb/`：Testcontainers-Go `v0.40.0` 测试数据库工厂。容器模式独占 pgvector 容器；外部模式只接受 admin URL，并由工厂创建、迁移和删除唯一临时数据库。两种模式都只暴露同一个 `platformpostgres.Pool`。
-- 各领域模块（如 `internal/changecontrol/`、`internal/workflow/`、`internal/review/`）：定义 Repository/Store Interface 和事务不变量；不得暴露 sqlc 类型。
+- 各领域模块（如 `internal/changecontrol/`、`internal/workflow/`、`internal/review/`）：定义 Repository/Store Interface 和事务不变量；Domain/Application 不得暴露 GORM、pgx 或 SQL 类型。
 - `internal/workflow/`：River Job 与 Workflow Node 的映射、租约和 Outbox 协作。
 
 ## 查询模式
 
-1. SQL 必须显式列出字段并参数化，避免生产路径使用 `SELECT *`；若采用 sqlc，生成类型不得泄漏到领域层。
+1. 查询必须显式列出字段并参数化，避免生产路径使用 `SELECT *`；GORM Persistence Model 不得泄漏到领域层。
 2. 所有外部输入使用参数化参数，动态过滤通过受限 Query AST/白名单映射生成，禁止字符串拼接。
 3. 列表查询使用稳定排序字段加稳定 ID 作为游标边界，并限制最大 `limit`；不使用无界 offset 扫描承载大列表。
 4. Embedding、解析、索引和健康扫描使用批量操作；禁止逐 Chunk、逐行循环远程调用或循环查库造成 N+1。
@@ -56,7 +56,7 @@
 
 ## 命名与约束
 
-- SQL 表名、列名和索引名采用小写 snake_case；同一业务对象沿用 `workspace_id`、`version`、`status`、`created_at` 等统一语义。最终命名以 M1 首个迁移和 sqlc 配置为准。
+- SQL 表名、列名和索引名采用小写 snake_case；同一业务对象沿用 `workspace_id`、`version`、`status`、`created_at` 等统一语义。命名和字段约束以 Atlas 迁移为准，GORM 必须显式映射。
 - 外键列以关联对象 `_id` 结尾；时间字段明确时区策略；JSONB 仅用于版本化契约或确实动态的结构，不为所有 JSONB 建无差别索引。
 - 索引名必须表达表、关键列和用途；核心 FTS 使用 GIN，向量先按文档压测选择 HNSW 参数，Relation 使用 source/target/relation_type 组合索引。
 - 对称关系（DUPLICATES、CONFLICTS_WITH）在写入前规范化稳定 ID 顺序，并用唯一约束阻止反向重复。
@@ -65,7 +65,7 @@
 ## 禁止模式
 
 - 在业务代码里拼接 SQL、表名或排序字段；不得把用户输入作为 SQL 标识符。
-- 用 ORM/手写 Map 绕过已定义的 Repository 查询边界，或把未来的 sqlc 生成类型泄漏到领域层。
+- 用 ORM/手写 Map 绕过已定义的 Repository 查询边界，或把 Persistence Model、GORM Clause 和驱动类型泄漏到领域层。
 - 在 HTTP Handler 中开启跨模块事务，或把文件/Git 网络调用放进数据库事务长期占用连接。
 - 通过删除历史记录、覆盖 Revision 或静默修改状态“修复”冲突；正式知识变更必须经过 Proposal/Approval/Safe Writeback。
 - 无约束地 `SELECT *`、无分页大结果、循环查库、逐条远程 Embedding 或无界 JSONB 索引。
@@ -523,12 +523,6 @@ type Dispatcher interface {
     DecideAndDispatch(context.Context, dispatch.Command) (dispatch.Result, error)
 }
 
-func (r *RuntimeRepository) StartTx(
-    context.Context,
-    pgx.Tx,
-    application.RuntimeStartRequest,
-) (application.RuntimeStartResult, error)
-
 type ScopedRuntimeStarter interface {
     StartScoped(context.Context, foundation.TransactionScope, RuntimeStartRequest) (RuntimeStartResult, error)
 }
@@ -548,7 +542,7 @@ func NewGORMApprovalDispatchRepository(
     ...eventsapplication.ScopedAppender,
 ) (*GORMApprovalDispatchRepository, error)
 
-func (r *Repository) FindWritebackExecutionByKey(
+func (r *GORMRepository) FindWritebackExecutionByKey(
     context.Context,
     foundation.ID,
     string,
@@ -561,8 +555,9 @@ func (r *Repository) FindWritebackExecutionByKey(
 
 - `proposal.workflow_run_id` 通过 `(workflow_run_id,workspace_id) → workflow.run(id,workspace_id)` 复合 FK 只允许 NULL→唯一同 Workspace Run，禁止 INSERT 预绑定、解绑、换绑或在绑定后移动 Run Workspace；历史 Proposal 保持 NULL。
 - Approved 首次决定或历史未绑定补建必须先在事务外通过 Target Hash 与 strict Git snapshot；完整绑定 exact replay 不读取文件/Git。
-- `Dispatcher` 在一个调用方持有的 pgx transaction 内保存 Approval、Proposal binding、固定 Definition/Run/Node、版本化 Workflow Outbox 与 River `InsertTx` Job；Rejected 不创建 Workflow 事实。
-- staged GORM composition 必须从同一个 `platformpostgres.Pool` 构造 Events、Change Control、Model Settings fence、Workflow scoped River runtime 与 Approval Dispatch；先构造 Change Control，并通过 `GORMRuntimeRepositoryHooks.CancellationSafety` 注入 Workflow。opaque scope 当前不携带 Pool identity，不能用第二 Pool、no-op fence 或省略 cancellation guard 代替 composition 约束。
+- `Dispatcher` 在一个 UoW 的 `foundation.TransactionScope` 内保存 Approval、Proposal binding、固定 Definition/Run/Node、版本化 Workflow Outbox 与 River Job；Rejected 不创建 Workflow 事实。
+- GORM composition 必须从同一个 `platformpostgres.Pool` 构造 Events、Change Control、Model Settings fence、Workflow scoped River runtime 与 Approval Dispatch；先构造 Change Control，并通过 `GORMRuntimeRepositoryHooks.CancellationSafety` 注入 Workflow。opaque scope 不携带 Pool identity，禁止第二 Pool；managed 必须使用真实 Model Settings fence，static 必须显式使用 `NewStaticScopedEnqueueFence()`，不能用 nil 或遗漏 cancellation guard 代替配置。
+- 并发批准先锁 Proposal/Revision，再用下一条 statement 读取 immutable dispatch；READ COMMITTED 的 nullable LEFT JOIN 等锁后可能仍是旧快照。拒绝决策绑定领域枚举 `DecisionRejected`，不得手写不同大小写字符串。
 - 固定 Node input 只允许 `schema_version/proposal_id/revision_id/approved_change_hash`；River Args 只允许 `schema_version/node_run_id/dispatch_no`。
 - Worker Claim 后使用 `safe-writeback:<node_run_id>` exact lookup；不存在才签发新的瞬时双授权并 Atomic Begin。原始 Credential 永不持久化，数据库只保存 Authorization token hash。
 - 正文、相对路径和 locator/identity token 只能存在于拥有恢复事实的 Change Control Proposal/Execution 记录，不得复制到 Runtime Job、Node input、Attempt、dispatch Outbox 或错误摘要。
@@ -591,7 +586,7 @@ func (r *Repository) FindWritebackExecutionByKey(
 ### 6. Tests Required
 
 - PostgreSQL：并发唯一 binding、Rejected 无 Workflow、Runtime 失败全回滚、commit response-loss 后 exact replay、迁移重复 Up 与同 Workspace 约束。
-- staged GORM 精简门禁：复用现有 Testcontainers fixture，从一个 Pool 构造真实 Model Settings fence、Change Control cancellation guard、Workflow scoped River producer 与 Dispatch；断言一次 Approval/Run/Node/Outbox/River Job，并以无 safety observation 的命令 exact replay。
+- GORM 精简门禁：复用现有 Testcontainers fixture，从一个 Pool 构造真实 Model Settings fence、Change Control cancellation guard、Workflow scoped River producer 与 Dispatch；断言一次 Approval/Run/Node/Outbox/River Job，并以无 safety observation 的命令 exact replay。
 - Application/HTTP：首次 201、exact replay 200、Approved 返回同一 status URL、Rejected 省略 Workflow 字段、完整 replay 不访问 FS/Git。
 - Bootstrap：exact lookup、双授权、Begin response-loss、binding conflict Manual、授权 replay 无 Credential 时拒绝。
 - 真实 Smoke：HTTP Approval → River Claim → Bootstrap → Safe Writeback → Workflow Complete；双 Worker只产生一个 Execution/Commit/Mapping/Reindex Outbox。
@@ -601,7 +596,7 @@ func (r *Repository) FindWritebackExecutionByKey(
 
 ```text
 Wrong: Approval Commit → 另起事务 Start Workflow → Job Insert；中间失败后留下无法判断的半绑定。
-Correct: 单一 pgx transaction 内 Approval + Proposal binding + Definition/Run/Node/Outbox + River InsertTx。
+Correct: 单一 UoW scope 内 Approval + Proposal binding + Definition/Run/Node/Outbox + River InsertTx。
 
 Wrong: 每次 delivery 都重签 Credential 并 Begin，或把 Credential 放进 River Args 方便恢复。
 Correct: Claim 后先按 safe-writeback:<node_run_id> exact lookup；只有不存在才瞬时签发双授权并 Atomic Begin，响应丢失后再次 exact lookup。
@@ -711,8 +706,8 @@ Correct: CompleteReindexTx 按固定锁序在单一事务中追加 Activation、
 
 ```go
 riveradapter.NewClientWithOptions(*pgxpool.Pool, *riveradapter.Workers, riveradapter.Options) (*riveradapter.Client, error)
-riveradapter.NewJobInserter(*riveradapter.Client) (riveradapter.JobInserter, error)
-CancellationSafetyGuard.SafeToCancelWorkflowNode(context.Context, any, foundation.ID) (bool, error)
+riveradapter.NewScopedJobInserter(*platformpostgres.Pool, *riveradapter.Client, riveradapter.ScopedEnqueueFence) (riveradapter.ScopedJobInserter, error)
+ScopedCancellationSafetyGuard.SafeToCancelWorkflowNodeScoped(context.Context, foundation.TransactionScope, foundation.ID) (bool, error)
 ```
 
 环境契约：`ZHIXU_WORKER_QUEUE`、`ZHIXU_WORKER_MAX_WORKERS`、`ZHIXU_WORKER_JOB_TIMEOUT`、`ZHIXU_WORKER_RESCUE_STUCK_AFTER`、`ZHIXU_WORKFLOW_LEASE`、`ZHIXU_WORKFLOW_HEARTBEAT`、`ZHIXU_WORKER_SOFT_STOP_TIMEOUT`、`ZHIXU_WORKER_HARD_STOP_TIMEOUT`。
@@ -733,7 +728,7 @@ CancellationSafetyGuard.SafeToCancelWorkflowNode(context.Context, any, foundatio
   `clock_timestamp()`；禁止用事务起点 `CURRENT_TIMESTAMP` 或锁前缓存时间比较 `lease_until`。锁等待跨过到期点后，
   Heartbeat/Transition 必须拒绝旧 owner，Claim 必须按到期后的当前数据库时间 reclaim。
 - Writeback Execution 处于 `prepared/file_prepared/file_applied/git_prepared/git_committed/publish_recovery/compensating` 时，Cancel 只记录 request，继续 heartbeat/lease reclaim，并返回 retryable `WORKFLOW_CANCELLATION_DEFERRED`；只有安全失败、补偿、人工恢复、完成或已清理恢复证据后才允许 Run terminal cancelled。
-- Cancellation guard 必须使用 Runtime 当前 pgx transaction 查询，保证 Control/Heartbeat/Transition 与 Execution checkpoint 判定原子。
+- Cancellation guard 必须使用 Runtime 当前 `foundation.TransactionScope` 查询，保证 Control/Heartbeat/Transition 与 Execution checkpoint 判定原子。
 - Compose PostgreSQL healthcheck 必须执行实际 `SELECT 1`；`pg_isready` 在数据库尚未创建时也可能报告 server accepting，不能作为 Migrate 前置门禁。
 
 ### 4. Validation & Error Matrix
@@ -1215,7 +1210,7 @@ ops.server_event
   slot 不进入上下文，也不阻止下一 Question。
 - Conversation 归档只拒绝新 Question；既有幂等键的 exact replay/冲突判定必须先执行。Answer Trigger 使用稳定
   constraint 名区分 active Workflow 与 archived Conversation，Adapter 将数据库兜底映射回同一稳定错误码。
-- Question exact replay 可与 Worker 推进 Run 状态并发。重放前只读取不可变 Answer ID；必须在 Workflow `StartTx`
+- Question exact replay 可与 Worker 推进 Run 状态并发。重放前只读取不可变 Answer ID；必须在 Workflow `StartScoped`
   replay 锁定并返回最新 Run 后重新读取 Answer/Workflow 投影，再比较 status/version/updated_at。不得把锁前旧快照与
   锁后新状态的正常差异归类为持久绑定损坏。
 - Feedback append-only 且按 canonical request hash 幂等。只允许已发布 Answer/Refusal；Clarification 和 pending

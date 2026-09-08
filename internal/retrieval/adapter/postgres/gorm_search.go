@@ -14,7 +14,6 @@ import (
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/retrieval/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/lib/pq"
 	"github.com/pgvector/pgvector-go"
 	"gorm.io/gorm"
@@ -383,9 +382,8 @@ func gormSearchClassify(ctx context.Context, cause error, code string) error {
 	if errors.Is(cause, sql.ErrTxDone) {
 		return foundation.NewError(foundation.ErrorDependencyUnavailable, code, true, cause)
 	}
-	var postgresError *pgconn.PgError
-	if errors.As(cause, &postgresError) {
-		switch postgresError.Code {
+	if state := platformpostgres.SQLState(cause); state != "" {
+		switch state {
 		case "40001", "40P01", "55P03":
 			return foundation.NewError(foundation.ErrorRetryableFailure, code, true, cause)
 		case "23505":

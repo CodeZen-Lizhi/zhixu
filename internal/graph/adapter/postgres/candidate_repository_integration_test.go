@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -14,9 +15,81 @@ import (
 	graphapp "github.com/CodeZen-Lizhi/zhixu/internal/graph/application"
 	graphdomain "github.com/CodeZen-Lizhi/zhixu/internal/graph/domain"
 	knowledge "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
+	"gorm.io/gorm"
 )
+
+func TestGORMCandidateRepositoryCreatesAndReplaysWithBatchEvidence(t *testing.T) {
+	databaseFixture := testdb.Require(t, testdb.Config{
+		ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
+		Availability:     testdb.FailWhenUnavailable,
+		MaxConns:         8,
+	})
+	platform := databaseFixture.Pool()
+	if platform == nil || platform.DB() == nil {
+		t.Fatal("Graph Candidate fixture did not provide a shared platform pool")
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	seedTx, err := platform.DB().Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedCommitted := false
+	defer func() {
+		if !seedCommitted {
+			_ = seedTx.Rollback(context.Background())
+		}
+	}()
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	workspaceID := seedGraphWorkspace(t, ctx, seedTx, now)
+	provenance := seedGraphProvenance(t, ctx, seedTx, workspaceID, now)
+	firstClaimID := seedGraphClaim(t, ctx, seedTx, workspaceID, "GORM candidate source", knowledge.ClaimStatusSuggested, floatPointer(0.9), now)
+	secondClaimID := seedGraphClaim(t, ctx, seedTx, workspaceID, "GORM candidate target", knowledge.ClaimStatusSuggested, floatPointer(0.8), now)
+	candidate := candidateFixture(t, workspaceID, firstClaimID, secondClaimID, provenance, now, "gorm-main", 1, 1)
+	secondEvidence := candidate.Evidence[0]
+	secondEvidence.ID = graphTestID(t)
+	secondEvidence.SemanticHash = graphHash("candidate-evidence-gorm-main-second")
+	secondEvidence.Reason = "second bounded source support"
+	secondEvidence.Excerpt = "second bounded evidence excerpt"
+	candidate.Evidence = append(candidate.Evidence, secondEvidence)
+	if candidate.Evidence[1].SemanticHash < candidate.Evidence[0].SemanticHash {
+		candidate.Evidence[0], candidate.Evidence[1] = candidate.Evidence[1], candidate.Evidence[0]
+	}
+	candidate.Fingerprint = ""
+	candidate.Fingerprint, err = graphdomain.ComputeSemanticLinkCandidateFingerprint(candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := graphdomain.ValidateSemanticLinkCandidate(candidate); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedTx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	seedCommitted = true
+
+	repository, err := NewGORMRepository(platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := repository.UpsertSemanticLinkCandidate(ctx, candidate)
+	if err != nil || !created.Created || created.Candidate.ID != candidate.ID || len(created.Candidate.Evidence) != 2 {
+		t.Fatalf("created=%+v err=%v", created, err)
+	}
+	replayed, err := repository.UpsertSemanticLinkCandidate(ctx, candidate)
+	if err != nil || replayed.Created || replayed.Candidate.ID != candidate.ID || replayed.Candidate.Fingerprint != candidate.Fingerprint || len(replayed.Candidate.Evidence) != 2 {
+		t.Fatalf("replayed=%+v err=%v", replayed, err)
+	}
+
+	page, err := repository.ListSemanticLinkCandidates(ctx, graphdomain.SemanticLinkCandidateQuery{WorkspaceID: workspaceID, Limit: 20})
+	if err != nil || len(page.Items) != 1 || page.Items[0].ID != candidate.ID || len(page.Items[0].Evidence) != 2 {
+		t.Fatalf("page=%+v err=%v", page, err)
+	}
+	assertGORMCandidateConfirmAtomicity(t, ctx, platform, candidate, now)
+}
 
 func TestSemanticLinkCandidateRepositoryLifecycleAndBatchHydration(t *testing.T) {
 	repository, tx, ctx := graphIntegrationRepository(t)
@@ -40,19 +113,19 @@ func TestSemanticLinkCandidateRepositoryLifecycleAndBatchHydration(t *testing.T)
 		t.Fatalf("replayed=%+v err=%v", replayed, err)
 	}
 
-	countingDB := &candidateQueryCountingDB{DB: tx}
-	repository.db = countingDB
+	queryCount := 0
+	stopCounting := graphRowHook(t, tx.platform, false, func(*gorm.DB) { queryCount++ })
 	page, err := repository.ListSemanticLinkCandidates(ctx, graphdomain.SemanticLinkCandidateQuery{WorkspaceID: workspaceID, Limit: 20})
 	if err != nil || len(page.Items) != 1 || len(page.Items[0].Evidence) != 1 || page.Items[0].Source.Excerpt != candidate.Source.Excerpt || page.Items[0].Target.Excerpt != candidate.Target.Excerpt {
 		t.Fatalf("page=%+v err=%v", page, err)
 	}
-	if countingDB.queryCount != 2 {
-		t.Fatalf("candidate list queries=%d, want 2", countingDB.queryCount)
+	if queryCount != 2 {
+		t.Fatalf("candidate list queries=%d, want 2", queryCount)
 	}
 	if page.Items[0].Evidence[0].Excerpt != candidate.Evidence[0].Excerpt {
 		t.Fatalf("evidence was not hydrated: %+v", page.Items[0].Evidence)
 	}
-	repository.db = tx
+	stopCounting()
 
 	otherWorkspaceID := seedGraphWorkspace(t, ctx, tx, now.Add(time.Microsecond))
 	otherClaimID := seedGraphClaim(t, ctx, tx, otherWorkspaceID, "cross workspace claim", knowledge.ClaimStatusSuggested, floatPointer(0.7), now)
@@ -214,20 +287,13 @@ func TestSemanticLinkCandidateRepositoryListsClaimPairsByTopicMembership(t *test
 }
 
 func TestSemanticLinkCandidateRepositoryFingerprintConcurrency(t *testing.T) {
-	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
-	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
+	pool := newGraphTestPool(t, 12)
+	ctx := t.Context()
 	seedTx, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer func() { _ = seedTx.Rollback(context.Background()) }()
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	workspaceID := seedGraphWorkspace(t, ctx, seedTx, now)
 	provenance := seedGraphProvenance(t, ctx, seedTx, workspaceID, now)
@@ -236,7 +302,6 @@ func TestSemanticLinkCandidateRepositoryFingerprintConcurrency(t *testing.T) {
 	if err := seedTx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { cleanupCandidateWorkspace(pool, workspaceID) })
 	candidate := candidateFixture(t, workspaceID, firstClaimID, secondClaimID, provenance, now, "concurrent", 1, 1)
 
 	const workers = 8
@@ -247,7 +312,7 @@ func TestSemanticLinkCandidateRepositoryFingerprintConcurrency(t *testing.T) {
 		waitGroup.Add(1)
 		go func() {
 			defer waitGroup.Done()
-			repository, repositoryErr := NewRepository(pool)
+			repository, repositoryErr := NewGORMRepository(pool.platform)
 			if repositoryErr != nil {
 				errorsCh <- repositoryErr
 				return
@@ -302,7 +367,7 @@ func TestSemanticLinkCandidateRepositoryFingerprintConcurrency(t *testing.T) {
 		waitGroup.Add(1)
 		go func() {
 			defer waitGroup.Done()
-			repository, repositoryErr := NewRepository(pool)
+			repository, repositoryErr := NewGORMRepository(pool.platform)
 			if repositoryErr != nil {
 				decisionErrors <- repositoryErr
 				return
@@ -368,21 +433,3 @@ func candidateFixture(t *testing.T, workspaceID, sourceID, targetID foundation.I
 }
 
 func ptrID(value foundation.ID) *foundation.ID { return &value }
-
-func cleanupCandidateWorkspace(pool *pgxpool.Pool, workspaceID foundation.ID) {
-	ctx := context.Background()
-	_, _ = pool.Exec(ctx, `DELETE FROM graph.semantic_link_candidate_decision WHERE workspace_id=$1`, string(workspaceID))
-	_, _ = pool.Exec(ctx, `DELETE FROM graph.semantic_link_candidate_evidence WHERE workspace_id=$1`, string(workspaceID))
-	_, _ = pool.Exec(ctx, `DELETE FROM graph.semantic_link_candidate WHERE workspace_id=$1`, string(workspaceID))
-	cleanupCommittedGraphFixture(pool, workspaceID)
-}
-
-type candidateQueryCountingDB struct {
-	DB
-	queryCount int
-}
-
-func (database *candidateQueryCountingDB) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
-	database.queryCount++
-	return database.DB.Query(ctx, sql, args...)
-}

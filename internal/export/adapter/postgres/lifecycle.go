@@ -23,7 +23,7 @@ const exportRecoveryCandidatesSQL = `SELECT ` + selectColumns + ` FROM ops.expor
 	ORDER BY created_at,id LIMIT $1`
 
 // Claim 以数据库时间获取 PENDING 或租约已到期 RUNNING 任务。
-func (repository *Repository) Claim(ctx context.Context, workspaceID, jobID foundation.ID, owner string, lease time.Duration) (domain.Job, bool, error) {
+func (repository *exportRepository) Claim(ctx context.Context, workspaceID, jobID foundation.ID, owner string, lease time.Duration) (domain.Job, bool, error) {
 	if repository == nil || isNilDependency(repository.db) {
 		return domain.Job{}, false, unavailable(errors.New("export repository is unavailable"))
 	}
@@ -111,7 +111,7 @@ func (repository *Repository) Claim(ctx context.Context, workspaceID, jobID foun
 }
 
 // Prepare 将冻结快照与 create-only staging 一次性绑定到有效租约。
-func (repository *Repository) Prepare(ctx context.Context, request exportapp.PrepareRequest) (domain.Job, error) {
+func (repository *exportRepository) Prepare(ctx context.Context, request exportapp.PrepareRequest) (domain.Job, error) {
 	if repository == nil || isNilDependency(repository.db) {
 		return domain.Job{}, unavailable(errors.New("export repository is unavailable"))
 	}
@@ -204,7 +204,7 @@ func (repository *Repository) Prepare(ctx context.Context, request exportapp.Pre
 }
 
 // Complete 在有效 DB-time 租约内归约已经提升的固定结果。
-func (repository *Repository) Complete(ctx context.Context, request exportapp.CompleteRequest) (domain.Job, error) {
+func (repository *exportRepository) Complete(ctx context.Context, request exportapp.CompleteRequest) (domain.Job, error) {
 	if repository == nil || isNilDependency(repository.db) {
 		return domain.Job{}, unavailable(errors.New("export repository is unavailable"))
 	}
@@ -284,7 +284,7 @@ func (repository *Repository) Complete(ctx context.Context, request exportapp.Co
 }
 
 // Fail 在有效 DB-time 租约内归约失败；prepared 可重试结果必须等待租约接管。
-func (repository *Repository) Fail(ctx context.Context, request exportapp.FailRequest) (domain.Job, error) {
+func (repository *exportRepository) Fail(ctx context.Context, request exportapp.FailRequest) (domain.Job, error) {
 	if repository == nil || isNilDependency(repository.db) {
 		return domain.Job{}, unavailable(errors.New("export repository is unavailable"))
 	}
@@ -384,7 +384,7 @@ func (repository *Repository) Fail(ctx context.Context, request exportapp.FailRe
 }
 
 // Expire 使用数据库当前时间归约一个任务；未到期时只返回当前事实。
-func (repository *Repository) Expire(ctx context.Context, workspaceID, jobID foundation.ID) (domain.Job, error) {
+func (repository *exportRepository) Expire(ctx context.Context, workspaceID, jobID foundation.ID) (domain.Job, error) {
 	if repository == nil || isNilDependency(repository.db) {
 		return domain.Job{}, unavailable(errors.New("export repository is unavailable"))
 	}
@@ -416,7 +416,7 @@ func (repository *Repository) Expire(ctx context.Context, workspaceID, jobID fou
 }
 
 // RecoveryCandidates 返回数据库时间下可重新投递的有界任务集合。
-func (repository *Repository) RecoveryCandidates(ctx context.Context, limit int) ([]domain.Job, error) {
+func (repository *exportRepository) RecoveryCandidates(ctx context.Context, limit int) ([]domain.Job, error) {
 	if repository == nil || isNilDependency(repository.db) {
 		return nil, unavailable(errors.New("export repository is unavailable"))
 	}

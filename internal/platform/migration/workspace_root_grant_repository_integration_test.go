@@ -25,39 +25,18 @@ type workspaceRootGrantRepository interface {
 	application.ControlStore
 }
 
-type workspaceRootGrantVariant struct {
-	name string
-	open func(*testing.T, *platformpostgres.Pool) workspaceRootGrantRepository
-}
-
-func runWorkspaceRootGrantVariants(t *testing.T, test func(*testing.T, *platformpostgres.Pool, context.Context, workspaceRootGrantRepository)) {
+func runWorkspaceRootGrantIntegration(t *testing.T, test func(*testing.T, *platformpostgres.Pool, context.Context, workspaceRootGrantRepository)) {
 	t.Helper()
-	variants := []workspaceRootGrantVariant{
-		{name: "legacy", open: openLegacyWorkspaceRootGrantRepository},
-		{name: "gorm", open: openGORMWorkspaceRootGrantRepository},
-	}
-	for _, variant := range variants {
-		variant := variant
-		t.Run(variant.name, func(t *testing.T) {
-			fixture := testdb.Require(t, testdb.Config{
-				ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
-				Availability:     testdb.FailWhenUnavailable,
-				MaxConns:         16,
-			})
-			ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
-			defer cancel()
-			test(t, fixture.Pool(), ctx, variant.open(t, fixture.Pool()))
+	t.Run("gorm", func(t *testing.T) {
+		fixture := testdb.Require(t, testdb.Config{
+			ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
+			Availability:     testdb.FailWhenUnavailable,
+			MaxConns:         16,
 		})
-	}
-}
-
-func openLegacyWorkspaceRootGrantRepository(t *testing.T, platform *platformpostgres.Pool) workspaceRootGrantRepository {
-	t.Helper()
-	repository, err := workspacepostgres.NewRepository(platform.DB())
-	if err != nil {
-		t.Fatal(err)
-	}
-	return repository
+		ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+		defer cancel()
+		test(t, fixture.Pool(), ctx, openGORMWorkspaceRootGrantRepository(t, fixture.Pool()))
+	})
 }
 
 func openGORMWorkspaceRootGrantRepository(t *testing.T, platform *platformpostgres.Pool) workspaceRootGrantRepository {
@@ -69,98 +48,76 @@ func openGORMWorkspaceRootGrantRepository(t *testing.T, platform *platformpostgr
 	return repository
 }
 
-type workspaceRootAuthorityVariant struct {
-	name string
-	open func(*platformpostgres.Pool, rootgrant.RuntimeGrantMode) (rootgrant.AuthoritativeStore, error)
-}
-
 func TestWorkspaceRootGrantAuthoritativeStoresMatchManagedAndDirect(t *testing.T) {
-	variants := []workspaceRootAuthorityVariant{
-		{
-			name: "legacy",
-			open: func(platform *platformpostgres.Pool, mode rootgrant.RuntimeGrantMode) (rootgrant.AuthoritativeStore, error) {
-				return rootgrant.NewPostgresAuthoritativeStore(platform.DB(), mode)
-			},
-		},
-		{
-			name: "gorm",
-			open: func(platform *platformpostgres.Pool, mode rootgrant.RuntimeGrantMode) (rootgrant.AuthoritativeStore, error) {
-				return rootgrant.NewGORMAuthoritativeStore(platform, mode)
-			},
-		},
-	}
-	for _, variant := range variants {
-		variant := variant
-		t.Run(variant.name, func(t *testing.T) {
-			fixture := testdb.Require(t, testdb.Config{
-				ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
-				Availability:     testdb.FailWhenUnavailable,
-				MaxConns:         16,
-			})
-			platform := fixture.Pool()
-			ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
-			defer cancel()
-			const (
-				workspaceID = "67400000-0000-4000-8000-000000000001"
-				root        = "/tmp/root-authority"
-			)
-			now := time.Now().UTC().Truncate(time.Microsecond)
-			if _, err := platform.DB().Exec(ctx, `INSERT INTO core.workspace(
+	t.Run("gorm", func(t *testing.T) {
+		fixture := testdb.Require(t, testdb.Config{
+			ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
+			Availability:     testdb.FailWhenUnavailable,
+			MaxConns:         16,
+		})
+		platform := fixture.Pool()
+		ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+		defer cancel()
+		const (
+			workspaceID = "67400000-0000-4000-8000-000000000001"
+			root        = "/tmp/root-authority"
+		)
+		now := time.Now().UTC().Truncate(time.Microsecond)
+		if _, err := platform.DB().Exec(ctx, `INSERT INTO core.workspace(
 				id,name,root_path,root_fingerprint,binding_version,git_repository_path,git_checked_at,
 				status,availability,availability_reason,availability_checked_at,version,created_at,updated_at)
 				VALUES($1,'Root authority',$2,$3,1,$2,$4,'active','available',NULL,$4,1,$4,$4)`,
-				workspaceID, root, strings.Repeat("a", 64), now); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := platform.DB().Exec(ctx, `UPDATE ops.workspace_control_state
+			workspaceID, root, strings.Repeat("a", 64), now); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := platform.DB().Exec(ctx, `UPDATE ops.workspace_control_state
 				SET active_workspace_id=$1,grant_generation=7,state_version=state_version+1,updated_at=clock_timestamp()
 				WHERE singleton=true`, workspaceID); err != nil {
-				t.Fatal(err)
-			}
+			t.Fatal(err)
+		}
 
-			managed, err := variant.open(platform, rootgrant.RuntimeGrantManaged)
-			if err != nil {
-				t.Fatal(err)
-			}
-			managedView, err := managed.CurrentRootGrant(ctx)
-			if err != nil {
-				t.Fatal(err)
-			}
-			expectedManaged := rootgrant.AuthoritativeView{
-				ActiveWorkspaceID: foundation.ID(workspaceID), WorkspaceID: foundation.ID(workspaceID),
-				WorkspaceActive: true, WorkspaceAvailable: true, PersistedRoot: root, GrantGeneration: 7,
-			}
-			if managedView != expectedManaged {
-				t.Fatalf("managed authority view=%#v want=%#v", managedView, expectedManaged)
-			}
+		managed, err := rootgrant.NewGORMAuthoritativeStore(platform, rootgrant.RuntimeGrantManaged)
+		if err != nil {
+			t.Fatal(err)
+		}
+		managedView, err := managed.CurrentRootGrant(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		expectedManaged := rootgrant.AuthoritativeView{
+			ActiveWorkspaceID: foundation.ID(workspaceID), WorkspaceID: foundation.ID(workspaceID),
+			WorkspaceActive: true, WorkspaceAvailable: true, PersistedRoot: root, GrantGeneration: 7,
+		}
+		if managedView != expectedManaged {
+			t.Fatalf("managed authority view=%#v want=%#v", managedView, expectedManaged)
+		}
 
-			direct, err := variant.open(platform, rootgrant.RuntimeGrantDirect)
-			if err != nil {
-				t.Fatal(err)
-			}
-			directView, err := direct.CurrentRootGrant(ctx)
-			if err != nil {
-				t.Fatal(err)
-			}
-			expectedDirect := expectedManaged
-			expectedDirect.GrantGeneration = 1
-			if directView != expectedDirect {
-				t.Fatalf("direct authority view=%#v want=%#v", directView, expectedDirect)
-			}
+		direct, err := rootgrant.NewGORMAuthoritativeStore(platform, rootgrant.RuntimeGrantDirect)
+		if err != nil {
+			t.Fatal(err)
+		}
+		directView, err := direct.CurrentRootGrant(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		expectedDirect := expectedManaged
+		expectedDirect.GrantGeneration = 1
+		if directView != expectedDirect {
+			t.Fatalf("direct authority view=%#v want=%#v", directView, expectedDirect)
+		}
 
-			cancelCause := errors.New("root authority caller stopped waiting")
-			canceledCtx, cancelCauseFunc := context.WithCancelCause(ctx)
-			cancelCauseFunc(cancelCause)
-			canceledView, err := managed.CurrentRootGrant(canceledCtx)
-			if err == nil || canceledView != (rootgrant.AuthoritativeView{}) || !errors.Is(err, context.Canceled) {
-				t.Fatalf("canceled authority view=%#v error=%v", canceledView, err)
-			}
-			if variant.name == "gorm" && !errors.Is(err, cancelCause) {
-				t.Fatalf("GORM root authority lost caller cause: %v", err)
-			}
-			requireWorkspaceRootGrantPoolReleased(t, platform)
-		})
-	}
+		cancelCause := errors.New("root authority caller stopped waiting")
+		canceledCtx, cancelCauseFunc := context.WithCancelCause(ctx)
+		cancelCauseFunc(cancelCause)
+		canceledView, err := managed.CurrentRootGrant(canceledCtx)
+		if err == nil || canceledView != (rootgrant.AuthoritativeView{}) || !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled authority view=%#v error=%v", canceledView, err)
+		}
+		if !errors.Is(err, cancelCause) {
+			t.Fatalf("GORM root authority lost caller cause: %v", err)
+		}
+		requireWorkspaceRootGrantPoolReleased(t, platform)
+	})
 }
 
 func requireWorkspaceRootGrantPoolReleased(t *testing.T, platform *platformpostgres.Pool) {
@@ -175,7 +132,7 @@ func requireWorkspaceRootGrantPoolReleased(t *testing.T, platform *platformpostg
 }
 
 func TestWorkspaceRootGrantRepositorySerializesBeginAndTakesOverExpiredLease(t *testing.T) {
-	runWorkspaceRootGrantVariants(t, testWorkspaceRootGrantRepositorySerializesBeginAndTakesOverExpiredLease)
+	runWorkspaceRootGrantIntegration(t, testWorkspaceRootGrantRepositorySerializesBeginAndTakesOverExpiredLease)
 }
 
 func testWorkspaceRootGrantRepositorySerializesBeginAndTakesOverExpiredLease(t *testing.T, _ *platformpostgres.Pool, ctx context.Context, repository workspaceRootGrantRepository) {
@@ -281,7 +238,7 @@ func testWorkspaceRootGrantRepositorySerializesBeginAndTakesOverExpiredLease(t *
 }
 
 func TestWorkspaceRootGrantRepositorySwitchAndRollback(t *testing.T) {
-	runWorkspaceRootGrantVariants(t, testWorkspaceRootGrantRepositorySwitchAndRollback)
+	runWorkspaceRootGrantIntegration(t, testWorkspaceRootGrantRepositorySwitchAndRollback)
 }
 
 func testWorkspaceRootGrantRepositorySwitchAndRollback(t *testing.T, platform *platformpostgres.Pool, ctx context.Context, repository workspaceRootGrantRepository) {
@@ -490,7 +447,7 @@ func testWorkspaceRootGrantRepositorySwitchAndRollback(t *testing.T, platform *p
 }
 
 func TestWorkspaceRootGrantRepositoryRuntimeFences(t *testing.T) {
-	runWorkspaceRootGrantVariants(t, testWorkspaceRootGrantRepositoryRuntimeFences)
+	runWorkspaceRootGrantIntegration(t, testWorkspaceRootGrantRepositoryRuntimeFences)
 }
 
 func testWorkspaceRootGrantRepositoryRuntimeFences(t *testing.T, platform *platformpostgres.Pool, ctx context.Context, repository workspaceRootGrantRepository) {

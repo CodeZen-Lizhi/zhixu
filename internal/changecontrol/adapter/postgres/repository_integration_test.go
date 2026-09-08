@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -17,36 +16,22 @@ import (
 	eventspostgres "github.com/CodeZen-Lizhi/zhixu/internal/events/adapter/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	knowledge "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
-	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestRepositoryProposalApprovalAndImmutability(t *testing.T) {
-	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
-	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	repository, err := NewRepository(tx)
+	platform, ctx := newChangeControlMigrationTestPool(t)
+	pool := platform.DB()
+	repository, err := NewGORMRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, 7, 16, 8, 0, 0, 0, time.UTC)
 	workspaceID := integrationID(1)
-	if _, err := tx.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'Change Test',$2,$2,$3,'test',1,$3,$3)`, string(workspaceID), "/tmp/change-"+string(workspaceID), now); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'Change Test',$2,$2,$3,'inactive',1,$3,$3)`, string(workspaceID), "/tmp/change-"+string(workspaceID), now); err != nil {
 		t.Fatal(err)
 	}
 
@@ -88,10 +73,10 @@ func TestRepositoryProposalApprovalAndImmutability(t *testing.T) {
 		t.Fatalf("queried=%#v err=%v", queried, err)
 	}
 	definitionID, workflowRunID := integrationID(7), integrationID(8)
-	if _, err := tx.Exec(ctx, `INSERT INTO workflow.definition(id,workspace_id,key,version,graph,created_at) VALUES($1,$2,'safe-writeback',1,'{}',$3)`, string(definitionID), string(workspaceID), now); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO workflow.definition(id,workspace_id,key,version,graph,created_at) VALUES($1,$2,'safe-writeback',1,'{}',$3)`, string(definitionID), string(workspaceID), now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO workflow.run(id,workspace_id,definition_id,status,input,version,created_at,updated_at) VALUES($1,$2,$3,'pending','{}',1,$4,$4)`, string(workflowRunID), string(workspaceID), string(definitionID), now); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO workflow.run(id,workspace_id,definition_id,status,input,version,created_at,updated_at) VALUES($1,$2,$3,'pending','{}',1,$4,$4)`, string(workflowRunID), string(workspaceID), string(definitionID), now); err != nil {
 		t.Fatal(err)
 	}
 	duplicateProposal := proposal
@@ -107,13 +92,13 @@ func TestRepositoryProposalApprovalAndImmutability(t *testing.T) {
 		t.Fatal(err)
 	}
 	otherWorkspaceID, otherDefinitionID, otherRunID := integrationID(15), integrationID(16), integrationID(17)
-	if _, err := tx.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'Other Change Test',$2,$2,$3,'test',1,$3,$3)`, string(otherWorkspaceID), "/tmp/change-"+string(otherWorkspaceID), now); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'Other Change Test',$2,$2,$3,'inactive',1,$3,$3)`, string(otherWorkspaceID), "/tmp/change-"+string(otherWorkspaceID), now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO workflow.definition(id,workspace_id,key,version,graph,created_at) VALUES($1,$2,'safe-writeback',1,'{}',$3)`, string(otherDefinitionID), string(otherWorkspaceID), now); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO workflow.definition(id,workspace_id,key,version,graph,created_at) VALUES($1,$2,'safe-writeback',1,'{}',$3)`, string(otherDefinitionID), string(otherWorkspaceID), now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO workflow.run(id,workspace_id,definition_id,status,input,version,created_at,updated_at) VALUES($1,$2,$3,'pending','{}',1,$4,$4)`, string(otherRunID), string(otherWorkspaceID), string(otherDefinitionID), now); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO workflow.run(id,workspace_id,definition_id,status,input,version,created_at,updated_at) VALUES($1,$2,$3,'pending','{}',1,$4,$4)`, string(otherRunID), string(otherWorkspaceID), string(otherDefinitionID), now); err != nil {
 		t.Fatal(err)
 	}
 	crossWorkspaceProposal := proposal
@@ -140,8 +125,8 @@ func TestRepositoryProposalApprovalAndImmutability(t *testing.T) {
 	if _, err := repository.CreateProposal(ctx, invalidStatusProposal); err != nil {
 		t.Fatal(err)
 	}
-	assertSQLState(t, ctx, tx, "23514", `UPDATE change_control.proposal SET status='rejected',workflow_run_id=$2,updated_at=$3,version=version+1 WHERE id=$1`, string(invalidStatusProposal.ID), string(workflowRunID), now.Add(time.Minute))
-	assertSQLState(t, ctx, tx, "55000", `INSERT INTO change_control.proposal(id,workspace_id,status,risk_level,created_at,updated_at,idempotency_key,request_hash,workflow_run_id) VALUES($1,$2,'ready_for_review','LOW',$3,$3,$4,$5,$6)`, string(integrationID(20)), string(workspaceID), now, "insert-bound-proposal", strings.Repeat("0", 64), string(workflowRunID))
+	assertSQLState(t, ctx, pool, "23514", `UPDATE change_control.proposal SET status='rejected',workflow_run_id=$2,updated_at=$3,version=version+1 WHERE id=$1`, string(invalidStatusProposal.ID), string(workflowRunID), now.Add(time.Minute))
+	assertSQLState(t, ctx, pool, "55000", `INSERT INTO change_control.proposal(id,workspace_id,status,risk_level,created_at,updated_at,idempotency_key,request_hash,workflow_run_id) VALUES($1,$2,'ready_for_review','LOW',$3,$3,$4,$5,$6)`, string(integrationID(20)), string(workspaceID), now, "insert-bound-proposal", strings.Repeat("0", 64), string(workflowRunID))
 
 	approvedGitHead := "ABCDEF0123456789ABCDEF0123456789ABCDEF01"
 	approval := domain.Approval{ID: integrationID(4), ProposalID: proposalID, RevisionID: revisionID, ChangeHash: changeHash, Decision: domain.DecisionApproved, ApprovedGitHead: &approvedGitHead, DecidedAt: now.Add(time.Minute)}
@@ -159,10 +144,10 @@ func TestRepositoryProposalApprovalAndImmutability(t *testing.T) {
 	if _, err := repository.Approve(ctx, domain.Approval{ID: integrationID(6), ProposalID: proposalID, RevisionID: revisionID, ChangeHash: changeHash, Decision: domain.DecisionRejected, DecidedAt: now.Add(2 * time.Minute)}); !hasCode(err, "PROPOSAL_NOT_READY_FOR_REVIEW") {
 		t.Fatalf("conflicting approval err=%v", err)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE change_control.proposal SET workflow_run_id=$2,updated_at=$3,version=version+1 WHERE id=$1 AND status='approved'`, string(proposalID), string(workflowRunID), now.Add(2*time.Minute)); err != nil {
+	if _, err := pool.Exec(ctx, `UPDATE change_control.proposal SET workflow_run_id=$2,updated_at=$3,version=version+1 WHERE id=$1 AND status='approved'`, string(proposalID), string(workflowRunID), now.Add(2*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.Exec(ctx, `
+	if _, err := pool.Exec(ctx, `
 		INSERT INTO change_control.proposal_revision_dispatch(
 			workspace_id,proposal_id,revision_id,approval_id,workflow_run_id,created_at
 		) VALUES($1,$2,$3,$4,$5,$6)`,
@@ -173,16 +158,16 @@ func TestRepositoryProposalApprovalAndImmutability(t *testing.T) {
 	if err != nil || queried.Status != domain.StatusApproved || queried.Version != 3 || queried.WorkflowRunID == nil || *queried.WorkflowRunID != workflowRunID || queried.Approval == nil || queried.Approval.ChangeHash != changeHash || queried.Approval.ApprovedGitHead == nil || *queried.Approval.ApprovedGitHead != "abcdef0123456789abcdef0123456789abcdef01" {
 		t.Fatalf("approved proposal=%#v err=%v", queried, err)
 	}
-	assertSQLState(t, ctx, tx, "55000", `UPDATE change_control.proposal SET workflow_run_id=NULL,updated_at=$2,version=version+1 WHERE id=$1`, string(proposalID), now.Add(3*time.Minute))
+	assertSQLState(t, ctx, pool, "55000", `UPDATE change_control.proposal SET workflow_run_id=NULL,updated_at=$2,version=version+1 WHERE id=$1`, string(proposalID), now.Add(3*time.Minute))
 
 	if _, err := repository.Approve(ctx, domain.Approval{ID: integrationID(21), ProposalID: duplicateProposal.ID, RevisionID: duplicateProposal.Revision.ID, ChangeHash: duplicateProposal.Revision.ChangeHash, Decision: domain.DecisionApproved, DecidedAt: now.Add(time.Minute)}); err != nil {
 		t.Fatal(err)
 	}
-	assertSQLState(t, ctx, tx, "23505", `UPDATE change_control.proposal SET workflow_run_id=$2,updated_at=$3,version=version+1 WHERE id=$1 AND status='approved'`, string(duplicateProposal.ID), string(workflowRunID), now.Add(2*time.Minute))
+	assertSQLState(t, ctx, pool, "23505", `UPDATE change_control.proposal SET workflow_run_id=$2,updated_at=$3,version=version+1 WHERE id=$1 AND status='approved'`, string(duplicateProposal.ID), string(workflowRunID), now.Add(2*time.Minute))
 	if _, err := repository.Approve(ctx, domain.Approval{ID: integrationID(22), ProposalID: crossWorkspaceProposal.ID, RevisionID: crossWorkspaceProposal.Revision.ID, ChangeHash: crossWorkspaceProposal.Revision.ChangeHash, Decision: domain.DecisionApproved, DecidedAt: now.Add(time.Minute)}); err != nil {
 		t.Fatal(err)
 	}
-	assertSQLState(t, ctx, tx, "23514", `UPDATE change_control.proposal SET workflow_run_id=$2,updated_at=$3,version=version+1 WHERE id=$1 AND status='approved'`, string(crossWorkspaceProposal.ID), string(otherRunID), now.Add(2*time.Minute))
+	assertSQLState(t, ctx, pool, "23514", `UPDATE change_control.proposal SET workflow_run_id=$2,updated_at=$3,version=version+1 WHERE id=$1 AND status='approved'`, string(crossWorkspaceProposal.ID), string(otherRunID), now.Add(2*time.Minute))
 
 	if err := repository.MarkNeedsRevision(ctx, proposalID, revisionID, queried.Version, now.Add(4*time.Minute)); err != nil {
 		t.Fatal(err)
@@ -192,14 +177,12 @@ func TestRepositoryProposalApprovalAndImmutability(t *testing.T) {
 		t.Fatalf("needs revision proposal=%#v err=%v", queried, err)
 	}
 
-	assertImmutable(t, ctx, tx, `UPDATE change_control.proposal_revision SET content='tampered' WHERE id=$1`, string(revisionID))
-	assertImmutable(t, ctx, tx, `UPDATE change_control.approval SET decision='rejected' WHERE id=$1`, string(approval.ID))
+	assertImmutable(t, ctx, pool, `UPDATE change_control.proposal_revision SET content='tampered' WHERE id=$1`, string(revisionID))
+	assertImmutable(t, ctx, pool, `UPDATE change_control.approval SET decision='rejected' WHERE id=$1`, string(approval.ID))
 }
 
 // TestGORMRepositoryProposalApprovalAndIdempotency is the focused PostgreSQL
-// gate for the staged adapter. It covers the main Proposal/Approval path and
-// the highest-value replay/conflict rollback invariant without rebuilding the
-// legacy matrix in this child task.
+// gate for the GORM Proposal/Approval path and exact replay/conflict rollback.
 func TestGORMRepositoryProposalApprovalAndIdempotency(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -425,7 +408,8 @@ func mustIntegrationUUID(t *testing.T) foundation.ID {
 }
 
 func TestProposalRevisionMigrationRejectsIncompleteCurrentBindings(t *testing.T) {
-	pool, ctx := newChangeControlMigrationTestPool(t)
+	platform, ctx := newChangeControlMigrationTestPool(t)
+	pool := platform.DB()
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -442,7 +426,7 @@ func TestProposalRevisionMigrationRejectsIncompleteCurrentBindings(t *testing.T)
 	resultChangeHash := domain.ComputeChangeHash("revision-guard.md", resultBaseHash, "result content")
 
 	if _, err := tx.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at)
-		VALUES($1,'Revision Guard',$2,$2,$3,'test',1,$3,$3)`, string(workspaceID), "/tmp/revision-guard-"+string(workspaceID), now); err != nil {
+		VALUES($1,'Revision Guard',$2,$2,$3,'inactive',1,$3,$3)`, string(workspaceID), "/tmp/revision-guard-"+string(workspaceID), now); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO change_control.proposal(
@@ -486,26 +470,21 @@ func TestProposalRevisionMigrationRejectsIncompleteCurrentBindings(t *testing.T)
 }
 
 func TestRepositoryRejectedApprovalPublishesProposalEventAndExactReplays(t *testing.T) {
-	pool, ctx := newChangeControlMigrationTestPool(t)
-	tx, err := pool.Begin(ctx)
+	platform, ctx := newChangeControlMigrationTestPool(t)
+	pool := platform.DB()
+	events, err := eventspostgres.NewGORMStore(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	events, err := eventspostgres.NewStore(tx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	repository, err := NewRepository(tx, events)
+	repository, err := NewGORMRepository(platform, events)
 	if err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC().Truncate(time.Microsecond).Add(-time.Second)
 	workspaceID := integrationID(60)
 	proposalID, revisionID, approvalID := integrationID(61), integrationID(62), integrationID(63)
-	if _, err := tx.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at)
-		VALUES($1,'Proposal Event Test',$2,$2,$3,'test',1,$3,$3)`, string(workspaceID), "/tmp/proposal-event-"+string(workspaceID), now); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at)
+		VALUES($1,'Proposal Event Test',$2,$2,$3,'inactive',1,$3,$3)`, string(workspaceID), "/tmp/proposal-event-"+string(workspaceID), now); err != nil {
 		t.Fatal(err)
 	}
 	baseHash := strings.Repeat("0", 64)
@@ -545,7 +524,7 @@ func TestRepositoryRejectedApprovalPublishesProposalEventAndExactReplays(t *test
 	}
 
 	var eventCount int
-	if err := tx.QueryRow(ctx, `SELECT count(*) FROM ops.server_event
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM ops.server_event
 		WHERE workspace_id=$1 AND event_type=$2 AND resource_ref=$3`,
 		string(workspaceID), eventcontract.ProposalRejectedEventType, "proposal:"+string(proposalID)).Scan(&eventCount); err != nil {
 		t.Fatal(err)
@@ -555,7 +534,7 @@ func TestRepositoryRejectedApprovalPublishesProposalEventAndExactReplays(t *test
 	}
 	var eventType, resourceRef, sourceRef, status string
 	var resourceVersion int64
-	if err := tx.QueryRow(ctx, `SELECT event_type,resource_ref,resource_version,source_event_ref,payload_summary->>'status'
+	if err := pool.QueryRow(ctx, `SELECT event_type,resource_ref,resource_version,source_event_ref,payload_summary->>'status'
 		FROM ops.server_event WHERE workspace_id=$1 ORDER BY seq`, string(workspaceID)).Scan(
 		&eventType, &resourceRef, &resourceVersion, &sourceRef, &status,
 	); err != nil {
@@ -568,28 +547,15 @@ func TestRepositoryRejectedApprovalPublishesProposalEventAndExactReplays(t *test
 }
 
 func TestRepositoryKnowledgeChangeProposalCompatibility(t *testing.T) {
-	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
-	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	repository, err := NewRepository(tx)
+	platform, ctx := newChangeControlMigrationTestPool(t)
+	pool := platform.DB()
+	repository, err := NewGORMRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC().Add(-time.Second)
 	workspaceID := integrationID(31)
-	if _, err := tx.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'Knowledge Typed Test',$2,$2,$3,'test',1,$3,$3)`, string(workspaceID), "/tmp/knowledge-"+string(workspaceID), now); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'Knowledge Typed Test',$2,$2,$3,'inactive',1,$3,$3)`, string(workspaceID), "/tmp/knowledge-"+string(workspaceID), now); err != nil {
 		t.Fatal(err)
 	}
 	change := knowledgeChangeFixtureForIntegration()
@@ -636,80 +602,31 @@ func TestRepositoryKnowledgeChangeProposalCompatibility(t *testing.T) {
 	if approved.Decision != domain.DecisionApproved {
 		t.Fatalf("approved=%#v", approved)
 	}
-	if err := tx.Commit(ctx); err != nil {
-		t.Fatal(err)
-	}
 }
 
-func newChangeControlMigrationTestPool(t *testing.T) (*pgxpool.Pool, context.Context) {
+func newChangeControlMigrationTestPool(t *testing.T) (*platformpostgres.Pool, context.Context) {
 	t.Helper()
-	pool, ctx := newChangeControlTestDatabase(t)
-	runner, err := platformmigration.NewAtlasEmbeddedRunner(pool)
-	if err == nil {
-		err = runner.Up(ctx)
-	}
-	if err != nil {
-		t.Fatal(err)
-	}
-	return pool, ctx
-}
-
-func newChangeControlTestDatabase(t *testing.T) (*pgxpool.Pool, context.Context) {
-	t.Helper()
-	baseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
-	if baseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL for Change Control migration integration tests")
-	}
-	ctx := context.Background()
-	parsed, err := url.Parse(baseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	admin, err := pgxpool.New(ctx, baseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	databaseName := fmt.Sprintf("zhixu_change_down_%d", time.Now().UnixNano())
-	identifier := pgx.Identifier{databaseName}.Sanitize()
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+identifier); err != nil {
-		admin.Close()
-		t.Fatal(err)
-	}
-	parsed.Path = "/" + databaseName
-	pool, err := pgxpool.New(ctx, parsed.String())
-	if err != nil {
-		if pool != nil {
-			pool.Close()
-		}
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		pool.Close()
-		_, _ = admin.Exec(context.Background(), "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
+	fixture := testdb.Require(t, testdb.Config{
+		ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
+		Availability:     testdb.FailWhenUnavailable,
+		MaxConns:         16,
 	})
-	return pool, ctx
+	pool := fixture.Pool()
+	if pool == nil || pool.DB() == nil {
+		t.Fatal("Change Control fixture did not provide a shared platform pool")
+	}
+	return pool, t.Context()
 }
+
+const testAuthorizationInsert = `INSERT INTO change_control.tool_authorization(
+		id,workspace_id,workflow_run_id,node_run_id,proposal_id,revision_id,approval_id,tool_name,capability,scope,approved_change_hash,target_mode,target_version,token_hash,idempotency_key,status,issued_at,expires_at,revoked_at,consumed_at,version
+	) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+	ON CONFLICT(workspace_id,idempotency_key) DO NOTHING`
 
 func TestRepositoryWriteAuthorizationLifecycle(t *testing.T) {
-	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
-	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	repository, err := NewRepository(tx)
+	platform, ctx := newChangeControlMigrationTestPool(t)
+	pool := platform.DB()
+	repository, err := NewGORMRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -728,16 +645,16 @@ func TestRepositoryWriteAuthorizationLifecycle(t *testing.T) {
 	definitionID, runID, nodeID := nextID(), nextID(), nextID()
 	proposalID, revisionID, approvalID := nextID(), nextID(), nextID()
 	authorizationID := nextID()
-	if _, err := tx.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'Auth Test',$2,$2,$3,'test',1,$3,$3)`, string(workspaceID), "/tmp/auth-"+string(workspaceID), now); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'Auth Test',$2,$2,$3,'inactive',1,$3,$3)`, string(workspaceID), "/tmp/auth-"+string(workspaceID), now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO workflow.definition(id,workspace_id,key,version,graph,created_at) VALUES($1,$2,'apply-test',1,'{}',$3)`, string(definitionID), string(workspaceID), now); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO workflow.definition(id,workspace_id,key,version,graph,created_at) VALUES($1,$2,'apply-test',1,'{}',$3)`, string(definitionID), string(workspaceID), now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO workflow.run(id,workspace_id,definition_id,status,input,version,created_at,updated_at) VALUES($1,$2,$3,'running','{}',1,$4,$4)`, string(runID), string(workspaceID), string(definitionID), now); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO workflow.run(id,workspace_id,definition_id,status,input,version,created_at,updated_at) VALUES($1,$2,$3,'running','{}',1,$4,$4)`, string(runID), string(workspaceID), string(definitionID), now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO workflow.node_run(id,run_id,node_key,node_type,status,attempt,input,version,created_at,updated_at,lease_owner,lease_until) VALUES($1,$2,'apply','tool','running',1,'{}',1,$3,$3,'test-owner',$4)`, string(nodeID), string(runID), now, now.Add(time.Hour)); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO workflow.node_run(id,run_id,node_key,node_type,status,attempt,input,version,created_at,updated_at,lease_owner,lease_until) VALUES($1,$2,'apply','tool','running',1,'{}',1,$3,$3,'test-owner',$4)`, string(nodeID), string(runID), now, now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	baseHash := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -757,10 +674,10 @@ func TestRepositoryWriteAuthorizationLifecycle(t *testing.T) {
 	if err != nil || historical.Version != 2 || historical.Approval == nil || historical.Approval.ApprovedGitHead != nil {
 		t.Fatalf("historical approval=%#v err=%v", historical, err)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE change_control.proposal SET workflow_run_id=$2,updated_at=$3,version=version+1 WHERE id=$1 AND status='approved'`, string(proposalID), string(runID), now); err != nil {
+	if _, err := pool.Exec(ctx, `UPDATE change_control.proposal SET workflow_run_id=$2,updated_at=$3,version=version+1 WHERE id=$1 AND status='approved'`, string(proposalID), string(runID), now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.Exec(ctx, `
+	if _, err := pool.Exec(ctx, `
 		INSERT INTO change_control.proposal_revision_dispatch(
 			workspace_id,proposal_id,revision_id,approval_id,workflow_run_id,created_at
 		) VALUES($1,$2,$3,$4,$5,$6)`,
@@ -768,13 +685,6 @@ func TestRepositoryWriteAuthorizationLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	historical.Version++
-	if err := tx.Commit(ctx); err != nil {
-		t.Fatal(err)
-	}
-	repository, err = NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
 	if err := repository.ValidateWorkflowContext(ctx, workspaceID, runID, nodeID); err != nil {
 		t.Fatal(err)
 	}
@@ -799,13 +709,13 @@ func TestRepositoryWriteAuthorizationLifecycle(t *testing.T) {
 		t.Fatalf("ttl idempotency conflict err=%v", err)
 	}
 	terminalInsert := domain.ToolAuthorization{ID: nextID(), WorkspaceID: workspaceID, WorkflowRunID: runID, NodeRunID: nodeID, ProposalID: proposalID, RevisionID: revisionID, ApprovalID: approvalID, ToolName: "ApplyApprovedPatch", Capability: domain.CapabilityWriteKnowledge, Scope: "target:a.md", ApprovedChangeHash: changeHash, TargetVersion: baseHash, TokenHash: tokenHash("terminal-insert"), IdempotencyKey: "auth-terminal-insert", Status: domain.AuthorizationConsumed, IssuedAt: now, ExpiresAt: now.Add(time.Minute), ConsumedAt: ptrTime(now), Version: 1}
-	if _, err := pool.Exec(ctx, authorizationInsert,
-		string(terminalInsert.ID), string(terminalInsert.WorkspaceID), string(terminalInsert.WorkflowRunID), string(terminalInsert.NodeRunID), string(terminalInsert.ProposalID), string(terminalInsert.RevisionID), string(terminalInsert.ApprovalID), terminalInsert.ToolName, string(terminalInsert.Capability), terminalInsert.Scope, terminalInsert.ApprovedChangeHash, terminalInsert.TargetVersion, terminalInsert.TokenHash, terminalInsert.IdempotencyKey, string(terminalInsert.Status), terminalInsert.IssuedAt, terminalInsert.ExpiresAt, nil, terminalInsert.ConsumedAt, terminalInsert.Version); err == nil {
+	if _, err := pool.Exec(ctx, testAuthorizationInsert,
+		string(terminalInsert.ID), string(terminalInsert.WorkspaceID), string(terminalInsert.WorkflowRunID), string(terminalInsert.NodeRunID), string(terminalInsert.ProposalID), string(terminalInsert.RevisionID), string(terminalInsert.ApprovalID), terminalInsert.ToolName, string(terminalInsert.Capability), terminalInsert.Scope, terminalInsert.ApprovedChangeHash, string(domain.NormalizeTargetMode(terminalInsert.TargetMode)), terminalInsert.TargetVersion, terminalInsert.TokenHash, terminalInsert.IdempotencyKey, string(terminalInsert.Status), terminalInsert.IssuedAt, terminalInsert.ExpiresAt, nil, terminalInsert.ConsumedAt, terminalInsert.Version); err == nil {
 		t.Fatal("terminal insert constraint accepted")
 	}
 	orderCheck := domain.ToolAuthorization{ID: nextID(), WorkspaceID: workspaceID, WorkflowRunID: runID, NodeRunID: nodeID, ProposalID: proposalID, RevisionID: revisionID, ApprovalID: approvalID, ToolName: "ApplyApprovedPatch", Capability: domain.CapabilityWriteKnowledge, Scope: "target:a.md", ApprovedChangeHash: changeHash, TargetVersion: baseHash, TokenHash: tokenHash("time-order"), IdempotencyKey: "auth-time-order", Status: domain.AuthorizationIssued, IssuedAt: now, ExpiresAt: now.Add(time.Minute), Version: 1}
-	if _, err := pool.Exec(ctx, authorizationInsert,
-		string(orderCheck.ID), string(orderCheck.WorkspaceID), string(orderCheck.WorkflowRunID), string(orderCheck.NodeRunID), string(orderCheck.ProposalID), string(orderCheck.RevisionID), string(orderCheck.ApprovalID), orderCheck.ToolName, string(orderCheck.Capability), orderCheck.Scope, orderCheck.ApprovedChangeHash, orderCheck.TargetVersion, orderCheck.TokenHash, orderCheck.IdempotencyKey, string(orderCheck.Status), orderCheck.IssuedAt, orderCheck.ExpiresAt, nil, nil, orderCheck.Version); err != nil {
+	if _, err := pool.Exec(ctx, testAuthorizationInsert,
+		string(orderCheck.ID), string(orderCheck.WorkspaceID), string(orderCheck.WorkflowRunID), string(orderCheck.NodeRunID), string(orderCheck.ProposalID), string(orderCheck.RevisionID), string(orderCheck.ApprovalID), orderCheck.ToolName, string(orderCheck.Capability), orderCheck.Scope, orderCheck.ApprovedChangeHash, string(domain.NormalizeTargetMode(orderCheck.TargetMode)), orderCheck.TargetVersion, orderCheck.TokenHash, orderCheck.IdempotencyKey, string(orderCheck.Status), orderCheck.IssuedAt, orderCheck.ExpiresAt, nil, nil, orderCheck.Version); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE change_control.tool_authorization SET status='consumed',consumed_at=issued_at-interval '1 second',version=2 WHERE id=$1`, string(orderCheck.ID)); err == nil {
@@ -873,10 +783,10 @@ func TestRepositoryWriteAuthorizationLifecycle(t *testing.T) {
 	expired.IdempotencyKey = "auth-expired"
 	expired.IssuedAt = time.Now().UTC().Add(-2 * time.Minute)
 	expired.ExpiresAt = time.Now().UTC().Add(-1 * time.Minute)
-	if _, err := pool.Exec(ctx, authorizationInsert,
+	if _, err := pool.Exec(ctx, testAuthorizationInsert,
 		string(expired.ID), string(expired.WorkspaceID), string(expired.WorkflowRunID), string(expired.NodeRunID),
 		string(expired.ProposalID), string(expired.RevisionID), string(expired.ApprovalID), expired.ToolName,
-		string(expired.Capability), expired.Scope, expired.ApprovedChangeHash, expired.TargetVersion,
+		string(expired.Capability), expired.Scope, expired.ApprovedChangeHash, string(domain.NormalizeTargetMode(expired.TargetMode)), expired.TargetVersion,
 		expired.TokenHash, expired.IdempotencyKey, string(expired.Status), expired.IssuedAt, expired.ExpiresAt,
 		nil, nil, expired.Version); err != nil {
 		t.Fatal(err)
@@ -930,7 +840,14 @@ func TestRepositoryWriteAuthorizationLifecycle(t *testing.T) {
 	}
 }
 
-func assertImmutable(t *testing.T, ctx context.Context, parent pgx.Tx, query string, arguments ...any) {
+// changeControlTestSQL keeps fixture statements independent of repository transactions.
+type changeControlTestSQL interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
+	Begin(context.Context) (pgx.Tx, error)
+}
+
+func assertImmutable(t *testing.T, ctx context.Context, parent changeControlTestSQL, query string, arguments ...any) {
 	t.Helper()
 	tx, err := parent.Begin(ctx)
 	if err != nil {
@@ -945,7 +862,7 @@ func assertImmutable(t *testing.T, ctx context.Context, parent pgx.Tx, query str
 	}
 }
 
-func assertSQLState(t *testing.T, ctx context.Context, parent pgx.Tx, sqlState, query string, arguments ...any) {
+func assertSQLState(t *testing.T, ctx context.Context, parent changeControlTestSQL, sqlState, query string, arguments ...any) {
 	t.Helper()
 	tx, err := parent.Begin(ctx)
 	if err != nil {

@@ -12,19 +12,15 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
-	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestRepositoryLeaseCompletionAndHumanSubmission(t *testing.T) {
 	ctx := context.Background()
 	fixture := testdb.Require(t, testdb.Config{Availability: testdb.FailWhenUnavailable, MaxConns: 8})
 	pool := fixture.Pool().DB()
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	repository, err := NewRepository(tx)
+	tx := pool
+	repository, err := NewGORMRepository(fixture.Pool())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +102,7 @@ func TestRepositoryLeaseCompletionAndHumanSubmission(t *testing.T) {
 // startFixture 直接以 SQL 播种 definition/run/node/outbox。legacy Start 不写入
 // runtime identity 列，而 M4-B 起的 workflow_node_guard_runtime_identity 触发器
 // 拒绝 NULL identity 节点的后续 UPDATE，因此这里写入完整 identity。
-func startFixture(t *testing.T, ctx context.Context, tx pgx.Tx, workspaceID foundation.ID, now time.Time, offset byte) (domain.Run, domain.NodeRun) {
+func startFixture(t *testing.T, ctx context.Context, tx *pgxpool.Pool, workspaceID foundation.ID, now time.Time, offset byte) (domain.Run, domain.NodeRun) {
 	t.Helper()
 	definitionID := testID(offset + 1)
 	runID := testID(offset + 2)

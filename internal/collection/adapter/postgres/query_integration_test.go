@@ -13,6 +13,7 @@ import (
 	collectionapp "github.com/CodeZen-Lizhi/zhixu/internal/collection/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/collection/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	"gorm.io/gorm"
 )
 
 func TestCollectionQueryUsesUnifiedReadModelAndCursor(t *testing.T) {
@@ -175,6 +176,10 @@ func TestCollectionQueryTimeoutClassificationAndConnectionReuse(t *testing.T) {
 	defer cancel()
 	platform := fixture.Pool()
 	pool := platform.DB()
+	gormRepository, err := NewGORMRepository(platform)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, test := range []struct {
 		name      string
 		statement bool
@@ -184,23 +189,21 @@ func TestCollectionQueryTimeoutClassificationAndConnectionReuse(t *testing.T) {
 		{name: "context deadline", statement: false, wantCause: context.DeadlineExceeded},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			tx, beginErr := pool.Begin(ctx)
-			if beginErr != nil {
-				t.Fatal(beginErr)
-			}
-			defer func() { _ = tx.Rollback(context.Background()) }()
 			queryCtx := ctx
 			cancel := func() {}
-			if test.statement {
-				if timeoutErr := configureCollectionStatementTimeout(ctx, tx, time.Millisecond); timeoutErr != nil {
-					t.Fatal(timeoutErr)
-				}
-			} else {
+			if !test.statement {
 				queryCtx, cancel = context.WithTimeout(ctx, time.Millisecond)
 			}
 			defer cancel()
-			var value int
-			queryErr := tx.QueryRow(queryCtx, `SELECT 1 FROM pg_catalog.pg_sleep(0.05)`).Scan(&value)
+			queryErr := gormRepository.within(queryCtx, foundation.TransactionOptions{}, func(callbackCtx context.Context, database *gorm.DB) error {
+				if test.statement {
+					if timeoutErr := configureCollectionStatementTimeout(callbackCtx, database, time.Millisecond); timeoutErr != nil {
+						return timeoutErr
+					}
+				}
+				var value int
+				return database.WithContext(callbackCtx).Raw(`SELECT 1 FROM pg_catalog.pg_sleep(?)`, 0.05).Row().Scan(&value)
+			})
 			if queryErr == nil {
 				t.Fatal("slow query unexpectedly succeeded")
 			}
@@ -214,17 +217,13 @@ func TestCollectionQueryTimeoutClassificationAndConnectionReuse(t *testing.T) {
 			}
 		})
 	}
-	gormRepository, err := NewGORMRepository(platform)
-	if err != nil {
-		t.Fatal(err)
-	}
 	t.Run("gorm statement timeout", func(t *testing.T) {
-		err := gormRepository.within(ctx, foundation.TransactionOptions{}, func(callbackCtx context.Context, database *gormDB) error {
+		err := gormRepository.within(ctx, foundation.TransactionOptions{}, func(callbackCtx context.Context, database *gorm.DB) error {
 			if timeoutErr := configureCollectionStatementTimeout(callbackCtx, database, time.Millisecond); timeoutErr != nil {
 				return timeoutErr
 			}
 			var value int
-			return database.QueryRow(callbackCtx, `SELECT 1 FROM pg_catalog.pg_sleep($1)`, 0.05).Scan(&value)
+			return database.WithContext(callbackCtx).Raw(`SELECT 1 FROM pg_catalog.pg_sleep(?)`, 0.05).Row().Scan(&value)
 		})
 		var classified *foundation.Error
 		if !errors.As(err, &classified) || classified.Code != collectionapp.ErrorCodeQueryTimeout || !classified.Retryable {
@@ -235,9 +234,9 @@ func TestCollectionQueryTimeoutClassificationAndConnectionReuse(t *testing.T) {
 		cause := errors.New("collection query caller stopped waiting")
 		queryCtx, cancelCause := context.WithCancelCause(ctx)
 		timer := time.AfterFunc(20*time.Millisecond, func() { cancelCause(cause) })
-		err := gormRepository.within(queryCtx, foundation.TransactionOptions{}, func(callbackCtx context.Context, database *gormDB) error {
+		err := gormRepository.within(queryCtx, foundation.TransactionOptions{}, func(callbackCtx context.Context, database *gorm.DB) error {
 			var value int
-			return database.QueryRow(callbackCtx, `SELECT 1 FROM pg_catalog.pg_sleep($1)`, 0.5).Scan(&value)
+			return database.WithContext(callbackCtx).Raw(`SELECT 1 FROM pg_catalog.pg_sleep(?)`, 0.5).Row().Scan(&value)
 		})
 		timer.Stop()
 		cancelCause(nil)

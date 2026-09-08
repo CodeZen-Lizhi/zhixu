@@ -12,8 +12,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// GORMRepository is the staged Change Control persistence implementation.
-// Production composition remains on Repository until the PostgreSQL gate passes.
+// GORMRepository owns Change Control persistence through the shared platform unit of work.
 type GORMRepository struct {
 	database   *gorm.DB
 	unitOfWork foundation.UnitOfWork

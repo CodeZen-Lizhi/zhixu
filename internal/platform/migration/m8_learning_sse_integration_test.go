@@ -23,6 +23,9 @@ func TestM8LearningSSEMigrationProjectsMinimalEvents(t *testing.T) {
 		t.Fatalf("migrate through 00047: %v", err)
 	}
 	assertMigrationVersion(t, ctx, pool, 47)
+	runtimePool := openMigrationRuntimePool(t, ctx, pool)
+	defer runtimePool.Close()
+	pool = runtimePool.DB()
 
 	workspaceID := "77000000-0000-4000-8000-000000000001"
 	deckID := "77000000-0000-4000-8000-000000000002"
@@ -66,7 +69,7 @@ func TestM8LearningSSEMigrationProjectsMinimalEvents(t *testing.T) {
 	}
 
 	assertM8LearningEventTriggers(t, ctx, pool)
-	store, err := eventspostgres.NewStore(pool)
+	store, err := eventspostgres.NewGORMStore(runtimePool)
 	if err != nil {
 		t.Fatal(err)
 	}

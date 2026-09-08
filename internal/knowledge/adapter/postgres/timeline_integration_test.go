@@ -32,12 +32,11 @@ type timelineIntegrationRepository interface {
 	knowledgeapp.EvidenceTopicRepository
 	knowledgeapp.TimelineReader
 	knowledgeapp.EventProjector
-	knowledgeapp.ImpactRepository
+	knowledgeapp.ScopedImpactRepository
 	knowledgeapp.TimelineProjectionPort
 }
 
 type timelineImpactAuditCollaborator interface {
-	knowledgeapp.ImpactAuditPort
 	knowledgeapp.ScopedImpactAuditPort
 }
 
@@ -54,14 +53,6 @@ type timelineIntegrationCase struct {
 	ctx        context.Context
 	variant    timelineIntegrationVariant
 	audit      timelineImpactAuditCollaborator
-}
-
-func TestTimelineImpactProjectionLegacyIntegration(t *testing.T) {
-	runTimelineIntegrationVariant(t, timelineIntegrationVariant{
-		open:          openLegacyTimelineIntegrationRepository,
-		openAudit:     openLegacyTimelineImpactAudit,
-		saveWithAudit: saveLegacyTimelineImpactWithAudit,
-	})
 }
 
 func TestTimelineImpactProjectionGORMIntegration(t *testing.T) {
@@ -148,7 +139,7 @@ func runTimelineIntegrationVariant(t *testing.T, variant timelineIntegrationVari
 	if platform == nil || platform.DB() == nil {
 		t.Fatal("Knowledge Timeline fixture did not provide a shared platform pool")
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
 	testCase := timelineIntegrationCase{
 		repository: variant.open(t, platform),
@@ -186,15 +177,6 @@ func runTimelineIntegrationVariant(t *testing.T, variant timelineIntegrationVari
 	}
 }
 
-func openLegacyTimelineIntegrationRepository(t *testing.T, platform *platformpostgres.Pool) timelineIntegrationRepository {
-	t.Helper()
-	repository, err := NewRepository(platform.DB())
-	if err != nil {
-		t.Fatal(err)
-	}
-	return repository
-}
-
 func openGORMTimelineIntegrationRepository(t *testing.T, platform *platformpostgres.Pool) timelineIntegrationRepository {
 	t.Helper()
 	repository, err := NewGORMRepository(platform)
@@ -202,15 +184,6 @@ func openGORMTimelineIntegrationRepository(t *testing.T, platform *platformpostg
 		t.Fatal(err)
 	}
 	return repository
-}
-
-func openLegacyTimelineImpactAudit(t *testing.T, platform *platformpostgres.Pool) timelineImpactAuditCollaborator {
-	t.Helper()
-	store, err := auditpostgres.NewStore(platform.DB())
-	if err != nil {
-		t.Fatal(err)
-	}
-	return newTimelineImpactAudit(t, store)
 }
 
 func openGORMTimelineImpactAudit(t *testing.T, platform *platformpostgres.Pool) timelineImpactAuditCollaborator {
@@ -237,16 +210,8 @@ func newTimelineImpactAudit(t *testing.T, repository auditapplication.Repository
 	return impactRecorder
 }
 
-func saveLegacyTimelineImpactWithAudit(ctx context.Context, repository timelineIntegrationRepository, report domain.ImpactReport, key string, audit timelineImpactAuditCollaborator) (domain.ImpactReport, bool, error) {
-	return repository.SaveImpactReportWithAudit(ctx, report, key, audit)
-}
-
 func saveGORMTimelineImpactWithAudit(ctx context.Context, repository timelineIntegrationRepository, report domain.ImpactReport, key string, audit timelineImpactAuditCollaborator) (domain.ImpactReport, bool, error) {
-	scoped, ok := repository.(knowledgeapp.ScopedImpactRepository)
-	if !ok {
-		return domain.ImpactReport{}, false, errors.New("Knowledge GORM repository does not expose scoped Impact persistence")
-	}
-	return scoped.SaveImpactReportWithScopedAudit(ctx, report, key, audit)
+	return repository.SaveImpactReportWithScopedAudit(ctx, report, key, audit)
 }
 
 func (testCase timelineIntegrationCase) openRepository(t *testing.T) timelineIntegrationRepository {
@@ -915,22 +880,6 @@ type impactAuditFailureAfterRecord struct {
 	delegate timelineImpactAuditCollaborator
 	err      error
 	recorded bool
-}
-
-func (collaborator *impactAuditFailureAfterRecord) RecordImpactAnalysis(ctx context.Context, record knowledgeapp.ImpactAuditRecord) error {
-	if err := collaborator.delegate.RecordImpactAnalysis(ctx, record); err != nil {
-		return err
-	}
-	collaborator.recorded = true
-	return collaborator.err
-}
-
-func (collaborator *impactAuditFailureAfterRecord) RecordImpactAnalysisTx(ctx context.Context, transaction any, record knowledgeapp.ImpactAuditRecord) error {
-	if err := collaborator.delegate.RecordImpactAnalysisTx(ctx, transaction, record); err != nil {
-		return err
-	}
-	collaborator.recorded = true
-	return collaborator.err
 }
 
 func (collaborator *impactAuditFailureAfterRecord) RecordImpactAnalysisScoped(ctx context.Context, scope foundation.TransactionScope, record knowledgeapp.ImpactAuditRecord) error {

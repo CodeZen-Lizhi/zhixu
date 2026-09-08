@@ -8,14 +8,14 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 )
 
-func TestCompositeCancellationSafetyGuardRequiresEveryBoundary(t *testing.T) {
+func TestCompositeScopedCancellationSafetyGuardRequiresEveryBoundary(t *testing.T) {
 	first := &cancellationGuardFake{safe: true}
 	second := &cancellationGuardFake{safe: false}
-	guard, err := NewCompositeCancellationSafetyGuard(first, second)
+	guard, err := NewCompositeScopedCancellationSafetyGuard(first, second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	safe, err := guard.SafeToCancelWorkflowNode(context.Background(), "tx", id(1))
+	safe, err := guard.SafeToCancelWorkflowNodeScoped(context.Background(), &workflowHookScope{name: "runtime-tx"}, id(1))
 	if err != nil || safe || first.calls != 1 || second.calls != 1 {
 		t.Fatalf("safe=%v err=%v first=%d second=%d", safe, err, first.calls, second.calls)
 	}
@@ -23,7 +23,7 @@ func TestCompositeCancellationSafetyGuardRequiresEveryBoundary(t *testing.T) {
 	cause := errors.New("guard failed")
 	first.err = cause
 	second.calls = 0
-	if _, err := guard.SafeToCancelWorkflowNode(context.Background(), "tx", id(1)); !errors.Is(err, cause) || second.calls != 0 {
+	if _, err := guard.SafeToCancelWorkflowNodeScoped(context.Background(), &workflowHookScope{name: "runtime-tx"}, id(1)); !errors.Is(err, cause) || second.calls != 0 {
 		t.Fatalf("error=%v second_calls=%d", err, second.calls)
 	}
 }
@@ -34,7 +34,7 @@ type cancellationGuardFake struct {
 	calls int
 }
 
-func (guard *cancellationGuardFake) SafeToCancelWorkflowNode(context.Context, any, foundation.ID) (bool, error) {
+func (guard *cancellationGuardFake) SafeToCancelWorkflowNodeScoped(context.Context, foundation.TransactionScope, foundation.ID) (bool, error) {
 	guard.calls++
 	return guard.safe, guard.err
 }

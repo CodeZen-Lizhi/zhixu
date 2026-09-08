@@ -10,11 +10,15 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 )
 
+type lifecycleEventScope struct{}
+
+func (*lifecycleEventScope) TransactionScope() {}
+
 type lifecycleEventAppender struct {
 	requests []eventsdomain.AppendRequest
 }
 
-func (appender *lifecycleEventAppender) AppendTx(_ context.Context, _ any, request eventsdomain.AppendRequest) (eventsdomain.ServerEvent, bool, error) {
+func (appender *lifecycleEventAppender) AppendScoped(_ context.Context, _ foundation.TransactionScope, request eventsdomain.AppendRequest) (eventsdomain.ServerEvent, bool, error) {
 	if err := request.Validate(); err != nil {
 		return eventsdomain.ServerEvent{}, false, err
 	}
@@ -37,13 +41,13 @@ func TestAppendLifecycleEventCarriesLowercaseScopeKindForEachStage(t *testing.T)
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			appender := &lifecycleEventAppender{}
-			repository := &Repository{events: appender}
+			repository := &exportRepository{events: appender}
 			job := exportdomain.Job{
 				ID: foundation.ID("7a000000-0000-4000-8000-000000000001"), WorkspaceID: foundation.ID("7a000000-0000-4000-8000-000000000002"),
 				Scope: exportdomain.Scope{Kind: test.scopeKind}, Status: exportdomain.StatusSucceeded, Version: 4, UpdatedAt: now,
 			}
 			for _, stage := range stages {
-				if err := repository.appendLifecycleEvent(context.Background(), nil, job, stage); err != nil {
+				if err := repository.appendLifecycleEvent(context.Background(), &gormTx{scope: &lifecycleEventScope{}}, job, stage); err != nil {
 					t.Fatalf("append lifecycle stage %q: %v", stage, err)
 				}
 			}

@@ -39,7 +39,7 @@ func TestImpactRecorderUsesStableRequestBindingAcrossReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	record.Replayed = true
-	if err := recorder.RecordImpactAnalysisTx(context.Background(), struct{}{}, record); err != nil {
+	if err := recorder.RecordImpactAnalysisScoped(context.Background(), impactAuditTestScope{}, record); err != nil {
 		t.Fatal(err)
 	}
 	if len(repository.events) != 1 {
@@ -111,6 +111,10 @@ func TestNewImpactRecorderRejectsMissingDependencies(t *testing.T) {
 	}
 }
 
+type impactAuditTestScope struct{}
+
+func (impactAuditTestScope) TransactionScope() {}
+
 type impactAuditRepository struct{ events map[string]auditdomain.Event }
 
 func (repository *impactAuditRepository) Append(_ context.Context, event auditdomain.Event) (auditdomain.Event, bool, error) {
@@ -124,7 +128,7 @@ func (repository *impactAuditRepository) Append(_ context.Context, event auditdo
 	return event, false, nil
 }
 
-func (repository *impactAuditRepository) AppendTx(ctx context.Context, _ any, event auditdomain.Event) (auditdomain.Event, bool, error) {
+func (repository *impactAuditRepository) AppendScoped(ctx context.Context, _ foundation.TransactionScope, event auditdomain.Event) (auditdomain.Event, bool, error) {
 	return repository.Append(ctx, event)
 }
 

@@ -3,19 +3,18 @@ package postgres
 import (
 	"context"
 	"errors"
-	"fmt"
 	"time"
 
 	collectionapp "github.com/CodeZen-Lizhi/zhixu/internal/collection/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/collection/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
+	"github.com/lib/pq"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
-// GORMRepository is the staged Collection implementation backed by the
-// platform's shared GORM root and UnitOfWork. Production composition remains
-// on Repository until the real PostgreSQL equivalence gate passes.
+// GORMRepository uses the platform's shared GORM root and UnitOfWork for all Collection persistence.
 type GORMRepository struct {
 	database   *gorm.DB
 	unitOfWork foundation.UnitOfWork
@@ -56,7 +55,7 @@ func (repository *GORMRepository) CreateCollection(ctx context.Context, record c
 		return collectionapp.CommandResult{}, err
 	}
 	var result collectionapp.CommandResult
-	err := repository.within(ctx, foundation.TransactionOptions{}, func(callbackCtx context.Context, database *gormDB) error {
+	err := repository.within(ctx, foundation.TransactionOptions{}, func(callbackCtx context.Context, database *gorm.DB) error {
 		if err := lockWorkspace(callbackCtx, database, record.Collection.WorkspaceID); err != nil {
 			return err
 		}
@@ -69,10 +68,12 @@ func (repository *GORMRepository) CreateCollection(ctx context.Context, record c
 			result = commandResult(receipt.collection, receipt, true)
 			return nil
 		}
-		if _, err := database.Exec(callbackCtx, `INSERT INTO learning.smart_collection(`+collectionColumnsForInsert+`) VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11::jsonb,$12,$13,$14,$15,$16,$17)`, collectionGORMArgs(record.Collection)...); err != nil {
+		model := collectionModelFrom(record.Collection)
+		if err := database.WithContext(callbackCtx).Create(&model).Error; err != nil {
 			return err
 		}
-		if _, err := database.Exec(callbackCtx, `INSERT INTO learning.smart_collection_command(workspace_id,idempotency_key,request_hash,command_type,collection_id,collection_version,receipt,created_at) VALUES($1,$2,$3,'CREATE',$4,$5,$6::jsonb,$7)`, string(record.Collection.WorkspaceID), record.IdempotencyKey, record.RequestHash, string(record.Collection.ID), record.Collection.Version, collectionJSONB(commandReceiptJSON(record.Collection, record.IdempotencyKey, "CREATE", record.RequestHash)), record.Collection.CreatedAt.UTC()); err != nil {
+		command := collectionCommandModelFrom(record.Collection, record.IdempotencyKey, "CREATE", record.RequestHash, record.Collection.CreatedAt)
+		if err := database.WithContext(callbackCtx).Create(&command).Error; err != nil {
 			return err
 		}
 		receipt := commandReceipt{workspaceID: record.Collection.WorkspaceID, idempotencyKey: record.IdempotencyKey, requestHash: record.RequestHash, commandType: "CREATE", collectionID: record.Collection.ID, collectionVersion: record.Collection.Version}
@@ -95,7 +96,7 @@ func (repository *GORMRepository) UpdateCollection(ctx context.Context, record c
 		return collectionapp.CommandResult{}, err
 	}
 	var result collectionapp.CommandResult
-	err := repository.within(ctx, foundation.TransactionOptions{}, func(callbackCtx context.Context, database *gormDB) error {
+	err := repository.within(ctx, foundation.TransactionOptions{}, func(callbackCtx context.Context, database *gorm.DB) error {
 		if err := lockWorkspace(callbackCtx, database, record.WorkspaceID); err != nil {
 			return err
 		}
@@ -129,8 +130,21 @@ func (repository *GORMRepository) UpdateCollection(ctx context.Context, record c
 		if current.QueryHash != record.Collection.QueryHash {
 			queryVersion++
 		}
-		if _, err := database.Exec(callbackCtx, `UPDATE learning.smart_collection SET name=$3,normalized_name=$4,description=$5,query_schema_version=$6,query_version=$7,query_definition=$8::jsonb,query_hash=$9,view_type=$10,view_config=$11::jsonb,status='ACTIVE',version=version+1,updated_at=$12 WHERE workspace_id=$1 AND id=$2 AND version=$13`, string(record.WorkspaceID), string(record.CollectionID), record.Collection.Name, record.Collection.NormalizedName, record.Collection.Description, record.Collection.QuerySchemaVersion, queryVersion, collectionJSONB(queryDefinition(record.Collection)), record.Collection.QueryHash, string(record.Collection.ViewType), collectionJSONB(viewConfig(record.Collection)), now, record.ExpectedVersion); err != nil {
-			return err
+		write := database.WithContext(callbackCtx).Model(&collectionModel{}).
+			Where("workspace_id = ? AND id = ? AND version = ?", string(record.WorkspaceID), string(record.CollectionID), record.ExpectedVersion).
+			Updates(map[string]any{
+				"name": record.Collection.Name, "normalized_name": record.Collection.NormalizedName,
+				"description": record.Collection.Description, "query_schema_version": record.Collection.QuerySchemaVersion,
+				"query_version": queryVersion, "query_definition": collectionJSONB(queryDefinition(record.Collection)),
+				"query_hash": record.Collection.QueryHash, "view_type": string(record.Collection.ViewType),
+				"view_config": collectionJSONB(viewConfig(record.Collection)), "status": string(collectionapp.CollectionStatusActive),
+				"version": gorm.Expr("version + 1"), "updated_at": now,
+			})
+		if write.Error != nil {
+			return write.Error
+		}
+		if write.RowsAffected != 1 {
+			return versionConflict(collectionapp.ErrorCodeVersionConflict, errors.New("collection expected version mismatch"))
 		}
 		updated := record.Collection
 		updated.QueryVersion = queryVersion
@@ -140,7 +154,8 @@ func (repository *GORMRepository) UpdateCollection(ctx context.Context, record c
 		updated.UpdatedAt = now
 		updated.CachedResultVersion = current.CachedResultVersion
 		updated.LastExecutedAt = current.LastExecutedAt
-		if _, err := database.Exec(callbackCtx, `INSERT INTO learning.smart_collection_command(workspace_id,idempotency_key,request_hash,command_type,collection_id,collection_version,receipt,created_at) VALUES($1,$2,$3,'UPDATE',$4,$5,$6::jsonb,$7)`, string(record.WorkspaceID), record.IdempotencyKey, record.RequestHash, string(record.CollectionID), updated.Version, collectionJSONB(commandReceiptJSON(updated, record.IdempotencyKey, "UPDATE", record.RequestHash)), now); err != nil {
+		command := collectionCommandModelFrom(updated, record.IdempotencyKey, "UPDATE", record.RequestHash, now)
+		if err := database.WithContext(callbackCtx).Create(&command).Error; err != nil {
 			return err
 		}
 		receipt := commandReceipt{workspaceID: record.WorkspaceID, idempotencyKey: record.IdempotencyKey, requestHash: record.RequestHash, commandType: "UPDATE", collectionID: record.CollectionID, collectionVersion: updated.Version}
@@ -162,7 +177,7 @@ func (repository *GORMRepository) ArchiveCollection(ctx context.Context, record 
 		return collectionapp.CommandResult{}, err
 	}
 	var result collectionapp.CommandResult
-	err := repository.within(ctx, foundation.TransactionOptions{}, func(callbackCtx context.Context, database *gormDB) error {
+	err := repository.within(ctx, foundation.TransactionOptions{}, func(callbackCtx context.Context, database *gorm.DB) error {
 		if err := lockWorkspace(callbackCtx, database, record.WorkspaceID); err != nil {
 			return err
 		}
@@ -192,13 +207,22 @@ func (repository *GORMRepository) ArchiveCollection(ctx context.Context, record 
 		if now.Before(current.UpdatedAt) {
 			now = current.UpdatedAt
 		}
-		if _, err := database.Exec(callbackCtx, `UPDATE learning.smart_collection SET status='ARCHIVED',version=version+1,updated_at=$3 WHERE workspace_id=$1 AND id=$2 AND version=$4`, string(record.WorkspaceID), string(record.CollectionID), now, record.ExpectedVersion); err != nil {
-			return err
+		write := database.WithContext(callbackCtx).Model(&collectionModel{}).
+			Where("workspace_id = ? AND id = ? AND version = ?", string(record.WorkspaceID), string(record.CollectionID), record.ExpectedVersion).
+			Updates(map[string]any{
+				"status": string(collectionapp.CollectionStatusArchived), "version": gorm.Expr("version + 1"), "updated_at": now,
+			})
+		if write.Error != nil {
+			return write.Error
+		}
+		if write.RowsAffected != 1 {
+			return versionConflict(collectionapp.ErrorCodeVersionConflict, errors.New("collection expected version mismatch"))
 		}
 		current.Status = collectionapp.CollectionStatusArchived
 		current.Version = record.ExpectedVersion + 1
 		current.UpdatedAt = now
-		if _, err := database.Exec(callbackCtx, `INSERT INTO learning.smart_collection_command(workspace_id,idempotency_key,request_hash,command_type,collection_id,collection_version,receipt,created_at) VALUES($1,$2,$3,'ARCHIVE',$4,$5,$6::jsonb,$7)`, string(record.WorkspaceID), record.IdempotencyKey, record.RequestHash, string(record.CollectionID), current.Version, collectionJSONB(commandReceiptJSON(current, record.IdempotencyKey, "ARCHIVE", record.RequestHash)), now); err != nil {
+		command := collectionCommandModelFrom(current, record.IdempotencyKey, "ARCHIVE", record.RequestHash, now)
+		if err := database.WithContext(callbackCtx).Create(&command).Error; err != nil {
 			return err
 		}
 		receipt := commandReceipt{workspaceID: record.WorkspaceID, idempotencyKey: record.IdempotencyKey, requestHash: record.RequestHash, commandType: "ARCHIVE", collectionID: record.CollectionID, collectionVersion: current.Version}
@@ -219,11 +243,7 @@ func (repository *GORMRepository) GetCollection(ctx context.Context, workspaceID
 	if !validID(workspaceID) || !validID(collectionID) {
 		return collectionapp.Collection{}, requestInvalid(errors.New("collection identity is invalid"))
 	}
-	database, err := newGORMDB(repository.database.WithContext(ctx))
-	if err != nil {
-		return collectionapp.Collection{}, unavailable(err)
-	}
-	return loadCollection(ctx, database, workspaceID, collectionID, false)
+	return loadCollection(ctx, repository.database, workspaceID, collectionID, false)
 }
 
 // SearchCollections performs the bounded active-name/description search.
@@ -234,19 +254,7 @@ func (repository *GORMRepository) SearchCollections(ctx context.Context, query c
 	if !validID(query.WorkspaceID) || query.Query == "" || query.Limit < 1 || query.Limit > collectionapp.MaxCollectionSearchLimit {
 		return nil, requestInvalid(errors.New("collection search request is invalid"))
 	}
-	database, err := newGORMDB(repository.database.WithContext(ctx))
-	if err != nil {
-		return nil, unavailable(err)
-	}
-	rows, err := database.collectionRows(ctx, collectionSelect+`
-		WHERE workspace_id=$1 AND status='ACTIVE'
-		  AND (position($2 in normalized_name)>0 OR position($2 in lower(description))>0)
-		ORDER BY CASE
-			WHEN normalized_name=$2 THEN 0
-			WHEN position($2 in normalized_name)=1 THEN 1
-			ELSE 2 END,
-			updated_at DESC,id DESC
-		LIMIT $3`, string(query.WorkspaceID), query.Query, query.Limit)
+	rows, err := collectionSearchQuery(repository.database.WithContext(ctx), query).Rows()
 	if err != nil {
 		return nil, classifyGORM(ctx, err)
 	}
@@ -278,7 +286,7 @@ func (repository *GORMRepository) ListCollections(ctx context.Context, query col
 		return collectionapp.CollectionListPage{}, requestInvalid(errors.New("collection list request is invalid"))
 	}
 	var page collectionapp.CollectionListPage
-	err := repository.within(ctx, foundation.TransactionOptions{Isolation: foundation.TransactionIsolationRepeatableRead, ReadOnly: true}, func(callbackCtx context.Context, database *gormDB) error {
+	err := repository.within(ctx, foundation.TransactionOptions{Isolation: foundation.TransactionIsolationRepeatableRead, ReadOnly: true}, func(callbackCtx context.Context, database *gorm.DB) error {
 		if err := configureCollectionStatementTimeout(callbackCtx, database, defaultCollectionStatementTimeout); err != nil {
 			return err
 		}
@@ -289,8 +297,7 @@ func (repository *GORMRepository) ListCollections(ctx context.Context, query col
 		if err != nil {
 			return err
 		}
-		args := []any{string(query.WorkspaceID), values}
-		where := ` WHERE workspace_id=$1 AND status=ANY($2::text[])`
+		statement := collectionListQuery(database.WithContext(callbackCtx), query.WorkspaceID, values)
 		if query.Cursor != "" {
 			cursor, decodeErr := repository.cursor.Decode(query.Cursor, collectionapp.CursorBinding{Scope: collectionapp.CursorScopeList, WorkspaceID: query.WorkspaceID, QueryHash: statusHash, SortHash: sortHash, Limit: query.Limit, RevisionHash: revisionHash})
 			if decodeErr != nil {
@@ -303,12 +310,9 @@ func (repository *GORMRepository) ListCollections(ctx context.Context, query col
 			if parseErr != nil || *cursor.LastSortValues[1] != string(cursor.LastID) {
 				return foundation.NewError(foundation.ErrorInvalidInput, collectionapp.ErrorCodeCursorInvalid, false, errors.New("collection list cursor key is invalid"))
 			}
-			where += ` AND (updated_at < $3 OR (updated_at = $3 AND id < $4::uuid))`
-			args = append(args, lastUpdatedAt.UTC(), string(cursor.LastID))
+			statement = statement.Where("updated_at < ? OR (updated_at = ? AND id < ?::uuid)", lastUpdatedAt.UTC(), lastUpdatedAt.UTC(), string(cursor.LastID))
 		}
-		limitPosition := len(args) + 1
-		args = append(args, query.Limit+1)
-		rows, err := database.collectionRows(callbackCtx, collectionSelect+where+fmt.Sprintf(` ORDER BY updated_at DESC,id DESC LIMIT $%d`, limitPosition), args...)
+		rows, err := statement.Limit(query.Limit + 1).Rows()
 		if err != nil {
 			return err
 		}
@@ -356,13 +360,12 @@ func (repository *GORMRepository) ExecuteQuery(ctx context.Context, request coll
 		return collectionapp.ResultPage{}, requestInvalid(errors.New("collection result request is invalid"))
 	}
 	var page collectionapp.ResultPage
-	err := repository.within(ctx, collectionReadOptions(), func(callbackCtx context.Context, database *gormDB) error {
+	err := repository.within(ctx, collectionReadOptions(), func(callbackCtx context.Context, database *gorm.DB) error {
 		if err := configureCollectionStatementTimeout(callbackCtx, database, defaultCollectionStatementTimeout); err != nil {
 			return err
 		}
-		legacy := &Repository{db: database, cursor: repository.cursor}
 		var err error
-		page, err = legacy.executeQuerySnapshot(callbackCtx, database, request)
+		page, err = repository.executeQuerySnapshot(callbackCtx, database, request)
 		return err
 	})
 	if err != nil {
@@ -384,13 +387,12 @@ func (repository *GORMRepository) ExecutePreview(ctx context.Context, request co
 		return collectionapp.ResultPage{}, err
 	}
 	var page collectionapp.ResultPage
-	err = repository.within(ctx, collectionReadOptions(), func(callbackCtx context.Context, database *gormDB) error {
+	err = repository.within(ctx, collectionReadOptions(), func(callbackCtx context.Context, database *gorm.DB) error {
 		if err := configureCollectionStatementTimeout(callbackCtx, database, defaultCollectionStatementTimeout); err != nil {
 			return err
 		}
-		legacy := &Repository{db: database, cursor: repository.cursor}
 		var err error
-		page, err = legacy.executePlanSnapshot(callbackCtx, database, queryExecution{workspaceID: request.WorkspaceID, queryHash: canonical.Hash, query: canonical.Definition, limit: request.Limit, cursor: request.Cursor, scope: collectionapp.CursorScopePreview})
+		page, err = repository.executePlanSnapshot(callbackCtx, database, queryExecution{workspaceID: request.WorkspaceID, queryHash: canonical.Hash, query: canonical.Definition, limit: request.Limit, cursor: request.Cursor, scope: collectionapp.CursorScopePreview})
 		return err
 	})
 	if err != nil {
@@ -409,7 +411,7 @@ func (repository *GORMRepository) PlanDurableScan(ctx context.Context, workspace
 		return collectionapp.DurableScanBinding{}, requestInvalid(errors.New("collection durable scan identity is invalid"))
 	}
 	var binding collectionapp.DurableScanBinding
-	err := repository.within(ctx, collectionReadOptions(), func(callbackCtx context.Context, database *gormDB) error {
+	err := repository.within(ctx, collectionReadOptions(), func(callbackCtx context.Context, database *gorm.DB) error {
 		if err := configureCollectionStatementTimeout(callbackCtx, database, defaultCollectionStatementTimeout); err != nil {
 			return err
 		}
@@ -433,7 +435,7 @@ func (repository *GORMRepository) ReadDurableScanPage(ctx context.Context, reque
 		return collectionapp.DurableScanPage{}, requestInvalid(errors.New("collection durable scan page request is invalid"))
 	}
 	var page collectionapp.DurableScanPage
-	err := repository.within(ctx, collectionReadOptions(), func(callbackCtx context.Context, database *gormDB) error {
+	err := repository.within(ctx, collectionReadOptions(), func(callbackCtx context.Context, database *gorm.DB) error {
 		if err := configureCollectionStatementTimeout(callbackCtx, database, defaultCollectionStatementTimeout); err != nil {
 			return err
 		}
@@ -456,7 +458,7 @@ func (repository *GORMRepository) VerifyDurableScanRevision(ctx context.Context,
 	if ctx == nil || !validDurableScanBinding(binding) {
 		return requestInvalid(errors.New("collection durable scan binding is invalid"))
 	}
-	err := repository.within(ctx, collectionReadOptions(), func(callbackCtx context.Context, database *gormDB) error {
+	err := repository.within(ctx, collectionReadOptions(), func(callbackCtx context.Context, database *gorm.DB) error {
 		if err := configureCollectionStatementTimeout(callbackCtx, database, defaultCollectionStatementTimeout); err != nil {
 			return err
 		}
@@ -486,15 +488,28 @@ func (repository *GORMRepository) VerifyDurableScanBindingScoped(ctx context.Con
 	return classifyGORM(ctx, err)
 }
 
+func collectionListQuery(database *gorm.DB, workspaceID foundation.ID, statuses []string) *gorm.DB {
+	return database.Model(&collectionModel{}).Select(collectionColumns).
+		Where("workspace_id = ? AND status = ANY(?::text[])", string(workspaceID), pq.Array(statuses)).
+		Order("updated_at DESC,id DESC")
+}
+
+func collectionSearchQuery(database *gorm.DB, query collectionapp.CollectionSearchQuery) *gorm.DB {
+	return database.Model(&collectionModel{}).Select(collectionColumns).
+		Where("workspace_id = ? AND status = 'ACTIVE'", string(query.WorkspaceID)).
+		Where("position(? in normalized_name)>0 OR position(? in lower(description))>0", query.Query, query.Query).
+		Clauses(clause.OrderBy{Expression: gorm.Expr(`CASE
+			WHEN normalized_name=? THEN 0
+			WHEN position(? in normalized_name)=1 THEN 1
+			ELSE 2 END,updated_at DESC,id DESC`, query.Query, query.Query)}).
+		Limit(query.Limit)
+}
+
 func collectionReadOptions() foundation.TransactionOptions {
 	return foundation.TransactionOptions{Isolation: foundation.TransactionIsolationRepeatableRead, ReadOnly: true}
 }
 
-func collectionGORMArgs(collection collectionapp.Collection) []any {
-	return []any{string(collection.ID), string(collection.WorkspaceID), collection.Name, collection.NormalizedName, collection.Description, collection.QuerySchemaVersion, collection.QueryVersion, collectionJSONB(queryDefinition(collection)), collection.QueryHash, string(collection.ViewType), collectionJSONB(viewConfig(collection)), string(collection.Status), collection.CachedResultVersion, collection.LastExecutedAt, collection.Version, collection.CreatedAt.UTC(), collection.UpdatedAt.UTC()}
-}
-
-func (repository *GORMRepository) within(ctx context.Context, options foundation.TransactionOptions, work func(context.Context, *gormDB) error) error {
+func (repository *GORMRepository) within(ctx context.Context, options foundation.TransactionOptions, work func(context.Context, *gorm.DB) error) error {
 	if repository == nil || !validCollectionGORMDatabase(repository.database) || !validCollectionGORMUnitOfWork(repository.unitOfWork) {
 		return unavailable(errors.New("collection GORM repository is unavailable"))
 	}
@@ -506,7 +521,7 @@ func (repository *GORMRepository) within(ctx context.Context, options foundation
 		if err != nil {
 			return err
 		}
-		return work(callbackCtx, database)
+		return work(callbackCtx, database.WithContext(callbackCtx))
 	})
 	return classifyGORM(ctx, err)
 }

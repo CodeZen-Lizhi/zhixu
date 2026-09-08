@@ -13,8 +13,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// GORMRepository is the staged Knowledge persistence implementation.
-// Production composition remains on Repository until the PostgreSQL gate passes.
+// GORMRepository persists Knowledge using the shared PostgreSQL pool and unit of work.
 type GORMRepository struct {
 	database   *gorm.DB
 	unitOfWork foundation.UnitOfWork

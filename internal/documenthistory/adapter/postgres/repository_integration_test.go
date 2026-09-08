@@ -20,6 +20,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/lib/pq"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
@@ -40,18 +41,13 @@ func TestRepositoryReadsDocumentAndBatchMapsManagedAndExternalCommits(t *testing
 		t.Fatalf("resolve shared GORM root: %v", err)
 	}
 
-	legacyCounter := &documentHistoryStatementCounter{database: pool.DB()}
-	legacy, err := NewRepository(legacyCounter)
-	if err != nil {
-		t.Fatal(err)
-	}
 	gormCounter := &documentHistoryGORMStatementCounter{}
 	gormRepository, err := NewGORMRepository(gormRoot.Session(&gorm.Session{Logger: gormCounter}))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
 	workspaceID := documentHistoryIntegrationID(1)
 	documentID := documentHistoryIntegrationID(2)
@@ -72,89 +68,74 @@ func TestRepositoryReadsDocumentAndBatchMapsManagedAndExternalCommits(t *testing
 		decidedAt: decidedAt,
 	})
 	seedDocumentHistoryNullableRevision(t, ctx, pool.DB(), workspaceID, nullableRevisionDocumentID, decidedAt)
-	otherWorkspaceID, planCommits := seedDocumentHistoryPlanFacts(t, ctx, pool.DB(), workspaceID, documentID, decidedAt)
+	otherWorkspaceID, planCommits, expectedPlanMappings := seedDocumentHistoryPlanFacts(t, ctx, pool.DB(), workspaceID, documentID, decidedAt)
 
-	readers := []documentHistoryIntegrationReader{
-		{name: "legacy", reader: legacy},
-		{name: "gorm", reader: gormRepository},
-	}
-	documentsByReader := make(map[string][]application.DocumentSnapshot, len(readers))
-	mappingsByReader := make(map[string][]domain.CommitMapping, len(readers))
-	for _, candidate := range readers {
-		candidate := candidate
-		t.Run(candidate.name, func(t *testing.T) {
-			document, err := candidate.reader.GetDocument(ctx, workspaceID, documentID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if document.ID != documentID || document.WorkspaceID != workspaceID || document.CanonicalPath != "notes/java-ai.md" ||
-				document.Lifecycle != "PUBLISHED" || document.Version != 7 || document.CurrentPublishedRevisionID != articleRevisionID {
-				t.Fatalf("document=%+v", document)
-			}
-			nullableDocument, err := candidate.reader.GetDocument(ctx, workspaceID, nullableRevisionDocumentID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if nullableDocument.CurrentPublishedRevisionID != "" {
-				t.Fatalf("nullable current revision=%q", nullableDocument.CurrentPublishedRevisionID)
-			}
-			documentsByReader[candidate.name] = []application.DocumentSnapshot{document, nullableDocument}
+	t.Run("gorm", func(t *testing.T) {
+		document, err := gormRepository.GetDocument(ctx, workspaceID, documentID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if document.ID != documentID || document.WorkspaceID != workspaceID || document.CanonicalPath != "notes/java-ai.md" ||
+			document.Lifecycle != "PUBLISHED" || document.Version != 7 || document.CurrentPublishedRevisionID != articleRevisionID {
+			t.Fatalf("document=%+v", document)
+		}
+		nullableDocument, err := gormRepository.GetDocument(ctx, workspaceID, nullableRevisionDocumentID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if nullableDocument.CurrentPublishedRevisionID != "" {
+			t.Fatalf("nullable current revision=%q", nullableDocument.CurrentPublishedRevisionID)
+		}
+		expectedDocuments := []application.DocumentSnapshot{
+			{ID: documentID, WorkspaceID: workspaceID, CanonicalPath: "notes/java-ai.md", Title: "Java AI", Lifecycle: "PUBLISHED", CurrentPublishedRevisionID: articleRevisionID, Version: 7},
+			{ID: nullableRevisionDocumentID, WorkspaceID: workspaceID, CanonicalPath: "notes/without-revision.md", Title: "Without Revision", Lifecycle: "DRAFT", Version: 1},
+		}
+		if !reflect.DeepEqual([]application.DocumentSnapshot{document, nullableDocument}, expectedDocuments) {
+			t.Fatalf("document snapshots differ from persisted fixture: %#v/%#v", document, nullableDocument)
+		}
 
-			mappings, err := candidate.reader.MapCommits(ctx, workspaceID, documentID, document.CanonicalPath, []string{externalCommit, proposalCommit, articleCommit})
-			if err != nil {
-				t.Fatal(err)
-			}
-			assertDocumentHistoryMixedMappings(t, mappings, articleRevisionID, proposalID, proposalRevisionID, approvalID, writebackID, articleCommit, proposalCommit, decidedAt)
-			mappingsByReader[candidate.name] = mappings
+		mappings, err := gormRepository.MapCommits(ctx, workspaceID, documentID, document.CanonicalPath, []string{externalCommit, proposalCommit, articleCommit})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertDocumentHistoryMixedMappings(t, mappings, articleRevisionID, proposalID, proposalRevisionID, approvalID, writebackID, articleCommit, proposalCommit, decidedAt)
 
-			crossWorkspace, err := candidate.reader.MapCommits(ctx, otherWorkspaceID, documentID, document.CanonicalPath, []string{articleCommit, proposalCommit})
-			if err != nil || len(crossWorkspace) != 0 {
-				t.Fatalf("cross-workspace mappings=%+v err=%v", crossWorkspace, err)
-			}
-			wrongPath, err := candidate.reader.MapCommits(ctx, workspaceID, documentID, "notes/not-java-ai.md", []string{proposalCommit})
-			if err != nil || len(wrongPath) != 0 {
-				t.Fatalf("wrong-path mappings=%+v err=%v", wrongPath, err)
-			}
-			if _, err := candidate.reader.MapCommits(ctx, workspaceID, documentID, document.CanonicalPath, []string{articleCommit, articleCommit}); err == nil {
-				t.Fatal("duplicate commit request was accepted")
-			}
-			if _, err := candidate.reader.MapCommits(ctx, workspaceID, documentID, document.CanonicalPath, append(append([]string{}, planCommits...), documentHistoryOID("over-limit"))); err == nil {
-				t.Fatal("more than 50 commit request was accepted")
-			}
-			if _, err := candidate.reader.MapCommits(ctx, workspaceID, documentID, document.CanonicalPath, []string{documentHistoryIntegrationHash("sha256")}); err != nil {
-				t.Fatalf("SHA-256 object ID was rejected: %v", err)
-			}
-			if _, err := candidate.reader.MapCommits(ctx, workspaceID, documentID, document.CanonicalPath, []string{"ABCDEF"}); err == nil {
-				t.Fatal("invalid object ID was accepted")
-			}
-			_, err = candidate.reader.GetDocument(ctx, workspaceID, documentHistoryIntegrationID(99))
-			assertDocumentHistoryError(t, err, foundation.ErrorNotFound, application.ErrorCodeNotFound, false, nil)
-			_, err = candidate.reader.GetDocument(ctx, otherWorkspaceID, documentID)
-			assertDocumentHistoryError(t, err, foundation.ErrorNotFound, application.ErrorCodeNotFound, false, nil)
+		crossWorkspace, err := gormRepository.MapCommits(ctx, otherWorkspaceID, documentID, document.CanonicalPath, []string{articleCommit, proposalCommit})
+		if err != nil || len(crossWorkspace) != 0 {
+			t.Fatalf("cross-workspace mappings=%+v err=%v", crossWorkspace, err)
+		}
+		wrongPath, err := gormRepository.MapCommits(ctx, workspaceID, documentID, "notes/not-java-ai.md", []string{proposalCommit})
+		if err != nil || len(wrongPath) != 0 {
+			t.Fatalf("wrong-path mappings=%+v err=%v", wrongPath, err)
+		}
+		if _, err := gormRepository.MapCommits(ctx, workspaceID, documentID, document.CanonicalPath, []string{articleCommit, articleCommit}); err == nil {
+			t.Fatal("duplicate commit request was accepted")
+		}
+		if _, err := gormRepository.MapCommits(ctx, workspaceID, documentID, document.CanonicalPath, append(append([]string{}, planCommits...), documentHistoryOID("over-limit"))); err == nil {
+			t.Fatal("more than 50 commit request was accepted")
+		}
+		if _, err := gormRepository.MapCommits(ctx, workspaceID, documentID, document.CanonicalPath, []string{documentHistoryIntegrationHash("sha256")}); err != nil {
+			t.Fatalf("SHA-256 object ID was rejected: %v", err)
+		}
+		if _, err := gormRepository.MapCommits(ctx, workspaceID, documentID, document.CanonicalPath, []string{"ABCDEF"}); err == nil {
+			t.Fatal("invalid object ID was accepted")
+		}
+		_, err = gormRepository.GetDocument(ctx, workspaceID, documentHistoryIntegrationID(99))
+		assertDocumentHistoryError(t, err, foundation.ErrorNotFound, application.ErrorCodeNotFound, false, nil)
+		_, err = gormRepository.GetDocument(ctx, otherWorkspaceID, documentID)
+		assertDocumentHistoryError(t, err, foundation.ErrorNotFound, application.ErrorCodeNotFound, false, nil)
 
-			cancelled, stop := context.WithCancel(context.Background())
-			stop()
-			_, err = candidate.reader.GetDocument(cancelled, workspaceID, documentID)
-			assertDocumentHistoryError(t, err, foundation.ErrorNonRetryableFailure, "DOCUMENT_HISTORY_DOCUMENT_QUERY_FAILED", false, context.Canceled)
-			deadline, stopDeadline := context.WithTimeout(context.Background(), 0)
-			<-deadline.Done()
-			stopDeadline()
-			_, err = candidate.reader.GetDocument(deadline, workspaceID, documentID)
-			assertDocumentHistoryError(t, err, foundation.ErrorRetryableFailure, "DOCUMENT_HISTORY_DOCUMENT_QUERY_FAILED", true, context.DeadlineExceeded)
-		})
-	}
-	if !reflect.DeepEqual(documentsByReader["legacy"], documentsByReader["gorm"]) || !reflect.DeepEqual(mappingsByReader["legacy"], mappingsByReader["gorm"]) {
-		t.Fatalf("legacy and GORM repository results diverged: legacy=%#v/%#v gorm=%#v/%#v", documentsByReader["legacy"], mappingsByReader["legacy"], documentsByReader["gorm"], mappingsByReader["gorm"])
-	}
+		cancelled, stop := context.WithCancel(context.Background())
+		stop()
+		_, err = gormRepository.GetDocument(cancelled, workspaceID, documentID)
+		assertDocumentHistoryError(t, err, foundation.ErrorNonRetryableFailure, "DOCUMENT_HISTORY_DOCUMENT_QUERY_FAILED", false, context.Canceled)
+		deadline, stopDeadline := context.WithTimeout(context.Background(), 0)
+		<-deadline.Done()
+		stopDeadline()
+		_, err = gormRepository.GetDocument(deadline, workspaceID, documentID)
+		assertDocumentHistoryError(t, err, foundation.ErrorRetryableFailure, "DOCUMENT_HISTORY_DOCUMENT_QUERY_FAILED", true, context.DeadlineExceeded)
+	})
 
-	legacyCounter.reset()
-	legacyMappings, err := legacy.MapCommits(ctx, workspaceID, documentID, "notes/java-ai.md", planCommits)
-	if err != nil || len(legacyMappings) != len(planCommits) {
-		t.Fatalf("legacy plan mappings=%d err=%v", len(legacyMappings), err)
-	}
-	if rows, queries := legacyCounter.snapshot(); rows != 0 || queries != 1 {
-		t.Fatalf("legacy MapCommits statements row=%d query=%d, want 0/1", rows, queries)
-	}
 	gormCounter.reset()
 	gormMappings, err := gormRepository.MapCommits(ctx, workspaceID, documentID, "notes/java-ai.md", planCommits)
 	if err != nil || len(gormMappings) != len(planCommits) {
@@ -163,40 +144,10 @@ func TestRepositoryReadsDocumentAndBatchMapsManagedAndExternalCommits(t *testing
 	if statements := gormCounter.snapshot(); statements != 1 {
 		t.Fatalf("GORM MapCommits statements=%d, want 1", statements)
 	}
-	if !reflect.DeepEqual(legacyMappings, gormMappings) {
-		t.Fatalf("legacy and GORM 50-commit mappings diverged: legacy=%#v gorm=%#v", legacyMappings, gormMappings)
+	if !reflect.DeepEqual(expectedPlanMappings, gormMappings) {
+		t.Fatalf("50-commit mappings differ from persisted fixture: want=%#v got=%#v", expectedPlanMappings, gormMappings)
 	}
-	assertDocumentHistoryPlanUsesIndexes(t, ctx, pool.DB(), workspaceID, documentID, "notes/java-ai.md", planCommits[:1])
-}
-
-type documentHistoryIntegrationReader struct {
-	name   string
-	reader application.DocumentReader
-}
-
-type documentHistoryStatementCounter struct {
-	database  *pgxpool.Pool
-	queryRows atomic.Int64
-	queries   atomic.Int64
-}
-
-func (counter *documentHistoryStatementCounter) QueryRow(ctx context.Context, query string, arguments ...any) pgx.Row {
-	counter.queryRows.Add(1)
-	return counter.database.QueryRow(ctx, query, arguments...)
-}
-
-func (counter *documentHistoryStatementCounter) Query(ctx context.Context, query string, arguments ...any) (pgx.Rows, error) {
-	counter.queries.Add(1)
-	return counter.database.Query(ctx, query, arguments...)
-}
-
-func (counter *documentHistoryStatementCounter) reset() {
-	counter.queryRows.Store(0)
-	counter.queries.Store(0)
-}
-
-func (counter *documentHistoryStatementCounter) snapshot() (int64, int64) {
-	return counter.queryRows.Load(), counter.queries.Load()
+	assertDocumentHistoryPlanUsesIndexes(t, ctx, gormRoot, workspaceID, documentID, "notes/java-ai.md", planCommits[:1])
 }
 
 type documentHistoryGORMStatementCounter struct{ statements atomic.Int64 }
@@ -299,7 +250,7 @@ func seedDocumentHistoryNullableRevision(t *testing.T, ctx context.Context, pool
 	}
 }
 
-func seedDocumentHistoryPlanFacts(t *testing.T, ctx context.Context, pool *pgxpool.Pool, workspaceID, documentID foundation.ID, now time.Time) (foundation.ID, []string) {
+func seedDocumentHistoryPlanFacts(t *testing.T, ctx context.Context, pool *pgxpool.Pool, workspaceID, documentID foundation.ID, now time.Time) (foundation.ID, []string, []domain.CommitMapping) {
 	t.Helper()
 	otherWorkspaceID := documentHistoryIntegrationID(20)
 	documents := make([]struct {
@@ -353,17 +304,25 @@ func seedDocumentHistoryPlanFacts(t *testing.T, ctx context.Context, pool *pgxpo
 	approvalRows := make([][]any, 0, documentHistoryPlanFixtureRows)
 	proposalCommitRows := make([][]any, 0, documentHistoryPlanFixtureRows)
 	planCommits := make([]string, 0, 50)
+	planMappings := make([]domain.CommitMapping, 0, 50)
+	decidedAt := now.UTC()
 	contentHash := documentHistoryIntegrationHash("plan fixture")
 	for index := 0; index < documentHistoryPlanFixtureRows; index++ {
 		document := documents[index%len(documents)]
 		commit := documentHistoryOID(fmt.Sprintf("plan-%d", index))
-		if index%len(documents) == 0 && len(planCommits) < 50 {
-			planCommits = append(planCommits, commit)
-		}
 		articleID := documentHistoryIntegrationID(10_000 + index)
 		proposalID := documentHistoryIntegrationID(20_000 + index)
 		proposalRevisionID := documentHistoryIntegrationID(30_000 + index)
 		approvalID := documentHistoryIntegrationID(80_000 + index)
+		if index%len(documents) == 0 && len(planCommits) < 50 {
+			planCommits = append(planCommits, commit)
+			planMappings = append(planMappings, domain.CommitMapping{
+				GitCommit: commit, ArticleRevisionID: articleID, ArticleRevisionNo: index/len(documents) + 10,
+				ProposalID: proposalID, ProposalRevisionID: proposalRevisionID, ApprovalID: approvalID,
+				WritebackID: documentHistoryIntegrationID(70_000 + index), ProposalType: "restore_document",
+				ApprovalDecidedAt: &decidedAt,
+			})
+		}
 		articleRows = append(articleRows, []any{
 			string(articleID), string(document.workspaceID), string(document.documentID), index/len(documents) + 10,
 			"plan fixture", contentHash, "DRAFT", commit, "NONE", "SYSTEM", now,
@@ -420,7 +379,7 @@ func seedDocumentHistoryPlanFacts(t *testing.T, ctx context.Context, pool *pgxpo
 	if _, err := pool.Exec(ctx, `ANALYZE core.article_revision; ANALYZE authoring.document_publication_binding; ANALYZE change_control.proposal; ANALYZE change_control.approval; ANALYZE change_control.proposal_commit`); err != nil {
 		t.Fatal(err)
 	}
-	return otherWorkspaceID, planCommits
+	return otherWorkspaceID, planCommits, planMappings
 }
 
 func assertDocumentHistoryMixedMappings(t *testing.T, mappings []domain.CommitMapping, articleRevisionID, proposalID, proposalRevisionID, approvalID, writebackID foundation.ID, articleCommit, proposalCommit string, decidedAt time.Time) {
@@ -437,6 +396,15 @@ func assertDocumentHistoryMixedMappings(t *testing.T, mappings []domain.CommitMa
 	article := mappings[1]
 	if article.ArticleRevisionID != articleRevisionID || article.ArticleRevisionNo != 3 || article.ProposalID != "" {
 		t.Fatalf("article mapping=%+v", article)
+	}
+	utcDecidedAt := decidedAt.UTC()
+	expected := []domain.CommitMapping{
+		{GitCommit: proposalCommit, ProposalID: proposalID, ProposalRevisionID: proposalRevisionID,
+			ApprovalID: approvalID, WritebackID: writebackID, ProposalType: "restore_document", ApprovalDecidedAt: &utcDecidedAt},
+		{GitCommit: articleCommit, ArticleRevisionID: articleRevisionID, ArticleRevisionNo: 3},
+	}
+	if !reflect.DeepEqual(mappings, expected) {
+		t.Fatalf("mixed mappings differ from persisted fixture: want=%#v got=%#v", expected, mappings)
 	}
 }
 
@@ -458,11 +426,12 @@ type documentHistoryExplainPlan struct {
 	Plans        []documentHistoryExplainPlan `json:"Plans"`
 }
 
-func assertDocumentHistoryPlanUsesIndexes(t *testing.T, ctx context.Context, pool *pgxpool.Pool, workspaceID, documentID foundation.ID, path string, commits []string) {
+func assertDocumentHistoryPlanUsesIndexes(t *testing.T, ctx context.Context, database *gorm.DB, workspaceID, documentID foundation.ID, path string, commits []string) {
 	t.Helper()
 	var raw []byte
-	if err := pool.QueryRow(ctx, `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, COSTS OFF) `+commitMappingSQL,
-		string(workspaceID), string(documentID), path, commits).Scan(&raw); err != nil {
+	if err := database.WithContext(ctx).Raw(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, COSTS OFF) `+gormCommitMappingSQL,
+		pq.Array(commits), string(workspaceID), string(documentID), string(workspaceID), string(documentID), path,
+		string(workspaceID), path).Row().Scan(&raw); err != nil {
 		t.Fatal(err)
 	}
 	var documents []struct {

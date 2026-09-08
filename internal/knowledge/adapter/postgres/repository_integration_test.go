@@ -17,7 +17,14 @@ import (
 	"testing"
 	"time"
 
+	changecontrolpostgres "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/postgres"
+	changecontroldomain "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/domain"
+	changecontroleventcontract "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/eventcontract"
+	eventspostgres "github.com/CodeZen-Lizhi/zhixu/internal/events/adapter/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	graphpostgres "github.com/CodeZen-Lizhi/zhixu/internal/graph/adapter/postgres"
+	"github.com/CodeZen-Lizhi/zhixu/internal/graph/candidateconfirm"
+	graphdomain "github.com/CodeZen-Lizhi/zhixu/internal/graph/domain"
 	knowledgeapp "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
@@ -49,7 +56,6 @@ type knowledgeCoreIntegrationCase struct {
 func runKnowledgeCoreIntegrationVariants(t *testing.T, scenario func(*testing.T, knowledgeCoreIntegrationCase)) {
 	t.Helper()
 	variants := []knowledgeCoreIntegrationVariant{
-		{name: "legacy", open: openLegacyKnowledgeCoreIntegrationRepository, openCommitLoss: openLegacyKnowledgeCoreCommitLossRepository},
 		{name: "gorm", open: openGORMKnowledgeCoreIntegrationRepository, openCommitLoss: openGORMKnowledgeCoreCommitLossRepository},
 	}
 	for _, variant := range variants {
@@ -64,7 +70,7 @@ func runKnowledgeCoreIntegrationVariants(t *testing.T, scenario func(*testing.T,
 			if platform == nil || platform.DB() == nil {
 				t.Fatal("Knowledge PostgreSQL fixture did not provide a shared platform pool")
 			}
-			ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 			defer cancel()
 			scenario(t, knowledgeCoreIntegrationCase{
 				repository: variant.open(t, platform),
@@ -77,27 +83,9 @@ func runKnowledgeCoreIntegrationVariants(t *testing.T, scenario func(*testing.T,
 	}
 }
 
-func openLegacyKnowledgeCoreIntegrationRepository(t *testing.T, platform *platformpostgres.Pool) knowledgeCoreIntegrationRepository {
-	t.Helper()
-	repository, err := NewRepository(platform.DB())
-	if err != nil {
-		t.Fatal(err)
-	}
-	return repository
-}
-
 func openGORMKnowledgeCoreIntegrationRepository(t *testing.T, platform *platformpostgres.Pool) knowledgeCoreIntegrationRepository {
 	t.Helper()
 	repository, err := NewGORMRepository(platform)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return repository
-}
-
-func openLegacyKnowledgeCoreCommitLossRepository(t *testing.T, platform *platformpostgres.Pool) knowledgeCoreIntegrationRepository {
-	t.Helper()
-	repository, err := NewRepository(commitResponseLossDB{pool: platform.DB()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -538,6 +526,218 @@ func testRepositoryCommitResponseLossReplaysWithoutDuplicateSource(t *testing.T,
 	}
 	if sourceCount != 1 || receiptCount != 1 {
 		t.Fatalf("response-loss duplicate source=%d receipt=%d", sourceCount, receiptCount)
+	}
+}
+
+// These two scenarios moved from Graph so the real Knowledge UnitOfWork can
+// lose its response only after the physical transaction has committed.
+func TestApprovedCandidateApplyRecoversCommitResponseLoss(t *testing.T) {
+	runKnowledgeCoreIntegrationVariants(t, func(t *testing.T, testCase knowledgeCoreIntegrationCase) {
+		fixture := prepareKnowledgeRelationApply(t, testCase, "apply-response-loss")
+		proposals, err := changecontrolpostgres.NewGORMRepository(testCase.platform)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := proposals.Approve(testCase.ctx, fixture.approval); err != nil {
+			t.Fatal(err)
+		}
+		lost, err := NewGORMApprovedRelationApplyRepository(testCase.platform, foundation.NewUUIDGenerator(nil), foundation.FixedClock{Value: fixture.now.Add(3 * time.Second)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		injected := errors.New("injected apply commit response loss")
+		loss := &commitResponseLossUnitOfWork{delegate: lost.unitOfWork, err: injected}
+		lost.unitOfWork = loss
+		if _, err := lost.ApplyApprovedRelation(testCase.ctx, fixture.command); !errors.Is(err, injected) || !hasCode(err, "RELATION_PROPOSAL_APPLY_COMMIT_FAILED") || !loss.injected.Load() {
+			t.Fatalf("commit response loss error=%v injected=%t", err, loss.injected.Load())
+		}
+		normal, err := NewGORMApprovedRelationApplyRepository(testCase.platform, foundation.NewUUIDGenerator(nil), foundation.FixedClock{Value: fixture.now.Add(4 * time.Second)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		replayed, err := normal.ApplyApprovedRelation(testCase.ctx, fixture.command)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertKnowledgeRelationApplyReplay(t, testCase, fixture, replayed)
+	})
+}
+
+func TestCandidateApprovalAndRelationApplyRecoverCommitResponseLoss(t *testing.T) {
+	runKnowledgeCoreIntegrationVariants(t, func(t *testing.T, testCase knowledgeCoreIntegrationCase) {
+		fixture := prepareKnowledgeRelationApply(t, testCase, "atomic-response-loss")
+		events, err := eventspostgres.NewGORMStore(testCase.platform)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lost, err := NewGORMApprovedRelationApplyRepository(testCase.platform, foundation.NewUUIDGenerator(nil), foundation.FixedClock{Value: fixture.now.Add(3 * time.Second)}, events)
+		if err != nil {
+			t.Fatal(err)
+		}
+		injected := errors.New("injected atomic commit response loss")
+		loss := &commitResponseLossUnitOfWork{delegate: lost.unitOfWork, err: injected}
+		lost.unitOfWork = loss
+		if _, _, err := lost.ApproveAndApplyRelation(testCase.ctx, fixture.approval); !errors.Is(err, injected) || !hasCode(err, "RELATION_PROPOSAL_APPROVAL_COMMIT_FAILED") || !loss.injected.Load() {
+			t.Fatalf("atomic commit response loss error=%v injected=%t", err, loss.injected.Load())
+		}
+		normal, err := NewGORMApprovedRelationApplyRepository(testCase.platform, foundation.NewUUIDGenerator(nil), foundation.FixedClock{Value: fixture.now.Add(4 * time.Second)}, events)
+		if err != nil {
+			t.Fatal(err)
+		}
+		retry := fixture.approval
+		retry.ID = newID(t)
+		approval, replayed, err := normal.ApproveAndApplyRelation(testCase.ctx, retry)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if approval.ID != fixture.approval.ID {
+			t.Fatalf("response-loss replay approval=%#v", approval)
+		}
+		assertKnowledgeRelationApplyReplay(t, testCase, fixture, replayed)
+		for _, eventType := range []string{changecontroleventcontract.ProposalApprovedEventType, changecontroleventcontract.ProposalAppliedEventType} {
+			var count int
+			if err := testCase.pool.QueryRow(testCase.ctx, `SELECT count(*) FROM ops.server_event
+				WHERE workspace_id=$1 AND event_type=$2 AND resource_ref=$3`,
+				string(fixture.proposal.WorkspaceID), eventType, "proposal:"+string(fixture.proposal.ID)).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if count != 1 {
+				t.Fatalf("proposal event type=%s count=%d want=1", eventType, count)
+			}
+		}
+	})
+}
+
+type knowledgeRelationApplyFixture struct {
+	now       time.Time
+	candidate graphdomain.SemanticLinkCandidate
+	proposal  changecontroldomain.Proposal
+	approval  changecontroldomain.Approval
+	command   knowledgeapp.ApprovedRelationApplyCommand
+}
+
+func prepareKnowledgeRelationApply(t *testing.T, testCase knowledgeCoreIntegrationCase, label string) knowledgeRelationApplyFixture {
+	t.Helper()
+	ctx, pool := testCase.ctx, testCase.pool
+	provenance := seedProvenance(t, ctx, pool, label)
+	now := time.Now().UTC().Add(-time.Minute).Truncate(time.Microsecond)
+	applicability := mustApplicability(t, `{}`)
+	claims := []domain.Claim{
+		newSuggestedClaim(t, provenance.workspaceID, label+" source", applicability, now),
+		newSuggestedClaim(t, provenance.workspaceID, label+" target", applicability, now),
+	}
+	for _, claim := range claims {
+		if _, err := pool.Exec(ctx, `INSERT INTO core.claim
+			(id,workspace_id,statement,normalized_statement,applicability,applicability_schema_version,
+			 applicability_hash,status,confidence_factors,fingerprint,version,created_at,updated_at)
+			VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,'SUGGESTED','{}',$8,1,$9,$9)`,
+			string(claim.ID), string(claim.WorkspaceID), claim.Statement, claim.NormalizedStatement,
+			string(applicability.CanonicalJSON), applicability.SchemaVersion, applicability.Hash, claim.Fingerprint, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	source, target, err := domain.CanonicalizeRelationEndpoints(domain.RelationComplements,
+		domain.NodeRef{Type: domain.NodeTypeClaim, ID: claims[0].ID}, domain.NodeRef{Type: domain.NodeTypeClaim, ID: claims[1].ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ruleID := newID(t)
+	candidate := graphdomain.SemanticLinkCandidate{
+		ID: newID(t), WorkspaceID: provenance.workspaceID,
+		Source:                graphdomain.SemanticLinkCandidateEndpoint{Ref: source, Version: 1, Summary: "source summary " + label, Excerpt: "source excerpt " + label},
+		Target:                graphdomain.SemanticLinkCandidateEndpoint{Ref: target, Version: 1, Summary: "target summary " + label, Excerpt: "target excerpt " + label},
+		SuggestedRelationType: domain.RelationComplements, Status: graphdomain.SemanticLinkCandidateStatusActive,
+		Reason: "shared evidence suggests a complementary relation", Confidence: 0.82,
+		DiscoveryMethods: []graphdomain.SemanticLinkDiscoveryMethod{graphdomain.SemanticLinkDiscoveryMethodCommonTopic, graphdomain.SemanticLinkDiscoveryMethodTitleAlias},
+		Evidence: []graphdomain.SemanticLinkCandidateEvidence{{
+			ID: newID(t), Provenance: domain.ProvenanceRef{WorkspaceID: provenance.workspaceID, SourceVersionID: provenance.sourceVersionID, SourceSpanID: provenance.sourceSpanID},
+			SemanticHash: testHash("candidate-evidence-" + label), Reason: "bounded source support", Excerpt: "bounded evidence excerpt",
+		}},
+		Generation: graphdomain.SemanticLinkCandidateGeneration{RuleID: &ruleID, RuleVersion: "semantic-rule-v1"},
+		Version:    1, CreatedAt: now, UpdatedAt: now,
+	}
+	candidate.Fingerprint, err = graphdomain.ComputeSemanticLinkCandidateFingerprint(candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	graphRepository, err := graphpostgres.NewGORMRepository(testCase.platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := graphRepository.UpsertSemanticLinkCandidate(ctx, candidate); err != nil {
+		t.Fatal(err)
+	}
+	proposals, err := changecontrolpostgres.NewGORMRepository(testCase.platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirmer, err := graphpostgres.NewGORMCandidateConfirmRepository(testCase.platform, proposals, foundation.NewUUIDGenerator(nil), foundation.FixedClock{Value: now.Add(time.Second)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirmed, err := confirmer.Confirm(ctx, candidateconfirm.Command{
+		WorkspaceID: provenance.workspaceID, CandidateID: candidate.ID, ExpectedVersion: candidate.Version,
+		IdempotencyKey: "confirm-" + label, Action: graphdomain.SemanticLinkCandidateDecisionConfirm,
+		RiskLevel: candidateconfirm.ProposalRiskLevel, Risk: "medium relation change", RollbackPlan: "create a corrective relation proposal",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	approval := changecontroldomain.Approval{
+		ID: newID(t), ProposalID: confirmed.Proposal.ID, RevisionID: confirmed.Proposal.Revision.ID,
+		ChangeHash: confirmed.Proposal.Revision.ChangeHash, Decision: changecontroldomain.DecisionApproved, DecidedAt: now.Add(2 * time.Second),
+	}
+	return knowledgeRelationApplyFixture{
+		now: now, candidate: candidate, proposal: confirmed.Proposal, approval: approval,
+		command: knowledgeapp.ApprovedRelationApplyCommand{WorkspaceID: provenance.workspaceID, ProposalID: approval.ProposalID, RevisionID: approval.RevisionID, ApprovalID: approval.ID},
+	}
+}
+
+func assertKnowledgeRelationApplyReplay(t *testing.T, testCase knowledgeCoreIntegrationCase, fixture knowledgeRelationApplyFixture, result knowledgeapp.ApprovedRelationApplyResult) {
+	t.Helper()
+	if !result.Replayed || result.Relation.ID == "" || result.Relation.WorkspaceID != fixture.proposal.WorkspaceID ||
+		result.Relation.Status != domain.RelationStatusConfirmed || result.Relation.Type != fixture.candidate.SuggestedRelationType ||
+		result.Relation.Source != fixture.candidate.Source.Ref || result.Relation.Target != fixture.candidate.Target.Ref ||
+		result.Relation.Confirmation == nil || result.Relation.Confirmation.Method != domain.ConfirmationUserApproval ||
+		result.Relation.Confirmation.Reference != string(fixture.approval.ID) || result.ProposalStatus != changecontroldomain.StatusApplied ||
+		result.ProposalVersion != 4 || len(result.Evidence) != len(fixture.candidate.Evidence) {
+		t.Fatalf("approved relation apply replay=%#v", result)
+	}
+	for _, evidence := range result.Evidence {
+		if evidence.Confirmation == nil || *evidence.Confirmation != *result.Relation.Confirmation ||
+			evidence.Applicability.SchemaVersion != domain.ApplicabilitySchemaV1 || string(evidence.Applicability.CanonicalJSON) != `{}` {
+			t.Fatalf("confirmed evidence=%#v", evidence)
+		}
+	}
+	var status string
+	var version, approvals, relations, receipts, evidenceCount int
+	if err := testCase.pool.QueryRow(testCase.ctx, `SELECT status,version,
+		(SELECT count(*) FROM change_control.approval WHERE revision_id=$2),
+		(SELECT count(*) FROM core.relation WHERE workspace_id=$3),
+		(SELECT count(*) FROM core.knowledge_command_receipt WHERE workspace_id=$3),
+		(SELECT count(*) FROM core.relation_evidence WHERE workspace_id=$3)
+		FROM change_control.proposal WHERE id=$1`, string(fixture.proposal.ID), string(fixture.proposal.Revision.ID), string(fixture.proposal.WorkspaceID)).Scan(
+		&status, &version, &approvals, &relations, &receipts, &evidenceCount); err != nil {
+		t.Fatal(err)
+	}
+	if status != string(changecontroldomain.StatusApplied) || version != 4 || approvals != 1 || relations != 1 || receipts != 1 || evidenceCount != len(fixture.candidate.Evidence) {
+		t.Fatalf("status=%s version=%d approval=%d relation=%d receipt=%d evidence=%d", status, version, approvals, relations, receipts, evidenceCount)
+	}
+	requestHash, err := knowledgeapp.RelationApplyRequestHash(fixture.command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var aggregateID, persistedHash, commandType, aggregateType string
+	var aggregateVersion int64
+	if err := testCase.pool.QueryRow(testCase.ctx, `SELECT aggregate_id::text,aggregate_version,request_hash,command_type,aggregate_type
+		FROM core.knowledge_command_receipt WHERE workspace_id=$1 AND idempotency_key=$2`,
+		string(fixture.proposal.WorkspaceID), knowledgeapp.RelationApplyIdempotencyKey(fixture.approval.ID)).Scan(
+		&aggregateID, &aggregateVersion, &persistedHash, &commandType, &aggregateType); err != nil {
+		t.Fatal(err)
+	}
+	if aggregateID != string(result.Relation.ID) || aggregateVersion != result.Relation.Version || persistedHash != requestHash ||
+		commandType != string(domain.CommandConfirmRelation) || aggregateType != string(domain.AggregateRelation) {
+		t.Fatalf("replayed receipt aggregate=%s/%s@%d hash=%s command=%s", aggregateType, aggregateID, aggregateVersion, persistedHash, commandType)
 	}
 }
 
@@ -1167,49 +1367,6 @@ type provenanceFixture struct {
 	workspaceID, sourceVersionID, sourceSpanID foundation.ID
 }
 
-func integrationRepository(t *testing.T) (*Repository, pgx.Tx, context.Context) {
-	t.Helper()
-	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
-	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = tx.Rollback(ctx) })
-	repository, err := NewRepository(tx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return repository, tx, ctx
-}
-
-func integrationPoolRepository(t *testing.T) (*Repository, *pgxpool.Pool, context.Context) {
-	t.Helper()
-	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
-	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
-	repository, err := NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return repository, pool, ctx
-}
-
 type sqlExecer interface {
 	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
 }
@@ -1363,11 +1520,10 @@ func assertTerminalConflictAllowsClaimTransition(t *testing.T, ctx context.Conte
 	}
 }
 
-type commitResponseLossDB struct{ pool *pgxpool.Pool }
-
 type commitResponseLossUnitOfWork struct {
 	delegate foundation.UnitOfWork
 	injected atomic.Bool
+	err      error
 }
 
 func (u *commitResponseLossUnitOfWork) Within(
@@ -1380,34 +1536,12 @@ func (u *commitResponseLossUnitOfWork) Within(
 		return err
 	}
 	if u.injected.CompareAndSwap(false, true) {
+		if u.err != nil {
+			return u.err
+		}
 		return errors.New("injected knowledge commit response loss")
 	}
 	return nil
-}
-
-func (d commitResponseLossDB) Begin(ctx context.Context) (pgx.Tx, error) {
-	tx, err := d.pool.Begin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return commitResponseLossTx{Tx: tx}, nil
-}
-
-func (d commitResponseLossDB) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
-	return d.pool.Query(ctx, sql, args...)
-}
-
-func (d commitResponseLossDB) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
-	return d.pool.QueryRow(ctx, sql, args...)
-}
-
-type commitResponseLossTx struct{ pgx.Tx }
-
-func (tx commitResponseLossTx) Commit(ctx context.Context) error {
-	if err := tx.Tx.Commit(ctx); err != nil {
-		return err
-	}
-	return errors.New("injected knowledge commit response loss")
 }
 
 func newTopic(t *testing.T, workspaceID foundation.ID, name string, at time.Time) domain.Topic {

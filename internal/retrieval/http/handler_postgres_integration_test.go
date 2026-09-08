@@ -14,7 +14,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -24,30 +23,29 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/app"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	platformfilesystem "github.com/CodeZen-Lizhi/zhixu/internal/platform/filesystem"
-	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	retrievalpostgres "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/adapter/postgres"
 	retrievalworkspace "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/adapter/workspace"
 	retrievalapplication "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/application"
 	retrievaldomain "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
 	retrievalhttp "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/http"
 	workspacepostgres "github.com/CodeZen-Lizhi/zhixu/internal/workspace/adapter/postgres"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgvector/pgvector-go"
 )
 
 func TestPostgresRouterSearchEvidenceCursorAndExplain(t *testing.T) {
 	database, ctx := newHTTPIntegrationDatabase(t)
-	repository, err := retrievalpostgres.NewRepository(database.DB())
+	repository, err := retrievalpostgres.NewGORMRepository(database)
 	if err != nil {
 		t.Fatal(err)
 	}
-	searchRepository, err := retrievalpostgres.NewSearchRepository(database.DB())
+	searchRepository, err := retrievalpostgres.NewGORMSearchRepository(database)
 	if err != nil {
 		t.Fatal(err)
 	}
-	workspaceRepository, err := workspacepostgres.NewRepository(database.DB())
+	workspaceRepository, err := workspacepostgres.NewGORMRepository(database)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -309,7 +307,7 @@ func seedHTTPWorkspace(
 		args  []any
 	}{
 		{`INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at)
-		  VALUES($1,$2,$3,$3,$4,'test',1,$4,$4)`, []any{string(workspaceID), fmt.Sprintf("http-integration-%d", ordinal), rootPath, capturedAt}},
+		  VALUES($1,$2,$3,$3,$4,'inactive',1,$4,$4)`, []any{string(workspaceID), fmt.Sprintf("http-integration-%d", ordinal), rootPath, capturedAt}},
 		{`INSERT INTO core.source(id,workspace_id,type,logical_name,original_location,created_at)
 		  VALUES($1,$2,'file',$3,$4,$5)`, []any{string(sourceID), string(workspaceID), fmt.Sprintf("Evidence %d", ordinal), relativePath, capturedAt}},
 		{`INSERT INTO core.content_artifact(id,workspace_id,content_hash,byte_size,managed_location,created_at)
@@ -358,7 +356,7 @@ func seedHTTPWorkspace(
 func buildHTTPHybridIndex(
 	t *testing.T,
 	ctx context.Context,
-	repository *retrievalpostgres.Repository,
+	repository *retrievalpostgres.GORMRepository,
 	fixture httpWorkspaceFixture,
 	contract retrievaldomain.EmbeddingContract,
 	ordinal int,
@@ -419,7 +417,7 @@ func buildHTTPHybridIndex(
 func buildHTTPFTSIndex(
 	t *testing.T,
 	ctx context.Context,
-	repository *retrievalpostgres.Repository,
+	repository *retrievalpostgres.GORMRepository,
 	fixture httpWorkspaceFixture,
 	ordinal int,
 	at time.Time,
@@ -441,7 +439,7 @@ func buildHTTPFTSIndex(
 func readyAndActivateHTTPIndex(
 	t *testing.T,
 	ctx context.Context,
-	repository *retrievalpostgres.Repository,
+	repository *retrievalpostgres.GORMRepository,
 	workspaceID, indexID foundation.ID,
 	ordinal int,
 	at time.Time,
@@ -798,59 +796,10 @@ func isFoundationKind(err error, kind foundation.ErrorKind) bool {
 
 func newHTTPIntegrationDatabase(t *testing.T) (*platformpostgres.Pool, context.Context) {
 	t.Helper()
-	baseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
-	if baseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL for Retrieval HTTP integration tests")
-	}
-	ctx := context.Background()
-	parsed, err := url.Parse(baseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	admin, err := pgxpool.New(ctx, baseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	name := fmt.Sprintf("zhixu_retrieval_http_%d_%d", os.Getpid(), time.Now().UnixNano())
-	identifier := pgx.Identifier{name}.Sanitize()
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+identifier); err != nil {
-		admin.Close()
-		t.Fatal(err)
-	}
-	parsed.Path = "/" + name
-	databaseURL := parsed.String()
-	migrationPool, err := platformpostgres.OpenMigration(ctx, databaseURL, 4, 0)
-	if err != nil {
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-		t.Fatal(err)
-	}
-	runner, err := platformmigration.NewAtlasEmbeddedRunner(migrationPool.DB())
-	if err == nil {
-		err = runner.Up(ctx)
-	}
-	migrationPool.Close()
-	if err != nil {
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-		t.Fatal(err)
-	}
-	database, err := platformpostgres.Open(ctx, databaseURL, 8, 0)
-	if err != nil {
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-		t.Fatal(err)
-	}
-	if err := database.Ping(ctx); err != nil {
-		database.Close()
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		database.Close()
-		_, _ = admin.Exec(context.Background(), "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
+	fixture := testdb.Require(t, testdb.Config{
+		ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
+		Availability:     testdb.FailWhenUnavailable,
+		MaxConns:         8,
 	})
-	return database, ctx
+	return fixture.Pool(), t.Context()
 }

@@ -13,8 +13,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// GORMRepository is the staged Interview persistence adapter. Production
-// composition remains on the legacy pgx Repository until the TODO 9 gate.
+// GORMRepository persists Interview facts through the shared platform Pool and unit of work.
 type GORMRepository struct {
 	database   *gorm.DB
 	unitOfWork foundation.UnitOfWork
@@ -50,7 +49,7 @@ func (repository *GORMRepository) ready(ctx context.Context) error {
 	return nil
 }
 
-// within is the only transaction boundary for staged Interview write flows.
+// within is the transaction boundary for Interview write flows.
 func (repository *GORMRepository) within(
 	ctx context.Context,
 	work func(context.Context, *gorm.DB) error,

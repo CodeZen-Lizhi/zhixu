@@ -3,32 +3,36 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
+	auditpostgres "github.com/CodeZen-Lizhi/zhixu/internal/audit/adapter/postgres"
 	ccpostgres "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/postgres"
 	ccdomain "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	modelsettingspostgres "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/adapter/postgres"
+	modelcrypto "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/crypto"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	reindexriver "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/adapter/river"
 	"github.com/CodeZen-Lizhi/zhixu/internal/retrieval/application"
 	reindexcontract "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/contract"
 	retrievaldomain "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
-	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
-	"github.com/jackc/pgx/v5"
+	workflowpostgres "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/postgres"
+	workflowriver "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestDispatcherFirstDispatchReplaysExactPendingAndResponseLoss(t *testing.T) {
 	_, database, ctx := newRetrievalTestRepository(t)
-	fixture := seedDispatcherWriteback(t, ctx, database.DB(), "", "response-loss")
+	fixture := seedDispatcherWriteback(t, ctx, database, "", "response-loss")
 	pendingID := dispatcherID(t)
 	if _, err := database.DB().Exec(ctx, `INSERT INTO retrieval.reindex_delivery(
 		id,consumer_name,outbox_event_id,workspace_id,writeback_execution_id,status,created_at,updated_at)
@@ -37,12 +41,12 @@ func TestDispatcherFirstDispatchReplaysExactPendingAndResponseLoss(t *testing.T)
 		t.Fatal(err)
 	}
 	inserter := &dispatcherInserterFake{}
-	lossDB := &responseLossDB{pool: database.DB()}
-	lossDB.lose.Store(true)
-	dispatcher, err := NewDispatcher(lossDB, foundation.NewUUIDGenerator(nil), inserter)
+	unitOfWork, err := database.UnitOfWork()
 	if err != nil {
 		t.Fatal(err)
 	}
+	loss := &completionResponseLossDB{UnitOfWork: unitOfWork, lose: true}
+	dispatcher := newGORMTestDispatcher(t, database, inserter, loss)
 	if err := dispatcher.DispatchBatch(ctx, 1); dispatcherErrorCode(err) != "REINDEX_DISPATCH_COMMIT_FAILED" {
 		t.Fatalf("response-loss error=%v", err)
 	}
@@ -60,10 +64,7 @@ func TestDispatcherFirstDispatchReplaysExactPendingAndResponseLoss(t *testing.T)
 		t.Fatalf("legacy runtime tuple was changed: %v %v %v", eventKey, schemaVersion, eventVersion)
 	}
 
-	replay, err := NewDispatcher(database.DB(), foundation.NewUUIDGenerator(nil), inserter)
-	if err != nil {
-		t.Fatal(err)
-	}
+	replay := newGORMTestDispatcher(t, database, inserter)
 	if err := replay.DispatchBatch(ctx, 1); err != nil {
 		t.Fatal(err)
 	}
@@ -73,45 +74,58 @@ func TestDispatcherFirstDispatchReplaysExactPendingAndResponseLoss(t *testing.T)
 }
 
 func TestDispatcherInsertFailureRollsBackDeliveryAndPublishedAt(t *testing.T) {
-	_, database, ctx := newRetrievalTestRepository(t)
-	fixture := seedDispatcherWriteback(t, ctx, database.DB(), "", "insert-rollback")
-	cause := errors.New("river unavailable")
-	inserter := &dispatcherInserterFake{err: cause}
-	dispatcher, err := NewDispatcher(database.DB(), foundation.NewUUIDGenerator(nil), inserter)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := dispatcher.DispatchBatch(ctx, 1); !errors.Is(err, cause) {
-		t.Fatalf("insert failure=%v", err)
-	}
-	assertOutboxPendingWithoutDelivery(t, ctx, database.DB(), fixture.EventID)
+	for _, implementation := range []string{"gorm"} {
+		t.Run(implementation, func(t *testing.T) {
+			_, database, ctx := newRetrievalTestRepository(t)
+			fixture := seedDispatcherWriteback(t, ctx, database, "", "insert-rollback")
+			cause := errors.New("river unavailable")
+			inserter := &dispatcherInserterFake{err: foundation.NewError(foundation.ErrorRetryableFailure, "WORKFLOW_RIVER_JOB_INSERT_FAILED", true, cause)}
+			dispatcher := newGORMTestDispatcher(t, database, inserter)
+			if err := dispatcher.DispatchBatch(ctx, 1); !errors.Is(err, cause) {
+				t.Fatalf("insert failure=%v", err)
+			}
+			assertOutboxPendingWithoutDelivery(t, ctx, database.DB(), fixture.EventID)
+			{
+				var jobs int
+				if err := database.QueryRow(ctx, `SELECT count(*) FROM workflow.river_job WHERE kind=$1`, reindexriver.JobKind).Scan(&jobs); err != nil || jobs != 0 {
+					t.Fatalf("rolled-back River jobs=%d err=%v", jobs, err)
+				}
+			}
 
-	inserter.err = nil
-	if err := dispatcher.DispatchBatch(ctx, 1); err != nil {
-		t.Fatal(err)
-	}
-	var count int
-	if err := database.DB().QueryRow(ctx, `SELECT count(*) FROM retrieval.reindex_delivery WHERE outbox_event_id=$1`, string(fixture.EventID)).Scan(&count); err != nil || count != 1 {
-		t.Fatalf("delivery count=%d err=%v", count, err)
+			inserter.err = nil
+			dispatcher = newGORMTestDispatcher(t, database, nil)
+			if err := dispatcher.DispatchBatch(ctx, 1); err != nil {
+				t.Fatal(err)
+			}
+			var count int
+			if err := database.DB().QueryRow(ctx, `SELECT count(*) FROM retrieval.reindex_delivery WHERE outbox_event_id=$1`, string(fixture.EventID)).Scan(&count); err != nil || count != 1 {
+				t.Fatalf("delivery count=%d err=%v", count, err)
+			}
+			{
+				var jobs int
+				if err := database.QueryRow(ctx, `SELECT count(*) FROM workflow.river_job job
+		        JOIN retrieval.reindex_delivery delivery ON delivery.id::text=job.args->>'delivery_id'
+		        JOIN workflow.outbox_event event ON event.id=delivery.outbox_event_id
+		        WHERE job.kind=$1 AND job.queue='retrieval-migration' AND event.id=$2
+		        AND event.published_at IS NOT NULL AND delivery.status='dispatched'
+		        AND (job.args->>'dispatch_no')::integer=delivery.dispatch_no`, reindexriver.JobKind, string(fixture.EventID)).Scan(&jobs); err != nil || jobs != 1 {
+					t.Fatalf("committed River/Delivery/Outbox closure=%d err=%v", jobs, err)
+				}
+			}
+		})
 	}
 }
 
 func TestConcurrentDispatchersCreateOneDeliveryAndOneJob(t *testing.T) {
 	_, database, ctx := newRetrievalTestRepository(t)
-	fixture := seedDispatcherWriteback(t, ctx, database.DB(), "", "concurrent")
+	fixture := seedDispatcherWriteback(t, ctx, database, "", "concurrent")
 	inserter := &dispatcherInserterFake{}
-	first, err := NewDispatcher(database.DB(), foundation.NewUUIDGenerator(nil), inserter)
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, err := NewDispatcher(database.DB(), foundation.NewUUIDGenerator(nil), inserter)
-	if err != nil {
-		t.Fatal(err)
-	}
+	first := newGORMTestDispatcher(t, database, inserter)
+	second := newGORMTestDispatcher(t, database, inserter)
 	start := make(chan struct{})
 	errorsOut := make(chan error, 2)
-	for _, dispatcher := range []*application.Dispatcher{first, second} {
-		go func(value *application.Dispatcher) {
+	for _, dispatcher := range []application.BatchDispatcher{first, second} {
+		go func(value application.BatchDispatcher) {
 			<-start
 			errorsOut <- value.DispatchBatch(ctx, 1)
 		}(dispatcher)
@@ -133,13 +147,10 @@ func TestConcurrentDispatchersCreateOneDeliveryAndOneJob(t *testing.T) {
 
 func TestDispatcherBlocksLaterOutboxForSameWorkspace(t *testing.T) {
 	_, database, ctx := newRetrievalTestRepository(t)
-	first := seedDispatcherWriteback(t, ctx, database.DB(), "", "workspace-first")
-	second := seedDispatcherWriteback(t, ctx, database.DB(), first.WorkspaceID, "workspace-second")
+	first := seedDispatcherWriteback(t, ctx, database, "", "workspace-first")
+	second := seedDispatcherWriteback(t, ctx, database, first.WorkspaceID, "workspace-second")
 	inserter := &dispatcherInserterFake{}
-	dispatcher, err := NewDispatcher(database.DB(), foundation.NewUUIDGenerator(nil), inserter)
-	if err != nil {
-		t.Fatal(err)
-	}
+	dispatcher := newGORMTestDispatcher(t, database, inserter)
 	if err := dispatcher.DispatchBatch(ctx, 2); err != nil {
 		t.Fatal(err)
 	}
@@ -158,96 +169,101 @@ func TestDispatcherBlocksLaterOutboxForSameWorkspace(t *testing.T) {
 }
 
 func TestDispatcherRetryCreatesNextGenerationWithoutChangingPublishedAt(t *testing.T) {
-	_, database, ctx := newRetrievalTestRepository(t)
-	fixture := seedDispatcherWriteback(t, ctx, database.DB(), "", "retry")
-	inserter := &dispatcherInserterFake{}
-	dispatcher, err := NewDispatcher(database.DB(), foundation.NewUUIDGenerator(nil), inserter)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := dispatcher.DispatchBatch(ctx, 1); err != nil {
-		t.Fatal(err)
-	}
-	var deliveryID foundation.ID
-	var publishedAt time.Time
-	if err := database.DB().QueryRow(ctx, `SELECT delivery.id::text,event.published_at
-		FROM retrieval.reindex_delivery delivery JOIN workflow.outbox_event event ON event.id=delivery.outbox_event_id
-		WHERE event.id=$1`, string(fixture.EventID)).Scan(&deliveryID, &publishedAt); err != nil {
-		t.Fatal(err)
-	}
-	repository, err := NewDeliveryRepository(database.DB(), foundation.NewUUIDGenerator(nil))
-	if err != nil {
-		t.Fatal(err)
-	}
-	runtime, err := application.NewDeliveryRuntime(repository)
-	if err != nil {
-		t.Fatal(err)
-	}
-	claim, err := runtime.Claim(ctx, application.DeliveryClaimCommand{
-		DeliveryID: deliveryID, DispatchNo: 1, RiverJobID: 1,
-		RiverAttempt: 1, DeliveryKey: "retry-generation-one", LeaseOwner: "retry-owner", LeaseDuration: time.Minute,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := runtime.Fail(ctx, application.DeliveryFailureCommand{
-		Fence: claim.Fence, RetryDelay: time.Microsecond,
-		Failure: retrievaldomain.DeliveryFailure{Class: retrievaldomain.DeliveryFailureRetryable,
-			ErrorKind: foundation.ErrorRetryableFailure, Code: "REINDEX_INGESTION_TEMPORARY", Summary: "temporary ingestion failure"},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := database.DB().Exec(ctx, `UPDATE retrieval.reindex_delivery SET next_attempt_at=CURRENT_TIMESTAMP,
-		updated_at=CURRENT_TIMESTAMP,version=version+1 WHERE id=$1 AND status='retry_wait'`, string(deliveryID)); err != nil {
-		t.Fatal(err)
-	}
-	lockTx, err := database.DB().Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := lockTx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, string(fixture.WorkspaceID)); err != nil {
-		_ = lockTx.Rollback(ctx)
-		t.Fatal(err)
-	}
-	lockedContext, cancelLocked := context.WithTimeout(ctx, 500*time.Millisecond)
-	if err := dispatcher.DispatchBatch(lockedContext, 1); err != nil {
-		cancelLocked()
-		_ = lockTx.Rollback(ctx)
-		t.Fatalf("retry dispatcher must not wait while holding the delivery row: %v", err)
-	}
-	cancelLocked()
-	if len(inserter.Commands()) != 1 {
-		_ = lockTx.Rollback(ctx)
-		t.Fatalf("retry dispatched while workspace lock was held: %#v", inserter.Commands())
-	}
-	if err := lockTx.Commit(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err := dispatcher.DispatchBatch(ctx, 1); err != nil {
-		t.Fatal(err)
-	}
-	commands := inserter.Commands()
-	if len(commands) != 2 || commands[1].DeliveryID != deliveryID || commands[1].DispatchNo != 2 {
-		t.Fatalf("retry commands=%#v", commands)
-	}
-	var afterPublished time.Time
-	var status string
-	var dispatchNo int
-	if err := database.DB().QueryRow(ctx, `SELECT event.published_at,delivery.status,delivery.dispatch_no
-		FROM workflow.outbox_event event JOIN retrieval.reindex_delivery delivery ON delivery.outbox_event_id=event.id
-		WHERE event.id=$1`, string(fixture.EventID)).Scan(&afterPublished, &status, &dispatchNo); err != nil {
-		t.Fatal(err)
-	}
-	if !afterPublished.Equal(publishedAt) || status != "dispatched" || dispatchNo != 2 {
-		t.Fatalf("retry published=%v want=%v status=%s dispatch=%d", afterPublished, publishedAt, status, dispatchNo)
+	for _, implementation := range []string{"gorm"} {
+		t.Run(implementation, func(t *testing.T) {
+			_, database, ctx := newRetrievalTestRepository(t)
+			fixture := seedDispatcherWriteback(t, ctx, database, "", "retry")
+			inserter := &dispatcherInserterFake{}
+			dispatcher := newGORMTestDispatcher(t, database, inserter)
+			if err := dispatcher.DispatchBatch(ctx, 1); err != nil {
+				t.Fatal(err)
+			}
+			var deliveryID foundation.ID
+			var publishedAt time.Time
+			if err := database.DB().QueryRow(ctx, `SELECT delivery.id::text,event.published_at
+				FROM retrieval.reindex_delivery delivery JOIN workflow.outbox_event event ON event.id=delivery.outbox_event_id
+				WHERE event.id=$1`, string(fixture.EventID)).Scan(&deliveryID, &publishedAt); err != nil {
+				t.Fatal(err)
+			}
+			repository, err := NewGORMDeliveryRepository(database, foundation.NewUUIDGenerator(nil))
+			if err != nil {
+				t.Fatal(err)
+			}
+			runtime, err := application.NewDeliveryRuntime(repository)
+			if err != nil {
+				t.Fatal(err)
+			}
+			claim, err := runtime.Claim(ctx, application.DeliveryClaimCommand{
+				DeliveryID: deliveryID, DispatchNo: 1, RiverJobID: 1,
+				RiverAttempt: 1, DeliveryKey: "retry-generation-one", LeaseOwner: "retry-owner", LeaseDuration: time.Minute,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := runtime.Fail(ctx, application.DeliveryFailureCommand{
+				Fence: claim.Fence, RetryDelay: time.Microsecond,
+				Failure: retrievaldomain.DeliveryFailure{Class: retrievaldomain.DeliveryFailureRetryable,
+					ErrorKind: foundation.ErrorRetryableFailure, Code: "REINDEX_INGESTION_TEMPORARY", Summary: "temporary ingestion failure"},
+			}); err != nil {
+				var pgErr *pgconn.PgError
+				if errors.As(err, &pgErr) {
+					t.Fatalf("fail delivery: %v (SQLSTATE=%s message=%s)", err, pgErr.Code, pgErr.Message)
+				}
+				t.Fatal(err)
+			}
+			if _, err := database.DB().Exec(ctx, `UPDATE retrieval.reindex_delivery SET next_attempt_at=CURRENT_TIMESTAMP,
+				updated_at=CURRENT_TIMESTAMP,version=version+1 WHERE id=$1 AND status='retry_wait'`, string(deliveryID)); err != nil {
+				t.Fatal(err)
+			}
+			lockTx, err := database.DB().Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := lockTx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, string(fixture.WorkspaceID)); err != nil {
+				_ = lockTx.Rollback(ctx)
+				t.Fatal(err)
+			}
+			lockedContext, cancelLocked := context.WithTimeout(ctx, 500*time.Millisecond)
+			if err := dispatcher.DispatchBatch(lockedContext, 1); err != nil {
+				cancelLocked()
+				_ = lockTx.Rollback(ctx)
+				t.Fatalf("retry dispatcher must not wait while holding the delivery row: %v", err)
+			}
+			cancelLocked()
+			if len(inserter.Commands()) != 1 {
+				_ = lockTx.Rollback(ctx)
+				t.Fatalf("retry dispatched while workspace lock was held: %#v", inserter.Commands())
+			}
+			if err := lockTx.Commit(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if err := dispatcher.DispatchBatch(ctx, 1); err != nil {
+				t.Fatal(err)
+			}
+			commands := inserter.Commands()
+			if len(commands) != 2 || commands[1].DeliveryID != deliveryID || commands[1].DispatchNo != 2 {
+				t.Fatalf("retry commands=%#v", commands)
+			}
+			var afterPublished time.Time
+			var status string
+			var dispatchNo int
+			if err := database.DB().QueryRow(ctx, `SELECT event.published_at,delivery.status,delivery.dispatch_no
+				FROM workflow.outbox_event event JOIN retrieval.reindex_delivery delivery ON delivery.outbox_event_id=event.id
+				WHERE event.id=$1`, string(fixture.EventID)).Scan(&afterPublished, &status, &dispatchNo); err != nil {
+				t.Fatal(err)
+			}
+			if !afterPublished.Equal(publishedAt) || status != "dispatched" || dispatchNo != 2 {
+				t.Fatalf("retry published=%v want=%v status=%s dispatch=%d", afterPublished, publishedAt, status, dispatchNo)
+			}
+		})
 	}
 }
 
 func TestDispatcherUsesFIFOAndSkipsLockedOutbox(t *testing.T) {
 	_, database, ctx := newRetrievalTestRepository(t)
-	oldest := seedDispatcherWriteback(t, ctx, database.DB(), "", "fifo-oldest")
+	oldest := seedDispatcherWriteback(t, ctx, database, "", "fifo-oldest")
 	time.Sleep(time.Millisecond)
-	newer := seedDispatcherWriteback(t, ctx, database.DB(), "", "fifo-newer")
+	newer := seedDispatcherWriteback(t, ctx, database, "", "fifo-newer")
 	lockTx, err := database.DB().Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -257,10 +273,7 @@ func TestDispatcherUsesFIFOAndSkipsLockedOutbox(t *testing.T) {
 		t.Fatal(err)
 	}
 	inserter := &dispatcherInserterFake{}
-	dispatcher, err := NewDispatcher(database.DB(), foundation.NewUUIDGenerator(nil), inserter)
-	if err != nil {
-		t.Fatal(err)
-	}
+	dispatcher := newGORMTestDispatcher(t, database, inserter)
 	if err := dispatcher.DispatchBatch(ctx, 1); err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +290,7 @@ func TestDispatcherUsesFIFOAndSkipsLockedOutbox(t *testing.T) {
 
 func TestDispatcherPoisonedOutboxIsFatalAndUnchanged(t *testing.T) {
 	_, database, ctx := newRetrievalTestRepository(t)
-	fixture := seedDispatcherWriteback(t, ctx, database.DB(), "", "poison")
+	fixture := seedDispatcherWriteback(t, ctx, database, "", "poison")
 	if _, err := database.DB().Exec(ctx, `ALTER TABLE workflow.outbox_event DISABLE TRIGGER writeback_reindex_guard_update`); err != nil {
 		t.Fatal(err)
 	}
@@ -288,11 +301,8 @@ func TestDispatcherPoisonedOutboxIsFatalAndUnchanged(t *testing.T) {
 		t.Fatal(err)
 	}
 	inserter := &dispatcherInserterFake{}
-	dispatcher, err := NewDispatcher(database.DB(), foundation.NewUUIDGenerator(nil), inserter)
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = dispatcher.DispatchBatch(ctx, 1)
+	dispatcher := newGORMTestDispatcher(t, database, inserter)
+	err := dispatcher.DispatchBatch(ctx, 1)
 	if dispatcherErrorCode(err) != outboxContractInvalid {
 		t.Fatalf("poison error=%v", err)
 	}
@@ -305,17 +315,14 @@ func TestDispatcherPoisonedOutboxIsFatalAndUnchanged(t *testing.T) {
 
 func TestDispatcherUnboundWritebackLifecycleIsFatalAndUnchanged(t *testing.T) {
 	_, database, ctx := newRetrievalTestRepository(t)
-	fixture := seedDispatcherWriteback(t, ctx, database.DB(), "", "unbound")
+	fixture := seedDispatcherWriteback(t, ctx, database, "", "unbound")
 	if _, err := database.DB().Exec(ctx, `UPDATE change_control.writeback_execution
 		SET status='verify_failed',failure_code='REGRESSION_FAILED',version=version+1,updated_at=CURRENT_TIMESTAMP
 		WHERE id=$1 AND status='verifying'`, string(fixture.ExecutionID)); err != nil {
 		t.Fatal(err)
 	}
 	inserter := &dispatcherInserterFake{}
-	dispatcher, err := NewDispatcher(database.DB(), foundation.NewUUIDGenerator(nil), inserter)
-	if err != nil {
-		t.Fatal(err)
-	}
+	dispatcher := newGORMTestDispatcher(t, database, inserter)
 	if err := dispatcher.DispatchBatch(ctx, 1); dispatcherErrorCode(err) != outboxContractInvalid {
 		t.Fatalf("unbound error=%v", err)
 	}
@@ -324,12 +331,9 @@ func TestDispatcherUnboundWritebackLifecycleIsFatalAndUnchanged(t *testing.T) {
 
 func TestDispatcherRejectsDuplicateJobReceiptAndRollsBack(t *testing.T) {
 	_, database, ctx := newRetrievalTestRepository(t)
-	fixture := seedDispatcherWriteback(t, ctx, database.DB(), "", "duplicate")
+	fixture := seedDispatcherWriteback(t, ctx, database, "", "duplicate")
 	inserter := &dispatcherInserterFake{duplicate: true}
-	dispatcher, err := NewDispatcher(database.DB(), foundation.NewUUIDGenerator(nil), inserter)
-	if err != nil {
-		t.Fatal(err)
-	}
+	dispatcher := newGORMTestDispatcher(t, database, inserter)
 	if err := dispatcher.DispatchBatch(ctx, 1); dispatcherErrorCode(err) != "REINDEX_DISPATCH_JOB_RECEIPT_CONFLICT" {
 		t.Fatalf("duplicate error=%v", err)
 	}
@@ -342,9 +346,10 @@ type dispatcherWritebackFixture struct {
 	EventID     foundation.ID
 }
 
-func seedDispatcherWriteback(t *testing.T, ctx context.Context, pool *pgxpool.Pool, workspaceID foundation.ID, label string) dispatcherWritebackFixture {
+func seedDispatcherWriteback(t *testing.T, ctx context.Context, database *platformpostgres.Pool, workspaceID foundation.ID, label string) dispatcherWritebackFixture {
 	t.Helper()
-	repository, err := ccpostgres.NewRepository(pool)
+	pool := database.DB()
+	repository, err := ccpostgres.NewGORMRepository(database)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -354,7 +359,7 @@ func seedDispatcherWriteback(t *testing.T, ctx context.Context, pool *pgxpool.Po
 		workspaceID = next()
 		root := "/tmp/reindex-dispatcher-" + string(workspaceID)
 		if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at)
-			VALUES($1,$2,$3,$3,$4,'test',1,$4,$4)`, string(workspaceID), "Dispatcher "+label, root, now); err != nil {
+			VALUES($1,$2,$3,$3,$4,'inactive',1,$4,$4)`, string(workspaceID), "Dispatcher "+label, root, now); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -406,6 +411,18 @@ func seedDispatcherWriteback(t *testing.T, ctx context.Context, pool *pgxpool.Po
 	gitHead := dispatcherGitOID(label + "-head")
 	if _, err := repository.Approve(ctx, ccdomain.Approval{ID: approvalID, ProposalID: proposalID, RevisionID: revisionID,
 		ChangeHash: changeHash, Decision: ccdomain.DecisionApproved, ApprovedGitHead: &gitHead, DecidedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE change_control.proposal
+		SET workflow_run_id=$2,updated_at=$3,version=version+1
+		WHERE id=$1 AND status='approved' AND workflow_run_id IS NULL`,
+		string(proposalID), string(runID), now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO change_control.proposal_revision_dispatch(
+		workspace_id,proposal_id,revision_id,approval_id,workflow_run_id,created_at
+	) VALUES($1,$2,$3,$4,$5,$6)`,
+		string(workspaceID), string(proposalID), string(revisionID), string(approvalID), string(runID), now); err != nil {
 		t.Fatal(err)
 	}
 	writeAuthorizationID, gitAuthorizationID := next(), next()
@@ -463,7 +480,7 @@ func seedDispatcherWriteback(t *testing.T, ctx context.Context, pool *pgxpool.Po
 	return dispatcherWritebackFixture{WorkspaceID: workspaceID, ExecutionID: executionID, EventID: eventID}
 }
 
-func seedDispatcherAuthorization(t *testing.T, ctx context.Context, repository *ccpostgres.Repository, id, workspaceID, runID, nodeID, proposalID, revisionID, approvalID foundation.ID, tool string, capability ccdomain.Capability, targetPath, changeHash, baseHash string, now time.Time) {
+func seedDispatcherAuthorization(t *testing.T, ctx context.Context, repository *ccpostgres.GORMRepository, id, workspaceID, runID, nodeID, proposalID, revisionID, approvalID foundation.ID, tool string, capability ccdomain.Capability, targetPath, changeHash, baseHash string, now time.Time) {
 	t.Helper()
 	_, err := repository.CreateAuthorization(ctx, ccdomain.ToolAuthorization{
 		ID: id, WorkspaceID: workspaceID, WorkflowRunID: runID, NodeRunID: nodeID,
@@ -484,24 +501,84 @@ func seedDispatcherAuthorization(t *testing.T, ctx context.Context, repository *
 
 type dispatcherInserterFake struct {
 	mu        sync.Mutex
-	nextJobID int64
 	commands  []reindexriver.Args
 	err       error
 	duplicate bool
+	scoped    application.ScopedJobInserter
 }
 
-func (f *dispatcherInserterFake) InsertTx(_ context.Context, transaction any, job reindexriver.Args, _ time.Time) (workflowapplication.JobReceipt, error) {
-	if _, ok := transaction.(pgx.Tx); !ok {
-		return workflowapplication.JobReceipt{}, errors.New("dispatcher did not pass a pgx transaction")
+// 先插入真实 River Job，再注入错误以验证整个外层事务回滚。
+func (f *dispatcherInserterFake) InsertScoped(ctx context.Context, scope foundation.TransactionScope, job application.ReindexJob) (application.JobReceipt, error) {
+	receipt, err := f.scoped.InsertScoped(ctx, scope, job)
+	if err != nil {
+		return application.JobReceipt{}, err
+	}
+	args, err := reindexriver.NewArgs(job.DeliveryID, job.DispatchNo)
+	if err != nil {
+		return application.JobReceipt{}, err
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.commands = append(f.commands, job)
+	f.commands = append(f.commands, args)
 	if f.err != nil {
-		return workflowapplication.JobReceipt{}, f.err
+		return application.JobReceipt{}, f.err
 	}
-	f.nextJobID++
-	return workflowapplication.JobReceipt{JobID: f.nextJobID, Duplicate: f.duplicate}, nil
+	receipt.Duplicate = receipt.Duplicate || f.duplicate
+	return receipt, nil
+}
+
+func newGORMTestDispatcher(t *testing.T, pool *platformpostgres.Pool, fault *dispatcherInserterFake, transactions ...foundation.UnitOfWork) application.BatchDispatcher {
+	t.Helper()
+	outbox, err := workflowpostgres.NewGORMReindexOutbox(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, err := ccpostgres.NewGORMRepository(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealer, err := modelcrypto.NewSealer(bytes.Repeat([]byte{0x2a}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	audit, err := auditpostgres.NewGORMStore(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fence, err := modelsettingspostgres.NewGORMRepository(pool,
+		modelsettingspostgres.WithGORMSecretSealer(sealer), modelsettingspostgres.WithGORMAuditAppender(audit))
+	if err != nil {
+		t.Fatal(err)
+	}
+	options := workflowriver.DefaultOptions()
+	options.Queue = "retrieval-migration"
+	if fault == nil {
+		dispatcher, err := NewGORMDispatcher(pool, foundation.NewUUIDGenerator(nil), options, fence, outbox, binding)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return dispatcher
+	}
+	store, err := newGORMDispatcherStore(pool, foundation.NewUUIDGenerator(nil), outbox, binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(transactions) > 0 {
+		store.unitOfWork = transactions[0]
+	}
+	client, err := workflowriver.NewClientWithOptions(pool.DB(), nil, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fault.scoped, err = reindexriver.NewScopedApplicationInserter(pool, client, fence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatcher, err := application.NewScopedDispatcher(store, fault)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dispatcher
 }
 
 func (f *dispatcherInserterFake) Commands() []reindexriver.Args {
@@ -510,31 +587,6 @@ func (f *dispatcherInserterFake) Commands() []reindexriver.Args {
 	result := make([]reindexriver.Args, len(f.commands))
 	copy(result, f.commands)
 	return result
-}
-
-type responseLossDB struct {
-	pool *pgxpool.Pool
-	lose atomic.Bool
-}
-
-func (d *responseLossDB) Begin(ctx context.Context) (pgx.Tx, error) {
-	tx, err := d.pool.Begin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if d.lose.CompareAndSwap(true, false) {
-		return &responseLossTx{Tx: tx}, nil
-	}
-	return tx, nil
-}
-
-type responseLossTx struct{ pgx.Tx }
-
-func (tx *responseLossTx) Commit(ctx context.Context) error {
-	if err := tx.Tx.Commit(ctx); err != nil {
-		return err
-	}
-	return errors.New("commit response lost")
 }
 
 func assertDispatchedOutbox(t *testing.T, ctx context.Context, pool *pgxpool.Pool, eventID, deliveryID foundation.ID, dispatchNo int) {

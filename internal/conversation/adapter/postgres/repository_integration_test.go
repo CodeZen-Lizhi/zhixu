@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -17,14 +16,13 @@ import (
 	eventspostgres "github.com/CodeZen-Lizhi/zhixu/internal/events/adapter/postgres"
 	eventsdomain "github.com/CodeZen-Lizhi/zhixu/internal/events/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
-	"github.com/jackc/pgx/v5"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestRepositoryCreatesConversationWithEventAndExactReplay(t *testing.T) {
-	repository, pool, ctx := newConversationTestRepository(t)
+	repository, _, pool, ctx := newConversationTestRepository(t)
 	workspaceA := conversationPostgresID(1)
 	workspaceB := conversationPostgresID(2)
 	seedConversationWorkspaces(t, ctx, pool, workspaceA, workspaceB)
@@ -78,7 +76,7 @@ func TestRepositoryCreatesConversationWithEventAndExactReplay(t *testing.T) {
 }
 
 func TestRepositoryListsAndGetsConversationsWithStableWorkspaceCursor(t *testing.T) {
-	repository, pool, ctx := newConversationTestRepository(t)
+	repository, _, pool, ctx := newConversationTestRepository(t)
 	workspaceA := conversationPostgresID(20)
 	workspaceB := conversationPostgresID(21)
 	seedConversationWorkspaces(t, ctx, pool, workspaceA, workspaceB)
@@ -130,7 +128,7 @@ func TestRepositoryListsAndGetsConversationsWithStableWorkspaceCursor(t *testing
 }
 
 func TestRepositoryConcurrentConversationCreateHasOneFactAndOneReplay(t *testing.T) {
-	repository, pool, ctx := newConversationTestRepository(t)
+	repository, _, pool, ctx := newConversationTestRepository(t)
 	workspaceID := conversationPostgresID(40)
 	seedConversationWorkspaces(t, ctx, pool, workspaceID)
 	now := time.Date(2026, 7, 19, 14, 30, 0, 0, time.UTC)
@@ -171,7 +169,7 @@ func TestRepositoryConcurrentConversationCreateHasOneFactAndOneReplay(t *testing
 }
 
 func TestRepositoryExactReplaySurvivesServerEventRetentionCleanup(t *testing.T) {
-	repository, pool, ctx := newConversationTestRepository(t)
+	repository, _, pool, ctx := newConversationTestRepository(t)
 	workspaceID := conversationPostgresID(50)
 	seedConversationWorkspaces(t, ctx, pool, workspaceID)
 	now := time.Date(2026, 7, 19, 15, 0, 0, 0, time.UTC)
@@ -206,10 +204,10 @@ func TestRepositoryExactReplaySurvivesServerEventRetentionCleanup(t *testing.T) 
 }
 
 func TestRepositoryRollsBackConversationWhenCreationEventAppendFails(t *testing.T) {
-	_, pool, ctx := newConversationTestRepository(t)
+	_, shared, pool, ctx := newConversationTestRepository(t)
 	workspaceID := conversationPostgresID(60)
 	seedConversationWorkspaces(t, ctx, pool, workspaceID)
-	repository, err := NewRepository(pool, failingConversationEventAppender{
+	repository, err := NewGORMRepository(shared, failingConversationEventAppender{
 		err: foundation.NewError(foundation.ErrorDependencyUnavailable, "TEST_EVENT_APPEND_FAILED", true, errors.New("injected event failure")),
 	})
 	if err != nil {
@@ -229,18 +227,19 @@ func TestRepositoryRollsBackConversationWhenCreationEventAppendFails(t *testing.
 }
 
 func TestRepositoryRecoversCommittedCreateAfterCommitResponseLoss(t *testing.T) {
-	_, pool, ctx := newConversationTestRepository(t)
+	_, shared, pool, ctx := newConversationTestRepository(t)
 	workspaceID := conversationPostgresID(70)
 	seedConversationWorkspaces(t, ctx, pool, workspaceID)
-	events, err := eventspostgres.NewStore(pool)
+	events, err := eventspostgres.NewGORMStore(shared)
 	if err != nil {
 		t.Fatal(err)
 	}
-	lossDB := &conversationCommitResponseLossDB{Pool: pool, loseNext: true}
-	repository, err := NewRepository(lossDB, events)
+	repository, err := NewGORMRepository(shared, events)
 	if err != nil {
 		t.Fatal(err)
 	}
+	repository.uow = &conversationCommitResponseLossDB{UnitOfWork: repository.uow, loseNext: true}
+
 	now := time.Date(2026, 7, 19, 16, 0, 0, 0, time.UTC)
 	firstRecord := conversationCreateRecord(t, workspaceID, conversationPostgresID(71), "Response loss", "response-loss", now)
 	if _, err := repository.CreateConversation(ctx, firstRecord); err == nil {
@@ -267,33 +266,23 @@ func TestRepositoryRecoversCommittedCreateAfterCommitResponseLoss(t *testing.T) 
 
 type failingConversationEventAppender struct{ err error }
 
-func (appender failingConversationEventAppender) AppendTx(context.Context, any, eventsdomain.AppendRequest) (eventsdomain.ServerEvent, bool, error) {
+func (appender failingConversationEventAppender) AppendScoped(context.Context, foundation.TransactionScope, eventsdomain.AppendRequest) (eventsdomain.ServerEvent, bool, error) {
 	return eventsdomain.ServerEvent{}, false, appender.err
 }
 
 type conversationCommitResponseLossDB struct {
-	*pgxpool.Pool
+	foundation.UnitOfWork
 	loseNext bool
 }
 
-func (database *conversationCommitResponseLossDB) Begin(ctx context.Context) (pgx.Tx, error) {
-	transaction, err := database.Pool.Begin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if !database.loseNext {
-		return transaction, nil
-	}
-	database.loseNext = false
-	return conversationCommitResponseLossTx{Tx: transaction}, nil
-}
-
-type conversationCommitResponseLossTx struct{ pgx.Tx }
-
-func (transaction conversationCommitResponseLossTx) Commit(ctx context.Context) error {
-	if err := transaction.Tx.Commit(ctx); err != nil {
+func (database *conversationCommitResponseLossDB) Within(ctx context.Context, options foundation.TransactionOptions, work foundation.TransactionFunc) error {
+	if err := database.UnitOfWork.Within(ctx, options, work); err != nil {
 		return err
 	}
+	if !database.loseNext {
+		return nil
+	}
+	database.loseNext = false
 	return errors.New("injected commit response loss")
 }
 
@@ -325,71 +314,19 @@ func conversationCreateRecord(
 	}
 }
 
-func newConversationTestRepository(t *testing.T) (*Repository, *pgxpool.Pool, context.Context) {
+func newConversationTestRepository(t *testing.T) (*GORMRepository, *platformpostgres.Pool, *pgxpool.Pool, context.Context) {
 	t.Helper()
-	baseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
-	if baseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL for Conversation integration tests")
-	}
-	ctx := context.Background()
-	parsed, err := url.Parse(baseURL)
+	fixture := testdb.Require(t, testdb.Config{ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")), MaxConns: 8})
+	database := fixture.Pool()
+	events, err := eventspostgres.NewGORMStore(database)
 	if err != nil {
 		t.Fatal(err)
 	}
-	admin, err := pgxpool.New(ctx, baseURL)
+	repository, err := NewGORMRepository(database, events)
 	if err != nil {
 		t.Fatal(err)
 	}
-	name := fmt.Sprintf("zhixu_conversation_%d", time.Now().UnixNano())
-	identifier := pgx.Identifier{name}.Sanitize()
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+identifier); err != nil {
-		admin.Close()
-		t.Fatal(err)
-	}
-	parsed.Path = "/" + name
-	databaseURL := parsed.String()
-	migrationPool, err := platformpostgres.OpenMigration(ctx, databaseURL, 4, 0)
-	if err != nil {
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-		t.Fatal(err)
-	}
-	runner, err := platformmigration.NewAtlasEmbeddedRunner(migrationPool.DB())
-	if err == nil {
-		err = runner.Up(ctx)
-	}
-	migrationPool.Close()
-	if err != nil {
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-		t.Fatal(err)
-	}
-	database, err := platformpostgres.Open(ctx, databaseURL, 8, 0)
-	if err != nil {
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-		t.Fatal(err)
-	}
-	if err := database.Ping(ctx); err != nil {
-		database.Close()
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		database.Close()
-		_, _ = admin.Exec(context.Background(), "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-	})
-	events, err := eventspostgres.NewStore(database.DB())
-	if err != nil {
-		t.Fatal(err)
-	}
-	repository, err := NewRepository(database.DB(), events)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return repository, database.DB(), ctx
+	return repository, database, database.DB(), t.Context()
 }
 
 func seedConversationWorkspaces(t *testing.T, ctx context.Context, pool *pgxpool.Pool, workspaceIDs ...foundation.ID) {

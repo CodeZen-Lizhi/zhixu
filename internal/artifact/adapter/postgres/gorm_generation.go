@@ -35,7 +35,7 @@ type GORMSectionGenerationRepository struct {
 	profile  agentdomain.ModelProfileRef
 }
 
-// NewGORMSectionGenerationRepository constructs the staged scoped generation
+// NewGORMSectionGenerationRepository constructs the scoped generation
 // coordinator. All database-owning dependencies must derive from the same Pool.
 func NewGORMSectionGenerationRepository(
 	pool *platformpostgres.Pool,

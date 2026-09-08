@@ -427,7 +427,6 @@ func memoryInterviewSourceRef(sessionID, pathID, stepID foundation.ID) string {
 
 type memoryIntegrationRepositories struct {
 	pool       *pgxpool.Pool
-	legacy     *Repository
 	gorm       *GORMRepository
 	unitOfWork foundation.UnitOfWork
 }
@@ -441,29 +440,16 @@ func (testCase memoryIntegrationCase) id(value int) foundation.ID {
 	return memoryIntegrationID(testCase.offset + value)
 }
 
-type memoryIntegrationVariant struct {
-	name       string
-	repository func(memoryIntegrationRepositories) memoryapp.Repository
-}
-
 func runMemoryIntegrationVariants(t *testing.T, scenario func(*testing.T, context.Context, memoryapp.Repository, memoryIntegrationCase)) {
 	t.Helper()
-	fixtureCtx, cancelFixture := context.WithTimeout(context.Background(), 90*time.Second)
+	fixtureCtx, cancelFixture := context.WithTimeout(context.Background(), 55*time.Second)
 	defer cancelFixture()
 	resources := newMemoryIntegrationRepositories(t)
-	variants := []memoryIntegrationVariant{
-		{name: "legacy-pgx", repository: func(resources memoryIntegrationRepositories) memoryapp.Repository { return resources.legacy }},
-		{name: "gorm", repository: func(resources memoryIntegrationRepositories) memoryapp.Repository { return resources.gorm }},
-	}
-	for index, variant := range variants {
-		index := index
-		variant := variant
-		t.Run(variant.name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(fixtureCtx, 45*time.Second)
-			defer cancel()
-			scenario(t, ctx, variant.repository(resources), memoryIntegrationCase{repositories: resources, offset: (index + 1) * 1000})
-		})
-	}
+	t.Run("gorm", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(fixtureCtx, 45*time.Second)
+		defer cancel()
+		scenario(t, ctx, resources.gorm, memoryIntegrationCase{repositories: resources, offset: 2000})
+	})
 }
 
 func newMemoryIntegrationRepositories(t *testing.T) memoryIntegrationRepositories {
@@ -472,10 +458,6 @@ func newMemoryIntegrationRepositories(t *testing.T) memoryIntegrationRepositorie
 	platform := fixture.Pool()
 	if platform == nil || platform.DB() == nil {
 		t.Fatal("test database fixture did not expose a shared platform pool")
-	}
-	legacy, err := NewRepository(platform.DB())
-	if err != nil {
-		t.Fatal(err)
 	}
 	root, err := platform.GORM()
 	if err != nil {
@@ -489,7 +471,7 @@ func newMemoryIntegrationRepositories(t *testing.T) memoryIntegrationRepositorie
 	if err != nil {
 		t.Fatal(err)
 	}
-	return memoryIntegrationRepositories{pool: platform.DB(), legacy: legacy, gorm: gorm, unitOfWork: unitOfWork}
+	return memoryIntegrationRepositories{pool: platform.DB(), gorm: gorm, unitOfWork: unitOfWork}
 }
 
 func memoryIntegrationAssertContextClassification(t *testing.T, ctx context.Context, repository memoryapp.Repository, scope memoryapp.Scope, memoryID, missingID foundation.ID) {
@@ -497,9 +479,10 @@ func memoryIntegrationAssertContextClassification(t *testing.T, ctx context.Cont
 	if _, err := repository.Get(ctx, scope, missingID); !memoryIntegrationErrorCode(err, domain.ErrorCodeNotFound) {
 		t.Fatalf("no-row get error=%v", err)
 	}
-	cancelledCtx, cancel := context.WithCancel(ctx)
-	cancel()
-	if _, err := repository.Get(cancelledCtx, scope, memoryID); !errors.Is(err, context.Canceled) || !memoryIntegrationErrorCode(err, domain.ErrorCodeUnavailable) {
+	cancelCause := errors.New("memory read canceled by caller")
+	cancelledCtx, cancel := context.WithCancelCause(ctx)
+	cancel(cancelCause)
+	if _, err := repository.Get(cancelledCtx, scope, memoryID); !errors.Is(err, context.Canceled) || !errors.Is(err, cancelCause) || !memoryIntegrationErrorCode(err, domain.ErrorCodeUnavailable) {
 		t.Fatalf("cancelled get error=%v", err)
 	}
 	deadlineCtx, cancelDeadline := context.WithDeadline(ctx, time.Now().Add(-time.Second))

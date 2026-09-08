@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/CodeZen-Lizhi/zhixu/internal/events/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/events/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
@@ -24,7 +23,7 @@ import (
 
 func TestStoreReadsScopedRetainedEventsInMonotonicBoundedPages(t *testing.T) {
 	stores := requireEventIntegrationStores(t)
-	store, pool, ctx := stores.legacy, stores.platform.DB(), context.Background()
+	store, pool, ctx := stores.gorm, stores.platform.DB(), context.Background()
 	workspaceA := foundation.ID("7b000000-0000-4000-8000-000000000001")
 	workspaceB := foundation.ID("7b000000-0000-4000-8000-000000000002")
 	seedEventWorkspaces(t, ctx, pool, workspaceA, workspaceB)
@@ -70,7 +69,7 @@ func TestStoreReadsScopedRetainedEventsInMonotonicBoundedPages(t *testing.T) {
 
 func TestStoreRejectsUnsafeSummaryWithoutReturningPartialReplay(t *testing.T) {
 	stores := requireEventIntegrationStores(t)
-	store, pool, ctx := stores.legacy, stores.platform.DB(), context.Background()
+	store, pool, ctx := stores.gorm, stores.platform.DB(), context.Background()
 	workspaceID := foundation.ID("7c000000-0000-4000-8000-000000000001")
 	seedEventWorkspaces(t, ctx, pool, workspaceID)
 	now := time.Now().UTC().Truncate(time.Microsecond)
@@ -102,19 +101,12 @@ func TestServerEventSourceReferenceIsUniquePerWorkspace(t *testing.T) {
 	}
 }
 
-func TestStoreAppendTxCreatesExactReplayRejectsConflictAndLeavesCommitToCaller(t *testing.T) {
+func TestStoreAppendScopedCreatesExactReplayRejectsConflictAndLeavesCommitToCaller(t *testing.T) {
 	stores := requireEventIntegrationStores(t)
-	store, pool, ctx := stores.legacy, stores.platform.DB(), context.Background()
+	store, pool, ctx := stores.gorm, stores.platform.DB(), context.Background()
 	workspaceID := foundation.ID("7d100000-0000-4000-8000-000000000001")
 	conversationID := foundation.ID("7d100000-0000-4000-8000-000000000002")
 	seedEventWorkspaces(t, ctx, pool, workspaceID)
-
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	insertEventConversation(t, ctx, tx, workspaceID, conversationID, "append-committed")
 	request := domain.AppendRequest{
 		WorkspaceID: workspaceID, ConversationID: &conversationID,
 		Type: "conversation.created", ResourceRef: "conversation:" + string(conversationID), ResourceVersion: 1,
@@ -122,20 +114,29 @@ func TestStoreAppendTxCreatesExactReplayRejectsConflictAndLeavesCommitToCaller(t
 		SourceEventRef: "conversation.created:" + string(conversationID) + ":v1",
 		OccurredAt:     time.Now().UTC().Truncate(time.Second).Add(123456789),
 	}
-	created, replayed, err := store.AppendTx(ctx, tx, request)
-	if err != nil || replayed || created.Seq <= 0 || created.ConversationID == nil || *created.ConversationID != conversationID || created.OccurredAt.Nanosecond() != 123456000 {
-		t.Fatalf("created event=%#v replayed=%t err=%v", created, replayed, err)
-	}
-	replayedEvent, replayed, err := store.AppendTx(ctx, tx, request)
-	if err != nil || !replayed || replayedEvent.Seq != created.Seq {
-		t.Fatalf("replayed event=%#v replayed=%t err=%v", replayedEvent, replayed, err)
-	}
-	conflict := request
-	conflict.ResourceVersion = 2
-	if _, _, err := store.AppendTx(ctx, tx, conflict); eventErrorCode(err) != domain.ErrorCodeAppendConflict {
-		t.Fatalf("append conflict code=%q err=%v", eventErrorCode(err), err)
-	}
-	if err := tx.Commit(ctx); err != nil {
+	var created domain.ServerEvent
+	err := stores.unitOfWork.Within(ctx, foundation.TransactionOptions{}, func(callbackCtx context.Context, scope foundation.TransactionScope) error {
+		if err := insertEventConversationScoped(callbackCtx, scope, workspaceID, conversationID, "append-committed"); err != nil {
+			return err
+		}
+		var replayed bool
+		var err error
+		created, replayed, err = store.AppendScoped(callbackCtx, scope, request)
+		if err != nil || replayed || created.Seq <= 0 || created.ConversationID == nil || *created.ConversationID != conversationID || created.OccurredAt.Nanosecond() != 123456000 {
+			t.Fatalf("created event=%#v replayed=%t err=%v", created, replayed, err)
+		}
+		replayedEvent, replayed, err := store.AppendScoped(callbackCtx, scope, request)
+		if err != nil || !replayed || replayedEvent.Seq != created.Seq {
+			t.Fatalf("replayed event=%#v replayed=%t err=%v", replayedEvent, replayed, err)
+		}
+		conflict := request
+		conflict.ResourceVersion = 2
+		if _, _, err := store.AppendScoped(callbackCtx, scope, conflict); eventErrorCode(err) != domain.ErrorCodeAppendConflict {
+			t.Fatalf("append conflict code=%q err=%v", eventErrorCode(err), err)
+		}
+		return nil
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 	page, err := store.ListAfter(ctx, workspaceID, 0, domain.MaxReplayPageSize)
@@ -144,34 +145,35 @@ func TestStoreAppendTxCreatesExactReplayRejectsConflictAndLeavesCommitToCaller(t
 	}
 
 	rolledBackConversationID := foundation.ID("7d100000-0000-4000-8000-000000000003")
-	rollbackTx, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	insertEventConversation(t, ctx, rollbackTx, workspaceID, rolledBackConversationID, "append-rolled-back")
 	rollbackRequest := request
 	rollbackRequest.ConversationID = &rolledBackConversationID
 	rollbackRequest.ResourceRef = "conversation:" + string(rolledBackConversationID)
 	rollbackRequest.SourceEventRef = "conversation.created:" + string(rolledBackConversationID) + ":v1"
-	if _, replayed, err := store.AppendTx(ctx, rollbackTx, rollbackRequest); err != nil || replayed {
-		_ = rollbackTx.Rollback(ctx)
-		t.Fatalf("append before caller rollback replayed=%t err=%v", replayed, err)
-	}
-	if err := rollbackTx.Rollback(ctx); err != nil {
-		t.Fatal(err)
+	rollback := errors.New("caller rejected event transaction")
+	err = stores.unitOfWork.Within(ctx, foundation.TransactionOptions{}, func(callbackCtx context.Context, scope foundation.TransactionScope) error {
+		if err := insertEventConversationScoped(callbackCtx, scope, workspaceID, rolledBackConversationID, "append-rolled-back"); err != nil {
+			return err
+		}
+		if _, replayed, err := store.AppendScoped(callbackCtx, scope, rollbackRequest); err != nil || replayed {
+			t.Fatalf("append before caller rollback replayed=%t err=%v", replayed, err)
+		}
+		return rollback
+	})
+	if !errors.Is(err, rollback) {
+		t.Fatalf("caller rollback err=%v", err)
 	}
 	page, err = store.ListAfter(ctx, workspaceID, created.Seq, domain.MaxReplayPageSize)
 	if err != nil || len(page) != 0 {
 		t.Fatalf("caller rollback left events=%#v err=%v", page, err)
 	}
-	if _, _, err := store.AppendTx(ctx, nil, request); eventErrorCode(err) != domain.ErrorCodeAppendTransactionUnavailable {
+	if _, _, err := store.AppendScoped(ctx, nil, request); eventErrorCode(err) != domain.ErrorCodeAppendTransactionUnavailable {
 		t.Fatalf("nil transaction code=%q err=%v", eventErrorCode(err), err)
 	}
 }
 
-func TestStoreAppendTxSerializesConcurrentSourceReferenceClaims(t *testing.T) {
+func TestStoreAppendScopedSerializesConcurrentSourceReferenceClaims(t *testing.T) {
 	stores := requireEventIntegrationStores(t)
-	store, pool, ctx := stores.legacy, stores.platform.DB(), context.Background()
+	pool, ctx := stores.platform.DB(), context.Background()
 	workspaceID := foundation.ID("7d200000-0000-4000-8000-000000000001")
 	conversationID := foundation.ID("7d200000-0000-4000-8000-000000000002")
 	seedEventWorkspaces(t, ctx, pool, workspaceID)
@@ -191,7 +193,7 @@ func TestStoreAppendTxSerializesConcurrentSourceReferenceClaims(t *testing.T) {
 		SourceEventRef: "conversation.created:" + string(conversationID) + ":concurrent-v1", OccurredAt: now,
 	}
 
-	exact := runConcurrentAppends(t, ctx, pool, store, request, request)
+	exact := runConcurrentScopedAppends(t, ctx, stores, request, request)
 	var createdCount, replayedCount int
 	var exactSequence int64
 	for _, result := range exact {
@@ -218,7 +220,7 @@ func TestStoreAppendTxSerializesConcurrentSourceReferenceClaims(t *testing.T) {
 	first.OccurredAt = now.Add(time.Second)
 	second := first
 	second.ResourceVersion = 2
-	conflicting := runConcurrentAppends(t, ctx, pool, store, first, second)
+	conflicting := runConcurrentScopedAppends(t, ctx, stores, first, second)
 	var successCount, conflictCount int
 	for _, result := range conflicting {
 		switch eventErrorCode(result.err) {
@@ -241,61 +243,13 @@ type concurrentAppendResult struct {
 	err      error
 }
 
-func runConcurrentAppends(t *testing.T, parent context.Context, pool *pgxpool.Pool, store *Store, requests ...domain.AppendRequest) []concurrentAppendResult {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
-	defer cancel()
-	start := make(chan struct{})
-	results := make(chan concurrentAppendResult, len(requests))
-	transactions := make([]pgx.Tx, len(requests))
-	for index := range requests {
-		tx, err := pool.Begin(ctx)
-		if err != nil {
-			for _, opened := range transactions[:index] {
-				_ = opened.Rollback(ctx)
-			}
-			t.Fatal(err)
-		}
-		transactions[index] = tx
-	}
-	for index, request := range requests {
-		request := request
-		tx := transactions[index]
-		go func() {
-			<-start
-			event, replayed, err := store.AppendTx(ctx, tx, request)
-			if err != nil {
-				_ = tx.Rollback(ctx)
-				results <- concurrentAppendResult{err: err}
-				return
-			}
-			if err := tx.Commit(ctx); err != nil {
-				results <- concurrentAppendResult{err: err}
-				return
-			}
-			results <- concurrentAppendResult{event: event, replayed: replayed}
-		}()
-	}
-	close(start)
-	collected := make([]concurrentAppendResult, 0, len(requests))
-	for range requests {
-		select {
-		case result := <-results:
-			collected = append(collected, result)
-		case <-ctx.Done():
-			t.Fatal(ctx.Err())
-		}
-	}
-	return collected
-}
-
-func TestGORMStorePostgresEquivalenceAndScopedTransactions(t *testing.T) {
+func TestGORMStorePostgresReadContractAndScopedTransactions(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	stores := requireEventIntegrationStores(t)
 	pool := stores.platform.DB()
 
-	t.Run("paired reads preserve workspace retention pages and corrupt rows", func(t *testing.T) {
+	t.Run("reads preserve workspace retention pages and corrupt rows", func(t *testing.T) {
 		workspaceA := foundation.ID("7e000000-0000-4000-8000-000000000001")
 		workspaceB := foundation.ID("7e000000-0000-4000-8000-000000000002")
 		emptyWorkspace := foundation.ID("7e000000-0000-4000-8000-000000000003")
@@ -309,9 +263,9 @@ func TestGORMStorePostgresEquivalenceAndScopedTransactions(t *testing.T) {
 		if !(expiredSeq < otherSeq && otherSeq < firstSeq && firstSeq < secondSeq) {
 			t.Fatalf("fixture sequences are not globally monotonic: %d %d %d %d", expiredSeq, otherSeq, firstSeq, secondSeq)
 		}
-		assertEventStoreReadParity(t, ctx, stores, workspaceA, firstSeq, secondSeq)
-		assertEventStoreReadParity(t, ctx, stores, workspaceB, otherSeq, otherSeq)
-		assertEventStoreReadParity(t, ctx, stores, emptyWorkspace, 0, 0)
+		assertEventStoreReadContract(t, ctx, stores, workspaceA, firstSeq, secondSeq)
+		assertEventStoreReadContract(t, ctx, stores, workspaceB, otherSeq, otherSeq)
+		assertEventStoreReadContract(t, ctx, stores, emptyWorkspace, 0, 0)
 		assertEventReplayPlans(t, ctx, pool, workspaceA)
 
 		triggerWorkspace := foundation.ID("7e000000-0000-4000-8000-000000000005")
@@ -327,22 +281,24 @@ func TestGORMStorePostgresEquivalenceAndScopedTransactions(t *testing.T) {
 		) VALUES($1,false,NULL,NULL,false,false,1,$2,$2)`, string(triggerWorkspace), now); err != nil {
 			t.Fatalf("trigger Git remote Event projection: %v", err)
 		}
-		legacyTriggered, legacyErr := stores.legacy.ListAfter(ctx, triggerWorkspace, 0, domain.MaxReplayPageSize)
-		gormTriggered, gormErr := stores.gorm.ListAfter(ctx, triggerWorkspace, 0, domain.MaxReplayPageSize)
-		if legacyErr != nil || gormErr != nil || !reflect.DeepEqual(gormTriggered, legacyTriggered) || len(gormTriggered) != 1 || gormTriggered[0].Type != "git.remote.updated" {
-			t.Fatalf("trigger Event replay legacy=%#v/%v gorm=%#v/%v", legacyTriggered, legacyErr, gormTriggered, gormErr)
+		triggered, err := stores.gorm.ListAfter(ctx, triggerWorkspace, 0, domain.MaxReplayPageSize)
+		if err != nil || len(triggered) != 1 || triggered[0].Type != "git.remote.updated" {
+			t.Fatalf("trigger Event replay=%#v err=%v", triggered, err)
+		}
+		persisted, err := scanEvent(pool.QueryRow(ctx, eventSelect+` WHERE seq=$1`, triggered[0].Seq))
+		if err != nil || !reflect.DeepEqual(triggered[0], persisted) {
+			t.Fatalf("trigger replay=%#v persisted=%#v err=%v", triggered[0], persisted, err)
 		}
 
 		corruptWorkspace := foundation.ID("7e000000-0000-4000-8000-000000000004")
 		seedEventWorkspaces(t, ctx, pool, corruptWorkspace)
 		insertServerEvent(t, ctx, pool, corruptWorkspace, "workflow.run.started", "7e000000-0000-4000-8000-000000000015", now.Add(-time.Minute), `{}`)
 		insertServerEvent(t, ctx, pool, corruptWorkspace, "answer.completed", "7e000000-0000-4000-8000-000000000016", now, `{"answer_text":"private answer canary"}`)
-		for name, store := range map[string]application.Store{"legacy": stores.legacy, "gorm": stores.gorm} {
-			events, err := store.ListAfter(ctx, corruptWorkspace, 0, domain.MaxReplayPageSize)
-			if len(events) != 0 || eventErrorCode(err) != domain.ErrorCodeEventCorrupt {
-				t.Fatalf("%s corrupt replay events=%d code=%q err=%v", name, len(events), eventErrorCode(err), err)
-			}
+		events, err := stores.gorm.ListAfter(ctx, corruptWorkspace, 0, domain.MaxReplayPageSize)
+		if len(events) != 0 || eventErrorCode(err) != domain.ErrorCodeEventCorrupt {
+			t.Fatalf("corrupt replay events=%d code=%q err=%v", len(events), eventErrorCode(err), err)
 		}
+
 		assertEventPoolReleased(t, pool, "GORM read and corrupt paths")
 	})
 
@@ -374,9 +330,9 @@ func TestGORMStorePostgresEquivalenceAndScopedTransactions(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("GORM scoped commit: %v", err)
 		}
-		committed, err := stores.legacy.ListAfter(ctx, workspaceID, 0, domain.MaxReplayPageSize)
+		committed, err := stores.gorm.ListAfter(ctx, workspaceID, 0, domain.MaxReplayPageSize)
 		if err != nil || len(committed) != 1 || committed[0].ConversationID == nil || *committed[0].ConversationID != conversationID {
-			t.Fatalf("legacy read after GORM commit=%#v err=%v", committed, err)
+			t.Fatalf("read after scoped commit=%#v err=%v", committed, err)
 		}
 
 		rollbackConversationID := foundation.ID("7e100000-0000-4000-8000-000000000003")
@@ -526,7 +482,6 @@ func insertEventConversation(t *testing.T, ctx context.Context, tx pgx.Tx, works
 
 type eventIntegrationStores struct {
 	platform   *platformpostgres.Pool
-	legacy     *Store
 	gorm       *GORMStore
 	unitOfWork foundation.UnitOfWork
 }
@@ -538,10 +493,6 @@ func requireEventIntegrationStores(t *testing.T) eventIntegrationStores {
 	if platform == nil || platform.DB() == nil {
 		t.Fatal("test database fixture did not provide a shared platform pool")
 	}
-	legacy, err := NewStore(platform.DB())
-	if err != nil {
-		t.Fatalf("NewStore from shared platform pool: %v", err)
-	}
 	gormStore, err := NewGORMStore(platform)
 	if err != nil {
 		t.Fatalf("NewGORMStore from shared platform pool: %v", err)
@@ -550,33 +501,47 @@ func requireEventIntegrationStores(t *testing.T) eventIntegrationStores {
 	if err != nil {
 		t.Fatalf("UnitOfWork from shared platform pool: %v", err)
 	}
-	return eventIntegrationStores{platform: platform, legacy: legacy, gorm: gormStore, unitOfWork: unitOfWork}
+	return eventIntegrationStores{platform: platform, gorm: gormStore, unitOfWork: unitOfWork}
 }
 
-func assertEventStoreReadParity(t *testing.T, ctx context.Context, stores eventIntegrationStores, workspaceID foundation.ID, wantEarliest, wantWatermark int64) {
+func assertEventStoreReadContract(t *testing.T, ctx context.Context, stores eventIntegrationStores, workspaceID foundation.ID, wantEarliest, wantWatermark int64) {
 	t.Helper()
-	legacyWatermark, legacyErr := stores.legacy.CurrentWatermark(ctx, workspaceID)
-	gormWatermark, gormErr := stores.gorm.CurrentWatermark(ctx, workspaceID)
-	if legacyErr != nil || gormErr != nil || legacyWatermark != wantWatermark || gormWatermark != legacyWatermark {
-		t.Fatalf("watermark legacy=%d/%v gorm=%d/%v want=%d", legacyWatermark, legacyErr, gormWatermark, gormErr, wantWatermark)
+	watermark, err := stores.gorm.CurrentWatermark(ctx, workspaceID)
+	if err != nil || watermark != wantWatermark {
+		t.Fatalf("watermark=%d err=%v want=%d", watermark, err, wantWatermark)
 	}
-	legacyEarliest, legacyErr := stores.legacy.EarliestRetained(ctx, workspaceID)
-	gormEarliest, gormErr := stores.gorm.EarliestRetained(ctx, workspaceID)
-	if legacyErr != nil || gormErr != nil || !reflect.DeepEqual(gormEarliest, legacyEarliest) {
-		t.Fatalf("earliest legacy=%v/%v gorm=%v/%v", legacyEarliest, legacyErr, gormEarliest, gormErr)
+	earliest, err := stores.gorm.EarliestRetained(ctx, workspaceID)
+	if err != nil {
+		t.Fatal(err)
 	}
+	var sequences []int64
 	if wantEarliest == 0 {
-		if legacyEarliest != nil {
-			t.Fatalf("earliest=%v, want nil", legacyEarliest)
+		if earliest != nil {
+			t.Fatalf("earliest=%v, want nil", earliest)
 		}
-	} else if legacyEarliest == nil || *legacyEarliest != wantEarliest {
-		t.Fatalf("earliest=%v, want=%d", legacyEarliest, wantEarliest)
+	} else {
+		if earliest == nil || *earliest != wantEarliest {
+			t.Fatalf("earliest=%v, want=%d", earliest, wantEarliest)
+		}
+		sequences = append(sequences, wantEarliest)
+		if wantWatermark != wantEarliest {
+			sequences = append(sequences, wantWatermark)
+		}
 	}
 	for _, limit := range []int{1, domain.MaxReplayPageSize} {
-		legacyEvents, legacyErr := stores.legacy.ListAfter(ctx, workspaceID, 0, limit)
-		gormEvents, gormErr := stores.gorm.ListAfter(ctx, workspaceID, 0, limit)
-		if legacyErr != nil || gormErr != nil || !reflect.DeepEqual(gormEvents, legacyEvents) {
-			t.Fatalf("page limit=%d legacy=%#v/%v gorm=%#v/%v", limit, legacyEvents, legacyErr, gormEvents, gormErr)
+		events, err := stores.gorm.ListAfter(ctx, workspaceID, 0, limit)
+		wantCount := min(len(sequences), limit)
+		if err != nil || len(events) != wantCount {
+			t.Fatalf("page limit=%d events=%#v err=%v want count=%d", limit, events, err, wantCount)
+		}
+		for index, event := range events {
+			if event.Seq != sequences[index] || event.WorkspaceID != workspaceID {
+				t.Fatalf("page event=%#v want sequence=%d workspace=%s", event, sequences[index], workspaceID)
+			}
+			persisted, err := scanEvent(stores.platform.DB().QueryRow(ctx, eventSelect+` WHERE seq=$1`, sequences[index]))
+			if err != nil || !reflect.DeepEqual(event, persisted) {
+				t.Fatalf("page event=%#v persisted=%#v err=%v", event, persisted, err)
+			}
 		}
 	}
 }
@@ -600,7 +565,7 @@ func eventAppendRequest(workspaceID, conversationID foundation.ID, suffix string
 		// 必须跟随当前时间：expires_at=occurred_at+24h 的保留窗口由 SQL 的
 		// CURRENT_TIMESTAMP 过滤判定，硬编码日期会在 24 小时后让事件过期失效。
 		// 固定纳秒尾数 123456789 用于验证微秒截断精度保留。
-		OccurredAt:     time.Now().UTC().Truncate(time.Second).Add(123456789),
+		OccurredAt: time.Now().UTC().Truncate(time.Second).Add(123456789),
 	}
 }
 

@@ -11,7 +11,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
 )
 
-func TestCompositeWorkflowTerminalHookRunsInRegistrationOrderAndStopsOnError(t *testing.T) {
+func TestCompositeScopedWorkflowTerminalHookRunsInRegistrationOrderAndStopsOnError(t *testing.T) {
 	event := WorkflowNodeTerminalEvent{
 		WorkflowRunID:  foundation.ID("00000000-0000-4000-8000-000000000001"),
 		NodeRunID:      foundation.ID("00000000-0000-4000-8000-000000000002"),
@@ -22,20 +22,20 @@ func TestCompositeWorkflowTerminalHookRunsInRegistrationOrderAndStopsOnError(t *
 		FailureSummary: "artifact generation failed",
 		TerminalAt:     time.Date(2026, 7, 26, 5, 0, 0, 0, time.UTC),
 	}
-	transaction := &struct{ name string }{name: "runtime-tx"}
+	transaction := &workflowHookScope{name: "runtime-tx"}
 	order := make([]string, 0, 3)
 	cause := errors.New("terminal projection failed")
 	first := &workflowTerminalHookFake{name: "first", order: &order}
 	second := &workflowTerminalHookFake{name: "second", order: &order, err: cause}
 	third := &workflowTerminalHookFake{name: "third", order: &order}
 
-	hook, err := NewCompositeWorkflowTerminalHook(first, second, third)
+	hook, err := NewCompositeScopedWorkflowTerminalHook(first, second, third)
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = hook.OnWorkflowNodeTerminal(context.Background(), transaction, event)
+	err = hook.OnWorkflowNodeTerminalScoped(context.Background(), transaction, event)
 	if !errors.Is(err, cause) {
-		t.Fatalf("OnWorkflowNodeTerminal() error = %v", err)
+		t.Fatalf("OnWorkflowNodeTerminalScoped() error = %v", err)
 	}
 	if !reflect.DeepEqual(order, []string{"first", "second"}) {
 		t.Fatalf("hook order = %v", order)
@@ -50,12 +50,12 @@ func TestCompositeWorkflowTerminalHookRunsInRegistrationOrderAndStopsOnError(t *
 	}
 }
 
-func TestCompositeWorkflowTerminalHookRejectsMissingRegistration(t *testing.T) {
-	if _, err := NewCompositeWorkflowTerminalHook(); err == nil {
+func TestCompositeScopedWorkflowTerminalHookRejectsMissingRegistration(t *testing.T) {
+	if _, err := NewCompositeScopedWorkflowTerminalHook(); err == nil {
 		t.Fatal("empty terminal hook registration was accepted")
 	}
 	var typedNil *workflowTerminalHookFake
-	if _, err := NewCompositeWorkflowTerminalHook(typedNil); err == nil {
+	if _, err := NewCompositeScopedWorkflowTerminalHook(typedNil); err == nil {
 		t.Fatal("typed nil terminal hook was accepted")
 	}
 }
@@ -65,11 +65,11 @@ type workflowTerminalHookFake struct {
 	order       *[]string
 	err         error
 	calls       int
-	transaction any
+	transaction foundation.TransactionScope
 	event       WorkflowNodeTerminalEvent
 }
 
-func (hook *workflowTerminalHookFake) OnWorkflowNodeTerminal(_ context.Context, transaction any, event WorkflowNodeTerminalEvent) error {
+func (hook *workflowTerminalHookFake) OnWorkflowNodeTerminalScoped(_ context.Context, transaction foundation.TransactionScope, event WorkflowNodeTerminalEvent) error {
 	hook.calls++
 	hook.transaction = transaction
 	hook.event = event
@@ -78,3 +78,7 @@ func (hook *workflowTerminalHookFake) OnWorkflowNodeTerminal(_ context.Context, 
 	}
 	return hook.err
 }
+
+type workflowHookScope struct{ name string }
+
+func (*workflowHookScope) TransactionScope() {}

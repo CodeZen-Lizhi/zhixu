@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"reflect"
 	"strings"
 	"time"
@@ -346,7 +345,7 @@ func (repository *GORMRepository) ListProposals(ctx context.Context, request dom
 		"PROPOSAL_LIST_TRANSACTION_FAILED", "PROPOSAL_LIST_COMMIT_FAILED", classifyGORMChange,
 		func(callbackCtx context.Context, _ foundation.TransactionScope, tx *gorm.DB) error {
 			query, arguments := buildProposalListQuery(request)
-			rows, err := gormChangeRawRows(callbackCtx, tx, gormChangePlaceholders(query), arguments...)
+			rows, err := gormChangeRawRows(callbackCtx, tx, query, arguments...)
 			if err != nil {
 				return classifyGORMChange(callbackCtx, err, "PROPOSAL_LIST_QUERY_FAILED")
 			}
@@ -575,13 +574,6 @@ const gormChangeProposalSnapshotSQL = `
 	LEFT JOIN change_control.proposal_revision_dispatch d ON d.proposal_id=p.id AND d.revision_id=r.id AND d.approval_id=a.id
 	LEFT JOIN workflow.run wr ON wr.id=CASE WHEN p.current_revision_id IS NULL THEN p.workflow_run_id ELSE d.workflow_run_id END AND wr.workspace_id=p.workspace_id
 	WHERE p.id=?`
-
-func gormChangePlaceholders(query string) string {
-	for index := 100; index > 0; index-- {
-		query = strings.ReplaceAll(query, "$"+fmt.Sprint(index), "?")
-	}
-	return query
-}
 
 func gormChangeLoadApproval(ctx context.Context, database *gorm.DB, revisionID foundation.ID) (domain.Approval, error) {
 	row, err := gormChangeRawRow(ctx, database, `SELECT id::text,proposal_id::text,revision_id::text,change_hash,decision,approved_git_head,decided_at FROM change_control.approval WHERE revision_id=?`, string(revisionID))

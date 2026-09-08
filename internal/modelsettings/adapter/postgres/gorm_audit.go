@@ -15,7 +15,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// GORMSettingsAuditAppender adapts the staged Audit scoped appender to the
+// GORMSettingsAuditAppender adapts the Audit scoped appender to the
 // deliberately redacted Model Settings contract.
 type GORMSettingsAuditAppender struct {
 	appender auditapplication.ScopedAppender
@@ -29,7 +29,7 @@ func NewGORMSettingsAuditAppender(appender auditapplication.ScopedAppender) (*GO
 	return &GORMSettingsAuditAppender{appender: appender}, nil
 }
 
-// WithGORMAuditAppender adapts the shared staged Audit store at construction.
+// WithGORMAuditAppender adapts the shared Audit store at construction.
 func WithGORMAuditAppender(appender auditapplication.ScopedAppender) GORMOption {
 	settingsAppender, err := NewGORMSettingsAuditAppender(appender)
 	return func(repository *GORMRepository) error {

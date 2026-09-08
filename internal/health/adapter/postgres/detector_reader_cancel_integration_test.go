@@ -17,7 +17,8 @@ import (
 func TestFactReaderCancellationReleasesBlockedConnection(t *testing.T) {
 	ctx, stop := context.WithTimeout(context.Background(), 20*time.Second)
 	defer stop()
-	pool := newHealthIntegrationPool(t)
+	platform := requireHealthIntegrationPlatform(t)
+	pool := platform.DB()
 	blocker, err := pool.Acquire(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -32,11 +33,12 @@ func TestFactReaderCancellationReleasesBlockedConnection(t *testing.T) {
 	if _, err := blockerTx.Exec(ctx, `LOCK TABLE core.topic IN ACCESS EXCLUSIVE MODE`); err != nil {
 		t.Fatal(err)
 	}
-	reader, err := NewFactReader(pool)
+	reader, err := NewGORMFactReader(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
-	queryCtx, cancel := context.WithCancel(ctx)
+	queryCtx, cancel := context.WithCancelCause(ctx)
+	cancelCause := errors.New("health detector shutdown")
 	result := make(chan error, 1)
 	go func() {
 		_, findErr := reader.Find(queryCtx, healthdetector.DetectorOrphan, healthapp.PageRequest{
@@ -57,10 +59,10 @@ func TestFactReaderCancellationReleasesBlockedConnection(t *testing.T) {
 	}()
 	waitForBlockedHealthDetectorQuery(t, ctx, pool)
 	started := time.Now()
-	cancel()
+	cancel(cancelCause)
 	select {
 	case err := <-result:
-		if !errors.Is(err, context.Canceled) {
+		if !errors.Is(err, context.Canceled) || !errors.Is(err, cancelCause) {
 			t.Fatalf("blocked detector cancellation error=%v", err)
 		}
 		if elapsed := time.Since(started); elapsed > 2*time.Second {

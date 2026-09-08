@@ -335,7 +335,7 @@ func TestWorkspaceAnalysisModelFailureClosureAcceptsFailureRefusalAndUnknownOnly
 		t.Run(test.name, func(t *testing.T) {
 			locked, command := workspaceAnalysisModelFailureClosureFixture(test.callStatus, test.runStatus,
 				test.resultType, test.errorCode, test.reservationStatus, test.operationStatus)
-			if err := validateWorkspaceAnalysisModelStoredClosure(nil, nil, locked); err != nil {
+			if err := gormValidateWorkspaceAnalysisModelStoredClosure(nil, nil, locked); err != nil {
 				t.Fatalf("valid closure rejected: %v", err)
 			}
 			result, err := replayWorkspaceAnalysisModelCallTerminal(locked, command)
@@ -347,14 +347,14 @@ func TestWorkspaceAnalysisModelFailureClosureAcceptsFailureRefusalAndUnknownOnly
 			drifted := locked
 			drifted.reservation = workspaceAnalysisModelReservationCopy(locked.reservation)
 			drifted.reservation.Status = domain.WorkspaceAnalysisBudgetReserved
-			if err := validateWorkspaceAnalysisModelStoredClosure(nil, nil, drifted); err == nil {
+			if err := gormValidateWorkspaceAnalysisModelStoredClosure(nil, nil, drifted); err == nil {
 				t.Fatal("reservation drift was accepted")
 			}
 
 			drifted = locked
 			partialResultKind := domain.WorkspaceAnalysisOperationResultModelCall
 			drifted.operation.resultKind = &partialResultKind
-			if err := validateWorkspaceAnalysisModelStoredClosure(nil, nil, drifted); err == nil {
+			if err := gormValidateWorkspaceAnalysisModelStoredClosure(nil, nil, drifted); err == nil {
 				t.Fatal("partial terminal result drift was accepted")
 			}
 		})

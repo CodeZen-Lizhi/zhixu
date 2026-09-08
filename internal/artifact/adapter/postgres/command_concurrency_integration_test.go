@@ -124,7 +124,8 @@ func TestGORMArtifactExternalReservationSerializesAndClearsAtomically(t *testing
 
 func TestArtifactCommandsConcurrentExportAndPublishKeepOneDurableBinding(t *testing.T) {
 	ctx := context.Background()
-	repository, pool := newArtifactIntegrationRepository(t, ctx)
+	repository, platformPool := newArtifactIntegrationGORMRepository(t, ctx)
+	pool := platformPool.DB()
 	workspaceID := artifactIntegrationID(401)
 	seedArtifactWorkspace(t, ctx, pool, workspaceID, "artifact-command-concurrency")
 
@@ -156,7 +157,7 @@ func TestArtifactCommandsConcurrentExportAndPublishKeepOneDurableBinding(t *test
 	}
 	assertSingleExportFileBinding(t, ctx, pool, root, *exported.Export)
 
-	changeRepository, err := changecontrolpostgres.NewRepository(pool)
+	changeRepository, err := changecontrolpostgres.NewGORMRepository(platformPool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +223,8 @@ func TestArtifactCommandsConcurrentExportAndPublishKeepOneDurableBinding(t *test
 
 func TestArtifactCommandsConcurrentExportAndPublishLeaveNoUnboundSideEffects(t *testing.T) {
 	ctx := context.Background()
-	repository, pool := newArtifactIntegrationRepository(t, ctx)
+	repository, platformPool := newArtifactIntegrationGORMRepository(t, ctx)
+	pool := platformPool.DB()
 	workspaceID := artifactIntegrationID(402)
 	seedArtifactWorkspace(t, ctx, pool, workspaceID, "artifact-cross-command-concurrency")
 
@@ -237,7 +239,7 @@ func TestArtifactCommandsConcurrentExportAndPublishLeaveNoUnboundSideEffects(t *
 	baseTime := time.Date(2026, 7, 26, 14, 0, 0, 0, time.UTC)
 	approved := createApprovedArtifactForConcurrency(t, ctx, repository, workspaceID, baseTime)
 
-	changeRepository, err := changecontrolpostgres.NewRepository(pool)
+	changeRepository, err := changecontrolpostgres.NewGORMRepository(platformPool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -324,7 +326,8 @@ func TestArtifactCommandsConcurrentExportAndPublishLeaveNoUnboundSideEffects(t *
 
 func TestArtifactCommandsConcurrentPublishThenExportBlocksFileSideEffect(t *testing.T) {
 	ctx := context.Background()
-	repository, pool := newArtifactIntegrationRepository(t, ctx)
+	repository, platformPool := newArtifactIntegrationGORMRepository(t, ctx)
+	pool := platformPool.DB()
 	workspaceID := artifactIntegrationID(403)
 	seedArtifactWorkspace(t, ctx, pool, workspaceID, "artifact-publish-first-concurrency")
 	root, err := filepath.EvalSymlinks(t.TempDir())
@@ -337,7 +340,7 @@ func TestArtifactCommandsConcurrentPublishThenExportBlocksFileSideEffect(t *test
 	}
 	baseTime := time.Date(2026, 7, 26, 15, 0, 0, 0, time.UTC)
 	approved := createApprovedArtifactForConcurrency(t, ctx, repository, workspaceID, baseTime)
-	changeRepository, err := changecontrolpostgres.NewRepository(pool)
+	changeRepository, err := changecontrolpostgres.NewGORMRepository(platformPool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -434,7 +437,8 @@ func TestArtifactExternalTransitionPreflightRejectsInvalidStateWithoutReservatio
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := context.Background()
-			repository, pool := newArtifactIntegrationRepository(t, ctx)
+			repository, platformPool := newArtifactIntegrationGORMRepository(t, ctx)
+			pool := platformPool.DB()
 			seedArtifactWorkspace(t, ctx, pool, test.workspace, "artifact-invalid-external-"+test.name)
 			base := time.Date(2026, 7, 26, 15, 30, 0, 0, time.UTC)
 			exporter := &artifactUnexpectedExporter{}
@@ -497,7 +501,8 @@ func TestArtifactExternalTransitionPreflightRejectsInvalidClockWithoutReservatio
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := context.Background()
-			repository, pool := newArtifactIntegrationRepository(t, ctx)
+			repository, platformPool := newArtifactIntegrationGORMRepository(t, ctx)
+			pool := platformPool.DB()
 			seedArtifactWorkspace(t, ctx, pool, test.workspace, "artifact-invalid-clock-"+test.name)
 			base := time.Date(2026, 7, 26, 15, 45, 0, 0, time.UTC)
 			approved := createApprovedArtifactForConcurrency(t, ctx, repository, test.workspace, base)
@@ -521,7 +526,8 @@ func TestArtifactExternalTransitionPreflightRejectsInvalidClockWithoutReservatio
 
 func TestArtifactExternalReservationRecoversOnlyExactOwnerAndClearsAtomically(t *testing.T) {
 	ctx := context.Background()
-	repository, pool := newArtifactIntegrationRepository(t, ctx)
+	repository, platformPool := newArtifactIntegrationGORMRepository(t, ctx)
+	pool := platformPool.DB()
 	workspaceID := artifactIntegrationID(404)
 	seedArtifactWorkspace(t, ctx, pool, workspaceID, "artifact-reservation-recovery")
 	root, err := filepath.EvalSymlinks(t.TempDir())
@@ -561,7 +567,7 @@ func TestArtifactExternalReservationRecoversOnlyExactOwnerAndClearsAtomically(t 
 	if err != nil || !replayed.Replayed || replayExporter.calls.Load() != 0 {
 		t.Fatalf("export receipt replay=%+v calls=%d err=%v", replayed, replayExporter.calls.Load(), err)
 	}
-	changeRepository, err := changecontrolpostgres.NewRepository(pool)
+	changeRepository, err := changecontrolpostgres.NewGORMRepository(platformPool)
 	if err != nil {
 		t.Fatal(err)
 	}

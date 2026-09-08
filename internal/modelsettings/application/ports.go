@@ -56,14 +56,8 @@ type ModelSettingsChange struct {
 	EmbeddingKeyConfigured bool
 }
 
-// SettingsAuditAppender appends a redacted model-settings fact in the caller's transaction.
-type SettingsAuditAppender interface {
-	AppendModelSettingsChangeTx(context.Context, any, ModelSettingsChange) error
-}
-
-// ScopedSettingsAuditAppender appends the same redacted fact through an
-// opaque caller-owned transaction. Staged GORM repositories use this seam;
-// legacy pgx repositories keep SettingsAuditAppender until final cutover.
+// ScopedSettingsAuditAppender appends a redacted model-settings fact through
+// an opaque caller-owned transaction.
 type ScopedSettingsAuditAppender interface {
 	AppendModelSettingsChangeScoped(context.Context, foundation.TransactionScope, ModelSettingsChange) error
 }

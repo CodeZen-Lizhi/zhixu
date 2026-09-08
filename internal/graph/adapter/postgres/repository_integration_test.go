@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,30 +19,30 @@ import (
 	graphapp "github.com/CodeZen-Lizhi/zhixu/internal/graph/application"
 	graphdomain "github.com/CodeZen-Lizhi/zhixu/internal/graph/domain"
 	knowledge "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"gorm.io/gorm"
 )
 
-func TestNewRepositoryRejectsExternallyOwnedTransaction(t *testing.T) {
-	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
-	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
+func TestNewRepositoryKeepsExternallyOwnedTransactionIndependent(t *testing.T) {
+	pool := newGraphTestPool(t, 4)
+	ctx := t.Context()
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = tx.Rollback(ctx) })
-	repository, err := NewRepository(tx)
-	if repository != nil || !hasGraphCode(err, graphdomain.ErrorCodeDependencyUnavailable) {
-		t.Fatalf("repository=%#v err=%v", repository, err)
+	t.Cleanup(func() { _ = tx.Rollback(context.Background()) })
+	// The final constructor takes the complete Pool, so it cannot adopt a
+	// caller-owned transaction or close it while running its own snapshot.
+	repository, err := NewGORMRepository(pool.platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.GlobalWindow(ctx, graphdomain.GlobalRequest{WorkspaceID: graphTestID(t), Limit: 25}); err != nil {
+		t.Fatal(err)
 	}
 	var one int
 	if err := tx.QueryRow(ctx, `SELECT 1`).Scan(&one); err != nil || one != 1 {
@@ -108,7 +109,7 @@ func TestRepositoryGlobalSearchAndDetailsUseCanonicalKnowledgeFacts(t *testing.T
 	}
 
 	otherWorkspace := graphTestID(t)
-	if _, err := tx.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'other',$2,$2,$3,'test',1,$3,$3)`, string(otherWorkspace), "/tmp/graph-other-"+string(otherWorkspace), time.Now().UTC()); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'other',$2,$2,$3,'inactive',1,$3,$3)`, string(otherWorkspace), "/tmp/graph-other-"+string(otherWorkspace), time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := repository.NodeDetail(ctx, otherWorkspace, knowledge.NodeRef{Type: knowledge.NodeTypeTopic, ID: fixture.primaryTopicID}); !hasGraphCode(err, graphdomain.ErrorCodeNodeNotFound) {
@@ -130,6 +131,54 @@ func TestRepositoryGlobalSearchAndDetailsUseCanonicalKnowledgeFacts(t *testing.T
 		if _, err := repository.RelationDetail(ctx, fixture.workspaceID, relationID); !hasGraphCode(err, graphdomain.ErrorCodeRelationNotFound) {
 			t.Fatalf("non-formal relation %s err=%v", relationID, err)
 		}
+	}
+}
+
+func TestGORMRepositoryGlobalWindowUsesCanonicalKnowledgeFacts(t *testing.T) {
+	databaseFixture := testdb.Require(t, testdb.Config{
+		ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
+		Availability:     testdb.FailWhenUnavailable,
+		MaxConns:         8,
+	})
+	platform := databaseFixture.Pool()
+	if platform == nil || platform.DB() == nil {
+		t.Fatal("Graph PostgreSQL fixture did not provide a shared platform pool")
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	seedTx, err := platform.DB().Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedCommitted := false
+	defer func() {
+		if !seedCommitted {
+			_ = seedTx.Rollback(context.Background())
+		}
+	}()
+	graphFixture := seedGraphFixture(t, ctx, seedTx)
+	if err := seedTx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	seedCommitted = true
+
+	repository, err := NewGORMRepository(platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	window, err := repository.GlobalWindow(ctx, graphdomain.GlobalRequest{WorkspaceID: graphFixture.workspaceID, Limit: 25})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if window.Truncated || len(window.Items) != 2 || window.Items[0].Topic.Ref.ID != graphFixture.primaryTopicID ||
+		window.Items[0].DirectClaimCount != 2 || window.Items[0].IncidentRelationCount != 3 || window.Items[0].ClusterScore != 5 {
+		t.Fatalf("window=%#v", window)
+	}
+
+	isolated, err := repository.GlobalWindow(ctx, graphdomain.GlobalRequest{WorkspaceID: graphTestID(t), Limit: 25})
+	if err != nil || len(isolated.Items) != 0 {
+		t.Fatalf("isolated window=%#v err=%v", isolated, err)
 	}
 }
 
@@ -493,20 +542,7 @@ func TestRepositoryDepthOneNeighborhoodTraversesSymmetricRelationBothWays(t *tes
 	if sourceID > targetID {
 		sourceID, targetID = targetID, sourceID
 	}
-	relationID := graphTestID(t)
-	now := time.Now().UTC()
-	if _, err := tx.Exec(ctx, `INSERT INTO core.relation(id,workspace_id,source_node_type,source_node_id,target_node_type,target_node_id,relation_type,status,confidence_score,fingerprint,evidence_fingerprint,confirmation_method,confirmation_ref,version,created_at,updated_at) VALUES($1,$2,'CLAIM',$3,'CLAIM',$4,'DUPLICATES','CONFIRMED',0.9,$5,$6,'SOURCE_DERIVED','symmetric fixture',1,$7,$7)`, string(relationID), string(fixture.workspaceID), string(sourceID), string(targetID), graphHash("symmetric-relation"+string(relationID)), graphHash("symmetric-evidence"+string(relationID)), now); err != nil {
-		t.Fatal(err)
-	}
-	var sourceVersionID, sourceSpanID string
-	var applicability []byte
-	var schemaVersion, applicabilityHash string
-	if err := tx.QueryRow(ctx, `SELECT source_version_id::text,source_span_id::text,applicability,applicability_schema_version,applicability_hash FROM core.relation_evidence WHERE workspace_id=$1 LIMIT 1`, string(fixture.workspaceID)).Scan(&sourceVersionID, &sourceSpanID, &applicability, &schemaVersion, &applicabilityHash); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tx.Exec(ctx, `INSERT INTO core.relation_evidence(id,workspace_id,relation_id,source_version_id,source_span_id,reason,evidence_hash,applicability,applicability_schema_version,applicability_hash,confirmation_method,confirmed_by,created_at) VALUES($1,$2,$3,$4,$5,'symmetric evidence',$6,$7,$8,$9,'SOURCE_DERIVED','fixture',$10)`, string(graphTestID(t)), string(fixture.workspaceID), string(relationID), sourceVersionID, sourceSpanID, graphHash("symmetric-evidence-row"+string(relationID)), applicability, schemaVersion, applicabilityHash, now); err != nil {
-		t.Fatal(err)
-	}
+	relationID := seedGraphRelation(t, ctx, tx, fixture.workspaceID, sourceID, knowledge.NodeTypeClaim, targetID, knowledge.NodeTypeClaim, knowledge.RelationDuplicates, knowledge.RelationStatusConfirmed, floatPointer(0.9), time.Now().UTC())
 	request := graphdomain.NeighborhoodRequest{
 		WorkspaceID: fixture.workspaceID,
 		Center:      knowledge.NodeRef{Type: knowledge.NodeTypeClaim, ID: targetID},
@@ -558,8 +594,9 @@ func TestRepositoryDepthOneNeighborhoodTruncatesFiveHundredEdgeWindow(t *testing
 	for index := 0; index < graphapp.MaxResultWindowItems+1; index++ {
 		topicID, relationID := graphTestID(t), graphTestID(t)
 		batch.Queue(`INSERT INTO core.topic(id,workspace_id,name,normalized_name,description,status,version,created_at,updated_at) VALUES($1,$2,$3,$4,'','ACTIVE',1,$5,$5)`, string(topicID), string(fixture.workspaceID), fmt.Sprintf("Neighbor %03d", index), fmt.Sprintf("neighbor %03d", index), now)
-		batch.Queue(`INSERT INTO core.relation(id,workspace_id,source_node_type,source_node_id,target_node_type,target_node_id,relation_type,status,confidence_score,fingerprint,evidence_fingerprint,confirmation_method,confirmation_ref,version,created_at,updated_at) VALUES($1,$2,'TOPIC',$3,'TOPIC',$4,'IMPACTS','CONFIRMED',0.9,$5,$6,'SOURCE_DERIVED','window fixture',1,$7,$7)`, string(relationID), string(fixture.workspaceID), string(fixture.primaryTopicID), string(topicID), graphHash(fmt.Sprintf("window-relation-%d", index)), graphHash(fmt.Sprintf("window-evidence-%d", index)), now)
+		batch.Queue(`INSERT INTO core.relation(id,workspace_id,source_node_type,source_node_id,target_node_type,target_node_id,relation_type,status,confidence_score,fingerprint,evidence_fingerprint,confirmation_method,confirmation_ref,version,created_at,updated_at) VALUES($1,$2,'TOPIC',$3,'TOPIC',$4,'IMPACTS','SUGGESTED',0.9,$5,$6,NULL,NULL,1,$7,$7)`, string(relationID), string(fixture.workspaceID), string(fixture.primaryTopicID), string(topicID), graphHash(fmt.Sprintf("window-relation-%d", index)), graphHash(fmt.Sprintf("window-evidence-%d", index)), now)
 		batch.Queue(`INSERT INTO core.relation_evidence(id,workspace_id,relation_id,source_version_id,source_span_id,reason,evidence_hash,applicability,applicability_schema_version,applicability_hash,confirmation_method,confirmed_by,created_at) VALUES($1,$2,$3,$4,$5,'window evidence',$6,$7,$8,$9,'SOURCE_DERIVED','fixture',$10)`, string(graphTestID(t)), string(fixture.workspaceID), string(relationID), sourceVersionID, sourceSpanID, graphHash(fmt.Sprintf("window-evidence-row-%d", index)), applicability, schemaVersion, applicabilityHash, now)
+		batch.Queue(`UPDATE core.relation SET status='CONFIRMED',confirmation_method='SOURCE_DERIVED',confirmation_ref='fixture',version=version+1 WHERE workspace_id=$1 AND id=$2`, string(fixture.workspaceID), string(relationID))
 	}
 	results := tx.SendBatch(ctx, batch)
 	if err := results.Close(); err != nil {
@@ -583,20 +620,13 @@ func TestRepositoryDepthOneNeighborhoodTruncatesFiveHundredEdgeWindow(t *testing
 }
 
 func TestRepositoryFindPathIsDeterministicAndDirectionAware(t *testing.T) {
-	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
-	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
+	pool := newGraphTestPool(t, 12)
+	ctx := t.Context()
 	seedTx, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer func() { _ = seedTx.Rollback(context.Background()) }()
 	fixture := seedGraphFixture(t, ctx, seedTx)
 	now := time.Now().UTC()
 	left := seedConfirmedClaimWithSource(t, ctx, seedTx, fixture.workspaceID, "Diamond left", now)
@@ -613,8 +643,7 @@ func TestRepositoryFindPathIsDeterministicAndDirectionAware(t *testing.T) {
 	if err := seedTx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { cleanupCommittedGraphFixture(pool, fixture.workspaceID) })
-	repository, err := NewRepository(pool)
+	repository, err := NewGORMRepository(pool.platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -706,27 +735,36 @@ func TestRepositoryFindPathIsDeterministicAndDirectionAware(t *testing.T) {
 }
 
 func TestRepositoryFindPathKeepsRepeatableReadSnapshotDuringConcurrentChange(t *testing.T) {
-	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
-	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
+	pool := newGraphTestPool(t, 12)
+	ctx := t.Context()
 	seedTx, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer func() { _ = seedTx.Rollback(context.Background()) }()
 	fixture := seedGraphFixture(t, ctx, seedTx)
 	if err := seedTx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { cleanupCommittedGraphFixture(pool, fixture.workspaceID) })
 	entered, release := make(chan struct{}), make(chan struct{})
-	repository, err := NewRepository(&pathBarrierDB{Pool: pool, entered: entered, release: release})
+	var once sync.Once
+	graphRowHook(t, pool.platform, false, func(statement *gorm.DB) {
+		if !isPathFrontierQuery(statement.Statement.SQL.String()) {
+			return
+		}
+		intercept := false
+		once.Do(func() { intercept = true })
+		if !intercept {
+			return
+		}
+		close(entered)
+		select {
+		case <-release:
+		case <-statement.Statement.Context.Done():
+			statement.AddError(statement.Statement.Context.Err())
+		}
+	})
+	repository, err := NewGORMRepository(pool.platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -762,7 +800,7 @@ func TestRepositoryFindPathKeepsRepeatableReadSnapshotDuringConcurrentChange(t *
 	if first.err != nil || first.result.Status != graphdomain.PathFound || first.result.HopCount != 1 {
 		t.Fatalf("snapshot result=%#v err=%v", first.result, first.err)
 	}
-	freshRepository, err := NewRepository(pool)
+	freshRepository, err := NewGORMRepository(pool.platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -773,26 +811,15 @@ func TestRepositoryFindPathKeepsRepeatableReadSnapshotDuringConcurrentChange(t *
 }
 
 func TestRepositoryAppliesPostgresStatementTimeoutToReadSnapshot(t *testing.T) {
-	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
-	}
-	ctx := context.Background()
-	poolConfig, err := pgxpool.ParseConfig(databaseURL)
+	pool := newGraphTestPool(t, 1)
+	ctx := t.Context()
+	repository, err := NewGORMRepository(pool.platform)
 	if err != nil {
 		t.Fatal(err)
 	}
-	poolConfig.MinConns = 0
-	poolConfig.MaxConns = 1
-	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
-	repository, err := NewRepository(&statementTimeoutDB{Pool: pool, delayQuery: topicDetailSQL})
-	if err != nil {
-		t.Fatal(err)
-	}
+	graphStatementDelay(t, pool.platform, func(query string) bool {
+		return strings.Contains(query, "SELECT id::text,workspace_id::text,name,description,status,version,updated_at")
+	})
 	repository.statementTimeout = 10 * time.Millisecond
 	_, err = repository.NodeDetail(ctx,
 		foundation.ID("10000000-0000-4000-8000-000000000001"),
@@ -808,25 +835,17 @@ func TestRepositoryAppliesPostgresStatementTimeoutToReadSnapshot(t *testing.T) {
 }
 
 func TestRepositoryFindPathReturnsFrontierCancellationAndTimeoutWithoutPartial(t *testing.T) {
-	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
-	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
+	pool := newGraphTestPool(t, 12)
+	ctx := t.Context()
 	seedTx, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer func() { _ = seedTx.Rollback(context.Background()) }()
 	fixture := seedGraphFixture(t, ctx, seedTx)
 	if err := seedTx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { cleanupCommittedGraphFixture(pool, fixture.workspaceID) })
 	request := graphdomain.PathRequest{
 		WorkspaceID: fixture.workspaceID,
 		From:        knowledge.NodeRef{Type: knowledge.NodeTypeClaim, ID: fixture.firstClaimID},
@@ -847,7 +866,12 @@ func TestRepositoryFindPathReturnsFrontierCancellationAndTimeoutWithoutPartial(t
 		{name: "postgres explicit cancel", err: &pgconn.PgError{Code: "57014", Message: "canceling statement due to user request"}, code: graphdomain.ErrorCodeQueryCanceled},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			repository, createErr := NewRepository(&pathFrontierErrorDB{Pool: pool, frontierErr: testCase.err})
+			graphRowHook(t, pool.platform, false, func(statement *gorm.DB) {
+				if isPathFrontierQuery(statement.Statement.SQL.String()) {
+					statement.AddError(testCase.err)
+				}
+			})
+			repository, createErr := NewGORMRepository(pool.platform)
 			if createErr != nil {
 				t.Fatal(createErr)
 			}
@@ -858,10 +882,11 @@ func TestRepositoryFindPathReturnsFrontierCancellationAndTimeoutWithoutPartial(t
 			}
 		})
 	}
-	delayedRepository, err := NewRepository(&statementTimeoutDB{Pool: pool, delayQuery: pathFrontierSQL})
+	delayedRepository, err := NewGORMRepository(pool.platform)
 	if err != nil {
 		t.Fatal(err)
 	}
+	graphStatementDelay(t, pool.platform, isPathFrontierQuery)
 	delayedRepository.statementTimeout = 10 * time.Millisecond
 	result, queryErr := delayedRepository.FindPath(ctx, request)
 	requirePostgresStatementTimeout(t, queryErr)
@@ -907,7 +932,7 @@ func TestRepositoryRelationEvidenceWindowPaginatesLazyProvenance(t *testing.T) {
 		t.Fatalf("stale err=%v", err)
 	}
 	otherWorkspace := graphTestID(t)
-	if _, err := tx.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'evidence other',$2,$2,$3,'test',1,$3,$3)`, string(otherWorkspace), "/tmp/graph-evidence-other-"+string(otherWorkspace), time.Now().UTC()); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'evidence other',$2,$2,$3,'inactive',1,$3,$3)`, string(otherWorkspace), "/tmp/graph-evidence-other-"+string(otherWorkspace), time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := repository.RelationEvidenceWindow(ctx, otherWorkspace, fixture.supportRelationID); !hasGraphCode(err, graphdomain.ErrorCodeRelationNotFound) {
@@ -943,124 +968,84 @@ func TestRepositoryRelationEvidenceWindowTruncatesAtFiveHundred(t *testing.T) {
 	}
 }
 
-type pathBarrierDB struct {
-	*pgxpool.Pool
-	entered chan struct{}
-	release chan struct{}
-}
-
-func (database *pathBarrierDB) BeginTx(ctx context.Context, options pgx.TxOptions) (pgx.Tx, error) {
-	tx, err := database.Pool.BeginTx(ctx, options)
+// Hooks instrument the actual shared GORM statements. The platform retains
+// transaction ownership and every successful query still reaches PostgreSQL.
+func graphRowHook(t *testing.T, pool *platformpostgres.Pool, after bool, hook func(*gorm.DB)) func() {
+	t.Helper()
+	database, err := pool.GORM()
 	if err != nil {
-		return nil, err
+		t.Fatal(err)
 	}
-	return &pathBarrierTx{Tx: tx, entered: database.entered, release: database.release}, nil
+	name := "graph-test:" + string(graphTestID(t))
+	callback := database.Callback().Row()
+	if after {
+		err = callback.After("gorm:row").Register(name, hook)
+	} else {
+		err = callback.Before("gorm:row").Register(name, hook)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	var once sync.Once
+	remove := func() {
+		once.Do(func() {
+			if err := callback.Remove(name); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	t.Cleanup(remove)
+	return remove
 }
 
-type pathBarrierTx struct {
-	pgx.Tx
-	entered chan struct{}
-	release chan struct{}
-	once    bool
+func graphRawHook(t *testing.T, pool *platformpostgres.Pool, hook func(*gorm.DB)) func() {
+	t.Helper()
+	database, err := pool.GORM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := "graph-test:" + string(graphTestID(t))
+	callback := database.Callback().Raw()
+	if err := callback.Before("gorm:raw").Register(name, hook); err != nil {
+		t.Fatal(err)
+	}
+	var once sync.Once
+	remove := func() {
+		once.Do(func() {
+			if err := callback.Remove(name); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	t.Cleanup(remove)
+	return remove
 }
 
-func (tx *pathBarrierTx) Query(ctx context.Context, query string, args ...any) (pgx.Rows, error) {
-	if !tx.once && query == pathFrontierSQL {
-		tx.once = true
-		close(tx.entered)
-		select {
-		case <-tx.release:
-		case <-ctx.Done():
-			return nil, ctx.Err()
+func isPathFrontierQuery(query string) bool {
+	return strings.Contains(query, "SELECT r.id,'FORWARD'::text AS traversal")
+}
+
+func graphStatementDelay(t *testing.T, pool *platformpostgres.Pool, matches func(string) bool) {
+	t.Helper()
+	graphRowHook(t, pool, false, func(statement *gorm.DB) {
+		if !matches(statement.Statement.SQL.String()) {
+			return
 		}
-	}
-	return tx.Tx.Query(ctx, query, args...)
-}
-
-type pathFrontierErrorDB struct {
-	*pgxpool.Pool
-	frontierErr error
-}
-
-func (database *pathFrontierErrorDB) BeginTx(ctx context.Context, options pgx.TxOptions) (pgx.Tx, error) {
-	tx, err := database.Pool.BeginTx(ctx, options)
-	if err != nil {
-		return nil, err
-	}
-	return &pathFrontierErrorTx{Tx: tx, frontierErr: database.frontierErr}, nil
-}
-
-type pathFrontierErrorTx struct {
-	pgx.Tx
-	frontierErr error
-}
-
-func (tx *pathFrontierErrorTx) Query(ctx context.Context, query string, args ...any) (pgx.Rows, error) {
-	if query == pathFrontierSQL {
-		return nil, tx.frontierErr
-	}
-	return tx.Tx.Query(ctx, query, args...)
-}
-
-type statementTimeoutDB struct {
-	*pgxpool.Pool
-	delayQuery string
-}
-
-func (database *statementTimeoutDB) BeginTx(ctx context.Context, options pgx.TxOptions) (pgx.Tx, error) {
-	if options.IsoLevel != pgx.RepeatableRead || options.AccessMode != pgx.ReadOnly {
-		return nil, errors.New("graph snapshot transaction options are not repeatable-read read-only")
-	}
-	tx, err := database.Pool.BeginTx(ctx, options)
-	if err != nil {
-		return nil, err
-	}
-	return &statementTimeoutTx{Tx: tx, delayQuery: database.delayQuery}, nil
-}
-
-type statementTimeoutTx struct {
-	pgx.Tx
-	delayQuery string
-}
-
-func (tx *statementTimeoutTx) Query(ctx context.Context, query string, args ...any) (pgx.Rows, error) {
-	if query == tx.delayQuery {
-		if _, err := tx.Tx.Exec(ctx, `SELECT pg_sleep(0.1)`); err != nil {
-			return nil, err
+		var isolation, readOnly string
+		err := statement.Statement.ConnPool.QueryRowContext(statement.Statement.Context,
+			`SELECT current_setting('transaction_isolation'),current_setting('transaction_read_only')`).Scan(&isolation, &readOnly)
+		if err != nil {
+			statement.AddError(err)
+			return
 		}
-		return nil, errors.New("delayed graph query unexpectedly completed")
-	}
-	return tx.Tx.Query(ctx, query, args...)
-}
-
-func (tx *statementTimeoutTx) QueryRow(ctx context.Context, query string, args ...any) pgx.Row {
-	if query == tx.delayQuery {
-		return tx.Tx.QueryRow(ctx, `SELECT pg_sleep(0.1)`)
-	}
-	return tx.Tx.QueryRow(ctx, query, args...)
-}
-
-func cleanupCommittedGraphFixture(pool *pgxpool.Pool, workspaceID foundation.ID) {
-	ctx := context.Background()
-	statements := []string{
-		`DELETE FROM core.relation_evidence WHERE workspace_id=$1`,
-		`DELETE FROM core.relation WHERE workspace_id=$1`,
-		`DELETE FROM core.claim_source WHERE workspace_id=$1`,
-		`DELETE FROM core.claim WHERE workspace_id=$1`,
-		`DELETE FROM core.topic_alias WHERE workspace_id=$1`,
-		`DELETE FROM core.topic WHERE workspace_id=$1`,
-		`DELETE FROM ingestion.canonical_chunk WHERE workspace_id=$1`,
-		`DELETE FROM ingestion.source_version_projection WHERE workspace_id=$1`,
-		`DELETE FROM ingestion.source_span WHERE workspace_id=$1`,
-		`DELETE FROM ingestion.parse_projection WHERE workspace_id=$1`,
-		`DELETE FROM core.source_version WHERE source_id IN (SELECT id FROM core.source WHERE workspace_id=$1)`,
-		`DELETE FROM core.source WHERE workspace_id=$1`,
-		`DELETE FROM core.content_artifact WHERE workspace_id=$1`,
-		`DELETE FROM core.workspace WHERE id=$1`,
-	}
-	for _, statement := range statements {
-		_, _ = pool.Exec(ctx, statement, string(workspaceID))
-	}
+		if isolation != "repeatable read" || readOnly != "on" {
+			statement.AddError(errors.New("graph snapshot transaction is not repeatable-read read-only"))
+			return
+		}
+		statement.Statement.SQL.Reset()
+		statement.Statement.SQL.WriteString(`SELECT pg_sleep(0.1)`)
+		statement.Statement.Vars = nil
+	})
 }
 
 type graphFixture struct {
@@ -1068,17 +1053,17 @@ type graphFixture struct {
 	firstClaimID, longClaimID, firstMembershipID, supportRelationID foundation.ID
 }
 
-func seedGraphWorkspace(t *testing.T, ctx context.Context, tx pgx.Tx, now time.Time) foundation.ID {
+func seedGraphWorkspace(t *testing.T, ctx context.Context, tx graphSeedDB, now time.Time) foundation.ID {
 	t.Helper()
 	workspaceID := graphTestID(t)
 	root := "/tmp/graph-" + string(workspaceID)
-	if _, err := tx.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'graph',$2,$2,$3,'test',1,$3,$3)`, string(workspaceID), root, now); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'graph',$2,$2,$3,'inactive',1,$3,$3)`, string(workspaceID), root, now); err != nil {
 		t.Fatal(err)
 	}
 	return workspaceID
 }
 
-func seedGraphTopic(t *testing.T, ctx context.Context, tx pgx.Tx, workspaceID foundation.ID, name, normalizedName string, now time.Time) foundation.ID {
+func seedGraphTopic(t *testing.T, ctx context.Context, tx graphSeedDB, workspaceID foundation.ID, name, normalizedName string, now time.Time) foundation.ID {
 	t.Helper()
 	topicID := graphTestID(t)
 	if _, err := tx.Exec(ctx, `INSERT INTO core.topic(id,workspace_id,name,normalized_name,description,status,version,created_at,updated_at) VALUES($1,$2,$3,$4,'','ACTIVE',1,$5,$5)`, string(topicID), string(workspaceID), name, normalizedName, now); err != nil {
@@ -1087,7 +1072,7 @@ func seedGraphTopic(t *testing.T, ctx context.Context, tx pgx.Tx, workspaceID fo
 	return topicID
 }
 
-func seedGraphClaim(t *testing.T, ctx context.Context, tx pgx.Tx, workspaceID foundation.ID, statement string, status knowledge.ClaimStatus, confidence *float64, now time.Time) foundation.ID {
+func seedGraphClaim(t *testing.T, ctx context.Context, tx graphSeedDB, workspaceID foundation.ID, statement string, status knowledge.ClaimStatus, confidence *float64, now time.Time) foundation.ID {
 	t.Helper()
 	applicability, err := knowledge.ParseApplicability([]byte(`{}`))
 	if err != nil {
@@ -1098,6 +1083,14 @@ func seedGraphClaim(t *testing.T, ctx context.Context, tx pgx.Tx, workspaceID fo
 		t.Fatal(err)
 	}
 	if status != knowledge.ClaimStatusSuggested {
+		// Pool-backed seeds commit each statement. Supply supporting provenance
+		// before confirming; explicit seed transactions can add it themselves.
+		if _, staged := tx.(pgx.Tx); !staged {
+			provenance := ensureGraphProvenance(t, ctx, tx, workspaceID, now)
+			if _, err := tx.Exec(ctx, `INSERT INTO core.claim_source(id,workspace_id,claim_id,source_version_id,source_span_id,support_type,reason,evidence_hash,created_at) VALUES($1,$2,$3,$4,$5,'SUPPORTS','graph fixture',$6,$7)`, string(graphTestID(t)), string(workspaceID), string(claimID), string(provenance.sourceVersionID), string(provenance.sourceSpanID), graphHash("fixture-claim-source-"+string(claimID)), now); err != nil {
+				t.Fatal(err)
+			}
+		}
 		if _, err := tx.Exec(ctx, `UPDATE core.claim SET status='CONFIRMED',version=version+1,updated_at=updated_at+interval '1 microsecond' WHERE workspace_id=$1 AND id=$2`, string(workspaceID), string(claimID)); err != nil {
 			t.Fatal(err)
 		}
@@ -1110,25 +1103,29 @@ func seedGraphClaim(t *testing.T, ctx context.Context, tx pgx.Tx, workspaceID fo
 	return claimID
 }
 
-func seedGraphRelation(t *testing.T, ctx context.Context, tx pgx.Tx, workspaceID, sourceID foundation.ID, sourceType knowledge.NodeType, targetID foundation.ID, targetType knowledge.NodeType, relationType knowledge.RelationType, status knowledge.RelationStatus, confidence *float64, now time.Time) foundation.ID {
+func seedGraphRelation(t *testing.T, ctx context.Context, tx graphSeedDB, workspaceID, sourceID foundation.ID, sourceType knowledge.NodeType, targetID foundation.ID, targetType knowledge.NodeType, relationType knowledge.RelationType, status knowledge.RelationStatus, confidence *float64, now time.Time) foundation.ID {
 	t.Helper()
 	relationID := graphTestID(t)
-	var confirmationMethod, confirmationRef, evidenceFingerprint any
-	storedStatus := status
-	if status == knowledge.RelationStatusStale || status == knowledge.RelationStatusDeprecated {
-		storedStatus = knowledge.RelationStatusConfirmed
-	} else if status == knowledge.RelationStatusRejected {
-		storedStatus = knowledge.RelationStatusSuggested
-	}
-	if storedStatus == knowledge.RelationStatusConfirmed {
-		confirmationMethod = string(knowledge.ConfirmationSourceDerived)
-		confirmationRef = "integration fixture"
-		evidenceFingerprint = graphHash("evidence-" + string(relationID))
-	}
-	if _, err := tx.Exec(ctx, `INSERT INTO core.relation(id,workspace_id,source_node_type,source_node_id,target_node_type,target_node_id,relation_type,status,confidence_score,fingerprint,evidence_fingerprint,confirmation_method,confirmation_ref,version,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,1,$14,$14)`, string(relationID), string(workspaceID), string(sourceType), string(sourceID), string(targetType), string(targetID), string(relationType), string(storedStatus), confidence, graphHash("relation-"+string(relationID)), evidenceFingerprint, confirmationMethod, confirmationRef, now); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO core.relation(id,workspace_id,source_node_type,source_node_id,target_node_type,target_node_id,relation_type,status,confidence_score,fingerprint,version,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,'SUGGESTED',$8,$9,1,$10,$10)`, string(relationID), string(workspaceID), string(sourceType), string(sourceID), string(targetType), string(targetID), string(relationType), confidence, graphHash("relation-"+string(relationID)), now); err != nil {
 		t.Fatal(err)
 	}
-	if status != storedStatus {
+	if status == knowledge.RelationStatusSuggested {
+		return relationID
+	}
+	if status != knowledge.RelationStatusRejected {
+		provenance := ensureGraphProvenance(t, ctx, tx, workspaceID, now)
+		applicability, err := knowledge.ParseApplicability([]byte(`{}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO core.relation_evidence(id,workspace_id,relation_id,source_version_id,source_span_id,reason,evidence_hash,applicability,applicability_schema_version,applicability_hash,confirmation_method,confirmed_by,created_at) VALUES($1,$2,$3,$4,$5,'graph fixture',$6,$7,$8,$9,'SOURCE_DERIVED','integration fixture',$10)`, string(graphTestID(t)), string(workspaceID), string(relationID), string(provenance.sourceVersionID), string(provenance.sourceSpanID), graphHash("fixture-relation-evidence-"+string(relationID)), string(applicability.CanonicalJSON), applicability.SchemaVersion, applicability.Hash, now); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(ctx, `UPDATE core.relation SET status='CONFIRMED',confirmation_method='SOURCE_DERIVED',confirmation_ref='integration fixture',evidence_fingerprint=$3,version=version+1 WHERE workspace_id=$1 AND id=$2`, string(workspaceID), string(relationID), graphHash("evidence-"+string(relationID))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if status != knowledge.RelationStatusConfirmed {
 		if _, err := tx.Exec(ctx, `UPDATE core.relation SET status=$3,version=version+1,updated_at=updated_at+interval '1 microsecond' WHERE workspace_id=$1 AND id=$2`, string(workspaceID), string(relationID), string(status)); err != nil {
 			t.Fatal(err)
 		}
@@ -1136,25 +1133,12 @@ func seedGraphRelation(t *testing.T, ctx context.Context, tx pgx.Tx, workspaceID
 	return relationID
 }
 
-func seedConfirmedRelationEvidence(t *testing.T, ctx context.Context, tx pgx.Tx, workspaceID, sourceID, targetID foundation.ID, relationType knowledge.RelationType, now time.Time) foundation.ID {
+func seedConfirmedRelationEvidence(t *testing.T, ctx context.Context, tx graphSeedDB, workspaceID, sourceID, targetID foundation.ID, relationType knowledge.RelationType, now time.Time) foundation.ID {
 	t.Helper()
-	var sourceVersionID, sourceSpanID string
-	var applicability []byte
-	var schemaVersion, applicabilityHash string
-	if err := tx.QueryRow(ctx, `SELECT source_version_id::text,source_span_id::text,applicability,applicability_schema_version,applicability_hash FROM core.relation_evidence WHERE workspace_id=$1 LIMIT 1`, string(workspaceID)).Scan(&sourceVersionID, &sourceSpanID, &applicability, &schemaVersion, &applicabilityHash); err != nil {
-		t.Fatal(err)
-	}
-	relationID := graphTestID(t)
-	if _, err := tx.Exec(ctx, `INSERT INTO core.relation(id,workspace_id,source_node_type,source_node_id,target_node_type,target_node_id,relation_type,status,confidence_score,fingerprint,evidence_fingerprint,confirmation_method,confirmation_ref,version,created_at,updated_at) VALUES($1,$2,'CLAIM',$3,'CLAIM',$4,$5,'CONFIRMED',0.9,$6,$7,'SOURCE_DERIVED','deep fixture',1,$8,$8)`, string(relationID), string(workspaceID), string(sourceID), string(targetID), string(relationType), graphHash("deep-relation-"+string(relationID)), graphHash("deep-evidence-"+string(relationID)), now); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tx.Exec(ctx, `INSERT INTO core.relation_evidence(id,workspace_id,relation_id,source_version_id,source_span_id,reason,evidence_hash,applicability,applicability_schema_version,applicability_hash,confirmation_method,confirmed_by,created_at) VALUES($1,$2,$3,$4,$5,'deep evidence',$6,$7,$8,$9,'SOURCE_DERIVED','deep fixture',$10)`, string(graphTestID(t)), string(workspaceID), string(relationID), sourceVersionID, sourceSpanID, graphHash("deep-evidence-row-"+string(relationID)), applicability, schemaVersion, applicabilityHash, now); err != nil {
-		t.Fatal(err)
-	}
-	return relationID
+	return seedGraphRelation(t, ctx, tx, workspaceID, sourceID, knowledge.NodeTypeClaim, targetID, knowledge.NodeTypeClaim, relationType, knowledge.RelationStatusConfirmed, floatPointer(0.9), now)
 }
 
-func seedConfirmedClaimWithSource(t *testing.T, ctx context.Context, tx pgx.Tx, workspaceID foundation.ID, statement string, now time.Time) foundation.ID {
+func seedConfirmedClaimWithSource(t *testing.T, ctx context.Context, tx graphSeedDB, workspaceID foundation.ID, statement string, now time.Time) foundation.ID {
 	t.Helper()
 	claimID := seedGraphClaim(t, ctx, tx, workspaceID, statement, knowledge.ClaimStatusSuggested, floatPointer(0.9), now)
 	var sourceVersionID, sourceSpanID string
@@ -1170,32 +1154,19 @@ func seedConfirmedClaimWithSource(t *testing.T, ctx context.Context, tx pgx.Tx, 
 	return claimID
 }
 
-func seedConfirmedClaimTopicRelationEvidence(t *testing.T, ctx context.Context, tx pgx.Tx, workspaceID, claimID, topicID foundation.ID, now time.Time) foundation.ID {
+func seedConfirmedClaimTopicRelationEvidence(t *testing.T, ctx context.Context, tx graphSeedDB, workspaceID, claimID, topicID foundation.ID, now time.Time) foundation.ID {
 	t.Helper()
-	var sourceVersionID, sourceSpanID string
-	var applicability []byte
-	var schemaVersion, applicabilityHash string
-	if err := tx.QueryRow(ctx, `SELECT source_version_id::text,source_span_id::text,applicability,applicability_schema_version,applicability_hash FROM core.relation_evidence WHERE workspace_id=$1 LIMIT 1`, string(workspaceID)).Scan(&sourceVersionID, &sourceSpanID, &applicability, &schemaVersion, &applicabilityHash); err != nil {
-		t.Fatal(err)
-	}
-	relationID := graphTestID(t)
-	if _, err := tx.Exec(ctx, `INSERT INTO core.relation(id,workspace_id,source_node_type,source_node_id,target_node_type,target_node_id,relation_type,status,confidence_score,fingerprint,evidence_fingerprint,confirmation_method,confirmation_ref,version,created_at,updated_at) VALUES($1,$2,'CLAIM',$3,'TOPIC',$4,'BELONGS_TO','CONFIRMED',0.9,$5,$6,'SOURCE_DERIVED','path fixture',1,$7,$7)`, string(relationID), string(workspaceID), string(claimID), string(topicID), graphHash("path-membership-"+string(relationID)), graphHash("path-membership-evidence-"+string(relationID)), now); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tx.Exec(ctx, `INSERT INTO core.relation_evidence(id,workspace_id,relation_id,source_version_id,source_span_id,reason,evidence_hash,applicability,applicability_schema_version,applicability_hash,confirmation_method,confirmed_by,created_at) VALUES($1,$2,$3,$4,$5,'path membership evidence',$6,$7,$8,$9,'SOURCE_DERIVED','path fixture',$10)`, string(graphTestID(t)), string(workspaceID), string(relationID), sourceVersionID, sourceSpanID, graphHash("path-membership-row-"+string(relationID)), applicability, schemaVersion, applicabilityHash, now); err != nil {
-		t.Fatal(err)
-	}
-	return relationID
+	return seedGraphRelation(t, ctx, tx, workspaceID, claimID, knowledge.NodeTypeClaim, topicID, knowledge.NodeTypeTopic, knowledge.RelationBelongsTo, knowledge.RelationStatusConfirmed, floatPointer(0.9), now)
 }
 
 func floatPointer(value float64) *float64 { return &value }
 
-func seedGraphFixture(t *testing.T, ctx context.Context, tx pgx.Tx) graphFixture {
+func seedGraphFixture(t *testing.T, ctx context.Context, tx graphSeedDB) graphFixture {
 	t.Helper()
 	now := time.Now().UTC().Add(-time.Minute)
 	workspaceID := graphTestID(t)
 	root := "/tmp/graph-" + string(workspaceID)
-	if _, err := tx.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'graph',$2,$2,$3,'test',1,$3,$3)`, string(workspaceID), root, now); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'graph',$2,$2,$3,'inactive',1,$3,$3)`, string(workspaceID), root, now); err != nil {
 		t.Fatal(err)
 	}
 	provenance := seedGraphProvenance(t, ctx, tx, workspaceID, now)
@@ -1237,10 +1208,14 @@ func seedGraphFixture(t *testing.T, ctx context.Context, tx pgx.Tx) graphFixture
 		{graphTestID(t), firstClaimID, longClaimID, "SUPPORTS"},
 	}
 	for index, relation := range relations {
-		if _, err := tx.Exec(ctx, `INSERT INTO core.relation(id,workspace_id,source_node_type,source_node_id,target_node_type,target_node_id,relation_type,status,confidence_score,fingerprint,evidence_fingerprint,confirmation_method,confirmation_ref,version,created_at,updated_at) VALUES($1,$2,'CLAIM',$3,$4,$5,$6,'CONFIRMED',0.9,$7,$8,'SOURCE_DERIVED',$9,1,$10,$10)`, string(relation.id), string(workspaceID), string(relation.source), targetType(relation.typeName), string(relation.target), relation.typeName, graphHash(fmt.Sprintf("relation-%d", index)), graphHash(fmt.Sprintf("evidence-set-%d", index)), "fixture", now.Add(time.Duration(index)*time.Second)); err != nil {
+		relationAt := now.Add(time.Duration(index) * time.Second)
+		if _, err := tx.Exec(ctx, `INSERT INTO core.relation(id,workspace_id,source_node_type,source_node_id,target_node_type,target_node_id,relation_type,status,confidence_score,fingerprint,version,created_at,updated_at) VALUES($1,$2,'CLAIM',$3,$4,$5,$6,'SUGGESTED',0.9,$7,1,$8,$8)`, string(relation.id), string(workspaceID), string(relation.source), targetType(relation.typeName), string(relation.target), relation.typeName, graphHash(fmt.Sprintf("relation-%d", index)), relationAt); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO core.relation_evidence(id,workspace_id,relation_id,source_version_id,source_span_id,reason,evidence_hash,applicability,applicability_schema_version,applicability_hash,confirmation_method,confirmed_by,created_at) VALUES($1,$2,$3,$4,$5,'fixture evidence',$6,$7,$8,$9,'SOURCE_DERIVED','fixture',$10)`, string(graphTestID(t)), string(workspaceID), string(relation.id), string(provenance.sourceVersionID), string(provenance.sourceSpanID), graphHash(fmt.Sprintf("relation-evidence-%d", index)), string(applicability.CanonicalJSON), applicability.SchemaVersion, applicability.Hash, now.Add(time.Duration(index)*time.Second)); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO core.relation_evidence(id,workspace_id,relation_id,source_version_id,source_span_id,reason,evidence_hash,applicability,applicability_schema_version,applicability_hash,confirmation_method,confirmed_by,created_at) VALUES($1,$2,$3,$4,$5,'fixture evidence',$6,$7,$8,$9,'SOURCE_DERIVED','fixture',$10)`, string(graphTestID(t)), string(workspaceID), string(relation.id), string(provenance.sourceVersionID), string(provenance.sourceSpanID), graphHash(fmt.Sprintf("relation-evidence-%d", index)), string(applicability.CanonicalJSON), applicability.SchemaVersion, applicability.Hash, relationAt); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(ctx, `UPDATE core.relation SET status='CONFIRMED',evidence_fingerprint=$3,confirmation_method='SOURCE_DERIVED',confirmation_ref='fixture',version=2,updated_at=$4 WHERE workspace_id=$1 AND id=$2`, string(workspaceID), string(relation.id), graphHash(fmt.Sprintf("evidence-set-%d", index)), relationAt.Add(time.Microsecond)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1249,7 +1224,23 @@ func seedGraphFixture(t *testing.T, ctx context.Context, tx pgx.Tx) graphFixture
 
 type graphProvenance struct{ sourceVersionID, sourceSpanID foundation.ID }
 
-func seedGraphProvenance(t *testing.T, ctx context.Context, tx pgx.Tx, workspaceID foundation.ID, now time.Time) graphProvenance {
+func ensureGraphProvenance(t *testing.T, ctx context.Context, tx graphSeedDB, workspaceID foundation.ID, now time.Time) graphProvenance {
+	t.Helper()
+	var sourceVersionID, sourceSpanID string
+	err := tx.QueryRow(ctx, `SELECT binding.source_version_id::text,span.id::text
+		FROM ingestion.source_version_projection binding
+		JOIN ingestion.source_span span ON span.workspace_id=binding.workspace_id AND span.parse_projection_id=binding.parse_projection_id
+		WHERE binding.workspace_id=$1 ORDER BY binding.source_version_id,span.id LIMIT 1`, string(workspaceID)).Scan(&sourceVersionID, &sourceSpanID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return seedGraphProvenance(t, ctx, tx, workspaceID, now)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return graphProvenance{sourceVersionID: foundation.ID(sourceVersionID), sourceSpanID: foundation.ID(sourceSpanID)}
+}
+
+func seedGraphProvenance(t *testing.T, ctx context.Context, tx graphSeedDB, workspaceID foundation.ID, now time.Time) graphProvenance {
 	t.Helper()
 	artifactID, sourceID, sourceVersionID := graphTestID(t), graphTestID(t), graphTestID(t)
 	projectionID, sourceSpanID := graphTestID(t), graphTestID(t)
@@ -1280,27 +1271,41 @@ func targetType(relationType string) string {
 	return "CLAIM"
 }
 
-func graphIntegrationRepository(t *testing.T) (*Repository, pgx.Tx, context.Context) {
+// graphTestPool exposes seed/assertion access to the same physical pool used
+// by all GORM repositories. Seed statements are committed before application
+// calls; no repository is injected with an uncommitted fixture transaction.
+type graphTestPool struct {
+	*pgxpool.Pool
+	platform *platformpostgres.Pool
+}
+
+type graphSeedDB interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func newGraphTestPool(t *testing.T, maxConns int32) *graphTestPool {
 	t.Helper()
-	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
+	fixture := testdb.Require(t, testdb.Config{
+		ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
+		Availability:     testdb.FailWhenUnavailable,
+		MaxConns:         maxConns,
+	})
+	pool := fixture.Pool()
+	if pool == nil || pool.DB() == nil {
+		t.Fatal("Graph fixture did not provide a complete platform pool")
 	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
+	return &graphTestPool{Pool: pool.DB(), platform: pool}
+}
+
+func graphIntegrationRepository(t *testing.T) (*GORMRepository, *graphTestPool, context.Context) {
+	t.Helper()
+	pool := newGraphTestPool(t, 12)
+	repository, err := NewGORMRepository(pool.platform)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(pool.Close)
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = tx.Rollback(ctx) })
-	// These projection tests must see fixture rows staged in the caller-owned transaction.
-	// Production construction rejects external transactions and always owns its read snapshot.
-	repository := &Repository{db: tx, statementTimeout: defaultStatementTimeout, inReadSnapshot: true}
-	return repository, tx, ctx
+	return repository, pool, t.Context()
 }
 
 func graphTestID(t *testing.T) foundation.ID {

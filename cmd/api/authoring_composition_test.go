@@ -10,7 +10,7 @@ import (
 	authoringchangecontrol "github.com/CodeZen-Lizhi/zhixu/internal/authoring/adapter/changecontrol"
 	changecontrolapp "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	"github.com/jackc/pgx/v5/pgxpool"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 )
 
 func TestNewAuthoringHandlerRequiresEveryProductionDependency(t *testing.T) {
@@ -18,13 +18,13 @@ func TestNewAuthoringHandlerRequiresEveryProductionDependency(t *testing.T) {
 	targets := authoringTargetReaderFake{}
 	for _, test := range []struct {
 		name      string
-		pool      *pgxpool.Pool
+		pool      *platformpostgres.Pool
 		proposals authoringchangecontrol.ProposalService
 		targets   authoringchangecontrol.TargetReader
 	}{
 		{name: "database", proposals: proposals, targets: &targets},
-		{name: "proposal service", pool: &pgxpool.Pool{}, targets: &targets},
-		{name: "target reader", pool: &pgxpool.Pool{}, proposals: proposals},
+		{name: "proposal service", pool: apiConstructorPool(t), targets: &targets},
+		{name: "target reader", pool: apiConstructorPool(t), proposals: proposals},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if handler, err := newAuthoringHandler(test.pool, test.proposals, test.targets, time.Second); err == nil || handler != nil {
@@ -36,7 +36,7 @@ func TestNewAuthoringHandlerRequiresEveryProductionDependency(t *testing.T) {
 
 func TestNewAuthoringHandlerComposesProductionBoundaries(t *testing.T) {
 	handler, err := newAuthoringHandler(
-		&pgxpool.Pool{}, authoringProposalServiceFake{}, &authoringTargetReaderFake{}, time.Second,
+		apiConstructorPool(t), authoringProposalServiceFake{}, &authoringTargetReaderFake{}, time.Second,
 	)
 	if err != nil || handler == nil || !handler.Available() {
 		t.Fatalf("handler=%#v err=%v", handler, err)

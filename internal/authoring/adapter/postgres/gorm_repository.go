@@ -15,8 +15,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// GORMRepository is the staged Authoring implementation. Production remains
-// on Repository until the TODO 9 PostgreSQL equivalence gate passes.
+// GORMRepository persists Authoring commands through the shared Pool and UoW.
 type GORMRepository struct {
 	database   *gorm.DB
 	unitOfWork foundation.UnitOfWork

@@ -12,7 +12,7 @@ import (
 )
 
 func TestRepositoryRecordsFeedbackWithExactReplayAndImmutableProductFacts(t *testing.T) {
-	repository, pool, ctx := newConversationTestRepository(t)
+	repository, _, pool, ctx := newConversationTestRepository(t)
 	workspaceID := conversationTurnID(800)
 	otherWorkspaceID := conversationTurnID(801)
 	seedConversationWorkspaces(t, ctx, pool, workspaceID, otherWorkspaceID)

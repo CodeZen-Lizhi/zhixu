@@ -10,71 +10,80 @@ import (
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	"github.com/CodeZen-Lizhi/zhixu/internal/retrieval/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestRepositorySnapshotRegressionPassesAndReplaysWithoutChangingBuildingIndex(t *testing.T) {
-	repository, database, ctx := newRetrievalTestRepository(t)
-	fixture := seedSnapshotRegressionFixture(t, ctx, repository, database.DB(), 600)
+	for _, implementation := range []string{"gorm"} {
+		t.Run(implementation, func(t *testing.T) {
+			repository, database, ctx := newRetrievalTestStore(t, implementation)
+			fixture := seedSnapshotRegressionFixture(t, ctx, repository, database.DB(), 600)
 
-	first, err := repository.RunSnapshotRegression(ctx, fixture.Command)
-	if err != nil {
-		t.Fatalf("RunSnapshotRegression() error = %v", err)
+			first, err := repository.RunSnapshotRegression(ctx, fixture.Command)
+			if err != nil {
+				t.Fatalf("RunSnapshotRegression() error = %v", err)
+			}
+			replay, err := repository.RunSnapshotRegression(ctx, fixture.Command)
+			if err != nil {
+				t.Fatalf("RunSnapshotRegression(replay) error = %v", err)
+			}
+			if first.Code != domain.SnapshotStructureRegressionV1 || first.Hash == "" || first.Hash != replay.Hash ||
+				first.PassedAt.IsZero() || replay.PassedAt.IsZero() {
+				t.Fatalf("first=%#v replay=%#v", first, replay)
+			}
+			assertRegressionIndexState(t, ctx, database.DB(), fixture.Command.IndexVersionID, domain.IndexStatusBuilding, "", 1)
+		})
 	}
-	replay, err := repository.RunSnapshotRegression(ctx, fixture.Command)
-	if err != nil {
-		t.Fatalf("RunSnapshotRegression(replay) error = %v", err)
-	}
-	if first.Code != domain.SnapshotStructureRegressionV1 || first.Hash == "" || first.Hash != replay.Hash ||
-		first.PassedAt.IsZero() || replay.PassedAt.IsZero() {
-		t.Fatalf("first=%#v replay=%#v", first, replay)
-	}
-	assertRegressionIndexState(t, ctx, database.DB(), fixture.Command.IndexVersionID, domain.IndexStatusBuilding, "", 1)
 }
 
 func TestRepositorySnapshotRegressionFailsClosedForStructuralMismatch(t *testing.T) {
-	repository, database, ctx := newRetrievalTestRepository(t)
-	tests := []struct {
-		name    string
-		ordinal int
-		mutate  func(*snapshotRegressionFixture)
-	}{
-		{"target missing", 610, func(fixture *snapshotRegressionFixture) {
-			fixture.Command.TargetSourceID = snapshotID(999_610)
-		}},
-		{"wrong result hash", 620, func(fixture *snapshotRegressionFixture) {
-			fixture.Command.TargetResultHash = snapshotHash("wrong-result", 620)
-		}},
-		{"missing chunk", 630, func(fixture *snapshotRegressionFixture) {
-			manifest := snapshotRegressionManifestChunks(t, ctx, database.DB(), fixture.Command.IndexVersionID)
-			seedAdditionalRetrievalChunk(t, ctx, database.DB(), manifest[0], snapshotID(999_630), 99, fixture.Now.Add(time.Minute))
-		}},
-		{"extra chunk", 640, func(fixture *snapshotRegressionFixture) {
-			addSnapshotRegressionExtraChunk(t, ctx, database.DB(), fixture, 641)
-		}},
-		{"vector not disabled", 650, func(fixture *snapshotRegressionFixture) {
-			withReplicaRole(t, ctx, database.DB(), func(connection *pgxpool.Conn) {
-				if _, err := connection.Exec(ctx, `UPDATE retrieval.chunk_projection SET vector_status='pending' WHERE index_version_id=$1`, string(fixture.Command.IndexVersionID)); err != nil {
-					t.Fatal(err)
-				}
-			})
-		}},
-	}
+	for _, implementation := range []string{"gorm"} {
+		t.Run(implementation, func(t *testing.T) {
+			repository, database, ctx := newRetrievalTestStore(t, implementation)
+			tests := []struct {
+				name    string
+				ordinal int
+				mutate  func(*snapshotRegressionFixture)
+			}{
+				{"target missing", 610, func(fixture *snapshotRegressionFixture) {
+					fixture.Command.TargetSourceID = snapshotID(999_610)
+				}},
+				{"wrong result hash", 620, func(fixture *snapshotRegressionFixture) {
+					fixture.Command.TargetResultHash = snapshotHash("wrong-result", 620)
+				}},
+				{"missing chunk", 630, func(fixture *snapshotRegressionFixture) {
+					manifest := snapshotRegressionManifestChunks(t, ctx, database.DB(), fixture.Command.IndexVersionID)
+					seedAdditionalRetrievalChunk(t, ctx, database.DB(), manifest[0], snapshotID(999_630), 99, fixture.Now.Add(time.Minute))
+				}},
+				{"extra chunk", 640, func(fixture *snapshotRegressionFixture) {
+					addSnapshotRegressionExtraChunk(t, ctx, database.DB(), fixture, 641)
+				}},
+				{"vector not disabled", 650, func(fixture *snapshotRegressionFixture) {
+					withReplicaRole(t, ctx, database.DB(), func(connection *pgxpool.Conn) {
+						if _, err := connection.Exec(ctx, `UPDATE retrieval.chunk_projection SET vector_status='pending' WHERE index_version_id=$1`, string(fixture.Command.IndexVersionID)); err != nil {
+							t.Fatal(err)
+						}
+					})
+				}},
+			}
 
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			fixture := seedSnapshotRegressionFixture(t, ctx, repository, database.DB(), test.ordinal)
-			test.mutate(&fixture)
-			_, err := repository.RunSnapshotRegression(ctx, fixture.Command)
-			assertSnapshotRegressionIntegrationError(t, err)
-			assertRegressionIndexState(t, ctx, database.DB(), fixture.Command.IndexVersionID, domain.IndexStatusFailed,
-				domain.ErrorCodeSnapshotStructureRegressionFailed, 2)
+			for _, test := range tests {
+				t.Run(test.name, func(t *testing.T) {
+					fixture := seedSnapshotRegressionFixture(t, ctx, repository, database.DB(), test.ordinal)
+					test.mutate(&fixture)
+					_, err := repository.RunSnapshotRegression(ctx, fixture.Command)
+					assertSnapshotRegressionIntegrationError(t, err)
+					assertRegressionIndexState(t, ctx, database.DB(), fixture.Command.IndexVersionID, domain.IndexStatusFailed,
+						domain.ErrorCodeSnapshotStructureRegressionFailed, 2)
 
-			_, replayErr := repository.RunSnapshotRegression(ctx, fixture.Command)
-			assertSnapshotRegressionIntegrationError(t, replayErr)
-			assertRegressionIndexState(t, ctx, database.DB(), fixture.Command.IndexVersionID, domain.IndexStatusFailed,
-				domain.ErrorCodeSnapshotStructureRegressionFailed, 2)
+					_, replayErr := repository.RunSnapshotRegression(ctx, fixture.Command)
+					assertSnapshotRegressionIntegrationError(t, replayErr)
+					assertRegressionIndexState(t, ctx, database.DB(), fixture.Command.IndexVersionID, domain.IndexStatusFailed,
+						domain.ErrorCodeSnapshotStructureRegressionFailed, 2)
+				})
+			}
 		})
 	}
 }
@@ -132,7 +141,7 @@ type snapshotRegressionFixture struct {
 func seedSnapshotRegressionFixture(
 	t *testing.T,
 	ctx context.Context,
-	repository *Repository,
+	repository application.Store,
 	database *pgxpool.Pool,
 	ordinal int,
 ) snapshotRegressionFixture {

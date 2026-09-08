@@ -37,10 +37,8 @@ type queueControlClient interface {
 // process lifecycle wiring remains the responsibility of cmd/worker.
 type Client struct {
 	generation atomic.Uint64
-	insert     riverInsertClient
 	lifecycle  clientLifecycle
 	queueCtl   queueControlClient
-	fence      EnqueueFence
 	logger     *slog.Logger
 	queue      string
 	schema     string
@@ -80,7 +78,7 @@ func NewClientWithOptions(pool *pgxpool.Pool, workers *Workers, options Options)
 	if err != nil {
 		return nil, jobError(foundation.ErrorDependencyUnavailable, "WORKFLOW_RIVER_CLIENT_INVALID", err)
 	}
-	return &Client{insert: inner, lifecycle: inner, queueCtl: inner, fence: options.EnqueueFence, logger: options.Logger, queue: options.Queue, schema: WorkflowSchema}, nil
+	return &Client{lifecycle: inner, queueCtl: inner, logger: options.Logger, queue: options.Queue, schema: WorkflowSchema}, nil
 }
 
 // Queue returns the queue shared by this client's producers and consumers.
@@ -195,8 +193,6 @@ type Options struct {
 	RescueStuckJobsAfter time.Duration
 	SoftStopTimeout      time.Duration
 	Logger               *slog.Logger
-	// EnqueueFence 在同一 PostgreSQL transaction 中阻止 rollout drain 后的新入队。
-	EnqueueFence EnqueueFence
 }
 
 func buildRiverConfig(workers *Workers, options Options) (*riverlib.Config, error) {
@@ -227,11 +223,6 @@ func buildRiverConfig(workers *Workers, options Options) (*riverlib.Config, erro
 func validateOptions(options Options) error {
 	if err := operability.ValidateRiverOptions(options.Queue, options.MaxWorkers, options.JobTimeout, options.RescueStuckJobsAfter, options.SoftStopTimeout); err != nil {
 		return optionsError(err)
-	}
-	if options.EnqueueFence != nil {
-		if isNilRiverDependency(options.EnqueueFence) {
-			return optionsError(errors.New("enqueue fence is nil"))
-		}
 	}
 	return nil
 }

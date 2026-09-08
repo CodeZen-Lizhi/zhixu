@@ -28,7 +28,7 @@ const (
 )
 
 // ExpireCandidates 原子归约一页数据库时间下已经到期的任务。
-func (repository *Repository) ExpireCandidates(ctx context.Context, limit int) ([]domain.Job, error) {
+func (repository *exportRepository) ExpireCandidates(ctx context.Context, limit int) ([]domain.Job, error) {
 	if repository == nil || isNilDependency(repository.db) {
 		return nil, unavailable(errors.New("export repository is unavailable"))
 	}
@@ -79,7 +79,7 @@ func (repository *Repository) ExpireCandidates(ctx context.Context, limit int) (
 }
 
 // CleanupCandidates 返回等待或重试物理文件删除的有界过期任务。
-func (repository *Repository) CleanupCandidates(ctx context.Context, limit int) ([]domain.Job, error) {
+func (repository *exportRepository) CleanupCandidates(ctx context.Context, limit int) ([]domain.Job, error) {
 	if repository == nil || isNilDependency(repository.db) {
 		return nil, unavailable(errors.New("export repository is unavailable"))
 	}
@@ -106,7 +106,7 @@ func (repository *Repository) CleanupCandidates(ctx context.Context, limit int) 
 }
 
 // RecordCleanup 以 version CAS 保存成功或可重试失败的清理事实。
-func (repository *Repository) RecordCleanup(ctx context.Context, request exportapp.CleanupRequest) (domain.Job, error) {
+func (repository *exportRepository) RecordCleanup(ctx context.Context, request exportapp.CleanupRequest) (domain.Job, error) {
 	if repository == nil || isNilDependency(repository.db) {
 		return domain.Job{}, unavailable(errors.New("export repository is unavailable"))
 	}
@@ -172,7 +172,7 @@ func (repository *Repository) RecordCleanup(ctx context.Context, request exporta
 }
 
 // UnreferencedStaging 返回输入中未被任何 prepared Job 引用的路径，保留输入顺序。
-func (repository *Repository) UnreferencedStaging(ctx context.Context, workspaceID foundation.ID, paths []string) ([]string, error) {
+func (repository *exportRepository) UnreferencedStaging(ctx context.Context, workspaceID foundation.ID, paths []string) ([]string, error) {
 	if repository == nil || isNilDependency(repository.db) {
 		return nil, unavailable(errors.New("export repository is unavailable"))
 	}
@@ -212,7 +212,7 @@ func (repository *Repository) UnreferencedStaging(ctx context.Context, workspace
 }
 
 // OrphanSweepWorkspaces 返回有 Export 历史的稳定 Workspace ID 页面。
-func (repository *Repository) OrphanSweepWorkspaces(ctx context.Context, afterWorkspaceID foundation.ID, limit int) ([]foundation.ID, error) {
+func (repository *exportRepository) OrphanSweepWorkspaces(ctx context.Context, afterWorkspaceID foundation.ID, limit int) ([]foundation.ID, error) {
 	if repository == nil || isNilDependency(repository.db) {
 		return nil, unavailable(errors.New("export repository is unavailable"))
 	}

@@ -117,7 +117,6 @@ import (
 	workspaceapplication "github.com/CodeZen-Lizhi/zhixu/internal/workspace/application"
 	workspacedomain "github.com/CodeZen-Lizhi/zhixu/internal/workspace/domain"
 	workspaceruntimegrant "github.com/CodeZen-Lizhi/zhixu/internal/workspace/runtimegrant"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const (
@@ -251,11 +250,17 @@ type workerComponents struct {
 	fatalInvariants <-chan error
 }
 
+// workerToolRepository 汇集普通 Tool 与工作区分析能力，供执行服务检查完整持久化端口。
+type workerToolRepository struct {
+	*toolpostgres.GORMRepository
+	*toolpostgres.GORMWorkspaceAnalysisRepository
+}
+
 type toolRuntimeComponents struct {
 	contracts      *toolsapplication.Registry
 	executions     *toolsapplication.Registry
 	execution      *toolsapplication.ExecutionService
-	repository     *toolpostgres.Repository
+	repository     *workerToolRepository
 	writebackAudit *toolchangecontrol.WritebackAuditRecorder
 	// workflow/definition 只服务迁移前 agent-rag@1 的持久回放。
 	// 新模型 Tool Calling 由 Eino AgentRuntime 通过 RAGAgentToolBridge 执行，
@@ -295,7 +300,7 @@ func main() {
 	}
 }
 
-func run(configPath string, logger *slog.Logger) error {
+func run(configPath string, logger *slog.Logger) (runErr error) {
 	if logger == nil {
 		return errors.New("worker logger is nil")
 	}
@@ -304,13 +309,35 @@ func run(configPath string, logger *slog.Logger) error {
 		logger.Error("configuration is invalid", "error_code", "INVALID_CONFIGURATION")
 		return err
 	}
+	var shutdownContext context.Context
+	var hardShutdownDeadline time.Time
+	var cancelShutdown context.CancelFunc
+	beginShutdown := func() context.Context {
+		if shutdownContext == nil {
+			var runtimeShutdownDeadline time.Time
+			runtimeShutdownDeadline, hardShutdownDeadline = workerShutdownDeadlines(
+				time.Now(), cfg.WorkerSoftStopTimeout, cfg.WorkerHardStopTimeout, cfg.ShutdownTimeout,
+			)
+			shutdownContext, cancelShutdown = context.WithDeadline(context.Background(), runtimeShutdownDeadline)
+		}
+		return shutdownContext
+	}
+	defer func() {
+		if cancelShutdown != nil {
+			cancelShutdown()
+		}
+	}()
 	telemetry, err := initializeWorkerTelemetry(context.Background(), cfg)
 	if err != nil {
 		logger.Error("telemetry initialization failed", "error_code", "TELEMETRY_EXPORTER_UNAVAILABLE")
 		return err
 	}
 	defer func() {
-		shutdownContext, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+		deadline := time.Now().Add(cfg.ShutdownTimeout)
+		if !hardShutdownDeadline.IsZero() && hardShutdownDeadline.Before(deadline) {
+			deadline = hardShutdownDeadline
+		}
+		shutdownContext, cancel := context.WithDeadline(context.Background(), deadline)
 		defer cancel()
 		_ = telemetry.Shutdown(shutdownContext)
 	}()
@@ -338,7 +365,14 @@ func run(configPath string, logger *slog.Logger) error {
 		logger.Error("database pool could not be opened", "error_code", "DEPENDENCY_UNAVAILABLE")
 		return err
 	}
-	defer database.Close()
+	modelBackgroundStopped := true
+	consumersStopped := true
+	defer func() {
+		// A timed-out controller retains its dependencies until the failed process exits.
+		if modelBackgroundStopped && consumersStopped {
+			database.Close()
+		}
+	}()
 
 	if err := ping(database, cfg.DatabasePingTimeout); err != nil {
 		logger.Error("worker startup database check failed", "error_code", "DEPENDENCY_UNAVAILABLE")
@@ -355,23 +389,34 @@ func run(configPath string, logger *slog.Logger) error {
 		logger.Error("worker River schema validation failed", "error_code", "WORKFLOW_RIVER_MIGRATION_INVALID")
 		return validationErr
 	}
-	workspaceRuntime, err := workspaceruntimegrant.NewProcessComposition(
-		context.Background(), database.DB(), os.LookupEnv, workspacedomain.RuntimeRoleWorker,
+	workspaceRuntime, err := workspaceruntimegrant.NewGORMProcessComposition(
+		context.Background(), database, os.LookupEnv, workspacedomain.RuntimeRoleWorker,
 	)
 	if err != nil {
 		logger.Error("workspace root grant is unavailable", "error_code", "WORKSPACE_ROOT_GRANT_UNAVAILABLE")
 		return err
 	}
 	defer func() {
-		shutdownContext, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+		if !consumersStopped || !modelBackgroundStopped {
+			return
+		}
+		deadline := time.Now().Add(cfg.ShutdownTimeout)
+		if !hardShutdownDeadline.IsZero() && hardShutdownDeadline.Before(deadline) {
+			deadline = hardShutdownDeadline
+		}
+		shutdownContext, cancel := context.WithDeadline(context.Background(), deadline)
 		defer cancel()
-		_ = workspaceRuntime.Close(shutdownContext)
+		if err := workspaceRuntime.Close(shutdownContext); err != nil {
+			consumersStopped = false
+			runErr = errors.Join(runErr, err)
+			logger.Error("workspace runtime shutdown failed", "error_code", "WORKSPACE_RUNTIME_SHUTDOWN_FAILED", "error", err)
+		}
 	}()
-	var managedModels modelsettingsruntime.BootstrapResult
-	var modelEnqueueFences []riveradapter.EnqueueFence
+	var managedModels modelsettingsruntime.GORMBootstrapResult
+	var modelEnqueueFences []riveradapter.ScopedEnqueueFence
 	var configuredModels *modelsettingsruntime.Models
 	if cfg.ModelSettingsMode == config.ModelSettingsModeManaged {
-		bootstrap, bootstrapErr := modelsettingsruntime.Bootstrap(context.Background(), database.DB(), cfg, modelTelemetry)
+		bootstrap, bootstrapErr := modelsettingsruntime.BootstrapGORM(context.Background(), database, cfg, modelTelemetry)
 		managedModels = bootstrap
 		if bootstrap.Repository != nil {
 			modelEnqueueFences = append(modelEnqueueFences, bootstrap.Repository)
@@ -413,7 +458,7 @@ func run(configPath string, logger *slog.Logger) error {
 		modelBinding.sourceRefreshAcquirer = sourceRefreshAcquirer
 	}
 	cfg = modelsettingsruntime.WithoutModelCredentials(cfg)
-	components, err := newWorkerComponentsWithModels(database.DB(), cfg, configuredModels, modelBinding, workspaceRuntime.Repository, logger, telemetry.Metrics(), telemetry.Tracer(), modelEnqueueFences...)
+	components, err := newWorkerComponentsWithModels(database, cfg, configuredModels, modelBinding, workspaceRuntime.Repository, logger, telemetry.Metrics(), telemetry.Tracer(), modelEnqueueFences...)
 	if err != nil {
 		logger.Error("worker components are unavailable", "error_code", "WORKER_COMPONENTS_UNAVAILABLE")
 		return err
@@ -460,7 +505,11 @@ func run(configPath string, logger *slog.Logger) error {
 		if err != nil {
 			return err
 		}
-		defer modelHost.Close()
+		defer func() {
+			if modelBackgroundStopped && consumersStopped {
+				modelHost.Close()
+			}
+		}()
 		if err := runtimeExecutorAcquirer.bind(modelHost); err != nil {
 			return err
 		}
@@ -502,13 +551,32 @@ func run(configPath string, logger *slog.Logger) error {
 		return err
 	}
 	processContext, cancelProcess := context.WithCancel(context.Background())
-	defer cancelProcess()
+	modelRuntimeErr := make(chan error, 1)
+	var modelRuntimeStopped <-chan struct{}
+	modelShutdownAttempted := false
+	stopModelRuntime := func(ctx context.Context) error {
+		if modelShutdownAttempted {
+			return nil
+		}
+		modelShutdownAttempted = true
+		var shutdownErr error
+		modelBackgroundStopped, shutdownErr = stopWorkerModelRuntime(ctx, consumersStopped, cancelProcess, modelRuntimeStopped, modelRuntimeErr)
+		if shutdownErr != nil {
+			logger.Error("model runtime shutdown failed", "error_code", modelsettingsdomain.ErrorCodeRuntimeConflict, "error", shutdownErr)
+		}
+		return shutdownErr
+	}
+	defer func() {
+		if !modelShutdownAttempted {
+			runErr = errors.Join(runErr, stopModelRuntime(beginShutdown()))
+		}
+	}()
 	modelDrain, err := newWorkerModelDrain(
 		components.dispatcher,
 		components.runtimeClient,
 		processContext,
 		func(ctx context.Context) (int64, error) {
-			return riveradapter.RunningJobCount(ctx, database.DB(), cfg.WorkerQueue)
+			return riveradapter.RunningJobCount(ctx, database, cfg.WorkerQueue)
 		},
 		readiness.SetReindexDispatcherStarted,
 	)
@@ -525,12 +593,19 @@ func run(configPath string, logger *slog.Logger) error {
 	signals := make(chan os.Signal, 2)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(signals)
-	modelRuntimeErr := make(chan error, 1)
 	workspaceRuntimeErr := workspaceRuntime.Errors()
 	if cfg.ModelSettingsMode == config.ModelSettingsModeManaged {
+		stopped := make(chan struct{})
+		modelRuntimeStopped = stopped
+		modelBackgroundStopped = false
 		go func() {
-			if runErr := modelController.Run(processContext); runErr != nil {
-				modelRuntimeErr <- runErr
+			defer close(stopped)
+			if controllerErr := modelController.Run(processContext); controllerErr != nil {
+				if processContext.Err() == nil || !errors.Is(controllerErr, processContext.Err()) {
+					modelRuntimeErr <- controllerErr
+				}
+			} else if processContext.Err() == nil {
+				modelRuntimeErr <- errors.New("worker model runtime stopped unexpectedly")
 			}
 		}()
 		select {
@@ -543,8 +618,7 @@ func run(configPath string, logger *slog.Logger) error {
 			return runErr
 		case received := <-signals:
 			logger.Info("worker stopping before model activation", "signal", received.String())
-			_ = health.server.Shutdown(context.Background())
-			return nil
+			return health.server.Shutdown(beginShutdown())
 		case healthErr := <-health.errors:
 			if healthErr == nil {
 				healthErr = errors.New("worker health server stopped unexpectedly")
@@ -565,13 +639,13 @@ func run(configPath string, logger *slog.Logger) error {
 			modelSnapshot.Rollout.Phase == modelsettingsdomain.RolloutPhaseFailed
 	}
 	workspaceAnalysisCapability, err := newWorkerWorkspaceAnalysisCapability(
-		database.DB(), cfg, components, configuredModels,
+		database, cfg, components, configuredModels,
 	)
 	if err != nil {
 		logger.Warn("workspace analysis worker capability is unavailable", "error_code", agentapplication.ErrorCodeWorkspaceAnalysisCapabilityUnavailable)
 		workspaceAnalysisCapability = nil
 	}
-	if err := startWorkerRuntime(
+	consumersStopped, err = startWorkerRuntime(
 		processContext,
 		resumeQueue,
 		cfg.DatabasePingTimeout,
@@ -580,7 +654,9 @@ func run(configPath string, logger *slog.Logger) error {
 		components.runtimeClient,
 		readiness,
 		health.server,
-	); err != nil {
+		beginShutdown,
+	)
+	if err != nil {
 		logger.Error("workflow runtime could not be started", "error_code", "WORKFLOW_RIVER_CLIENT_START_FAILED")
 		return err
 	}
@@ -655,7 +731,6 @@ func run(configPath string, logger *slog.Logger) error {
 	captureTicker := time.NewTicker(captureDispatchInterval)
 	defer captureTicker.Stop()
 	shutdownMode := shutdownGraceful
-	var runErr error
 	for {
 		select {
 		case received := <-signals:
@@ -724,7 +799,7 @@ func run(configPath string, logger *slog.Logger) error {
 				readiness.SetDatabaseOK(true)
 				logger.Debug("worker database health check passed")
 				metricContext, cancelMetric := context.WithTimeout(context.Background(), cfg.DatabasePingTimeout)
-				metricErr := recordQueueDepthMetric(metricContext, telemetry.Metrics(), database.DB(), cfg.WorkerQueue)
+				metricErr := recordQueueDepthMetric(metricContext, telemetry.Metrics(), database, cfg.WorkerQueue)
 				cancelMetric()
 				if metricErr != nil {
 					logger.Warn("worker queue depth metric failed", "error_code", "WORKER_QUEUE_METRIC_FAILED")
@@ -786,34 +861,36 @@ func run(configPath string, logger *slog.Logger) error {
 	}
 
 shutdown:
+	beginShutdown()
 	readiness.BeginShutdown()
 	readiness.SetReindexDispatcherStarted(false)
 	if workspaceAnalysisCapability != nil {
-		releaseContext, cancelRelease := context.WithTimeout(context.Background(), cfg.DatabasePingTimeout)
+		releaseContext, cancelRelease := context.WithTimeout(shutdownContext, cfg.DatabasePingTimeout)
 		releaseErr := workspaceAnalysisCapability.Release(releaseContext)
 		cancelRelease()
 		if releaseErr != nil {
 			logger.Warn("workspace analysis worker capability release failed", "error_code", agentapplication.ErrorCodeWorkspaceAnalysisCapabilityUnavailable)
 		}
 	}
-	shutdownStartedAt := time.Now()
-	runtimeShutdownDeadline, hardShutdownDeadline := workerShutdownDeadlines(
-		shutdownStartedAt, cfg.WorkerSoftStopTimeout, cfg.WorkerHardStopTimeout, cfg.ShutdownTimeout,
-	)
-	shutdownContext, cancelShutdown := context.WithDeadline(context.Background(), runtimeShutdownDeadline)
-	defer cancelShutdown()
 	cancelGitSyncProcess()
+	gitSyncDrained := false
 	select {
 	case <-gitSyncStopped:
+		gitSyncDrained = true
 	case <-shutdownContext.Done():
+		runErr = errors.Join(runErr, shutdownContext.Err())
 	}
-	if err := lifecycle.Shutdown(shutdownContext, shutdownMode); err != nil && runErr == nil {
-		runErr = err
+	if err := lifecycle.Shutdown(shutdownContext, shutdownMode); err != nil {
+		runErr = errors.Join(runErr, err)
+	} else {
+		consumersStopped = gitSyncDrained
 	}
 	readiness.SetRiverStarted(false)
-	if err := health.server.Shutdown(shutdownContext); err != nil && runErr == nil {
-		runErr = err
+	if err := health.server.Shutdown(shutdownContext); err != nil {
+		_ = health.server.Close()
+		runErr = errors.Join(runErr, err)
 	}
+	runErr = errors.Join(runErr, stopModelRuntime(shutdownContext))
 	runtimeShutdownExpired := errors.Is(shutdownContext.Err(), context.DeadlineExceeded)
 	result := "success"
 	if runErr != nil || runtimeShutdownExpired {
@@ -831,7 +908,7 @@ shutdown:
 	}
 	if runtimeShutdownExpired || hardShutdownExpired {
 		logger.Error("worker hard shutdown deadline exceeded", "error_code", "WORKER_HARD_SHUTDOWN_TIMEOUT")
-		return context.DeadlineExceeded
+		return errors.Join(runErr, context.DeadlineExceeded)
 	}
 	return runErr
 }
@@ -840,6 +917,35 @@ func workerShutdownDeadlines(startedAt time.Time, softStopTimeout, hardStopTimeo
 	hardDeadline := startedAt.Add(hardStopTimeout)
 	flushBudget := min(telemetryTimeout, hardStopTimeout-softStopTimeout)
 	return hardDeadline.Add(-flushBudget), hardDeadline
+}
+
+// stopWorkerModelRuntime 仅在全部消费者停止后取消模型后台任务，并沿用关闭期限等待清理。
+// 返回 false 时调用方不得关闭仍由消费者或后台任务使用的 Host/Pool。
+func stopWorkerModelRuntime(ctx context.Context, consumersStopped bool, cancel context.CancelFunc, stopped <-chan struct{}, failures <-chan error) (bool, error) {
+	if !consumersStopped {
+		return false, errors.New("worker consumers have not stopped before model shutdown")
+	}
+	cancel()
+	completed := true
+	var waitErr error
+	if stopped != nil {
+		select {
+		case <-stopped:
+		default:
+			select {
+			case <-stopped:
+			case <-ctx.Done():
+				completed = false
+				waitErr = ctx.Err()
+			}
+		}
+	}
+	select {
+	case err := <-failures:
+		return completed, errors.Join(waitErr, err)
+	default:
+		return completed, waitErr
+	}
 }
 
 // initializeWorkerTelemetry 以独立 service.name 组合 Worker 的 OTLP Provider。
@@ -1174,12 +1280,29 @@ func runDraftStreamCleanup(ctx context.Context, logger *slog.Logger, service dra
 	}
 }
 
-func newWorkerComponents(db *pgxpool.Pool, cfg config.Config, logger *slog.Logger, metrics observability.Metrics, enqueueFences ...riveradapter.EnqueueFence) (workerComponents, error) {
+func newWorkerComponents(db *postgres.Pool, cfg config.Config, logger *slog.Logger, metrics observability.Metrics, enqueueFences ...riveradapter.ScopedEnqueueFence) (workerComponents, error) {
 	models, err := modelRuntimeForComposition(cfg)
 	if err != nil {
 		return workerComponents{}, err
 	}
 	return newWorkerComponentsWithModels(db, cfg, models, workerModelRuntimeBinding{}, nil, logger, metrics, observability.NewNoopTracer(), enqueueFences...)
+}
+
+// workerEnqueueFence 在静态配置与受管配置间显式选择原有的入队策略。
+func workerEnqueueFence(cfg config.Config, fences []riveradapter.ScopedEnqueueFence) (riveradapter.ScopedEnqueueFence, error) {
+	if len(fences) > 1 {
+		return nil, errors.New("workflow enqueue fence is ambiguous")
+	}
+	if len(fences) == 1 {
+		if fences[0] == nil {
+			return nil, errors.New("workflow enqueue fence is unavailable")
+		}
+		return fences[0], nil
+	}
+	if cfg.ModelSettingsMode == config.ModelSettingsModeStatic {
+		return riveradapter.NewStaticScopedEnqueueFence(), nil
+	}
+	return nil, errors.New("managed workflow enqueue fence is unavailable")
 }
 
 type workerModelRuntimeBinding struct {
@@ -1240,7 +1363,7 @@ func modelRuntimeForComposition(cfg config.Config, supplied ...*modelsettingsrun
 	return loaded.Models, nil
 }
 
-func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *modelsettingsruntime.Models, modelBinding workerModelRuntimeBinding, workspaceRepository *workspacepostgres.Repository, logger *slog.Logger, metrics observability.Metrics, tracer observability.Tracer, enqueueFences ...riveradapter.EnqueueFence) (workerComponents, error) {
+func newWorkerComponentsWithModels(db *postgres.Pool, cfg config.Config, models *modelsettingsruntime.Models, modelBinding workerModelRuntimeBinding, workspaceRepository workspaceruntimegrant.GORMRepositoryPort, logger *slog.Logger, metrics observability.Metrics, tracer observability.Tracer, enqueueFences ...riveradapter.ScopedEnqueueFence) (workerComponents, error) {
 	if db == nil {
 		return workerComponents{}, foundation.NewError(foundation.ErrorDependencyUnavailable, "WORKER_DATABASE_UNAVAILABLE", true, errors.New("database pool is nil"))
 	}
@@ -1254,22 +1377,22 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	} else if modelBinding.revision != nil || modelBinding.instanceID != nil || modelBinding.runtimeFreshWithin != 0 || modelBinding.executorAcquirer != nil || modelBinding.sourceRefreshAcquirer != nil {
 		return workerComponents{}, foundation.NewError(foundation.ErrorConsistencyViolation, modelsettingsdomain.ErrorCodeRuntimeConflict, false, errors.New("static worker must not bind a managed model runtime"))
 	}
-	draftStreams, err := conversationpostgres.NewDraftStreamRepository(db)
+	draftStreams, err := conversationpostgres.NewGORMDraftStreamRepository(db)
 	if err != nil {
 		return workerComponents{}, err
 	}
 	if workspaceRepository == nil {
 		var err error
-		workspaceRepository, err = workspacepostgres.NewRepository(db)
+		workspaceRepository, err = workspacepostgres.NewGORMRepository(db)
 		if err != nil {
 			return workerComponents{}, err
 		}
 	}
-	gitOperationLocker, err := gitoperation.NewPostgresLocker(db)
+	gitOperationLocker, err := gitoperation.NewPostgresLocker(db.DB())
 	if err != nil {
 		return workerComponents{}, err
 	}
-	writebackRepository, err := changecontrolpostgres.NewRepository(db)
+	writebackRepository, err := changecontrolpostgres.NewGORMRepository(db)
 	if err != nil {
 		return workerComponents{}, err
 	}
@@ -1296,7 +1419,7 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	var workspaceAnalysisAudit *auditapplication.Recorder
 	workspaceAnalysisActorRef := ""
 	if cfg.WorkspaceAnalysisWorkerEnabled {
-		auditRepository, auditErr := auditpostgres.NewRepository(db)
+		auditRepository, auditErr := auditpostgres.NewGORMStore(db)
 		if auditErr == nil {
 			auditRecorder, recorderErr := auditapplication.NewRecorder(auditRepository)
 			if recorderErr == nil {
@@ -1314,7 +1437,7 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	}
 	toolComponents.workspaceAnalysisAudit = workspaceAnalysisAudit
 	toolComponents.workspaceAnalysisActorRef = workspaceAnalysisActorRef
-	authoringRepository, err := authoringpostgres.NewRepository(db)
+	authoringRepository, err := authoringpostgres.NewGORMRepository(db)
 	if err != nil {
 		return workerComponents{}, err
 	}
@@ -1357,25 +1480,22 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 		JobTimeout: cfg.WorkerJobTimeout, RescueStuckJobsAfter: cfg.WorkerRescueStuckJobsAfter,
 		SoftStopTimeout: cfg.WorkerSoftStopTimeout, Logger: logger,
 	}
-	if len(enqueueFences) > 0 {
-		riverOptions.EnqueueFence = enqueueFences[0]
-	}
-	insertClient, err := riveradapter.NewClientWithOptions(db, nil, riverOptions)
+	enqueueFence, err := workerEnqueueFence(cfg, enqueueFences)
 	if err != nil {
 		return workerComponents{}, err
 	}
-	inserter, err := riveradapter.NewJobInserter(insertClient)
+	insertClient, err := riveradapter.NewClientWithOptions(db.DB(), nil, riverOptions)
 	if err != nil {
 		return workerComponents{}, err
 	}
 	if err := executors.Register(changecontrolworkflow.SafeWritebackNodeKind, changecontrolworkflow.SafeWritebackBootstrapInputSchemaVersion, bootstrap); err != nil {
 		return workerComponents{}, err
 	}
-	graphRepository, err := graphpostgres.NewRepository(db)
+	graphRepository, err := graphpostgres.NewGORMRepository(db)
 	if err != nil {
 		return workerComponents{}, err
 	}
-	scanState, err := graphpostgres.NewSemanticLinkScanStateRepository(db)
+	scanState, err := graphpostgres.NewGORMSemanticLinkScanStateRepository(db)
 	if err != nil {
 		return workerComponents{}, err
 	}
@@ -1383,11 +1503,11 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	if err != nil {
 		return workerComponents{}, err
 	}
-	pageSource, err := graphpostgres.NewSemanticLinkTopicScanPageRepository(db)
+	pageSource, err := graphpostgres.NewGORMSemanticLinkTopicScanPageRepository(db)
 	if err != nil {
 		return workerComponents{}, err
 	}
-	collectionRepository, err := collectionpostgres.NewRepository(db)
+	collectionRepository, err := collectionpostgres.NewGORMRepository(db)
 	if err != nil {
 		return workerComponents{}, err
 	}
@@ -1397,7 +1517,7 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	if err != nil {
 		return workerComponents{}, err
 	}
-	smartPageSource, err := graphpostgres.NewSmartCollectionScanPageRepository(collectionService, db)
+	smartPageSource, err := graphpostgres.NewGORMSmartCollectionScanPageRepository(db, collectionService)
 	if err != nil {
 		return workerComponents{}, err
 	}
@@ -1405,7 +1525,7 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	if err != nil {
 		return workerComponents{}, err
 	}
-	candidateWriter, err := graphpostgres.NewSemanticLinkDiscoveryCandidateWriter(db, graphRepository, foundation.NewUUIDGenerator(nil), foundation.SystemClock{})
+	candidateWriter, err := graphpostgres.NewGORMSemanticLinkDiscoveryCandidateWriter(graphRepository, foundation.NewUUIDGenerator(nil), foundation.SystemClock{})
 	if err != nil {
 		return workerComponents{}, err
 	}
@@ -1427,7 +1547,7 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	if err != nil {
 		return workerComponents{}, err
 	}
-	healthFactReader, err := healthpostgres.NewFactReader(db, healthMembership)
+	healthFactReader, err := healthpostgres.NewGORMFactReader(db, healthMembership)
 	if err != nil {
 		return workerComponents{}, err
 	}
@@ -1435,11 +1555,11 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	if err != nil {
 		return workerComponents{}, err
 	}
-	healthEvents, err := eventspostgres.NewStore(db)
+	healthEvents, err := eventspostgres.NewGORMStore(db)
 	if err != nil {
 		return workerComponents{}, err
 	}
-	healthScanState, err := healthpostgres.NewScanStateRepository(db, healthEvents)
+	healthScanState, err := healthpostgres.NewGORMScanStateRepository(db, healthEvents)
 	if err != nil {
 		return workerComponents{}, err
 	}
@@ -1447,7 +1567,7 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	if err != nil {
 		return workerComponents{}, err
 	}
-	healthIssueRepository, err := healthpostgres.NewSmartCollectionIssueRepository(db, healthMembership, foundation.NewUUIDGenerator(nil))
+	healthIssueRepository, err := healthpostgres.NewGORMIssueRepository(db, healthMembership, foundation.NewUUIDGenerator(nil), collectionRepository)
 	if err != nil {
 		return workerComponents{}, err
 	}
@@ -1458,13 +1578,13 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	if err := executors.Register(healthapplication.HealthScanNodeKind, healthapplication.HealthScanInputSchemaVersion, healthScan); err != nil {
 		return workerComponents{}, err
 	}
-	healthCancellationGuard, err := healthpostgres.NewScanCancellationGuard(healthEvents)
+	healthCancellationGuard, err := healthpostgres.NewGORMScanCancellationGuard(db, healthEvents)
 	if err != nil {
 		return workerComponents{}, err
 	}
-	cancellationGuard, err := workflowapplication.NewCompositeCancellationSafetyGuard(
+	cancellationGuard, err := workflowapplication.NewCompositeScopedCancellationSafetyGuard(
 		writebackRepository,
-		graphpostgres.NewSemanticLinkScanCancellationGuard(),
+		graphRepository,
 		healthCancellationGuard,
 	)
 	if err != nil {
@@ -1476,13 +1596,21 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	}
 	workspaceAnalysisWorkerEnabled := cfg.WorkspaceAnalysisWorkerEnabled &&
 		toolComponents.workspaceAnalysisAudit != nil && toolComponents.workspaceAnalysisActorRef != ""
-	var workspaceAnalysisControlHook workflowapplication.WorkflowControlHook
-	terminalHookComponents := []workflowapplication.WorkflowTerminalHook{
+	organizingRepository, err := organizingpostgres.NewGORMRepository(db)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	organizingTerminal, err := organizingworkflow.NewScopedTerminalHook(organizingRepository)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	var workspaceAnalysisControlHook workflowapplication.ScopedWorkflowControlHook
+	terminalHookComponents := []workflowapplication.ScopedWorkflowTerminalHook{
 		artifactTerminal,
-		organizingworkflow.NewTerminalHook(),
+		organizingTerminal,
 	}
 	if workspaceAnalysisWorkerEnabled {
-		workspaceAnalysisCancellationAudit, workspaceAnalysisControlErr := conversationpostgres.NewWorkspaceAnalysisCancellationAuditHook(
+		workspaceAnalysisCancellationAudit, workspaceAnalysisControlErr := conversationpostgres.NewGORMWorkspaceAnalysisCancellationAuditHook(
 			toolComponents.workspaceAnalysisAudit,
 		)
 		if workspaceAnalysisControlErr == nil {
@@ -1492,7 +1620,7 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 		}
 	}
 	if workspaceAnalysisWorkerEnabled {
-		workspaceAnalysisCancellationTerminal, workspaceAnalysisTerminalErr := conversationpostgres.NewWorkspaceAnalysisCancellationTerminalHookWithAudit(
+		workspaceAnalysisCancellationTerminal, workspaceAnalysisTerminalErr := conversationpostgres.NewGORMWorkspaceAnalysisCancellationTerminalHookWithAudit(
 			healthEvents,
 			foundation.NewUUIDGenerator(nil),
 			toolComponents.workspaceAnalysisAudit,
@@ -1505,11 +1633,11 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 			workspaceAnalysisControlHook = nil
 		}
 	}
-	terminalHooks, err := workflowapplication.NewCompositeWorkflowTerminalHook(terminalHookComponents...)
+	terminalHooks, err := workflowapplication.NewCompositeScopedWorkflowTerminalHook(terminalHookComponents...)
 	if err != nil {
 		return workerComponents{}, err
 	}
-	runtimeRepository, err := workflowpostgres.NewRuntimeRepositoryWithHooks(db, inserter, workflowpostgres.RuntimeRepositoryHooks{
+	runtimeRepository, err := workflowpostgres.NewGORMRuntimeRepositoryWithHooks(db, riverOptions, enqueueFence, workflowpostgres.GORMRuntimeRepositoryHooks{
 		CancellationSafety:      cancellationGuard,
 		Terminal:                terminalHooks,
 		Control:                 workspaceAnalysisControlHook,
@@ -1518,7 +1646,7 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	if err != nil {
 		return workerComponents{}, err
 	}
-	workflowRepository, err := workflowpostgres.NewRepository(db)
+	workflowRepository, err := workflowpostgres.NewGORMRepository(db)
 	if err != nil {
 		return workerComponents{}, err
 	}
@@ -1546,7 +1674,7 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	if gitSyncWorker != nil && gitSyncScheduler != nil {
 		gitSyncCapability = agentCapabilityStatus{available: true}
 	}
-	captureRepository, err := capturepostgres.NewRepository(db)
+	captureRepository, err := capturepostgres.NewGORMRepository(db, workspaceRepository)
 	if err != nil {
 		return workerComponents{}, err
 	}
@@ -1554,7 +1682,15 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	if err != nil {
 		return workerComponents{}, err
 	}
-	memoryRepository, err := memorypostgres.NewRepository(db)
+	gormDB, err := db.GORM()
+	if err != nil {
+		return workerComponents{}, err
+	}
+	unitOfWork, err := db.UnitOfWork()
+	if err != nil {
+		return workerComponents{}, err
+	}
+	memoryRepository, err := memorypostgres.NewGORMRepository(gormDB, unitOfWork)
 	if err != nil {
 		return workerComponents{}, err
 	}
@@ -1625,7 +1761,7 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 			return workerComponents{}, err
 		}
 	}
-	artifactRepository, err := artifactpostgres.NewRepository(db)
+	artifactRepository, err := artifactpostgres.NewGORMRepository(db)
 	if err != nil {
 		return workerComponents{}, err
 	}
@@ -1649,10 +1785,6 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	if err != nil {
 		return workerComponents{}, err
 	}
-	organizingRepository, err := organizingpostgres.NewRepository(db)
-	if err != nil {
-		return workerComponents{}, err
-	}
 	builtInContext, cancelBuiltIns := context.WithTimeout(context.Background(), cfg.DatabasePingTimeout)
 	builtInErr := organizingRepository.EnsureBuiltIns(builtInContext, foundation.SystemClock{}.Now())
 	cancelBuiltIns()
@@ -1665,7 +1797,7 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	}
 	var organizingGenerator organizingworkflow.ContentGenerator = organizingworkflow.NewUnavailableGenerator()
 	if agentComponents.model != nil {
-		organizingGenerationRepository, repositoryErr := organizingpostgres.NewGenerationRepository(db, artifactAgentRepository)
+		organizingGenerationRepository, repositoryErr := organizingpostgres.NewGORMGenerationRepository(db, artifactAgentRepository)
 		if repositoryErr != nil {
 			return workerComponents{}, repositoryErr
 		}
@@ -1815,8 +1947,16 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	if err != nil {
 		return workerComponents{}, err
 	}
-	organizingOutbox, err := organizingworkflow.NewDispatcher(organizingworkflow.DispatcherDependencies{
-		Repository: organizingRepository, Workflows: workflowService,
+	workflowBindings, err := workflowpostgres.NewGORMRuntimeBindingReader(db)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	organizingStarts, err := organizingpostgres.NewGORMStartRepository(db, runtimeRepository, workflowBindings)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	organizingOutbox, err := organizingworkflow.NewScopedDispatcher(organizingworkflow.ScopedDispatcherDependencies{
+		Repository: organizingStarts, Definitions: definitions,
 		IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{},
 		Owner: fmt.Sprintf("organizing-worker:%s", workerID), LeaseDuration: organizingDispatchLeaseDuration,
 		RetryBase: organizingDispatchRetryBase, MaxAttempts: organizingDispatchMaxAttempts,
@@ -1824,7 +1964,7 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	if err != nil {
 		return workerComponents{}, err
 	}
-	healthScanStartRepository, err := healthpostgres.NewScanRepository(db, runtimeRepository, healthEvents, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, healthcollection.DurableBindingVerifier{})
+	healthScanStartRepository, err := healthpostgres.NewGORMScanRepository(db, runtimeRepository, healthEvents, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, collectionRepository)
 	if err != nil {
 		return workerComponents{}, err
 	}
@@ -1832,7 +1972,7 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	if err != nil {
 		return workerComponents{}, err
 	}
-	healthScheduleRepository, err := healthpostgres.NewScheduleRepository(db, foundation.NewUUIDGenerator(nil))
+	healthScheduleRepository, err := healthpostgres.NewGORMScheduleRepository(db, foundation.NewUUIDGenerator(nil))
 	if err != nil {
 		return workerComponents{}, err
 	}
@@ -1844,7 +1984,7 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	if err != nil {
 		return workerComponents{}, err
 	}
-	healthAffectedRepository, err := healthpostgres.NewAffectedChangeDispatchRepository(healthScanStartRepository, healthAffectedPlanner)
+	healthAffectedRepository, err := healthpostgres.NewGORMAffectedChangeDispatchRepository(healthScanStartRepository, healthAffectedPlanner)
 	if err != nil {
 		return workerComponents{}, err
 	}
@@ -1852,7 +1992,7 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	if err != nil {
 		return workerComponents{}, err
 	}
-	timelineRepository, err := knowledgepostgres.NewRepository(db)
+	timelineRepository, err := knowledgepostgres.NewGORMRepository(db)
 	if err != nil {
 		return workerComponents{}, err
 	}
@@ -1876,11 +2016,11 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	if err != nil {
 		return workerComponents{}, err
 	}
-	exportRepository, err := exportpostgres.NewRepository(db, exportpostgres.WithEventAppender(healthEvents))
+	exportRepository, err := exportpostgres.NewGORMRepository(db, exportpostgres.WithGORMEventAppender(healthEvents))
 	if err != nil {
 		return workerComponents{}, err
 	}
-	exportDispatcher, err := exportriver.NewTransactionalDispatcher(db, insertClient)
+	exportDispatcher, err := exportriver.NewGORMTransactionalDispatcher(db, insertClient, enqueueFence)
 	if err != nil {
 		return workerComponents{}, err
 	}
@@ -1896,11 +2036,11 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	if err != nil {
 		return workerComponents{}, err
 	}
-	interviewCompletion, err := interviewpostgres.NewRepository(db)
+	interviewCompletion, err := interviewpostgres.NewGORMRepository(db)
 	if err != nil {
 		return workerComponents{}, err
 	}
-	learningPathRepository, err := learningpathpostgres.NewRepository(db)
+	learningPathRepository, err := learningpathpostgres.NewGORMRepository(db)
 	if err != nil {
 		return workerComponents{}, err
 	}
@@ -1916,7 +2056,7 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 		return workerComponents{}, err
 	}
 	reindex, err := newReindexComponents(
-		db, cfg, sourceProcessing, insertClient, workerID, logger, metrics, fatalInvariants, models,
+		db, cfg, sourceProcessing, riverOptions, enqueueFence, workerID, logger, metrics, fatalInvariants, models,
 	)
 	if err != nil {
 		return workerComponents{}, err
@@ -1931,7 +2071,7 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 	if err := riveradapter.AddWorkerSafely(workers, exportWorker); err != nil {
 		return workerComponents{}, err
 	}
-	runtimeClient, err := riveradapter.NewClientWithOptions(db, workers, riverOptions)
+	runtimeClient, err := riveradapter.NewClientWithOptions(db.DB(), workers, riverOptions)
 	if err != nil {
 		return workerComponents{}, err
 	}
@@ -1954,22 +2094,22 @@ func newWorkerComponentsWithModels(db *pgxpool.Pool, cfg config.Config, models *
 }
 
 func newWorkerRuntimeGenerationBuilder(
-	db *pgxpool.Pool,
+	db *postgres.Pool,
 	cfg config.Config,
 	catalog workflowapplication.ValidationCatalog,
-	workspaceRepository *workspacepostgres.Repository,
+	workspaceRepository workspaceruntimegrant.GORMRepositoryPort,
 	gitRepository *gitcli.WritebackClient,
 	safeWriteback workflowapplication.Executor,
 	semanticScan workflowapplication.Executor,
 	healthScan workflowapplication.Executor,
-	artifactAgentRepository *agentpostgres.Repository,
-	artifactTerminal *artifactpostgres.SectionGenerationTerminalHook,
-	runtimeRepository *workflowpostgres.RuntimeRepository,
-	workflowRepository *workflowpostgres.Repository,
-	captureRepository *capturepostgres.Repository,
+	artifactAgentRepository *agentpostgres.GORMRepository,
+	artifactTerminal *artifactpostgres.GORMSectionGenerationTerminalHook,
+	runtimeRepository *workflowpostgres.GORMRuntimeRepository,
+	workflowRepository *workflowpostgres.GORMRepository,
+	captureRepository *capturepostgres.GORMRepository,
 	captureFetcher captureapplication.URLFetcher,
 	memoryService *memoryapplication.Service,
-	organizingRepository *organizingpostgres.Repository,
+	organizingRepository *organizingpostgres.GORMRepository,
 	organizingArtifacts *organizingworkflow.ArtifactOwner,
 	organizingProposals *organizingworkflow.ProposalOwner,
 	organizingRenderer *organizingworkflow.EvidenceRenderer,
@@ -2057,7 +2197,7 @@ func newWorkerRuntimeGenerationBuilder(
 
 		var organizingGenerator organizingworkflow.ContentGenerator = organizingworkflow.NewUnavailableGenerator()
 		if agentComponents.model != nil {
-			organizingGenerationRepository, err := organizingpostgres.NewGenerationRepository(db, artifactAgentRepository)
+			organizingGenerationRepository, err := organizingpostgres.NewGORMGenerationRepository(db, artifactAgentRepository)
 			if err != nil {
 				return nil, err
 			}
@@ -2211,9 +2351,9 @@ type toolRuntimeCompositionInput struct {
 }
 
 func newToolRuntimeComponents(
-	db *pgxpool.Pool,
+	db *postgres.Pool,
 	cfg config.Config,
-	workspaceRepository *workspacepostgres.Repository,
+	workspaceRepository workspaceruntimegrant.GORMRepositoryPort,
 	gitInspector *gitcli.WritebackClient,
 	inputs ...toolRuntimeCompositionInput,
 ) (toolRuntimeComponents, error) {
@@ -2234,9 +2374,9 @@ func newToolRuntimeComponents(
 }
 
 func newToolRuntimeComponentsWithWorkspaceAnalysisAudit(
-	db *pgxpool.Pool,
+	db *postgres.Pool,
 	cfg config.Config,
-	workspaceRepository *workspacepostgres.Repository,
+	workspaceRepository workspaceruntimegrant.GORMRepositoryPort,
 	gitInspector *gitcli.WritebackClient,
 	workspaceAnalysisAudit *auditapplication.Recorder,
 	modelRuntimes ...*modelsettingsruntime.Models,
@@ -2252,21 +2392,34 @@ func newToolRuntimeComponentsWithWorkspaceAnalysisAudit(
 	if err != nil {
 		return toolRuntimeComponents{}, err
 	}
-	repository, err := toolpostgres.NewRepository(db)
+	policy, err := workflowpostgres.NewGORMToolExecutionPolicySnapshot(db)
 	if err != nil {
 		return toolRuntimeComponents{}, err
 	}
+	recovery, err := workflowpostgres.NewGORMToolCallRecoveryFence(db)
+	if err != nil {
+		return toolRuntimeComponents{}, err
+	}
+	core, err := toolpostgres.NewGORMRepository(db, policy, recovery)
+	if err != nil {
+		return toolRuntimeComponents{}, err
+	}
+	repository := &workerToolRepository{GORMRepository: core}
 	workspaceAnalysisCapability := agentCapabilityStatus{}
 	if cfg.WorkspaceAnalysisWorkerEnabled {
 		workspaceAnalysisCapability.code = agentapplication.ErrorCodeWorkspaceAnalysisCapabilityUnavailable
-		eventStore, eventErr := eventspostgres.NewStore(db)
+		eventStore, eventErr := eventspostgres.NewGORMStore(db)
 		if eventErr == nil && workspaceAnalysisAudit != nil {
-			eventRepository, repositoryErr := toolpostgres.NewRepositoryWithWorkspaceAnalysisEventsAndAudit(db, eventStore, workspaceAnalysisAudit)
-			if repositoryErr == nil {
-				repository = eventRepository
-				workspaceAnalysisCapability = agentCapabilityStatus{available: true}
-			} else {
-				workspaceAnalysisCapability.code = agentapplication.ErrorCodeWorkspaceAnalysisCapabilityUnavailable
+			executionFence, fenceErr := workflowpostgres.NewGORMWorkspaceAnalysisExecutionFence(db)
+			agentRepository, agentErr := agentpostgres.NewGORMRepository(db)
+			if fenceErr == nil && agentErr == nil {
+				analysisRepository, repositoryErr := toolpostgres.NewGORMWorkspaceAnalysisRepository(
+					db, executionFence, agentRepository, agentRepository, agentRepository, eventStore, workspaceAnalysisAudit,
+				)
+				if repositoryErr == nil {
+					repository.GORMWorkspaceAnalysisRepository = analysisRepository
+					workspaceAnalysisCapability = agentCapabilityStatus{available: true}
+				}
 			}
 		}
 	}
@@ -2289,7 +2442,7 @@ func newToolRuntimeComponentsWithWorkspaceAnalysisAudit(
 		return toolRuntimeComponents{}, foundation.NewError(foundation.ErrorDependencyUnavailable, "WORKER_TOOL_DEPENDENCIES_UNAVAILABLE", false, errors.New("tool workspace dependencies are unavailable"))
 	}
 
-	searchRepository, err := retrievalpostgres.NewSearchRepository(db)
+	searchRepository, err := retrievalpostgres.NewGORMSearchRepository(db)
 	if err != nil {
 		return toolRuntimeComponents{}, err
 	}
@@ -2305,7 +2458,7 @@ func newToolRuntimeComponentsWithWorkspaceAnalysisAudit(
 	if err != nil {
 		return toolRuntimeComponents{}, err
 	}
-	knowledgeRepository, err := knowledgepostgres.NewRepository(db)
+	knowledgeRepository, err := knowledgepostgres.NewGORMRepository(db)
 	if err != nil {
 		return toolRuntimeComponents{}, err
 	}
@@ -2409,10 +2562,10 @@ func newToolRuntimeComponentsWithWorkspaceAnalysisAudit(
 // separate prevents a partial optional Tool set from leaking into the fixed
 // RAG runtime when any Workspace Analysis dependency is unavailable.
 func newWorkspaceAnalysisToolExecutors(
-	workspaceRepository *workspacepostgres.Repository,
-	repository *toolpostgres.Repository,
+	workspaceRepository workspaceruntimegrant.GORMRepositoryPort,
+	repository *workerToolRepository,
 	searchService *retrievalapplication.SearchService,
-	searchRepository *retrievalpostgres.SearchRepository,
+	searchRepository *retrievalpostgres.GORMSearchRepository,
 	evidenceReference *retrievalapplication.EvidenceReferenceService,
 	eligibility *knowledgeapplication.EvidenceEligibilityService,
 ) ([]toolExecutorRegistration, error) {
@@ -2655,22 +2808,22 @@ func newRAGExecutionScheduler(metrics ...observability.Metrics) (agentapplicatio
 // newAgentWorkflowComponents preserves the pre-v2 constructor used by focused
 // composition tests. Production composition must pass the frozen Tool runtime
 // and Metrics through newAgentWorkflowComponentsWithToolsAndMetrics.
-func newAgentWorkflowComponents(db *pgxpool.Pool, cfg config.Config, workspaceRepository *workspacepostgres.Repository, memoryService *memoryapplication.Service, modelRuntimes ...*modelsettingsruntime.Models) (agentWorkflowComponents, error) {
+func newAgentWorkflowComponents(db *postgres.Pool, cfg config.Config, workspaceRepository workspaceruntimegrant.GORMRepositoryPort, memoryService *memoryapplication.Service, modelRuntimes ...*modelsettingsruntime.Models) (agentWorkflowComponents, error) {
 	return newAgentWorkflowComponentsWithDependencies(db, cfg, workspaceRepository, memoryService, nil, toolRuntimeComponents{}, false, nil, modelRuntimes...)
 }
 
 // newAgentWorkflowComponentsWithTools composes the formal v2 RAG runtime with
 // the same frozen model runtime and the sole project Tool execution boundary.
-func newAgentWorkflowComponentsWithTools(db *pgxpool.Pool, cfg config.Config, workspaceRepository *workspacepostgres.Repository, memoryService *memoryapplication.Service, tools toolRuntimeComponents, modelRuntimes ...*modelsettingsruntime.Models) (agentWorkflowComponents, error) {
+func newAgentWorkflowComponentsWithTools(db *postgres.Pool, cfg config.Config, workspaceRepository workspaceruntimegrant.GORMRepositoryPort, memoryService *memoryapplication.Service, tools toolRuntimeComponents, modelRuntimes ...*modelsettingsruntime.Models) (agentWorkflowComponents, error) {
 	return newAgentWorkflowComponentsWithDependencies(db, cfg, workspaceRepository, memoryService, nil, tools, true, nil, modelRuntimes...)
 }
 
 func newAgentWorkflowComponentsWithToolsAndMetrics(
-	db *pgxpool.Pool,
+	db *postgres.Pool,
 	cfg config.Config,
-	workspaceRepository *workspacepostgres.Repository,
+	workspaceRepository workspaceruntimegrant.GORMRepositoryPort,
 	memoryService *memoryapplication.Service,
-	runtimeRepository *workflowpostgres.RuntimeRepository,
+	runtimeRepository *workflowpostgres.GORMRuntimeRepository,
 	tools toolRuntimeComponents,
 	metrics observability.Metrics,
 	modelRuntimes ...*modelsettingsruntime.Models,
@@ -2681,11 +2834,11 @@ func newAgentWorkflowComponentsWithToolsAndMetrics(
 }
 
 func newAgentWorkflowComponentsWithDependencies(
-	db *pgxpool.Pool,
+	db *postgres.Pool,
 	cfg config.Config,
-	workspaceRepository *workspacepostgres.Repository,
+	workspaceRepository workspaceruntimegrant.GORMRepositoryPort,
 	memoryService *memoryapplication.Service,
-	runtimeRepository *workflowpostgres.RuntimeRepository,
+	runtimeRepository *workflowpostgres.GORMRuntimeRepository,
 	tools toolRuntimeComponents,
 	requireV2Runtime bool,
 	metrics observability.Metrics,
@@ -2757,11 +2910,11 @@ func newAgentWorkflowComponentsWithDependencies(
 	if err != nil {
 		return agentWorkflowComponents{}, err
 	}
-	repository, err := agentpostgres.NewRepository(db)
+	repository, err := agentpostgres.NewGORMRepository(db)
 	if err != nil {
 		return agentWorkflowComponents{}, err
 	}
-	knowledgeRepository, err := knowledgepostgres.NewRepository(db)
+	knowledgeRepository, err := knowledgepostgres.NewGORMRepository(db)
 	if err != nil {
 		return agentWorkflowComponents{}, err
 	}
@@ -2777,7 +2930,7 @@ func newAgentWorkflowComponentsWithDependencies(
 	if err != nil {
 		return agentWorkflowComponents{}, err
 	}
-	searchRepository, err := retrievalpostgres.NewSearchRepository(db)
+	searchRepository, err := retrievalpostgres.NewGORMSearchRepository(db)
 	if err != nil {
 		return agentWorkflowComponents{}, err
 	}
@@ -2800,26 +2953,26 @@ func newAgentWorkflowComponentsWithDependencies(
 	if err != nil {
 		return agentWorkflowComponents{}, err
 	}
-	eventStore, err := eventspostgres.NewStore(db)
+	eventStore, err := eventspostgres.NewGORMStore(db)
 	if err != nil {
 		return agentWorkflowComponents{}, err
 	}
-	conversationRepository, err := conversationpostgres.NewRepository(db, eventStore)
+	conversationRepository, err := conversationpostgres.NewGORMRepository(db, eventStore)
 	if err != nil {
 		return agentWorkflowComponents{}, err
 	}
-	finalizer, err := conversationpostgres.NewAnswerFinalizer(db, repository, eventStore, foundation.SystemClock{})
+	finalizer, err := conversationpostgres.NewGORMAnswerFinalizer(db, repository, eventStore, foundation.SystemClock{})
 	if err != nil {
 		return agentWorkflowComponents{}, err
 	}
-	workspaceFinalizerStore, err := conversationpostgres.NewWorkspaceAnalysisFinalizer(
+	workspaceFinalizerStore, err := conversationpostgres.NewGORMWorkspaceAnalysisFinalizer(
 		db, eventStore, foundation.NewUUIDGenerator(nil),
 	)
 	if err != nil {
 		return agentWorkflowComponents{}, err
 	}
 	if cfg.WorkspaceAnalysisWorkerEnabled && tools.workspaceAnalysisAudit != nil && tools.workspaceAnalysisActorRef != "" {
-		auditedFinalizer, auditErr := conversationpostgres.NewWorkspaceAnalysisFinalizerWithAudit(
+		auditedFinalizer, auditErr := conversationpostgres.NewGORMWorkspaceAnalysisFinalizerWithAudit(
 			db, eventStore, foundation.NewUUIDGenerator(nil),
 			tools.workspaceAnalysisAudit, tools.workspaceAnalysisActorRef,
 		)
@@ -2833,11 +2986,11 @@ func newAgentWorkflowComponentsWithDependencies(
 	if err != nil {
 		return agentWorkflowComponents{}, err
 	}
-	draftStreams, err := conversationpostgres.NewDraftStreamRepository(db)
+	draftStreams, err := conversationpostgres.NewGORMDraftStreamRepository(db)
 	if err != nil {
 		return agentWorkflowComponents{}, err
 	}
-	progress, err := agentpostgres.NewRAGProgressStore(db, eventStore)
+	progress, err := agentpostgres.NewGORMRAGProgressStore(db, eventStore)
 	if err != nil {
 		return agentWorkflowComponents{}, err
 	}
@@ -2889,6 +3042,14 @@ func newAgentWorkflowComponentsWithDependencies(
 		if err := validateWorkspaceAnalysisWorkerRuntime(cfg, contract.Timeout, tools.contracts); err != nil {
 			return err
 		}
+		executionFence, err := workflowpostgres.NewGORMWorkspaceAnalysisExecutionFence(db)
+		if err != nil {
+			return err
+		}
+		modelOperations, err := agentpostgres.NewGORMWorkspaceAnalysisRepository(db, executionFence)
+		if err != nil {
+			return err
+		}
 		runtimeChat := models.RuntimeChat()
 		workspaceCandidateStream, err = agenteino.NewWorkspaceAnalysisCandidateStreamRuntime(runtimeChat.Model())
 		if err != nil {
@@ -2903,7 +3064,7 @@ func newAgentWorkflowComponentsWithDependencies(
 		}
 		planner, plannerErr := agentapplication.NewWorkspaceAnalysisRetrievalPlanRunner(
 			agentapplication.WorkspaceAnalysisRetrievalPlanRunnerDependencies{
-				Model: model, Catalog: catalog, Repository: repository,
+				Model: model, Catalog: catalog, Repository: modelOperations,
 				IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{},
 			},
 		)
@@ -2942,7 +3103,7 @@ func newAgentWorkflowComponentsWithDependencies(
 		}
 		synthesisRunner, synthesisErr := agentapplication.NewWorkspaceAnalysisSynthesisRunner(
 			agentapplication.WorkspaceAnalysisSynthesisRunnerDependencies{
-				Runtime: workspaceCandidateStream, Catalog: catalog, Repository: repository, Drafts: candidateDrafts,
+				Runtime: workspaceCandidateStream, Catalog: catalog, Repository: modelOperations, Drafts: candidateDrafts,
 				IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{},
 			},
 		)
@@ -2972,7 +3133,7 @@ func newAgentWorkflowComponentsWithDependencies(
 		}
 		reviewRunner, reviewErr := agentapplication.NewWorkspaceAnalysisReviewRunner(
 			agentapplication.WorkspaceAnalysisReviewRunnerDependencies{
-				Model: model, Catalog: catalog, Repository: repository,
+				Model: model, Catalog: catalog, Repository: modelOperations,
 				IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{},
 			},
 		)
@@ -2982,7 +3143,7 @@ func newAgentWorkflowComponentsWithDependencies(
 		workspaceReview, err = agentworkflow.NewWorkspaceAnalysisReviewPublishExecutor(
 			agentworkflow.WorkspaceAnalysisReviewPublishExecutorDependencies{
 				Context: conversationRepository, Runs: repository,
-				Inputs: runtimeRepository, Stages: runtimeRepository, Candidates: repository,
+				Inputs: runtimeRepository, Stages: runtimeRepository, Candidates: modelOperations,
 				Evidence: tools.repository, Validation: tools.repository,
 				Review: reviewRunner, Finalizer: workspaceFinalizer, Clock: foundation.SystemClock{},
 			},
@@ -3017,8 +3178,8 @@ func newAgentWorkflowComponentsWithDependencies(
 }
 
 type artifactWorkflowComponents struct {
-	generation       *artifactpostgres.SectionGenerationRepository
-	terminal         *artifactpostgres.SectionGenerationTerminalHook
+	generation       *artifactpostgres.GORMSectionGenerationRepository
+	terminal         *artifactpostgres.GORMSectionGenerationTerminalHook
 	citationVerifier *artifactapplication.ServerCitationVerifier
 	executor         *artifactworkflow.Executor
 	catalog          *agentapplication.RuntimeCatalog
@@ -3026,10 +3187,10 @@ type artifactWorkflowComponents struct {
 }
 
 func newCaptureProfileGenerator(
-	db *pgxpool.Pool,
+	db *postgres.Pool,
 	model agentapplication.ChatModel,
 	contract platformmodels.ChatContract,
-	modelRuns *agentpostgres.Repository,
+	modelRuns *agentpostgres.GORMRepository,
 	scheduler agentapplication.StructuredPhaseScheduler,
 	ids foundation.IDGenerator,
 	clock foundation.Clock,
@@ -3038,7 +3199,7 @@ func newCaptureProfileGenerator(
 	if db == nil || modelRuns == nil || ids == nil || clock == nil {
 		return nil, unavailable, foundation.NewError(foundation.ErrorDependencyUnavailable, captureprofile.ErrorCodeCapabilityUnavailable, false, errors.New("configured capture profile dependencies are unavailable"))
 	}
-	profileRepository, err := capturepostgres.NewProfileRepository(db, modelRuns)
+	profileRepository, err := capturepostgres.NewGORMProfileRepository(db, modelRuns)
 	if err != nil {
 		return nil, unavailable, err
 	}
@@ -3069,16 +3230,16 @@ func newCaptureProfileGenerator(
 
 // newArtifactGenerationAgent 先组装 Agent 事务端口与独立 terminal hook，解除 Runtime 构造依赖环。
 func newArtifactGenerationAgent(
-	db *pgxpool.Pool,
-) (*agentpostgres.Repository, *artifactpostgres.SectionGenerationTerminalHook, error) {
+	db *postgres.Pool,
+) (*agentpostgres.GORMRepository, *artifactpostgres.GORMSectionGenerationTerminalHook, error) {
 	if db == nil {
 		return nil, nil, errors.New("artifact generation database is unavailable")
 	}
-	agentRepository, err := agentpostgres.NewRepository(db)
+	agentRepository, err := agentpostgres.NewGORMRepository(db)
 	if err != nil {
 		return nil, nil, err
 	}
-	terminal, err := artifactpostgres.NewSectionGenerationTerminalHook(agentRepository, agentworkflow.DefaultProfileRef())
+	terminal, err := artifactpostgres.NewGORMSectionGenerationTerminalHook(db, agentRepository, agentworkflow.DefaultProfileRef())
 	if err != nil {
 		return nil, nil, err
 	}
@@ -3087,11 +3248,11 @@ func newArtifactGenerationAgent(
 
 // newArtifactWorkflowComponents 组装始终存在的 Generation 终态事实，并仅在 Chat 启用时创建真实 Executor。
 func newArtifactWorkflowComponents(
-	db *pgxpool.Pool,
-	workspaceRepository *workspacepostgres.Repository,
-	runtime artifactpostgres.RuntimeStarterTx,
-	agentRepository *agentpostgres.Repository,
-	terminal *artifactpostgres.SectionGenerationTerminalHook,
+	db *postgres.Pool,
+	workspaceRepository workspaceruntimegrant.GORMRepositoryPort,
+	runtime *workflowpostgres.GORMRuntimeRepository,
+	agentRepository *agentpostgres.GORMRepository,
+	terminal *artifactpostgres.GORMSectionGenerationTerminalHook,
 	model agentapplication.ChatModel,
 	contract platformmodels.ChatContract,
 	scheduler agentapplication.StructuredPhaseScheduler,
@@ -3102,7 +3263,7 @@ func newArtifactWorkflowComponents(
 	if db == nil || workspaceRepository == nil || runtime == nil || agentRepository == nil || terminal == nil || ids == nil || clock == nil {
 		return artifactWorkflowComponents{}, foundation.NewError(foundation.ErrorDependencyUnavailable, artifactworkflow.ErrorCodeCapabilityUnavailable, false, errors.New("artifact generation persistence dependencies are incomplete"))
 	}
-	knowledgeRepository, err := knowledgepostgres.NewRepository(db)
+	knowledgeRepository, err := knowledgepostgres.NewGORMRepository(db)
 	if err != nil {
 		return artifactWorkflowComponents{}, err
 	}
@@ -3110,7 +3271,7 @@ func newArtifactWorkflowComponents(
 	if err != nil {
 		return artifactWorkflowComponents{}, err
 	}
-	searchRepository, err := retrievalpostgres.NewSearchRepository(db)
+	searchRepository, err := retrievalpostgres.NewGORMSearchRepository(db)
 	if err != nil {
 		return artifactWorkflowComponents{}, err
 	}
@@ -3126,8 +3287,12 @@ func newArtifactWorkflowComponents(
 	if err != nil {
 		return artifactWorkflowComponents{}, err
 	}
-	generation, err := artifactpostgres.NewSectionGenerationRepository(
-		db, runtime, agentRepository, citationVerifier, ids, clock, agentworkflow.DefaultProfileRef(),
+	bindings, err := workflowpostgres.NewGORMRuntimeBindingReader(db)
+	if err != nil {
+		return artifactWorkflowComponents{}, err
+	}
+	generation, err := artifactpostgres.NewGORMSectionGenerationRepository(
+		db, runtime, bindings, agentRepository, citationVerifier, ids, clock, agentworkflow.DefaultProfileRef(),
 	)
 	if err != nil {
 		return artifactWorkflowComponents{}, err
@@ -3317,14 +3482,14 @@ type sourceProcessingComponents struct {
 	workspace        *workspaceapplication.Service
 	ingestion        *ingestionapplication.Service
 	retrieval        *retrievalapplication.Service
-	store            *retrievalpostgres.Repository
+	store            *retrievalpostgres.GORMRepository
 	vectors          retrievalapplication.ProcessorVectorPort
 	regression       *retrievalapplication.RegressionService
 	processorOptions retrievalapplication.ProcessorOptions
 	refresher        retrievalapplication.SourceRefreshOperationRunner
 }
 
-func newSourceProcessingComponents(db *pgxpool.Pool, cfg config.Config, workspaceRepository *workspacepostgres.Repository, committedGit *gitcli.WritebackClient, modelSettingsRevision *int64, modelRuntimes ...*modelsettingsruntime.Models) (sourceProcessingComponents, error) {
+func newSourceProcessingComponents(db *postgres.Pool, cfg config.Config, workspaceRepository workspaceruntimegrant.GORMRepositoryPort, committedGit *gitcli.WritebackClient, modelSettingsRevision *int64, modelRuntimes ...*modelsettingsruntime.Models) (sourceProcessingComponents, error) {
 	models, err := modelRuntimeForComposition(cfg, modelRuntimes...)
 	if err != nil {
 		return sourceProcessingComponents{}, err
@@ -3336,7 +3501,11 @@ func newSourceProcessingComponents(db *pgxpool.Pool, cfg config.Config, workspac
 		Repository: workspaceRepository, ManagedFiles: files, CommittedFiles: files, CommittedGit: committedGit,
 		IDs: ids, Clock: clock,
 	})
-	ingestionRepository, err := ingestionpostgres.NewRepository(db)
+	gormDB, err := db.GORM()
+	if err != nil {
+		return sourceProcessingComponents{}, err
+	}
+	ingestionRepository, err := ingestionpostgres.NewGORMRepository(gormDB)
 	if err != nil {
 		return sourceProcessingComponents{}, err
 	}
@@ -3357,7 +3526,7 @@ func newSourceProcessingComponents(db *pgxpool.Pool, cfg config.Config, workspac
 	if err != nil {
 		return sourceProcessingComponents{}, err
 	}
-	retrievalRepository, err := retrievalpostgres.NewRepository(db)
+	retrievalRepository, err := retrievalpostgres.NewGORMRepository(db)
 	if err != nil {
 		return sourceProcessingComponents{}, err
 	}
@@ -3425,9 +3594,9 @@ func newSourceProcessingComponents(db *pgxpool.Pool, cfg config.Config, workspac
 // intentionally leaves it unavailable: no credential store or remote client is
 // created, while unrelated Worker capabilities remain runnable.
 func newGitSyncWorker(
-	db *pgxpool.Pool,
+	db *postgres.Pool,
 	cfg config.Config,
-	workspaceRepository *workspacepostgres.Repository,
+	workspaceRepository workspaceruntimegrant.GORMRepositoryPort,
 	committedGit *gitcli.WritebackClient,
 	sources sourceProcessingComponents,
 	locker gitoperation.WorkspaceLocker,
@@ -3444,7 +3613,15 @@ func newGitSyncWorker(
 		sources.refresher == nil || locker == nil || workerID == "" {
 		return nil, nil, foundation.NewError(foundation.ErrorDependencyUnavailable, "WORKER_GIT_SYNC_DEPENDENCIES_UNAVAILABLE", false, errors.New("Git sync worker dependencies are unavailable"))
 	}
-	repository, err := gitsyncpostgres.NewRepository(db, sealer)
+	gormDB, err := db.GORM()
+	if err != nil {
+		return nil, nil, err
+	}
+	unitOfWork, err := db.UnitOfWork()
+	if err != nil {
+		return nil, nil, err
+	}
+	repository, err := gitsyncpostgres.NewGORMRepository(gormDB, unitOfWork, sealer)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -3491,7 +3668,7 @@ func newGitSyncWorker(
 	return worker, scheduler, nil
 }
 
-func newReindexComponents(db *pgxpool.Pool, cfg config.Config, processing sourceProcessingComponents, insertClient *riveradapter.Client, workerID foundation.ID, logger *slog.Logger, metrics observability.Metrics, fatalInvariants chan<- error, modelRuntimes ...*modelsettingsruntime.Models) (reindexComponents, error) {
+func newReindexComponents(db *postgres.Pool, cfg config.Config, processing sourceProcessingComponents, riverOptions riveradapter.Options, enqueueFence riveradapter.ScopedEnqueueFence, workerID foundation.ID, logger *slog.Logger, metrics observability.Metrics, fatalInvariants chan<- error, modelRuntimes ...*modelsettingsruntime.Models) (reindexComponents, error) {
 	models, err := modelRuntimeForComposition(cfg, modelRuntimes...)
 	if err != nil {
 		return reindexComponents{}, err
@@ -3502,7 +3679,7 @@ func newReindexComponents(db *pgxpool.Pool, cfg config.Config, processing source
 		return reindexComponents{}, foundation.NewError(foundation.ErrorConsistencyViolation, "WORKER_SOURCE_PROCESSING_UNAVAILABLE", false, errors.New("shared source processing components do not match the frozen model runtime"))
 	}
 	ids := foundation.NewUUIDGenerator(nil)
-	deliveryRepository, err := retrievalpostgres.NewDeliveryRepository(db, ids)
+	deliveryRepository, err := retrievalpostgres.NewGORMDeliveryRepository(db, ids)
 	if err != nil {
 		return reindexComponents{}, err
 	}
@@ -3517,7 +3694,15 @@ func newReindexComponents(db *pgxpool.Pool, cfg config.Config, processing source
 	if err != nil {
 		return reindexComponents{}, err
 	}
-	completion, err := retrievalapplication.NewCompletionService(processing.store, ids, cfg.ReindexDispatchErrorBackoff)
+	changeControl, err := changecontrolpostgres.NewGORMRepository(db)
+	if err != nil {
+		return reindexComponents{}, err
+	}
+	completionStore, err := retrievalpostgres.NewGORMCompletionRepository(db, changeControl)
+	if err != nil {
+		return reindexComponents{}, err
+	}
+	completion, err := retrievalapplication.NewCompletionService(completionStore, ids, cfg.ReindexDispatchErrorBackoff)
 	if err != nil {
 		return reindexComponents{}, err
 	}
@@ -3540,11 +3725,11 @@ func newReindexComponents(db *pgxpool.Pool, cfg config.Config, processing source
 	if err != nil {
 		return reindexComponents{}, err
 	}
-	inserter, err := reindexriver.NewInserter(insertClient)
+	outbox, err := workflowpostgres.NewGORMReindexOutbox(db)
 	if err != nil {
 		return reindexComponents{}, err
 	}
-	dispatcher, err := retrievalpostgres.NewDispatcher(db, ids, inserter)
+	dispatcher, err := retrievalpostgres.NewGORMDispatcher(db, ids, riverOptions, enqueueFence, outbox, changeControl)
 	if err != nil {
 		return reindexComponents{}, err
 	}

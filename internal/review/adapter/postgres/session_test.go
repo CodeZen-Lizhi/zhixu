@@ -25,7 +25,7 @@ func TestStartSessionRejectsNonReviewBindingBeforeDatabase(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			repository := &Repository{}
+			repository := &GORMRepository{}
 			_, err := repository.StartSession(context.Background(), domain.Session{
 				ID:             foundation.ID("73000000-0000-4000-8000-000000000001"),
 				WorkspaceID:    foundation.ID("73000000-0000-4000-8000-000000000002"),

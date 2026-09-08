@@ -13,15 +13,17 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"gorm.io/gorm"
 )
 
 func TestArtifactRevisionWritesCitationSelectorsInOwnerTransaction(t *testing.T) {
 	ctx := context.Background()
-	repository, pool := newArtifactIntegrationRepository(t, ctx)
+	repository, platformPool := newArtifactIntegrationGORMRepository(t, ctx)
+	pool := platformPool.DB()
 	workspaceID := artifactIntegrationID(3001)
 	seedArtifactWorkspace(t, ctx, pool, workspaceID, "artifact-selector-owner")
 	provenance := seedArtifactCitationProvenance(t, ctx, pool, workspaceID, 3010)
-	revision := insertArtifactCitationRevision(t, ctx, pool, workspaceID, 3020, provenance, time.Date(2026, 7, 27, 10, 0, 0, 0, time.UTC))
+	revision := insertArtifactCitationRevision(t, ctx, repository, workspaceID, 3020, provenance, time.Date(2026, 7, 27, 10, 0, 0, 0, time.UTC))
 
 	var artifactID, sourceVersionID, sourceSpanID string
 	if err := pool.QueryRow(ctx, `SELECT artifact_id::text,source_version_id::text,source_span_id::text
@@ -34,9 +36,9 @@ func TestArtifactRevisionWritesCitationSelectorsInOwnerTransaction(t *testing.T)
 	if artifactID != string(revision.ArtifactID) || sourceVersionID != string(provenance.sourceVersionID) || sourceSpanID != string(provenance.sourceSpanID) {
 		t.Fatalf("selector artifact=%s source_version=%s source_span=%s", artifactID, sourceVersionID, sourceSpanID)
 	}
-	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-		return insertRevisionCitationSelectors(ctx, tx, workspaceID, revision)
-	}); err != nil {
+	if err := repository.within(ctx, foundation.TransactionOptions{}, func(callbackCtx context.Context, tx *gorm.DB) error {
+		return gormInsertRevisionSelectors(callbackCtx, tx, workspaceID, revision)
+	}, "ARTIFACT_CITATION_SELECTOR_WRITE_FAILED"); err != nil {
 		t.Fatalf("replay exact owner selector write: %v", err)
 	}
 
@@ -52,9 +54,9 @@ func TestArtifactRevisionWritesCitationSelectorsInOwnerTransaction(t *testing.T)
 	}); err != nil {
 		t.Fatalf("remove selector for owner repair: %v", err)
 	}
-	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-		return insertRevisionCitationSelectors(ctx, tx, workspaceID, revision)
-	}); err != nil {
+	if err := repository.within(ctx, foundation.TransactionOptions{}, func(callbackCtx context.Context, tx *gorm.DB) error {
+		return gormInsertRevisionSelectors(callbackCtx, tx, workspaceID, revision)
+	}, "ARTIFACT_CITATION_SELECTOR_WRITE_FAILED"); err != nil {
 		t.Fatalf("repair missing owner selector: %v", err)
 	}
 	var repairedSelectors int64
@@ -70,9 +72,9 @@ func TestArtifactRevisionWritesCitationSelectorsInOwnerTransaction(t *testing.T)
 
 	driftedRevision := revision
 	driftedRevision.ArtifactID = artifactIntegrationID(3099)
-	err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-		return insertRevisionCitationSelectors(ctx, tx, workspaceID, driftedRevision)
-	})
+	err := repository.within(ctx, foundation.TransactionOptions{}, func(callbackCtx context.Context, tx *gorm.DB) error {
+		return gormInsertRevisionSelectors(callbackCtx, tx, workspaceID, driftedRevision)
+	}, "ARTIFACT_CITATION_SELECTOR_WRITE_FAILED")
 	if !artifactIntegrationErrorCode(err, artifactapp.ErrorCodeResultInconsistent) {
 		t.Fatalf("drifted owner binding error=%v", err)
 	}
@@ -84,9 +86,9 @@ func TestArtifactRevisionWritesCitationSelectorsInOwnerTransaction(t *testing.T)
 		string(extraProvenance.sourceVersionID), string(extraProvenance.sourceSpanID)); err != nil {
 		t.Fatal(err)
 	}
-	err = pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-		return insertRevisionCitationSelectors(ctx, tx, workspaceID, revision)
-	})
+	err = repository.within(ctx, foundation.TransactionOptions{}, func(callbackCtx context.Context, tx *gorm.DB) error {
+		return gormInsertRevisionSelectors(callbackCtx, tx, workspaceID, revision)
+	}, "ARTIFACT_CITATION_SELECTOR_WRITE_FAILED")
 	if !artifactIntegrationErrorCode(err, artifactapp.ErrorCodeResultInconsistent) {
 		t.Fatalf("extra owner selector error=%v", err)
 	}
@@ -139,7 +141,7 @@ func TestGORMCitationBackfillPostgreSQLResumesAndValidatesSelectors(t *testing.T
 	workspaceID := artifactIntegrationID(3901)
 	seedArtifactWorkspace(t, ctx, pool, workspaceID, "artifact-gorm-backfill")
 	provenance := seedArtifactCitationProvenance(t, ctx, pool, workspaceID, 3910)
-	revision := insertArtifactCitationRevision(t, ctx, pool, workspaceID, 3920, provenance, time.Now().UTC().Truncate(time.Microsecond))
+	revision := insertArtifactCitationRevision(t, ctx, repository, workspaceID, 3920, provenance, time.Now().UTC().Truncate(time.Microsecond))
 	if _, err := pool.Exec(ctx, `ALTER TABLE learning.artifact_revision_citation_selector DISABLE TRIGGER artifact_citation_selector_append_only`); err != nil {
 		t.Fatal(err)
 	}
@@ -178,9 +180,9 @@ func TestGORMCitationBackfillPostgreSQLSkipsLockedMarkerAndResumesSavepointFailu
 		t.Fatal(err)
 	}
 	setArtifactRevisionCitationProjection(t, ctx, pool, false)
-	firstRevision := insertArtifactCitationRevision(t, ctx, pool, damagedWorkspaceID, 3980, damagedProvenance, time.Date(2026, 7, 27, 14, 0, 0, 0, time.UTC))
-	damagedRevision := insertArtifactCitationRevision(t, ctx, pool, damagedWorkspaceID, 3990, damagedProvenance, time.Date(2026, 7, 27, 14, 1, 0, 0, time.UTC))
-	healthyRevision := insertArtifactCitationRevision(t, ctx, pool, healthyWorkspaceID, 4000, healthyProvenance, time.Date(2026, 7, 27, 15, 0, 0, 0, time.UTC))
+	firstRevision := insertArtifactCitationRevision(t, ctx, repository, damagedWorkspaceID, 3980, damagedProvenance, time.Date(2026, 7, 27, 14, 0, 0, 0, time.UTC))
+	damagedRevision := insertArtifactCitationRevision(t, ctx, repository, damagedWorkspaceID, 3990, damagedProvenance, time.Date(2026, 7, 27, 14, 1, 0, 0, time.UTC))
+	healthyRevision := insertArtifactCitationRevision(t, ctx, repository, healthyWorkspaceID, 4000, healthyProvenance, time.Date(2026, 7, 27, 15, 0, 0, 0, time.UTC))
 	setArtifactRevisionCitationProjection(t, ctx, pool, true)
 	if _, err := pool.Exec(ctx, `UPDATE core.schema_meta SET value='m7-v2',updated_at=now() WHERE key='timeline_impact'`); err != nil {
 		t.Fatal(err)
@@ -266,7 +268,8 @@ func TestGORMCitationBackfillPostgreSQLSkipsLockedMarkerAndResumesSavepointFailu
 
 func TestArtifactCitationBackfillPersistsFailureAndResumesExactValidation(t *testing.T) {
 	ctx := context.Background()
-	repository, pool := newArtifactIntegrationRepository(t, ctx)
+	repository, platformPool := newArtifactIntegrationGORMRepository(t, ctx)
+	pool := platformPool.DB()
 	workspaceID := artifactIntegrationID(3101)
 	seedArtifactWorkspace(t, ctx, pool, workspaceID, "artifact-selector-backfill")
 	provenance := seedArtifactCitationProvenance(t, ctx, pool, workspaceID, 3110)
@@ -275,7 +278,7 @@ func TestArtifactCitationBackfillPersistsFailureAndResumesExactValidation(t *tes
 		t.Fatal(err)
 	}
 	setArtifactRevisionCitationProjection(t, ctx, pool, false)
-	revision := insertArtifactCitationRevision(t, ctx, pool, workspaceID, 3120, provenance, time.Date(2026, 7, 27, 11, 0, 0, 0, time.UTC))
+	revision := insertArtifactCitationRevision(t, ctx, repository, workspaceID, 3120, provenance, time.Date(2026, 7, 27, 11, 0, 0, 0, time.UTC))
 	setArtifactRevisionCitationProjection(t, ctx, pool, true)
 	if _, err := pool.Exec(ctx, `UPDATE core.schema_meta SET value='m7-v2',updated_at=now() WHERE key='timeline_impact'`); err != nil {
 		t.Fatal(err)
@@ -349,9 +352,9 @@ func TestArtifactCitationBackfillPersistsFailureAndResumesExactValidation(t *tes
 		t.Fatal(err)
 	}
 	setArtifactRevisionCitationProjection(t, ctx, pool, false)
-	firstRevision := insertArtifactCitationRevision(t, ctx, pool, damagedWorkspaceID, 3220, damagedProvenance, time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC))
-	damagedRevision := insertArtifactCitationRevision(t, ctx, pool, damagedWorkspaceID, 3230, damagedProvenance, time.Date(2026, 7, 27, 12, 1, 0, 0, time.UTC))
-	healthyRevision := insertArtifactCitationRevision(t, ctx, pool, healthyWorkspaceID, 3320, healthyProvenance, time.Date(2026, 7, 27, 13, 0, 0, 0, time.UTC))
+	firstRevision := insertArtifactCitationRevision(t, ctx, repository, damagedWorkspaceID, 3220, damagedProvenance, time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC))
+	damagedRevision := insertArtifactCitationRevision(t, ctx, repository, damagedWorkspaceID, 3230, damagedProvenance, time.Date(2026, 7, 27, 12, 1, 0, 0, time.UTC))
+	healthyRevision := insertArtifactCitationRevision(t, ctx, repository, healthyWorkspaceID, 3320, healthyProvenance, time.Date(2026, 7, 27, 13, 0, 0, 0, time.UTC))
 	setArtifactRevisionCitationProjection(t, ctx, pool, true)
 	if _, err := pool.Exec(ctx, `UPDATE core.schema_meta SET value='m7-v2',updated_at=now() WHERE key='timeline_impact'`); err != nil {
 		t.Fatal(err)
@@ -475,7 +478,7 @@ func seedArtifactCitationProvenance(t *testing.T, ctx context.Context, db *pgxpo
 	return artifactCitationProvenance{sourceVersionID: sourceVersionID, sourceSpanID: sourceSpanID, contentHash: contentHash}
 }
 
-func insertArtifactCitationRevision(t *testing.T, ctx context.Context, pool *pgxpool.Pool, workspaceID foundation.ID, base int, provenance artifactCitationProvenance, createdAt time.Time) artifactdomain.Revision {
+func insertArtifactCitationRevision(t *testing.T, ctx context.Context, repository *GORMRepository, workspaceID foundation.ID, base int, provenance artifactCitationProvenance, createdAt time.Time) artifactdomain.Revision {
 	t.Helper()
 	revision := artifactdomain.Revision{
 		ID: artifactIntegrationID(base + 1), ArtifactID: artifactIntegrationID(base), RevisionNo: 1,
@@ -495,17 +498,17 @@ func insertArtifactCitationRevision(t *testing.T, ctx context.Context, pool *pgx
 		t.Fatal(err)
 	}
 	revision.ContentHash = hash
-	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `INSERT INTO learning.artifact(
+	if err := repository.within(ctx, foundation.TransactionOptions{}, func(callbackCtx context.Context, tx *gorm.DB) error {
+		if err := tx.WithContext(callbackCtx).Exec(`INSERT INTO learning.artifact(
 			id,workspace_id,artifact_type,title,scope,scope_definition,source_coverage,current_revision_id,
 			status,version,domain_schema_version,created_at,updated_at
-		) VALUES($1,$2,'study-guide','Selector Artifact','{}','selector test',$3,$4,
-			'DRAFT',1,'artifact/v1',$5,$5)`, string(revision.ArtifactID), string(workspaceID),
-			marshalJSON(coverageFromSections(revision.Sections)), string(revision.ID), createdAt.UTC()); err != nil {
+		) VALUES(?,?,'study-guide','Selector Artifact','{}','selector test',?::jsonb,?,
+			'DRAFT',1,'artifact/v1',?,?)`, string(revision.ArtifactID), string(workspaceID),
+			string(marshalJSON(coverageFromSections(revision.Sections))), string(revision.ID), createdAt.UTC(), createdAt.UTC()).Error; err != nil {
 			return err
 		}
-		return insertRevision(ctx, tx, workspaceID, revision)
-	}); err != nil {
+		return gormInsertRevision(callbackCtx, tx, workspaceID, revision)
+	}, "ARTIFACT_CITATION_REVISION_INSERT_FAILED"); err != nil {
 		t.Fatalf("insert Artifact citation Revision: %v (cause: %v)", err, errors.Unwrap(err))
 	}
 	return revision

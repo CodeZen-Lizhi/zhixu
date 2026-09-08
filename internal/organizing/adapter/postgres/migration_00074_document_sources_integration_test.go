@@ -19,7 +19,7 @@ import (
 func TestMigration00074ProjectsVerifiedDocumentSourcesAndGuardsDeferredRetrieval(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	pool := newOrganizingIntegrationDatabase(t, ctx)
+	repository, pool := newOrganizingIntegrationRepository(t, ctx)
 	workspaceID := organizingIntegrationID(740)
 	seedOrganizingWorkspace(t, ctx, pool, workspaceID, "organizing-v2-document-source")
 	now := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
@@ -164,10 +164,6 @@ func TestMigration00074ProjectsVerifiedDocumentSourcesAndGuardsDeferredRetrieval
 	)
 	organizingIntegrationPostgresCode(t, err, "23514")
 
-	repository, err := NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
 	if err := repository.EnsureBuiltIns(ctx, now); err != nil {
 		organizingIntegrationFatal(t, err)
 	}

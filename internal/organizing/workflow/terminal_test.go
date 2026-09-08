@@ -15,7 +15,10 @@ import (
 
 func TestTerminalHookBindsFinalReceiptAtWorkflowTerminalTime(t *testing.T) {
 	writer := &terminalResultWriterFake{}
-	hook := newTerminalHook(writer)
+	hook, err := NewScopedTerminalHook(writer)
+	if err != nil {
+		t.Fatal(err)
+	}
 	receipt := finalReceipt{
 		SchemaVersion: receiptSchemaV1,
 		ResultID:      terminalTestID(5),
@@ -35,15 +38,15 @@ func TestTerminalHookBindsFinalReceiptAtWorkflowTerminalTime(t *testing.T) {
 		NodeKind: KnowledgeReportNodeKind, NodeAttemptID: terminalTestID(8),
 		Outcome: workflowapp.WorkflowTerminalOutcomeSucceeded, TerminalOutput: string(output), TerminalAt: terminalAt,
 	}
-	transaction := &struct{ name string }{name: "runtime transaction"}
-	if err := hook.OnWorkflowNodeTerminal(context.Background(), transaction, event); err != nil {
+	transaction := writer
+	if err := hook.OnWorkflowNodeTerminalScoped(context.Background(), transaction, event); err != nil {
 		t.Fatal(err)
 	}
 	if writer.calls != 1 || writer.transaction != transaction {
 		t.Fatalf("writer calls=%d transaction=%p", writer.calls, writer.transaction)
 	}
 	got := writer.request
-	if got.DefinitionKey != KnowledgeReportDefinitionKey || got.Result.ID != receipt.ResultID ||
+	if got.DefinitionKey != KnowledgeReportDefinitionKey || got.DefinitionVersion != DefinitionVersion || got.Result.ID != receipt.ResultID ||
 		got.Result.WorkspaceID != event.WorkspaceID || got.Result.RunBindingID != receipt.RunBindingID ||
 		got.Result.SnapshotID != receipt.SnapshotID || got.Result.WorkflowRunID != event.WorkflowRunID ||
 		got.Result.NodeRunID != event.NodeRunID || got.Result.Kind != receipt.Kind ||
@@ -62,7 +65,11 @@ func TestTerminalHookIgnoresNonFinalAndUnsuccessfulNodes(t *testing.T) {
 	}
 	for _, event := range tests {
 		writer := &terminalResultWriterFake{}
-		if err := newTerminalHook(writer).OnWorkflowNodeTerminal(context.Background(), nil, event); err != nil {
+		hook, err := NewScopedTerminalHook(writer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := hook.OnWorkflowNodeTerminalScoped(context.Background(), nil, event); err != nil {
 			t.Fatalf("event=%+v error=%v", event, err)
 		}
 		if writer.calls != 0 {
@@ -89,7 +96,11 @@ func TestTerminalHookRejectsMismatchedOrMalformedReceipt(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			writer := &terminalResultWriterFake{}
-			err := newTerminalHook(writer).OnWorkflowNodeTerminal(context.Background(), struct{}{}, workflowapp.WorkflowNodeTerminalEvent{
+			hook, err := NewScopedTerminalHook(writer)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = hook.OnWorkflowNodeTerminalScoped(context.Background(), writer, workflowapp.WorkflowNodeTerminalEvent{
 				WorkspaceID: terminalTestID(1), WorkflowRunID: terminalTestID(2), NodeRunID: terminalTestID(7),
 				NodeKind: test.nodeKind, NodeAttemptID: terminalTestID(8), Outcome: workflowapp.WorkflowTerminalOutcomeSucceeded,
 				TerminalOutput: test.output, TerminalAt: time.Date(2026, 8, 3, 5, 0, 0, 0, time.UTC),
@@ -108,12 +119,16 @@ func TestTerminalHookRejectsMismatchedOrMalformedReceipt(t *testing.T) {
 func TestTerminalHookPropagatesTransactionalWriteFailure(t *testing.T) {
 	cause := foundation.NewError(foundation.ErrorRetryableFailure, organizingapp.ErrorCodeRepositoryUnavailable, true, errors.New("serialization failure"))
 	writer := &terminalResultWriterFake{err: cause}
+	hook, err := NewScopedTerminalHook(writer)
+	if err != nil {
+		t.Fatal(err)
+	}
 	receipt := finalReceipt{
 		SchemaVersion: receiptSchemaV1, ResultID: terminalTestID(5), RunBindingID: terminalTestID(4),
 		SnapshotID: terminalTestID(3), Kind: organizingdomain.ResultMergeProposal,
 		ResultRef: terminalTestID(6), ResultHash: terminalTestHash("c"),
 	}
-	err := newTerminalHook(writer).OnWorkflowNodeTerminal(context.Background(), struct{}{}, workflowapp.WorkflowNodeTerminalEvent{
+	err = hook.OnWorkflowNodeTerminalScoped(context.Background(), writer, workflowapp.WorkflowNodeTerminalEvent{
 		WorkspaceID: terminalTestID(1), WorkflowRunID: terminalTestID(2), NodeRunID: terminalTestID(7),
 		NodeKind: MergeProposalNodeKind, NodeAttemptID: terminalTestID(8), Outcome: workflowapp.WorkflowTerminalOutcomeSucceeded,
 		TerminalOutput: terminalReceiptJSON(t, receipt), TerminalAt: time.Date(2026, 8, 3, 5, 0, 0, 0, time.UTC),
@@ -125,12 +140,14 @@ func TestTerminalHookPropagatesTransactionalWriteFailure(t *testing.T) {
 
 type terminalResultWriterFake struct {
 	calls       int
-	transaction any
-	request     terminalResultRequest
+	transaction foundation.TransactionScope
+	request     organizingapp.TerminalResultRequest
 	err         error
 }
 
-func (writer *terminalResultWriterFake) BindSucceededResult(_ context.Context, transaction any, request terminalResultRequest) error {
+func (writer *terminalResultWriterFake) TransactionScope() {}
+
+func (writer *terminalResultWriterFake) BindSucceededResultScoped(_ context.Context, transaction foundation.TransactionScope, request organizingapp.TerminalResultRequest) error {
 	writer.calls++
 	writer.transaction = transaction
 	writer.request = request

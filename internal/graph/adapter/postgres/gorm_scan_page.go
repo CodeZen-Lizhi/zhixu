@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"sort"
 
@@ -11,20 +12,21 @@ import (
 	graphdomain "github.com/CodeZen-Lizhi/zhixu/internal/graph/domain"
 	knowledge "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
+	"github.com/lib/pq"
 	"gorm.io/gorm"
 )
 
 const gormTopicPairExclusionsSQL = `
 	WITH requested AS (
 		SELECT input.left_type,input.left_id,input.right_type,input.right_id,input.ordinality
-		FROM unnest($2::text[],$3::uuid[],$4::text[],$5::uuid[]) WITH ORDINALITY
+		FROM unnest((@p2)::text[],(@p3)::uuid[],(@p4)::text[],(@p5)::uuid[]) WITH ORDINALITY
 			AS input(left_type,left_id,right_type,right_id,ordinality)
 	)
 	SELECT requested.left_type,requested.left_id::text,requested.right_type,requested.right_id::text,
 		CASE
 		WHEN EXISTS (
 			SELECT 1 FROM core.relation relation
-			WHERE relation.workspace_id=$1 AND relation.status IN ('CONFIRMED','STALE')
+			WHERE relation.workspace_id=(@p1) AND relation.status IN ('CONFIRMED','STALE')
 			  AND ((relation.source_node_type=requested.left_type AND relation.source_node_id=requested.left_id AND relation.target_node_type=requested.right_type AND relation.target_node_id=requested.right_id)
 			    OR (relation.source_node_type=requested.right_type AND relation.source_node_id=requested.right_id AND relation.target_node_type=requested.left_type AND relation.target_node_id=requested.left_id))
 		) THEN 'FORMAL_RELATION'
@@ -32,7 +34,7 @@ const gormTopicPairExclusionsSQL = `
 			SELECT 1
 			FROM change_control.proposal proposal
 			JOIN change_control.proposal_revision revision ON revision.proposal_id=proposal.id
-			WHERE proposal.workspace_id=$1 AND proposal.proposal_type='knowledge_change'
+			WHERE proposal.workspace_id=(@p1) AND proposal.proposal_type='knowledge_change'
 			  AND proposal.status NOT IN ('rejected','needs_revision','completed','cancelled','rolled_back')
 			  AND ((COALESCE(revision.change_set->'source'->>'Type',revision.change_set->'source'->>'type')=requested.left_type
 			        AND COALESCE(revision.change_set->'source'->>'ID',revision.change_set->'source'->>'id')=requested.left_id::text
@@ -50,14 +52,14 @@ const gormTopicPairExclusionsSQL = `
 const gormSmartCollectionPairExclusionsSQL = `
 	WITH requested AS (
 		SELECT input.left_type,input.left_id,input.right_type,input.right_id,input.ordinality
-		FROM unnest($2::text[],$3::uuid[],$4::text[],$5::uuid[]) WITH ORDINALITY
+		FROM unnest((@p2)::text[],(@p3)::uuid[],(@p4)::text[],(@p5)::uuid[]) WITH ORDINALITY
 			AS input(left_type,left_id,right_type,right_id,ordinality)
 	)
 	SELECT requested.left_type,requested.left_id::text,requested.right_type,requested.right_id::text,
 		CASE
 		WHEN EXISTS (
 			SELECT 1 FROM core.relation relation
-			WHERE relation.workspace_id=$1 AND relation.status IN ('CONFIRMED','STALE')
+			WHERE relation.workspace_id=(@p1) AND relation.status IN ('CONFIRMED','STALE')
 			  AND ((relation.source_node_type=requested.left_type AND relation.source_node_id=requested.left_id
 			        AND relation.target_node_type=requested.right_type AND relation.target_node_id=requested.right_id)
 			    OR (relation.source_node_type=requested.right_type AND relation.source_node_id=requested.right_id
@@ -67,7 +69,7 @@ const gormSmartCollectionPairExclusionsSQL = `
 			SELECT 1
 			FROM change_control.proposal proposal
 			JOIN change_control.proposal_revision revision ON revision.proposal_id=proposal.id
-			WHERE proposal.workspace_id=$1 AND proposal.proposal_type='knowledge_change'
+			WHERE proposal.workspace_id=(@p1) AND proposal.proposal_type='knowledge_change'
 			  AND proposal.status NOT IN ('rejected','needs_revision','completed','cancelled','rolled_back')
 			  AND ((COALESCE(revision.change_set->'source'->>'type',revision.change_set->'source'->>'Type')=requested.left_type
 			        AND COALESCE(revision.change_set->'source'->>'id',revision.change_set->'source'->>'ID')=requested.left_id::text
@@ -97,7 +99,7 @@ type GORMSemanticLinkTopicScanPlanner struct {
 
 var _ graphapp.SemanticLinkTopicScanPlanner = (*GORMSemanticLinkTopicScanPlanner)(nil)
 
-// NewGORMSemanticLinkTopicScanPlanner constructs the staged Topic planner.
+// NewGORMSemanticLinkTopicScanPlanner constructs the Topic planner.
 func NewGORMSemanticLinkTopicScanPlanner(pool *platformpostgres.Pool) (*GORMSemanticLinkTopicScanPlanner, error) {
 	if pool == nil {
 		return nil, scanRepositoryUnavailable(errors.New("semantic link GORM scan planner pool is missing"))
@@ -135,8 +137,8 @@ func (planner *GORMSemanticLinkTopicScanPlanner) PlanTopicScan(ctx context.Conte
 		LEFT JOIN core.claim claim
 		  ON claim.workspace_id=topic.workspace_id AND claim.id=relation.source_node_id
 		 AND claim.status IN ('CONFIRMED','DISPUTED')
-		WHERE topic.workspace_id=$1 AND topic.id=$2 AND topic.status='ACTIVE'
-		GROUP BY topic.version`, string(workspaceID), string(topicID))
+		WHERE topic.workspace_id=(@p1) AND topic.id=(@p2) AND topic.status='ACTIVE'
+		GROUP BY topic.version`, sql.Named("p1", string(workspaceID)), sql.Named("p2", string(topicID)))
 	if err != nil {
 		return graphapp.SemanticLinkTopicScanPlan{}, classifyGORMScan(ctx, err, "GRAPH_SEMANTIC_LINK_SCAN_PLAN_FAILED")
 	}
@@ -157,7 +159,7 @@ type GORMSemanticLinkTopicScanPageRepository struct {
 
 var _ graphapp.SemanticLinkTopicScanPageSource = (*GORMSemanticLinkTopicScanPageRepository)(nil)
 
-// NewGORMSemanticLinkTopicScanPageRepository constructs the staged Topic page source.
+// NewGORMSemanticLinkTopicScanPageRepository constructs the Topic page source.
 func NewGORMSemanticLinkTopicScanPageRepository(pool *platformpostgres.Pool) (*GORMSemanticLinkTopicScanPageRepository, error) {
 	if pool == nil {
 		return nil, scanRepositoryUnavailable(errors.New("semantic link GORM Topic page pool is missing"))
@@ -212,7 +214,7 @@ func validateGORMTopicScanPageRequest(request graphapp.SemanticLinkTopicScanPage
 }
 
 func gormLoadTopicScanPage(ctx context.Context, database *gorm.DB, request graphapp.SemanticLinkTopicScanPageRequest, topicID foundation.ID) (graphapp.SemanticLinkTopicScanPage, error) {
-	row, err := gormRawRow(ctx, database, `SELECT version FROM core.topic WHERE workspace_id=$1 AND id=$2 AND status='ACTIVE'`, string(request.WorkspaceID), string(topicID))
+	row, err := gormRawRow(ctx, database, `SELECT version FROM core.topic WHERE workspace_id=(@p1) AND id=(@p2) AND status='ACTIVE'`, sql.Named("p1", string(request.WorkspaceID)), sql.Named("p2", string(topicID)))
 	if err != nil {
 		return graphapp.SemanticLinkTopicScanPage{}, classifyGORMScan(ctx, err, "GRAPH_SEMANTIC_LINK_SCAN_PAGE_SCOPE_FAILED")
 	}
@@ -261,7 +263,7 @@ func gormLoadTopicClaimNodes(ctx context.Context, database *gorm.DB, request gra
 		JOIN core.relation scoped
 		  ON scoped.workspace_id=claim.workspace_id
 		 AND scoped.source_node_type='CLAIM' AND scoped.source_node_id=claim.id
-		 AND scoped.target_node_type='TOPIC' AND scoped.target_node_id=$2
+		 AND scoped.target_node_type='TOPIC' AND scoped.target_node_id=(@p2)
 		 AND scoped.relation_type='BELONGS_TO' AND scoped.status='CONFIRMED'
 		LEFT JOIN core.relation membership
 		  ON membership.workspace_id=claim.workspace_id
@@ -270,11 +272,11 @@ func gormLoadTopicClaimNodes(ctx context.Context, database *gorm.DB, request gra
 		 AND membership.status='CONFIRMED'
 		LEFT JOIN core.claim_source source
 		  ON source.workspace_id=claim.workspace_id AND source.claim_id=claim.id
-		WHERE claim.workspace_id=$1 AND claim.status IN ('CONFIRMED','DISPUTED')
-		  AND ($3='' OR claim.id::text>$3)
+		WHERE claim.workspace_id=(@p1) AND claim.status IN ('CONFIRMED','DISPUTED')
+		  AND ((@p3)='' OR claim.id::text>(@p3))
 		GROUP BY claim.id,claim.version,claim.statement,claim.status
 		ORDER BY claim.id
-		LIMIT $4`, string(request.WorkspaceID), string(topicID), request.Cursor, request.Limit+1)
+		LIMIT (@p4)`, sql.Named("p1", string(request.WorkspaceID)), sql.Named("p2", string(topicID)), sql.Named("p3", request.Cursor), sql.Named("p4", request.Limit+1))
 	if err != nil {
 		return nil, false, classifyGORMScan(ctx, err, "GRAPH_SEMANTIC_LINK_SCAN_PAGE_QUERY_FAILED")
 	}
@@ -307,7 +309,7 @@ func gormLoadTopicClaimPairs(ctx context.Context, database *gorm.DB, workspaceID
 		sourceIDs[index] = string(source.Endpoint.Ref.ID)
 		nodes[source.Endpoint.Ref.ID] = source
 	}
-	rows, err := gormRawRows(ctx, database, semanticLinkTopicClaimPairsSQL, string(workspaceID), string(topicID), sourceIDs, graphapp.MaxSemanticLinkScanPagePairsPerNode)
+	rows, err := gormRawRows(ctx, database, semanticLinkTopicClaimPairsSQL, sql.Named("p1", string(workspaceID)), sql.Named("p2", string(topicID)), sql.Named("p3", pq.Array(sourceIDs)), sql.Named("p4", graphapp.MaxSemanticLinkScanPagePairsPerNode))
 	if err != nil {
 		return nil, classifyGORMScan(ctx, err, "GRAPH_SEMANTIC_LINK_SCAN_PAIR_QUERY_FAILED")
 	}
@@ -363,7 +365,7 @@ func gormLoadTopicClaimNodesByID(ctx context.Context, database *gorm.DB, workspa
 		JOIN core.relation scoped
 		  ON scoped.workspace_id=claim.workspace_id
 		 AND scoped.source_node_type='CLAIM' AND scoped.source_node_id=claim.id
-		 AND scoped.target_node_type='TOPIC' AND scoped.target_node_id=$2
+		 AND scoped.target_node_type='TOPIC' AND scoped.target_node_id=(@p2)
 		 AND scoped.relation_type='BELONGS_TO' AND scoped.status='CONFIRMED'
 		LEFT JOIN core.relation membership
 		  ON membership.workspace_id=claim.workspace_id
@@ -372,9 +374,9 @@ func gormLoadTopicClaimNodesByID(ctx context.Context, database *gorm.DB, workspa
 		 AND membership.status='CONFIRMED'
 		LEFT JOIN core.claim_source source
 		  ON source.workspace_id=claim.workspace_id AND source.claim_id=claim.id
-		WHERE claim.workspace_id=$1 AND claim.status IN ('CONFIRMED','DISPUTED') AND claim.id=ANY($3::uuid[])
+		WHERE claim.workspace_id=(@p1) AND claim.status IN ('CONFIRMED','DISPUTED') AND claim.id=ANY((@p3)::uuid[])
 		GROUP BY claim.id,claim.version,claim.statement,claim.status
-		ORDER BY claim.id`, string(workspaceID), string(topicID), claimIDs)
+		ORDER BY claim.id`, sql.Named("p1", string(workspaceID)), sql.Named("p2", string(topicID)), sql.Named("p3", pq.Array(claimIDs)))
 	if err != nil {
 		return nil, classifyGORMScan(ctx, err, "GRAPH_SEMANTIC_LINK_SCAN_PAIR_NODE_QUERY_FAILED")
 	}
@@ -428,7 +430,7 @@ type GORMSmartCollectionScanPlanner struct {
 
 var _ graphapp.SemanticLinkSmartCollectionScanPlanner = (*GORMSmartCollectionScanPlanner)(nil)
 
-// NewGORMSmartCollectionScanPlanner constructs the staged Smart planner.
+// NewGORMSmartCollectionScanPlanner constructs the Smart planner.
 func NewGORMSmartCollectionScanPlanner(reader graphapp.SmartCollectionScanReader) (*GORMSmartCollectionScanPlanner, error) {
 	if isNilScanDependency(reader) {
 		return nil, scanRepositoryUnavailable(errors.New("smart collection GORM scan reader is missing"))
@@ -444,7 +446,20 @@ func (planner *GORMSmartCollectionScanPlanner) PlanSmartCollectionScan(ctx conte
 	if ctx == nil {
 		return graphapp.SemanticLinkSmartCollectionScanPlan{}, scanRepositoryInvalid(errors.New("smart collection GORM scan context is nil"))
 	}
-	return (&SmartCollectionScanPlanner{reader: planner.reader}).PlanSmartCollectionScan(ctx, workspaceID, collectionID)
+	if !validID(workspaceID) || !validID(collectionID) {
+		return graphapp.SemanticLinkSmartCollectionScanPlan{}, scanRepositoryInvalid(errors.New("smart collection scan identity is invalid"))
+	}
+	binding, err := planner.reader.PlanDurableScan(ctx, workspaceID, collectionID)
+	if err != nil {
+		return graphapp.SemanticLinkSmartCollectionScanPlan{}, err
+	}
+	if binding.WorkspaceID != workspaceID || binding.CollectionID != collectionID || binding.CollectionVersion < 1 || binding.ExactCount < 0 || !canonicalScanHash(binding.QueryHash) || !canonicalScanHash(binding.ReadModelRevision) {
+		return graphapp.SemanticLinkSmartCollectionScanPlan{}, scanRepositoryConsistency(errors.New("smart collection durable scan plan is invalid"))
+	}
+	return graphapp.SemanticLinkSmartCollectionScanPlan{
+		WorkspaceID: workspaceID, CollectionID: collectionID, CollectionVersion: binding.CollectionVersion,
+		QueryHash: binding.QueryHash, ReadModelRevision: binding.ReadModelRevision, TotalNodes: binding.ExactCount,
+	}, nil
 }
 
 // GORMSmartCollectionScanPageRepository keeps the existing cross-owner
@@ -457,7 +472,7 @@ type GORMSmartCollectionScanPageRepository struct {
 
 var _ graphapp.SemanticLinkTopicScanPageSource = (*GORMSmartCollectionScanPageRepository)(nil)
 
-// NewGORMSmartCollectionScanPageRepository constructs the staged Smart page source.
+// NewGORMSmartCollectionScanPageRepository constructs the Smart page source.
 func NewGORMSmartCollectionScanPageRepository(pool *platformpostgres.Pool, reader graphapp.SmartCollectionScanReader) (*GORMSmartCollectionScanPageRepository, error) {
 	if pool == nil || isNilScanDependency(reader) {
 		return nil, scanRepositoryUnavailable(errors.New("smart collection GORM scan page dependencies are missing"))
@@ -557,7 +572,7 @@ func gormLoadPairExclusions(ctx context.Context, database *gorm.DB, workspaceID 
 		leftTypes[index], leftIDs[index] = string(pair.Source.Endpoint.Ref.Type), string(pair.Source.Endpoint.Ref.ID)
 		rightTypes[index], rightIDs[index] = string(pair.Target.Endpoint.Ref.Type), string(pair.Target.Endpoint.Ref.ID)
 	}
-	rows, err := gormRawRows(ctx, database, query, string(workspaceID), leftTypes, leftIDs, rightTypes, rightIDs)
+	rows, err := gormRawRows(ctx, database, query, sql.Named("p1", string(workspaceID)), sql.Named("p2", pq.Array(leftTypes)), sql.Named("p3", pq.Array(leftIDs)), sql.Named("p4", pq.Array(rightTypes)), sql.Named("p5", pq.Array(rightIDs)))
 	if err != nil {
 		return nil, classifyGORMScan(ctx, err, "GRAPH_SEMANTIC_LINK_SCAN_EXCLUSION_QUERY_FAILED")
 	}

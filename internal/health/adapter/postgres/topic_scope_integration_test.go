@@ -22,7 +22,8 @@ import (
 
 func TestTopicScopeReaderAndMissingSetUseConfirmedMembership(t *testing.T) {
 	ctx := context.Background()
-	pool := newHealthIntegrationPool(t)
+	platform := requireHealthIntegrationPlatform(t)
+	pool := platform.DB()
 	fixture, err := graphfixture.SeedFunctional(ctx, pool)
 	if err != nil {
 		t.Fatal(err)
@@ -30,6 +31,7 @@ func TestTopicScopeReaderAndMissingSetUseConfirmedMembership(t *testing.T) {
 	t.Cleanup(func() {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
+		defer cleanupHealthIntegrationWorkspace(t, pool, fixture.WorkspaceID)
 		if cleanupErr := graphfixture.Cleanup(cleanupCtx, pool, fixture.WorkspaceID); cleanupErr != nil {
 			t.Errorf("cleanup graph fixture: %v", cleanupErr)
 		}
@@ -54,7 +56,11 @@ WHERE workspace_id=$1 AND id=$2`, string(fixture.WorkspaceID), string(fixture.Me
 	orphanClaimID := seedConfirmedClaimWithSuggestedMembership(t, ctx, tx, fixture, now)
 	isolatedTopicID := seedIsolatedTopic(t, ctx, tx, fixture.WorkspaceID, now)
 
-	reader, err := NewFactReader(tx)
+	scanID := seedTopicScopeScan(t, ctx, tx, fixture.WorkspaceID, fixture.PrimaryTopicID, now)
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := NewGORMFactReader(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,8 +78,7 @@ WHERE workspace_id=$1 AND id=$2`, string(fixture.WorkspaceID), string(fixture.Me
 	isolatedOrphans := readTopicDetectorPage(t, ctx, reader, healthdetector.DetectorOrphan, fixture.WorkspaceID, isolatedTopicID, 0)
 	assertFinding(t, isolatedOrphans, domain.ObjectTypeTopic, isolatedTopicID, true)
 
-	scanID := seedTopicScopeScan(t, ctx, tx, fixture.WorkspaceID, fixture.PrimaryTopicID, now)
-	repository, err := NewIssueRepository(tx)
+	repository, err := NewGORMIssueRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +110,7 @@ WHERE workspace_id=$1 AND id=$2`, string(fixture.WorkspaceID), string(fixture.Me
 		}
 	}
 	var scanResolved, orphanResolved, indexResolved int64
-	if err := tx.QueryRow(ctx, `SELECT scan.resolved_count,
+	if err := pool.QueryRow(ctx, `SELECT scan.resolved_count,
   (SELECT resolved_count FROM ops.health_scan_detector WHERE scan_id=scan.id AND detector_id=$2),
   (SELECT resolved_count FROM ops.health_scan_detector WHERE scan_id=scan.id AND detector_id=$3)
 FROM ops.health_scan scan WHERE scan.id=$1`, string(scanID), healthdetector.DetectorOrphan, healthdetector.DetectorIndexError).Scan(&scanResolved, &orphanResolved, &indexResolved); err != nil {
@@ -119,7 +124,7 @@ FROM ops.health_scan scan WHERE scan.id=$1`, string(scanID), healthdetector.Dete
 	}
 }
 
-func readTopicDetectorPage(t *testing.T, ctx context.Context, reader *FactReader, detectorID string, workspaceID, topicID foundation.ID, threshold float64) healthapp.Page {
+func readTopicDetectorPage(t *testing.T, ctx context.Context, reader *GORMFactReader, detectorID string, workspaceID, topicID foundation.ID, threshold float64) healthapp.Page {
 	t.Helper()
 	page, err := reader.Find(ctx, detectorID, healthapp.PageRequest{
 		Scope:                  healthapp.Scope{WorkspaceID: workspaceID, Type: domain.ScanScopeTypeTopic, Ref: topicID, Version: 1},

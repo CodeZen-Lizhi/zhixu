@@ -7,8 +7,7 @@ import (
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/audit/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	"gorm.io/gorm"
 )
 
@@ -35,16 +34,13 @@ func classifyStoreError(err error) error {
 	if auditNoRows(err) {
 		return foundation.NewError(foundation.ErrorNotFound, domain.ErrorCodeEventNotFound, false, errors.New("audit event was not found"))
 	}
-	var postgresError *pgconn.PgError
-	if errors.As(err, &postgresError) {
-		switch postgresError.Code {
-		case "23503", "23514":
-			return foundation.NewError(foundation.ErrorConsistencyViolation, domain.ErrorCodeEventInvalid, false, errors.New("audit database constraint rejected event"))
-		case "23505":
-			return appendConflict()
-		case "40001", "40P01":
-			return foundation.NewError(foundation.ErrorRetryableFailure, domain.ErrorCodeStoreUnavailable, true, errors.New("audit database transaction should be retried"))
-		}
+	switch platformpostgres.SQLState(err) {
+	case "23503", "23514":
+		return foundation.NewError(foundation.ErrorConsistencyViolation, domain.ErrorCodeEventInvalid, false, errors.New("audit database constraint rejected event"))
+	case "23505":
+		return appendConflict()
+	case "40001", "40P01":
+		return foundation.NewError(foundation.ErrorRetryableFailure, domain.ErrorCodeStoreUnavailable, true, errors.New("audit database transaction should be retried"))
 	}
 	// Do not wrap or expose a driver error string: it may contain SQL values,
 	// DSNs, Cookie/Token data, or absolute paths supplied by a caller.
@@ -52,5 +48,5 @@ func classifyStoreError(err error) error {
 }
 
 func auditNoRows(err error) bool {
-	return errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows) || errors.Is(err, gorm.ErrRecordNotFound)
+	return errors.Is(err, sql.ErrNoRows) || errors.Is(err, gorm.ErrRecordNotFound)
 }

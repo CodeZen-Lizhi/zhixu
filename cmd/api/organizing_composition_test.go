@@ -6,13 +6,13 @@ import (
 	"time"
 
 	authoringapplication "github.com/CodeZen-Lizhi/zhixu/internal/authoring/application"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	workflowpostgres "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/postgres"
 	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestNewOrganizingHandlerRequiresEveryOwnerBoundary(t *testing.T) {
-	pool := &pgxpool.Pool{}
+	pool := apiConstructorPool(t)
 	workspaces := fakeSourceMaterialRepository{}
 	files := fakeFileScanner{}
 	authoring := organizingAuthoringReaderFake{}
@@ -20,7 +20,7 @@ func TestNewOrganizingHandlerRequiresEveryOwnerBoundary(t *testing.T) {
 	tests := []struct {
 		name       string
 		ctx        context.Context
-		pool       *pgxpool.Pool
+		pool       *platformpostgres.Pool
 		workspaces fakeSourceMaterialRepository
 		files      fakeFileScanner
 		authoring  organizingAuthoringReaderFake
@@ -51,8 +51,8 @@ func TestNewOrganizingHandlerRequiresEveryOwnerBoundary(t *testing.T) {
 }
 
 func TestNewOrganizingHumanTaskReviewProjectorRequiresDatabaseAndRuntime(t *testing.T) {
-	pool := &pgxpool.Pool{}
-	runtime := &workflowpostgres.RuntimeRepository{}
+	pool := apiConstructorPool(t)
+	runtime := &workflowpostgres.GORMRuntimeRepository{}
 	if projector, err := newOrganizingHumanTaskReviewProjector(nil, runtime); err == nil || projector != nil {
 		t.Fatalf("nil database projector=%#v error=%v", projector, err)
 	}

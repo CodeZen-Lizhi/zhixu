@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"sort"
 
@@ -10,10 +11,11 @@ import (
 	graphdomain "github.com/CodeZen-Lizhi/zhixu/internal/graph/domain"
 	knowledge "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
 	"github.com/lib/pq"
+	"gorm.io/gorm"
 )
 
 // GORMSemanticLinkDiscoveryCandidateWriter persists bounded rule-discovery
-// output through the same staged GORMRepository used for Candidate commands.
+// output through the same GORMRepository used for Candidate commands.
 // It never owns a second database root or transaction boundary.
 type GORMSemanticLinkDiscoveryCandidateWriter struct {
 	repository *GORMRepository
@@ -23,7 +25,7 @@ type GORMSemanticLinkDiscoveryCandidateWriter struct {
 
 var _ graphapp.SemanticLinkDiscoveryCandidateWriter = (*GORMSemanticLinkDiscoveryCandidateWriter)(nil)
 
-// NewGORMSemanticLinkDiscoveryCandidateWriter creates the staged rule-only
+// NewGORMSemanticLinkDiscoveryCandidateWriter creates the rule-only
 // Candidate writer from one already-constructed GORMRepository.
 func NewGORMSemanticLinkDiscoveryCandidateWriter(repository *GORMRepository, ids foundation.IDGenerator, clock foundation.Clock) (*GORMSemanticLinkDiscoveryCandidateWriter, error) {
 	if repository == nil || !validGraphGORMDatabase(repository.database) || nilGraphGORMDependency(repository.unitOfWork) || isNilScanDependency(ids) || isNilScanDependency(clock) {
@@ -138,27 +140,27 @@ func (writer *GORMSemanticLinkDiscoveryCandidateWriter) loadClaimEvidence(ctx co
 		return result, nil
 	}
 
-	err := writer.repository.readSnapshot(ctx, func(callbackCtx context.Context, database *gormDB) error {
-		rows, queryErr := database.Query(callbackCtx, `
+	err := writer.repository.gormReadSnapshot(ctx, func(callbackCtx context.Context, database *gorm.DB) error {
+		rows, queryErr := gormRawRows(callbackCtx, database, `
 			SELECT evidence.claim_id::text,evidence.id::text,evidence.source_version_id::text,evidence.source_span_id::text,
 			       evidence.evidence_hash,evidence.reason,
 			       COALESCE((
 			           SELECT chunk.content
 			           FROM ingestion.canonical_chunk chunk
-			           WHERE chunk.workspace_id=$1 AND chunk.source_span_id=evidence.source_span_id
+			           WHERE chunk.workspace_id=(@p1) AND chunk.source_span_id=evidence.source_span_id
 			           ORDER BY chunk.sequence,chunk.id
 			           LIMIT 1
 			       ),evidence.reason)
-			FROM unnest($2::uuid[]) requested(claim_id)
+			FROM unnest((@p2)::uuid[]) requested(claim_id)
 			CROSS JOIN LATERAL (
 			    SELECT claim_source.claim_id,claim_source.id,claim_source.source_version_id,claim_source.source_span_id,
 			           claim_source.evidence_hash,claim_source.reason
 			    FROM core.claim_source claim_source
-			    WHERE claim_source.workspace_id=$1 AND claim_source.claim_id=requested.claim_id
+			    WHERE claim_source.workspace_id=(@p1) AND claim_source.claim_id=requested.claim_id
 			    ORDER BY claim_source.evidence_hash,claim_source.id
 			    LIMIT 2
 			) evidence
-			ORDER BY evidence.claim_id,evidence.evidence_hash,evidence.id`, string(workspaceID), pq.Array(claimIDs))
+			ORDER BY evidence.claim_id,evidence.evidence_hash,evidence.id`, sql.Named("p1", string(workspaceID)), sql.Named("p2", pq.Array(claimIDs)))
 		if queryErr != nil {
 			return queryErr
 		}

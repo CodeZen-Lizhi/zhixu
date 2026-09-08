@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,14 +16,13 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation/strictjson"
 	healthapp "github.com/CodeZen-Lizhi/zhixu/internal/health/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/health/domain"
-	"github.com/jackc/pgx/v5"
 )
 
 const healthScheduleDispatchLease = 2 * time.Minute
 
 // ScheduleRepository 持久化 Health Schedule 并以 DB time/SKIP LOCKED 领取 due rows。
 type ScheduleRepository struct {
-	db            scanDB
+	db            healthStore
 	ids           foundation.IDGenerator
 	dispatchLease time.Duration
 }
@@ -30,8 +30,8 @@ type ScheduleRepository struct {
 var _ healthapp.ScheduleStatePort = (*ScheduleRepository)(nil)
 var _ healthapp.ScheduleDispatchPort = (*ScheduleRepository)(nil)
 
-// NewScheduleRepository 构造 schedule repository。
-func NewScheduleRepository(db scanDB, ids foundation.IDGenerator, dispatchLeases ...time.Duration) (*ScheduleRepository, error) {
+// newScheduleRepository 构造 schedule repository。
+func newScheduleRepository(db healthStore, ids foundation.IDGenerator, dispatchLeases ...time.Duration) (*ScheduleRepository, error) {
 	if nilScanValue(db) || nilScanValue(ids) || len(dispatchLeases) > 1 {
 		return nil, repositoryUnavailable(errors.New("health schedule repository dependencies are missing"))
 	}
@@ -54,11 +54,22 @@ func (repository *ScheduleRepository) Create(ctx context.Context, command health
 	if err != nil || !validScheduleCommandKey(command.IdempotencyKey) {
 		return domain.Schedule{}, repositoryInvalid(errors.New("health schedule create idempotency binding is invalid"))
 	}
-	tx, err := repository.db.Begin(ctx)
-	if err != nil {
-		return domain.Schedule{}, classifyScanError(err, "HEALTH_SCHEDULE_CREATE_BEGIN_FAILED")
+	result, err := withHealthTransaction(ctx, repository.db, foundation.TransactionOptions{}, func(ctx context.Context, tx healthTransaction) (domain.Schedule, error) {
+		return repository.createTx(ctx, tx, command, requestHash)
+	})
+	if healthCommitFailed(err) {
+		if receipt, found, recoveryErr := loadScheduleCommand(ctx, repository.db, command.WorkspaceID, command.IdempotencyKey, false); recoveryErr == nil && found && receipt.RequestHash == requestHash && receipt.CommandType == "CREATE" {
+			return receipt.Schedule, nil
+		}
+		return domain.Schedule{}, classifyScanError(err, "HEALTH_SCHEDULE_CREATE_COMMIT_FAILED")
 	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
+	if err != nil {
+		return domain.Schedule{}, classifyHealthTransactionError(err, "HEALTH_SCHEDULE_CREATE_BEGIN_FAILED", "HEALTH_SCHEDULE_CREATE_COMMIT_FAILED")
+	}
+	return result, nil
+}
+
+func (repository *ScheduleRepository) createTx(ctx context.Context, tx healthTransaction, command healthapp.ScheduleCreateCommand, requestHash string) (domain.Schedule, error) {
 	if err := lockScheduleWorkspace(ctx, tx, command.WorkspaceID); err != nil {
 		return domain.Schedule{}, err
 	}
@@ -91,12 +102,6 @@ VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NULL,1,$13,$13)`, string(schedule.
 	if err := insertScheduleCommand(ctx, tx, command.WorkspaceID, command.IdempotencyKey, requestHash, "CREATE", schedule); err != nil {
 		return domain.Schedule{}, err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		if receipt, found, recoveryErr := loadScheduleCommand(ctx, repository.db, command.WorkspaceID, command.IdempotencyKey, false); recoveryErr == nil && found && receipt.RequestHash == requestHash && receipt.CommandType == "CREATE" {
-			return receipt.Schedule, nil
-		}
-		return domain.Schedule{}, classifyScanError(err, "HEALTH_SCHEDULE_CREATE_COMMIT_FAILED")
-	}
 	return schedule, nil
 }
 
@@ -109,11 +114,22 @@ func (repository *ScheduleRepository) Update(ctx context.Context, command health
 	if err != nil || !validScheduleCommandKey(command.IdempotencyKey) {
 		return domain.Schedule{}, repositoryInvalid(errors.New("health schedule update idempotency binding is invalid"))
 	}
-	tx, err := repository.db.Begin(ctx)
-	if err != nil {
-		return domain.Schedule{}, classifyScanError(err, "HEALTH_SCHEDULE_UPDATE_BEGIN_FAILED")
+	result, err := withHealthTransaction(ctx, repository.db, foundation.TransactionOptions{}, func(ctx context.Context, tx healthTransaction) (domain.Schedule, error) {
+		return repository.updateTx(ctx, tx, command, requestHash)
+	})
+	if healthCommitFailed(err) {
+		if receipt, found, recoveryErr := loadScheduleCommand(ctx, repository.db, command.WorkspaceID, command.IdempotencyKey, false); recoveryErr == nil && found && receipt.RequestHash == requestHash && receipt.CommandType == "UPDATE" {
+			return receipt.Schedule, nil
+		}
+		return domain.Schedule{}, classifyScanError(err, "HEALTH_SCHEDULE_UPDATE_COMMIT_FAILED")
 	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
+	if err != nil {
+		return domain.Schedule{}, classifyHealthTransactionError(err, "HEALTH_SCHEDULE_UPDATE_BEGIN_FAILED", "HEALTH_SCHEDULE_UPDATE_COMMIT_FAILED")
+	}
+	return result, nil
+}
+
+func (repository *ScheduleRepository) updateTx(ctx context.Context, tx healthTransaction, command healthapp.ScheduleUpdateCommand, requestHash string) (domain.Schedule, error) {
 	if err := lockScheduleWorkspace(ctx, tx, command.WorkspaceID); err != nil {
 		return domain.Schedule{}, err
 	}
@@ -162,12 +178,6 @@ WHERE id=$1 AND workspace_id=$2 AND version=$3 AND pending_due_at IS NULL`, stri
 	if err := insertScheduleCommand(ctx, tx, command.WorkspaceID, command.IdempotencyKey, requestHash, "UPDATE", updated); err != nil {
 		return domain.Schedule{}, err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		if receipt, found, recoveryErr := loadScheduleCommand(ctx, repository.db, command.WorkspaceID, command.IdempotencyKey, false); recoveryErr == nil && found && receipt.RequestHash == requestHash && receipt.CommandType == "UPDATE" {
-			return receipt.Schedule, nil
-		}
-		return domain.Schedule{}, classifyScanError(err, "HEALTH_SCHEDULE_UPDATE_COMMIT_FAILED")
-	}
 	return updated, nil
 }
 
@@ -185,11 +195,17 @@ func (repository *ScheduleRepository) ClaimDue(ctx context.Context, limit int) (
 	if repository == nil || nilScanValue(repository.db) || limit < 1 || limit > 100 {
 		return nil, repositoryInvalid(errors.New("health schedule claim limit is invalid"))
 	}
-	tx, err := repository.db.Begin(ctx)
+	result, err := withHealthTransaction(ctx, repository.db, foundation.TransactionOptions{}, func(ctx context.Context, tx healthTransaction) ([]healthapp.DueScheduleClaim, error) {
+		return repository.claimDueTx(ctx, tx, limit)
+	})
+
 	if err != nil {
-		return nil, classifyScanError(err, "HEALTH_SCHEDULE_CLAIM_BEGIN_FAILED")
+		return nil, classifyHealthTransactionError(err, "HEALTH_SCHEDULE_CLAIM_BEGIN_FAILED", "HEALTH_SCHEDULE_CLAIM_COMMIT_FAILED")
 	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
+	return result, nil
+}
+
+func (repository *ScheduleRepository) claimDueTx(ctx context.Context, tx healthTransaction, limit int) ([]healthapp.DueScheduleClaim, error) {
 	now, err := databaseTime(ctx, tx)
 	if err != nil {
 		return nil, err
@@ -263,9 +279,6 @@ WHERE id=$1 AND workspace_id=$2 AND version=$3
 		schedule.UpdatedAt = now
 		claims = append(claims, healthapp.DueScheduleClaim{Schedule: schedule, DueAt: dueAt, ClaimedAt: now, LeaseUntil: leaseUntil})
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, classifyScanError(err, "HEALTH_SCHEDULE_CLAIM_COMMIT_FAILED")
-	}
 	return claims, nil
 }
 
@@ -274,11 +287,21 @@ func (repository *ScheduleRepository) AcknowledgeDue(ctx context.Context, claim 
 	if repository == nil || nilScanValue(repository.db) || !validScheduleClaim(claim) {
 		return repositoryInvalid(errors.New("health schedule acknowledgement is invalid"))
 	}
-	tx, err := repository.db.Begin(ctx)
-	if err != nil {
-		return classifyScanError(err, "HEALTH_SCHEDULE_ACK_BEGIN_FAILED")
+	_, err := withHealthTransaction(ctx, repository.db, foundation.TransactionOptions{}, func(ctx context.Context, tx healthTransaction) (struct{}, error) {
+		return struct{}{}, repository.acknowledgeDueTx(ctx, tx, claim)
+	})
+	if healthCommitFailed(err) {
+		if recovered, recoveryErr := loadScheduleState(ctx, repository.db, claim.Schedule.WorkspaceID, claim.Schedule.ID, false); recoveryErr == nil && recovered.PendingDueAt == nil && recovered.Schedule.LastRunAt != nil && recovered.Schedule.LastRunAt.Equal(claim.DueAt) {
+			return nil
+		} else if recoveryErr != nil {
+			return errors.Join(classifyScanError(err, "HEALTH_SCHEDULE_ACK_COMMIT_FAILED"), recoveryErr)
+		}
+		return classifyScanError(err, "HEALTH_SCHEDULE_ACK_COMMIT_FAILED")
 	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
+	return classifyHealthTransactionError(err, "HEALTH_SCHEDULE_ACK_BEGIN_FAILED", "HEALTH_SCHEDULE_ACK_COMMIT_FAILED")
+}
+
+func (repository *ScheduleRepository) acknowledgeDueTx(ctx context.Context, tx healthTransaction, claim healthapp.DueScheduleClaim) error {
 	current, err := loadScheduleState(ctx, tx, claim.Schedule.WorkspaceID, claim.Schedule.ID, true)
 	if err != nil {
 		return err
@@ -307,14 +330,6 @@ WHERE id=$1 AND workspace_id=$2 AND version=$3
 	if commandTag.RowsAffected() != 1 {
 		return repositoryConflict("health schedule acknowledgement CAS did not match")
 	}
-	if err := tx.Commit(ctx); err != nil {
-		if recovered, recoveryErr := loadScheduleState(ctx, repository.db, claim.Schedule.WorkspaceID, claim.Schedule.ID, false); recoveryErr == nil && recovered.PendingDueAt == nil && recovered.Schedule.LastRunAt != nil && recovered.Schedule.LastRunAt.Equal(claim.DueAt) {
-			return nil
-		} else if recoveryErr != nil {
-			return errors.Join(classifyScanError(err, "HEALTH_SCHEDULE_ACK_COMMIT_FAILED"), recoveryErr)
-		}
-		return classifyScanError(err, "HEALTH_SCHEDULE_ACK_COMMIT_FAILED")
-	}
 	return nil
 }
 
@@ -323,11 +338,14 @@ func (repository *ScheduleRepository) ReleaseDue(ctx context.Context, claim heal
 	if repository == nil || nilScanValue(repository.db) || !validScheduleClaim(claim) {
 		return repositoryInvalid(errors.New("health schedule release is invalid"))
 	}
-	tx, err := repository.db.Begin(ctx)
-	if err != nil {
-		return classifyScanError(err, "HEALTH_SCHEDULE_RELEASE_BEGIN_FAILED")
-	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
+	_, err := withHealthTransaction(ctx, repository.db, foundation.TransactionOptions{}, func(ctx context.Context, tx healthTransaction) (struct{}, error) {
+		return struct{}{}, repository.releaseDueTx(ctx, tx, claim)
+	})
+
+	return classifyHealthTransactionError(err, "HEALTH_SCHEDULE_RELEASE_BEGIN_FAILED", "HEALTH_SCHEDULE_RELEASE_COMMIT_FAILED")
+}
+
+func (repository *ScheduleRepository) releaseDueTx(ctx context.Context, tx healthTransaction, claim healthapp.DueScheduleClaim) error {
 	current, err := loadScheduleState(ctx, tx, claim.Schedule.WorkspaceID, claim.Schedule.ID, true)
 	if err != nil {
 		return err
@@ -352,14 +370,11 @@ WHERE id=$1 AND workspace_id=$2 AND version=$3
 	if commandTag.RowsAffected() != 1 {
 		return repositoryConflict("health schedule release CAS did not match")
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return classifyScanError(err, "HEALTH_SCHEDULE_RELEASE_COMMIT_FAILED")
-	}
 	return nil
 }
 
 type scheduleQueryDB interface {
-	QueryRow(context.Context, string, ...any) pgx.Row
+	QueryRow(context.Context, string, ...any) healthRow
 }
 
 func loadSchedule(ctx context.Context, db scheduleQueryDB, workspaceID, scheduleID foundation.ID, forUpdate bool) (domain.Schedule, error) {
@@ -383,7 +398,7 @@ func loadScheduleState(ctx context.Context, db scheduleQueryDB, workspaceID, sch
 	}
 	var schedule persistedSchedule
 	if err := scanScheduleState(db.QueryRow(ctx, query, string(scheduleID), string(workspaceID)), &schedule); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, sql.ErrNoRows) {
 			return persistedSchedule{}, repositoryNotFound(err)
 		}
 		return persistedSchedule{}, err
@@ -453,10 +468,10 @@ func validScheduleCommandKey(value string) bool {
 	return true
 }
 
-func lockScheduleWorkspace(ctx context.Context, tx pgx.Tx, workspaceID foundation.ID) error {
+func lockScheduleWorkspace(ctx context.Context, tx healthTransaction, workspaceID foundation.ID) error {
 	var id string
 	if err := tx.QueryRow(ctx, `SELECT id::text FROM core.workspace WHERE id=$1 FOR UPDATE`, string(workspaceID)).Scan(&id); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, sql.ErrNoRows) {
 			return repositoryNotFound(err)
 		}
 		return classifyScanError(err, "HEALTH_SCHEDULE_WORKSPACE_LOCK_FAILED")
@@ -464,7 +479,7 @@ func lockScheduleWorkspace(ctx context.Context, tx pgx.Tx, workspaceID foundatio
 	return nil
 }
 
-func insertScheduleCommand(ctx context.Context, tx pgx.Tx, workspaceID foundation.ID, key, requestHash, commandType string, schedule domain.Schedule) error {
+func insertScheduleCommand(ctx context.Context, tx healthTransaction, workspaceID foundation.ID, key, requestHash, commandType string, schedule domain.Schedule) error {
 	envelope := scheduleCommandReceiptEnvelope{
 		SchemaVersion: "health-schedule-command-receipt/v1",
 		CommandType:   commandType,
@@ -484,7 +499,7 @@ VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, string(workspaceID), key, requestHash, command
 }
 
 func loadScheduleCommand(ctx context.Context, db interface {
-	QueryRow(context.Context, string, ...any) pgx.Row
+	QueryRow(context.Context, string, ...any) healthRow
 }, workspaceID foundation.ID, key string, forUpdate bool) (scheduleCommandReceipt, bool, error) {
 	query := `SELECT request_hash,command_type,schedule_id::text,schedule_version,receipt
 FROM ops.health_schedule_command WHERE workspace_id=$1 AND idempotency_key=$2`
@@ -495,7 +510,7 @@ FROM ops.health_schedule_command WHERE workspace_id=$1 AND idempotency_key=$2`
 	var scheduleID string
 	var raw []byte
 	if err := db.QueryRow(ctx, query, string(workspaceID), key).Scan(&receipt.RequestHash, &receipt.CommandType, &scheduleID, &receipt.ScheduleVer, &raw); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, sql.ErrNoRows) {
 			return scheduleCommandReceipt{}, false, nil
 		}
 		return scheduleCommandReceipt{}, false, classifyScanError(err, "HEALTH_SCHEDULE_COMMAND_LOOKUP_FAILED")

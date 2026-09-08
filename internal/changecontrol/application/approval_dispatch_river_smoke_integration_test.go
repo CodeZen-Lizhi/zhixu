@@ -6,10 +6,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,6 +17,7 @@ import (
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/app"
+	auditpostgres "github.com/CodeZen-Lizhi/zhixu/internal/audit/adapter/postgres"
 	approvaldispatchpostgres "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/approvaldispatchpostgres"
 	changecontrollocalfs "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/localfs"
 	changecontrolpostgres "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/postgres"
@@ -27,12 +26,16 @@ import (
 	changecontrolhttp "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/http"
 	changecontrolworkflow "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/workflow"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	modelsettingspostgres "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/adapter/postgres"
+	modelsettingsapplication "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/application"
+	modelcrypto "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/crypto"
+	modelsettingsdomain "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/gitcli"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/gitoperation"
-	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	toolcatalog "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/catalog"
 	toolchangecontrol "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/changecontrol"
-	toolpostgres "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/postgres"
 	toolsapplication "github.com/CodeZen-Lizhi/zhixu/internal/tools/application"
 	workflowpostgres "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/postgres"
 	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
@@ -51,10 +54,10 @@ func TestApprovalDispatchRealRiverSafeWritebackSmoke(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git executable is required")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
-	pool, cleanup := newApprovalRiverSmokeDatabase(t, ctx)
-	defer cleanup()
+	platform := newApprovalRiverSmokeDatabase(t)
+	pool := platform.DB()
 
 	root := t.TempDir()
 	targetPath := "docs/approval-river-smoke.md"
@@ -75,7 +78,7 @@ func TestApprovalDispatchRealRiverSafeWritebackSmoke(t *testing.T) {
 
 	ids := foundation.NewUUIDGenerator(nil)
 	workspaceID := mustRiverSmokeID(t, ids)
-	workspaceRepository, err := workspacepostgres.NewRepository(pool)
+	workspaceRepository, err := workspacepostgres.NewGORMRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +90,7 @@ func TestApprovalDispatchRealRiverSafeWritebackSmoke(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	changeRepository, err := changecontrolpostgres.NewRepository(pool)
+	changeRepository, err := changecontrolpostgres.NewGORMRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,19 +102,28 @@ func TestApprovalDispatchRealRiverSafeWritebackSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	insertClient, err := riveradapter.NewClient(pool, nil)
+	sealer, err := modelcrypto.NewSealer(bytes.Repeat([]byte{0x2a}, 32))
 	if err != nil {
 		t.Fatal(err)
 	}
-	inserter, err := riveradapter.NewJobInserter(insertClient)
+	auditStore, err := auditpostgres.NewGORMStore(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtimeRepository, err := workflowpostgres.NewRuntimeRepository(pool, inserter)
+	settings, err := modelsettingspostgres.NewGORMRepository(platform,
+		modelsettingspostgres.WithGORMSecretSealer(sealer), modelsettingspostgres.WithGORMAuditAppender(auditStore),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	dispatchRepository, err := approvaldispatchpostgres.NewApprovalDispatchRepository(pool, runtimeRepository, ids, foundation.SystemClock{})
+	runtimeRepository, err := workflowpostgres.NewGORMRuntimeRepositoryWithHooks(
+		platform, riveradapter.DefaultOptions(), settings,
+		workflowpostgres.GORMRuntimeRepositoryHooks{CancellationSafety: changeRepository},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatchRepository, err := approvaldispatchpostgres.NewGORMApprovalDispatchRepository(platform, runtimeRepository, ids, foundation.SystemClock{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,10 +159,7 @@ func TestApprovalDispatchRealRiverSafeWritebackSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	toolRepository, err := toolpostgres.NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
+	toolRepository := newWritebackSmokeTools(t, platform)
 	auditService, err := toolsapplication.NewTrustedWriteAuditService(contractRegistry, toolRepository, ids, foundation.SystemClock{})
 	if err != nil {
 		t.Fatal(err)
@@ -197,8 +206,17 @@ func TestApprovalDispatchRealRiverSafeWritebackSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	modelRuntimeID := mustRiverSmokeID(t, ids)
+	if _, err := settings.RegisterRuntime(ctx, modelsettingsapplication.RuntimeRegistration{
+		Role: modelsettingsdomain.RuntimeRoleWorker, InstanceID: modelRuntimeID,
+		AppliedRevision: 0, Phase: modelsettingsdomain.RuntimePhaseActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	newWorkerClient := func(owner string) *riveradapter.Client {
-		runtimeWorker, workerErr := riveradapter.NewRuntimeNodeWorker(executors, coordinator, owner, 10*time.Second, time.Second)
+		runtimeWorker, workerErr := riveradapter.NewRuntimeNodeWorker(executors, coordinator, owner, 10*time.Second, time.Second,
+			riveradapter.RuntimeWorkerOptions{ModelRuntimeInstanceID: &modelRuntimeID},
+		)
 		if workerErr != nil {
 			t.Fatal(workerErr)
 		}
@@ -294,7 +312,7 @@ func TestApprovalDispatchRealRiverSafeWritebackSmoke(t *testing.T) {
 	}
 	stopCancel()
 	workerClients = nil
-	runReindexRiverFaultSmoke(t, ctx, pool, workspaceRepository, gitRepository, insertClient,
+	runReindexRiverFaultSmoke(t, ctx, platform, workspaceRepository, changeRepository, gitRepository, settings,
 		workspaceID, foundation.ID(executionID), root, targetPath, approvedContent)
 }
 
@@ -376,46 +394,12 @@ func mustRiverSmokeID(t *testing.T, ids foundation.IDGenerator) foundation.ID {
 	return id
 }
 
-func newApprovalRiverSmokeDatabase(t *testing.T, ctx context.Context) (*pgxpool.Pool, func()) {
+func newApprovalRiverSmokeDatabase(t *testing.T) *platformpostgres.Pool {
 	t.Helper()
-	baseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
-	if baseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL for real River smoke")
-	}
-	parsed, err := url.Parse(baseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	admin, err := pgxpool.New(ctx, baseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	name := fmt.Sprintf("zhixu_approval_river_%d", time.Now().UnixNano())
-	identifier := pgx.Identifier{name}.Sanitize()
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+identifier); err != nil {
-		admin.Close()
-		t.Fatal(err)
-	}
-	parsed.Path = "/" + name
-	pool, err := pgxpool.New(ctx, parsed.String())
-	if err != nil {
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier)
-		admin.Close()
-		t.Fatal(err)
-	}
-	runner, err := platformmigration.NewAtlasEmbeddedRunner(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := runner.Up(ctx); err != nil {
-		pool.Close()
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-		t.Fatal(err)
-	}
-	return pool, func() {
-		pool.Close()
-		_, _ = admin.Exec(context.Background(), "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-	}
+	fixture := testdb.Require(t, testdb.Config{
+		ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
+		Availability:     testdb.FailWhenUnavailable,
+		MaxConns:         16,
+	})
+	return fixture.Pool()
 }

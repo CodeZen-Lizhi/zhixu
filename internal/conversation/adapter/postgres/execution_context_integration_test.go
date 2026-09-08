@@ -14,7 +14,7 @@ import (
 )
 
 func TestRepositoryLoadsBoundedQuestionExecutionContext(t *testing.T) {
-	repository, pool, ctx := newConversationTestRepository(t)
+	repository, shared, pool, ctx := newConversationTestRepository(t)
 	workspaceID := conversationTurnID(30)
 	conversationID := conversationTurnID(31)
 	seedConversationWorkspaces(t, ctx, pool, workspaceID)
@@ -44,14 +44,14 @@ func TestRepositoryLoadsBoundedQuestionExecutionContext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dispatched, err := newQuestionDispatcherIntegration(t, pool).SubmitQuestion(ctx, conversationapplication.SubmitQuestionRecord{
+	dispatched, err := newQuestionDispatcherIntegration(t, shared).SubmitQuestion(ctx, conversationapplication.SubmitQuestionRecord{
 		Request: request, IdempotencyKey: "execution-context-question", RequestHash: requestHash,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	counted, counter := countingConversationRepository(t, pool)
+	counted, counter := countingConversationRepository(t, shared)
 	loaded, err := counted.LoadQuestionExecutionContext(ctx, conversationapplication.QuestionExecutionContextQuery{
 		WorkspaceID: workspaceID, WorkflowRunID: dispatched.Workflow.RunID,
 		ConversationID: conversationID, QuestionID: dispatched.Question.ID, AnswerID: dispatched.Answer.ID,
@@ -83,7 +83,7 @@ func TestRepositoryLoadsBoundedQuestionExecutionContext(t *testing.T) {
 }
 
 func TestRepositoryQuestionExecutionContextRejectsBindingDrift(t *testing.T) {
-	repository, pool, ctx := newConversationTestRepository(t)
+	repository, shared, pool, ctx := newConversationTestRepository(t)
 	workspaceID := conversationTurnID(40)
 	conversationID := conversationTurnID(41)
 	seedConversationWorkspaces(t, ctx, pool, workspaceID)
@@ -93,7 +93,7 @@ func TestRepositoryQuestionExecutionContextRejectsBindingDrift(t *testing.T) {
 	)); err != nil {
 		t.Fatal(err)
 	}
-	dispatched, err := newQuestionDispatcherIntegration(t, pool).SubmitQuestion(ctx, questionDispatchRecord(
+	dispatched, err := newQuestionDispatcherIntegration(t, shared).SubmitQuestion(ctx, questionDispatchRecord(
 		t, workspaceID, conversationID, "Reject every drifted execution binding", "execution-context-binding-question",
 	))
 	if err != nil {
@@ -139,7 +139,7 @@ func TestRepositoryQuestionExecutionContextRejectsBindingDrift(t *testing.T) {
 }
 
 func TestRepositoryQuestionExecutionContextRecomputesPersistedHistoryHash(t *testing.T) {
-	repository, pool, ctx := newConversationTestRepository(t)
+	repository, _, pool, ctx := newConversationTestRepository(t)
 	workspaceID := conversationTurnID(60)
 	conversationID := conversationTurnID(61)
 	seedConversationWorkspaces(t, ctx, pool, workspaceID)

@@ -98,7 +98,13 @@ func TestReviewInvalidationObservabilityMigrationUsesHealthAndTimelineOwners(t *
 	}
 	assertReviewHealthTimelineSource(t, ctx, pool, workspaceID, issueID, 3, "HEALTH_ISSUE_DETECTED")
 
-	repository, err := knowledgepostgres.NewRepository(pool)
+	if err := provider.UpTo(ctx, 62); err != nil {
+		t.Fatalf("upgrade Timeline projector schema to 00062: %v", err)
+	}
+	platform := openMigrationRuntimePool(t, ctx, pool)
+	defer platform.Close()
+	pool = platform.DB()
+	repository, err := knowledgepostgres.NewGORMRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"time"
 
-	"github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 )
 
@@ -89,12 +88,6 @@ type WorkspaceAnalysisCapabilityLifecyclePort interface {
 	ReleaseWorkspaceAnalysisWorker(context.Context, WorkspaceAnalysisWorkerAdvertisement) (WorkspaceAnalysisWorkerCapability, error)
 }
 
-// WorkspaceAnalysisCapabilityRepository 保留 legacy caller-owned transaction ready 检查兼容。
-type WorkspaceAnalysisCapabilityRepository interface {
-	WorkspaceAnalysisCapabilityLifecyclePort
-	RequireWorkspaceAnalysisWorkerReadyTx(context.Context, any, WorkspaceAnalysisCapabilityContract) error
-}
-
 // WorkspaceAnalysisCapabilityService 是 Worker 生命周期调用的窄应用服务。
 // Repository 自管三种生命周期写入的短事务，避免把 Worker 心跳塞进调用方事务。
 type WorkspaceAnalysisCapabilityService struct {
@@ -156,52 +149,6 @@ func (service *WorkspaceAnalysisCapabilityService) Release(ctx context.Context, 
 	return service.repository.ReleaseWorkspaceAnalysisWorker(ctx, advertisement)
 }
 
-// WorkspaceAnalysisCapabilityCheckedRunStarter 在 Question 派发持有的同一事务中检查 Worker 合同。
-// 它只保护新创建；重放仍须通过同一检查，避免旧 API 在新 Worker 下制造新的 Run 事实。
-type WorkspaceAnalysisCapabilityCheckedRunStarter struct {
-	readiness WorkspaceAnalysisCapabilityRepository
-	delegate  WorkspaceAnalysisRunStarter
-	contract  WorkspaceAnalysisCapabilityContract
-}
-
-// NewWorkspaceAnalysisCapabilityCheckedRunStarter 将 ready 检查包裹在既有 Analysis Run 创建端口之外。
-func NewWorkspaceAnalysisCapabilityCheckedRunStarter(
-	readiness WorkspaceAnalysisCapabilityRepository,
-	delegate WorkspaceAnalysisRunStarter,
-	contract WorkspaceAnalysisCapabilityContract,
-) (*WorkspaceAnalysisCapabilityCheckedRunStarter, error) {
-	if isNilPort(readiness) || isNilPort(delegate) {
-		return nil, workspaceAnalysisCapabilityError(
-			foundation.ErrorDependencyUnavailable,
-			ErrorCodeWorkspaceAnalysisCapabilityUnavailable,
-			true,
-			errors.New("workspace analysis readiness or run starter is unavailable"),
-		)
-	}
-	if err := contract.Validate(); err != nil {
-		return nil, err
-	}
-	return &WorkspaceAnalysisCapabilityCheckedRunStarter{readiness: readiness, delegate: delegate, contract: contract}, nil
-}
-
-// StartWorkspaceAnalysisRunTx 先在 caller-owned transaction 内确认至少一个精确 Worker 广告新鲜，再创建 Run。
-func (starter *WorkspaceAnalysisCapabilityCheckedRunStarter) StartWorkspaceAnalysisRunTx(
-	ctx context.Context,
-	transaction any,
-	command WorkspaceAnalysisRunStartCommand,
-) (domain.WorkspaceAnalysisRun, error) {
-	if starter == nil || isNilPort(starter.readiness) || isNilPort(starter.delegate) || isNilOpaqueTransaction(transaction) {
-		return domain.WorkspaceAnalysisRun{}, workspaceAnalysisCapabilityUnavailable(errors.New("workspace analysis ready run starter is unavailable"))
-	}
-	if ctx == nil {
-		return domain.WorkspaceAnalysisRun{}, workspaceAnalysisCapabilityInvalid(errors.New("workspace analysis capability context is nil"))
-	}
-	if err := starter.readiness.RequireWorkspaceAnalysisWorkerReadyTx(ctx, transaction, starter.contract); err != nil {
-		return domain.WorkspaceAnalysisRun{}, err
-	}
-	return starter.delegate.StartWorkspaceAnalysisRunTx(ctx, transaction, command)
-}
-
 func workspaceAnalysisCapabilityInvalid(cause error) error {
 	return workspaceAnalysisCapabilityError(foundation.ErrorInvalidInput, ErrorCodeWorkspaceAnalysisCapabilityInvalid, false, cause)
 }
@@ -213,5 +160,3 @@ func workspaceAnalysisCapabilityUnavailable(cause error) error {
 func workspaceAnalysisCapabilityError(kind foundation.ErrorKind, code string, retryable bool, cause error) error {
 	return applicationError(kind, code, retryable, cause)
 }
-
-var _ WorkspaceAnalysisRunStarter = (*WorkspaceAnalysisCapabilityCheckedRunStarter)(nil)

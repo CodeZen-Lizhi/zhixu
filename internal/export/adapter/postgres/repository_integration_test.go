@@ -1297,7 +1297,6 @@ func testExportRepositoryVariants(
 ) {
 	t.Helper()
 	variants := []exportRepositoryIntegrationVariant{
-		{name: "legacy", open: openLegacyExportRepositoryIntegration},
 		{name: "gorm", open: openGORMExportRepositoryIntegration},
 	}
 	for _, variant := range variants {
@@ -1318,24 +1317,6 @@ func requireExportIntegrationDatabase(t *testing.T, maxConns int32) *testdb.Fixt
 		Availability:     testdb.FailWhenUnavailable,
 		MaxConns:         maxConns,
 	})
-}
-
-func openLegacyExportRepositoryIntegration(t *testing.T, platform *platformpostgres.Pool) exportapp.Repository {
-	t.Helper()
-	pool := platform.DB()
-	events, err := eventspostgres.NewStore(pool)
-	if err != nil {
-		t.Fatalf("create event store: %v", err)
-	}
-	audit, err := auditpostgres.NewStore(pool)
-	if err != nil {
-		t.Fatalf("create audit store: %v", err)
-	}
-	repository, err := NewRepository(pool, WithEventAppender(events), WithAuditAppender(audit))
-	if err != nil {
-		t.Fatalf("create export repository: %v", err)
-	}
-	return repository
 }
 
 func openGORMExportRepositoryIntegration(t *testing.T, platform *platformpostgres.Pool) exportapp.Repository {

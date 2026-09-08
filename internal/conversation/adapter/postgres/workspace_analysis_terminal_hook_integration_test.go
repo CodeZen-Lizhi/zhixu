@@ -14,18 +14,18 @@ import (
 	conversationdomain "github.com/CodeZen-Lizhi/zhixu/internal/conversation/domain"
 	eventspostgres "github.com/CodeZen-Lizhi/zhixu/internal/events/adapter/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	workflowpostgres "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/postgres"
-	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
 	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
 	workflowdomain "github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestWorkspaceAnalysisCancellationTerminalHookDirectRuntimeCancelClosesPublicationAndReplays(t *testing.T) {
-	pool, ctx, dispatched := newWorkspaceAnalysisCancellationHookFixture(t, "direct")
-	auditRecorder, auditStore := newWorkspaceAnalysisAuditIntegration(t, pool)
+	shared, pool, ctx, dispatched := newWorkspaceAnalysisCancellationHookFixture(t, "direct")
+	auditRecorder, auditStore := newWorkspaceAnalysisAuditIntegration(t, shared)
 	hook, coordinator := newWorkspaceAnalysisCancellationHookRuntimeWithAudit(
-		t, pool, auditRecorder, "workspace-analysis-runtime-integration",
+		t, shared, auditRecorder, "workspace-analysis-runtime-integration",
 	)
 
 	cancelled, err := coordinator.Cancel(ctx, workflowapplication.RunControlCommand{
@@ -42,16 +42,14 @@ func TestWorkspaceAnalysisCancellationTerminalHookDirectRuntimeCancelClosesPubli
 
 	event := loadWorkspaceAnalysisCancellationTerminalEvent(t, ctx, pool, dispatched.WorkflowRunID, dispatched.NodeRunID, "")
 	hook.ids = workspaceAnalysisReplayFailingIDs{}
-	tx, err := pool.Begin(ctx)
+	uow, err := shared.UnitOfWork()
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if err := hook.OnWorkflowNodeTerminal(ctx, tx, event); err != nil {
+	if err := uow.Within(ctx, foundation.TransactionOptions{}, func(ctx context.Context, scope foundation.TransactionScope) error {
+		return hook.OnWorkflowNodeTerminalScoped(ctx, scope, event)
+	}); err != nil {
 		t.Fatalf("replay terminal hook: %v", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		t.Fatal(err)
 	}
 	assertWorkspaceAnalysisRuntimeCancellationBundle(t, ctx, pool, dispatched.AnswerID, false, true)
 	var analysisRunID foundation.ID
@@ -86,8 +84,8 @@ func TestWorkspaceAnalysisCancellationTerminalHookDirectRuntimeCancelClosesPubli
 }
 
 func TestWorkspaceAnalysisRuntimeFailureHookClosesPendingAnswerWithoutFabricatingCall(t *testing.T) {
-	pool, ctx, dispatched := newWorkspaceAnalysisCancellationHookFixture(t, "runtime-failure")
-	hook, coordinator := newWorkspaceAnalysisCancellationHookRuntime(t, pool)
+	shared, pool, ctx, dispatched := newWorkspaceAnalysisCancellationHookFixture(t, "runtime-failure")
+	hook, coordinator := newWorkspaceAnalysisCancellationHookRuntime(t, shared)
 	const deliveryID = "workspace-analysis-runtime-failure"
 	claimed, err := coordinator.Claim(ctx, workflowapplication.ClaimCommand{
 		NodeRunID: dispatched.NodeRunID, DispatchNo: 1, DeliveryID: deliveryID,
@@ -160,16 +158,14 @@ func TestWorkspaceAnalysisRuntimeFailureHookClosesPendingAnswerWithoutFabricatin
 		FailureSummary: failed.Node.ErrorSummary, TerminalAt: *failed.Node.CompletedAt,
 	}
 	hook.ids = workspaceAnalysisReplayFailingIDs{}
-	tx, err := pool.Begin(ctx)
+	uow, err := shared.UnitOfWork()
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if err := hook.OnWorkflowNodeTerminal(ctx, tx, replayEvent); err != nil {
-		t.Fatalf("replay runtime failure hook: %v", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		t.Fatal(err)
+	if err := uow.Within(ctx, foundation.TransactionOptions{}, func(ctx context.Context, scope foundation.TransactionScope) error {
+		return hook.OnWorkflowNodeTerminalScoped(ctx, scope, replayEvent)
+	}); err != nil {
+		t.Fatalf("replay terminal hook: %v", err)
 	}
 	if err := pool.QueryRow(ctx, `SELECT
 		(SELECT count(*) FROM agent.workspace_analysis_termination_proof p WHERE p.answer_id=$1),
@@ -189,10 +185,10 @@ func TestWorkspaceAnalysisRuntimeFailureHookClosesPendingAnswerWithoutFabricatin
 }
 
 func TestWorkspaceAnalysisCancellationTerminalHookAuditFailureRollsBackRuntimeAndPublication(t *testing.T) {
-	pool, ctx, dispatched := newWorkspaceAnalysisCancellationHookFixture(t, "audit-rollback")
+	shared, pool, ctx, dispatched := newWorkspaceAnalysisCancellationHookFixture(t, "audit-rollback")
 	cause := errors.New("injected workspace analysis cancellation audit failure")
 	_, coordinator := newWorkspaceAnalysisCancellationHookRuntimeWithAudit(
-		t, pool, &workspaceAnalysisAuditCapture{err: cause}, "workspace-analysis-runtime-integration",
+		t, shared, &workspaceAnalysisAuditCapture{err: cause}, "workspace-analysis-runtime-integration",
 	)
 	if _, err := coordinator.Cancel(ctx, workflowapplication.RunControlCommand{
 		WorkflowRunID: dispatched.WorkflowRunID, ExpectedVersion: dispatched.WorkflowVersion,
@@ -232,10 +228,10 @@ func TestWorkspaceAnalysisCancellationTerminalHookAuditFailureRollsBackRuntimeAn
 }
 
 func TestWorkspaceAnalysisCancellationControlAuditIsSingleSafeAndRollbackAtomic(t *testing.T) {
-	pool, ctx, dispatched := newWorkspaceAnalysisCancellationHookFixture(t, "control-audit")
-	auditRecorder, auditStore := newWorkspaceAnalysisAuditIntegration(t, pool)
+	shared, pool, ctx, dispatched := newWorkspaceAnalysisCancellationHookFixture(t, "control-audit")
+	auditRecorder, auditStore := newWorkspaceAnalysisAuditIntegration(t, shared)
 	_, coordinator := newWorkspaceAnalysisCancellationHookRuntimeWithAudit(
-		t, pool, auditRecorder, "workspace-analysis-runtime-integration",
+		t, shared, auditRecorder, "workspace-analysis-runtime-integration",
 	)
 	command := workflowapplication.RunControlCommand{
 		WorkflowRunID: dispatched.WorkflowRunID, ExpectedVersion: dispatched.WorkflowVersion,
@@ -281,34 +277,22 @@ func TestWorkspaceAnalysisCancellationControlAuditIsSingleSafeAndRollbackAtomic(
 		t.Fatalf("cancel audit rows=%d err=%v", cancels, err)
 	}
 
-	rollbackPool, rollbackCtx, rollbackDispatched := newWorkspaceAnalysisCancellationHookFixture(t, "control-audit-rollback")
-	events, err := eventspostgres.NewStore(rollbackPool)
+	rollbackShared, rollbackPool, rollbackCtx, rollbackDispatched := newWorkspaceAnalysisCancellationHookFixture(t, "control-audit-rollback")
+	events, err := eventspostgres.NewGORMStore(rollbackShared)
 	if err != nil {
 		t.Fatal(err)
 	}
-	terminal, err := NewWorkspaceAnalysisCancellationTerminalHook(events, foundation.NewUUIDGenerator(nil))
+	terminal, err := NewGORMWorkspaceAnalysisCancellationTerminalHook(events, foundation.NewUUIDGenerator(nil))
 	if err != nil {
 		t.Fatal(err)
 	}
 	cause := errors.New("injected workspace analysis control audit failure")
-	controlAudit, err := NewWorkspaceAnalysisCancellationAuditHook(&workspaceAnalysisAuditCapture{err: cause})
+	controlAudit, err := NewGORMWorkspaceAnalysisCancellationAuditHook(&workspaceAnalysisAuditCapture{err: cause})
 	if err != nil {
 		t.Fatal(err)
 	}
-	client, err := riveradapter.NewClient(rollbackPool, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	inserter, err := riveradapter.NewJobInserter(client)
-	if err != nil {
-		t.Fatal(err)
-	}
-	runtime, err := workflowpostgres.NewRuntimeRepositoryWithHooks(rollbackPool, inserter, workflowpostgres.RuntimeRepositoryHooks{
-		Terminal: terminal, Control: controlAudit,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime, _ := newQuestionDispatchDependencies(t, rollbackShared, workflowpostgres.GORMRuntimeRepositoryHooks{Terminal: terminal, Control: controlAudit})
+
 	rollbackCoordinator, err := workflowapplication.NewRuntimeCoordinator(runtime)
 	if err != nil {
 		t.Fatal(err)
@@ -340,8 +324,8 @@ func TestWorkspaceAnalysisCancellationControlAuditIsSingleSafeAndRollbackAtomic(
 }
 
 func TestWorkspaceAnalysisCancellationTerminalHookCheckpointCancelClosesAttemptBoundPublication(t *testing.T) {
-	pool, ctx, dispatched := newWorkspaceAnalysisCancellationHookFixture(t, "checkpoint")
-	_, coordinator := newWorkspaceAnalysisCancellationHookRuntime(t, pool)
+	shared, pool, ctx, dispatched := newWorkspaceAnalysisCancellationHookFixture(t, "checkpoint")
+	_, coordinator := newWorkspaceAnalysisCancellationHookRuntime(t, shared)
 	const deliveryID = "workspace-analysis-cancellation-checkpoint"
 	claimed, err := coordinator.Claim(ctx, workflowapplication.ClaimCommand{
 		NodeRunID: dispatched.NodeRunID, DispatchNo: 1, DeliveryID: deliveryID,
@@ -380,8 +364,8 @@ func TestWorkspaceAnalysisCancellationTerminalHookCheckpointCancelClosesAttemptB
 }
 
 func TestWorkspaceAnalysisCancellationTerminalHookAcceptsExactActiveLeasePublication(t *testing.T) {
-	pool, ctx, dispatched := newWorkspaceAnalysisCancellationHookFixture(t, "active-publication")
-	_, coordinator := newWorkspaceAnalysisCancellationHookRuntime(t, pool)
+	shared, pool, ctx, dispatched := newWorkspaceAnalysisCancellationHookFixture(t, "active-publication")
+	_, coordinator := newWorkspaceAnalysisCancellationHookRuntime(t, shared)
 	const deliveryID = "workspace-analysis-active-cancellation-publication"
 	claimed, err := coordinator.Claim(ctx, workflowapplication.ClaimCommand{
 		NodeRunID: dispatched.NodeRunID, DispatchNo: 1, DeliveryID: deliveryID,
@@ -411,11 +395,11 @@ func TestWorkspaceAnalysisCancellationTerminalHookAcceptsExactActiveLeasePublica
 	); err != nil {
 		t.Fatal(err)
 	}
-	events, err := eventspostgres.NewStore(pool)
+	events, err := eventspostgres.NewGORMStore(shared)
 	if err != nil {
 		t.Fatal(err)
 	}
-	finalizer, err := NewWorkspaceAnalysisFinalizer(pool, events, foundation.NewUUIDGenerator(nil))
+	finalizer, err := NewGORMWorkspaceAnalysisFinalizer(shared, events, foundation.NewUUIDGenerator(nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -456,9 +440,9 @@ func TestWorkspaceAnalysisCancellationTerminalHookAcceptsExactActiveLeasePublica
 func newWorkspaceAnalysisCancellationHookFixture(
 	t *testing.T,
 	suffix string,
-) (*pgxpool.Pool, context.Context, cancellationHookDispatchResult) {
+) (*platformpostgres.Pool, *pgxpool.Pool, context.Context, cancellationHookDispatchResult) {
 	t.Helper()
-	repository, pool, ctx := newConversationTestRepository(t)
+	repository, shared, pool, ctx := newConversationTestRepository(t)
 	workspaceID := foundation.NewUUIDGenerator(nil)
 	workspace, err := workspaceID.New()
 	if err != nil {
@@ -475,7 +459,7 @@ func newWorkspaceAnalysisCancellationHookFixture(
 	)); err != nil {
 		t.Fatal(err)
 	}
-	dispatched, err := newWorkspaceAnalysisQuestionDispatcherIntegration(t, pool).SubmitQuestion(
+	dispatched, err := newWorkspaceAnalysisQuestionDispatcherIntegration(t, shared).SubmitQuestion(
 		ctx,
 		workspaceAnalysisQuestionDispatchRecord(
 			t, workspace, conversationID, "Inspect the current workspace.", "workspace-analysis-cancellation-question-"+suffix,
@@ -484,7 +468,7 @@ func newWorkspaceAnalysisCancellationHookFixture(
 	if err != nil {
 		t.Fatal(err)
 	}
-	return pool, ctx, cancellationHookDispatchResult{
+	return shared, pool, ctx, cancellationHookDispatchResult{
 		WorkspaceID: workspace, ConversationID: conversationID, QuestionID: dispatched.Question.ID,
 		AnswerID: dispatched.Answer.ID, WorkflowRunID: dispatched.Workflow.RunID,
 		WorkflowVersion: dispatched.Workflow.Version, NodeRunID: dispatched.NodeRunID, JobID: dispatched.JobID,
@@ -504,58 +488,46 @@ type cancellationHookDispatchResult struct {
 
 func newWorkspaceAnalysisCancellationHookRuntime(
 	t *testing.T,
-	pool *pgxpool.Pool,
-) (*WorkspaceAnalysisCancellationTerminalHook, *workflowapplication.RuntimeCoordinator) {
+	pool *platformpostgres.Pool,
+) (*GORMWorkspaceAnalysisCancellationTerminalHook, *workflowapplication.RuntimeCoordinator) {
 	return newWorkspaceAnalysisCancellationHookRuntimeConfigured(t, pool, nil, "")
 }
 
 func newWorkspaceAnalysisCancellationHookRuntimeWithAudit(
 	t *testing.T,
-	pool *pgxpool.Pool,
-	audit WorkspaceAnalysisAuditRecorder,
+	pool *platformpostgres.Pool,
+	audit ScopedWorkspaceAnalysisAuditRecorder,
 	workerActorRef string,
-) (*WorkspaceAnalysisCancellationTerminalHook, *workflowapplication.RuntimeCoordinator) {
+) (*GORMWorkspaceAnalysisCancellationTerminalHook, *workflowapplication.RuntimeCoordinator) {
 	return newWorkspaceAnalysisCancellationHookRuntimeConfigured(t, pool, audit, workerActorRef)
 }
 
 func newWorkspaceAnalysisCancellationHookRuntimeConfigured(
 	t *testing.T,
-	pool *pgxpool.Pool,
-	audit WorkspaceAnalysisAuditRecorder,
+	pool *platformpostgres.Pool,
+	audit ScopedWorkspaceAnalysisAuditRecorder,
 	workerActorRef string,
-) (*WorkspaceAnalysisCancellationTerminalHook, *workflowapplication.RuntimeCoordinator) {
+) (*GORMWorkspaceAnalysisCancellationTerminalHook, *workflowapplication.RuntimeCoordinator) {
 	t.Helper()
-	events, err := eventspostgres.NewStore(pool)
+	events, err := eventspostgres.NewGORMStore(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var hook *WorkspaceAnalysisCancellationTerminalHook
-	var control workflowapplication.WorkflowControlHook
+	var hook *GORMWorkspaceAnalysisCancellationTerminalHook
+	var control workflowapplication.ScopedWorkflowControlHook
 	if isNilInterface(audit) {
-		hook, err = NewWorkspaceAnalysisCancellationTerminalHook(events, foundation.NewUUIDGenerator(nil))
+		hook, err = NewGORMWorkspaceAnalysisCancellationTerminalHook(events, foundation.NewUUIDGenerator(nil))
 	} else {
-		hook, err = NewWorkspaceAnalysisCancellationTerminalHookWithAudit(
+		hook, err = NewGORMWorkspaceAnalysisCancellationTerminalHookWithAudit(
 			events, foundation.NewUUIDGenerator(nil), audit, workerActorRef,
 		)
-		control, err = NewWorkspaceAnalysisCancellationAuditHook(audit)
+		control, err = NewGORMWorkspaceAnalysisCancellationAuditHook(audit)
 	}
 	if err != nil {
 		t.Fatal(err)
 	}
-	client, err := riveradapter.NewClient(pool, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	inserter, err := riveradapter.NewJobInserter(client)
-	if err != nil {
-		t.Fatal(err)
-	}
-	runtime, err := workflowpostgres.NewRuntimeRepositoryWithHooks(
-		pool, inserter, workflowpostgres.RuntimeRepositoryHooks{Terminal: hook, Control: control},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime, _ := newQuestionDispatchDependencies(t, pool, workflowpostgres.GORMRuntimeRepositoryHooks{Terminal: hook, Control: control})
+
 	coordinator, err := workflowapplication.NewRuntimeCoordinator(runtime)
 	if err != nil {
 		t.Fatal(err)

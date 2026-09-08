@@ -18,8 +18,8 @@ import (
 func TestWorkspaceAnalysisRunStartedAuditUsesStableSafeBinding(t *testing.T) {
 	capture := &workspaceAnalysisAuditCapture{}
 	run := workspaceAnalysisAuditTestRun()
-	if err := appendWorkspaceAnalysisRunStartedAudit(context.Background(), nil, capture, run); err != nil {
-		t.Fatalf("appendWorkspaceAnalysisRunStartedAudit() = %v", err)
+	if err := appendScopedWorkspaceAnalysisRunStartedAudit(context.Background(), nil, capture, run); err != nil {
+		t.Fatalf("appendScopedWorkspaceAnalysisRunStartedAudit() = %v", err)
 	}
 	if len(capture.events) != 1 {
 		t.Fatalf("audit events=%#v", capture.events)
@@ -54,13 +54,13 @@ func TestWorkspaceAnalysisRunStartedAuditUsesStableSafeBinding(t *testing.T) {
 	}
 
 	capture.replayed = true
-	if err := appendWorkspaceAnalysisRunStartedAudit(context.Background(), nil, capture, run); err == nil {
+	if err := appendScopedWorkspaceAnalysisRunStartedAudit(context.Background(), nil, capture, run); err == nil {
 		t.Fatal("fresh run accepted a replayed audit")
 	}
 	cause := errors.New("audit unavailable")
 	capture.replayed = false
 	capture.err = cause
-	if err := appendWorkspaceAnalysisRunStartedAudit(context.Background(), nil, capture, run); !errors.Is(err, cause) {
+	if err := appendScopedWorkspaceAnalysisRunStartedAudit(context.Background(), nil, capture, run); !errors.Is(err, cause) {
 		t.Fatalf("audit failure=%v", err)
 	}
 }
@@ -95,11 +95,11 @@ func TestWorkspaceAnalysisTerminalAuditMapsStableOutcomesAndCounts(t *testing.T)
 			terminalAnswer := answer
 			terminalAnswer.PublicationStatus = test.publication
 			terminalAnswer.ResultType = test.resultType
-			if err := appendWorkspaceAnalysisTerminalAudit(
+			if err := appendScopedWorkspaceAnalysisTerminalAudit(
 				context.Background(), nil, capture, "workspace-analysis-worker-1", analysisRunID,
 				test.status, test.reason, terminalAnswer, 2, now,
 			); err != nil {
-				t.Fatalf("appendWorkspaceAnalysisTerminalAudit() = %v", err)
+				t.Fatalf("appendScopedWorkspaceAnalysisTerminalAudit() = %v", err)
 			}
 			if len(capture.events) != 1 {
 				t.Fatalf("audit events=%#v", capture.events)
@@ -143,8 +143,8 @@ func TestWorkspaceAnalysisCancelRequestedAuditUsesStableSafeBinding(t *testing.T
 		OccurredAt: time.Date(2026, 8, 17, 10, 0, 0, 123456000, time.UTC),
 	}
 	capture := &workspaceAnalysisAuditCapture{}
-	if err := appendWorkspaceAnalysisCancelRequestedAudit(context.Background(), nil, capture, run, control); err != nil {
-		t.Fatalf("appendWorkspaceAnalysisCancelRequestedAudit() = %v", err)
+	if err := appendScopedWorkspaceAnalysisCancelRequestedAudit(context.Background(), nil, capture, run, control); err != nil {
+		t.Fatalf("appendScopedWorkspaceAnalysisCancelRequestedAudit() = %v", err)
 	}
 	if len(capture.events) != 1 {
 		t.Fatalf("audit events=%#v", capture.events)
@@ -175,36 +175,36 @@ func TestWorkspaceAnalysisCancelRequestedAuditUsesStableSafeBinding(t *testing.T
 		}
 	}
 	capture.replayed = true
-	if err := appendWorkspaceAnalysisCancelRequestedAudit(context.Background(), nil, capture, run, control); err == nil {
+	if err := appendScopedWorkspaceAnalysisCancelRequestedAudit(context.Background(), nil, capture, run, control); err == nil {
 		t.Fatal("fresh cancel accepted a replayed audit")
 	}
 }
 
 func TestWorkspaceAnalysisAuditConstructorsRejectUnsafeDependencies(t *testing.T) {
 	var audit *workspaceAnalysisAuditCapture
-	if _, err := NewQuestionDispatcherWithWorkspaceAnalysisAndAudit(
-		&questionConstructorDB{}, &questionConstructorRuntime{}, &questionConstructorAppender{},
+	if _, err := NewGORMQuestionDispatcherWithWorkspaceAnalysisAndAudit(
+		questionConstructorPool(t), &questionConstructorRuntime{}, &questionConstructorAppender{},
 		foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, &questionAnalysisRunStarter{}, audit,
 	); err == nil {
 		t.Fatal("dispatcher accepted a typed-nil audit recorder")
 	}
-	if _, err := NewWorkspaceAnalysisFinalizerWithAudit(
-		&questionConstructorDB{}, &questionConstructorAppender{}, foundation.NewUUIDGenerator(nil),
+	if _, err := NewGORMWorkspaceAnalysisFinalizerWithAudit(
+		questionConstructorPool(t), &questionConstructorAppender{}, foundation.NewUUIDGenerator(nil),
 		&workspaceAnalysisAuditCapture{}, "/tmp/worker-secret",
 	); err == nil {
 		t.Fatal("finalizer accepted an unsafe worker actor ref")
 	}
-	if _, err := NewWorkspaceAnalysisCancellationTerminalHookWithAudit(
+	if _, err := NewGORMWorkspaceAnalysisCancellationTerminalHookWithAudit(
 		&questionConstructorAppender{}, foundation.NewUUIDGenerator(nil), &workspaceAnalysisAuditCapture{}, "token=plain-secret",
 	); err == nil {
 		t.Fatal("terminal hook accepted a sensitive worker actor ref")
 	}
-	if _, err := NewWorkspaceAnalysisCancellationTerminalHookWithAudit(
+	if _, err := NewGORMWorkspaceAnalysisCancellationTerminalHookWithAudit(
 		&questionConstructorAppender{}, foundation.NewUUIDGenerator(nil), &workspaceAnalysisAuditCapture{}, "worker@example.test",
 	); err == nil {
 		t.Fatal("terminal hook accepted a PII worker actor ref")
 	}
-	if _, err := NewWorkspaceAnalysisCancellationAuditHook(audit); err == nil {
+	if _, err := NewGORMWorkspaceAnalysisCancellationAuditHook(audit); err == nil {
 		t.Fatal("control audit hook accepted a typed-nil audit recorder")
 	}
 }
@@ -215,9 +215,9 @@ type workspaceAnalysisAuditCapture struct {
 	err      error
 }
 
-func (capture *workspaceAnalysisAuditCapture) RecordTx(
+func (capture *workspaceAnalysisAuditCapture) RecordScoped(
 	_ context.Context,
-	_ any,
+	_ foundation.TransactionScope,
 	event auditdomain.Event,
 ) (auditdomain.Event, bool, error) {
 	if capture.err != nil {
@@ -241,4 +241,4 @@ func workspaceAnalysisAuditTestID(value int) foundation.ID {
 	return foundation.ID(fmt.Sprintf("89000000-0000-4000-8000-%012d", value))
 }
 
-var _ WorkspaceAnalysisAuditRecorder = (*workspaceAnalysisAuditCapture)(nil)
+var _ ScopedWorkspaceAnalysisAuditRecorder = (*workspaceAnalysisAuditCapture)(nil)

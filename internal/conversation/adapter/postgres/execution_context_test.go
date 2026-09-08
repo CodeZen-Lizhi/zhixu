@@ -2,13 +2,15 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"strings"
 	"testing"
 
 	conversationapplication "github.com/CodeZen-Lizhi/zhixu/internal/conversation/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	"github.com/jackc/pgx/v5"
+	gormpostgres "gorm.io/driver/postgres"
+	"gorm.io/gorm"
 )
 
 func TestRepositoryQuestionExecutionContextRejectsInvalidQueryBeforeDatabase(t *testing.T) {
@@ -28,7 +30,11 @@ func TestRepositoryQuestionExecutionContextRejectsInvalidQueryBeforeDatabase(t *
 			query.ContextHash = strings.Repeat("A", 64)
 		}},
 	}
-	repository := &Repository{db: noQueryExecutionContextDB{}}
+	database, err := gorm.Open(gormpostgres.New(gormpostgres.Config{Conn: noQueryExecutionContextDB{}}), &gorm.Config{DisableAutomaticPing: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := &GORMRepository{db: database}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			query := valid
@@ -49,14 +55,22 @@ func requireExecutionContextError(t *testing.T, err error, kind foundation.Error
 
 type noQueryExecutionContextDB struct{}
 
-func (noQueryExecutionContextDB) Begin(context.Context) (pgx.Tx, error) {
+func (noQueryExecutionContextDB) BeginTx(context.Context, *sql.TxOptions) (*sql.Tx, error) {
 	panic("invalid execution context must not begin a transaction")
 }
 
-func (noQueryExecutionContextDB) Query(context.Context, string, ...any) (pgx.Rows, error) {
+func (noQueryExecutionContextDB) PrepareContext(context.Context, string) (*sql.Stmt, error) {
+	panic("invalid execution context must not prepare a database query")
+}
+
+func (noQueryExecutionContextDB) ExecContext(context.Context, string, ...any) (sql.Result, error) {
+	panic("invalid execution context must not write to the database")
+}
+
+func (noQueryExecutionContextDB) QueryContext(context.Context, string, ...any) (*sql.Rows, error) {
 	panic("invalid execution context must not query the database")
 }
 
-func (noQueryExecutionContextDB) QueryRow(context.Context, string, ...any) pgx.Row {
+func (noQueryExecutionContextDB) QueryRowContext(context.Context, string, ...any) *sql.Row {
 	panic("invalid execution context must not query the database")
 }

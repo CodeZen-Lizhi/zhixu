@@ -9,13 +9,12 @@ import (
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/domain"
-	"github.com/jackc/pgx/v5/pgxpool"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 )
 
 func TestRepositoryHotActivationProtocolAndRecovery(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := newModelSettingsTestDatabase(t, ctx)
-	defer cleanup()
+	pool := newModelSettingsTestDatabase(t)
 	repository, _, _ := newConfiguredModelSettingsRepository(t, pool, 21)
 	degraded, err := repository.Snapshot(ctx, 20*time.Second)
 	if err != nil {
@@ -142,7 +141,7 @@ func TestRepositoryHotActivationProtocolAndRecovery(t *testing.T) {
 	if committed.Phase != domain.RolloutPhaseActivating || committed.TargetRevision != 1 || committed.PreviousActiveRevision != 0 {
 		t.Fatalf("committed activation=%s", committed)
 	}
-	if _, err := pool.Exec(ctx, `UPDATE ops.model_settings_state
+	if _, err := pool.DB().Exec(ctx, `UPDATE ops.model_settings_state
 SET lease_expires_at=clock_timestamp()-interval '1 second',version=version+1,updated_at=clock_timestamp()
 WHERE singleton=true`); err != nil {
 		t.Fatal(err)
@@ -181,7 +180,7 @@ WHERE singleton=true`); err != nil {
 		}
 	}
 	apiInstanceID := mustModelSettingsID(t, "a2000000-0000-4000-8000-000000000001")
-	if _, err := pool.Exec(ctx, `UPDATE ops.model_settings_runtime
+	if _, err := pool.DB().Exec(ctx, `UPDATE ops.model_settings_runtime
 SET phase='unavailable',heartbeat_at=clock_timestamp()
 WHERE role='api' AND instance_id=$1::uuid`, string(apiInstanceID)); err != nil {
 		t.Fatal(err)
@@ -217,7 +216,7 @@ WHERE role='api' AND instance_id=$1::uuid`, string(apiInstanceID)); err != nil {
 	if finalSnapshot.ActiveRevision != 1 || finalSnapshot.DesiredRevision != 1 || finalSnapshot.ApplyRequired || finalSnapshot.RestartRequired {
 		t.Fatalf("final snapshot=%+v", finalSnapshot)
 	}
-	if _, err := pool.Exec(ctx, `UPDATE ops.model_settings_runtime
+	if _, err := pool.DB().Exec(ctx, `UPDATE ops.model_settings_runtime
 SET phase='unavailable',heartbeat_at=clock_timestamp()
 WHERE role='api' AND instance_id=$1::uuid`, string(apiInstanceID)); err != nil {
 		t.Fatal(err)
@@ -292,7 +291,7 @@ WHERE role='api' AND instance_id=$1::uuid`, string(apiInstanceID)); err != nil {
 			t.Fatal(transitionErr)
 		}
 	}
-	if _, err := pool.Exec(ctx, `UPDATE ops.model_settings_state
+	if _, err := pool.DB().Exec(ctx, `UPDATE ops.model_settings_state
 SET lease_expires_at=clock_timestamp()-interval '1 second',version=version+1,updated_at=clock_timestamp()
 WHERE singleton=true`); err != nil {
 		t.Fatal(err)
@@ -317,8 +316,7 @@ WHERE singleton=true`); err != nil {
 
 func TestRepositoryRuntimeTakeoverRequiresDatabaseTimeStaleness(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := newModelSettingsTestDatabase(t, ctx)
-	defer cleanup()
+	pool := newModelSettingsTestDatabase(t)
 	repository, _, _ := newConfiguredModelSettingsRepository(t, pool, 22)
 	oldOwner := mustModelSettingsID(t, "a2000000-0000-4000-8000-000000000221")
 	newOwner := mustModelSettingsID(t, "a2000000-0000-4000-8000-000000000222")
@@ -344,8 +342,7 @@ func TestRepositoryRuntimeTakeoverRequiresDatabaseTimeStaleness(t *testing.T) {
 
 func TestRepositoryParticipantTakeoverRebuildsWhileArming(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := newModelSettingsTestDatabase(t, ctx)
-	defer cleanup()
+	pool := newModelSettingsTestDatabase(t)
 	repository, _, _ := newConfiguredModelSettingsRepository(t, pool, 23)
 	registerActiveRuntimes(t, ctx, repository, 0)
 	saved, err := repository.SaveDesired(ctx, application.SaveCommand{
@@ -435,7 +432,7 @@ func TestRepositoryParticipantTakeoverRebuildsWhileArming(t *testing.T) {
 func backdateModelSettingsTakeoverHeartbeats(
 	t *testing.T,
 	ctx context.Context,
-	pool *pgxpool.Pool,
+	pool *platformpostgres.Pool,
 	role domain.RuntimeRole,
 	rolloutID string,
 	age time.Duration,

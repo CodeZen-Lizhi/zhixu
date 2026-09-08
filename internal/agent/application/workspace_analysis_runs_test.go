@@ -15,13 +15,13 @@ func TestWorkspaceAnalysisRunServiceCreatesFrozenQueuedRun(t *testing.T) {
 	repository := &workspaceAnalysisRunPersistenceFake{}
 	ids := &workspaceAnalysisRunIDGenerator{id: workspaceAnalysisRunApplicationID(20)}
 	config := workspaceAnalysisRunStartTestConfig()
-	service, err := NewWorkspaceAnalysisRunService(repository, ids, config)
+	service, err := NewScopedWorkspaceAnalysisRunService(repository, ids, config)
 	if err != nil {
 		t.Fatal(err)
 	}
 	command := workspaceAnalysisRunStartTestCommand(false)
 	transaction := &workspaceAnalysisRunTransaction{}
-	run, err := service.StartWorkspaceAnalysisRunTx(context.Background(), transaction, command)
+	run, err := service.StartWorkspaceAnalysisRunScoped(context.Background(), transaction, command)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,11 +41,11 @@ func TestWorkspaceAnalysisRunServiceCreatesFrozenQueuedRun(t *testing.T) {
 func TestWorkspaceAnalysisRunServiceAcceptsDatabaseTimeNormalization(t *testing.T) {
 	repository := &workspaceAnalysisRunPersistenceFake{normalizeTimes: true}
 	ids := &workspaceAnalysisRunIDGenerator{id: workspaceAnalysisRunApplicationID(20)}
-	service, err := NewWorkspaceAnalysisRunService(repository, ids, workspaceAnalysisRunStartTestConfig())
+	service, err := NewScopedWorkspaceAnalysisRunService(repository, ids, workspaceAnalysisRunStartTestConfig())
 	if err != nil {
 		t.Fatal(err)
 	}
-	run, err := service.StartWorkspaceAnalysisRunTx(
+	run, err := service.StartWorkspaceAnalysisRunScoped(
 		context.Background(),
 		&workspaceAnalysisRunTransaction{},
 		workspaceAnalysisRunStartTestCommand(false),
@@ -63,12 +63,12 @@ func TestWorkspaceAnalysisRunServiceReplayRequiresExactExistingBinding(t *testin
 	command := workspaceAnalysisRunStartTestCommand(false)
 	seedRepository := &workspaceAnalysisRunPersistenceFake{}
 	seedIDs := &workspaceAnalysisRunIDGenerator{id: workspaceAnalysisRunApplicationID(20)}
-	seedService, err := NewWorkspaceAnalysisRunService(seedRepository, seedIDs, config)
+	seedService, err := NewScopedWorkspaceAnalysisRunService(seedRepository, seedIDs, config)
 	if err != nil {
 		t.Fatal(err)
 	}
 	transaction := &workspaceAnalysisRunTransaction{}
-	seeded, err := seedService.StartWorkspaceAnalysisRunTx(context.Background(), transaction, command)
+	seeded, err := seedService.StartWorkspaceAnalysisRunScoped(context.Background(), transaction, command)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,13 +100,13 @@ func TestWorkspaceAnalysisRunServiceReplayRequiresExactExistingBinding(t *testin
 			}
 			repository := &workspaceAnalysisRunPersistenceFake{existing: existing, found: test.found}
 			ids := &workspaceAnalysisRunIDGenerator{id: workspaceAnalysisRunApplicationID(22)}
-			service, err := NewWorkspaceAnalysisRunService(repository, ids, config)
+			service, err := NewScopedWorkspaceAnalysisRunService(repository, ids, config)
 			if err != nil {
 				t.Fatal(err)
 			}
 			replay := command
 			replay.Replayed = true
-			got, err := service.StartWorkspaceAnalysisRunTx(context.Background(), transaction, replay)
+			got, err := service.StartWorkspaceAnalysisRunScoped(context.Background(), transaction, replay)
 			if test.valid {
 				if err != nil || got.ID != seeded.ID || ids.calls != 0 || repository.insertCalls != 0 || repository.findCalls != 1 {
 					t.Fatalf("run=%#v err=%v ids=%d insert=%d find=%d", got, err, ids.calls, repository.insertCalls, repository.findCalls)
@@ -122,7 +122,7 @@ func TestWorkspaceAnalysisRunServiceReplayRequiresExactExistingBinding(t *testin
 	}
 }
 
-func TestNewWorkspaceAnalysisRunServiceRejectsUnsafeReadinessAndHashes(t *testing.T) {
+func TestNewScopedWorkspaceAnalysisRunServiceRejectsUnsafeReadinessAndHashes(t *testing.T) {
 	repository := &workspaceAnalysisRunPersistenceFake{}
 	ids := &workspaceAnalysisRunIDGenerator{id: workspaceAnalysisRunApplicationID(20)}
 	tests := []struct {
@@ -138,7 +138,7 @@ func TestNewWorkspaceAnalysisRunServiceRejectsUnsafeReadinessAndHashes(t *testin
 		t.Run(test.name, func(t *testing.T) {
 			config := workspaceAnalysisRunStartTestConfig()
 			test.mutate(&config)
-			_, err := NewWorkspaceAnalysisRunService(repository, ids, config)
+			_, err := NewScopedWorkspaceAnalysisRunService(repository, ids, config)
 			var classified *foundation.Error
 			if !errors.As(err, &classified) || classified.Code != test.code {
 				t.Fatalf("error=%#v", err)
@@ -179,13 +179,13 @@ func TestWorkspaceAnalysisRunExecutionQueryRejectsInvalidOrReusedIdentity(t *tes
 type workspaceAnalysisRunPersistenceFake struct {
 	existing       domain.WorkspaceAnalysisRun
 	found          bool
-	transaction    any
+	transaction    foundation.TransactionScope
 	normalizeTimes bool
 	insertCalls    int
 	findCalls      int
 }
 
-func (fake *workspaceAnalysisRunPersistenceFake) InsertWorkspaceAnalysisRunTx(_ context.Context, transaction any, run domain.WorkspaceAnalysisRun) (domain.WorkspaceAnalysisRun, error) {
+func (fake *workspaceAnalysisRunPersistenceFake) InsertWorkspaceAnalysisRunScoped(_ context.Context, transaction foundation.TransactionScope, run domain.WorkspaceAnalysisRun) (domain.WorkspaceAnalysisRun, error) {
 	fake.transaction = transaction
 	fake.insertCalls++
 	if fake.normalizeTimes {
@@ -199,7 +199,7 @@ func (fake *workspaceAnalysisRunPersistenceFake) InsertWorkspaceAnalysisRunTx(_ 
 	return run, nil
 }
 
-func (fake *workspaceAnalysisRunPersistenceFake) FindWorkspaceAnalysisRunTx(_ context.Context, transaction any, _, _ foundation.ID) (domain.WorkspaceAnalysisRun, bool, error) {
+func (fake *workspaceAnalysisRunPersistenceFake) FindWorkspaceAnalysisRunScoped(_ context.Context, transaction foundation.TransactionScope, _, _ foundation.ID) (domain.WorkspaceAnalysisRun, bool, error) {
 	fake.transaction = transaction
 	fake.findCalls++
 	return fake.existing, fake.found, nil
@@ -216,6 +216,8 @@ func (generator *workspaceAnalysisRunIDGenerator) New() (foundation.ID, error) {
 }
 
 type workspaceAnalysisRunTransaction struct{}
+
+func (*workspaceAnalysisRunTransaction) TransactionScope() {}
 
 func workspaceAnalysisRunStartTestConfig() WorkspaceAnalysisRunStartConfig {
 	return WorkspaceAnalysisRunStartConfig{

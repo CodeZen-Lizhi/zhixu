@@ -47,46 +47,8 @@ var errAgentCallerTransactionRollback = errors.New("rollback agent caller transa
 
 func agentCallerTransactionIntegrationVariants() []agentCallerTransactionIntegrationVariant {
 	return []agentCallerTransactionIntegrationVariant{
-		{name: "legacy", open: openLegacyAgentCallerTransactionIntegration},
-		{name: "gorm", open: openGORMAgentCallerTransactionIntegration},
-	}
-}
 
-func openLegacyAgentCallerTransactionIntegration(
-	t *testing.T,
-	platform *platformpostgres.Pool,
-	ctx context.Context,
-) agentCallerTransactionIntegrationHarness {
-	t.Helper()
-	repository, err := NewRepository(platform.DB())
-	if err != nil {
-		t.Fatal(err)
-	}
-	return agentCallerTransactionIntegrationHarness{
-		repository: repository,
-		within: func(work func(application.ModelRunRepository, agentModelRunRecordReader) error) error {
-			tx, err := platform.DB().Begin(ctx)
-			if err != nil {
-				return err
-			}
-			defer func() { _ = tx.Rollback(context.Background()) }()
-			transactionRepository, err := NewRepository(tx)
-			if err != nil {
-				return err
-			}
-			return work(transactionRepository, func(
-				readCtx context.Context,
-				workspaceID foundation.ID,
-				runID foundation.ID,
-				forUpdate bool,
-			) (application.ModelRunRecord, error) {
-				return repository.GetModelRunRecordTx(readCtx, tx, workspaceID, runID, forUpdate)
-			})
-		},
-		invalidRead: func() error {
-			_, err := repository.GetModelRunRecordTx(ctx, nil, testAgentID(1), testAgentID(87), false)
-			return err
-		},
+		{name: "gorm", open: openGORMAgentCallerTransactionIntegration},
 	}
 }
 
@@ -858,14 +820,7 @@ type agentRepositoryIntegrationVariant struct {
 
 func agentRepositoryIntegrationVariants() []agentRepositoryIntegrationVariant {
 	return []agentRepositoryIntegrationVariant{
-		{name: "legacy", open: func(t *testing.T, platform *platformpostgres.Pool) agentRepositoryIntegrationStore {
-			t.Helper()
-			repository, err := NewRepository(platform.DB())
-			if err != nil {
-				t.Fatal(err)
-			}
-			return repository
-		}},
+
 		{name: "gorm", open: func(t *testing.T, platform *platformpostgres.Pool) agentRepositoryIntegrationStore {
 			t.Helper()
 			repository, err := NewGORMRepository(platform)
@@ -899,7 +854,7 @@ func newAgentRepositoryIntegrationPool(t *testing.T) (*pgxpool.Pool, context.Con
 func newAgentPlatformIntegrationPool(t *testing.T) (*platformpostgres.Pool, context.Context) {
 	t.Helper()
 	// 统一使用 TODO 9 共享 Testcontainers 工厂：数据库 provisioning、迁移与
-	// 生命周期由 fixture 拥有；legacy 与 GORM Adapter 共享唯一 platform Pool。
+	// 生命周期由 fixture 拥有；全部 GORM Adapter 共享唯一 platform Pool。
 	fixture := testdb.Require(t, testdb.Config{Availability: testdb.FailWhenUnavailable, MaxConns: 16})
 	return fixture.Pool(), context.Background()
 }

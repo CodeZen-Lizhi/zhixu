@@ -20,7 +20,7 @@ import (
 
 func TestEvidenceReferenceStoreLoadsFullyBoundReferences(t *testing.T) {
 	_, database, ctx := newRetrievalTestRepository(t)
-	repository, err := NewSearchRepository(database.DB())
+	repository, err := NewGORMSearchRepository(database)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func TestEvidenceReferenceStoreLoadsFullyBoundReferences(t *testing.T) {
 
 func TestEvidenceReferenceStoreLoadsDerivedTextEvidence(t *testing.T) {
 	_, database, ctx := newRetrievalTestRepository(t)
-	repository, err := NewSearchRepository(database.DB())
+	repository, err := NewGORMSearchRepository(database)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestEvidenceReferenceStoreLoadsDerivedTextEvidence(t *testing.T) {
 
 func TestEvidenceReferenceStoreUsesLatestAttemptSecurityStatus(t *testing.T) {
 	_, database, ctx := newRetrievalTestRepository(t)
-	repository, err := NewSearchRepository(database.DB())
+	repository, err := NewGORMSearchRepository(database)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +116,7 @@ func TestEvidenceReferenceStoreUsesLatestAttemptSecurityStatus(t *testing.T) {
 
 func TestEvidenceReferenceStoreHidesCrossWorkspaceAndBindingMisses(t *testing.T) {
 	_, database, ctx := newRetrievalTestRepository(t)
-	repository, err := NewSearchRepository(database.DB())
+	repository, err := NewGORMSearchRepository(database)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +187,7 @@ func TestEvidenceReferenceStoreHidesCrossWorkspaceAndBindingMisses(t *testing.T)
 
 func TestEvidenceReferenceStoreFailsClosedForDamagedPersistentMetadata(t *testing.T) {
 	_, database, ctx := newRetrievalTestRepository(t)
-	repository, err := NewSearchRepository(database.DB())
+	repository, err := NewGORMSearchRepository(database)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +202,7 @@ func TestEvidenceReferenceStoreFailsClosedForDamagedPersistentMetadata(t *testin
 
 func TestEvidenceReferenceStoreLoadsFiveHundredCitationsInInputOrderAndFailsClosed(t *testing.T) {
 	_, database, ctx := newRetrievalTestRepository(t)
-	repository, err := NewSearchRepository(database.DB())
+	repository, err := NewGORMSearchRepository(database)
 	if err != nil {
 		t.Fatal(err)
 	}

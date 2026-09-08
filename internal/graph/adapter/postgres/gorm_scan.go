@@ -16,7 +16,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// GORMSemanticLinkScanRepository is the staged Scan implementation. The
+// GORMSemanticLinkScanRepository is the Scan implementation. The
 // shared Graph repository owns its GORM root and UnitOfWork; Workflow and
 // Collection only consume the live scope created here.
 type GORMSemanticLinkScanRepository struct {
@@ -30,7 +30,7 @@ type GORMSemanticLinkScanRepository struct {
 var _ graphapp.SemanticLinkScanStartPort = (*GORMSemanticLinkScanRepository)(nil)
 var _ graphapp.SemanticLinkScanStatePort = (*GORMSemanticLinkScanRepository)(nil)
 
-// NewGORMSemanticLinkScanRepository constructs the complete staged Scan
+// NewGORMSemanticLinkScanRepository constructs the complete Scan
 // repository from one platform Pool and scoped collaborators.
 func NewGORMSemanticLinkScanRepository(
 	pool *platformpostgres.Pool,
@@ -49,7 +49,7 @@ func NewGORMSemanticLinkScanRepository(
 	return &GORMSemanticLinkScanRepository{repository: repository, runtime: runtime, collection: collection, ids: ids, clock: clock}, nil
 }
 
-// NewGORMSemanticLinkScanStateRepository constructs the state-only staged
+// NewGORMSemanticLinkScanStateRepository constructs the state-only
 // repository used by the Workflow executor.
 func NewGORMSemanticLinkScanStateRepository(pool *platformpostgres.Pool) (*GORMSemanticLinkScanRepository, error) {
 	if pool == nil {
@@ -226,7 +226,7 @@ func (repository *GORMSemanticLinkScanRepository) GetByWorkflowRun(ctx context.C
 	if err != nil {
 		return graphdomain.SemanticLinkScan{}, err
 	}
-	row, err := gormRawRow(ctx, database, scanSelectSQL+` WHERE workspace_id=$1 AND workflow_run_id=$2`, string(workspaceID), string(workflowRunID))
+	row, err := gormRawRow(ctx, database, scanSelectSQL+` WHERE workspace_id=(@p1) AND workflow_run_id=(@p2)`, sql.Named("p1", string(workspaceID)), sql.Named("p2", string(workflowRunID)))
 	if err != nil {
 		return graphdomain.SemanticLinkScan{}, classifyGORMScan(ctx, err, "GRAPH_SEMANTIC_LINK_SCAN_QUERY_FAILED")
 	}
@@ -263,8 +263,8 @@ func (repository *GORMSemanticLinkScanRepository) AdvancePage(ctx context.Contex
 		"GRAPH_SEMANTIC_LINK_SCAN_ADVANCE_FAILED",
 		func(callbackCtx context.Context, database *gorm.DB, _ foundation.TransactionScope) error {
 			row, queryErr := gormRawRow(callbackCtx, database, scanSelectSQL+`
-				WHERE id=$1 AND workspace_id=$2 AND version=$3 AND status IN ('PENDING','RUNNING')
-				FOR UPDATE`, string(progress.ScanID), string(progress.WorkspaceID), progress.ExpectedVersion)
+				WHERE id=(@p1) AND workspace_id=(@p2) AND version=(@p3) AND status IN ('PENDING','RUNNING')
+				FOR UPDATE`, sql.Named("p1", string(progress.ScanID)), sql.Named("p2", string(progress.WorkspaceID)), sql.Named("p3", progress.ExpectedVersion))
 			if queryErr != nil {
 				return queryErr
 			}
@@ -286,19 +286,19 @@ func (repository *GORMSemanticLinkScanRepository) AdvancePage(ctx context.Contex
 			result, scanErr = gormUpdateSemanticLinkScan(callbackCtx, database, `
 				UPDATE graph.semantic_link_scan
 				SET status='RUNNING',
-				    processed_nodes=processed_nodes+$4,
-				    candidate_count=candidate_count+$5,
-				    suppressed_count=suppressed_count+$6,
-				    reopened_count=reopened_count+$7,
-				    failed_count=failed_count+$8,
-				    checkpoint=$9::jsonb,
+				    processed_nodes=processed_nodes+(@p4),
+				    candidate_count=candidate_count+(@p5),
+				    suppressed_count=suppressed_count+(@p6),
+				    reopened_count=reopened_count+(@p7),
+				    failed_count=failed_count+(@p8),
+				    checkpoint=(@p9)::jsonb,
 				    version=version+1,
-				    updated_at=$10
-				WHERE id=$1 AND workspace_id=$2 AND version=$3 AND status IN ('PENDING','RUNNING')
+				    updated_at=(@p10)
+				WHERE id=(@p1) AND workspace_id=(@p2) AND version=(@p3) AND status IN ('PENDING','RUNNING')
 				RETURNING `+scanColumns,
-				string(progress.ScanID), string(progress.WorkspaceID), progress.ExpectedVersion,
-				progress.ProcessedDelta, progress.CandidateDelta, progress.SuppressedDelta, progress.ReopenedDelta, progress.FailedDelta,
-				graphJSONB(checkpoint), now)
+				sql.Named("p1", string(progress.ScanID)), sql.Named("p2", string(progress.WorkspaceID)), sql.Named("p3", progress.ExpectedVersion),
+				sql.Named("p4", progress.ProcessedDelta), sql.Named("p5", progress.CandidateDelta), sql.Named("p6", progress.SuppressedDelta), sql.Named("p7", progress.ReopenedDelta), sql.Named("p8", progress.FailedDelta),
+				sql.Named("p9", graphJSONB(checkpoint)), sql.Named("p10", now))
 			return scanErr
 		},
 	)
@@ -339,10 +339,10 @@ func (repository *GORMSemanticLinkScanRepository) Finish(ctx context.Context, te
 	}
 	return gormUpdateSemanticLinkScan(ctx, database, `
 		UPDATE graph.semantic_link_scan
-		SET status=$4,last_error=$5::jsonb,version=version+1,updated_at=$6,completed_at=$6
-		WHERE id=$1 AND workspace_id=$2 AND version=$3 AND status IN ('PENDING','RUNNING')
+		SET status=(@p4),last_error=(@p5)::jsonb,version=version+1,updated_at=(@p6),completed_at=(@p6)
+		WHERE id=(@p1) AND workspace_id=(@p2) AND version=(@p3) AND status IN ('PENDING','RUNNING')
 		RETURNING `+scanColumns,
-		string(terminal.ScanID), string(terminal.WorkspaceID), terminal.ExpectedVersion, string(terminal.Status), lastError, terminal.At.UTC())
+		sql.Named("p1", string(terminal.ScanID)), sql.Named("p2", string(terminal.WorkspaceID)), sql.Named("p3", terminal.ExpectedVersion), sql.Named("p4", string(terminal.Status)), sql.Named("p5", lastError), sql.Named("p6", terminal.At.UTC()))
 }
 
 func (repository *GORMSemanticLinkScanRepository) recoverCommittedStart(ctx context.Context, request graphapp.SemanticLinkScanStartRequest) (graphapp.SemanticLinkScanStartResult, bool, error) {
@@ -432,13 +432,13 @@ func gormInsertSemanticLinkScan(ctx context.Context, database *gorm.DB, scan gra
 			fingerprint,idempotency_key,request_hash,workflow_run_id,status,total_nodes,
 			processed_nodes,candidate_count,suppressed_count,reopened_count,failed_count,
 			checkpoint,last_error,version,created_at,updated_at,completed_at
-		) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20::jsonb,$21::jsonb,$22,$23,$24,$25)
+		) VALUES((@p1),(@p2),(@p3),(@p4),(@p5),(@p6),(@p7),(@p8),(@p9),(@p10),(@p11),(@p12),(@p13),(@p14),(@p15),(@p16),(@p17),(@p18),(@p19),(@p20)::jsonb,(@p21)::jsonb,(@p22),(@p23),(@p24),(@p25))
 		ON CONFLICT (workspace_id,idempotency_key) DO NOTHING
 		RETURNING id::text`,
-		string(scan.ID), string(scan.WorkspaceID), string(scan.Scope.Type), scan.Scope.Ref, scan.Scope.Version, scan.Scope.SchemaVersion, nullableScanHash(scan.Scope.QueryHash), nullableScanHash(scan.Scope.ReadModelRevision),
-		scan.Fingerprint, scan.IdempotencyKey, scan.RequestHash, string(scan.WorkflowRunID), string(scan.Status), scan.TotalNodes,
-		scan.ProcessedNodes, scan.CandidateCount, scan.SuppressedCount, scan.ReopenedCount, scan.FailedCount,
-		graphJSONB(checkpoint), lastError, scan.Version, scan.CreatedAt.UTC(), scan.UpdatedAt.UTC(), optionalTime(scan.CompletedAt))
+		sql.Named("p1", string(scan.ID)), sql.Named("p2", string(scan.WorkspaceID)), sql.Named("p3", string(scan.Scope.Type)), sql.Named("p4", scan.Scope.Ref), sql.Named("p5", scan.Scope.Version), sql.Named("p6", scan.Scope.SchemaVersion), sql.Named("p7", nullableScanHash(scan.Scope.QueryHash)), sql.Named("p8", nullableScanHash(scan.Scope.ReadModelRevision)),
+		sql.Named("p9", scan.Fingerprint), sql.Named("p10", scan.IdempotencyKey), sql.Named("p11", scan.RequestHash), sql.Named("p12", string(scan.WorkflowRunID)), sql.Named("p13", string(scan.Status)), sql.Named("p14", scan.TotalNodes),
+		sql.Named("p15", scan.ProcessedNodes), sql.Named("p16", scan.CandidateCount), sql.Named("p17", scan.SuppressedCount), sql.Named("p18", scan.ReopenedCount), sql.Named("p19", scan.FailedCount),
+		sql.Named("p20", graphJSONB(checkpoint)), sql.Named("p21", lastError), sql.Named("p22", scan.Version), sql.Named("p23", scan.CreatedAt.UTC()), sql.Named("p24", scan.UpdatedAt.UTC()), sql.Named("p25", optionalTime(scan.CompletedAt)))
 	if err != nil {
 		return false, classifyGORMScan(ctx, err, "GRAPH_SEMANTIC_LINK_SCAN_CREATE_FAILED")
 	}
@@ -452,11 +452,11 @@ func gormInsertSemanticLinkScan(ctx context.Context, database *gorm.DB, scan gra
 }
 
 func gormLoadScanByID(ctx context.Context, database *gorm.DB, workspaceID, scanID foundation.ID, forUpdate bool) (graphdomain.SemanticLinkScan, error) {
-	query := scanSelectSQL + ` WHERE id=$1 AND workspace_id=$2`
+	query := scanSelectSQL + ` WHERE id=(@p1) AND workspace_id=(@p2)`
 	if forUpdate {
 		query += ` FOR UPDATE`
 	}
-	row, err := gormRawRow(ctx, database, query, string(scanID), string(workspaceID))
+	row, err := gormRawRow(ctx, database, query, sql.Named("p1", string(scanID)), sql.Named("p2", string(workspaceID)))
 	if err != nil {
 		return graphdomain.SemanticLinkScan{}, classifyGORMScan(ctx, err, "GRAPH_SEMANTIC_LINK_SCAN_QUERY_FAILED")
 	}
@@ -469,11 +469,11 @@ func gormLoadScanByID(ctx context.Context, database *gorm.DB, workspaceID, scanI
 }
 
 func gormLoadScanByIdempotency(ctx context.Context, database *gorm.DB, workspaceID foundation.ID, key string, forUpdate bool) (graphdomain.SemanticLinkScan, bool, error) {
-	query := scanSelectSQL + ` WHERE workspace_id=$1 AND idempotency_key=$2`
+	query := scanSelectSQL + ` WHERE workspace_id=(@p1) AND idempotency_key=(@p2)`
 	if forUpdate {
 		query += ` FOR UPDATE`
 	}
-	row, err := gormRawRow(ctx, database, query, string(workspaceID), key)
+	row, err := gormRawRow(ctx, database, query, sql.Named("p1", string(workspaceID)), sql.Named("p2", key))
 	if err != nil {
 		return graphdomain.SemanticLinkScan{}, false, classifyGORMScan(ctx, err, "GRAPH_SEMANTIC_LINK_SCAN_QUERY_FAILED")
 	}

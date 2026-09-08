@@ -55,9 +55,9 @@ func TestProfileRetryReceiptRoundTripAndStrictDecoder(t *testing.T) {
 }
 
 func TestProfileRetryRepositoryRejectsUnavailableDependencies(t *testing.T) {
-	var repository *ProfileRepository
+	var repository *GORMProfileRepository
 	_, _, err := repository.ReplayProfileRetry(context.Background(), captureapp.ProfileRetryBinding{})
-	if postgresCaptureErrorCode(err) != "CAPTURE_PROFILE_RETRY_INVALID" {
+	if postgresCaptureErrorCode(err) != "CAPTURE_PROFILE_REPOSITORY_UNAVAILABLE" {
 		t.Fatalf("error=%#v", err)
 	}
 }

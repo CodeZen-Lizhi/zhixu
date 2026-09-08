@@ -47,50 +47,16 @@ type captureProfileRepositoryIntegrationHarness struct {
 	modelRuns agentapp.ModelRunRepository
 }
 
-type captureProfileRepositoryIntegrationVariant struct {
-	name string
-	open func(*testing.T, *platformpostgres.Pool) captureProfileRepositoryIntegrationHarness
-}
-
-func testCaptureProfileRepositoryVariants(
+func withCaptureProfileRepositoryIntegration(
 	t *testing.T,
 	test func(*testing.T, *platformpostgres.Pool, context.Context, captureProfileRepositoryIntegrationHarness),
 ) {
 	t.Helper()
-	variants := []captureProfileRepositoryIntegrationVariant{
-		{name: "legacy", open: openLegacyCaptureProfileRepositoryIntegration},
-		{name: "gorm", open: openGORMCaptureProfileRepositoryIntegration},
-	}
-	for _, variant := range variants {
-		t.Run(variant.name, func(t *testing.T) {
-			fixture := testdb.Require(t, testdb.Config{Availability: testdb.FailWhenUnavailable, MaxConns: 16})
-			platform := fixture.Pool()
-			test(t, platform, context.Background(), variant.open(t, platform))
-		})
-	}
-}
-
-func openLegacyCaptureProfileRepositoryIntegration(
-	t *testing.T,
-	platform *platformpostgres.Pool,
-) captureProfileRepositoryIntegrationHarness {
-	t.Helper()
-	pool := platform.DB()
-	captureRepository, err := capturepostgres.NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
-	modelRuns, err := agentpostgres.NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
-	profiles, err := capturepostgres.NewProfileRepository(pool, modelRuns)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return captureProfileRepositoryIntegrationHarness{
-		capture: captureRepository, profiles: profiles, modelRuns: modelRuns,
-	}
+	t.Run("gorm", func(t *testing.T) {
+		fixture := testdb.Require(t, testdb.Config{Availability: testdb.FailWhenUnavailable, MaxConns: 16})
+		platform := fixture.Pool()
+		test(t, platform, context.Background(), openGORMCaptureProfileRepositoryIntegration(t, platform))
+	})
 }
 
 func openGORMCaptureProfileRepositoryIntegration(
@@ -120,7 +86,7 @@ func openGORMCaptureProfileRepositoryIntegration(
 }
 
 func TestUnavailableProfileGeneratorPersistsStateAndAttemptWithoutDerivedContent(t *testing.T) {
-	testCaptureProfileRepositoryVariants(t, testUnavailableProfileGeneratorPersistsStateAndAttemptWithoutDerivedContent)
+	withCaptureProfileRepositoryIntegration(t, testUnavailableProfileGeneratorPersistsStateAndAttemptWithoutDerivedContent)
 }
 
 func testUnavailableProfileGeneratorPersistsStateAndAttemptWithoutDerivedContent(
@@ -377,7 +343,7 @@ func testUnavailableProfileGeneratorPersistsStateAndAttemptWithoutDerivedContent
 }
 
 func TestReadyProfileGeneratorPersistsEvidenceAndReplaysWithoutCallingModelAgain(t *testing.T) {
-	testCaptureProfileRepositoryVariants(t, testReadyProfileGeneratorPersistsEvidenceAndReplaysWithoutCallingModelAgain)
+	withCaptureProfileRepositoryIntegration(t, testReadyProfileGeneratorPersistsEvidenceAndReplaysWithoutCallingModelAgain)
 }
 
 func testReadyProfileGeneratorPersistsEvidenceAndReplaysWithoutCallingModelAgain(
@@ -1540,7 +1506,7 @@ func (model *captureProfileBlockingModel) CallCount() int {
 }
 
 func TestCaptureProfileRepositoryPreservesContextCauseAndReusesConnection(t *testing.T) {
-	testCaptureProfileRepositoryVariants(t, testCaptureProfileRepositoryPreservesContextCauseAndReusesConnection)
+	withCaptureProfileRepositoryIntegration(t, testCaptureProfileRepositoryPreservesContextCauseAndReusesConnection)
 }
 
 func testCaptureProfileRepositoryPreservesContextCauseAndReusesConnection(
@@ -1590,7 +1556,7 @@ func testCaptureProfileRepositoryPreservesContextCauseAndReusesConnection(
 }
 
 func TestCaptureProfileRepositoryTargetQueryPlansUseDeclaredIndexes(t *testing.T) {
-	testCaptureProfileRepositoryVariants(t, testCaptureProfileRepositoryTargetQueryPlansUseDeclaredIndexes)
+	withCaptureProfileRepositoryIntegration(t, testCaptureProfileRepositoryTargetQueryPlansUseDeclaredIndexes)
 }
 
 func testCaptureProfileRepositoryTargetQueryPlansUseDeclaredIndexes(

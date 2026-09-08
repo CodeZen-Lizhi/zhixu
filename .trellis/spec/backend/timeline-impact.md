@@ -38,13 +38,16 @@ type ImpactRepository interface {
     ImpactAnalysisReady(context.Context, foundation.ID) (bool, error)
     ListImpactObjects(context.Context, domain.KnowledgeEvent) ([]domain.ImpactObject, error)
     SaveImpactReport(context.Context, domain.ImpactReport) (domain.ImpactReport, bool, error)
-    SaveImpactReportWithAudit(context.Context, domain.ImpactReport, string, ImpactAuditPort) (domain.ImpactReport, bool, error)
     GetImpactReportByID(context.Context, foundation.ID, foundation.ID) (domain.ImpactReport, error)
 }
 
-type ImpactAuditPort interface {
-    RecordImpactAnalysis(context.Context, ImpactAuditRecord) error
-    RecordImpactAnalysisTx(context.Context, any, ImpactAuditRecord) error
+type ScopedImpactRepository interface {
+    ImpactRepository
+    SaveImpactReportWithScopedAudit(context.Context, domain.ImpactReport, string, ScopedImpactAuditPort) (domain.ImpactReport, bool, error)
+}
+
+type ScopedImpactAuditPort interface {
+    RecordImpactAnalysisScoped(context.Context, foundation.TransactionScope, ImpactAuditRecord) error
 }
 ```
 
@@ -62,7 +65,7 @@ type ImpactAuditPort interface {
 - Impact 对象必须 canonical sort/dedupe；同 ID 的冲突副本 fail closed。报告绑定 source event ID/ref/version，并以这些绑定和对象计算稳定 fingerprint。
 - `ARTIFACT` 只能来自 Artifact Revision citation selector 对 Source Version/Span tuple 的精确 provenance；`REVIEW_CARD` 必须复用 owner 的 evidence selector。两个对象都冻结 owner version 与 revision/card binding，不允许文本相似度、请求时扫描 Revision JSON 或第二套 Card 事实源。
 - Artifact selector backfill 必须冻结高水位并持久化 cursor/count/status；只有 `COMPLETED` 且覆盖校验通过时 `impact-analysis/v2` 才 ready。新 Revision 同事务写 selector，历史 backfill 必须有界、可重入并 fail closed。
-- 每个 `(workspace_id, source_event_id, analysis_version)` 只有一份报告。v1 历史报告保持不变；首次 v2 报告通过 `SaveImpactReportWithAudit` 在同一 PostgreSQL 事务保存 Report、由 trigger 追加 Timeline Outbox、并追加 `IMPACT_ANALYZED` Audit，且以 `supersedes_report_id` 指向同 source 的 v1 前驱；Audit 失败时整体回滚。
+- 每个 `(workspace_id, source_event_id, analysis_version)` 只有一份报告。v1 历史报告保持不变；首次 v2 报告通过 `SaveImpactReportWithScopedAudit` 在同一 PostgreSQL 事务保存 Report、由 trigger 追加 Timeline Outbox、并追加 `IMPACT_ANALYZED` Audit，且以 `supersedes_report_id` 指向同 source 的 v1 前驱；Audit 失败时整体回滚。Repository 与 Audit 从同一平台 Pool 构造，Audit 只参与调用方 scope，不另行提交。
 - 已有报告的每次认证 HTTP 请求仍追加一条 Audit：同 report 与同 `Idempotency-Key` 派生同一 UUID v5 Audit ID，不同键产生不同 Audit Event。Audit 只保存 actor、report/event ID、对象数和受控关联，不保存正文、Secret、Credential 或绝对路径。
 - Session actor 记录为 `USER`，API Token actor 记录为 `API_TOKEN`；递归 redaction 后仍含明文 Secret、重复 key 或非 canonical JSON 时必须 fail closed。
 - `ARTIFACT_GENERATED` 只由 Artifact terminal-success owner 事务 enqueue；`REVIEW_CARD_INVALIDATED` 只由 Card 首次持久进入 `INVALIDATED` 的 owner 事务 enqueue。两者使用 `knowledge-event/v2`，冻结 operator 与 owner binding，重复 source identity 必须精确 replay。

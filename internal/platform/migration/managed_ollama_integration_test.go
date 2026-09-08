@@ -28,11 +28,6 @@ type managedOllamaIntegrationStore interface {
 	CompleteTestPreparation(context.Context, foundation.ID, string, bool) (localmodelruntime.OperationRecord, error)
 }
 
-type managedOllamaIntegrationVariant struct {
-	name string
-	open func(*testing.T, *platformpostgres.Pool) managedOllamaIntegrationStore
-}
-
 func managedOllamaTestPlatform(t *testing.T) *platformpostgres.Pool {
 	t.Helper()
 	fixture := testdb.Require(t, testdb.Config{
@@ -47,33 +42,19 @@ func managedOllamaTestPlatform(t *testing.T) *platformpostgres.Pool {
 	return platform
 }
 
-func runManagedOllamaIntegrationVariants(
+func runManagedOllamaIntegration(
 	t *testing.T,
 	scenario func(*testing.T, context.Context, *pgxpool.Pool, managedOllamaIntegrationStore),
 ) {
 	t.Helper()
-	variants := []managedOllamaIntegrationVariant{
-		{name: "legacy-pgx", open: func(t *testing.T, platform *platformpostgres.Pool) managedOllamaIntegrationStore {
-			store, err := localmodelruntime.NewPostgresStore(platform.DB())
-			if err != nil {
-				t.Fatal(err)
-			}
-			return store
-		}},
-		{name: "gorm", open: func(t *testing.T, platform *platformpostgres.Pool) managedOllamaIntegrationStore {
-			store, err := localmodelruntime.NewGORMStore(platform)
-			if err != nil {
-				t.Fatal(err)
-			}
-			return store
-		}},
-	}
-	for _, variant := range variants {
-		t.Run(variant.name, func(t *testing.T) {
-			platform := managedOllamaTestPlatform(t)
-			scenario(t, context.Background(), platform.DB(), variant.open(t, platform))
-		})
-	}
+	t.Run("gorm", func(t *testing.T) {
+		platform := managedOllamaTestPlatform(t)
+		store, err := localmodelruntime.NewGORMStore(platform)
+		if err != nil {
+			t.Fatal(err)
+		}
+		scenario(t, context.Background(), platform.DB(), store)
+	})
 }
 
 func assertPostgresCode(t *testing.T, err error, want string) {
@@ -285,7 +266,7 @@ func TestManagedOllamaRuntimeRoleLeastPrivilege(t *testing.T) {
 }
 
 func TestManagedOllamaPersistentPullBudgetAndDeadline(t *testing.T) {
-	runManagedOllamaIntegrationVariants(t, testManagedOllamaPersistentPullBudgetAndDeadline)
+	runManagedOllamaIntegration(t, testManagedOllamaPersistentPullBudgetAndDeadline)
 }
 
 func testManagedOllamaPersistentPullBudgetAndDeadline(
@@ -413,7 +394,7 @@ func assertManagedOllamaHoldReleased(t *testing.T, ctx context.Context, pool int
 }
 
 func TestManagedOllamaActiveRecoverySeed(t *testing.T) {
-	runManagedOllamaIntegrationVariants(t, testManagedOllamaActiveRecoverySeed)
+	runManagedOllamaIntegration(t, testManagedOllamaActiveRecoverySeed)
 }
 
 func testManagedOllamaActiveRecoverySeed(
@@ -554,7 +535,7 @@ func testManagedOllamaActiveRecoverySeed(
 }
 
 func TestManagedOllamaSupersedesStaleActiveRecovery(t *testing.T) {
-	runManagedOllamaIntegrationVariants(t, testManagedOllamaSupersedesStaleActiveRecovery)
+	runManagedOllamaIntegration(t, testManagedOllamaSupersedesStaleActiveRecovery)
 }
 
 func testManagedOllamaSupersedesStaleActiveRecovery(
@@ -632,7 +613,7 @@ func testManagedOllamaSupersedesStaleActiveRecovery(
 }
 
 func TestManagedOllamaLifecycleStoreCAS(t *testing.T) {
-	runManagedOllamaIntegrationVariants(t, testManagedOllamaLifecycleStoreCAS)
+	runManagedOllamaIntegration(t, testManagedOllamaLifecycleStoreCAS)
 }
 
 func TestManagedOllamaScopedActivationTransaction(t *testing.T) {
@@ -743,7 +724,7 @@ func TestManagedOllamaScopedActivationTransaction(t *testing.T) {
 }
 
 func TestManagedOllamaReadDemandCancellationAndConnectionRelease(t *testing.T) {
-	runManagedOllamaIntegrationVariants(t, func(t *testing.T, ctx context.Context, pool *pgxpool.Pool, store managedOllamaIntegrationStore) {
+	runManagedOllamaIntegration(t, func(t *testing.T, ctx context.Context, pool *pgxpool.Pool, store managedOllamaIntegrationStore) {
 		lock, err := pool.Begin(ctx)
 		if err != nil {
 			t.Fatal(err)
@@ -770,7 +751,7 @@ func TestManagedOllamaReadDemandCancellationAndConnectionRelease(t *testing.T) {
 			if !errors.Is(readErr, context.Canceled) {
 				t.Fatalf("canceled demand read error=%v, want context cancellation", readErr)
 			}
-			if _, isGORM := store.(*localmodelruntime.GORMStore); isGORM && !errors.Is(readErr, cause) {
+			if !errors.Is(readErr, cause) {
 				t.Fatalf("GORM canceled demand read error=%v, want custom cause", readErr)
 			}
 		case <-time.After(5 * time.Second):

@@ -2,6 +2,7 @@ package runtimegrant
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -94,6 +95,50 @@ func TestStartRegistersExactManagedGrantAndClosesUnavailable(t *testing.T) {
 	if service.phase.ExpectedPhase != workspacedomain.RuntimePhaseActive || service.phase.NextPhase != workspacedomain.RuntimePhaseUnavailable {
 		t.Fatalf("close phase=%#v", service.phase)
 	}
+
+	t.Run("shutdown deadline retains an unfinished heartbeat", func(t *testing.T) {
+		processContext, cancelProcess := context.WithCancel(context.Background())
+		defer cancelProcess()
+		stopped := make(chan struct{})
+		service := &runtimeServiceStub{record: workspacedomain.RuntimeRecord{
+			Role: workspacedomain.RuntimeRoleAPI, WorkspaceID: runtimeTestWorkspaceID,
+			Phase: workspacedomain.RuntimePhaseActive, Version: 1,
+		}}
+		lease := &Lease{service: service, record: service.record, cancel: cancelProcess, done: stopped}
+		composition := &GORMProcessComposition{Lease: lease}
+		expired, cancelExpired := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+		defer cancelExpired()
+		closeResult := make(chan error, 1)
+		go func() { closeResult <- composition.Close(expired) }()
+		defer func() {
+			select {
+			case <-stopped:
+			default:
+				close(stopped)
+			}
+		}()
+		select {
+		case err := <-closeResult:
+			if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(processContext.Err(), context.Canceled) {
+				t.Fatalf("unfinished heartbeat close=%v process=%v", err, processContext.Err())
+			}
+		case <-time.After(time.Second):
+			t.Fatal("workspace cleanup exceeded the caller deadline")
+		}
+		service.mu.Lock()
+		phase, command := service.record.Phase, service.phase
+		service.mu.Unlock()
+		if phase != workspacedomain.RuntimePhaseActive || command.NextPhase != "" {
+			t.Fatal("unfinished heartbeat was declared unavailable")
+		}
+		close(stopped)
+		if err := composition.Close(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if service.record.Phase != workspacedomain.RuntimePhaseUnavailable {
+			t.Fatal("completed heartbeat did not release runtime ownership")
+		}
+	})
 }
 
 func TestStartRejectsGrantThatIsNotAuthoritative(t *testing.T) {

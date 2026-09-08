@@ -2,11 +2,13 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	graphapp "github.com/CodeZen-Lizhi/zhixu/internal/graph/application"
 	graphdomain "github.com/CodeZen-Lizhi/zhixu/internal/graph/domain"
+	"gorm.io/gorm"
 )
 
 // UpsertSemanticLinkCandidate persists one candidate evaluation in a
@@ -24,7 +26,7 @@ func (repository *GORMRepository) UpsertSemanticLinkCandidate(ctx context.Contex
 	}
 
 	var result SemanticLinkCandidateUpsertResult
-	err := repository.withinDB(ctx, foundation.TransactionOptions{}, gormCandidateClassify, func(callbackCtx context.Context, _ foundation.TransactionScope, database *gormDB) error {
+	err := repository.within(ctx, foundation.TransactionOptions{}, gormCandidateClassify, func(callbackCtx context.Context, _ foundation.TransactionScope, database *gorm.DB) error {
 		existing, err := loadCandidate(callbackCtx, database, candidate.WorkspaceID, candidate.Fingerprint, "fingerprint", true)
 		if err == nil {
 			result = SemanticLinkCandidateUpsertResult{
@@ -97,7 +99,7 @@ func (repository *GORMRepository) ListSemanticLinkCandidates(ctx context.Context
 	}
 
 	var page graphdomain.SemanticLinkCandidatePage
-	err := repository.readSnapshot(ctx, func(callbackCtx context.Context, database *gormDB) error {
+	err := repository.gormReadSnapshot(ctx, func(callbackCtx context.Context, database *gorm.DB) error {
 		bases, truncated, err := queryCandidateWindow(callbackCtx, database, request, request.Limit)
 		if err != nil {
 			return gormCandidateClassify(callbackCtx, err, gormGraphTransactionStageCallback)
@@ -134,7 +136,7 @@ func (repository *GORMRepository) SemanticLinkCandidateWindow(ctx context.Contex
 	}
 
 	var window graphapp.SemanticLinkCandidateResultWindow
-	err := repository.readSnapshot(ctx, func(callbackCtx context.Context, database *gormDB) error {
+	err := repository.gormReadSnapshot(ctx, func(callbackCtx context.Context, database *gorm.DB) error {
 		bases, truncated, err := queryCandidateWindow(callbackCtx, database, request, graphapp.MaxSemanticLinkCandidateWindow)
 		if err != nil {
 			return gormCandidateClassify(callbackCtx, err, gormGraphTransactionStageCallback)
@@ -166,7 +168,7 @@ func (repository *GORMRepository) GetSemanticLinkCandidate(ctx context.Context, 
 	}
 
 	var candidate graphdomain.SemanticLinkCandidate
-	err := repository.readSnapshot(ctx, func(callbackCtx context.Context, database *gormDB) error {
+	err := repository.gormReadSnapshot(ctx, func(callbackCtx context.Context, database *gorm.DB) error {
 		base, err := loadCandidate(callbackCtx, database, workspaceID, candidateID, "id", false)
 		if err != nil {
 			return gormCandidateClassify(callbackCtx, err, gormGraphTransactionStageCallback)
@@ -182,7 +184,7 @@ func (repository *GORMRepository) GetSemanticLinkCandidate(ctx context.Context, 
 
 // DecideSemanticLinkCandidate writes an ordinary append-only decision receipt
 // before the candidate CAS. Confirm is routed through the separate scoped
-// Change Control collaborator and does not use this staged method directly.
+// Change Control collaborator and does not use this method directly.
 func (repository *GORMRepository) DecideSemanticLinkCandidate(ctx context.Context, command graphapp.SemanticLinkCandidateDecisionCommand, proposalID *foundation.ID) (graphapp.SemanticLinkCandidateDecisionResult, error) {
 	if err := repository.ready(ctx); err != nil {
 		return graphapp.SemanticLinkCandidateDecisionResult{}, err
@@ -200,7 +202,7 @@ func (repository *GORMRepository) DecideSemanticLinkCandidate(ctx context.Contex
 	}
 
 	var result graphapp.SemanticLinkCandidateDecisionResult
-	err = repository.withinDB(ctx, foundation.TransactionOptions{}, gormCandidateClassify, func(callbackCtx context.Context, _ foundation.TransactionScope, database *gormDB) error {
+	err = repository.within(ctx, foundation.TransactionOptions{}, gormCandidateClassify, func(callbackCtx context.Context, _ foundation.TransactionScope, database *gorm.DB) error {
 		if receipt, found, err := loadDecisionByIdempotency(callbackCtx, database, canonical.WorkspaceID, canonical.IdempotencyKey); err != nil {
 			return err
 		} else if found {
@@ -282,15 +284,15 @@ func (repository *GORMRepository) DecideSemanticLinkCandidate(ctx context.Contex
 		if canonical.Decision.ResumeAfter != nil {
 			deferUntil = canonical.Decision.ResumeAfter.UTC()
 		}
-		commandTag, err := database.Exec(callbackCtx, `
+		rowsAffected, err := gormGraphExec(callbackCtx, database, `
 			UPDATE graph.semantic_link_candidate
-			SET status=$3,current_proposal_id=$4,deferred_until=$5,version=version+1,updated_at=$6
-			WHERE workspace_id=$1 AND id=$2 AND version=$7`,
-			string(canonical.WorkspaceID), string(canonical.CandidateID), string(nextStatus), nextProposal, deferUntil, now, canonical.ExpectedVersion)
+			SET status=(@p3),current_proposal_id=(@p4),deferred_until=(@p5),version=version+1,updated_at=(@p6)
+			WHERE workspace_id=(@p1) AND id=(@p2) AND version=(@p7)`,
+			sql.Named("p1", string(canonical.WorkspaceID)), sql.Named("p2", string(canonical.CandidateID)), sql.Named("p3", string(nextStatus)), sql.Named("p4", nextProposal), sql.Named("p5", deferUntil), sql.Named("p6", now), sql.Named("p7", canonical.ExpectedVersion))
 		if err != nil {
 			return err
 		}
-		if commandTag.RowsAffected() != 1 {
+		if rowsAffected != 1 {
 			return candidateVersionConflict("candidate decision CAS was lost")
 		}
 

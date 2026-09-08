@@ -12,7 +12,7 @@ import (
 )
 
 // 本文件是 Workspace Analysis 模型操作 GORM 实现的事务内变更、回放与恢复
-// helper。全部 SQL 与 legacy 逐语义对齐，仅把 pgx `$n` 绑定换成 GORM `?`，
+// helper。SQL 保持既有状态机与锁序，参数统一使用 GORM `?` 绑定，
 // 事务边界由 Foundation UnitOfWork 提供。
 
 func gormValidateWorkspaceAnalysisModelLockedBinding(

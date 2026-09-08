@@ -71,7 +71,7 @@ func runCommand(ctx context.Context, arguments []string, stdout io.Writer) error
 	if err != nil {
 		return err
 	}
-	bootstrap, bootstrapErr := modelruntime.Bootstrap(executionCtx, database.DB(), cfg)
+	bootstrap, bootstrapErr := modelruntime.BootstrapGORM(executionCtx, database, cfg)
 	if bootstrap.Service == nil || bootstrap.Repository == nil {
 		if bootstrapErr != nil {
 			return bootstrapErr

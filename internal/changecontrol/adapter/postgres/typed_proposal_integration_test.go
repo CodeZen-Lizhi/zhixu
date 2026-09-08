@@ -15,17 +15,18 @@ import (
 )
 
 func TestRepositoryKnowledgeChangeProposalRoundTripAndReplay(t *testing.T) {
-	pool, ctx := newChangeControlMigrationTestPool(t)
+	platform, ctx := newChangeControlMigrationTestPool(t)
+	pool := platform.DB()
 	workspaceID := foundation.ID("71000000-0000-4000-8000-000000000001")
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO core.workspace(
 			id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at
-		) VALUES($1,'Typed Proposal Test',$2,$2,$3,'test',1,$3,$3)`,
+		) VALUES($1,'Typed Proposal Test',$2,$2,$3,'inactive',1,$3,$3)`,
 		string(workspaceID), "/tmp/typed-proposal-"+string(workspaceID), now); err != nil {
 		t.Fatal(err)
 	}
-	repository, err := NewRepository(pool)
+	repository, err := NewGORMRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,17 +168,18 @@ func TestRepositoryKnowledgeChangeProposalRoundTripAndReplay(t *testing.T) {
 }
 
 func TestRepositoryPublishArtifactProposalRoundTripAndReplay(t *testing.T) {
-	pool, ctx := newChangeControlMigrationTestPool(t)
+	platform, ctx := newChangeControlMigrationTestPool(t)
+	pool := platform.DB()
 	workspaceID := foundation.ID("72000000-0000-4000-8000-000000000001")
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO core.workspace(
 			id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at
-		) VALUES($1,'Publish Artifact Proposal Test',$2,$2,$3,'test',1,$3,$3)`,
+		) VALUES($1,'Publish Artifact Proposal Test',$2,$2,$3,'inactive',1,$3,$3)`,
 		string(workspaceID), "/tmp/publish-artifact-"+string(workspaceID), now); err != nil {
 		t.Fatal(err)
 	}
-	repository, err := NewRepository(pool)
+	repository, err := NewGORMRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +241,8 @@ func TestRepositoryPublishArtifactProposalRoundTripAndReplay(t *testing.T) {
 }
 
 func TestRepositoryDownstreamUpdateProposalRoundTripReplayAndApprovalOnly(t *testing.T) {
-	pool, ctx := newChangeControlMigrationTestPool(t)
+	platform, ctx := newChangeControlMigrationTestPool(t)
+	pool := platform.DB()
 	workspaceID := foundation.ID("77000000-0000-4000-8000-000000000001")
 	eventID := foundation.ID("77000000-0000-4000-8000-000000000002")
 	reportID := foundation.ID("77000000-0000-4000-8000-000000000003")
@@ -249,7 +252,7 @@ func TestRepositoryDownstreamUpdateProposalRoundTripReplayAndApprovalOnly(t *tes
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO core.workspace(
 			id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at
-		) VALUES($1,'Downstream Update Proposal Test',$2,$2,$3,'test',1,$3,$3)`,
+		) VALUES($1,'Downstream Update Proposal Test',$2,$2,$3,'inactive',1,$3,$3)`,
 		string(workspaceID), "/tmp/downstream-update-"+string(workspaceID), now); err != nil {
 		t.Fatal(err)
 	}
@@ -335,7 +338,7 @@ func TestRepositoryDownstreamUpdateProposalRoundTripReplayAndApprovalOnly(t *tes
 			Risk: risk, RollbackPlan: rollback, ChangeHash: changeHash, DownstreamUpdate: &update, CreatedAt: now,
 		},
 	}
-	repository, err := NewRepository(pool)
+	repository, err := NewGORMRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -393,7 +396,8 @@ func TestRepositoryDownstreamUpdateProposalRoundTripReplayAndApprovalOnly(t *tes
 }
 
 func TestRepositoryBuildDownstreamReviewCardProposalGuardsBindings(t *testing.T) {
-	pool, ctx := newChangeControlMigrationTestPool(t)
+	platform, ctx := newChangeControlMigrationTestPool(t)
+	pool := platform.DB()
 	workspaceID := foundation.ID("78000000-0000-4000-8000-000000000001")
 	otherWorkspaceID := foundation.ID("78000000-0000-4000-8000-000000000002")
 	claimID := foundation.ID("78000000-0000-4000-8000-000000000003")
@@ -412,7 +416,7 @@ func TestRepositoryBuildDownstreamReviewCardProposalGuardsBindings(t *testing.T)
 		if _, err := pool.Exec(ctx, `
 			INSERT INTO core.workspace(
 				id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at
-			) VALUES($1,$2,$3,$3,$4,'test',1,$4,$4)`,
+			) VALUES($1,$2,$3,$3,$4,'inactive',1,$4,$4)`,
 			string(workspace.id), workspace.name, "/tmp/review-card-downstream-"+string(workspace.id), now); err != nil {
 			t.Fatal(err)
 		}
@@ -533,7 +537,7 @@ func TestRepositoryBuildDownstreamReviewCardProposalGuardsBindings(t *testing.T)
 
 	insertEvent(eventID, "current")
 	insertV2Report(reportID, eventID, nil)
-	repository, err := NewRepository(pool)
+	repository, err := NewGORMRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -686,17 +690,18 @@ func publishArtifactPayload(workspaceID foundation.ID) domain.PublishArtifact {
 }
 
 func TestRepositoryFilePatchProposalRequestHashCompatibility(t *testing.T) {
-	pool, ctx := newChangeControlMigrationTestPool(t)
+	platform, ctx := newChangeControlMigrationTestPool(t)
+	pool := platform.DB()
 	workspaceID := foundation.ID("75000000-0000-4000-8000-000000000001")
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO core.workspace(
 			id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at
-		) VALUES($1,'File Proposal Hash Compatibility',$2,$2,$3,'test',1,$3,$3)`,
+		) VALUES($1,'File Proposal Hash Compatibility',$2,$2,$3,'inactive',1,$3,$3)`,
 		string(workspaceID), "/tmp/file-proposal-"+string(workspaceID), now); err != nil {
 		t.Fatal(err)
 	}
-	repository, err := NewRepository(pool)
+	repository, err := NewGORMRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -822,17 +827,18 @@ func TestRepositoryFilePatchProposalRequestHashCompatibility(t *testing.T) {
 }
 
 func TestRepositoryProposalRiskLevelIsIndependentFromRevisionNarrative(t *testing.T) {
-	pool, ctx := newChangeControlMigrationTestPool(t)
+	platform, ctx := newChangeControlMigrationTestPool(t)
+	pool := platform.DB()
 	workspaceID := foundation.ID("76000000-0000-4000-8000-000000000001")
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO core.workspace(
 			id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at
-		) VALUES($1,'Proposal Risk Source',$2,$2,$3,'test',1,$3,$3)`,
+		) VALUES($1,'Proposal Risk Source',$2,$2,$3,'inactive',1,$3,$3)`,
 		string(workspaceID), "/tmp/proposal-risk-source-"+string(workspaceID), now); err != nil {
 		t.Fatal(err)
 	}
-	repository, err := NewRepository(pool)
+	repository, err := NewGORMRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}

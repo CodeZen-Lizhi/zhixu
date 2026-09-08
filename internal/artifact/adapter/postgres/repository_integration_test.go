@@ -6,8 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/url"
-	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -16,9 +14,8 @@ import (
 	artifactapp "github.com/CodeZen-Lizhi/zhixu/internal/artifact/application"
 	artifactdomain "github.com/CodeZen-Lizhi/zhixu/internal/artifact/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
-	"github.com/jackc/pgx/v5"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -254,7 +251,8 @@ func TestGORMRepositoryPostgreSQLDocumentSourceProjectionFailsClosed(t *testing.
 
 func TestRepositoryPostgreSQLWorkspaceCASReceiptsAndImmutableBindings(t *testing.T) {
 	ctx := context.Background()
-	repository, pool := newArtifactIntegrationRepository(t, ctx)
+	repository, platformPool := newArtifactIntegrationGORMRepository(t, ctx)
+	pool := platformPool.DB()
 	workspaceA := artifactIntegrationID(1)
 	workspaceB := artifactIntegrationID(2)
 	seedArtifactWorkspace(t, ctx, pool, workspaceA, "artifact-integration-a")
@@ -397,7 +395,8 @@ func TestRepositoryPostgreSQLWorkspaceCASReceiptsAndImmutableBindings(t *testing
 
 func TestRepositoryPostgreSQLTransitionRejectsUnclosedSideFactsWithoutPersistence(t *testing.T) {
 	ctx := context.Background()
-	repository, pool := newArtifactIntegrationRepository(t, ctx)
+	repository, platformPool := newArtifactIntegrationGORMRepository(t, ctx)
+	pool := platformPool.DB()
 	workspaceID := artifactIntegrationID(500)
 	seedArtifactWorkspace(t, ctx, pool, workspaceID, "artifact-side-fact-closure")
 	now := time.Date(2026, 7, 26, 11, 0, 0, 0, time.UTC)
@@ -498,101 +497,10 @@ func TestRepositoryPostgreSQLTransitionRejectsUnclosedSideFactsWithoutPersistenc
 	}
 }
 
-func newArtifactIntegrationRepository(t *testing.T, ctx context.Context) (*Repository, *pgxpool.Pool) {
-	t.Helper()
-	baseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
-	if baseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a disposable PostgreSQL instance")
-	}
-	parsed, err := url.Parse(baseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	admin, err := pgxpool.New(ctx, baseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	databaseName := fmt.Sprintf("zhixu_artifact_%d", time.Now().UnixNano())
-	identifier := pgx.Identifier{databaseName}.Sanitize()
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+identifier); err != nil {
-		admin.Close()
-		t.Fatal(err)
-	}
-	parsed.Path = "/" + databaseName
-	pool, err := pgxpool.New(ctx, parsed.String())
-	if err != nil {
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		pool.Close()
-		_, _ = admin.Exec(context.Background(), "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-	})
-	runner, err := platformmigration.NewAtlasEmbeddedRunner(pool)
-	if err == nil {
-		err = runner.Up(ctx)
-	}
-	if err != nil {
-		t.Fatal(err)
-	}
-	repository, err := NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return repository, pool
-}
-
 func newArtifactIntegrationGORMRepository(t *testing.T, ctx context.Context) (*GORMRepository, *platformpostgres.Pool) {
 	t.Helper()
-	baseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
-	if baseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a disposable PostgreSQL instance")
-	}
-	parsed, err := url.Parse(baseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	admin, err := pgxpool.New(ctx, baseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	databaseName := fmt.Sprintf("zhixu_artifact_gorm_%d", time.Now().UnixNano())
-	identifier := pgx.Identifier{databaseName}.Sanitize()
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+identifier); err != nil {
-		admin.Close()
-		t.Fatal(err)
-	}
-	parsed.Path = "/" + databaseName
-	databaseURL := parsed.String()
-	migrationPool, err := platformpostgres.OpenMigration(ctx, databaseURL, 4, 1)
-	if err != nil {
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-		t.Fatal(err)
-	}
-	runner, err := platformmigration.NewAtlasEmbeddedRunner(migrationPool.DB())
-	if err == nil {
-		err = runner.Up(ctx)
-	}
-	migrationPool.Close()
-	if err != nil {
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-		t.Fatal(err)
-	}
-	platformPool, err := platformpostgres.Open(ctx, databaseURL, 4, 1)
-	if err != nil {
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		platformPool.Close()
-		_, _ = admin.Exec(context.Background(), "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-	})
+	fixture := testdb.Require(t, testdb.Config{Availability: testdb.FailWhenUnavailable, MaxConns: 8})
+	platformPool := fixture.Pool()
 	repository, err := NewGORMRepository(platformPool)
 	if err != nil {
 		t.Fatal(err)
@@ -672,7 +580,7 @@ type artifactIntegrationSideEffectSnapshot struct {
 	Reservations int64
 }
 
-func artifactIntegrationAssertInvalidTransitionLeavesNoSideEffects(t *testing.T, ctx context.Context, repository *Repository, pool *pgxpool.Pool, record artifactapp.TransitionRecord) {
+func artifactIntegrationAssertInvalidTransitionLeavesNoSideEffects(t *testing.T, ctx context.Context, repository *GORMRepository, pool *pgxpool.Pool, record artifactapp.TransitionRecord) {
 	t.Helper()
 	before := artifactIntegrationSideEffectState(t, ctx, pool, record.Binding.WorkspaceID, record.Binding.ArtifactID)
 	if before.Exports != 0 || before.Publications != 0 || before.Reservations != 0 {

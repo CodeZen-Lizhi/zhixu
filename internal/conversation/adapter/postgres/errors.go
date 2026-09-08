@@ -3,11 +3,11 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 )
 
 const (
@@ -65,22 +65,19 @@ func classify(cause error, code string) error {
 	}
 	switch {
 	case errors.Is(cause, context.Canceled):
-		return foundation.NewError(foundation.ErrorNonRetryableFailure, code, false, context.Canceled)
+		return foundation.NewError(foundation.ErrorNonRetryableFailure, code, false, cause)
 	case errors.Is(cause, context.DeadlineExceeded):
-		return foundation.NewError(foundation.ErrorRetryableFailure, code, true, context.DeadlineExceeded)
-	case errors.Is(cause, pgx.ErrNoRows):
+		return foundation.NewError(foundation.ErrorRetryableFailure, code, true, cause)
+	case errors.Is(cause, sql.ErrNoRows):
 		return notFound(code, cause)
 	}
-	var pgErr *pgconn.PgError
-	if errors.As(cause, &pgErr) {
-		switch pgErr.Code {
-		case "40001", "40P01", "55P03":
-			return foundation.NewError(foundation.ErrorRetryableFailure, code, true, cause)
-		case "23505":
-			return conflict(code, cause)
-		case "23503", "23514", "55000":
-			return consistency(code, cause)
-		}
+	switch platformpostgres.SQLState(cause) {
+	case "40001", "40P01", "55P03":
+		return foundation.NewError(foundation.ErrorRetryableFailure, code, true, cause)
+	case "23505":
+		return conflict(code, cause)
+	case "23503", "23514", "55000":
+		return consistency(code, cause)
 	}
 	return dependency(code, cause)
 }

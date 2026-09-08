@@ -1,51 +1,70 @@
 package postgres
 
 import (
+	"encoding/json"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
 	collectionapp "github.com/CodeZen-Lizhi/zhixu/internal/collection/application"
+	"github.com/CodeZen-Lizhi/zhixu/internal/collection/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	gormpostgres "gorm.io/driver/postgres"
+	"gorm.io/gorm"
 )
 
-func TestRenderGORMPositionalPreservesRepeatedAndMultiDigitMarkerOrder(t *testing.T) {
+func TestGORMNamedQueryPreservesRepeatedAndMultiDigitMarkerOrder(t *testing.T) {
 	t.Parallel()
-	args := []any{"one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"}
-	query := "SELECT $10::text, $2::text, $10::text, $1::text, $3::text, $4::text, $5::text, $6::text, $7::text, $8::text, $9::text"
-
-	rendered, bound, err := renderGORMPositional(query, args)
+	values := []any{"one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"}
+	args := make(map[string]any, len(values))
+	for index, value := range values {
+		args["query"+strconv.Itoa(index+1)] = value
+	}
+	query := "SELECT (@query10)::text, (@query2)::text, (@query10)::text, (@query1)::text, (@query3)::text, (@query4)::text, (@query5)::text, (@query6)::text, (@query7)::text, (@query8)::text, (@query9)::text"
+	database, err := gorm.Open(gormpostgres.New(gormpostgres.Config{DSN: "postgres://localhost/unused"}), &gorm.Config{DryRun: true, DisableAutomaticPing: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantQuery := "SELECT ?::text, ?::text, ?::text, ?::text, ?::text, ?::text, ?::text, ?::text, ?::text, ?::text, ?::text"
-	if rendered != wantQuery {
-		t.Fatalf("rendered=%q want=%q", rendered, wantQuery)
+	sqlDatabase, err := database.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sqlDatabase.Close() })
+	statement := database.Raw(query, collectionQueryArguments("10000000-0000-4000-8000-000000000001", args)).Statement
+	wantQuery := "SELECT ($1)::text, ($2)::text, ($3)::text, ($4)::text, ($5)::text, ($6)::text, ($7)::text, ($8)::text, ($9)::text, ($10)::text, ($11)::text"
+	if statement.SQL.String() != wantQuery {
+		t.Fatalf("rendered=%q want=%q", statement.SQL.String(), wantQuery)
 	}
 	wantBound := []any{"ten", "two", "ten", "one", "three", "four", "five", "six", "seven", "eight", "nine"}
-	if !reflect.DeepEqual(bound, wantBound) {
-		t.Fatalf("bound=%#v want=%#v", bound, wantBound)
+	if !reflect.DeepEqual(statement.Vars, wantBound) {
+		t.Fatalf("bound=%#v want=%#v", statement.Vars, wantBound)
 	}
 }
 
-func TestRenderGORMPositionalRejectsInvalidBindings(t *testing.T) {
+func TestCollectionQueryRejectsInvalidBindings(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name  string
-		query string
-		args  []any
+		name     string
+		field    string
+		operator string
+		value    json.RawMessage
 	}{
-		{name: "zero marker", query: "SELECT $0", args: []any{"one"}},
-		{name: "out of range marker", query: "SELECT $2", args: []any{"one"}},
-		{name: "malformed marker", query: "SELECT $", args: nil},
-		{name: "unused argument", query: "SELECT $1", args: []any{"one", "two"}},
+		{name: "unknown registry field", field: "unknown", operator: "EQ", value: json.RawMessage(`"one"`)},
+		{name: "unsupported operator", field: "object_type", operator: "RAW", value: json.RawMessage(`"TOPIC"`)},
+		{name: "missing value", field: "object_type", operator: "EQ"},
+		{name: "invalid typed value", field: "topic_id", operator: "EQ", value: json.RawMessage(`"not-a-uuid"`)},
 	}
 	for _, test := range tests {
-		test := test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			if _, _, err := renderGORMPositional(test.query, test.args); err == nil {
-				t.Fatal("expected invalid positional bindings to fail")
+			query := domain.Query{SchemaVersion: domain.QuerySchemaVersionV1, Root: domain.Clause{
+				Kind: domain.ClauseKindGroup, Operator: "AND", Clauses: []domain.Clause{{
+					Kind: domain.ClauseKindPredicate, Field: test.field, Operator: test.operator, Value: test.value,
+				}},
+			}}
+			if _, err := collectionapp.CompileQuery(query); err == nil {
+				t.Fatal("expected invalid query binding to fail")
 			}
 		})
 	}
@@ -67,17 +86,17 @@ func TestBuildKeysetPredicatePreservesNullsLastAcrossDirections(t *testing.T) {
 				LastID:         foundation.ID("20000000-0000-4000-8000-000000000001"),
 				LastSortValues: []*string{nil, stringPointer("TOPIC"), stringPointer("20000000-0000-4000-8000-000000000001")},
 			}
-			predicate, args, err := buildKeysetPredicate(sortTerms, cursor, 3)
+			predicate, args, err := buildKeysetPredicate(sortTerms, cursor)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(args) != 3 || args[0] != nil || args[1] != "TOPIC" {
+			if len(args) != 3 || args["cursor1"] != nil || args["cursor2"] != "TOPIC" {
 				t.Fatalf("args=%#v", args)
 			}
 			for _, expected := range []string{
-				"item.confidence IS NOT DISTINCT FROM $3::double precision",
-				"item.object_type IS NOT DISTINCT FROM $4::text",
-				"item.id > $5::text",
+				"item.confidence IS NOT DISTINCT FROM (@cursor1)::double precision",
+				"item.object_type IS NOT DISTINCT FROM (@cursor2)::text",
+				"item.id > (@cursor3)::text",
 			} {
 				if !strings.Contains(predicate, expected) {
 					t.Fatalf("predicate=%q missing=%q", predicate, expected)
@@ -99,11 +118,11 @@ func TestBuildKeysetPredicateMovesFromNonNullValueIntoNullTail(t *testing.T) {
 		LastID:         foundation.ID("20000000-0000-4000-8000-000000000001"),
 		LastSortValues: []*string{stringPointer("0.5"), stringPointer("CLAIM"), stringPointer("20000000-0000-4000-8000-000000000001")},
 	}
-	predicate, _, err := buildKeysetPredicate(sortTerms, cursor, 1)
+	predicate, _, err := buildKeysetPredicate(sortTerms, cursor)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(predicate, "item.confidence < $1::double precision") || !strings.Contains(predicate, "$1::double precision IS NOT NULL AND item.confidence IS NULL") {
+	if !strings.Contains(predicate, "item.confidence < (@cursor1)::double precision") || !strings.Contains(predicate, "(@cursor1)::double precision IS NOT NULL AND item.confidence IS NULL") {
 		t.Fatalf("predicate=%q", predicate)
 	}
 }

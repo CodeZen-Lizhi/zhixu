@@ -19,14 +19,12 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
 	platformmodels "github.com/CodeZen-Lizhi/zhixu/internal/platform/models"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
+	workspacepostgres "github.com/CodeZen-Lizhi/zhixu/internal/workspace/adapter/postgres"
 	workspacedomain "github.com/CodeZen-Lizhi/zhixu/internal/workspace/domain"
 )
 
 func TestWorkerCaptureCompositionRegistersExecutorDefinitionAndOutbox(t *testing.T) {
 	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated PostgreSQL database")
-	}
 	pool := newMigratedWorkerTestPool(t, databaseURL)
 	components, err := newWorkerComponents(
 		pool,
@@ -43,7 +41,7 @@ func TestWorkerCaptureCompositionRegistersExecutorDefinitionAndOutbox(t *testing
 	if components.captureProfile.available || components.captureProfile.code != captureprofile.ErrorCodeCapabilityUnavailable {
 		t.Fatalf("disabled Capture Profile capability=%+v", components.captureProfile)
 	}
-	modelRuns, err := agentpostgres.NewRepository(pool)
+	modelRuns, err := agentpostgres.NewGORMRepository(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,12 +73,16 @@ func TestWorkerCaptureCompositionRegistersExecutorDefinitionAndOutbox(t *testing
 	defer cancel()
 	workspaceID := foundation.ID("53000000-0000-4000-8000-000000000001")
 	now := time.Now().UTC()
-	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(
+	if _, err := pool.DB().Exec(ctx, `INSERT INTO core.workspace(
 		id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at
 	) VALUES($1,'Capture Worker Composition',$2,$2,$3,'active',1,$3,$3)`, string(workspaceID), t.TempDir(), now); err != nil {
 		t.Fatal(err)
 	}
-	captureRepository, err := capturepostgres.NewRepository(pool)
+	workspaces, err := workspacepostgres.NewGORMRepository(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	captureRepository, err := capturepostgres.NewGORMRepository(pool, workspaces)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +111,7 @@ func TestWorkerCaptureCompositionRegistersExecutorDefinitionAndOutbox(t *testing
 	}
 
 	var published, runs, nodes, jobs int
-	err = pool.QueryRow(ctx, `SELECT
+	err = pool.DB().QueryRow(ctx, `SELECT
 		(SELECT count(*) FROM ops.capture_outbox
 		 WHERE workspace_id=$1 AND capture_id=$2 AND published_at IS NOT NULL),
 		(SELECT count(*) FROM workflow.run AS run

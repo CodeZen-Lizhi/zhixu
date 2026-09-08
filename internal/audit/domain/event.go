@@ -39,7 +39,7 @@ const (
 	ErrorCodeNotFound = "AUDIT_EVENT_NOT_FOUND"
 	// ErrorCodeCorrupt 表示持久 Audit 无法安全解码。
 	ErrorCodeCorrupt = "AUDIT_EVENT_CORRUPT"
-	// ErrorCodeTransactionUnavailable 表示 AppendTx 缺少可用事务。
+	// ErrorCodeTransactionUnavailable 表示 scoped 操作缺少可用事务。
 	ErrorCodeTransactionUnavailable = "AUDIT_TRANSACTION_UNAVAILABLE"
 
 	// 兼容清晰的长名称，避免 Adapter 或调用方重复定义错误码。

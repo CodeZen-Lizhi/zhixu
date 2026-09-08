@@ -47,12 +47,6 @@ type WorkspaceAnalysisRunStartCommand struct {
 	Replayed       bool
 }
 
-// WorkspaceAnalysisRunPersistence 隐藏 caller-owned 事务中的 Analysis Run 插入与读取。
-type WorkspaceAnalysisRunPersistence interface {
-	InsertWorkspaceAnalysisRunTx(context.Context, any, domain.WorkspaceAnalysisRun) (domain.WorkspaceAnalysisRun, error)
-	FindWorkspaceAnalysisRunTx(context.Context, any, foundation.ID, foundation.ID) (domain.WorkspaceAnalysisRun, bool, error)
-}
-
 // WorkspaceAnalysisRunExecutionQuery 绑定 Workflow 节点执行时必须重新读取的不可变 Run 身份。
 type WorkspaceAnalysisRunExecutionQuery struct {
 	WorkspaceID    foundation.ID
@@ -95,127 +89,6 @@ type WorkspaceAnalysisRunLoader interface {
 	LoadWorkspaceAnalysisRunForExecution(context.Context, WorkspaceAnalysisRunExecutionQuery) (domain.WorkspaceAnalysisRun, error)
 }
 
-// WorkspaceAnalysisRunStarter 是 Conversation Dispatcher 使用的窄原子创建端口。
-type WorkspaceAnalysisRunStarter interface {
-	StartWorkspaceAnalysisRunTx(context.Context, any, WorkspaceAnalysisRunStartCommand) (domain.WorkspaceAnalysisRun, error)
-}
-
-// WorkspaceAnalysisRunService 构造并验证冻结预算后，在调用方事务中创建或校验 Run。
-type WorkspaceAnalysisRunService struct {
-	repository WorkspaceAnalysisRunPersistence
-	ids        foundation.IDGenerator
-	config     WorkspaceAnalysisRunStartConfig
-	budget     WorkspaceAnalysisBudgetPolicy
-	deadlines  WorkspaceAnalysisV1Deadlines
-}
-
-// NewWorkspaceAnalysisRunService 创建默认关闭能力被显式启用时使用的 Run 服务。
-func NewWorkspaceAnalysisRunService(
-	repository WorkspaceAnalysisRunPersistence,
-	ids foundation.IDGenerator,
-	config WorkspaceAnalysisRunStartConfig,
-) (*WorkspaceAnalysisRunService, error) {
-	if isNilPort(repository) {
-		return nil, workspaceAnalysisRunStartError(
-			foundation.ErrorInvalidInput,
-			ErrorCodeWorkspaceAnalysisRunStartInvalid,
-			false,
-			errors.New("workspace analysis run persistence is unavailable"),
-		)
-	}
-	budget, deadlines, err := newWorkspaceAnalysisRunStartDependencies(ids, config)
-	if err != nil {
-		return nil, err
-	}
-	return &WorkspaceAnalysisRunService{
-		repository: repository,
-		ids:        ids,
-		config:     config,
-		budget:     budget,
-		deadlines:  deadlines,
-	}, nil
-}
-
-// StartWorkspaceAnalysisRunTx 创建全空预算 queued Run；重放只接受已存在的精确不可变绑定。
-func (service *WorkspaceAnalysisRunService) StartWorkspaceAnalysisRunTx(
-	ctx context.Context,
-	transaction any,
-	command WorkspaceAnalysisRunStartCommand,
-) (domain.WorkspaceAnalysisRun, error) {
-	if service == nil || isNilPort(service.repository) || isNilPort(service.ids) || isNilOpaqueTransaction(transaction) {
-		return domain.WorkspaceAnalysisRun{}, workspaceAnalysisRunStartError(
-			foundation.ErrorDependencyUnavailable,
-			ErrorCodeWorkspaceAnalysisRunStartUnavailable,
-			true,
-			errors.New("workspace analysis run service or transaction is unavailable"),
-		)
-	}
-	if ctx == nil || !validWorkspaceAnalysisRunStartCommand(command) {
-		return domain.WorkspaceAnalysisRun{}, workspaceAnalysisRunStartError(
-			foundation.ErrorInvalidInput,
-			ErrorCodeWorkspaceAnalysisRunStartInvalid,
-			false,
-			errors.New("workspace analysis run start command is invalid"),
-		)
-	}
-
-	if command.Replayed {
-		existing, found, err := service.repository.FindWorkspaceAnalysisRunTx(ctx, transaction, command.WorkspaceID, command.QuestionID)
-		if err != nil {
-			return domain.WorkspaceAnalysisRun{}, err
-		}
-		if !found || domain.ValidateWorkspaceAnalysisRun(existing) != nil || !sameWorkspaceAnalysisRunDispatchBinding(existing, command) {
-			return domain.WorkspaceAnalysisRun{}, workspaceAnalysisRunStartError(
-				foundation.ErrorConsistencyViolation,
-				ErrorCodeWorkspaceAnalysisRunStartConflict,
-				false,
-				errors.New("replayed workspace analysis run is missing or drifted"),
-			)
-		}
-		return existing, nil
-	}
-
-	runID, err := service.ids.New()
-	if err != nil {
-		return domain.WorkspaceAnalysisRun{}, workspaceAnalysisRunStartError(
-			foundation.ErrorDependencyUnavailable,
-			ErrorCodeWorkspaceAnalysisRunStartUnavailable,
-			true,
-			err,
-		)
-	}
-	run := service.newQueuedRun(runID, command)
-	if err := domain.ValidateWorkspaceAnalysisRun(run); err != nil {
-		return domain.WorkspaceAnalysisRun{}, workspaceAnalysisRunStartError(
-			foundation.ErrorInvalidInput,
-			ErrorCodeWorkspaceAnalysisRunStartInvalid,
-			false,
-			err,
-		)
-	}
-	persisted, err := service.repository.InsertWorkspaceAnalysisRunTx(ctx, transaction, run)
-	if err != nil {
-		return domain.WorkspaceAnalysisRun{}, err
-	}
-	if domain.ValidateWorkspaceAnalysisRun(persisted) != nil || !service.sameQueuedRun(persisted, run) {
-		return domain.WorkspaceAnalysisRun{}, workspaceAnalysisRunStartError(
-			foundation.ErrorConsistencyViolation,
-			ErrorCodeWorkspaceAnalysisRunStartConflict,
-			false,
-			errors.New("persisted workspace analysis run differs from the queued candidate"),
-		)
-	}
-	return persisted, nil
-}
-
-func (service *WorkspaceAnalysisRunService) sameQueuedRun(persisted, expected domain.WorkspaceAnalysisRun) bool {
-	return sameWorkspaceAnalysisQueuedRun(persisted, expected, service.config, service.budget, service.deadlines)
-}
-
-func (service *WorkspaceAnalysisRunService) newQueuedRun(id foundation.ID, command WorkspaceAnalysisRunStartCommand) domain.WorkspaceAnalysisRun {
-	return newWorkspaceAnalysisQueuedRun(id, command, service.config, service.budget, service.deadlines)
-}
-
 func newWorkspaceAnalysisQueuedRun(
 	id foundation.ID,
 	command WorkspaceAnalysisRunStartCommand,
@@ -254,10 +127,6 @@ func newWorkspaceAnalysisQueuedRun(
 		CreatedAt: command.CreatedAt.UTC(),
 		UpdatedAt: command.CreatedAt.UTC(),
 	}
-}
-
-func (service *WorkspaceAnalysisRunService) sameFrozenStartBinding(run domain.WorkspaceAnalysisRun, command WorkspaceAnalysisRunStartCommand) bool {
-	return sameWorkspaceAnalysisFrozenStartBinding(run, command, service.config, service.budget, service.deadlines)
 }
 
 func sameWorkspaceAnalysisQueuedRun(
@@ -368,12 +237,6 @@ func lowerASCII(value string) string {
 	return string(result)
 }
 
-func isNilOpaqueTransaction(transaction any) bool {
-	return isNilPort(transaction)
-}
-
 func workspaceAnalysisRunStartError(kind foundation.ErrorKind, code string, retryable bool, cause error) error {
 	return applicationError(kind, code, retryable, cause)
 }
-
-var _ WorkspaceAnalysisRunStarter = (*WorkspaceAnalysisRunService)(nil)

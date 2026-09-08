@@ -33,21 +33,10 @@ var (
 	postgresAttemptB   foundation.ID = "73000000-0000-4000-8000-000000000002"
 )
 
-var (
-	legacyGitSyncIDs = [...]foundation.ID{
-		"71000000-0000-4000-8000-000000000001", "71000000-0000-4000-8000-000000000002", "71000000-0000-4000-8000-000000000003",
-		"72000000-0000-4000-8000-000000000001", "72000000-0000-4000-8000-000000000002", "72000000-0000-4000-8000-000000000003",
-		"73000000-0000-4000-8000-000000000001", "73000000-0000-4000-8000-000000000002",
-	}
-	gormGitSyncIDs = [...]foundation.ID{
-		"71000000-0000-4000-8000-000000000011", "71000000-0000-4000-8000-000000000012", "71000000-0000-4000-8000-000000000013",
-		"72000000-0000-4000-8000-000000000011", "72000000-0000-4000-8000-000000000012", "72000000-0000-4000-8000-000000000013",
-		"73000000-0000-4000-8000-000000000011", "73000000-0000-4000-8000-000000000012",
-	}
-	legacyGitSyncAutoIDs = [...]foundation.ID{"74000000-0000-4000-8000-000000000001", "74100000-0000-4000-8000-000000000001", "75000000-0000-4000-8000-000000000002", "75100000-0000-4000-8000-000000000002"}
-	gormGitSyncAutoIDs   = [...]foundation.ID{"74000000-0000-4000-8000-000000000011", "74100000-0000-4000-8000-000000000011", "75000000-0000-4000-8000-000000000012", "75100000-0000-4000-8000-000000000012"}
-	gitSyncAutoIDs       = legacyGitSyncAutoIDs
-)
+var gitSyncAutoIDs = [...]foundation.ID{
+	"74000000-0000-4000-8000-000000000001", "74100000-0000-4000-8000-000000000001",
+	"75000000-0000-4000-8000-000000000002", "75100000-0000-4000-8000-000000000002",
+}
 
 type gitSyncIntegrationRepository interface {
 	application.ConfigStore
@@ -57,9 +46,9 @@ type gitSyncIntegrationRepository interface {
 	application.OutboxStore
 }
 
-func withGitSyncRepositories(t *testing.T, run func(*testing.T, gitSyncIntegrationRepository, *pgxpool.Pool, string)) {
+func withGitSyncRepository(t *testing.T, run func(*testing.T, gitSyncIntegrationRepository, *pgxpool.Pool)) {
 	t.Helper()
-	fixture := testdb.Require(t, testdb.Config{MaxConns: 8})
+	fixture := testdb.Require(t, testdb.Config{MaxConns: 8, Availability: testdb.FailWhenUnavailable})
 	platformPool := fixture.Pool()
 	if platformPool == nil || platformPool.DB() == nil {
 		t.Fatal("shared PostgreSQL test pool is unavailable")
@@ -77,62 +66,19 @@ func withGitSyncRepositories(t *testing.T, run func(*testing.T, gitSyncIntegrati
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacy, err := postgres.NewRepository(pool, sealer)
-	if err != nil {
-		t.Fatal(err)
-	}
 	gormRepository, err := postgres.NewGORMRepository(gormRoot, unitOfWork, sealer)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for index, candidate := range []struct {
-		name       string
-		repository gitSyncIntegrationRepository
-	}{
-		{name: "legacy", repository: legacy},
-		{name: "gorm", repository: gormRepository},
-	} {
-		candidate := candidate
-		t.Run(candidate.name, func(t *testing.T) {
-			setGitSyncVariant(index)
-			run(t, candidate.repository, pool, candidate.name)
-			if index == 0 {
-				finishGitSyncLegacyPath(t, pool)
-			}
-		})
-	}
-}
-
-func setGitSyncVariant(index int) {
-	ids := legacyGitSyncIDs
-	autoIDs := legacyGitSyncAutoIDs
-	if index == 1 {
-		ids = gormGitSyncIDs
-		autoIDs = gormGitSyncAutoIDs
-	}
-	postgresWorkspaceA, postgresWorkspaceB, postgresWorkspaceC = ids[0], ids[1], ids[2]
-	postgresRunA, postgresRunB, postgresRunC = ids[3], ids[4], ids[5]
-	postgresAttemptA, postgresAttemptB = ids[6], ids[7]
-	gitSyncAutoIDs = autoIDs
-}
-
-func finishGitSyncLegacyPath(t *testing.T, pool *pgxpool.Pool) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	workspaceIDs := []string{string(legacyGitSyncIDs[0]), string(legacyGitSyncIDs[1]), string(legacyGitSyncIDs[2])}
-	if _, err := pool.Exec(ctx, `UPDATE ops.git_sync_outbox SET published_at=COALESCE(published_at,clock_timestamp()),lease_owner=NULL,lease_expires_at=NULL WHERE workspace_id=ANY($1::uuid[]) AND poisoned_at IS NULL`, workspaceIDs); err != nil {
-		t.Errorf("finish legacy Git Sync outbox fixtures: %v", err)
-	}
-	if _, err := pool.Exec(ctx, `UPDATE core.workspace SET status='inactive',version=version+1,updated_at=clock_timestamp() WHERE id=ANY($1::uuid[]) AND status='active'`, workspaceIDs); err != nil {
-		t.Errorf("deactivate legacy Git Sync workspaces: %v", err)
-	}
+	t.Run("gorm", func(t *testing.T) {
+		run(t, gormRepository, pool)
+	})
 }
 
 func TestRepositoryConfigReplayFencingAndActiveRunUniqueness(t *testing.T) {
-	withGitSyncRepositories(t, func(t *testing.T, repository gitSyncIntegrationRepository, pool *pgxpool.Pool, variant string) {
-		ctx := context.Background()
-		seedWorkspace(t, ctx, pool, postgresWorkspaceA, "git-sync-a-"+variant)
+	withGitSyncRepository(t, func(t *testing.T, repository gitSyncIntegrationRepository, pool *pgxpool.Pool) {
+		ctx := t.Context()
+		seedWorkspace(t, ctx, pool, postgresWorkspaceA, "git-sync-a-gorm")
 
 		first := saveConfig(t, ctx, repository, postgresWorkspaceA, 0, "save-1", strings.Repeat("a", 64), domain.SecretActionReplace, "initial-token")
 		if first.Config.Revision != 1 || !first.Config.TokenConfigured {
@@ -289,8 +235,8 @@ func TestRepositoryConfigReplayFencingAndActiveRunUniqueness(t *testing.T) {
 }
 
 func TestRepositoryAutoSyncCandidateQueryIsBoundedOnEmptyFacts(t *testing.T) {
-	withGitSyncRepositories(t, func(t *testing.T, repository gitSyncIntegrationRepository, pool *pgxpool.Pool, _ string) {
-		ctx := context.Background()
+	withGitSyncRepository(t, func(t *testing.T, repository gitSyncIntegrationRepository, pool *pgxpool.Pool) {
+		ctx := t.Context()
 		candidates, err := repository.ListAutoSyncCandidates(ctx, application.MaxAutoSyncBatch)
 		if err != nil {
 			t.Fatal(err)
@@ -302,9 +248,9 @@ func TestRepositoryAutoSyncCandidateQueryIsBoundedOnEmptyFacts(t *testing.T) {
 }
 
 func TestRepositoryAutoSyncCandidatesRespectCompletionTimeAndRunReplay(t *testing.T) {
-	withGitSyncRepositories(t, func(t *testing.T, repository gitSyncIntegrationRepository, pool *pgxpool.Pool, variant string) {
-		ctx := context.Background()
-		seedWorkspace(t, ctx, pool, postgresWorkspaceA, "git-sync-auto-"+variant)
+	withGitSyncRepository(t, func(t *testing.T, repository gitSyncIntegrationRepository, pool *pgxpool.Pool) {
+		ctx := t.Context()
+		seedWorkspace(t, ctx, pool, postgresWorkspaceA, "git-sync-auto-gorm")
 		first := saveConfig(t, ctx, repository, postgresWorkspaceA, 0, "save-auto-off", strings.Repeat("a", 64), domain.SecretActionReplace, "auto-token")
 		var firstConfiguredAt time.Time
 		if err := pool.QueryRow(ctx, `SELECT created_at FROM ops.git_remote_config_revision WHERE workspace_id=$1 AND revision=$2`, string(postgresWorkspaceA), first.Config.Revision).Scan(&firstConfiguredAt); err != nil {
@@ -417,9 +363,9 @@ func seedAutoSyncWriteback(t *testing.T, ctx context.Context, pool *pgxpool.Pool
 }
 
 func TestRepositoryPublishesWorkspaceScopedServerEventsWithoutRemoteSecrets(t *testing.T) {
-	withGitSyncRepositories(t, func(t *testing.T, repository gitSyncIntegrationRepository, pool *pgxpool.Pool, variant string) {
-		ctx := context.Background()
-		seedWorkspace(t, ctx, pool, postgresWorkspaceA, "git-sync-events-"+variant)
+	withGitSyncRepository(t, func(t *testing.T, repository gitSyncIntegrationRepository, pool *pgxpool.Pool) {
+		ctx := t.Context()
+		seedWorkspace(t, ctx, pool, postgresWorkspaceA, "git-sync-events-gorm")
 		configReceipt := saveConfig(t, ctx, repository, postgresWorkspaceA, 0, "save-events", strings.Repeat("a", 64), domain.SecretActionReplace, "server-event-secret")
 		run, replayed, err := repository.CreateRun(ctx, application.CreateRunRecord{
 			Run: pendingRun(postgresRunA, postgresWorkspaceA, configReceipt.Config.Revision, "run-events", "b"),
@@ -480,9 +426,9 @@ func assertGitSyncServerEvent(
 }
 
 func TestRepositoryClearSecretPreservesConfigButBlocksRuns(t *testing.T) {
-	withGitSyncRepositories(t, func(t *testing.T, repository gitSyncIntegrationRepository, pool *pgxpool.Pool, variant string) {
-		ctx := context.Background()
-		seedWorkspace(t, ctx, pool, postgresWorkspaceB, "git-sync-b-"+variant)
+	withGitSyncRepository(t, func(t *testing.T, repository gitSyncIntegrationRepository, pool *pgxpool.Pool) {
+		ctx := t.Context()
+		seedWorkspace(t, ctx, pool, postgresWorkspaceB, "git-sync-b-gorm")
 		saveConfig(t, ctx, repository, postgresWorkspaceB, 0, "save-b-1", strings.Repeat("a", 64), domain.SecretActionReplace, "temporary-token")
 		cleared := saveConfig(t, ctx, repository, postgresWorkspaceB, 1, "save-b-2", strings.Repeat("b", 64), domain.SecretActionClear, "")
 		if !cleared.Config.Configured || cleared.Config.TokenConfigured || cleared.Config.Revision != 2 {
@@ -504,9 +450,9 @@ func TestRepositoryClearSecretPreservesConfigButBlocksRuns(t *testing.T) {
 }
 
 func TestRepositoryPoisonConvergesRunAndReleasesActiveSlot(t *testing.T) {
-	withGitSyncRepositories(t, func(t *testing.T, repository gitSyncIntegrationRepository, pool *pgxpool.Pool, variant string) {
-		ctx := context.Background()
-		seedWorkspace(t, ctx, pool, postgresWorkspaceB, "git-sync-poison-"+variant)
+	withGitSyncRepository(t, func(t *testing.T, repository gitSyncIntegrationRepository, pool *pgxpool.Pool) {
+		ctx := t.Context()
+		seedWorkspace(t, ctx, pool, postgresWorkspaceB, "git-sync-poison-gorm")
 		saveConfig(t, ctx, repository, postgresWorkspaceB, 0, "save-poison-1", strings.Repeat("a", 64), domain.SecretActionReplace, "temporary-token")
 
 		_, _, err := repository.CreateRun(ctx, application.CreateRunRecord{Run: pendingRun(postgresRunA, postgresWorkspaceB, 1, "run-poison-1", "b")})
@@ -598,9 +544,9 @@ func TestRepositoryPoisonConvergesRunAndReleasesActiveSlot(t *testing.T) {
 }
 
 func TestRepositoryPersistsAttemptsOutboxAndIndependentIndexFailure(t *testing.T) {
-	withGitSyncRepositories(t, func(t *testing.T, repository gitSyncIntegrationRepository, pool *pgxpool.Pool, variant string) {
-		ctx := context.Background()
-		seedWorkspace(t, ctx, pool, postgresWorkspaceC, "git-sync-c-"+variant)
+	withGitSyncRepository(t, func(t *testing.T, repository gitSyncIntegrationRepository, pool *pgxpool.Pool) {
+		ctx := t.Context()
+		seedWorkspace(t, ctx, pool, postgresWorkspaceC, "git-sync-c-gorm")
 		saveConfig(t, ctx, repository, postgresWorkspaceC, 0, "save-c-1", strings.Repeat("a", 64), domain.SecretActionReplace, "sync-token")
 		run, _, err := repository.CreateRun(ctx, application.CreateRunRecord{Run: pendingRun(postgresRunA, postgresWorkspaceC, 1, "run-c-1", "b")})
 		if err != nil {

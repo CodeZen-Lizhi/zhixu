@@ -20,12 +20,13 @@ import (
 	eventspostgres "github.com/CodeZen-Lizhi/zhixu/internal/events/adapter/postgres"
 	eventsdomain "github.com/CodeZen-Lizhi/zhixu/internal/events/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	workflowpostgres "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/postgres"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestWorkspaceAnalysisFinalizerClarificationAcceptsPlannerResultWithoutSubjectCandidateAndReplays(t *testing.T) {
-	pool, ctx, dispatched := newWorkspaceAnalysisCancellationHookFixture(t, "clarification-finalizer")
+	shared, pool, ctx, dispatched := newWorkspaceAnalysisCancellationHookFixture(t, "clarification-finalizer")
 	ids := foundation.NewUUIDGenerator(nil)
 	newID := func() foundation.ID {
 		t.Helper()
@@ -117,7 +118,11 @@ func TestWorkspaceAnalysisFinalizerClarificationAcceptsPlannerResultWithoutSubje
 	}
 	seedWorkspaceAnalysisFinalizerGitPrefix(t, ctx, pool, ids, dispatched.WorkspaceID, dispatched.WorkflowRunID, analysisRunID, dispatched.NodeRunID)
 
-	repository, err := agentpostgres.NewRepository(pool)
+	fence, err := workflowpostgres.NewGORMWorkspaceAnalysisExecutionFence(shared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := agentpostgres.NewGORMWorkspaceAnalysisRepository(shared, fence)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,11 +210,11 @@ func TestWorkspaceAnalysisFinalizerClarificationAcceptsPlannerResultWithoutSubje
 		t.Fatalf("planner subject candidate id=%v hash=%v; want both NULL", subjectCandidateID, subjectCandidateHash)
 	}
 
-	events, err := eventspostgres.NewStore(pool)
+	events, err := eventspostgres.NewGORMStore(shared)
 	if err != nil {
 		t.Fatal(err)
 	}
-	finalizer, err := NewWorkspaceAnalysisFinalizer(pool, events, ids)
+	finalizer, err := NewGORMWorkspaceAnalysisFinalizer(shared, events, ids)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -360,7 +365,7 @@ func seedWorkspaceAnalysisFinalizerGitPrefix(
 }
 
 func TestWorkspaceAnalysisFinalizerCancellationCommitsBundleAndRecoversExactResponseLoss(t *testing.T) {
-	repository, pool, ctx := newConversationTestRepository(t)
+	repository, shared, pool, ctx := newConversationTestRepository(t)
 	workspaceID := conversationPostgresID(900)
 	conversationID := conversationPostgresID(901)
 	seedConversationWorkspaces(t, ctx, pool, workspaceID)
@@ -370,7 +375,7 @@ func TestWorkspaceAnalysisFinalizerCancellationCommitsBundleAndRecoversExactResp
 	)); err != nil {
 		t.Fatal(err)
 	}
-	dispatched, err := newWorkspaceAnalysisQuestionDispatcherIntegration(t, pool).SubmitQuestion(
+	dispatched, err := newWorkspaceAnalysisQuestionDispatcherIntegration(t, shared).SubmitQuestion(
 		ctx,
 		workspaceAnalysisQuestionDispatchRecord(
 			t, workspaceID, conversationID, "Inspect the current workspace.", "workspace-analysis-finalizer-question",
@@ -426,7 +431,7 @@ func TestWorkspaceAnalysisFinalizerCancellationCommitsBundleAndRecoversExactResp
 		t.Fatal(err)
 	}
 
-	events, err := eventspostgres.NewStore(pool)
+	events, err := eventspostgres.NewGORMStore(shared)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -445,10 +450,10 @@ func TestWorkspaceAnalysisFinalizerCancellationCommitsBundleAndRecoversExactResp
 		ExpectedAnswerVersion:              1,
 		Reason:                             agentdomain.WorkspaceAnalysisRunCancellation,
 	}
-	auditRecorder, auditStore := newWorkspaceAnalysisAuditIntegration(t, pool)
+	auditRecorder, auditStore := newWorkspaceAnalysisAuditIntegration(t, shared)
 	auditFailure := errors.New("injected workspace analysis terminal audit failure")
-	failingFinalizer, err := NewWorkspaceAnalysisFinalizerWithAudit(
-		pool, events, foundation.NewUUIDGenerator(nil), &workspaceAnalysisAuditCapture{err: auditFailure},
+	failingFinalizer, err := NewGORMWorkspaceAnalysisFinalizerWithAudit(
+		shared, events, foundation.NewUUIDGenerator(nil), &workspaceAnalysisAuditCapture{err: auditFailure},
 		"workspace-analysis-finalizer-integration",
 	)
 	if err != nil {
@@ -484,13 +489,13 @@ func TestWorkspaceAnalysisFinalizerCancellationCommitsBundleAndRecoversExactResp
 		)
 	}
 
-	lossDB := &conversationCommitResponseLossDB{Pool: pool, loseNext: true}
-	finalizer, err := NewWorkspaceAnalysisFinalizerWithAudit(
-		lossDB, events, foundation.NewUUIDGenerator(nil), auditRecorder, "workspace-analysis-finalizer-integration",
+	finalizer, err := NewGORMWorkspaceAnalysisFinalizerWithAudit(
+		shared, events, foundation.NewUUIDGenerator(nil), auditRecorder, "workspace-analysis-finalizer-integration",
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
+	finalizer.uow = &conversationCommitResponseLossDB{UnitOfWork: finalizer.uow, loseNext: true}
 	output, replayed, err := finalizer.FinalizeTermination(ctx, command)
 	if err != nil || replayed || output.AnswerID != dispatched.Answer.ID || output.ProofID == "" ||
 		output.PublicationStatus != conversationdomain.WorkspaceAnalysisPublicationCancelled ||

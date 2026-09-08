@@ -8,14 +8,12 @@ import (
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/ingestion/domain"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
-// GORMRepository is the staged GORM implementation. Production composition
-// remains on Repository until the migration TODO 9 gate passes.
+// GORMRepository persists Ingestion facts through the shared GORM root.
 type GORMRepository struct{ database *gorm.DB }
 
 // NewGORMRepository constructs an Ingestion repository from the shared GORM root.
@@ -477,7 +475,7 @@ func gormRawRows(database *gorm.DB, query string, args ...any) (*sql.Rows, error
 }
 
 func gormNoRows(err error) bool {
-	return errors.Is(err, sql.ErrNoRows) || errors.Is(err, pgx.ErrNoRows) || errors.Is(err, gorm.ErrRecordNotFound)
+	return errors.Is(err, sql.ErrNoRows) || errors.Is(err, gorm.ErrRecordNotFound)
 }
 
 func gormClassify(ctx context.Context, err error, fallback string) error {
@@ -500,9 +498,8 @@ func gormClassify(ctx context.Context, err error, fallback string) error {
 	if gormNoRows(err) {
 		return foundation.NewError(foundation.ErrorNotFound, "INGESTION_RECORD_NOT_FOUND", false, err)
 	}
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) {
-		switch pgErr.Code {
+	if state := platformpostgres.SQLState(err); state != "" {
+		switch state {
 		case "23505":
 			return foundation.NewError(foundation.ErrorVersionConflict, "INGESTION_RECORD_CONFLICT", false, err)
 		case "23503", "23514", "22P02":

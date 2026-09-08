@@ -25,10 +25,11 @@ import (
 
 func TestSectionGenerationTerminalHookClosesWorkflowOutcomesAtomically(t *testing.T) {
 	ctx := context.Background()
-	artifactRepository, pool := newArtifactIntegrationRepository(t, ctx)
+	artifactRepository, platformPool := newArtifactIntegrationGORMRepository(t, ctx)
+	pool := platformPool.DB()
 	now := time.Date(2026, 7, 26, 20, 0, 0, 0, time.UTC)
-	coordinator, agentRepository := newGenerationIntegrationCoordinator(t, pool, now, &generationCitationVerifierFake{})
-	runtime := newGenerationTerminalRuntime(t, pool, agentRepository, generationIntegrationProfile())
+	coordinator, agentRepository := newGenerationIntegrationCoordinator(t, platformPool, now, &generationCitationVerifierFake{})
+	runtime := newGORMGenerationTerminalRuntime(t, platformPool, generationIntegrationProfile())
 
 	t.Run("non retryable failure releases the source slot", func(t *testing.T) {
 		workspaceID := artifactIntegrationID(2001)
@@ -39,7 +40,7 @@ func TestSectionGenerationTerminalHookClosesWorkflowOutcomesAtomically(t *testin
 		if err != nil || result.Run.Status != workflowdomain.RunStatusFailed || result.Node.Status != workflowdomain.NodeStatusFailed {
 			t.Fatalf("failure result=%+v err=%v", result, err)
 		}
-		persisted := requireTerminalGeneration(t, ctx, pool, generation, artifactapplication.SectionGenerationFailed)
+		persisted := requireTerminalGeneration(t, ctx, artifactRepository, generation, artifactapplication.SectionGenerationFailed)
 		if persisted.FailureClass != string(workflowdomain.FailureClassNonRetryable) || persisted.ErrorCode != "ARTIFACT_EXECUTION_FAILED" || persisted.ModelRunID != nil {
 			t.Fatalf("failed generation=%+v", persisted)
 		}
@@ -67,7 +68,7 @@ func TestSectionGenerationTerminalHookClosesWorkflowOutcomesAtomically(t *testin
 		if err != nil || result.Run.Status != workflowdomain.RunStatusSucceeded {
 			t.Fatalf("success result=%+v err=%v", result, err)
 		}
-		persisted := requireTerminalGeneration(t, ctx, pool, generation, artifactapplication.SectionGenerationRecoveryRequired)
+		persisted := requireTerminalGeneration(t, ctx, artifactRepository, generation, artifactapplication.SectionGenerationRecoveryRequired)
 		if persisted.ErrorCode != generationReceiptMissingCode || persisted.FailureClass != string(workflowdomain.FailureClassManualRecovery) {
 			t.Fatalf("missing receipt generation=%+v", persisted)
 		}
@@ -87,7 +88,7 @@ func TestSectionGenerationTerminalHookClosesWorkflowOutcomesAtomically(t *testin
 		if err != nil || cancelled.Status != workflowdomain.RunStatusCancelled {
 			t.Fatalf("direct cancel=%+v err=%v", cancelled, err)
 		}
-		requireTerminalGeneration(t, ctx, pool, pending, artifactapplication.SectionGenerationCancelled)
+		requireTerminalGeneration(t, ctx, artifactRepository, pending, artifactapplication.SectionGenerationCancelled)
 
 		retryWorkspaceID := artifactIntegrationID(2202)
 		retrying := startTerminalGeneration(t, ctx, artifactRepository, coordinator, pool, retryWorkspaceID, 2220, "terminal-retry-cancel")
@@ -98,7 +99,7 @@ func TestSectionGenerationTerminalHookClosesWorkflowOutcomesAtomically(t *testin
 		if err != nil || retried.Run.Status != workflowdomain.RunStatusRetryWait || retried.Node.Status != workflowdomain.NodeStatusRetryWait {
 			t.Fatalf("retry result=%+v err=%v", retried, err)
 		}
-		if current := requireTerminalGeneration(t, ctx, pool, retrying, artifactapplication.SectionGenerationPending); current.TerminalAt != nil {
+		if current := requireTerminalGeneration(t, ctx, artifactRepository, retrying, artifactapplication.SectionGenerationPending); current.TerminalAt != nil {
 			t.Fatalf("retry scheduled terminalized generation=%+v", current)
 		}
 		cancelled, err = control.Cancel(ctx, workflowapplication.RunControlCommand{
@@ -107,7 +108,7 @@ func TestSectionGenerationTerminalHookClosesWorkflowOutcomesAtomically(t *testin
 		if err != nil || cancelled.Status != workflowdomain.RunStatusCancelled {
 			t.Fatalf("retry wait cancel=%+v err=%v", cancelled, err)
 		}
-		requireTerminalGeneration(t, ctx, pool, retrying, artifactapplication.SectionGenerationCancelled)
+		requireTerminalGeneration(t, ctx, artifactRepository, retrying, artifactapplication.SectionGenerationCancelled)
 	})
 
 	t.Run("running model outcome retains exclusive recovery ownership", func(t *testing.T) {
@@ -121,7 +122,7 @@ func TestSectionGenerationTerminalHookClosesWorkflowOutcomesAtomically(t *testin
 		if err != nil || result.Run.Status != workflowdomain.RunStatusFailed {
 			t.Fatalf("running model failure=%+v err=%v", result, err)
 		}
-		persisted := requireTerminalGeneration(t, ctx, pool, generation, artifactapplication.SectionGenerationRecoveryRequired)
+		persisted := requireTerminalGeneration(t, ctx, artifactRepository, generation, artifactapplication.SectionGenerationRecoveryRequired)
 		if persisted.ModelRunID == nil || *persisted.ModelRunID != run.ID || persisted.ErrorCode != generationModelOutcomeUnknownCode {
 			t.Fatalf("running model generation=%+v", persisted)
 		}
@@ -137,13 +138,14 @@ func TestSectionGenerationTerminalHookClosesWorkflowOutcomesAtomically(t *testin
 
 func TestSectionGenerationTerminalHookErrorRollsBackWorkflowAndGeneration(t *testing.T) {
 	ctx := context.Background()
-	artifactRepository, pool := newArtifactIntegrationRepository(t, ctx)
+	artifactRepository, platformPool := newArtifactIntegrationGORMRepository(t, ctx)
+	pool := platformPool.DB()
 	workspaceID := artifactIntegrationID(2401)
 	now := time.Date(2026, 7, 26, 21, 0, 0, 0, time.UTC)
-	coordinator, agentRepository := newGenerationIntegrationCoordinator(t, pool, now, &generationCitationVerifierFake{})
+	coordinator, agentRepository := newGenerationIntegrationCoordinator(t, platformPool, now, &generationCitationVerifierFake{})
 	generation := startTerminalGeneration(t, ctx, artifactRepository, coordinator, pool, workspaceID, 2410, "terminal-hook-rollback")
 	wrongProfile := agentdomain.ModelProfileRef{ID: "artifact.wrong", Version: "v1"}
-	runtime := newGenerationTerminalRuntime(t, pool, agentRepository, wrongProfile)
+	runtime := newGORMGenerationTerminalRuntime(t, platformPool, wrongProfile)
 	claimed, deliveryID := claimTerminalGeneration(t, ctx, pool, runtime, generation)
 	seedGenerationRunningModelRun(t, ctx, pool, agentRepository, generation, claimed.Attempt.ID, artifactIntegrationID(2430), now.Add(time.Minute))
 
@@ -153,7 +155,7 @@ func TestSectionGenerationTerminalHookErrorRollsBackWorkflowAndGeneration(t *tes
 	if !artifactIntegrationErrorCode(err, "ARTIFACT_WORKFLOW_CONTEXT_INVALID") {
 		t.Fatalf("terminal hook error=%v", err)
 	}
-	requireTerminalGeneration(t, ctx, pool, generation, artifactapplication.SectionGenerationPending)
+	requireTerminalGeneration(t, ctx, artifactRepository, generation, artifactapplication.SectionGenerationPending)
 	var nodeStatus workflowdomain.NodeStatus
 	var attemptStatus workflowdomain.AttemptStatus
 	if err := pool.QueryRow(ctx, `SELECT status FROM workflow.node_run WHERE id=$1`, string(generation.NodeRunID)).Scan(&nodeStatus); err != nil {
@@ -171,12 +173,12 @@ func TestGORMSectionGenerationTerminalHookPostgreSQLClosesAndRollsBack(t *testin
 	ctx := context.Background()
 	_, platformPool := newArtifactIntegrationGORMRepository(t, ctx)
 	pool := platformPool.DB()
-	artifactRepository, err := NewRepository(pool)
+	artifactRepository, err := NewGORMRepository(platformPool)
 	if err != nil {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, 7, 27, 8, 0, 0, 0, time.UTC)
-	coordinator, agentRepository := newGenerationIntegrationCoordinator(t, pool, now, &generationCitationVerifierFake{})
+	coordinator, agentRepository := newGenerationIntegrationCoordinator(t, platformPool, now, &generationCitationVerifierFake{})
 	runtime := newGORMGenerationTerminalRuntime(t, platformPool, generationIntegrationProfile())
 	gormAgent, err := agentpostgres.NewGORMRepository(platformPool)
 	if err != nil {
@@ -206,7 +208,7 @@ func TestGORMSectionGenerationTerminalHookPostgreSQLClosesAndRollsBack(t *testin
 		if transitionErr != nil || result.Run.Status != workflowdomain.RunStatusFailed || result.Node.Status != workflowdomain.NodeStatusFailed {
 			t.Fatalf("gorm failure result=%+v err=%v", result, transitionErr)
 		}
-		persisted := requireTerminalGeneration(t, ctx, pool, generation, artifactapplication.SectionGenerationFailed)
+		persisted := requireTerminalGeneration(t, ctx, artifactRepository, generation, artifactapplication.SectionGenerationFailed)
 		if persisted.FailureClass != string(workflowdomain.FailureClassNonRetryable) || persisted.ErrorCode != "ARTIFACT_EXECUTION_FAILED" {
 			t.Fatalf("gorm failed generation=%+v", persisted)
 		}
@@ -216,7 +218,7 @@ func TestGORMSectionGenerationTerminalHookPostgreSQLClosesAndRollsBack(t *testin
 		if replayErr != nil || replayed.Run.Status != workflowdomain.RunStatusFailed {
 			t.Fatalf("gorm failure replay=%+v err=%v", replayed, replayErr)
 		}
-		beforeNoop := requireTerminalGeneration(t, ctx, pool, generation, artifactapplication.SectionGenerationFailed)
+		beforeNoop := requireTerminalGeneration(t, ctx, artifactRepository, generation, artifactapplication.SectionGenerationFailed)
 		if err := callTerminalHook(workflowapplication.WorkflowNodeTerminalEvent{
 			WorkspaceID: generation.WorkspaceID, WorkflowRunID: generation.WorkflowRunID, NodeRunID: generation.NodeRunID,
 			NodeKind: artifactworkflow.NodeKind, NodeAttemptID: claimed.Attempt.ID,
@@ -225,7 +227,7 @@ func TestGORMSectionGenerationTerminalHookPostgreSQLClosesAndRollsBack(t *testin
 		}); err != nil {
 			t.Fatalf("gorm terminal generation no-op: %v", err)
 		}
-		afterNoop := requireTerminalGeneration(t, ctx, pool, generation, artifactapplication.SectionGenerationFailed)
+		afterNoop := requireTerminalGeneration(t, ctx, artifactRepository, generation, artifactapplication.SectionGenerationFailed)
 		if afterNoop.Version != beforeNoop.Version {
 			t.Fatalf("gorm terminal no-op changed version from %d to %d", beforeNoop.Version, afterNoop.Version)
 		}
@@ -242,7 +244,7 @@ func TestGORMSectionGenerationTerminalHookPostgreSQLClosesAndRollsBack(t *testin
 		}); err != nil {
 			t.Fatalf("gorm foreign node no-op: %v", err)
 		}
-		requireTerminalGeneration(t, ctx, pool, generation, artifactapplication.SectionGenerationPending)
+		requireTerminalGeneration(t, ctx, artifactRepository, generation, artifactapplication.SectionGenerationPending)
 	})
 
 	t.Run("successful workflow without receipt", func(t *testing.T) {
@@ -256,7 +258,7 @@ func TestGORMSectionGenerationTerminalHookPostgreSQLClosesAndRollsBack(t *testin
 		if transitionErr != nil || result.Run.Status != workflowdomain.RunStatusSucceeded {
 			t.Fatalf("gorm success result=%+v err=%v", result, transitionErr)
 		}
-		persisted := requireTerminalGeneration(t, ctx, pool, generation, artifactapplication.SectionGenerationRecoveryRequired)
+		persisted := requireTerminalGeneration(t, ctx, artifactRepository, generation, artifactapplication.SectionGenerationRecoveryRequired)
 		if persisted.ErrorCode != generationReceiptMissingCode || persisted.FailureClass != string(workflowdomain.FailureClassManualRecovery) {
 			t.Fatalf("gorm missing receipt generation=%+v", persisted)
 		}
@@ -277,7 +279,7 @@ func TestGORMSectionGenerationTerminalHookPostgreSQLClosesAndRollsBack(t *testin
 		if cancelErr != nil || cancelled.Status != workflowdomain.RunStatusCancelled {
 			t.Fatalf("gorm cancel=%+v err=%v", cancelled, cancelErr)
 		}
-		requireTerminalGeneration(t, ctx, pool, generation, artifactapplication.SectionGenerationCancelled)
+		requireTerminalGeneration(t, ctx, artifactRepository, generation, artifactapplication.SectionGenerationCancelled)
 	})
 
 	t.Run("retry wait cancellation", func(t *testing.T) {
@@ -290,7 +292,7 @@ func TestGORMSectionGenerationTerminalHookPostgreSQLClosesAndRollsBack(t *testin
 		if transitionErr != nil || retried.Run.Status != workflowdomain.RunStatusRetryWait || retried.Node.Status != workflowdomain.NodeStatusRetryWait {
 			t.Fatalf("gorm retry result=%+v err=%v", retried, transitionErr)
 		}
-		requireTerminalGeneration(t, ctx, pool, generation, artifactapplication.SectionGenerationPending)
+		requireTerminalGeneration(t, ctx, artifactRepository, generation, artifactapplication.SectionGenerationPending)
 		control, controlErr := workflowapplication.NewRuntimeCoordinator(runtime)
 		if controlErr != nil {
 			t.Fatal(controlErr)
@@ -302,7 +304,7 @@ func TestGORMSectionGenerationTerminalHookPostgreSQLClosesAndRollsBack(t *testin
 		if cancelErr != nil || cancelled.Status != workflowdomain.RunStatusCancelled {
 			t.Fatalf("gorm retry wait cancel=%+v err=%v", cancelled, cancelErr)
 		}
-		requireTerminalGeneration(t, ctx, pool, generation, artifactapplication.SectionGenerationCancelled)
+		requireTerminalGeneration(t, ctx, artifactRepository, generation, artifactapplication.SectionGenerationCancelled)
 	})
 
 	t.Run("running model requires recovery", func(t *testing.T) {
@@ -316,7 +318,7 @@ func TestGORMSectionGenerationTerminalHookPostgreSQLClosesAndRollsBack(t *testin
 		if transitionErr != nil || result.Run.Status != workflowdomain.RunStatusFailed {
 			t.Fatalf("gorm running model result=%+v err=%v", result, transitionErr)
 		}
-		persisted := requireTerminalGeneration(t, ctx, pool, generation, artifactapplication.SectionGenerationRecoveryRequired)
+		persisted := requireTerminalGeneration(t, ctx, artifactRepository, generation, artifactapplication.SectionGenerationRecoveryRequired)
 		if persisted.ModelRunID == nil || *persisted.ModelRunID != run.ID || persisted.ErrorCode != generationModelOutcomeUnknownCode {
 			t.Fatalf("gorm running model generation=%+v", persisted)
 		}
@@ -335,7 +337,7 @@ func TestGORMSectionGenerationTerminalHookPostgreSQLClosesAndRollsBack(t *testin
 		if !artifactIntegrationErrorCode(transitionErr, "ARTIFACT_WORKFLOW_CONTEXT_INVALID") {
 			t.Fatalf("gorm rollback terminal err=%v", transitionErr)
 		}
-		requireTerminalGeneration(t, ctx, pool, generation, artifactapplication.SectionGenerationPending)
+		requireTerminalGeneration(t, ctx, artifactRepository, generation, artifactapplication.SectionGenerationPending)
 		var nodeStatus workflowdomain.NodeStatus
 		var attemptStatus workflowdomain.AttemptStatus
 		if err := pool.QueryRow(ctx, `SELECT status FROM workflow.node_run WHERE id=$1`, string(generation.NodeRunID)).Scan(&nodeStatus); err != nil {
@@ -348,32 +350,6 @@ func TestGORMSectionGenerationTerminalHookPostgreSQLClosesAndRollsBack(t *testin
 			t.Fatalf("gorm rollback node=%s attempt=%s", nodeStatus, attemptStatus)
 		}
 	})
-}
-
-func newGenerationTerminalRuntime(
-	t *testing.T,
-	pool *pgxpool.Pool,
-	agentRepository *agentpostgres.Repository,
-	profile agentdomain.ModelProfileRef,
-) *workflowpostgres.RuntimeRepository {
-	t.Helper()
-	hook, err := NewSectionGenerationTerminalHook(agentRepository, profile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	client, err := riveradapter.NewClient(pool, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	inserter, err := riveradapter.NewJobInserter(client)
-	if err != nil {
-		t.Fatal(err)
-	}
-	runtime, err := workflowpostgres.NewRuntimeRepositoryWithHooks(pool, inserter, workflowpostgres.RuntimeRepositoryHooks{Terminal: hook})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return runtime
 }
 
 func newGORMGenerationTerminalRuntime(
@@ -393,7 +369,7 @@ func newGORMGenerationTerminalRuntime(
 	runtime, err := workflowpostgres.NewGORMRuntimeRepositoryWithHooks(
 		pool,
 		riveradapter.DefaultOptions(),
-		generationScopedEnqueueFence{},
+		riveradapter.NewStaticScopedEnqueueFence(),
 		workflowpostgres.GORMRuntimeRepositoryHooks{Terminal: hook},
 	)
 	if err != nil {
@@ -405,8 +381,8 @@ func newGORMGenerationTerminalRuntime(
 func startTerminalGeneration(
 	t *testing.T,
 	ctx context.Context,
-	artifactRepository *Repository,
-	coordinator *SectionGenerationRepository,
+	artifactRepository *GORMRepository,
+	coordinator *GORMSectionGenerationRepository,
 	pool *pgxpool.Pool,
 	workspaceID foundation.ID,
 	idBase int,
@@ -490,12 +466,12 @@ func terminalDeliveryBinding(
 func requireTerminalGeneration(
 	t *testing.T,
 	ctx context.Context,
-	pool *pgxpool.Pool,
+	repository *GORMRepository,
 	generation artifactapplication.SectionGeneration,
 	status artifactapplication.SectionGenerationStatus,
 ) artifactapplication.SectionGeneration {
 	t.Helper()
-	persisted, found, err := loadSectionGenerationByKey(ctx, pool, generation.WorkspaceID, generation.IdempotencyKey, false)
+	persisted, found, err := gormLoadGenerationByKey(ctx, repository.database, generation.WorkspaceID, generation.IdempotencyKey, false)
 	if err != nil || !found || persisted.Status != status {
 		t.Fatalf("generation=%+v found=%t err=%v want_status=%s", persisted, found, err, status)
 	}

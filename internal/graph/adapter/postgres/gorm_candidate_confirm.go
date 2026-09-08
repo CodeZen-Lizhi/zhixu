@@ -12,7 +12,6 @@ import (
 	graphdomain "github.com/CodeZen-Lizhi/zhixu/internal/graph/domain"
 	knowledge "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
-	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
 )
 
@@ -124,7 +123,7 @@ func (repository *GORMCandidateConfirmRepository) confirmScoped(
 		return candidateconfirm.Result{}, candidateConfirmInvalid(errors.New("new candidate confirmation requires HIGH risk level"))
 	}
 
-	base, err := gormLoadCandidate(ctx, transaction, command.WorkspaceID, command.CandidateID, "id", true)
+	base, err := loadCandidate(ctx, transaction, command.WorkspaceID, command.CandidateID, "id", true)
 	if err != nil {
 		return candidateconfirm.Result{}, candidateConfirmGraphOperationError(ctx, err, "RELATION_PROPOSAL_CONFIRM_CANDIDATE_QUERY_FAILED")
 	}
@@ -216,7 +215,7 @@ func (repository *GORMCandidateConfirmRepository) confirmScoped(
 		idempotencyKey: command.IdempotencyKey, requestHash: requestHash,
 		action: command.Action, relationType: command.RelationType, createdAt: now,
 	}
-	inserted, err := gormInsertDecision(ctx, transaction, receipt)
+	inserted, err := insertDecision(ctx, transaction, receipt)
 	if err != nil {
 		return candidateconfirm.Result{}, candidateConfirmGraphOperationError(ctx, err, "RELATION_PROPOSAL_CONFIRM_DECISION_CREATE_FAILED")
 	}
@@ -233,9 +232,9 @@ func (repository *GORMCandidateConfirmRepository) confirmScoped(
 
 	changed, err := gormGraphExec(ctx, transaction, `
 		UPDATE graph.semantic_link_candidate
-		SET status='PROPOSAL_CREATED',current_proposal_id=$3,deferred_until=NULL,version=version+1,updated_at=$4
-		WHERE workspace_id=$1 AND id=$2 AND version=$5 AND current_proposal_id IS NULL`,
-		string(command.WorkspaceID), string(command.CandidateID), string(proposal.ID), now, command.ExpectedVersion)
+		SET status='PROPOSAL_CREATED',current_proposal_id=(@p3),deferred_until=NULL,version=version+1,updated_at=(@p4)
+		WHERE workspace_id=(@p1) AND id=(@p2) AND version=(@p5) AND current_proposal_id IS NULL`,
+		sql.Named("p1", string(command.WorkspaceID)), sql.Named("p2", string(command.CandidateID)), sql.Named("p3", string(proposal.ID)), sql.Named("p4", now), sql.Named("p5", command.ExpectedVersion))
 	if err != nil {
 		return candidateconfirm.Result{}, candidateConfirmGORMClassify(ctx, err, "RELATION_PROPOSAL_CONFIRM_CANDIDATE_UPDATE_FAILED")
 	}
@@ -263,7 +262,7 @@ func (repository *GORMCandidateConfirmRepository) replayScoped(
 	if (receipt.requestHash != requestHash && !legacy) || receipt.candidateID != command.CandidateID || receipt.workspaceID != command.WorkspaceID || receipt.proposalID == nil || receipt.action != command.Action || !sameOptionalRelationType(receipt.relationType, command.RelationType) {
 		return candidateconfirm.Result{}, candidateConfirmVersionConflict("candidate confirmation idempotency binding differs")
 	}
-	current, err := gormLoadCandidate(ctx, transaction, command.WorkspaceID, command.CandidateID, "id", true)
+	current, err := loadCandidate(ctx, transaction, command.WorkspaceID, command.CandidateID, "id", true)
 	if err != nil {
 		return candidateconfirm.Result{}, candidateConfirmGraphOperationError(ctx, err, "RELATION_PROPOSAL_CONFIRM_CANDIDATE_QUERY_FAILED")
 	}
@@ -287,7 +286,7 @@ func (repository *GORMCandidateConfirmRepository) replayScoped(
 }
 
 func gormCandidateConfirmReceipt(ctx context.Context, transaction *gorm.DB, workspaceID foundation.ID, key string) (candidateDecisionRow, bool, error) {
-	receipt, found, err := gormLoadDecisionByIdempotency(ctx, transaction, workspaceID, key)
+	receipt, found, err := loadDecisionByIdempotency(ctx, transaction, workspaceID, key)
 	if err != nil {
 		return candidateDecisionRow{}, false, candidateConfirmGraphOperationError(ctx, err, "RELATION_PROPOSAL_CONFIRM_RECEIPT_QUERY_FAILED")
 	}
@@ -320,8 +319,7 @@ func candidateConfirmGraphOperationError(ctx context.Context, err error, operati
 	if cause := graphGORMContextCause(ctx, err); cause != nil || errors.Is(err, sql.ErrTxDone) {
 		return candidateConfirmGORMClassify(ctx, err, operationCode)
 	}
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) {
+	if platformpostgres.SQLState(err) != "" {
 		return candidateConfirmGORMClassify(ctx, err, operationCode)
 	}
 	var classified *foundation.Error
@@ -391,16 +389,13 @@ func candidateConfirmGORMClassify(ctx context.Context, err error, code string) e
 	if errors.Is(err, sql.ErrTxDone) {
 		return foundation.NewError(foundation.ErrorDependencyUnavailable, code, true, err)
 	}
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) {
-		switch pgErr.Code {
-		case "40001", "40P01", "55P03", "08000", "08003", "08006", "57P01":
-			return foundation.NewError(foundation.ErrorRetryableFailure, code, true, err)
-		case "23503", "23514", "55000":
-			return foundation.NewError(foundation.ErrorConsistencyViolation, code, false, err)
-		case "23505":
-			return foundation.NewError(foundation.ErrorVersionConflict, code, false, err)
-		}
+	switch platformpostgres.SQLState(err) {
+	case "40001", "40P01", "55P03", "08000", "08003", "08006", "57P01":
+		return foundation.NewError(foundation.ErrorRetryableFailure, code, true, err)
+	case "23503", "23514", "55000":
+		return foundation.NewError(foundation.ErrorConsistencyViolation, code, false, err)
+	case "23505":
+		return foundation.NewError(foundation.ErrorVersionConflict, code, false, err)
 	}
 	var classified *foundation.Error
 	if errors.As(err, &classified) {

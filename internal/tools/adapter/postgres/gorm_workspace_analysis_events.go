@@ -28,6 +28,9 @@ func (repository *GORMWorkspaceAnalysisRepository) appendCompleted(ctx context.C
 }
 
 func (repository *GORMWorkspaceAnalysisRepository) appendEvent(ctx context.Context, scope foundation.TransactionScope, operation agentdomain.WorkspaceAnalysisOperation, call domain.ToolCall, eventType, status string, occurredAt time.Time, replay bool) error {
+	if repository == nil || nilGORMToolsDependency(repository.events) || nilGORMToolsDependency(scope) {
+		return gormToolsUnavailable(errors.New("Workspace Analysis Tool event scope or appender is unavailable"))
+	}
 	if operation.ID == "" || operation.AnalysisRunID == "" || operation.NodeKey == "" || call.WorkspaceID == "" || call.WorkflowRunID == "" || occurredAt.IsZero() {
 		return consistency(errors.New("Workspace Analysis Tool event binding is incomplete"))
 	}

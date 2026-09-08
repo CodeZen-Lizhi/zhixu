@@ -13,7 +13,8 @@ import (
 
 func TestReadRepositoryHealthTrendAggregatesSevenUTCDaysFromTerminalScans(t *testing.T) {
 	ctx := context.Background()
-	pool := newHealthIntegrationPool(t)
+	platform := requireHealthIntegrationPlatform(t)
+	pool := platform.DB()
 
 	workspaceID := newHealthReadTestID(t)
 	otherWorkspaceID := newHealthReadTestID(t)
@@ -39,11 +40,12 @@ func TestReadRepositoryHealthTrendAggregatesSevenUTCDaysFromTerminalScans(t *tes
 	seedActiveHealthTrendScan(t, ctx, pool, workspaceID, now, 99)
 	seedHealthTrendScan(t, ctx, pool, otherWorkspaceID, now, "SUCCEEDED", 70, 7, 8)
 
-	countingDB := &healthTrendCountingDB{Pool: pool}
-	repository, err := NewReadRepository(countingDB)
+	repository, err := NewGORMReadRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
+	countingDB := &healthTrendCountingDB{healthReadDB: repository.database}
+	repository.core.db = countingDB
 	summary, err := repository.GetHealthSummary(ctx, workspaceID)
 	if err != nil {
 		t.Fatal(err)

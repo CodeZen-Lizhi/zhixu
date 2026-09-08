@@ -14,6 +14,7 @@ import (
 	knowledgeapp "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/application"
 	knowledgedomain "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
 	organizingapp "github.com/CodeZen-Lizhi/zhixu/internal/organizing/application"
+	organizingdomain "github.com/CodeZen-Lizhi/zhixu/internal/organizing/domain"
 	retrievalapp "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/application"
 	retrievaldomain "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
 )
@@ -97,6 +98,19 @@ type Dependencies struct {
 	Authoring AuthoringReader
 	// Claims 搜索正式知识 Claim identity。
 	Claims ClaimSearchReader
+	// FrozenFence 在 GORM 确认事务中重验材料；由 Composition 注入 PostgreSQL 实现。
+	FrozenFence organizingapp.ScopedFrozenMaterialFence
+}
+
+// VerifyFrozenScoped 将确认事务交给注入的材料 fence，不执行跨事务 owner 读取。
+func (adapter *Adapter) VerifyFrozenScoped(ctx context.Context, scope foundation.TransactionScope, workspaceID foundation.ID, references []organizingdomain.MaterialRef) error {
+	if ctx == nil || nilDependency(scope) || !validID(workspaceID) || len(references) == 0 || len(references) > organizingdomain.MaxSnapshotMaterials {
+		return invalid("organizing material transaction fence request is invalid")
+	}
+	if adapter == nil || nilDependency(adapter.dependencies.FrozenFence) {
+		return dependencyUnavailable("organizing scoped material fence is unavailable")
+	}
+	return adapter.dependencies.FrozenFence.VerifyFrozenScoped(ctx, scope, workspaceID, references)
 }
 
 // Adapter 实现 Organizing 的 MaterialResolver 与 SuggestionProvider。

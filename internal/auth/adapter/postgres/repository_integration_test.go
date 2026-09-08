@@ -26,7 +26,7 @@ import (
 const integrationBootstrapToken = "auth-integration-bootstrap-token-with-at-least-32-characters"
 
 func TestServicePostgreSQLCredentialLifecycleUsesDatabaseClockAndNeverPersistsPlaintext(t *testing.T) {
-	runAuthIntegrationRepositoryCases(t, func(t *testing.T, pool *pgxpool.Pool, repository authIntegrationRepository) {
+	runAuthIntegrationRepository(t, func(t *testing.T, pool *pgxpool.Pool, repository authIntegrationRepository) {
 		ctx := context.Background()
 		prefix := "a7100001"
 		prepareAuthPrefix(t, ctx, pool, prefix)
@@ -102,7 +102,7 @@ func TestServicePostgreSQLCredentialLifecycleUsesDatabaseClockAndNeverPersistsPl
 }
 
 func TestServicePostgreSQLAuthenticateRevokeRacesFailClosedAfterCommit(t *testing.T) {
-	runAuthIntegrationRepositoryCases(t, func(t *testing.T, pool *pgxpool.Pool, repository authIntegrationRepository) {
+	runAuthIntegrationRepository(t, func(t *testing.T, pool *pgxpool.Pool, repository authIntegrationRepository) {
 		ctx := context.Background()
 		prefix := "a7100002"
 		prepareAuthPrefix(t, ctx, pool, prefix)
@@ -167,7 +167,7 @@ func TestServicePostgreSQLAuthenticateRevokeRacesFailClosedAfterCommit(t *testin
 }
 
 func TestServicePostgreSQLConcurrentSessionRotationAllowsOneWinner(t *testing.T) {
-	runAuthIntegrationRepositoryCases(t, func(t *testing.T, pool *pgxpool.Pool, repository authIntegrationRepository) {
+	runAuthIntegrationRepository(t, func(t *testing.T, pool *pgxpool.Pool, repository authIntegrationRepository) {
 		ctx := context.Background()
 		prefix := "a7100003"
 		prepareAuthPrefix(t, ctx, pool, prefix)
@@ -235,7 +235,7 @@ func TestServicePostgreSQLConcurrentSessionRotationAllowsOneWinner(t *testing.T)
 }
 
 func TestServicePostgreSQLAPITokenKeysetPaginationUsesUUIDTieBreaker(t *testing.T) {
-	runAuthIntegrationRepositoryCases(t, func(t *testing.T, pool *pgxpool.Pool, repository authIntegrationRepository) {
+	runAuthIntegrationRepository(t, func(t *testing.T, pool *pgxpool.Pool, repository authIntegrationRepository) {
 		ctx := context.Background()
 		prefix := "a7100004"
 		prepareAuthPrefix(t, ctx, pool, prefix)
@@ -314,7 +314,7 @@ func TestServicePostgreSQLAPITokenKeysetPaginationUsesUUIDTieBreaker(t *testing.
 }
 
 func TestServicePostgreSQLAPITokenExpiredRevokedAndCorruptScopesFailClosed(t *testing.T) {
-	runAuthIntegrationRepositoryCases(t, func(t *testing.T, pool *pgxpool.Pool, repository authIntegrationRepository) {
+	runAuthIntegrationRepository(t, func(t *testing.T, pool *pgxpool.Pool, repository authIntegrationRepository) {
 		ctx := context.Background()
 		prefix := "a7100005"
 		prepareAuthPrefix(t, ctx, pool, prefix)
@@ -367,7 +367,7 @@ func TestServicePostgreSQLAPITokenExpiredRevokedAndCorruptScopesFailClosed(t *te
 }
 
 func TestRepositoryPostgreSQLAuthLifecycleAndFailClosedReads(t *testing.T) {
-	runAuthIntegrationRepositoryCases(t, func(t *testing.T, pool *pgxpool.Pool, repository authIntegrationRepository) {
+	runAuthIntegrationRepository(t, func(t *testing.T, pool *pgxpool.Pool, repository authIntegrationRepository) {
 		ctx := context.Background()
 		cleanupAuthRows(t, ctx, pool)
 		defer cleanupAuthRows(t, ctx, pool)
@@ -484,7 +484,7 @@ func TestRepositoryPostgreSQLAuthLifecycleAndFailClosedReads(t *testing.T) {
 }
 
 func TestRepositoryPostgreSQLSessionRotationIsAtomicAndConcurrentAuthenticationUpdatesLastSeen(t *testing.T) {
-	runAuthIntegrationRepositoryCases(t, func(t *testing.T, pool *pgxpool.Pool, repository authIntegrationRepository) {
+	runAuthIntegrationRepository(t, func(t *testing.T, pool *pgxpool.Pool, repository authIntegrationRepository) {
 		ctx := context.Background()
 		cleanupAuthRows(t, ctx, pool)
 		defer cleanupAuthRows(t, ctx, pool)
@@ -582,12 +582,7 @@ type authIntegrationRepository interface {
 	Check(context.Context) error
 }
 
-type authIntegrationRepositoryCase struct {
-	name       string
-	repository authIntegrationRepository
-}
-
-func runAuthIntegrationRepositoryCases(t *testing.T, test func(*testing.T, *pgxpool.Pool, authIntegrationRepository)) {
+func runAuthIntegrationRepository(t *testing.T, test func(*testing.T, *pgxpool.Pool, authIntegrationRepository)) {
 	t.Helper()
 	platformPool := authIntegrationPool(t)
 	pool := platformPool.DB()
@@ -595,10 +590,6 @@ func runAuthIntegrationRepositoryCases(t *testing.T, test func(*testing.T, *pgxp
 		t.Fatal("shared platform pool has no pgx database")
 	}
 
-	legacy, err := NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
 	gormDatabase, err := platformPool.GORM()
 	if err != nil {
 		t.Fatal(err)
@@ -608,15 +599,9 @@ func runAuthIntegrationRepositoryCases(t *testing.T, test func(*testing.T, *pgxp
 		t.Fatal(err)
 	}
 
-	for _, repositoryCase := range []authIntegrationRepositoryCase{
-		{name: "legacy", repository: legacy},
-		{name: "gorm", repository: gormRepository},
-	} {
-		repositoryCase := repositoryCase
-		t.Run(repositoryCase.name, func(t *testing.T) {
-			test(t, pool, repositoryCase.repository)
-		})
-	}
+	t.Run("gorm", func(t *testing.T) {
+		test(t, pool, gormRepository)
+	})
 }
 
 func newAuthIntegrationService(t *testing.T, repository application.Repository, ids foundation.IDGenerator, clock time.Time) *application.Service {

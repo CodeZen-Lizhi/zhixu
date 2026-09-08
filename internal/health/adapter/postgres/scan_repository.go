@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -18,35 +19,16 @@ import (
 	healthapp "github.com/CodeZen-Lizhi/zhixu/internal/health/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/health/domain"
 	healthworkflow "github.com/CodeZen-Lizhi/zhixu/internal/health/workflow"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	workflowapp "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// ScanRuntimeStarter 是通用 Workflow Runtime 事务启动接缝的最小子集。
-type ScanRuntimeStarter interface {
-	StartTx(context.Context, pgx.Tx, workflowapp.RuntimeStartRequest) (workflowapp.RuntimeStartResult, error)
-}
-
-// SmartCollectionBindingVerifier 在 Health start transaction 内复核 Collection owner 的冻结 binding。
-type SmartCollectionBindingVerifier interface {
-	Verify(context.Context, pgx.Tx, healthapp.SmartCollectionBinding) error
-}
-
-type scanDB interface {
-	DB
-	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
-	QueryRow(context.Context, string, ...any) pgx.Row
-	Begin(context.Context) (pgx.Tx, error)
-	BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, error)
-}
-
-// ScanRepository 持久化 Health Scan 业务事实并复用 Workflow Runtime StartTx。
+// ScanRepository 持久化 Health Scan 业务事实并复用 Workflow Runtime scoped 启动。
 type ScanRepository struct {
-	db       scanDB
-	runtime  ScanRuntimeStarter
-	events   eventsapp.Appender
-	verifier SmartCollectionBindingVerifier
+	db       healthStore
+	runtime  workflowapp.ScopedRuntimeStarter
+	events   eventsapp.ScopedAppender
+	verifier scopedHealthBindingVerifier
 	ids      foundation.IDGenerator
 	clock    foundation.Clock
 }
@@ -54,12 +36,12 @@ type ScanRepository struct {
 var _ healthapp.ScanStartPort = (*ScanRepository)(nil)
 var _ healthapp.ScanStatePort = (*ScanRepository)(nil)
 
-// NewScanRepository 构造支持 Start、查询和 CAS 推进的 Health Scan Repository。
-func NewScanRepository(db scanDB, runtime ScanRuntimeStarter, events eventsapp.Appender, ids foundation.IDGenerator, clock foundation.Clock, verifiers ...SmartCollectionBindingVerifier) (*ScanRepository, error) {
+// newScanRepository 构造支持 Start、查询和 CAS 推进的 Health Scan Repository。
+func newScanRepository(db healthStore, runtime workflowapp.ScopedRuntimeStarter, events eventsapp.ScopedAppender, ids foundation.IDGenerator, clock foundation.Clock, verifiers ...scopedHealthBindingVerifier) (*ScanRepository, error) {
 	if nilScanValue(db) || nilScanValue(runtime) || nilScanValue(events) || nilScanValue(ids) || nilScanValue(clock) {
 		return nil, repositoryUnavailable(errors.New("health scan repository dependencies are missing"))
 	}
-	var verifier SmartCollectionBindingVerifier
+	var verifier scopedHealthBindingVerifier
 	if len(verifiers) > 0 {
 		if len(verifiers) != 1 || nilScanValue(verifiers[0]) {
 			return nil, repositoryUnavailable(errors.New("health smart-collection verifier is invalid"))
@@ -69,8 +51,8 @@ func NewScanRepository(db scanDB, runtime ScanRuntimeStarter, events eventsapp.A
 	return &ScanRepository{db: db, runtime: runtime, events: events, verifier: verifier, ids: ids, clock: clock}, nil
 }
 
-// NewScanStateRepository 构造只供 Worker 查询与推进的 Health Scan Repository。
-func NewScanStateRepository(db scanDB, events eventsapp.Appender) (*ScanRepository, error) {
+// newScanStateRepository 构造只供 Worker 查询与推进的 Health Scan Repository。
+func newScanStateRepository(db healthStore, events eventsapp.ScopedAppender) (*ScanRepository, error) {
 	if nilScanValue(db) || nilScanValue(events) {
 		return nil, repositoryUnavailable(errors.New("health scan state dependencies are missing"))
 	}
@@ -85,16 +67,10 @@ func (repository *ScanRepository) StartOrReplay(ctx context.Context, request hea
 	if err := validateStartRequest(request); err != nil {
 		return healthapp.ScanStartResult{}, err
 	}
-	tx, err := repository.db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
-	if err != nil {
-		return healthapp.ScanStartResult{}, classifyScanError(err, "HEALTH_SCAN_START_FAILED")
-	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
-	result, err := repository.startOrReplayTx(ctx, tx, request)
-	if err != nil {
-		return healthapp.ScanStartResult{}, err
-	}
-	if err := tx.Commit(ctx); err != nil {
+	result, err := withHealthTransaction(ctx, repository.db, foundation.TransactionOptions{Isolation: foundation.TransactionIsolationRepeatableRead}, func(ctx context.Context, tx healthTransaction) (healthapp.ScanStartResult, error) {
+		return repository.startOrReplayTx(ctx, tx, request)
+	})
+	if healthCommitFailed(err) {
 		if recovered, found, recoveryErr := repository.recoverCommittedStart(ctx, request); recoveryErr != nil {
 			return healthapp.ScanStartResult{}, errors.Join(classifyScanError(err, "HEALTH_SCAN_COMMIT_FAILED"), recoveryErr)
 		} else if found {
@@ -102,10 +78,13 @@ func (repository *ScanRepository) StartOrReplay(ctx context.Context, request hea
 		}
 		return healthapp.ScanStartResult{}, classifyScanError(err, "HEALTH_SCAN_COMMIT_FAILED")
 	}
+	if err != nil {
+		return healthapp.ScanStartResult{}, classifyHealthTransactionError(err, "HEALTH_SCAN_START_FAILED", "HEALTH_SCAN_COMMIT_FAILED")
+	}
 	return result, nil
 }
 
-func (repository *ScanRepository) startOrReplayTx(ctx context.Context, tx pgx.Tx, request healthapp.ScanStartRequest) (healthapp.ScanStartResult, error) {
+func (repository *ScanRepository) startOrReplayTx(ctx context.Context, tx healthTransaction, request healthapp.ScanStartRequest) (healthapp.ScanStartResult, error) {
 	if existing, found, err := loadScanByIdempotency(ctx, tx, request.WorkspaceID, request.IdempotencyKey, true); err != nil {
 		return healthapp.ScanStartResult{}, err
 	} else if found {
@@ -123,7 +102,7 @@ ORDER BY created_at,id LIMIT 1 FOR UPDATE`, string(request.WorkspaceID), string(
 		if err == nil {
 			return healthapp.ScanStartResult{}, repositoryConflict("health scan scope already has an active scan")
 		}
-		if !errors.Is(err, pgx.ErrNoRows) {
+		if !errors.Is(err, sql.ErrNoRows) {
 			return healthapp.ScanStartResult{}, classifyScanError(err, "HEALTH_SCAN_SCOPE_QUERY_FAILED")
 		}
 	}
@@ -147,7 +126,7 @@ ORDER BY created_at,id LIMIT 1 FOR UPDATE`, string(request.WorkspaceID), string(
 	if err != nil {
 		return healthapp.ScanStartResult{}, classifyScanError(err, "HEALTH_SCAN_WORKFLOW_START_INVALID")
 	}
-	runtimeResult, err := repository.runtime.StartTx(ctx, tx, runtimeRequest)
+	runtimeResult, err := repository.runtime.StartScoped(ctx, tx.scope, runtimeRequest)
 	if err != nil {
 		if existing, found, replayErr := loadScanByIdempotency(ctx, tx, request.WorkspaceID, request.IdempotencyKey, true); replayErr != nil {
 			return healthapp.ScanStartResult{}, replayErr
@@ -195,7 +174,7 @@ func (repository *ScanRepository) Get(ctx context.Context, workspaceID, scanID f
 	if repository == nil || nilScanValue(repository.db) || !validID(workspaceID) || !validID(scanID) {
 		return domain.Scan{}, repositoryInvalid(errors.New("health scan lookup is invalid"))
 	}
-	return inScanSnapshot(ctx, repository.db, func(tx pgx.Tx) (domain.Scan, error) {
+	return inScanSnapshot(ctx, repository.db, func(ctx context.Context, tx healthTransaction) (domain.Scan, error) {
 		return loadScanByID(ctx, tx, workspaceID, scanID, false)
 	})
 }
@@ -205,10 +184,10 @@ func (repository *ScanRepository) GetByWorkflowRun(ctx context.Context, workspac
 	if repository == nil || nilScanValue(repository.db) || !validID(workspaceID) || !validID(workflowRunID) {
 		return domain.Scan{}, repositoryInvalid(errors.New("health scan workflow lookup is invalid"))
 	}
-	return inScanSnapshot(ctx, repository.db, func(tx pgx.Tx) (domain.Scan, error) {
+	return inScanSnapshot(ctx, repository.db, func(ctx context.Context, tx healthTransaction) (domain.Scan, error) {
 		var scan domain.Scan
 		err := scanHealthScan(tx.QueryRow(ctx, scanSelectSQL+` WHERE workspace_id=$1 AND workflow_run_id=$2`, string(workspaceID), string(workflowRunID)), &scan)
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, sql.ErrNoRows) {
 			return domain.Scan{}, repositoryNotFound(err)
 		}
 		if err != nil {
@@ -231,11 +210,26 @@ func (repository *ScanRepository) Advance(ctx context.Context, progress healthap
 	if repository == nil || nilScanValue(repository.db) {
 		return domain.Scan{}, repositoryUnavailable(errors.New("health scan state repository is unavailable"))
 	}
-	tx, err := repository.db.Begin(ctx)
-	if err != nil {
-		return domain.Scan{}, classifyScanError(err, "HEALTH_SCAN_PROGRESS_BEGIN_FAILED")
+	updated, err := withHealthTransaction(ctx, repository.db, foundation.TransactionOptions{}, func(ctx context.Context, tx healthTransaction) (domain.Scan, error) {
+		return repository.advanceTx(ctx, tx, progress)
+	})
+	if healthCommitFailed(err) {
+		if recovered, recoveryErr := loadScanByID(ctx, repository.db, progress.WorkspaceID, progress.ScanID, false); recoveryErr == nil {
+			if result, ok := recoverProgress(recovered, progress); ok {
+				return result, nil
+			}
+		} else {
+			return domain.Scan{}, errors.Join(classifyScanError(err, "HEALTH_SCAN_PROGRESS_COMMIT_FAILED"), recoveryErr)
+		}
+		return domain.Scan{}, classifyScanError(err, "HEALTH_SCAN_PROGRESS_COMMIT_FAILED")
 	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
+	if err != nil {
+		return domain.Scan{}, classifyHealthTransactionError(err, "HEALTH_SCAN_PROGRESS_BEGIN_FAILED", "HEALTH_SCAN_PROGRESS_COMMIT_FAILED")
+	}
+	return updated, nil
+}
+
+func (repository *ScanRepository) advanceTx(ctx context.Context, tx healthTransaction, progress healthapp.ScanProgress) (domain.Scan, error) {
 	scan, err := loadScanByID(ctx, tx, progress.WorkspaceID, progress.ScanID, true)
 	if err != nil {
 		return domain.Scan{}, err
@@ -300,16 +294,6 @@ WHERE id=$1 AND workspace_id=$2 AND version=$3 AND status IN ('PENDING','RUNNING
 	if err != nil {
 		return domain.Scan{}, err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		if recovered, recoveryErr := loadScanByID(ctx, repository.db, progress.WorkspaceID, progress.ScanID, false); recoveryErr == nil {
-			if result, ok := recoverProgress(recovered, progress); ok {
-				return result, nil
-			}
-		} else {
-			return domain.Scan{}, errors.Join(classifyScanError(err, "HEALTH_SCAN_PROGRESS_COMMIT_FAILED"), recoveryErr)
-		}
-		return domain.Scan{}, classifyScanError(err, "HEALTH_SCAN_PROGRESS_COMMIT_FAILED")
-	}
 	return updated, nil
 }
 
@@ -318,11 +302,26 @@ func (repository *ScanRepository) Finish(ctx context.Context, terminal healthapp
 	if repository == nil || nilScanValue(repository.db) || nilScanValue(repository.events) {
 		return domain.Scan{}, repositoryUnavailable(errors.New("health scan state repository is unavailable"))
 	}
-	tx, err := repository.db.Begin(ctx)
-	if err != nil {
-		return domain.Scan{}, classifyScanError(err, "HEALTH_SCAN_FINISH_BEGIN_FAILED")
+	updated, err := withHealthTransaction(ctx, repository.db, foundation.TransactionOptions{}, func(ctx context.Context, tx healthTransaction) (domain.Scan, error) {
+		return repository.finishTx(ctx, tx, terminal)
+	})
+	if healthCommitFailed(err) {
+		if recovered, recoveryErr := loadScanByID(ctx, repository.db, terminal.WorkspaceID, terminal.ScanID, false); recoveryErr == nil {
+			if recovered.Version == terminal.ExpectedVersion+1 && recovered.Status == terminal.Status && sameFailure(recovered.LastError, terminal.LastError) {
+				return recovered, nil
+			}
+		} else {
+			return domain.Scan{}, errors.Join(classifyScanError(err, "HEALTH_SCAN_FINISH_COMMIT_FAILED"), recoveryErr)
+		}
+		return domain.Scan{}, classifyScanError(err, "HEALTH_SCAN_FINISH_COMMIT_FAILED")
 	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
+	if err != nil {
+		return domain.Scan{}, classifyHealthTransactionError(err, "HEALTH_SCAN_FINISH_BEGIN_FAILED", "HEALTH_SCAN_FINISH_COMMIT_FAILED")
+	}
+	return updated, nil
+}
+
+func (repository *ScanRepository) finishTx(ctx context.Context, tx healthTransaction, terminal healthapp.ScanTerminal) (domain.Scan, error) {
 	scan, err := loadScanByID(ctx, tx, terminal.WorkspaceID, terminal.ScanID, true)
 	if err != nil {
 		return domain.Scan{}, err
@@ -372,49 +371,20 @@ WHERE id=$1 AND workspace_id=$2 AND version=$3 AND status IN ('PENDING','RUNNING
 	if err := appendHealthScanCompletedEvent(ctx, tx, repository.events, updated, now); err != nil {
 		return domain.Scan{}, err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		if recovered, recoveryErr := loadScanByID(ctx, repository.db, terminal.WorkspaceID, terminal.ScanID, false); recoveryErr == nil {
-			if recovered.Version == terminal.ExpectedVersion+1 && recovered.Status == terminal.Status && sameFailure(recovered.LastError, terminal.LastError) {
-				return recovered, nil
-			}
-		} else {
-			return domain.Scan{}, errors.Join(classifyScanError(err, "HEALTH_SCAN_FINISH_COMMIT_FAILED"), recoveryErr)
-		}
-		return domain.Scan{}, classifyScanError(err, "HEALTH_SCAN_FINISH_COMMIT_FAILED")
-	}
 	return updated, nil
 }
 
-// ScanCancellationGuard 在 Workflow cancel 事务内同步 Health Scan 与 active coverage。
-type ScanCancellationGuard struct {
-	events eventsapp.Appender
-}
-
-var _ workflowapp.CancellationSafetyGuard = (*ScanCancellationGuard)(nil)
-
-// NewScanCancellationGuard 构造 Health Scan 的取消安全边界。
-func NewScanCancellationGuard(events eventsapp.Appender) (*ScanCancellationGuard, error) {
-	if nilScanValue(events) {
-		return nil, repositoryUnavailable(errors.New("health scan cancellation event appender is missing"))
-	}
-	return &ScanCancellationGuard{events: events}, nil
-}
-
-// SafeToCancelWorkflowNode 原子取消 active Scan；已完成 Scan 拒绝迟到取消。
-func (guard *ScanCancellationGuard) SafeToCancelWorkflowNode(ctx context.Context, transaction any, nodeRunID foundation.ID) (bool, error) {
-	if guard == nil || nilScanValue(guard.events) || !validID(nodeRunID) {
+// cancelHealthWorkflowNode 在调用方 scope 内取消 Scan，不提交或回滚事务。
+func cancelHealthWorkflowNode(ctx context.Context, tx healthTransaction, appender eventsapp.ScopedAppender, nodeRunID foundation.ID) (bool, error) {
+	if nilScanValue(appender) || !validID(nodeRunID) {
 		return false, repositoryInvalid(errors.New("health scan cancellation guard or node is invalid"))
-	}
-	tx, ok := transaction.(pgx.Tx)
-	if !ok || tx == nil {
-		return false, repositoryInvalid(errors.New("health scan cancellation transaction is invalid"))
 	}
 	var scanID, workspaceID, workflowRunID, status string
 	var version int64
 	err := tx.QueryRow(ctx, `SELECT scan.id::text,scan.workspace_id::text,scan.workflow_run_id::text,scan.status,scan.version
 FROM ops.health_scan scan JOIN workflow.node_run node ON node.run_id=scan.workflow_run_id
 WHERE node.id=$1 FOR UPDATE OF scan`, string(nodeRunID)).Scan(&scanID, &workspaceID, &workflowRunID, &status, &version)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, sql.ErrNoRows) {
 		return true, nil
 	}
 	if err != nil {
@@ -453,7 +423,7 @@ WHERE id=$1 AND workspace_id=$2 AND version=$3 AND status IN ('PENDING','RUNNING
 		if parseErr != nil {
 			return false, repositoryConsistency(parseErr)
 		}
-		if err := appendHealthScanCompletedEvent(ctx, tx, guard.events, domain.Scan{
+		if err := appendHealthScanCompletedEvent(ctx, tx, appender, domain.Scan{
 			ID: scan, WorkspaceID: workspace, WorkflowRunID: run, Status: domain.ScanStatusCancelled, Version: version + 1,
 		}, now); err != nil {
 			return false, err
@@ -468,9 +438,9 @@ WHERE id=$1 AND workspace_id=$2 AND version=$3 AND status IN ('PENDING','RUNNING
 	}
 }
 
-func appendHealthScanCompletedEvent(ctx context.Context, tx pgx.Tx, appender eventsapp.Appender, scan domain.Scan, occurredAt time.Time) error {
+func appendHealthScanCompletedEvent(ctx context.Context, tx healthTransaction, appender eventsapp.ScopedAppender, scan domain.Scan, occurredAt time.Time) error {
 	workflowRunID := scan.WorkflowRunID
-	_, replayed, err := appender.AppendTx(ctx, tx, eventsdomain.AppendRequest{
+	_, replayed, err := appender.AppendScoped(ctx, tx.scope, eventsdomain.AppendRequest{
 		WorkspaceID: scan.WorkspaceID, WorkflowRunID: &workflowRunID,
 		Type: "health.scan.completed", ResourceRef: "health_scan:" + string(scan.ID), ResourceVersion: scan.Version,
 		PayloadSummary: eventsdomain.PayloadSummary{Status: strings.ToLower(string(scan.Status))}, SchemaVersion: 1,
@@ -487,7 +457,7 @@ func appendHealthScanCompletedEvent(ctx context.Context, tx pgx.Tx, appender eve
 }
 
 func insertScan(ctx context.Context, db interface {
-	QueryRow(context.Context, string, ...any) pgx.Row
+	QueryRow(context.Context, string, ...any) healthRow
 }, scan domain.Scan) (bool, error) {
 	checkpoint, err := encodeCheckpoint(scan.Checkpoint)
 	if err != nil {
@@ -505,7 +475,7 @@ ON CONFLICT (workspace_id,idempotency_key) DO NOTHING RETURNING id::text`, strin
 		scan.IdempotencyKey, scan.RequestHash, string(scan.WorkflowRunID), scan.MaxItems, string(scan.Status), checkpoint,
 		scan.Counters.Processed, scan.Counters.Created, scan.Counters.Reopened, scan.Counters.Resolved, scan.Counters.Unchanged,
 		scan.Counters.Failed, scan.Version, scan.CreatedAt.UTC(), scan.UpdatedAt.UTC()).Scan(&id)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
@@ -514,7 +484,7 @@ ON CONFLICT (workspace_id,idempotency_key) DO NOTHING RETURNING id::text`, strin
 	return id != "", nil
 }
 
-func insertCoverage(ctx context.Context, tx pgx.Tx, scanID, workspaceID foundation.ID, coverage []domain.DetectorCoverage, now time.Time) error {
+func insertCoverage(ctx context.Context, tx healthTransaction, scanID, workspaceID foundation.ID, coverage []domain.DetectorCoverage, now time.Time) error {
 	emptyCheckpoint, err := encodeCheckpoint(domain.ScanCheckpoint{})
 	if err != nil {
 		return err
@@ -537,14 +507,14 @@ WHERE scan_id=$1 AND workspace_id=$2 AND detector_id=$3 AND status='PENDING'`, s
 	return nil
 }
 
-func loadScanByID(ctx context.Context, db scanQueryDB, workspaceID, scanID foundation.ID, forUpdate bool) (domain.Scan, error) {
+func loadScanByID(ctx context.Context, db healthReadDB, workspaceID, scanID foundation.ID, forUpdate bool) (domain.Scan, error) {
 	query := scanSelectSQL + ` WHERE id=$1 AND workspace_id=$2`
 	if forUpdate {
 		query += ` FOR UPDATE`
 	}
 	var scan domain.Scan
 	err := scanHealthScan(db.QueryRow(ctx, query, string(scanID), string(workspaceID)), &scan)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Scan{}, repositoryNotFound(err)
 	}
 	if err != nil {
@@ -561,14 +531,14 @@ func loadScanByID(ctx context.Context, db scanQueryDB, workspaceID, scanID found
 	return scan, nil
 }
 
-func loadScanByIdempotency(ctx context.Context, db scanQueryDB, workspaceID foundation.ID, key string, forUpdate bool) (domain.Scan, bool, error) {
+func loadScanByIdempotency(ctx context.Context, db healthReadDB, workspaceID foundation.ID, key string, forUpdate bool) (domain.Scan, bool, error) {
 	query := scanSelectSQL + ` WHERE workspace_id=$1 AND idempotency_key=$2`
 	if forUpdate {
 		query += ` FOR UPDATE`
 	}
 	var scan domain.Scan
 	err := scanHealthScan(db.QueryRow(ctx, query, string(workspaceID), key), &scan)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Scan{}, false, nil
 	}
 	if err != nil {
@@ -585,12 +555,7 @@ func loadScanByIdempotency(ctx context.Context, db scanQueryDB, workspaceID foun
 	return scan, true, nil
 }
 
-type scanQueryDB interface {
-	Query(context.Context, string, ...any) (pgx.Rows, error)
-	QueryRow(context.Context, string, ...any) pgx.Row
-}
-
-func loadCoverage(ctx context.Context, db scanQueryDB, scanID, workspaceID foundation.ID, forUpdate bool) ([]domain.DetectorCoverage, error) {
+func loadCoverage(ctx context.Context, db healthReadDB, scanID, workspaceID foundation.ID, forUpdate bool) ([]domain.DetectorCoverage, error) {
 	query := `SELECT detector_id,detector_version,status,checkpoint,failure_summary,unavailable_reason,
 processed_count,created_count,reopened_count,resolved_count,unchanged_count,failed_count
 FROM ops.health_scan_detector WHERE scan_id=$1 AND workspace_id=$2 ORDER BY detector_id`
@@ -633,7 +598,7 @@ FROM ops.health_scan_detector WHERE scan_id=$1 AND workspace_id=$2 ORDER BY dete
 	return result, nil
 }
 
-func scanHealthScan(row pgx.Row, target *domain.Scan) error {
+func scanHealthScan(row healthRow, target *domain.Scan) error {
 	var id, workspaceID, workflowRunID, scopeType, status string
 	var scopeRef string
 	var scopeHash, scopeReadModelRevision *string
@@ -645,7 +610,7 @@ func scanHealthScan(row pgx.Row, target *domain.Scan) error {
 		&checkpointRaw, &failureRaw, &target.Counters.Processed, &target.Counters.Created, &target.Counters.Reopened,
 		&target.Counters.Resolved, &target.Counters.Unchanged, &target.Counters.Failed, &target.Version,
 		&target.CreatedAt, &target.UpdatedAt, &completedAt); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
 		return classifyScanError(err, "HEALTH_SCAN_QUERY_FAILED")
@@ -853,7 +818,7 @@ func sameFailure(left, right *domain.FailureSummary) bool {
 }
 
 func databaseTime(ctx context.Context, db interface {
-	QueryRow(context.Context, string, ...any) pgx.Row
+	QueryRow(context.Context, string, ...any) healthRow
 }) (time.Time, error) {
 	var now time.Time
 	if err := db.QueryRow(ctx, `SELECT CURRENT_TIMESTAMP`).Scan(&now); err != nil {
@@ -862,18 +827,10 @@ func databaseTime(ctx context.Context, db interface {
 	return now.UTC(), nil
 }
 
-func inScanSnapshot(ctx context.Context, db scanDB, operation func(pgx.Tx) (domain.Scan, error)) (domain.Scan, error) {
-	tx, err := db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+func inScanSnapshot(ctx context.Context, db healthStore, operation func(context.Context, healthTransaction) (domain.Scan, error)) (domain.Scan, error) {
+	result, err := withHealthTransaction(ctx, db, foundation.TransactionOptions{Isolation: foundation.TransactionIsolationRepeatableRead, ReadOnly: true}, operation)
 	if err != nil {
-		return domain.Scan{}, classifyScanError(err, "HEALTH_SCAN_SNAPSHOT_BEGIN_FAILED")
-	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
-	result, err := operation(tx)
-	if err != nil {
-		return domain.Scan{}, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return domain.Scan{}, classifyScanError(err, "HEALTH_SCAN_SNAPSHOT_COMMIT_FAILED")
+		return domain.Scan{}, classifyHealthTransactionError(err, "HEALTH_SCAN_SNAPSHOT_BEGIN_FAILED", "HEALTH_SCAN_SNAPSHOT_COMMIT_FAILED")
 	}
 	return result, nil
 }
@@ -883,7 +840,7 @@ func runtimeIdempotencyKey(request healthapp.ScanStartRequest) string {
 	return "health-scan:" + hex.EncodeToString(digest[:])
 }
 
-func (repository *ScanRepository) verifySmartCollectionBinding(ctx context.Context, tx pgx.Tx, request healthapp.ScanStartRequest) error {
+func (repository *ScanRepository) verifySmartCollectionBinding(ctx context.Context, tx healthTransaction, request healthapp.ScanStartRequest) error {
 	if request.Scope.Type != domain.ScanScopeTypeSmartCollection {
 		return nil
 	}
@@ -895,7 +852,7 @@ func (repository *ScanRepository) verifySmartCollectionBinding(ctx context.Conte
 		CollectionVersion: request.Scope.Version, QueryHash: request.Scope.Hash,
 		ReadModelRevision: request.Scope.ReadModelRevision, ExactCount: request.Scope.ExactCount,
 	}
-	if err := repository.verifier.Verify(ctx, tx, binding); err != nil {
+	if err := repository.verifier.VerifyBindingScoped(ctx, tx.scope, binding); err != nil {
 		var classified *foundation.Error
 		if errors.As(err, &classified) && (classified.Kind == foundation.ErrorVersionConflict || classified.Kind == foundation.ErrorNotFound) {
 			return foundation.NewError(foundation.ErrorVersionConflict, domain.ErrorCodeScanScopeStale, false, err)
@@ -1017,17 +974,15 @@ func classifyScanError(err error, code string) error {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return foundation.NewError(foundation.ErrorRetryableFailure, code, true, err)
 	}
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) {
-		switch pgErr.Code {
-		case "40001", "40P01", "55P03", "08000", "08003", "08006", "57P01":
-			return foundation.NewError(foundation.ErrorRetryableFailure, code, true, err)
-		case "23505":
-			return repositoryConflict("health scan uniqueness binding conflicted")
-		case "23503", "23514", "55000":
-			return foundation.NewError(foundation.ErrorConsistencyViolation, code, false, err)
-		}
+	switch platformpostgres.SQLState(err) {
+	case "40001", "40P01", "55P03", "08000", "08003", "08006", "57P01":
+		return foundation.NewError(foundation.ErrorRetryableFailure, code, true, err)
+	case "23505":
+		return repositoryConflict("health scan uniqueness binding conflicted")
+	case "23503", "23514", "55000":
+		return foundation.NewError(foundation.ErrorConsistencyViolation, code, false, err)
 	}
+
 	return foundation.NewError(foundation.ErrorDependencyUnavailable, code, true, err)
 }
 

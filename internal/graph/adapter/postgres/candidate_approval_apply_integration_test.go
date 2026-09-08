@@ -5,11 +5,9 @@ package postgres
 import (
 	"context"
 	"errors"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,153 +22,18 @@ import (
 	knowledgepostgres "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/adapter/postgres"
 	knowledgeapplication "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/application"
 	knowledge "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
-	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
-	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"gorm.io/gorm"
 )
-
-type approvedRelationApplyIntegrationRepository interface {
-	knowledgeapplication.ApprovedRelationApprovalPort
-}
-
-type approvedRelationApplyIntegrationVariant struct {
-	name string
-	open func(*testing.T, *platformpostgres.Pool, foundation.Clock, eventsdomainScopedAppender) approvedRelationApplyIntegrationRepository
-	loss func(*testing.T, *platformpostgres.Pool, foundation.Clock, eventsdomainScopedAppender, error) approvedRelationApplyIntegrationRepository
-}
-
-type eventsdomainScopedAppender interface {
-	AppendScoped(context.Context, foundation.TransactionScope, eventsdomain.AppendRequest) (eventsdomain.ServerEvent, bool, error)
-}
-
-type approvedRelationApplyIntegrationCase struct {
-	pool       *platformpostgres.Pool
-	repository approvedRelationApplyIntegrationRepository
-	fixture    approvedCandidateApplyFixture
-}
-
-func runApprovedRelationApplyIntegrationVariants(
-	t *testing.T,
-	label string,
-	events func(*testing.T, eventsdomainScopedAppender) eventsdomainScopedAppender,
-	open func(approvedRelationApplyIntegrationVariant, *testing.T, *platformpostgres.Pool, foundation.Clock, eventsdomainScopedAppender) approvedRelationApplyIntegrationRepository,
-	scenario func(*testing.T, approvedRelationApplyIntegrationCase),
-) {
-	t.Helper()
-	variants := []approvedRelationApplyIntegrationVariant{
-		{name: "legacy", open: openLegacyApprovedRelationApplyIntegrationRepository, loss: openLegacyApprovedRelationApplyCommitLossIntegrationRepository},
-		{name: "gorm", open: openGORMApprovedRelationApplyIntegrationRepository, loss: openGORMApprovedRelationApplyCommitLossIntegrationRepository},
-	}
-	for _, variant := range variants {
-		variant := variant
-		t.Run(variant.name, func(t *testing.T) {
-			fixture := testdb.Require(t, testdb.Config{
-				ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
-				Availability:     testdb.FailWhenUnavailable,
-				MaxConns:         16,
-			})
-			platform := fixture.Pool()
-			if platform == nil || platform.DB() == nil {
-				t.Fatal("Relation Apply fixture did not provide a shared platform pool")
-			}
-			seed := prepareCommittedCandidateApplyProposal(t, platform, label+"-"+variant.name)
-			appender, err := eventspostgres.NewGORMStore(platform)
-			if err != nil {
-				t.Fatalf("NewGORMStore from Relation Apply pool: %v", err)
-			}
-			if events != nil {
-				appender = events(t, appender).(*eventspostgres.GORMStore)
-			}
-			clock := foundation.FixedClock{Value: seed.now.Add(3 * time.Second)}
-			repository := open(variant, t, platform, clock, appender)
-			scenario(t, approvedRelationApplyIntegrationCase{pool: platform, repository: repository, fixture: seed})
-		})
-	}
-}
-
-func openLegacyApprovedRelationApplyIntegrationRepository(
-	t *testing.T,
-	platform *platformpostgres.Pool,
-	clock foundation.Clock,
-	_ eventsdomainScopedAppender,
-) approvedRelationApplyIntegrationRepository {
-	t.Helper()
-	events, err := eventspostgres.NewStore(platform.DB())
-	if err != nil {
-		t.Fatal(err)
-	}
-	repository, err := knowledgepostgres.NewApprovedRelationApplyRepository(platform.DB(), foundation.NewUUIDGenerator(nil), clock, events)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return repository
-}
-
-func openGORMApprovedRelationApplyIntegrationRepository(
-	t *testing.T,
-	platform *platformpostgres.Pool,
-	clock foundation.Clock,
-	events eventsdomainScopedAppender,
-) approvedRelationApplyIntegrationRepository {
-	t.Helper()
-	repository, err := knowledgepostgres.NewGORMApprovedRelationApplyRepository(platform, foundation.NewUUIDGenerator(nil), clock, events)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return repository
-}
-
-func openLegacyApprovedRelationApplyCommitLossIntegrationRepository(
-	t *testing.T,
-	platform *platformpostgres.Pool,
-	clock foundation.Clock,
-	_ eventsdomainScopedAppender,
-	loss error,
-) approvedRelationApplyIntegrationRepository {
-	t.Helper()
-	events, err := eventspostgres.NewStore(platform.DB())
-	if err != nil {
-		t.Fatal(err)
-	}
-	repository, err := knowledgepostgres.NewApprovedRelationApplyRepository(
-		candidateConfirmCommitLossBeginner{Tx: platform.DB(), err: loss}, foundation.NewUUIDGenerator(nil), clock, events,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return repository
-}
-
-func openGORMApprovedRelationApplyCommitLossIntegrationRepository(
-	t *testing.T,
-	platform *platformpostgres.Pool,
-	clock foundation.Clock,
-	events eventsdomainScopedAppender,
-	loss error,
-) approvedRelationApplyIntegrationRepository {
-	t.Helper()
-	repository, err := knowledgepostgres.NewGORMApprovedRelationApplyRepository(platform, foundation.NewUUIDGenerator(nil), clock, events)
-	if err != nil {
-		t.Fatal(err)
-	}
-	unitOfWork, err := platform.UnitOfWork()
-	if err != nil {
-		t.Fatal(err)
-	}
-	setGORMRelationApplyUnitOfWork(t, repository, &relationApplyPostCommitErrorUnitOfWork{delegate: unitOfWork, err: loss})
-	return repository
-}
 
 func TestApprovedCandidateAppliesOneConfirmedRelationAndExactlyReplays(t *testing.T) {
 	fixture := prepareApprovedCandidateApply(t, "approved-apply")
-	events, err := eventspostgres.NewStore(fixture.tx)
+	events, err := eventspostgres.NewGORMStore(fixture.pool.platform)
 	if err != nil {
 		t.Fatal(err)
 	}
-	repository, err := knowledgepostgres.NewApprovedRelationApplyRepository(
-		fixture.tx,
+	repository, err := knowledgepostgres.NewGORMApprovedRelationApplyRepository(
+		fixture.pool.platform,
 		foundation.NewUUIDGenerator(nil),
 		foundation.FixedClock{Value: fixture.now.Add(3 * time.Second)},
 		events,
@@ -194,23 +57,23 @@ func TestApprovedCandidateAppliesOneConfirmedRelationAndExactlyReplays(t *testin
 	}
 
 	var relationCount, evidenceCount, receiptCount, writebackCount int
-	if err := fixture.tx.QueryRow(fixture.ctx, `SELECT count(*) FROM core.relation WHERE workspace_id=$1`, string(fixture.workspaceID)).Scan(&relationCount); err != nil {
+	if err := fixture.pool.QueryRow(fixture.ctx, `SELECT count(*) FROM core.relation WHERE workspace_id=$1`, string(fixture.workspaceID)).Scan(&relationCount); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.tx.QueryRow(fixture.ctx, `SELECT count(*) FROM core.relation_evidence WHERE workspace_id=$1`, string(fixture.workspaceID)).Scan(&evidenceCount); err != nil {
+	if err := fixture.pool.QueryRow(fixture.ctx, `SELECT count(*) FROM core.relation_evidence WHERE workspace_id=$1`, string(fixture.workspaceID)).Scan(&evidenceCount); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.tx.QueryRow(fixture.ctx, `SELECT count(*) FROM core.knowledge_command_receipt WHERE workspace_id=$1 AND idempotency_key=$2`, string(fixture.workspaceID), knowledgeapplication.RelationApplyIdempotencyKey(fixture.approvalID)).Scan(&receiptCount); err != nil {
+	if err := fixture.pool.QueryRow(fixture.ctx, `SELECT count(*) FROM core.knowledge_command_receipt WHERE workspace_id=$1 AND idempotency_key=$2`, string(fixture.workspaceID), knowledgeapplication.RelationApplyIdempotencyKey(fixture.approvalID)).Scan(&receiptCount); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.tx.QueryRow(fixture.ctx, `SELECT count(*) FROM change_control.writeback_execution WHERE proposal_id=$1`, string(fixture.proposal.ID)).Scan(&writebackCount); err != nil {
+	if err := fixture.pool.QueryRow(fixture.ctx, `SELECT count(*) FROM change_control.writeback_execution WHERE proposal_id=$1`, string(fixture.proposal.ID)).Scan(&writebackCount); err != nil {
 		t.Fatal(err)
 	}
 	if relationCount != 1 || evidenceCount != len(fixture.candidate.Evidence) || receiptCount != 1 || writebackCount != 0 {
 		t.Fatalf("relation=%d evidence=%d receipt=%d writeback=%d", relationCount, evidenceCount, receiptCount, writebackCount)
 	}
 	var eventCount int
-	if err := fixture.tx.QueryRow(fixture.ctx, `SELECT count(*) FROM ops.server_event
+	if err := fixture.pool.QueryRow(fixture.ctx, `SELECT count(*) FROM ops.server_event
 		WHERE workspace_id=$1 AND event_type=$2 AND resource_ref=$3`,
 		string(fixture.workspaceID), eventcontract.ProposalAppliedEventType, "proposal:"+string(fixture.proposal.ID)).Scan(&eventCount); err != nil {
 		t.Fatal(err)
@@ -220,7 +83,7 @@ func TestApprovedCandidateAppliesOneConfirmedRelationAndExactlyReplays(t *testin
 	}
 	var eventVersion int64
 	var sourceRef, status string
-	if err := fixture.tx.QueryRow(fixture.ctx, `SELECT resource_version,source_event_ref,payload_summary->>'status'
+	if err := fixture.pool.QueryRow(fixture.ctx, `SELECT resource_version,source_event_ref,payload_summary->>'status'
 		FROM ops.server_event WHERE workspace_id=$1 AND event_type=$2`,
 		string(fixture.workspaceID), eventcontract.ProposalAppliedEventType).Scan(&eventVersion, &sourceRef, &status); err != nil {
 		t.Fatal(err)
@@ -229,7 +92,7 @@ func TestApprovedCandidateAppliesOneConfirmedRelationAndExactlyReplays(t *testin
 		t.Fatalf("proposal applied event version=%d source=%s status=%s", eventVersion, sourceRef, status)
 	}
 	var candidateStatus string
-	if err := fixture.tx.QueryRow(fixture.ctx, `SELECT status FROM graph.semantic_link_candidate WHERE id=$1`, string(fixture.candidate.ID)).Scan(&candidateStatus); err != nil {
+	if err := fixture.pool.QueryRow(fixture.ctx, `SELECT status FROM graph.semantic_link_candidate WHERE id=$1`, string(fixture.candidate.ID)).Scan(&candidateStatus); err != nil {
 		t.Fatal(err)
 	}
 	if candidateStatus != string(graphdomain.SemanticLinkCandidateStatusProposalCreated) {
@@ -240,13 +103,13 @@ func TestApprovedCandidateAppliesOneConfirmedRelationAndExactlyReplays(t *testin
 func TestApprovedCandidateApplyMarksNeedsRevisionOnEndpointOrProvenanceDrift(t *testing.T) {
 	t.Run("endpoint version", func(t *testing.T) {
 		fixture := prepareApprovedCandidateApply(t, "endpoint-drift")
-		if _, err := fixture.tx.Exec(fixture.ctx, `
+		if _, err := fixture.pool.Exec(fixture.ctx, `
 			UPDATE core.claim
 			SET status='INVALID',version=version+1,updated_at=$3
 			WHERE workspace_id=$1 AND id=$2`, string(fixture.workspaceID), string(fixture.candidate.Source.Ref.ID), fixture.now.Add(3*time.Second)); err != nil {
 			t.Fatal(err)
 		}
-		repository, err := knowledgepostgres.NewApprovedRelationApplyRepository(fixture.tx, foundation.NewUUIDGenerator(nil), foundation.FixedClock{Value: fixture.now.Add(4 * time.Second)})
+		repository, err := knowledgepostgres.NewGORMApprovedRelationApplyRepository(fixture.pool.platform, foundation.NewUUIDGenerator(nil), foundation.FixedClock{Value: fixture.now.Add(4 * time.Second)})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -258,16 +121,16 @@ func TestApprovedCandidateApplyMarksNeedsRevisionOnEndpointOrProvenanceDrift(t *
 
 	t.Run("provenance unreachable", func(t *testing.T) {
 		fixture := prepareApprovedCandidateApply(t, "provenance-drift")
-		if _, err := fixture.tx.Exec(fixture.ctx, `ALTER TABLE ingestion.source_version_projection DISABLE TRIGGER source_version_projection_reject_mutation`); err != nil {
+		if _, err := fixture.pool.Exec(fixture.ctx, `ALTER TABLE ingestion.source_version_projection DISABLE TRIGGER source_version_projection_reject_mutation`); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := fixture.tx.Exec(fixture.ctx, `DELETE FROM ingestion.source_version_projection WHERE source_version_id=$1`, string(fixture.provenance.sourceVersionID)); err != nil {
+		if _, err := fixture.pool.Exec(fixture.ctx, `DELETE FROM ingestion.source_version_projection WHERE source_version_id=$1`, string(fixture.provenance.sourceVersionID)); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := fixture.tx.Exec(fixture.ctx, `ALTER TABLE ingestion.source_version_projection ENABLE TRIGGER source_version_projection_reject_mutation`); err != nil {
+		if _, err := fixture.pool.Exec(fixture.ctx, `ALTER TABLE ingestion.source_version_projection ENABLE TRIGGER source_version_projection_reject_mutation`); err != nil {
 			t.Fatal(err)
 		}
-		repository, err := knowledgepostgres.NewApprovedRelationApplyRepository(fixture.tx, foundation.NewUUIDGenerator(nil), foundation.FixedClock{Value: fixture.now.Add(4 * time.Second)})
+		repository, err := knowledgepostgres.NewGORMApprovedRelationApplyRepository(fixture.pool.platform, foundation.NewUUIDGenerator(nil), foundation.FixedClock{Value: fixture.now.Add(4 * time.Second)})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -281,26 +144,31 @@ func TestApprovedCandidateApplyMarksNeedsRevisionOnEndpointOrProvenanceDrift(t *
 func TestApprovedCandidateApplyRollsBackRelationAndProposalOnEvidenceFailure(t *testing.T) {
 	fixture := prepareApprovedCandidateApply(t, "apply-rollback")
 	injected := errors.New("injected relation evidence failure")
-	repository, err := knowledgepostgres.NewApprovedRelationApplyRepository(
-		relationApplyFailBeginner{Tx: fixture.tx, err: injected},
+	repository, err := knowledgepostgres.NewGORMApprovedRelationApplyRepository(
+		fixture.pool.platform,
 		foundation.NewUUIDGenerator(nil),
 		foundation.FixedClock{Value: fixture.now.Add(3 * time.Second)},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
+	graphRawHook(t, fixture.pool.platform, func(statement *gorm.DB) {
+		if strings.Contains(strings.ReplaceAll(statement.Statement.SQL.String(), `"`, ""), "INSERT INTO core.relation_evidence") {
+			statement.AddError(injected)
+		}
+	})
 	if _, err := repository.ApplyApprovedRelation(fixture.ctx, fixture.command); !errors.Is(err, injected) {
 		t.Fatalf("apply failure = %v", err)
 	}
 	var status string
 	var version, relationCount, receiptCount int
-	if err := fixture.tx.QueryRow(fixture.ctx, `SELECT status,version FROM change_control.proposal WHERE id=$1`, string(fixture.proposal.ID)).Scan(&status, &version); err != nil {
+	if err := fixture.pool.QueryRow(fixture.ctx, `SELECT status,version FROM change_control.proposal WHERE id=$1`, string(fixture.proposal.ID)).Scan(&status, &version); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.tx.QueryRow(fixture.ctx, `SELECT count(*) FROM core.relation WHERE workspace_id=$1`, string(fixture.workspaceID)).Scan(&relationCount); err != nil {
+	if err := fixture.pool.QueryRow(fixture.ctx, `SELECT count(*) FROM core.relation WHERE workspace_id=$1`, string(fixture.workspaceID)).Scan(&relationCount); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.tx.QueryRow(fixture.ctx, `SELECT count(*) FROM core.knowledge_command_receipt WHERE workspace_id=$1`, string(fixture.workspaceID)).Scan(&receiptCount); err != nil {
+	if err := fixture.pool.QueryRow(fixture.ctx, `SELECT count(*) FROM core.knowledge_command_receipt WHERE workspace_id=$1`, string(fixture.workspaceID)).Scan(&receiptCount); err != nil {
 		t.Fatal(err)
 	}
 	if status != string(changecontroldomain.StatusApproved) || version != 2 || relationCount != 0 || receiptCount != 0 {
@@ -308,40 +176,14 @@ func TestApprovedCandidateApplyRollsBackRelationAndProposalOnEvidenceFailure(t *
 	}
 }
 
-func TestApprovedCandidateApplyRecoversCommitResponseLoss(t *testing.T) {
-	fixture := prepareApprovedCandidateApply(t, "apply-response-loss")
-	injected := errors.New("injected apply commit response loss")
-	lost, err := knowledgepostgres.NewApprovedRelationApplyRepository(
-		candidateConfirmCommitLossBeginner{Tx: fixture.tx, err: injected},
-		foundation.NewUUIDGenerator(nil),
-		foundation.FixedClock{Value: fixture.now.Add(3 * time.Second)},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := lost.ApplyApprovedRelation(fixture.ctx, fixture.command); !errors.Is(err, injected) {
-		t.Fatalf("commit response loss error = %v", err)
-	}
-
-	normal, err := knowledgepostgres.NewApprovedRelationApplyRepository(fixture.tx, foundation.NewUUIDGenerator(nil), foundation.FixedClock{Value: fixture.now.Add(4 * time.Second)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	replayed, err := normal.ApplyApprovedRelation(fixture.ctx, fixture.command)
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertApprovedRelationApplyResult(t, replayed, fixture, true)
-}
-
 func TestCandidateApprovalAndRelationApplyCommitInOneTransaction(t *testing.T) {
 	fixture := prepareCandidateApplyProposal(t, "atomic-success")
-	events, err := eventspostgres.NewStore(fixture.tx)
+	events, err := eventspostgres.NewGORMStore(fixture.pool.platform)
 	if err != nil {
 		t.Fatal(err)
 	}
-	repository, err := knowledgepostgres.NewApprovedRelationApplyRepository(
-		fixture.tx,
+	repository, err := knowledgepostgres.NewGORMApprovedRelationApplyRepository(
+		fixture.pool.platform,
 		foundation.NewUUIDGenerator(nil),
 		foundation.FixedClock{Value: fixture.now.Add(3 * time.Second)},
 		events,
@@ -378,13 +220,13 @@ func TestCandidateApprovalAndRelationApplyCommitInOneTransaction(t *testing.T) {
 
 func TestCandidateApprovalAndRelationApplyRollBackTogetherOnEvidenceFailure(t *testing.T) {
 	fixture := prepareCandidateApplyProposal(t, "atomic-rollback")
-	events, err := eventspostgres.NewStore(fixture.tx)
+	events, err := eventspostgres.NewGORMStore(fixture.pool.platform)
 	if err != nil {
 		t.Fatal(err)
 	}
 	injected := errors.New("injected atomic relation evidence failure")
-	repository, err := knowledgepostgres.NewApprovedRelationApplyRepository(
-		relationApplyFailBeginner{Tx: fixture.tx, err: injected},
+	repository, err := knowledgepostgres.NewGORMApprovedRelationApplyRepository(
+		fixture.pool.platform,
 		foundation.NewUUIDGenerator(nil),
 		foundation.FixedClock{Value: fixture.now.Add(3 * time.Second)},
 		events,
@@ -392,6 +234,11 @@ func TestCandidateApprovalAndRelationApplyRollBackTogetherOnEvidenceFailure(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
+	graphRawHook(t, fixture.pool.platform, func(statement *gorm.DB) {
+		if strings.Contains(strings.ReplaceAll(statement.Statement.SQL.String(), `"`, ""), "INSERT INTO core.relation_evidence") {
+			statement.AddError(injected)
+		}
+	})
 	if _, _, err := repository.ApproveAndApplyRelation(fixture.ctx, fixture.approval); !errors.Is(err, injected) {
 		t.Fatalf("atomic apply failure = %v", err)
 	}
@@ -405,11 +252,11 @@ func TestCandidateApprovalAndRelationApplyRollBackTogetherOnEventFailure(t *test
 		t.Run(eventType, func(t *testing.T) {
 			fixture := prepareCandidateApplyProposal(t, "atomic-event-"+eventType)
 			injected := errors.New("injected atomic proposal event failure")
-			repository, err := knowledgepostgres.NewApprovedRelationApplyRepository(
-				fixture.tx,
+			repository, err := knowledgepostgres.NewGORMApprovedRelationApplyRepository(
+				fixture.pool.platform,
 				foundation.NewUUIDGenerator(nil),
 				foundation.FixedClock{Value: fixture.now.Add(3 * time.Second)},
-				selectiveFailProposalEventAppender{eventType: eventType, err: injected},
+				newSelectiveFailProposalEventAppender(t, fixture.pool, eventType, injected),
 			)
 			if err != nil {
 				t.Fatal(err)
@@ -424,18 +271,18 @@ func TestCandidateApprovalAndRelationApplyRollBackTogetherOnEventFailure(t *test
 
 func TestCandidateApprovalAndRelationApplyRollsBackNeedsRevisionEventFailure(t *testing.T) {
 	fixture := prepareCandidateApplyProposal(t, "atomic-needs-revision-event-failure")
-	if _, err := fixture.tx.Exec(fixture.ctx, `
+	if _, err := fixture.pool.Exec(fixture.ctx, `
 		UPDATE core.claim
 		SET status='INVALID',version=version+1,updated_at=$3
 		WHERE workspace_id=$1 AND id=$2`, string(fixture.workspaceID), string(fixture.candidate.Source.Ref.ID), fixture.now.Add(2*time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	injected := errors.New("injected needs_revision event failure")
-	repository, err := knowledgepostgres.NewApprovedRelationApplyRepository(
-		fixture.tx,
+	repository, err := knowledgepostgres.NewGORMApprovedRelationApplyRepository(
+		fixture.pool.platform,
 		foundation.NewUUIDGenerator(nil),
 		foundation.FixedClock{Value: fixture.now.Add(3 * time.Second)},
-		selectiveFailProposalEventAppender{eventType: eventcontract.ProposalNeedsRevisionEventType, err: injected},
+		newSelectiveFailProposalEventAppender(t, fixture.pool, eventcontract.ProposalNeedsRevisionEventType, injected),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -450,18 +297,18 @@ func TestCandidateApprovalAndRelationApplyRollsBackNeedsRevisionEventFailure(t *
 
 func TestCandidateApprovalAndRelationApplyCommitNeedsRevisionOnBaselineDrift(t *testing.T) {
 	fixture := prepareCandidateApplyProposal(t, "atomic-stale")
-	if _, err := fixture.tx.Exec(fixture.ctx, `
+	if _, err := fixture.pool.Exec(fixture.ctx, `
 		UPDATE core.claim
 		SET status='INVALID',version=version+1,updated_at=$3
 		WHERE workspace_id=$1 AND id=$2`, string(fixture.workspaceID), string(fixture.candidate.Source.Ref.ID), fixture.now.Add(2*time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	events, err := eventspostgres.NewStore(fixture.tx)
+	events, err := eventspostgres.NewGORMStore(fixture.pool.platform)
 	if err != nil {
 		t.Fatal(err)
 	}
-	repository, err := knowledgepostgres.NewApprovedRelationApplyRepository(
-		fixture.tx,
+	repository, err := knowledgepostgres.NewGORMApprovedRelationApplyRepository(
+		fixture.pool.platform,
 		foundation.NewUUIDGenerator(nil),
 		foundation.FixedClock{Value: fixture.now.Add(3 * time.Second)},
 		events,
@@ -488,55 +335,11 @@ func TestCandidateApprovalAndRelationApplyCommitNeedsRevisionOnBaselineDrift(t *
 	assertProposalEventCount(t, fixture, eventcontract.ProposalNeedsRevisionEventType, 1)
 }
 
-func TestCandidateApprovalAndRelationApplyRecoverCommitResponseLoss(t *testing.T) {
-	fixture := prepareCandidateApplyProposal(t, "atomic-response-loss")
-	events, err := eventspostgres.NewStore(fixture.tx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	injected := errors.New("injected atomic commit response loss")
-	lost, err := knowledgepostgres.NewApprovedRelationApplyRepository(
-		candidateConfirmCommitLossBeginner{Tx: fixture.tx, err: injected},
-		foundation.NewUUIDGenerator(nil),
-		foundation.FixedClock{Value: fixture.now.Add(3 * time.Second)},
-		events,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := lost.ApproveAndApplyRelation(fixture.ctx, fixture.approval); !errors.Is(err, injected) {
-		t.Fatalf("atomic commit response loss = %v", err)
-	}
-
-	normal, err := knowledgepostgres.NewApprovedRelationApplyRepository(
-		fixture.tx,
-		foundation.NewUUIDGenerator(nil),
-		foundation.FixedClock{Value: fixture.now.Add(4 * time.Second)},
-		events,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	retry := fixture.approval
-	retry.ID = graphTestID(t)
-	approval, replayed, err := normal.ApproveAndApplyRelation(fixture.ctx, retry)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if approval.ID != fixture.approvalID {
-		t.Fatalf("response-loss replay approval=%#v", approval)
-	}
-	assertApprovedRelationApplyResult(t, replayed, fixture, true)
-	assertAtomicApprovalApplyRows(t, fixture, changecontroldomain.StatusApplied, 4, 1, 1, 1)
-	assertProposalEventCount(t, fixture, eventcontract.ProposalApprovedEventType, 1)
-	assertProposalEventCount(t, fixture, eventcontract.ProposalAppliedEventType, 1)
-}
-
 func TestCandidateApprovalAndRelationApplyReusesSuggestedRelationAndEvidence(t *testing.T) {
 	for _, existingEvidenceCount := range []int{0, 1} {
 		t.Run("existing-evidence-"+strconv.Itoa(existingEvidenceCount), func(t *testing.T) {
 			fixture := prepareCandidateApplyProposal(t, "reuse-suggested-"+strconv.Itoa(existingEvidenceCount))
-			knowledgeRepository, err := knowledgepostgres.NewRepository(fixture.tx)
+			knowledgeRepository, err := knowledgepostgres.NewGORMRepository(fixture.pool.platform)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -555,12 +358,12 @@ func TestCandidateApprovalAndRelationApplyReusesSuggestedRelationAndEvidence(t *
 				t.Fatal(err)
 			}
 
-			events, err := eventspostgres.NewStore(fixture.tx)
+			events, err := eventspostgres.NewGORMStore(fixture.pool.platform)
 			if err != nil {
 				t.Fatal(err)
 			}
-			applyRepository, err := knowledgepostgres.NewApprovedRelationApplyRepository(
-				fixture.tx, foundation.NewUUIDGenerator(nil), foundation.FixedClock{Value: fixture.now.Add(3 * time.Second)}, events,
+			applyRepository, err := knowledgepostgres.NewGORMApprovedRelationApplyRepository(
+				fixture.pool.platform, foundation.NewUUIDGenerator(nil), foundation.FixedClock{Value: fixture.now.Add(3 * time.Second)}, events,
 			)
 			if err != nil {
 				t.Fatal(err)
@@ -606,10 +409,10 @@ func TestCandidateApprovalAndRelationApplyReusesSuggestedRelationAndEvidence(t *
 				t.Fatalf("reused relation replay approval=%#v result=%#v", replayedApproval, replayed)
 			}
 			var relationCount, evidenceCount int
-			if err := fixture.tx.QueryRow(fixture.ctx, `SELECT count(*) FROM core.relation WHERE workspace_id=$1 AND fingerprint=$2`, string(fixture.workspaceID), persisted.Relation.Fingerprint).Scan(&relationCount); err != nil {
+			if err := fixture.pool.QueryRow(fixture.ctx, `SELECT count(*) FROM core.relation WHERE workspace_id=$1 AND fingerprint=$2`, string(fixture.workspaceID), persisted.Relation.Fingerprint).Scan(&relationCount); err != nil {
 				t.Fatal(err)
 			}
-			if err := fixture.tx.QueryRow(fixture.ctx, `SELECT count(*) FROM core.relation_evidence WHERE workspace_id=$1 AND relation_id=$2`, string(fixture.workspaceID), string(persisted.Relation.ID)).Scan(&evidenceCount); err != nil {
+			if err := fixture.pool.QueryRow(fixture.ctx, `SELECT count(*) FROM core.relation_evidence WHERE workspace_id=$1 AND relation_id=$2`, string(fixture.workspaceID), string(persisted.Relation.ID)).Scan(&evidenceCount); err != nil {
 				t.Fatal(err)
 			}
 			if relationCount != 1 || evidenceCount != len(result.Evidence) {
@@ -621,7 +424,7 @@ func TestCandidateApprovalAndRelationApplyReusesSuggestedRelationAndEvidence(t *
 
 func TestCandidateApprovalAndRelationApplyDoesNotOverwriteConfirmedRelation(t *testing.T) {
 	fixture := prepareCandidateApplyProposal(t, "existing-confirmed")
-	knowledgeRepository, err := knowledgepostgres.NewRepository(fixture.tx)
+	knowledgeRepository, err := knowledgepostgres.NewGORMRepository(fixture.pool.platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -643,12 +446,12 @@ func TestCandidateApprovalAndRelationApplyDoesNotOverwriteConfirmedRelation(t *t
 		t.Fatal(err)
 	}
 
-	events, err := eventspostgres.NewStore(fixture.tx)
+	events, err := eventspostgres.NewGORMStore(fixture.pool.platform)
 	if err != nil {
 		t.Fatal(err)
 	}
-	applyRepository, err := knowledgepostgres.NewApprovedRelationApplyRepository(
-		fixture.tx, foundation.NewUUIDGenerator(nil), foundation.FixedClock{Value: fixture.now.Add(3 * time.Second)}, events,
+	applyRepository, err := knowledgepostgres.NewGORMApprovedRelationApplyRepository(
+		fixture.pool.platform, foundation.NewUUIDGenerator(nil), foundation.FixedClock{Value: fixture.now.Add(3 * time.Second)}, events,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -662,7 +465,7 @@ func TestCandidateApprovalAndRelationApplyDoesNotOverwriteConfirmedRelation(t *t
 	assertProposalEventCount(t, fixture, eventcontract.ProposalAppliedEventType, 0)
 	assertProposalEventBinding(t, fixture, eventcontract.ProposalNeedsRevisionEventType, changecontroldomain.StatusNeedsRevision, 3, fixture.now.Add(3*time.Second))
 	var applyReceiptCount int
-	if err := fixture.tx.QueryRow(fixture.ctx, `SELECT count(*) FROM core.knowledge_command_receipt WHERE workspace_id=$1 AND idempotency_key=$2`, string(fixture.workspaceID), knowledgeapplication.RelationApplyIdempotencyKey(fixture.approvalID)).Scan(&applyReceiptCount); err != nil {
+	if err := fixture.pool.QueryRow(fixture.ctx, `SELECT count(*) FROM core.knowledge_command_receipt WHERE workspace_id=$1 AND idempotency_key=$2`, string(fixture.workspaceID), knowledgeapplication.RelationApplyIdempotencyKey(fixture.approvalID)).Scan(&applyReceiptCount); err != nil {
 		t.Fatal(err)
 	}
 	if applyReceiptCount != 0 {
@@ -670,7 +473,7 @@ func TestCandidateApprovalAndRelationApplyDoesNotOverwriteConfirmedRelation(t *t
 	}
 	var relationStatus string
 	var relationVersion int64
-	if err := fixture.tx.QueryRow(fixture.ctx, `SELECT status,version FROM core.relation WHERE workspace_id=$1 AND id=$2`, string(fixture.workspaceID), string(confirmed.Relation.ID)).Scan(&relationStatus, &relationVersion); err != nil {
+	if err := fixture.pool.QueryRow(fixture.ctx, `SELECT status,version FROM core.relation WHERE workspace_id=$1 AND id=$2`, string(fixture.workspaceID), string(confirmed.Relation.ID)).Scan(&relationStatus, &relationVersion); err != nil {
 		t.Fatal(err)
 	}
 	if relationStatus != string(knowledge.RelationStatusConfirmed) || relationVersion != confirmed.Relation.Version {
@@ -681,11 +484,11 @@ func TestCandidateApprovalAndRelationApplyDoesNotOverwriteConfirmedRelation(t *t
 func TestCandidateApprovalAndRelationApplyRejectsNonSuggestedRelationStates(t *testing.T) {
 	tests := []struct {
 		name    string
-		prepare func(t *testing.T, fixture approvedCandidateApplyFixture, repository *knowledgepostgres.Repository) knowledge.RelationResult
+		prepare func(t *testing.T, fixture approvedCandidateApplyFixture, repository *knowledgepostgres.GORMRepository) knowledge.RelationResult
 	}{
 		{
 			name: "stale",
-			prepare: func(t *testing.T, fixture approvedCandidateApplyFixture, repository *knowledgepostgres.Repository) knowledge.RelationResult {
+			prepare: func(t *testing.T, fixture approvedCandidateApplyFixture, repository *knowledgepostgres.GORMRepository) knowledge.RelationResult {
 				relation := suggestExistingApplyRelation(t, fixture, repository, "non-suggested-stale")
 				confirmed := confirmExistingApplyRelation(t, fixture, repository, relation, "previous-stale-approval")
 				result, err := repository.TransitionRelation(fixture.ctx, knowledge.TransitionRelationRecord{
@@ -700,7 +503,7 @@ func TestCandidateApprovalAndRelationApplyRejectsNonSuggestedRelationStates(t *t
 		},
 		{
 			name: "rejected",
-			prepare: func(t *testing.T, fixture approvedCandidateApplyFixture, repository *knowledgepostgres.Repository) knowledge.RelationResult {
+			prepare: func(t *testing.T, fixture approvedCandidateApplyFixture, repository *knowledgepostgres.GORMRepository) knowledge.RelationResult {
 				relation := suggestExistingApplyRelation(t, fixture, repository, "non-suggested-rejected")
 				result, err := repository.TransitionRelation(fixture.ctx, knowledge.TransitionRelationRecord{
 					WorkspaceID: fixture.workspaceID, RelationID: relation.Relation.ID, ExpectedVersion: relation.Relation.Version,
@@ -714,7 +517,7 @@ func TestCandidateApprovalAndRelationApplyRejectsNonSuggestedRelationStates(t *t
 		},
 		{
 			name: "deprecated",
-			prepare: func(t *testing.T, fixture approvedCandidateApplyFixture, repository *knowledgepostgres.Repository) knowledge.RelationResult {
+			prepare: func(t *testing.T, fixture approvedCandidateApplyFixture, repository *knowledgepostgres.GORMRepository) knowledge.RelationResult {
 				relation := suggestExistingApplyRelation(t, fixture, repository, "non-suggested-deprecated")
 				confirmed := confirmExistingApplyRelation(t, fixture, repository, relation, "previous-deprecated-approval")
 				result, err := repository.TransitionRelation(fixture.ctx, knowledge.TransitionRelationRecord{
@@ -732,22 +535,22 @@ func TestCandidateApprovalAndRelationApplyRejectsNonSuggestedRelationStates(t *t
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := prepareCandidateApplyProposal(t, "reject-"+test.name)
-			knowledgeRepository, err := knowledgepostgres.NewRepository(fixture.tx)
+			knowledgeRepository, err := knowledgepostgres.NewGORMRepository(fixture.pool.platform)
 			if err != nil {
 				t.Fatal(err)
 			}
 			existing := test.prepare(t, fixture, knowledgeRepository)
 			var receiptCountBefore int
-			if err := fixture.tx.QueryRow(fixture.ctx, `SELECT count(*) FROM core.knowledge_command_receipt WHERE workspace_id=$1`, string(fixture.workspaceID)).Scan(&receiptCountBefore); err != nil {
+			if err := fixture.pool.QueryRow(fixture.ctx, `SELECT count(*) FROM core.knowledge_command_receipt WHERE workspace_id=$1`, string(fixture.workspaceID)).Scan(&receiptCountBefore); err != nil {
 				t.Fatal(err)
 			}
 
-			events, err := eventspostgres.NewStore(fixture.tx)
+			events, err := eventspostgres.NewGORMStore(fixture.pool.platform)
 			if err != nil {
 				t.Fatal(err)
 			}
-			applyRepository, err := knowledgepostgres.NewApprovedRelationApplyRepository(
-				fixture.tx, foundation.NewUUIDGenerator(nil), foundation.FixedClock{Value: fixture.now.Add(4 * time.Second)}, events,
+			applyRepository, err := knowledgepostgres.NewGORMApprovedRelationApplyRepository(
+				fixture.pool.platform, foundation.NewUUIDGenerator(nil), foundation.FixedClock{Value: fixture.now.Add(4 * time.Second)}, events,
 			)
 			if err != nil {
 				t.Fatal(err)
@@ -761,7 +564,7 @@ func TestCandidateApprovalAndRelationApplyRejectsNonSuggestedRelationStates(t *t
 			assertProposalEventCount(t, fixture, eventcontract.ProposalAppliedEventType, 0)
 			assertProposalEventBinding(t, fixture, eventcontract.ProposalNeedsRevisionEventType, changecontroldomain.StatusNeedsRevision, 3, fixture.now.Add(4*time.Second))
 			var applyReceiptCount int
-			if err := fixture.tx.QueryRow(fixture.ctx, `SELECT count(*) FROM core.knowledge_command_receipt WHERE workspace_id=$1 AND idempotency_key=$2`, string(fixture.workspaceID), knowledgeapplication.RelationApplyIdempotencyKey(fixture.approvalID)).Scan(&applyReceiptCount); err != nil {
+			if err := fixture.pool.QueryRow(fixture.ctx, `SELECT count(*) FROM core.knowledge_command_receipt WHERE workspace_id=$1 AND idempotency_key=$2`, string(fixture.workspaceID), knowledgeapplication.RelationApplyIdempotencyKey(fixture.approvalID)).Scan(&applyReceiptCount); err != nil {
 				t.Fatal(err)
 			}
 			if applyReceiptCount != 0 {
@@ -783,7 +586,7 @@ func TestCandidateApprovalAndRelationApplyRejectsNonSuggestedRelationStates(t *t
 
 func TestCandidateApprovalAndRelationApplyPreservesHistoricalEvidenceAcrossLifecycleReplay(t *testing.T) {
 	fixture := prepareCandidateApplyProposal(t, "historical-evidence-lifecycle")
-	knowledgeRepository, err := knowledgepostgres.NewRepository(fixture.tx)
+	knowledgeRepository, err := knowledgepostgres.NewGORMRepository(fixture.pool.platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -817,12 +620,12 @@ func TestCandidateApprovalAndRelationApplyPreservesHistoricalEvidenceAcrossLifec
 		t.Fatalf("resuggested lifecycle state=%#v", resuggested)
 	}
 
-	events, err := eventspostgres.NewStore(fixture.tx)
+	events, err := eventspostgres.NewGORMStore(fixture.pool.platform)
 	if err != nil {
 		t.Fatal(err)
 	}
-	applyRepository, err := knowledgepostgres.NewApprovedRelationApplyRepository(
-		fixture.tx, foundation.NewUUIDGenerator(nil), foundation.FixedClock{Value: fixture.now.Add(6 * time.Second)}, events,
+	applyRepository, err := knowledgepostgres.NewGORMApprovedRelationApplyRepository(
+		fixture.pool.platform, foundation.NewUUIDGenerator(nil), foundation.FixedClock{Value: fixture.now.Add(6 * time.Second)}, events,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -851,7 +654,7 @@ func TestCandidateApprovalAndRelationApplyPreservesHistoricalEvidenceAcrossLifec
 	assertHistoricalApprovalEvidence(t, replayed.Evidence, fixture.approvalID, "historical-approval", len(fixture.candidate.Evidence))
 }
 
-func suggestExistingApplyRelation(t *testing.T, fixture approvedCandidateApplyFixture, repository *knowledgepostgres.Repository, label string) knowledge.RelationResult {
+func suggestExistingApplyRelation(t *testing.T, fixture approvedCandidateApplyFixture, repository *knowledgepostgres.GORMRepository, label string) knowledge.RelationResult {
 	t.Helper()
 	relation := newCandidateApplyRelation(t, fixture.workspaceID, fixture.candidate.SuggestedRelationType, fixture.candidate.Source.Ref, fixture.candidate.Target.Ref, fixture.now.Add(time.Second))
 	returnResult, err := repository.SuggestRelation(fixture.ctx, knowledge.SuggestRelationRecord{
@@ -863,7 +666,7 @@ func suggestExistingApplyRelation(t *testing.T, fixture approvedCandidateApplyFi
 	return returnResult
 }
 
-func confirmExistingApplyRelation(t *testing.T, fixture approvedCandidateApplyFixture, repository *knowledgepostgres.Repository, relation knowledge.RelationResult, reference string) knowledge.RelationResult {
+func confirmExistingApplyRelation(t *testing.T, fixture approvedCandidateApplyFixture, repository *knowledgepostgres.GORMRepository, relation knowledge.RelationResult, reference string) knowledge.RelationResult {
 	t.Helper()
 	confirmation := knowledge.Confirmation{Method: knowledge.ConfirmationUserApproval, Reference: reference}
 	evidence := newCandidateApplyEvidence(t, fixture.workspaceID, reference+" evidence", fixture.provenance, fixture.now.Add(2*time.Second), &confirmation)
@@ -898,26 +701,10 @@ func assertHistoricalApprovalEvidence(t *testing.T, evidence []knowledge.Relatio
 }
 
 func TestCandidateApprovalAndRelationApplyLocksCandidateBeforeProposal(t *testing.T) {
-	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	fixture := prepareCandidateApplyProposal(t, "lock-order")
+	pool := fixture.pool
+	ctx, cancel := context.WithTimeout(fixture.ctx, 10*time.Second)
 	defer cancel()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
-	seedTx, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	graphRepository := &Repository{db: seedTx, statementTimeout: defaultStatementTimeout, inReadSnapshot: true}
-	fixture := prepareCandidateApplyProposalOnTx(t, graphRepository, seedTx, ctx, "lock-order")
-	if err := seedTx.Commit(ctx); err != nil {
-		t.Fatal(err)
-	}
 
 	locker, err := pool.Begin(ctx)
 	if err != nil {
@@ -928,9 +715,9 @@ func TestCandidateApprovalAndRelationApplyLocksCandidateBeforeProposal(t *testin
 		t.Fatal(err)
 	}
 
-	probe := newApprovalLockProbeDB(pool)
-	applyRepository, err := knowledgepostgres.NewApprovedRelationApplyRepository(
-		probe, foundation.NewUUIDGenerator(nil), foundation.FixedClock{Value: fixture.now.Add(3 * time.Second)},
+	probe := newApprovalLockProbe(t, pool)
+	applyRepository, err := knowledgepostgres.NewGORMApprovedRelationApplyRepository(
+		pool.platform, foundation.NewUUIDGenerator(nil), foundation.FixedClock{Value: fixture.now.Add(3 * time.Second)},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -975,33 +762,15 @@ func TestCandidateApprovalAndRelationApplyLocksCandidateBeforeProposal(t *testin
 }
 
 func TestCandidateApprovalAndRelationApplyReusesConcurrentSuggestedWinner(t *testing.T) {
-	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	fixture := prepareCandidateApplyProposal(t, "concurrent-suggested-winner")
+	pool := fixture.pool
+	ctx, cancel := context.WithTimeout(fixture.ctx, 15*time.Second)
 	defer cancel()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
 
-	seedTx, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	graphRepository := &Repository{db: seedTx, statementTimeout: defaultStatementTimeout, inReadSnapshot: true}
-	fixture := prepareCandidateApplyProposalOnTx(t, graphRepository, seedTx, ctx, "concurrent-suggested-winner")
-	if err := seedTx.Commit(ctx); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { cleanupApprovalApplyWorkspace(pool, fixture.workspaceID) })
-
-	probe := newRelationWinnerProbeDB(pool)
+	probe := newRelationWinnerProbe(t, pool)
 	defer probe.release()
-	applyRepository, err := knowledgepostgres.NewApprovedRelationApplyRepository(
-		probe, foundation.NewUUIDGenerator(nil), foundation.FixedClock{Value: fixture.now.Add(3 * time.Second)},
+	applyRepository, err := knowledgepostgres.NewGORMApprovedRelationApplyRepository(
+		pool.platform, foundation.NewUUIDGenerator(nil), foundation.FixedClock{Value: fixture.now.Add(3 * time.Second)},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -1022,7 +791,7 @@ func TestCandidateApprovalAndRelationApplyReusesConcurrentSuggestedWinner(t *tes
 		t.Fatalf("approval UoW did not complete its initial relation lookup: %v", ctx.Err())
 	}
 
-	suggestionRepository, err := knowledgepostgres.NewRepository(pool)
+	suggestionRepository, err := knowledgepostgres.NewGORMRepository(pool.platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1069,121 +838,60 @@ func TestCandidateApprovalAndRelationApplyReusesConcurrentSuggestedWinner(t *tes
 	}
 }
 
-type relationWinnerProbeDB struct {
-	pool           *pgxpool.Pool
+type relationWinnerProbe struct {
 	relationLookup chan struct{}
 	allowLookup    chan struct{}
 	lookupOnce     sync.Once
 	releaseOnce    sync.Once
 }
 
-func newRelationWinnerProbeDB(pool *pgxpool.Pool) *relationWinnerProbeDB {
-	return &relationWinnerProbeDB{pool: pool, relationLookup: make(chan struct{}, 1), allowLookup: make(chan struct{})}
-}
-
-func (db *relationWinnerProbeDB) Begin(ctx context.Context) (pgx.Tx, error) {
-	tx, err := db.pool.Begin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return &relationWinnerProbeTx{Tx: tx, db: db}, nil
-}
-
-func (db *relationWinnerProbeDB) Query(ctx context.Context, query string, args ...any) (pgx.Rows, error) {
-	return db.pool.Query(ctx, query, args...)
-}
-
-func (db *relationWinnerProbeDB) QueryRow(ctx context.Context, query string, args ...any) pgx.Row {
-	return db.pool.QueryRow(ctx, query, args...)
-}
-
-type relationWinnerProbeTx struct {
-	pgx.Tx
-	db *relationWinnerProbeDB
-}
-
-func (tx *relationWinnerProbeTx) QueryRow(ctx context.Context, query string, args ...any) pgx.Row {
-	if strings.Contains(query, "FROM core.relation") && strings.Contains(query, "fingerprint=$2 FOR UPDATE") {
-		intercept := false
-		tx.db.lookupOnce.Do(func() { intercept = true })
-		if intercept {
-			return &relationWinnerProbeRow{Row: tx.Tx.QueryRow(ctx, query, args...), db: tx.db, ctx: ctx}
+func newRelationWinnerProbe(t *testing.T, pool *graphTestPool) *relationWinnerProbe {
+	t.Helper()
+	probe := &relationWinnerProbe{relationLookup: make(chan struct{}, 1), allowLookup: make(chan struct{})}
+	graphRowHook(t, pool.platform, true, func(statement *gorm.DB) {
+		query := strings.ReplaceAll(statement.Statement.SQL.String(), `"`, "")
+		if !strings.Contains(query, "FROM core.relation") || !strings.Contains(query, "fingerprint") || !strings.Contains(query, "FOR UPDATE") {
+			return
 		}
-	}
-	return tx.Tx.QueryRow(ctx, query, args...)
+		intercept := false
+		probe.lookupOnce.Do(func() { intercept = true })
+		if !intercept {
+			return
+		}
+		probe.relationLookup <- struct{}{}
+		select {
+		case <-probe.allowLookup:
+		case <-statement.Statement.Context.Done():
+			statement.AddError(statement.Statement.Context.Err())
+		}
+	})
+	return probe
 }
 
-type relationWinnerProbeRow struct {
-	pgx.Row
-	db  *relationWinnerProbeDB
-	ctx context.Context
+func (probe *relationWinnerProbe) release() {
+	probe.releaseOnce.Do(func() { close(probe.allowLookup) })
 }
 
-func (row *relationWinnerProbeRow) Scan(dest ...any) error {
-	err := row.Row.Scan(dest...)
-	row.db.relationLookup <- struct{}{}
-	select {
-	case <-row.db.allowLookup:
-	case <-row.ctx.Done():
-	}
-	return err
-}
-
-func (db *relationWinnerProbeDB) release() {
-	db.releaseOnce.Do(func() { close(db.allowLookup) })
-}
-
-func cleanupApprovalApplyWorkspace(pool *pgxpool.Pool, workspaceID foundation.ID) {
-	ctx := context.Background()
-	_, _ = pool.Exec(ctx, `DELETE FROM ops.server_event WHERE workspace_id=$1`, string(workspaceID))
-	_, _ = pool.Exec(ctx, `DELETE FROM core.knowledge_command_receipt WHERE workspace_id=$1`, string(workspaceID))
-	_, _ = pool.Exec(ctx, `DELETE FROM change_control.approval WHERE proposal_id IN (SELECT id FROM change_control.proposal WHERE workspace_id=$1)`, string(workspaceID))
-	_, _ = pool.Exec(ctx, `DELETE FROM change_control.proposal_revision WHERE proposal_id IN (SELECT id FROM change_control.proposal WHERE workspace_id=$1)`, string(workspaceID))
-	_, _ = pool.Exec(ctx, `DELETE FROM change_control.proposal WHERE workspace_id=$1`, string(workspaceID))
-	cleanupCandidateWorkspace(pool, workspaceID)
-}
-
-type approvalLockProbeDB struct {
-	pool             *pgxpool.Pool
+type approvalLockProbe struct {
 	candidateAttempt chan struct{}
 	candidateOnce    sync.Once
 }
 
-func newApprovalLockProbeDB(pool *pgxpool.Pool) *approvalLockProbeDB {
-	return &approvalLockProbeDB{pool: pool, candidateAttempt: make(chan struct{})}
-}
-
-func (db *approvalLockProbeDB) Begin(ctx context.Context) (pgx.Tx, error) {
-	tx, err := db.pool.Begin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return &approvalLockProbeTx{Tx: tx, db: db}, nil
-}
-
-func (db *approvalLockProbeDB) Query(ctx context.Context, query string, args ...any) (pgx.Rows, error) {
-	return db.pool.Query(ctx, query, args...)
-}
-
-func (db *approvalLockProbeDB) QueryRow(ctx context.Context, query string, args ...any) pgx.Row {
-	return db.pool.QueryRow(ctx, query, args...)
-}
-
-type approvalLockProbeTx struct {
-	pgx.Tx
-	db *approvalLockProbeDB
-}
-
-func (tx *approvalLockProbeTx) QueryRow(ctx context.Context, query string, args ...any) pgx.Row {
-	if strings.Contains(query, "FROM graph.semantic_link_candidate") && strings.Contains(query, "FOR UPDATE") {
-		tx.db.candidateOnce.Do(func() { close(tx.db.candidateAttempt) })
-	}
-	return tx.Tx.QueryRow(ctx, query, args...)
+func newApprovalLockProbe(t *testing.T, pool *graphTestPool) *approvalLockProbe {
+	t.Helper()
+	probe := &approvalLockProbe{candidateAttempt: make(chan struct{})}
+	graphRowHook(t, pool.platform, false, func(statement *gorm.DB) {
+		query := strings.ReplaceAll(statement.Statement.SQL.String(), `"`, "")
+		if strings.Contains(query, "FROM graph.semantic_link_candidate") && strings.Contains(query, "FOR UPDATE") {
+			probe.candidateOnce.Do(func() { close(probe.candidateAttempt) })
+		}
+	})
+	return probe
 }
 
 type approvedCandidateApplyFixture struct {
 	ctx         context.Context
-	tx          pgx.Tx
+	pool        *graphTestPool
 	now         time.Time
 	workspaceID foundation.ID
 	approvalID  foundation.ID
@@ -1197,7 +905,7 @@ type approvedCandidateApplyFixture struct {
 func prepareApprovedCandidateApply(t *testing.T, label string) approvedCandidateApplyFixture {
 	t.Helper()
 	fixture := prepareCandidateApplyProposal(t, label)
-	changeRepository, err := changecontrolpostgres.NewRepository(fixture.tx)
+	changeRepository, err := changecontrolpostgres.NewGORMRepository(fixture.pool.platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1210,21 +918,21 @@ func prepareApprovedCandidateApply(t *testing.T, label string) approvedCandidate
 func prepareCandidateApplyProposal(t *testing.T, label string) approvedCandidateApplyFixture {
 	t.Helper()
 	graphRepository, tx, ctx := graphIntegrationRepository(t)
-	return prepareCandidateApplyProposalOnTx(t, graphRepository, tx, ctx, label)
+	return prepareCandidateApplyProposalOnPool(t, graphRepository, tx, ctx, label)
 }
 
-func prepareCandidateApplyProposalOnTx(t *testing.T, graphRepository *Repository, tx pgx.Tx, ctx context.Context, label string) approvedCandidateApplyFixture {
+func prepareCandidateApplyProposalOnPool(t *testing.T, graphRepository *GORMRepository, pool *graphTestPool, ctx context.Context, label string) approvedCandidateApplyFixture {
 	t.Helper()
 	now := time.Now().UTC().Truncate(time.Microsecond)
-	workspaceID := seedGraphWorkspace(t, ctx, tx, now)
-	provenance := seedGraphProvenance(t, ctx, tx, workspaceID, now)
-	sourceID := seedGraphClaim(t, ctx, tx, workspaceID, label+" source", knowledge.ClaimStatusSuggested, floatPointer(0.9), now)
-	targetID := seedGraphClaim(t, ctx, tx, workspaceID, label+" target", knowledge.ClaimStatusSuggested, floatPointer(0.8), now)
+	workspaceID := seedGraphWorkspace(t, ctx, pool, now)
+	provenance := seedGraphProvenance(t, ctx, pool, workspaceID, now)
+	sourceID := seedGraphClaim(t, ctx, pool, workspaceID, label+" source", knowledge.ClaimStatusSuggested, floatPointer(0.9), now)
+	targetID := seedGraphClaim(t, ctx, pool, workspaceID, label+" target", knowledge.ClaimStatusSuggested, floatPointer(0.8), now)
 	candidate := candidateFixture(t, workspaceID, sourceID, targetID, provenance, now, label, 1, 1)
 	if _, err := graphRepository.UpsertSemanticLinkCandidate(ctx, candidate); err != nil {
 		t.Fatal(err)
 	}
-	confirmer, err := NewCandidateConfirmRepository(tx, foundation.NewUUIDGenerator(nil), foundation.FixedClock{Value: now.Add(time.Second)})
+	confirmer, err := newCandidateConfirmTestRepository(pool.platform, foundation.NewUUIDGenerator(nil), foundation.FixedClock{Value: now.Add(time.Second)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1244,7 +952,7 @@ func prepareCandidateApplyProposalOnTx(t *testing.T, graphRepository *Repository
 		DecidedAt: now.Add(2 * time.Second),
 	}
 	return approvedCandidateApplyFixture{
-		ctx: ctx, tx: tx, now: now, workspaceID: workspaceID, approvalID: approvalID,
+		ctx: ctx, pool: pool, now: now, workspaceID: workspaceID, approvalID: approvalID,
 		provenance: provenance, candidate: candidate, proposal: confirmed.Proposal, approval: approval,
 		command: knowledgeapplication.ApprovedRelationApplyCommand{
 			WorkspaceID: workspaceID, ProposalID: confirmed.Proposal.ID,
@@ -1284,16 +992,16 @@ func assertAtomicApprovalApplyRows(t *testing.T, fixture approvedCandidateApplyF
 	t.Helper()
 	var status string
 	var version, approvals, relations, receipts int
-	if err := fixture.tx.QueryRow(fixture.ctx, `SELECT status,version FROM change_control.proposal WHERE id=$1`, string(fixture.proposal.ID)).Scan(&status, &version); err != nil {
+	if err := fixture.pool.QueryRow(fixture.ctx, `SELECT status,version FROM change_control.proposal WHERE id=$1`, string(fixture.proposal.ID)).Scan(&status, &version); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.tx.QueryRow(fixture.ctx, `SELECT count(*) FROM change_control.approval WHERE revision_id=$1`, string(fixture.proposal.Revision.ID)).Scan(&approvals); err != nil {
+	if err := fixture.pool.QueryRow(fixture.ctx, `SELECT count(*) FROM change_control.approval WHERE revision_id=$1`, string(fixture.proposal.Revision.ID)).Scan(&approvals); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.tx.QueryRow(fixture.ctx, `SELECT count(*) FROM core.relation WHERE workspace_id=$1`, string(fixture.workspaceID)).Scan(&relations); err != nil {
+	if err := fixture.pool.QueryRow(fixture.ctx, `SELECT count(*) FROM core.relation WHERE workspace_id=$1`, string(fixture.workspaceID)).Scan(&relations); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.tx.QueryRow(fixture.ctx, `SELECT count(*) FROM core.knowledge_command_receipt WHERE workspace_id=$1`, string(fixture.workspaceID)).Scan(&receipts); err != nil {
+	if err := fixture.pool.QueryRow(fixture.ctx, `SELECT count(*) FROM core.knowledge_command_receipt WHERE workspace_id=$1`, string(fixture.workspaceID)).Scan(&receipts); err != nil {
 		t.Fatal(err)
 	}
 	if status != string(expectedStatus) || version != expectedVersion || approvals != approvalCount || relations != relationCount || receipts != receiptCount {
@@ -1304,7 +1012,7 @@ func assertAtomicApprovalApplyRows(t *testing.T, fixture approvedCandidateApplyF
 func assertProposalEventCount(t *testing.T, fixture approvedCandidateApplyFixture, eventType string, expected int) {
 	t.Helper()
 	var count int
-	if err := fixture.tx.QueryRow(fixture.ctx, `SELECT count(*) FROM ops.server_event
+	if err := fixture.pool.QueryRow(fixture.ctx, `SELECT count(*) FROM ops.server_event
 		WHERE workspace_id=$1 AND event_type=$2 AND resource_ref=$3`,
 		string(fixture.workspaceID), eventType, "proposal:"+string(fixture.proposal.ID)).Scan(&count); err != nil {
 		t.Fatal(err)
@@ -1319,7 +1027,7 @@ func assertProposalEventBinding(t *testing.T, fixture approvedCandidateApplyFixt
 	var resourceVersion int64
 	var sourceRef, status string
 	var occurredAt time.Time
-	err := fixture.tx.QueryRow(fixture.ctx, `
+	err := fixture.pool.QueryRow(fixture.ctx, `
 		SELECT resource_version,source_event_ref,payload_summary->>'status',occurred_at
 		FROM ops.server_event
 		WHERE workspace_id=$1 AND event_type=$2 AND resource_ref=$3
@@ -1343,7 +1051,7 @@ func assertRelationApplyReceiptBinding(t *testing.T, fixture approvedCandidateAp
 	}
 	var idempotencyKey, persistedHash, commandType, aggregateType, aggregateID string
 	var aggregateVersion int64
-	err = fixture.tx.QueryRow(fixture.ctx, `
+	err = fixture.pool.QueryRow(fixture.ctx, `
 		SELECT idempotency_key,request_hash,command_type,aggregate_type,aggregate_id::text,aggregate_version
 		FROM core.knowledge_command_receipt
 		WHERE workspace_id=$1 AND idempotency_key=$2`,
@@ -1381,13 +1089,13 @@ func assertNeedsRevisionWithoutRelation(t *testing.T, fixture approvedCandidateA
 	t.Helper()
 	var status string
 	var version, relationCount, receiptCount int
-	if err := fixture.tx.QueryRow(fixture.ctx, `SELECT status,version FROM change_control.proposal WHERE id=$1`, string(fixture.proposal.ID)).Scan(&status, &version); err != nil {
+	if err := fixture.pool.QueryRow(fixture.ctx, `SELECT status,version FROM change_control.proposal WHERE id=$1`, string(fixture.proposal.ID)).Scan(&status, &version); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.tx.QueryRow(fixture.ctx, `SELECT count(*) FROM core.relation WHERE workspace_id=$1`, string(fixture.workspaceID)).Scan(&relationCount); err != nil {
+	if err := fixture.pool.QueryRow(fixture.ctx, `SELECT count(*) FROM core.relation WHERE workspace_id=$1`, string(fixture.workspaceID)).Scan(&relationCount); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.tx.QueryRow(fixture.ctx, `SELECT count(*) FROM core.knowledge_command_receipt WHERE workspace_id=$1`, string(fixture.workspaceID)).Scan(&receiptCount); err != nil {
+	if err := fixture.pool.QueryRow(fixture.ctx, `SELECT count(*) FROM core.knowledge_command_receipt WHERE workspace_id=$1`, string(fixture.workspaceID)).Scan(&receiptCount); err != nil {
 		t.Fatal(err)
 	}
 	if status != string(changecontroldomain.StatusNeedsRevision) || version != 3 || relationCount != 0 || receiptCount != 0 {
@@ -1400,39 +1108,24 @@ func hasCandidateApplyCode(err error, code string) bool {
 	return errors.As(err, &classified) && classified.Code == code
 }
 
-type relationApplyFailBeginner struct {
-	pgx.Tx
-	err error
-}
-
-func (beginner relationApplyFailBeginner) Begin(ctx context.Context) (pgx.Tx, error) {
-	tx, err := beginner.Tx.Begin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return &relationApplyFailTx{Tx: tx, err: beginner.err}, nil
-}
-
-type relationApplyFailTx struct {
-	pgx.Tx
-	err error
-}
-
 type selectiveFailProposalEventAppender struct {
+	delegate  *eventspostgres.GORMStore
 	eventType string
 	err       error
 }
 
-func (appender selectiveFailProposalEventAppender) AppendTx(_ context.Context, _ any, request eventsdomain.AppendRequest) (eventsdomain.ServerEvent, bool, error) {
+func newSelectiveFailProposalEventAppender(t *testing.T, pool *graphTestPool, eventType string, injected error) selectiveFailProposalEventAppender {
+	t.Helper()
+	store, err := eventspostgres.NewGORMStore(pool.platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return selectiveFailProposalEventAppender{delegate: store, eventType: eventType, err: injected}
+}
+
+func (appender selectiveFailProposalEventAppender) AppendScoped(ctx context.Context, scope foundation.TransactionScope, request eventsdomain.AppendRequest) (eventsdomain.ServerEvent, bool, error) {
 	if request.Type == appender.eventType {
 		return eventsdomain.ServerEvent{}, false, appender.err
 	}
-	return eventsdomain.ServerEvent{}, false, nil
-}
-
-func (tx *relationApplyFailTx) Exec(ctx context.Context, query string, args ...any) (pgconn.CommandTag, error) {
-	if strings.Contains(query, "INSERT INTO core.relation_evidence") {
-		return pgconn.CommandTag{}, tx.err
-	}
-	return tx.Tx.Exec(ctx, query, args...)
+	return appender.delegate.AppendScoped(ctx, scope, request)
 }

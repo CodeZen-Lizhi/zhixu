@@ -5,12 +5,13 @@ import (
 	"database/sql"
 	"errors"
 
+	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	"gorm.io/gorm"
 )
 
 // GORMAuthoritativeStore reads root authority through the platform-owned GORM
-// root. It is staged only; the legacy pgx store remains the production path.
+// root.
 type GORMAuthoritativeStore struct {
 	database *gorm.DB
 	mode     RuntimeGrantMode
@@ -145,7 +146,7 @@ func validGORMDatabase(database *gorm.DB) bool {
 		database.Config.ConnPool != nil && database.Statement.ConnPool != nil && database.Error == nil
 }
 
-// NewGORMRuntimeResolver builds the staged process resolver from one shared
+// NewGORMRuntimeResolver builds the process resolver from one shared
 // Pool. Managed configuration never degrades to direct mode when authority is
 // unavailable or malformed.
 func NewGORMRuntimeResolver(pool *platformpostgres.Pool, lookup LookupEnv) (*RootGrantResolver, RuntimeGrantMode, ProcessGrant, error) {
@@ -163,6 +164,28 @@ func NewGORMRuntimeResolver(pool *platformpostgres.Pool, lookup LookupEnv) (*Roo
 	}
 	resolver, err := NewDirectRootGrantResolver(store)
 	return resolver, mode, ProcessGrant{}, err
+}
+
+func authoritativeView(activeID, workspaceID string, active, available bool, root string, generation int64) (AuthoritativeView, error) {
+	view := AuthoritativeView{
+		WorkspaceActive: active, WorkspaceAvailable: available,
+		PersistedRoot: root, GrantGeneration: generation,
+	}
+	if activeID != "" {
+		parsed, err := foundation.ParseID(activeID)
+		if err != nil {
+			return AuthoritativeView{}, err
+		}
+		view.ActiveWorkspaceID = parsed
+	}
+	if workspaceID != "" {
+		parsed, err := foundation.ParseID(workspaceID)
+		if err != nil {
+			return AuthoritativeView{}, err
+		}
+		view.WorkspaceID = parsed
+	}
+	return view, nil
 }
 
 var _ AuthoritativeStore = (*GORMAuthoritativeStore)(nil)

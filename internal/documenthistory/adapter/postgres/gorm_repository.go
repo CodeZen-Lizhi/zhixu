@@ -13,12 +13,12 @@ import (
 )
 
 // GORMRepository reads Document History projections through the shared GORM
-// root while the legacy pgx Repository remains wired in production.
+// root.
 type GORMRepository struct {
 	database *gorm.DB
 }
 
-// NewGORMRepository creates a staged Document History projection repository.
+// NewGORMRepository creates a Document History projection repository.
 func NewGORMRepository(database *gorm.DB) (*GORMRepository, error) {
 	if !validGORMDatabase(database) {
 		return nil, dependencyUnavailable(errors.New("document history GORM database is unavailable"))

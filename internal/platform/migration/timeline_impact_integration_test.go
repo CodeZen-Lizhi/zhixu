@@ -158,7 +158,10 @@ WHERE workspace_id=$1 AND aggregate_type='HEALTH_ISSUE' AND aggregate_id=$2`, wo
 		t.Fatalf("upgrade Timeline projector schema to 00062: %v", err)
 	}
 
-	repository, err := knowledgepostgres.NewRepository(pool)
+	platform := openMigrationRuntimePool(t, ctx, pool)
+	defer platform.Close()
+	pool = platform.DB()
+	repository, err := knowledgepostgres.NewGORMRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -303,7 +306,10 @@ func TestTimelineImpactMigrationBackfillsAndProjectsSourceDirectory(t *testing.T
 		t.Fatalf("upgrade Timeline projector schema to 00062: %v", err)
 	}
 
-	repository, err := knowledgepostgres.NewRepository(pool)
+	platform := openMigrationRuntimePool(t, ctx, pool)
+	defer platform.Close()
+	pool = platform.DB()
+	repository, err := knowledgepostgres.NewGORMRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -478,7 +484,7 @@ WHERE workspace_id=$1 AND aggregate_type='HEALTH_ISSUE' AND aggregate_id=$2`, wo
 	}
 }
 
-func projectTimelineSource(t *testing.T, ctx context.Context, repository *knowledgepostgres.Repository, want knowledgeapp.TimelineProjectionOutcome) {
+func projectTimelineSource(t *testing.T, ctx context.Context, repository knowledgeapp.TimelineProjectionPort, want knowledgeapp.TimelineProjectionOutcome) {
 	t.Helper()
 	result, found, err := repository.ProjectNext(ctx)
 	if err != nil || !found || result.Outcome != want {

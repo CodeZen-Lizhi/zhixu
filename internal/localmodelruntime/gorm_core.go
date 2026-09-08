@@ -9,12 +9,10 @@ import (
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
-	"github.com/jackc/pgx/v5"
 	"gorm.io/gorm"
 )
 
-// GORMStore is the staged GORM implementation. Production composition stays
-// on PostgresStore until the TODO 9 and Final gates are complete.
+// GORMStore persists managed lifecycle facts through the shared platform pool.
 type GORMStore struct {
 	database   *gorm.DB
 	unitOfWork foundation.UnitOfWork
@@ -105,7 +103,7 @@ func gormRawRows(ctx context.Context, database *gorm.DB, query string, args ...a
 }
 
 func gormNoRows(err error) bool {
-	return errors.Is(err, sql.ErrNoRows) || errors.Is(err, pgx.ErrNoRows)
+	return errors.Is(err, sql.ErrNoRows)
 }
 
 func gormContextError(ctx context.Context, err error) error {

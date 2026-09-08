@@ -14,6 +14,12 @@ type ClaimQueryRepository interface {
 	BatchGetClaims(context.Context, domain.BatchGetClaimsQuery) ([]domain.ClaimWithSources, error)
 }
 
+// ScopedClaimReader 在调用方事务中批量读取 Claim，供材料确认复用同一快照。
+type ScopedClaimReader interface {
+	// BatchGetClaimsScoped 不创建或结束事务，保持 Workspace、状态和批量边界。
+	BatchGetClaimsScoped(context.Context, foundation.TransactionScope, domain.BatchGetClaimsQuery) ([]domain.ClaimWithSources, error)
+}
+
 // ClaimQueryService exposes formal Claim reads without requiring unrelated Knowledge write verifiers.
 type ClaimQueryService struct {
 	repository ClaimQueryRepository

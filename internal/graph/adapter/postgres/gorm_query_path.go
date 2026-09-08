@@ -2,11 +2,13 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	graphdomain "github.com/CodeZen-Lizhi/zhixu/internal/graph/domain"
 	knowledge "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
+	"github.com/lib/pq"
 	"gorm.io/gorm"
 )
 
@@ -176,7 +178,7 @@ func gormQueryPathFrontier(ctx context.Context, database *gorm.DB, request graph
 		frontierTypes[index], frontierIDs[index] = string(ref.Type), string(ref.ID)
 	}
 	rows, err := gormGraphRawRows(ctx, database, pathFrontierSQL,
-		string(request.WorkspaceID), frontierTypes, frontierIDs, string(request.Direction), stringsOf(request.Filter.RelationTypes), limit,
+		sql.Named("p1", string(request.WorkspaceID)), sql.Named("p2", pq.Array(frontierTypes)), sql.Named("p3", pq.Array(frontierIDs)), sql.Named("p4", string(request.Direction)), sql.Named("p5", pq.Array(stringsOf(request.Filter.RelationTypes))), sql.Named("p6", limit),
 	)
 	if err != nil {
 		return nil, classifyGORM(ctx, err)
@@ -210,7 +212,7 @@ func gormHydratePathEdges(ctx context.Context, database *gorm.DB, workspaceID fo
 	for index, edge := range pathEdges {
 		idsToLoad[index], traversalByID[edge.RelationID] = edge.RelationID, edge.Traversal
 	}
-	rows, err := gormGraphRawRows(ctx, database, pathEdgeHydrationSQL, string(workspaceID), ids(idsToLoad))
+	rows, err := gormGraphRawRows(ctx, database, pathEdgeHydrationSQL, sql.Named("p1", string(workspaceID)), sql.Named("p2", pq.Array(ids(idsToLoad))))
 	if err != nil {
 		return nil, classifyGORM(ctx, err)
 	}
@@ -243,7 +245,7 @@ func gormHydratePathEdges(ctx context.Context, database *gorm.DB, workspaceID fo
 
 func gormCommonTopicSuggestions(ctx context.Context, database *gorm.DB, request graphdomain.PathRequest) ([]graphdomain.TopicNode, error) {
 	rows, err := gormGraphRawRows(ctx, database, commonTopicSuggestionSQL,
-		string(request.WorkspaceID), string(request.From.Type), string(request.From.ID), string(request.To.Type), string(request.To.ID),
+		sql.Named("p1", string(request.WorkspaceID)), sql.Named("p2", string(request.From.Type)), sql.Named("p3", string(request.From.ID)), sql.Named("p4", string(request.To.Type)), sql.Named("p5", string(request.To.ID)),
 	)
 	if err != nil {
 		return nil, classifyGORM(ctx, err)

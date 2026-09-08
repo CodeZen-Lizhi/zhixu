@@ -19,11 +19,11 @@ func TestStartWorkerRuntimeStartsBeforeResumeAndReadiness(t *testing.T) {
 	health := &fakeWorkerStartupHealth{order: &order}
 	readiness := newFakeWorkerStartupReadiness(&order)
 
-	if err := startWorkerRuntime(
+	if stopped, err := startWorkerRuntime(
 		context.Background(), true, time.Second, 2*time.Second,
 		lifecycle, queue, readiness, health,
-	); err != nil {
-		t.Fatal(err)
+	); err != nil || stopped {
+		t.Fatalf("started runtime stopped=%t err=%v", stopped, err)
 	}
 	want := []string{"lifecycle:start", "queue:resume", "readiness:river_started"}
 	if !sameOrder(order, want) {
@@ -43,11 +43,11 @@ func TestStartWorkerRuntimeSkipsResumeWhenQueueMustRemainPaused(t *testing.T) {
 	health := &fakeWorkerStartupHealth{order: &order}
 	readiness := newFakeWorkerStartupReadiness(&order)
 
-	if err := startWorkerRuntime(
+	if stopped, err := startWorkerRuntime(
 		context.Background(), false, time.Second, 2*time.Second,
 		lifecycle, queue, readiness, health,
-	); err != nil {
-		t.Fatal(err)
+	); err != nil || stopped {
+		t.Fatalf("started runtime stopped=%t err=%v", stopped, err)
 	}
 	want := []string{"queue:pause", "lifecycle:start", "readiness:river_started"}
 	if !sameOrder(order, want) {
@@ -75,12 +75,12 @@ func TestStartWorkerRuntimeMissingPausedQueueFailsClosedBeforeStart(t *testing.T
 	health := &fakeWorkerStartupHealth{order: &order}
 	readiness := newFakeWorkerStartupReadiness(&order)
 
-	err := startWorkerRuntime(
+	stopped, err := startWorkerRuntime(
 		context.Background(), false, time.Second, 2*time.Second,
 		lifecycle, queue, readiness, health,
 	)
-	if !errors.Is(err, rivertype.ErrNotFound) {
-		t.Fatalf("startup error=%v", err)
+	if !errors.Is(err, rivertype.ErrNotFound) || !stopped {
+		t.Fatalf("unstarted runtime stopped=%t error=%v", stopped, err)
 	}
 	var classified *foundation.Error
 	if !errors.As(err, &classified) || classified.Code != "WORKFLOW_RIVER_QUEUE_PAUSE_FAILED" {
@@ -117,13 +117,20 @@ func TestStartWorkerRuntimeResumeFailureCleansUpWithIndependentDeadline(t *testi
 	}
 	health := &fakeWorkerStartupHealth{order: &order, closeErr: healthFailure}
 	readiness := newFakeWorkerStartupReadiness(&order)
+	shutdownContext, cancelShutdown := context.WithDeadline(context.Background(), time.Now().Add(time.Second))
+	defer cancelShutdown()
+	shutdownContextCalls := 0
 
-	err := startWorkerRuntime(
+	stopped, err := startWorkerRuntime(
 		processContext, true, time.Second, 2*time.Second,
 		lifecycle, queue, readiness, health,
+		func() context.Context {
+			shutdownContextCalls++
+			return shutdownContext
+		},
 	)
-	if !errors.Is(err, rivertype.ErrNotFound) || !errors.Is(err, shutdownFailure) || !errors.Is(err, healthFailure) {
-		t.Fatalf("startup error=%v", err)
+	if !errors.Is(err, rivertype.ErrNotFound) || !errors.Is(err, shutdownFailure) || !errors.Is(err, healthFailure) || stopped {
+		t.Fatalf("unfinished startup rollback stopped=%t error=%v", stopped, err)
 	}
 	var classified *foundation.Error
 	if !errors.As(err, &classified) || classified.Code != "WORKFLOW_RIVER_QUEUE_RESUME_FAILED" {
@@ -138,6 +145,9 @@ func TestStartWorkerRuntimeResumeFailureCleansUpWithIndependentDeadline(t *testi
 		lifecycle.shutdownMode != shutdownGraceful || lifecycle.shutdownContextErr != nil ||
 		!lifecycle.shutdownHasDeadline || health.closeCalls != 1 || health.shutdownCalls != 0 {
 		t.Fatalf("snapshot=%#v lifecycle=%#v health=%#v", snapshot, lifecycle, health)
+	}
+	if shutdownContextCalls != 1 || lifecycle.shutdownContext != shutdownContext {
+		t.Fatal("startup cleanup did not share the process shutdown deadline")
 	}
 }
 
@@ -178,6 +188,37 @@ func TestLifecycleControllerHonorsHardShutdownContext(t *testing.T) {
 	if client.stopCalls != 1 || client.cancelCalls != 0 {
 		t.Fatalf("client=%+v", client)
 	}
+
+	t.Run("model cleanup shares the expired deadline", func(t *testing.T) {
+		processContext, cancelProcess := context.WithCancel(context.Background())
+		defer cancelProcess()
+		stopped := make(chan struct{})
+		failures := make(chan error, 1)
+		completed, err := stopWorkerModelRuntime(ctx, false, cancelProcess, stopped, failures)
+		if completed || err == nil || processContext.Err() != nil {
+			t.Fatalf("unfinished consumers lost their runtime completed=%t err=%v process=%v", completed, err, processContext.Err())
+		}
+		completed, err = stopWorkerModelRuntime(ctx, true, cancelProcess, stopped, failures)
+		if completed || !errors.Is(err, context.DeadlineExceeded) || !errors.Is(processContext.Err(), context.Canceled) {
+			t.Fatalf("unfinished model cleanup completed=%t err=%v process=%v", completed, err, processContext.Err())
+		}
+		want := errors.New("runtime ownership lost during shutdown")
+		failures <- want
+		completed, err = stopWorkerModelRuntime(ctx, true, cancelProcess, stopped, failures)
+		if completed || !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, want) {
+			t.Fatalf("unfinished model cleanup lost its failure completed=%t err=%v", completed, err)
+		}
+		failures <- want
+		close(stopped)
+		completed, err = stopWorkerModelRuntime(ctx, true, cancelProcess, stopped, failures)
+		if !completed || !errors.Is(err, want) || errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("completed model cleanup completed=%t err=%v", completed, err)
+		}
+		completed, err = stopWorkerModelRuntime(ctx, true, cancelProcess, nil, nil)
+		if !completed || err != nil {
+			t.Fatalf("unstarted model cleanup completed=%t err=%v", completed, err)
+		}
+	})
 }
 
 func TestLifecycleControllerEmergencyShutdownIsExclusive(t *testing.T) {
@@ -363,6 +404,7 @@ type fakeWorkerStartupLifecycle struct {
 	shutdownMode        shutdownMode
 	shutdownContextErr  error
 	shutdownHasDeadline bool
+	shutdownContext     context.Context
 }
 
 func (lifecycle *fakeWorkerStartupLifecycle) Start(context.Context) error {
@@ -377,6 +419,7 @@ func (lifecycle *fakeWorkerStartupLifecycle) Shutdown(ctx context.Context, mode 
 	lifecycle.shutdownCalls++
 	lifecycle.shutdownMode = mode
 	lifecycle.shutdownContextErr = ctx.Err()
+	lifecycle.shutdownContext = ctx
 	_, lifecycle.shutdownHasDeadline = ctx.Deadline()
 	if lifecycle.order != nil {
 		*lifecycle.order = append(*lifecycle.order, "lifecycle:shutdown")

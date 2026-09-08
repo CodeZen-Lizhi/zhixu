@@ -85,7 +85,7 @@ func TestRAGProgressStoreAppenderFailureRollsBackIntegration(t *testing.T) {
 		name string
 		open func(*testing.T, *platformpostgres.Pool) agentapplication.RAGProgressRecorder
 	}{
-		{name: "legacy", open: openLegacyRAGProgressRollbackStoreIntegration},
+
 		{name: "gorm", open: openGORMRAGProgressRollbackStoreIntegration},
 	} {
 		t.Run(variant.name, func(t *testing.T) {
@@ -106,7 +106,7 @@ func TestRAGProgressStoreCommitResponseLossIntegration(t *testing.T) {
 		name string
 		open func(*testing.T, *platformpostgres.Pool) (agentapplication.RAGProgressRecorder, func())
 	}{
-		{name: "legacy", open: openLegacyRAGProgressStoreWithCommitLossIntegration},
+
 		{name: "gorm", open: openGORMRAGProgressStoreWithCommitLossIntegration},
 	} {
 		t.Run(variant.name, func(t *testing.T) {
@@ -166,22 +166,6 @@ func assertRAGProgressEventCount(
 	}
 }
 
-type rollbackRAGProgressAppender struct {
-	inner eventsapplication.Appender
-}
-
-func (appender rollbackRAGProgressAppender) AppendTx(
-	ctx context.Context,
-	transaction any,
-	request eventsdomain.AppendRequest,
-) (eventsdomain.ServerEvent, bool, error) {
-	event, replayed, err := appender.inner.AppendTx(ctx, transaction, request)
-	if err != nil {
-		return event, replayed, err
-	}
-	return event, replayed, errors.New("injected legacy RAG progress Event append failure")
-}
-
 type rollbackScopedRAGProgressAppender struct {
 	inner eventsapplication.ScopedAppender
 }
@@ -198,19 +182,6 @@ func (appender rollbackScopedRAGProgressAppender) AppendScoped(
 	return event, replayed, errors.New("injected GORM RAG progress Event append failure")
 }
 
-func openLegacyRAGProgressRollbackStoreIntegration(t *testing.T, platform *platformpostgres.Pool) agentapplication.RAGProgressRecorder {
-	t.Helper()
-	events, err := eventspostgres.NewStore(platform.DB())
-	if err != nil {
-		t.Fatal(err)
-	}
-	store, err := NewRAGProgressStore(platform.DB(), rollbackRAGProgressAppender{inner: events})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return store
-}
-
 func openGORMRAGProgressRollbackStoreIntegration(t *testing.T, platform *platformpostgres.Pool) agentapplication.RAGProgressRecorder {
 	t.Helper()
 	events, err := eventspostgres.NewGORMStore(platform)
@@ -222,23 +193,6 @@ func openGORMRAGProgressRollbackStoreIntegration(t *testing.T, platform *platfor
 		t.Fatal(err)
 	}
 	return store
-}
-
-func openLegacyRAGProgressStoreWithCommitLossIntegration(
-	t *testing.T,
-	platform *platformpostgres.Pool,
-) (agentapplication.RAGProgressRecorder, func()) {
-	t.Helper()
-	database := &workspaceAnalysisModelCommitLossDB{DB: platform.DB()}
-	events, err := eventspostgres.NewStore(platform.DB())
-	if err != nil {
-		t.Fatal(err)
-	}
-	store, err := NewRAGProgressStore(database, events)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return store, func() { database.injectNext.Store(true) }
 }
 
 func openGORMRAGProgressStoreWithCommitLossIntegration(
@@ -272,18 +226,7 @@ type ragProgressStoreIntegrationVariant struct {
 
 func ragProgressStoreIntegrationVariants() []ragProgressStoreIntegrationVariant {
 	return []ragProgressStoreIntegrationVariant{
-		{name: "legacy", open: func(t *testing.T, platform *platformpostgres.Pool) agentapplication.RAGProgressRecorder {
-			t.Helper()
-			events, err := eventspostgres.NewStore(platform.DB())
-			if err != nil {
-				t.Fatal(err)
-			}
-			store, err := NewRAGProgressStore(platform.DB(), events)
-			if err != nil {
-				t.Fatal(err)
-			}
-			return store
-		}},
+
 		{name: "gorm", open: func(t *testing.T, platform *platformpostgres.Pool) agentapplication.RAGProgressRecorder {
 			t.Helper()
 			events, err := eventspostgres.NewGORMStore(platform)

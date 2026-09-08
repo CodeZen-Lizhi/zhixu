@@ -7,7 +7,7 @@ import (
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
-	"github.com/jackc/pgx/v5/pgconn"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 )
 
 const (
@@ -32,9 +32,8 @@ func classify(err error, fallbackCode string) error {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return foundation.NewError(foundation.ErrorDependencyUnavailable, fallbackCode, false, err)
 	}
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) {
-		switch pgErr.Code {
+	if sqlState := platformpostgres.SQLState(err); sqlState != "" {
+		switch sqlState {
 		case "40001", "40P01", "55P03":
 			return foundation.NewError(foundation.ErrorRetryableFailure, errorCodeStorageRetryable, true, err)
 		case "23505":
@@ -44,7 +43,7 @@ func classify(err error, fallbackCode string) error {
 		case "57P01", "08000", "08003", "08006":
 			return foundation.NewError(foundation.ErrorRetryableFailure, errorCodeStorageRetryable, true, err)
 		}
-		if strings.HasPrefix(pgErr.Code, "22") {
+		if strings.HasPrefix(sqlState, "22") {
 			return foundation.NewError(foundation.ErrorConsistencyViolation, errorCodeStorageConsistency, false, err)
 		}
 	}

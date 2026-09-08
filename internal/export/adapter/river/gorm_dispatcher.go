@@ -9,6 +9,8 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	workflowriver "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
+	riverlib "github.com/riverqueue/river"
+	"github.com/riverqueue/river/rivertype"
 )
 
 type scopedExportJobInserter interface {
@@ -23,7 +25,7 @@ type GORMDispatcher struct {
 
 var _ exportapp.Dispatcher = (*GORMDispatcher)(nil)
 
-// NewGORMTransactionalDispatcher 创建未接生产的 GORM Export 投递器。
+// NewGORMTransactionalDispatcher 创建通过共享事务 scope 检查围栏并入队的 Export 投递器。
 func NewGORMTransactionalDispatcher(
 	database *platformpostgres.Pool,
 	client *workflowriver.Client,
@@ -106,4 +108,14 @@ func isNilExportRiverDependency(value any) bool {
 	default:
 		return false
 	}
+}
+
+func exportUniqueOpts() riverlib.UniqueOpts {
+	return riverlib.UniqueOpts{ByArgs: true, ByState: []rivertype.JobState{
+		rivertype.JobStateAvailable,
+		rivertype.JobStatePending,
+		rivertype.JobStateRunning,
+		rivertype.JobStateScheduled,
+		rivertype.JobStateRetryable,
+	}}
 }

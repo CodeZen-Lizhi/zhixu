@@ -132,13 +132,11 @@ import (
 	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
 	workflowdomain "github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
 	workflowhttp "github.com/CodeZen-Lizhi/zhixu/internal/workflow/http"
-	workspacepostgres "github.com/CodeZen-Lizhi/zhixu/internal/workspace/adapter/postgres"
 	workspaceapplication "github.com/CodeZen-Lizhi/zhixu/internal/workspace/application"
 	workspacedomain "github.com/CodeZen-Lizhi/zhixu/internal/workspace/domain"
 	workspacehttp "github.com/CodeZen-Lizhi/zhixu/internal/workspace/http"
 	workspaceruntimegrant "github.com/CodeZen-Lizhi/zhixu/internal/workspace/runtimegrant"
 	"github.com/gin-gonic/gin"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const (
@@ -153,7 +151,7 @@ func main() {
 }
 
 // runAPI 组装并运行 API，返回退出码以保证资源清理 defer 在进程退出前执行。
-func runAPI() int {
+func runAPI() (exitCode int) {
 	gin.SetMode(gin.ReleaseMode)
 	configPath := flag.String("config", "", "optional YAML configuration path")
 	flag.Parse()
@@ -164,15 +162,29 @@ func runAPI() int {
 		logger.Error("configuration is invalid", "error_code", "INVALID_CONFIGURATION")
 		return 1
 	}
+	var shutdownContext context.Context
+	var cancelShutdown context.CancelFunc
+	beginShutdown := func() context.Context {
+		if shutdownContext == nil {
+			shutdownContext, cancelShutdown = context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+		}
+		return shutdownContext
+	}
+	defer func() {
+		if cancelShutdown != nil {
+			cancelShutdown()
+		}
+	}()
 	telemetry, telemetryErr := initializeAPITelemetry(context.Background(), cfg)
 	if telemetryErr != nil {
 		logger.Error("telemetry initialization failed", "error_code", "TELEMETRY_EXPORTER_UNAVAILABLE")
 		return 1
 	}
 	defer func() {
-		shutdownContext, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-		defer cancel()
-		_ = telemetry.Shutdown(shutdownContext)
+		if err := telemetry.Shutdown(beginShutdown()); err != nil {
+			logger.Error("telemetry shutdown failed", "error_code", "SHUTDOWN_FAILED", "error", err)
+			exitCode = 1
+		}
 	}()
 	if telemetryStatus := telemetry.Status(); telemetryStatus.Degraded {
 		logger.Warn("telemetry exporter is unavailable", "error_code", telemetryStatus.Code)
@@ -189,6 +201,8 @@ func runAPI() int {
 
 	var database *postgres.Pool
 	var databaseErr error
+	modelBackgroundStopped := true
+	consumersStopped := true
 	databaseURL, databaseConfigErr := cfg.DatabaseConnectionString()
 	if databaseConfigErr == nil && loadErr == nil {
 		database, databaseErr = postgres.Open(context.Background(), databaseURL, cfg.DatabaseMaxConns, cfg.DatabaseMinConns)
@@ -197,7 +211,8 @@ func runAPI() int {
 		}
 	}
 	defer func() {
-		if database != nil {
+		// A shutdown timeout leaves resources owned by the unfinished task until process exit.
+		if database != nil && modelBackgroundStopped && consumersStopped {
 			database.Close()
 		}
 	}()
@@ -209,7 +224,7 @@ func runAPI() int {
 	var modelRuntimeHost *modelsettingsruntime.RuntimeHost[*modelsettingsruntime.Models]
 	var modelSettingsManager modelsettingsapplication.SettingsManager
 	var modelActivationStarter modelsettingshttp.ActivationStarter
-	var modelEnqueueFences []riveradapter.EnqueueFence
+	var modelEnqueueFences []riveradapter.ScopedEnqueueFence
 	var configuredModels *modelsettingsruntime.Models
 	if cfg.ModelSettingsMode == config.ModelSettingsModeManaged {
 		if database == nil {
@@ -218,7 +233,7 @@ func runAPI() int {
 				return 1
 			}
 		} else {
-			bootstrap, bootstrapErr := modelsettingsruntime.Bootstrap(context.Background(), database.DB(), cfg, modelTelemetry)
+			bootstrap, bootstrapErr := modelsettingsruntime.BootstrapGORM(context.Background(), database, cfg, modelTelemetry)
 			modelSettingsManager = bootstrap.Manager
 			if bootstrap.Repository != nil {
 				modelEnqueueFences = append(modelEnqueueFences, bootstrap.Repository)
@@ -259,7 +274,11 @@ func runAPI() int {
 					logger.Error("model runtime host is unavailable", "error_code", modelsettingsdomain.ErrorCodeUnavailable)
 					return 1
 				}
-				defer modelRuntimeHost.Close()
+				defer func() {
+					if modelBackgroundStopped && consumersStopped {
+						modelRuntimeHost.Close()
+					}
+				}()
 				modelRuntimeController, bootstrapErr = modelsettingsruntime.NewHotRuntimeController(
 					modelsettingsruntime.HotRuntimeControllerOptions[*modelsettingsruntime.Models]{
 						Host: modelRuntimeHost, Activation: bootstrap.Service, Revisions: bootstrap.Service,
@@ -297,7 +316,11 @@ func runAPI() int {
 		configuredModels = disabledModels
 	}
 	if modelRuntimeHost == nil {
-		defer func() { _ = configuredModels.Close() }()
+		defer func() {
+			if consumersStopped {
+				_ = configuredModels.Close()
+			}
+		}()
 	}
 	cfg = modelsettingsruntime.WithoutModelCredentials(cfg)
 	fixedSearchEmbedder := configuredModels.Embedding().Embedder()
@@ -325,7 +348,11 @@ func runAPI() int {
 		if database == nil {
 			authInitErr = errors.New("authentication database is unavailable")
 		} else {
-			authRepository, repositoryErr := authpostgres.NewRepository(database.DB())
+			gormDB, repositoryErr := database.GORM()
+			var authRepository *authpostgres.GORMRepository
+			if repositoryErr == nil {
+				authRepository, repositoryErr = authpostgres.NewGORMRepository(gormDB)
+			}
 			if repositoryErr != nil {
 				authInitErr = repositoryErr
 			} else {
@@ -387,43 +414,48 @@ func runAPI() int {
 		ragInitErr = errors.New("RAG database dependency is unavailable")
 	}
 	var changeControlService *changecontrolapplication.Service
-	var artifactGeneration *artifactpostgres.SectionGenerationRepository
+	var artifactGeneration *artifactpostgres.GORMSectionGenerationRepository
 	artifactIDs := foundation.NewUUIDGenerator(nil)
 	artifactClock := foundation.SystemClock{}
 	fileScanner := filesystem.Scanner{Options: filesystem.ScanOptions{MaxBytes: filesystem.DefaultMaxBytes}}
-	var workspaceRuntime *workspaceruntimegrant.ProcessComposition
+	var workspaceRuntime *workspaceruntimegrant.GORMProcessComposition
 	if database != nil {
-		workspaceRuntime, databaseErr = workspaceruntimegrant.NewProcessComposition(
-			context.Background(), database.DB(), os.LookupEnv, workspacedomain.RuntimeRoleAPI,
+		workspaceRuntime, databaseErr = workspaceruntimegrant.NewGORMProcessComposition(
+			context.Background(), database, os.LookupEnv, workspacedomain.RuntimeRoleAPI,
 		)
 		if databaseErr != nil {
 			logger.Error("workspace root grant is unavailable", "error_code", "WORKSPACE_ROOT_GRANT_UNAVAILABLE")
 			return 1
 		}
+		defer func() {
+			if !consumersStopped || !modelBackgroundStopped {
+				return
+			}
+			if err := workspaceRuntime.Close(beginShutdown()); err != nil {
+				consumersStopped = false
+				exitCode = 1
+				logger.Error("workspace runtime shutdown failed", "error_code", "SHUTDOWN_FAILED", "error", err)
+			}
+		}()
 		if err := workspaceRuntime.SetQuiescenceHooks(workspaceGate.Hooks()); err != nil {
 			logger.Error("workspace runtime quiescence is unavailable", "error_code", "WORKSPACE_QUIESCENCE_UNAVAILABLE")
 			return 1
 		}
-		defer func() {
-			shutdownContext, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-			defer cancel()
-			_ = workspaceRuntime.Close(shutdownContext)
-		}()
 	}
 	if database != nil {
-		configuredKnowledgeHandler, knowledgeHandlerErr := newKnowledgeHandler(database.DB(), cfg.GraphQueryTimeout)
+		configuredKnowledgeHandler, knowledgeHandlerErr := newKnowledgeHandler(database, cfg.GraphQueryTimeout)
 		if knowledgeHandlerErr != nil {
 			logger.Error("knowledge timeline and impact services are unavailable", "error_code", "KNOWLEDGE_TIMELINE_IMPACT_UNAVAILABLE")
 		} else {
 			knowledgeHandler = configuredKnowledgeHandler
 		}
-		configuredReviewHandler, reviewHandlerErr := newReviewHandler(database.DB(), cfg.GraphQueryTimeout, cfg.ReviewQuestionRefKey)
+		configuredReviewHandler, reviewHandlerErr := newReviewHandler(database, cfg.GraphQueryTimeout, cfg.ReviewQuestionRefKey)
 		if reviewHandlerErr != nil {
 			logger.Error("review service is unavailable", "error_code", "REVIEW_DEPENDENCY_UNAVAILABLE")
 		} else {
 			reviewHandler = configuredReviewHandler
 		}
-		configuredMemoryHandler, memoryHandlerErr := newMemoryHandler(database.DB(), cfg.GraphQueryTimeout)
+		configuredMemoryHandler, memoryHandlerErr := newMemoryHandler(database, cfg.GraphQueryTimeout)
 		if memoryHandlerErr != nil {
 			logger.Error("memory service is unavailable", "error_code", "MEMORY_DEPENDENCY_UNAVAILABLE")
 		} else {
@@ -432,7 +464,7 @@ func runAPI() int {
 		if err := configureCollectionHealth(database, cfg, &collectionHandler, &healthHandler, nil); err != nil {
 			logger.Error("collection and health services are unavailable", "error_code", "COLLECTION_HEALTH_DEPENDENCY_UNAVAILABLE")
 		}
-		configuredGraphHandler, graphHandlerErr := newGraphHandler(database.DB(), cfg.GraphQueryTimeout)
+		configuredGraphHandler, graphHandlerErr := newGraphHandler(database, cfg.GraphQueryTimeout)
 		if graphHandlerErr != nil {
 			logger.Error("graph query service is unavailable", "error_code", "GRAPH_DEPENDENCY_UNAVAILABLE")
 		} else {
@@ -440,11 +472,11 @@ func runAPI() int {
 		}
 		workspaceRepository := workspaceRuntime.Repository
 		var repositoryErr error
-		healthEvents, healthEventsErr := eventspostgres.NewStore(database.DB())
-		changeControlRepository, changeControlRepositoryErr := changecontrolpostgres.NewRepository(database.DB(), healthEvents)
+		healthEvents, healthEventsErr := eventspostgres.NewGORMStore(database)
+		changeControlRepository, changeControlRepositoryErr := changecontrolpostgres.NewGORMRepository(database, healthEvents)
 		var workflowService *workflowapplication.Service
 		var workflowControlService *workflowapplication.Service
-		var workflowRuntime *workflowpostgres.RuntimeRepository
+		var workflowRuntime *workflowpostgres.GORMRuntimeRepository
 		var workspaceAnalysisRuntimeHooks *apiWorkspaceAnalysisRuntimeHooks
 		if changeControlRepositoryErr != nil {
 			logger.Error("change control repository is unavailable", "error_code", "CHANGE_CONTROL_DATABASE_UNAVAILABLE")
@@ -452,26 +484,25 @@ func runAPI() int {
 			logger.Error("health event store is unavailable", "error_code", "HEALTH_EVENT_STORE_UNAVAILABLE")
 		} else {
 			if cfg.WorkspaceAnalysisAPIEnabled {
-				configuredHooks, hooksErr := newAPIWorkspaceAnalysisRuntimeHooks(database.DB(), healthEvents)
+				configuredHooks, hooksErr := newAPIWorkspaceAnalysisRuntimeHooks(database, healthEvents)
 				if hooksErr != nil {
 					logger.Warn("workspace analysis API runtime hooks are unavailable", "error_code", "WORKSPACE_ANALYSIS_CAPABILITY_UNAVAILABLE")
 				} else {
 					workspaceAnalysisRuntimeHooks = configuredHooks
 				}
 			}
-			healthCancellationGuard, healthCancellationGuardErr := healthpostgres.NewScanCancellationGuard(healthEvents)
-			cancellationGuard, cancellationGuardErr := workflowapplication.NewCompositeCancellationSafetyGuard(
+			healthCancellationGuard, healthCancellationGuardErr := healthpostgres.NewGORMScanCancellationGuard(database, healthEvents)
+			graphCancellationGuard, graphCancellationGuardErr := graphpostgres.NewGORMRepository(database)
+			cancellationGuard, cancellationGuardErr := workflowapplication.NewCompositeScopedCancellationSafetyGuard(
 				changeControlRepository,
-				graphpostgres.NewSemanticLinkScanCancellationGuard(),
+				graphCancellationGuard,
 				healthCancellationGuard,
 			)
-			if healthCancellationGuardErr != nil {
-				cancellationGuardErr = healthCancellationGuardErr
-			}
+			cancellationGuardErr = firstError(healthCancellationGuardErr, graphCancellationGuardErr, cancellationGuardErr)
 			if cancellationGuardErr != nil {
 				logger.Error("workflow cancellation guard is unavailable", "error_code", "WORKFLOW_CANCELLATION_GUARD_UNAVAILABLE")
 			}
-			var runtime *workflowpostgres.RuntimeRepository
+			var runtime *workflowpostgres.GORMRuntimeRepository
 			var workflowServiceErr error
 			if cancellationGuardErr != nil {
 				workflowServiceErr = cancellationGuardErr
@@ -479,7 +510,7 @@ func runAPI() int {
 				workflowServiceErr = repositoryErr
 			} else {
 				workflowService, runtime, artifactGeneration, workflowServiceErr = newAPIArtifactWorkflowComponents(
-					database.DB(), cfg, workspaceRepository, fileScanner, cancellationGuard, artifactIDs, artifactClock,
+					database, cfg, workspaceRepository, fileScanner, cancellationGuard, artifactIDs, artifactClock,
 					workspaceAnalysisRuntimeHooks,
 					modelEnqueueFences...,
 				)
@@ -490,7 +521,7 @@ func runAPI() int {
 			} else {
 				workflowRuntime = runtime
 				workflowControlService = workflowService
-				humanReviewProjector, humanReviewErr := newOrganizingHumanTaskReviewProjector(database.DB(), workflowRuntime)
+				humanReviewProjector, humanReviewErr := newOrganizingHumanTaskReviewProjector(database, workflowRuntime)
 				if humanReviewErr != nil {
 					logger.Error("workflow human review projector is unavailable", "error_code", "ORGANIZING_HUMAN_REVIEW_UNAVAILABLE")
 					workflowService = nil
@@ -517,39 +548,39 @@ func runAPI() int {
 			})
 			workspaceHandler = workspacehttp.NewHandler(workspaceService)
 			configuredGitSyncHandler, gitSyncHandlerErr := newGitSyncHandler(
-				database.DB(), workspaceRepository, cfg.GitSyncKeyFile, cfg.GraphQueryTimeout,
+				database, workspaceRepository, cfg.GitSyncKeyFile, cfg.GraphQueryTimeout,
 			)
 			if gitSyncHandlerErr != nil {
 				logger.Warn("Git sync capability is unavailable", "error_code", "GIT_SYNC_CAPABILITY_UNAVAILABLE")
 			} else {
 				gitSyncHandler = configuredGitSyncHandler
 			}
-			configuredCaptureHandler, captureHandlerErr := newCaptureHandler(database.DB(), workspaceService, 0)
+			configuredCaptureHandler, captureHandlerErr := newCaptureHandler(database, workspaceService, workspaceRepository, 0)
 			if captureHandlerErr != nil {
 				logger.Error("capture service is unavailable", "error_code", "CAPTURE_SERVICE_UNAVAILABLE")
 			} else {
 				captureHandler = configuredCaptureHandler
 			}
-			configuredInterviewHandler, interviewHandlerErr := newInterviewHandler(database.DB(), workspaceRepository, fileScanner, cfg.GraphQueryTimeout)
+			configuredInterviewHandler, interviewHandlerErr := newInterviewHandler(database, workspaceRepository, fileScanner, cfg.GraphQueryTimeout)
 			if interviewHandlerErr != nil {
 				logger.Error("interview service is unavailable", "error_code", "INTERVIEW_DEPENDENCY_UNAVAILABLE")
 			} else {
 				interviewHandler = configuredInterviewHandler
 			}
-			configuredLearningPathHandler, learningPathHandlerErr := newLearningPathHandler(database.DB(), workspaceRepository, fileScanner, cfg.GraphQueryTimeout)
+			configuredLearningPathHandler, learningPathHandlerErr := newLearningPathHandler(database, workspaceRepository, fileScanner, cfg.GraphQueryTimeout)
 			if learningPathHandlerErr != nil {
 				logger.Error("learning path service is unavailable", "error_code", "LEARNING_PATH_DEPENDENCY_UNAVAILABLE")
 			} else {
 				learningPathHandler = configuredLearningPathHandler
 			}
-			configuredExportHandler, exportHandlerErr := newExportHandler(database.DB(), cfg, workspaceRepository, modelEnqueueFences...)
+			configuredExportHandler, exportHandlerErr := newExportHandler(database, cfg, workspaceRepository, modelEnqueueFences...)
 			if exportHandlerErr != nil {
 				logger.Error("export service is unavailable", "error_code", "EXPORT_DEPENDENCY_UNAVAILABLE")
 			} else {
 				exportHandler = configuredExportHandler
 			}
 			configuredRetrievalHandler, retrievalHandlerErr := newRetrievalHandler(
-				database.DB(), fixedSearchEmbedder, workspaceRepository, fileScanner, searchEmbeddingAcquirers...,
+				database, fixedSearchEmbedder, workspaceRepository, fileScanner, searchEmbeddingAcquirers...,
 			)
 			if retrievalHandlerErr != nil {
 				logger.Error("retrieval search service is unavailable", "error_code", "RETRIEVAL_SEARCH_SERVICE_UNAVAILABLE")
@@ -558,7 +589,11 @@ func runAPI() int {
 				retrievalHandler = configuredRetrievalHandler
 			}
 
-			ingestionRepository, ingestionRepositoryErr := ingestionpostgres.NewRepository(database.DB())
+			gormDB, ingestionRepositoryErr := database.GORM()
+			var ingestionRepository *ingestionpostgres.GORMRepository
+			if ingestionRepositoryErr == nil {
+				ingestionRepository, ingestionRepositoryErr = ingestionpostgres.NewGORMRepository(gormDB)
+			}
 			sourceReader, sourceReaderErr := ingestionworkspace.NewReader(workspaceRepository, fileScanner)
 			parserRegistry := platformparser.NewRegistry(platformparser.Options{MaxBytes: filesystem.DefaultMaxBytes})
 			if ingestionRepositoryErr != nil || sourceReaderErr != nil {
@@ -582,11 +617,11 @@ func runAPI() int {
 			if changeControlRepositoryErr != nil || targetReaderErr != nil || approvalGitInspectorErr != nil || workflowRuntime == nil {
 				logger.Error("change control dependencies are unavailable", "error_code", "CHANGE_CONTROL_DEPENDENCY_UNAVAILABLE")
 			} else {
-				dispatchRepository, dispatchRepositoryErr := approvaldispatchpostgres.NewApprovalDispatchRepository(database.DB(), workflowRuntime, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, healthEvents)
+				dispatchRepository, dispatchRepositoryErr := approvaldispatchpostgres.NewGORMApprovalDispatchRepository(database, workflowRuntime, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, healthEvents)
 				if dispatchRepositoryErr != nil {
 					logger.Error("approval dispatch repository is unavailable", "error_code", "APPROVAL_DISPATCH_DEPENDENCY_MISSING")
 				} else {
-					knowledgeRelationApplier, knowledgeRelationApplierErr := knowledgepostgres.NewApprovedRelationApplyRepository(database.DB(), foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, healthEvents)
+					knowledgeRelationApplier, knowledgeRelationApplierErr := knowledgepostgres.NewGORMApprovedRelationApplyRepository(database, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, healthEvents)
 					if knowledgeRelationApplierErr != nil {
 						logger.Error("knowledge relation apply service is unavailable", "error_code", "KNOWLEDGE_RELATION_APPLIER_UNAVAILABLE")
 					}
@@ -618,7 +653,7 @@ func runAPI() int {
 			}
 			if changeControlService != nil {
 				configuredDocumentHistoryHandler, documentHistoryErr := newDocumentHistoryHandler(
-					database.DB(), workspaceRepository, changeControlService, changeControlRepository, cfg.GraphQueryTimeout,
+					database, workspaceRepository, changeControlService, changeControlRepository, cfg.GraphQueryTimeout,
 				)
 				if documentHistoryErr != nil {
 					logger.Error("document history service is unavailable", "error_code", "DOCUMENT_HISTORY_DEPENDENCY_UNAVAILABLE")
@@ -627,13 +662,13 @@ func runAPI() int {
 				}
 			}
 			configuredAuthoringService, authoringHandlerErr := newAuthoringService(
-				database.DB(), changeControlService, targetReader,
+				database, changeControlService, targetReader,
 			)
 			if authoringHandlerErr != nil {
 				logger.Error("authoring service is unavailable", "error_code", "AUTHORING_DEPENDENCY_UNAVAILABLE")
 			} else {
 				configuredOrganizingHandler, organizingHandlerErr := newOrganizingHandler(
-					context.Background(), database.DB(), fixedSearchEmbedder, workspaceRepository,
+					context.Background(), database, fixedSearchEmbedder, workspaceRepository,
 					fileScanner, configuredAuthoringService, workflowService, cfg.GraphQueryTimeout,
 					searchEmbeddingAcquirers...,
 				)
@@ -657,7 +692,7 @@ func runAPI() int {
 				generation = artifactGenerationDependencies(artifactGeneration)
 			}
 			configuredArtifactHandler, artifactHandlerErr := newArtifactHandlerWithDependencies(
-				database.DB(), workspaceRepository, fileScanner, changeControlService, cfg.GraphQueryTimeout,
+				database, workspaceRepository, fileScanner, changeControlService, cfg.GraphQueryTimeout,
 				artifactIDs, artifactClock, generation...,
 			)
 			if artifactHandlerErr != nil {
@@ -666,16 +701,16 @@ func runAPI() int {
 				artifactHandler = configuredArtifactHandler
 			}
 		}
-		configuredCandidateHandler, candidateHandlerErr := newCandidateHandler(database.DB(), workflowRuntime, cfg.GraphQueryTimeout)
+		configuredCandidateHandler, candidateHandlerErr := newCandidateHandler(database, workflowRuntime, cfg.GraphQueryTimeout)
 		if candidateHandlerErr != nil {
 			logger.Error("semantic link candidate service is unavailable", "error_code", "SEMANTIC_LINK_DEPENDENCY_UNAVAILABLE")
 		} else {
 			candidateHandler = configuredCandidateHandler
 		}
 		dispatchReady := questionDispatchEnabled(true, ragInitErr)
-		var workspaceAnalysisStarters []agentapplication.WorkspaceAnalysisRunStarter
+		var workspaceAnalysisStarters []agentapplication.ScopedWorkspaceAnalysisRunStarter
 		if cfg.WorkspaceAnalysisAPIEnabled && dispatchReady && workspaceAnalysisRuntimeHooks != nil {
-			starter, starterErr := newAPIWorkspaceAnalysisRunStarter(database.DB(), cfg, configuredModels)
+			starter, starterErr := newAPIWorkspaceAnalysisRunStarter(database, cfg, configuredModels)
 			if starterErr != nil {
 				logger.Warn("workspace analysis API capability is unavailable", "error_code", "WORKSPACE_ANALYSIS_CAPABILITY_UNAVAILABLE")
 			} else {
@@ -683,7 +718,7 @@ func runAPI() int {
 			}
 		}
 		configuredConversation, configuredEvents, conversationErr := newConversationHandlers(
-			database.DB(), workflowRuntime, dispatchReady, workspaceAnalysisStarters...,
+			database, workflowRuntime, dispatchReady, workspaceAnalysisStarters...,
 		)
 		if conversationErr != nil {
 			logger.Error("conversation service is unavailable", "error_code", "CONVERSATION_SERVICE_UNAVAILABLE")
@@ -692,7 +727,7 @@ func runAPI() int {
 			conversationHandler = configuredConversation
 			eventsHandler = configuredEvents
 		}
-		configuredDraftStream, draftStreamErr := newDraftStreamHandler(database.DB())
+		configuredDraftStream, draftStreamErr := newDraftStreamHandler(database)
 		if draftStreamErr != nil {
 			logger.Error("answer draft stream is unavailable", "error_code", conversationhttp.ErrorCodeDraftStreamUnavailable)
 		} else {
@@ -745,14 +780,45 @@ func runAPI() int {
 	server := newAPIServer(cfg.HTTPAddr, workspaceGate.Wrap(producerGate.Wrap(app.NewRouter(deps))))
 	stop, stopCancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopCancel()
+	modelRuntimeContext, cancelModelRuntime := context.WithCancel(context.Background())
 	var modelRuntimeErr <-chan error
 	var activationCoordinatorErr <-chan error
+	var modelRuntimeStopped <-chan struct{}
+	var activationCoordinatorStopped <-chan struct{}
 	var workspaceRuntimeErr <-chan error
+	defer func() {
+		// HTTP Close cancels connections but does not join unfinished handlers.
+		// Keep their runtime, Workspace anchor and Pool alive until process exit.
+		if !consumersStopped {
+			exitCode = 1
+			return
+		}
+		cancelModelRuntime()
+		if err := waitAPIModelRuntime(beginShutdown(), modelRuntimeStopped, activationCoordinatorStopped); err != nil {
+			logger.Error("model runtime shutdown failed", "error_code", "SHUTDOWN_FAILED", "error", err)
+			exitCode = 1
+		} else {
+			modelBackgroundStopped = true
+		}
+		select {
+		case err := <-modelRuntimeErr:
+			logger.Error("model runtime stopped during shutdown", "error_code", modelsettingsdomain.ErrorCodeRuntimeConflict, "error", err)
+			exitCode = 1
+		default:
+		}
+		select {
+		case err := <-activationCoordinatorErr:
+			logger.Error("model activation coordinator stopped during shutdown", "error_code", modelsettingsdomain.ErrorCodeActivationConflict, "error", err)
+			exitCode = 1
+		default:
+		}
+	}()
 	if workspaceRuntime != nil {
 		workspaceRuntimeErr = workspaceRuntime.Errors()
 	}
 	if modelRuntimeController != nil {
-		modelRuntimeErr = startAPIModelRuntime(stop, modelRuntimeController)
+		modelBackgroundStopped = false
+		modelRuntimeErr, modelRuntimeStopped = startAPIModelRuntime(modelRuntimeContext, modelRuntimeController)
 		select {
 		case <-modelRuntimeController.Active():
 		case err := <-modelRuntimeErr:
@@ -765,10 +831,11 @@ func runAPI() int {
 			logger.Error("model activation coordinator is unavailable", "error_code", modelsettingsdomain.ErrorCodeUnavailable)
 			return 1
 		}
-		activationCoordinatorErr = startAPIActivationCoordinator(stop, activationCoordinator)
+		activationCoordinatorErr, activationCoordinatorStopped = startAPIActivationCoordinator(modelRuntimeContext, activationCoordinator)
 	}
 
 	serverErr := make(chan error, 1)
+	consumersStopped = false
 	go func() {
 		logger.Info("api server starting", "addr", cfg.HTTPAddr, "version", cfg.Version)
 		if err := server.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
@@ -776,7 +843,6 @@ func runAPI() int {
 		}
 	}()
 
-	exitCode := 0
 	select {
 	case err := <-serverErr:
 		logger.Error("api server stopped unexpectedly", "error_code", "SERVER_FAILED", "error", err)
@@ -792,13 +858,14 @@ func runAPI() int {
 		exitCode = 1
 	case <-stop.Done():
 	}
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-	defer cancel()
-	if err := server.Shutdown(shutdownCtx); err != nil {
+	if err := server.Shutdown(beginShutdown()); err != nil {
+		_ = server.Close()
 		logger.Error("api server shutdown failed", "error_code", "SHUTDOWN_FAILED", "error", err)
 		if exitCode == 0 {
 			exitCode = 1
 		}
+	} else {
+		consumersStopped = true
 	}
 	return exitCode
 }
@@ -826,7 +893,7 @@ func newAPIServer(address string, handler http.Handler) *http.Server {
 
 // newAuthoringHandler 组装持久草稿、Change Control Proposal 与受控目标读取边界。
 func newAuthoringHandler(
-	pool *pgxpool.Pool,
+	pool *postgres.Pool,
 	proposals authoringchangecontrol.ProposalService,
 	targets authoringchangecontrol.TargetReader,
 	timeout time.Duration,
@@ -840,14 +907,14 @@ func newAuthoringHandler(
 
 // newAuthoringService 组装可供 Authoring HTTP 与 Organizing owner bridge 复用的应用服务。
 func newAuthoringService(
-	pool *pgxpool.Pool,
+	pool *postgres.Pool,
 	proposals authoringchangecontrol.ProposalService,
 	targets authoringchangecontrol.TargetReader,
 ) (*authoringapplication.Service, error) {
 	if pool == nil || proposals == nil || targets == nil {
 		return nil, errors.New("authoring database, proposal service and target reader are required")
 	}
-	repository, err := authoringpostgres.NewRepository(pool)
+	repository, err := authoringpostgres.NewGORMRepository(pool)
 	if err != nil {
 		return nil, err
 	}
@@ -867,16 +934,20 @@ func newAuthoringService(
 
 // newDocumentHistoryHandler 组装文档投影、只读 Git 历史与强类型恢复 Proposal 边界。
 func newDocumentHistoryHandler(
-	pool *pgxpool.Pool,
+	pool *postgres.Pool,
 	workspaces gitcli.WorkspaceRepository,
 	proposals *changecontrolapplication.Service,
-	proposalLookup *changecontrolpostgres.Repository,
+	proposalLookup *changecontrolpostgres.GORMRepository,
 	timeout time.Duration,
 ) (*documenthistoryhttp.Handler, error) {
 	if pool == nil || workspaces == nil || proposals == nil || proposalLookup == nil {
 		return nil, errors.New("document history database, workspace and proposal services are required")
 	}
-	documents, err := documenthistorypostgres.NewRepository(pool)
+	gormDB, err := pool.GORM()
+	if err != nil {
+		return nil, err
+	}
+	documents, err := documenthistorypostgres.NewGORMRepository(gormDB)
 	if err != nil {
 		return nil, err
 	}
@@ -908,7 +979,7 @@ func newDocumentHistoryHandler(
 // newGitSyncHandler composes the production-only Git Remote configuration and
 // run service. The caller retains a fail-closed Handler when this returns an error.
 func newGitSyncHandler(
-	pool *pgxpool.Pool,
+	pool *postgres.Pool,
 	workspaces gitcli.WorkspaceRepository,
 	keyFile string,
 	timeout time.Duration,
@@ -920,7 +991,15 @@ func newGitSyncHandler(
 	if err != nil {
 		return nil, err
 	}
-	repository, err := gitsyncpostgres.NewRepository(pool, sealer)
+	gormDB, err := pool.GORM()
+	if err != nil {
+		return nil, err
+	}
+	unitOfWork, err := pool.UnitOfWork()
+	if err != nil {
+		return nil, err
+	}
+	repository, err := gitsyncpostgres.NewGORMRepository(gormDB, unitOfWork, sealer)
 	if err != nil {
 		return nil, err
 	}
@@ -945,7 +1024,7 @@ func newGitSyncHandler(
 // newOrganizingHandler 通过公开 owner 读取服务组装 Draft、Template、Snapshot 与 Run 投影。
 func newOrganizingHandler(
 	ctx context.Context,
-	pool *pgxpool.Pool,
+	pool *postgres.Pool,
 	embedder retrievalapplication.Embedder,
 	workspaceRepository workspacedomain.SourceMaterialRepository,
 	files workspacedomain.FileScanner,
@@ -957,7 +1036,7 @@ func newOrganizingHandler(
 	if ctx == nil || pool == nil || workspaceRepository == nil || files == nil || authoring == nil || workflows == nil {
 		return nil, errors.New("organizing database, owner services and workflow reader are required")
 	}
-	searchRepository, err := retrievalpostgres.NewSearchRepository(pool)
+	searchRepository, err := retrievalpostgres.NewGORMSearchRepository(pool)
 	if err != nil {
 		return nil, err
 	}
@@ -973,15 +1052,15 @@ func newOrganizingHandler(
 	if err != nil {
 		return nil, err
 	}
-	modelRuns, err := agentpostgres.NewRepository(pool)
+	modelRuns, err := agentpostgres.NewGORMRepository(pool)
 	if err != nil {
 		return nil, err
 	}
-	profiles, err := capturepostgres.NewProfileRepository(pool, modelRuns)
+	profiles, err := capturepostgres.NewGORMProfileRepository(pool, modelRuns)
 	if err != nil {
 		return nil, err
 	}
-	knowledgeRepository, err := knowledgepostgres.NewRepository(pool)
+	knowledgeRepository, err := knowledgepostgres.NewGORMRepository(pool)
 	if err != nil {
 		return nil, err
 	}
@@ -989,11 +1068,11 @@ func newOrganizingHandler(
 	if err != nil {
 		return nil, err
 	}
-	claimSearch, err := graphpostgres.NewRepository(pool)
+	claimSearch, err := graphpostgres.NewGORMRepository(pool)
 	if err != nil {
 		return nil, err
 	}
-	collectionRepository, err := collectionpostgres.NewRepository(pool)
+	collectionRepository, err := collectionpostgres.NewGORMRepository(pool)
 	if err != nil {
 		return nil, err
 	}
@@ -1003,14 +1082,18 @@ func newOrganizingHandler(
 	if err != nil {
 		return nil, err
 	}
+	frozenFence, err := organizingpostgres.NewGORMFrozenMaterialFence(searchRepository, knowledgeRepository)
+	if err != nil {
+		return nil, err
+	}
 	owners, err := organizingowner.New(organizingowner.Dependencies{
 		Search: search, Evidence: evidence, Profiles: profiles, Knowledge: claims, Collections: collections,
-		Authoring: authoring, Claims: claimSearch,
+		Authoring: authoring, Claims: claimSearch, FrozenFence: frozenFence,
 	})
 	if err != nil {
 		return nil, err
 	}
-	repository, err := organizingpostgres.NewRepository(pool)
+	repository, err := organizingpostgres.NewGORMRepository(pool)
 	if err != nil {
 		return nil, err
 	}
@@ -1038,13 +1121,13 @@ func newOrganizingHandler(
 // task/node and immutable Organizing Snapshot reads before HTTP exposes a
 // reviewable Human Task.
 func newOrganizingHumanTaskReviewProjector(
-	pool *pgxpool.Pool,
-	runtime *workflowpostgres.RuntimeRepository,
+	pool *postgres.Pool,
+	runtime *workflowpostgres.GORMRuntimeRepository,
 ) (*organizingworkflow.HumanTaskReviewProjector, error) {
 	if pool == nil || runtime == nil {
 		return nil, errors.New("organizing human review database and Workflow runtime are required")
 	}
-	repository, err := organizingpostgres.NewRepository(pool)
+	repository, err := organizingpostgres.NewGORMRepository(pool)
 	if err != nil {
 		return nil, err
 	}
@@ -1054,11 +1137,11 @@ func newOrganizingHumanTaskReviewProjector(
 }
 
 // newCaptureHandler 组装 Workspace-owned 原始内容写入与 PostgreSQL Capture 事实边界。
-func newCaptureHandler(pool *pgxpool.Pool, content captureapplication.ManagedContentWriter, timeout time.Duration) (*capturehttp.Handler, error) {
-	if pool == nil || content == nil {
+func newCaptureHandler(pool *postgres.Pool, content captureapplication.ManagedContentWriter, sources workspaceapplication.ScopedSourceWriter, timeout time.Duration) (*capturehttp.Handler, error) {
+	if pool == nil || content == nil || sources == nil {
 		return nil, errors.New("capture database and managed content writer are required")
 	}
-	repository, err := capturepostgres.NewRepository(pool)
+	repository, err := capturepostgres.NewGORMRepository(pool, sources)
 	if err != nil {
 		return nil, err
 	}
@@ -1071,11 +1154,11 @@ func newCaptureHandler(pool *pgxpool.Pool, content captureapplication.ManagedCon
 	if err != nil {
 		return nil, err
 	}
-	modelRuns, err := agentpostgres.NewRepository(pool)
+	modelRuns, err := agentpostgres.NewGORMRepository(pool)
 	if err != nil {
 		return nil, err
 	}
-	profiles, err := capturepostgres.NewProfileRepository(pool, modelRuns)
+	profiles, err := capturepostgres.NewGORMProfileRepository(pool, modelRuns)
 	if err != nil {
 		return nil, err
 	}
@@ -1089,11 +1172,11 @@ func newCaptureHandler(pool *pgxpool.Pool, content captureapplication.ManagedCon
 }
 
 // newKnowledgeHandler 组装不可变 Timeline 投影查询与只读 Impact 报告服务。
-func newKnowledgeHandler(pool *pgxpool.Pool, timeout time.Duration) (*knowledgehttp.Handler, error) {
+func newKnowledgeHandler(pool *postgres.Pool, timeout time.Duration) (*knowledgehttp.Handler, error) {
 	if pool == nil {
 		return nil, errors.New("knowledge timeline database is unavailable")
 	}
-	repository, err := knowledgepostgres.NewRepository(pool)
+	repository, err := knowledgepostgres.NewGORMRepository(pool)
 	if err != nil {
 		return nil, err
 	}
@@ -1109,7 +1192,7 @@ func newKnowledgeHandler(pool *pgxpool.Pool, timeout time.Duration) (*knowledgeh
 	if err != nil {
 		return nil, err
 	}
-	auditRepository, err := auditpostgres.NewRepository(pool)
+	auditRepository, err := auditpostgres.NewGORMStore(pool)
 	if err != nil {
 		return nil, err
 	}
@@ -1121,7 +1204,7 @@ func newKnowledgeHandler(pool *pgxpool.Pool, timeout time.Duration) (*knowledgeh
 	if err != nil {
 		return nil, err
 	}
-	impact, err := knowledgeapplication.NewImpactServiceWithAudit(repository, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, impactAudit)
+	impact, err := knowledgeapplication.NewScopedImpactServiceWithAudit(repository, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, impactAudit)
 	if err != nil {
 		return nil, err
 	}
@@ -1129,11 +1212,11 @@ func newKnowledgeHandler(pool *pgxpool.Pool, timeout time.Duration) (*knowledgeh
 }
 
 // newReviewHandler 组装 Review 的 PostgreSQL 事实、证据校验与冻结 FSRS 调度器。
-func newReviewHandler(pool *pgxpool.Pool, timeout time.Duration, questionRefKey string) (*reviewhttp.Handler, error) {
+func newReviewHandler(pool *postgres.Pool, timeout time.Duration, questionRefKey string) (*reviewhttp.Handler, error) {
 	if pool == nil {
 		return nil, errors.New("review database is unavailable")
 	}
-	repository, err := reviewpostgres.NewRepository(pool)
+	repository, err := reviewpostgres.NewGORMRepository(pool)
 	if err != nil {
 		return nil, err
 	}
@@ -1150,7 +1233,7 @@ func newReviewHandler(pool *pgxpool.Pool, timeout time.Duration, questionRefKey 
 }
 
 // newMemoryHandler 组装 Memory 的 PostgreSQL 生命周期事实与认证 HTTP 边界。
-func newMemoryHandler(pool *pgxpool.Pool, timeout time.Duration) (*memoryhttp.Handler, error) {
+func newMemoryHandler(pool *postgres.Pool, timeout time.Duration) (*memoryhttp.Handler, error) {
 	service, err := newMemoryService(pool)
 	if err != nil {
 		return nil, err
@@ -1159,11 +1242,19 @@ func newMemoryHandler(pool *pgxpool.Pool, timeout time.Duration) (*memoryhttp.Ha
 }
 
 // newMemoryService 统一组装 Memory 生命周期与 effective-context 读取依赖。
-func newMemoryService(pool *pgxpool.Pool) (*memoryapplication.Service, error) {
+func newMemoryService(pool *postgres.Pool) (*memoryapplication.Service, error) {
 	if pool == nil {
 		return nil, errors.New("memory database is unavailable")
 	}
-	repository, err := memorypostgres.NewRepository(pool)
+	gormDB, err := pool.GORM()
+	if err != nil {
+		return nil, err
+	}
+	unitOfWork, err := pool.UnitOfWork()
+	if err != nil {
+		return nil, err
+	}
+	repository, err := memorypostgres.NewGORMRepository(gormDB, unitOfWork)
 	if err != nil {
 		return nil, err
 	}
@@ -1176,8 +1267,8 @@ func newMemoryService(pool *pgxpool.Pool) (*memoryapplication.Service, error) {
 
 // newInterviewHandler 组装 Interview 专属 PostgreSQL 事实、确定性评分和 Artifact DRAFT bridge。
 func newInterviewHandler(
-	pool *pgxpool.Pool,
-	workspaces *workspacepostgres.Repository,
+	pool *postgres.Pool,
+	workspaces workspaceruntimegrant.GORMRepositoryPort,
 	files workspacedomain.FileScanner,
 	timeout time.Duration,
 ) (*interviewhttp.Handler, error) {
@@ -1190,18 +1281,18 @@ func newInterviewHandler(
 
 // newInterviewService 统一组装 Interview、Memory 上下文和带服务端 Citation 校验的 Artifact 命令。
 func newInterviewService(
-	pool *pgxpool.Pool,
-	workspaces *workspacepostgres.Repository,
+	pool *postgres.Pool,
+	workspaces workspaceruntimegrant.GORMRepositoryPort,
 	files workspacedomain.FileScanner,
 ) (*interviewapplication.Service, error) {
 	if pool == nil || workspaces == nil || files == nil {
 		return nil, errors.New("interview dependencies are unavailable")
 	}
-	repository, err := interviewpostgres.NewRepository(pool)
+	repository, err := interviewpostgres.NewGORMRepository(pool)
 	if err != nil {
 		return nil, err
 	}
-	artifactRepository, err := artifactpostgres.NewRepository(pool)
+	artifactRepository, err := artifactpostgres.NewGORMRepository(pool)
 	if err != nil {
 		return nil, err
 	}
@@ -1248,19 +1339,19 @@ func newInterviewService(
 
 // newLearningPathHandler 组装 Review Answer 派生的共享 Path、Artifact hidden hold 与 HTTP 边界。
 func newLearningPathHandler(
-	pool *pgxpool.Pool,
-	workspaces *workspacepostgres.Repository,
+	pool *postgres.Pool,
+	workspaces workspaceruntimegrant.GORMRepositoryPort,
 	files workspacedomain.FileScanner,
 	timeout time.Duration,
 ) (*learningpathhttp.Handler, error) {
 	if pool == nil || workspaces == nil || files == nil {
 		return nil, errors.New("learning path dependencies are unavailable")
 	}
-	repository, err := learningpathpostgres.NewRepository(pool)
+	repository, err := learningpathpostgres.NewGORMRepository(pool)
 	if err != nil {
 		return nil, err
 	}
-	artifactRepository, err := artifactpostgres.NewRepository(pool)
+	artifactRepository, err := artifactpostgres.NewGORMRepository(pool)
 	if err != nil {
 		return nil, err
 	}
@@ -1315,11 +1406,11 @@ func impactAuditActorForPrincipal(principal authdomain.Principal, found bool) (a
 }
 
 // newExportHandler 组装 Collection durable snapshot、受限本地文件和 insert-only River 投递边界。
-func newExportHandler(pool *pgxpool.Pool, cfg config.Config, workspaces *workspacepostgres.Repository, enqueueFences ...riveradapter.EnqueueFence) (*exporthttp.Handler, error) {
+func newExportHandler(pool *postgres.Pool, cfg config.Config, workspaces workspaceruntimegrant.GORMRepositoryPort, enqueueFences ...riveradapter.ScopedEnqueueFence) (*exporthttp.Handler, error) {
 	if pool == nil || workspaces == nil {
 		return nil, errors.New("export dependencies are unavailable")
 	}
-	collectionRepository, err := collectionpostgres.NewRepository(pool)
+	collectionRepository, err := collectionpostgres.NewGORMRepository(pool)
 	if err != nil {
 		return nil, err
 	}
@@ -1337,18 +1428,18 @@ func newExportHandler(pool *pgxpool.Pool, cfg config.Config, workspaces *workspa
 	if err != nil {
 		return nil, err
 	}
-	eventStore, err := eventspostgres.NewStore(pool)
+	eventStore, err := eventspostgres.NewGORMStore(pool)
 	if err != nil {
 		return nil, err
 	}
-	auditStore, err := auditpostgres.NewStore(pool)
+	auditStore, err := auditpostgres.NewGORMStore(pool)
 	if err != nil {
 		return nil, err
 	}
-	repository, err := exportpostgres.NewRepository(
+	repository, err := exportpostgres.NewGORMRepository(
 		pool,
-		exportpostgres.WithEventAppender(eventStore),
-		exportpostgres.WithAuditAppender(auditStore),
+		exportpostgres.WithGORMEventAppender(eventStore),
+		exportpostgres.WithGORMAuditAppender(auditStore),
 	)
 	if err != nil {
 		return nil, err
@@ -1358,14 +1449,15 @@ func newExportHandler(pool *pgxpool.Pool, cfg config.Config, workspaces *workspa
 		JobTimeout: cfg.WorkerJobTimeout, RescueStuckJobsAfter: cfg.WorkerRescueStuckJobsAfter,
 		SoftStopTimeout: cfg.WorkerSoftStopTimeout,
 	}
-	if len(enqueueFences) > 0 {
-		riverOptions.EnqueueFence = enqueueFences[0]
-	}
-	client, err := riveradapter.NewClientWithOptions(pool, nil, riverOptions)
+	fence, err := apiEnqueueFence(cfg, enqueueFences)
 	if err != nil {
 		return nil, err
 	}
-	dispatcher, err := exportriver.NewTransactionalDispatcher(pool, client)
+	client, err := riveradapter.NewClientWithOptions(pool.DB(), nil, riverOptions)
+	if err != nil {
+		return nil, err
+	}
+	dispatcher, err := exportriver.NewGORMTransactionalDispatcher(pool, client, fence)
 	if err != nil {
 		return nil, err
 	}
@@ -1380,11 +1472,11 @@ func newExportHandler(pool *pgxpool.Pool, cfg config.Config, workspaces *workspa
 }
 
 // newGraphHandler 以 canonical Knowledge facts 组装只读 Graph 查询链路。
-func newGraphHandler(pool *pgxpool.Pool, timeout time.Duration) (*graphhttp.Handler, error) {
+func newGraphHandler(pool *postgres.Pool, timeout time.Duration) (*graphhttp.Handler, error) {
 	if pool == nil {
 		return nil, errors.New("graph database is unavailable")
 	}
-	repository, err := graphpostgres.NewRepository(pool)
+	repository, err := graphpostgres.NewGORMRepository(pool)
 	if err != nil {
 		return nil, err
 	}
@@ -1401,16 +1493,21 @@ func newGraphHandler(pool *pgxpool.Pool, timeout time.Duration) (*graphhttp.Hand
 
 // newCandidateHandler 组装独立候选查询与 Confirm Proposal 写入链路。
 // 候选不可用不会改变正式 Graph 查询的 readiness。
-func newCandidateHandler(pool *pgxpool.Pool, runtime *workflowpostgres.RuntimeRepository, timeout time.Duration) (*graphhttp.CandidateHandler, error) {
+func newCandidateHandler(pool *postgres.Pool, runtime *workflowpostgres.GORMRuntimeRepository, timeout time.Duration) (*graphhttp.CandidateHandler, error) {
 	if pool == nil {
 		return nil, errors.New("semantic link candidate database is unavailable")
 	}
-	repository, err := graphpostgres.NewRepository(pool)
+	repository, err := graphpostgres.NewGORMRepository(pool)
 	if err != nil {
 		return nil, err
 	}
-	confirmer, err := graphpostgres.NewCandidateConfirmRepository(
+	proposals, err := changecontrolpostgres.NewGORMRepository(pool)
+	if err != nil {
+		return nil, err
+	}
+	confirmer, err := graphpostgres.NewGORMCandidateConfirmRepository(
 		pool,
+		proposals,
 		foundation.NewUUIDGenerator(nil),
 		foundation.SystemClock{},
 	)
@@ -1428,7 +1525,11 @@ func newCandidateHandler(pool *pgxpool.Pool, runtime *workflowpostgres.RuntimeRe
 	if runtime == nil {
 		return graphhttp.NewCandidateHandler(service, timeout), nil
 	}
-	scanRepository, err := graphpostgres.NewSemanticLinkScanRepository(pool, runtime, foundation.NewUUIDGenerator(nil), foundation.SystemClock{})
+	collectionRepository, err := collectionpostgres.NewGORMRepository(pool)
+	if err != nil {
+		return nil, err
+	}
+	scanRepository, err := graphpostgres.NewGORMSemanticLinkScanRepository(pool, runtime, collectionRepository, foundation.NewUUIDGenerator(nil), foundation.SystemClock{})
 	if err != nil {
 		return nil, err
 	}
@@ -1436,11 +1537,7 @@ func newCandidateHandler(pool *pgxpool.Pool, runtime *workflowpostgres.RuntimeRe
 	if err != nil {
 		return nil, err
 	}
-	planner, err := graphpostgres.NewSemanticLinkTopicScanPlanner(pool)
-	if err != nil {
-		return nil, err
-	}
-	collectionRepository, err := collectionpostgres.NewRepository(pool)
+	planner, err := graphpostgres.NewGORMSemanticLinkTopicScanPlanner(pool)
 	if err != nil {
 		return nil, err
 	}
@@ -1450,7 +1547,7 @@ func newCandidateHandler(pool *pgxpool.Pool, runtime *workflowpostgres.RuntimeRe
 	if err != nil {
 		return nil, err
 	}
-	smartPlanner, err := graphpostgres.NewSmartCollectionScanPlanner(collectionService)
+	smartPlanner, err := graphpostgres.NewGORMSmartCollectionScanPlanner(collectionService)
 	if err != nil {
 		return nil, err
 	}
@@ -1466,7 +1563,7 @@ func newCandidateHandler(pool *pgxpool.Pool, runtime *workflowpostgres.RuntimeRe
 }
 
 func newRetrievalHandler(
-	pool *pgxpool.Pool,
+	pool *postgres.Pool,
 	embedder retrievalapplication.Embedder,
 	workspaceRepository workspacedomain.SourceMaterialRepository,
 	files workspacedomain.FileScanner,
@@ -1475,7 +1572,7 @@ func newRetrievalHandler(
 	if pool == nil || workspaceRepository == nil || files == nil {
 		return nil, errors.New("retrieval search dependencies are unavailable")
 	}
-	searchRepository, err := retrievalpostgres.NewSearchRepository(pool)
+	searchRepository, err := retrievalpostgres.NewGORMSearchRepository(pool)
 	if err != nil {
 		return nil, err
 	}
@@ -1500,8 +1597,8 @@ func newRetrievalHandler(
 
 // newArtifactHandler 从 PostgreSQL 事实组装 Artifact 人工、查询和可选生成边界。
 func newArtifactHandler(
-	pool *pgxpool.Pool,
-	workspaces *workspacepostgres.Repository,
+	pool *postgres.Pool,
+	workspaces workspaceruntimegrant.GORMRepositoryPort,
 	files workspacedomain.FileScanner,
 	proposals artifactchangecontrol.ProposalCreator,
 	timeout time.Duration,
@@ -1514,8 +1611,8 @@ func newArtifactHandler(
 }
 
 func newArtifactHandlerWithDependencies(
-	pool *pgxpool.Pool,
-	workspaces *workspacepostgres.Repository,
+	pool *postgres.Pool,
+	workspaces workspaceruntimegrant.GORMRepositoryPort,
 	files workspacedomain.FileScanner,
 	proposals artifactchangecontrol.ProposalCreator,
 	timeout time.Duration,
@@ -1529,7 +1626,7 @@ func newArtifactHandlerWithDependencies(
 	if len(generation) > 1 {
 		return nil, errors.New("artifact generation dependency is ambiguous")
 	}
-	repository, err := artifactpostgres.NewRepository(pool)
+	repository, err := artifactpostgres.NewGORMRepository(pool)
 	if err != nil {
 		return nil, err
 	}
@@ -1568,14 +1665,14 @@ func newArtifactHandlerWithDependencies(
 
 // newArtifactCitationVerifier 组装 Retrieval 打开与 Knowledge 正式资格的服务端 Citation 校验器。
 func newArtifactCitationVerifier(
-	pool *pgxpool.Pool,
-	workspaces *workspacepostgres.Repository,
+	pool *postgres.Pool,
+	workspaces workspaceruntimegrant.GORMRepositoryPort,
 	files workspacedomain.FileScanner,
 ) (*artifactapplication.ServerCitationVerifier, error) {
 	if pool == nil || workspaces == nil || files == nil {
 		return nil, errors.New("artifact citation dependencies are unavailable")
 	}
-	searchRepository, err := retrievalpostgres.NewSearchRepository(pool)
+	searchRepository, err := retrievalpostgres.NewGORMSearchRepository(pool)
 	if err != nil {
 		return nil, err
 	}
@@ -1587,7 +1684,7 @@ func newArtifactCitationVerifier(
 	if err != nil {
 		return nil, err
 	}
-	knowledgeRepository, err := knowledgepostgres.NewRepository(pool)
+	knowledgeRepository, err := knowledgepostgres.NewGORMRepository(pool)
 	if err != nil {
 		return nil, err
 	}
@@ -1600,16 +1697,16 @@ func newArtifactCitationVerifier(
 
 // newArtifactGenerationAgent 先组装 Agent 事务端口与独立 terminal hook，解除 Runtime 构造依赖环。
 func newArtifactGenerationAgent(
-	pool *pgxpool.Pool,
-) (*agentpostgres.Repository, *artifactpostgres.SectionGenerationTerminalHook, error) {
+	pool *postgres.Pool,
+) (*agentpostgres.GORMRepository, *artifactpostgres.GORMSectionGenerationTerminalHook, error) {
 	if pool == nil {
 		return nil, nil, errors.New("artifact generation database is unavailable")
 	}
-	agentRepository, err := agentpostgres.NewRepository(pool)
+	agentRepository, err := agentpostgres.NewGORMRepository(pool)
 	if err != nil {
 		return nil, nil, err
 	}
-	terminal, err := artifactpostgres.NewSectionGenerationTerminalHook(agentRepository, agentworkflow.DefaultProfileRef())
+	terminal, err := artifactpostgres.NewGORMSectionGenerationTerminalHook(pool, agentRepository, agentworkflow.DefaultProfileRef())
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1618,14 +1715,14 @@ func newArtifactGenerationAgent(
 
 // newArtifactSectionGeneration 在权威 Runtime 构造后组装 PostgreSQL Generation Repository。
 func newArtifactSectionGeneration(
-	pool *pgxpool.Pool,
-	workspaces *workspacepostgres.Repository,
+	pool *postgres.Pool,
+	workspaces workspaceruntimegrant.GORMRepositoryPort,
 	files workspacedomain.FileScanner,
-	runtime artifactpostgres.RuntimeStarterTx,
-	agentRepository *agentpostgres.Repository,
+	runtime *workflowpostgres.GORMRuntimeRepository,
+	agentRepository *agentpostgres.GORMRepository,
 	ids foundation.IDGenerator,
 	clock foundation.Clock,
-) (*artifactpostgres.SectionGenerationRepository, error) {
+) (*artifactpostgres.GORMSectionGenerationRepository, error) {
 	if pool == nil || workspaces == nil || files == nil || runtime == nil || agentRepository == nil || ids == nil || clock == nil {
 		return nil, errors.New("artifact generation dependencies are unavailable")
 	}
@@ -1633,9 +1730,14 @@ func newArtifactSectionGeneration(
 	if err != nil {
 		return nil, err
 	}
-	generation, err := artifactpostgres.NewSectionGenerationRepository(
+	binding, err := workflowpostgres.NewGORMRuntimeBindingReader(pool)
+	if err != nil {
+		return nil, err
+	}
+	generation, err := artifactpostgres.NewGORMSectionGenerationRepository(
 		pool,
 		runtime,
+		binding,
 		agentRepository,
 		verifier,
 		ids,
@@ -1666,10 +1768,10 @@ func questionDispatchEnabled(ragEnabled bool, ragInitErr error) bool {
 
 // newConversationHandlers 使用同一个持久 Event Store 组装 Conversation 写事件与 SSE 重放边界。
 func newConversationHandlers(
-	pool *pgxpool.Pool,
-	runtime *workflowpostgres.RuntimeRepository,
+	pool *postgres.Pool,
+	runtime *workflowpostgres.GORMRuntimeRepository,
 	ragEnabled bool,
-	workspaceAnalysis ...agentapplication.WorkspaceAnalysisRunStarter,
+	workspaceAnalysis ...agentapplication.ScopedWorkspaceAnalysisRunStarter,
 ) (*conversationhttp.Handler, *eventshttp.Handler, error) {
 	if pool == nil {
 		return nil, nil, errors.New("conversation database is unavailable")
@@ -1677,18 +1779,18 @@ func newConversationHandlers(
 	if len(workspaceAnalysis) > 1 || (!ragEnabled && len(workspaceAnalysis) != 0) {
 		return nil, nil, errors.New("conversation workspace analysis capability is ambiguous or cannot run without dispatch")
 	}
-	eventStore, err := eventspostgres.NewStore(pool)
+	eventStore, err := eventspostgres.NewGORMStore(pool)
 	if err != nil {
 		return nil, nil, err
 	}
-	repository, err := conversationpostgres.NewRepository(pool, eventStore)
+	repository, err := conversationpostgres.NewGORMRepository(pool, eventStore)
 	if err != nil {
 		return nil, nil, err
 	}
 	var dispatcher conversationapplication.QuestionDispatcher
 	if ragEnabled {
 		if len(workspaceAnalysis) == 1 {
-			auditRepository, auditErr := auditpostgres.NewRepository(pool)
+			auditRepository, auditErr := auditpostgres.NewGORMStore(pool)
 			if auditErr != nil {
 				return nil, nil, auditErr
 			}
@@ -1696,11 +1798,11 @@ func newConversationHandlers(
 			if auditErr != nil {
 				return nil, nil, auditErr
 			}
-			dispatcher, err = conversationpostgres.NewQuestionDispatcherWithWorkspaceAnalysisAndAudit(
+			dispatcher, err = conversationpostgres.NewGORMQuestionDispatcherWithWorkspaceAnalysisAndAudit(
 				pool, runtime, eventStore, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, workspaceAnalysis[0], auditRecorder,
 			)
 		} else {
-			dispatcher, err = conversationpostgres.NewQuestionDispatcher(
+			dispatcher, err = conversationpostgres.NewGORMQuestionDispatcher(
 				pool, runtime, eventStore, foundation.NewUUIDGenerator(nil), foundation.SystemClock{},
 			)
 		}
@@ -1720,29 +1822,47 @@ func newConversationHandlers(
 }
 
 // newDraftStreamHandler 独立于持久 Server Event 组装短期 Answer 草稿流。
-func newDraftStreamHandler(pool *pgxpool.Pool) (*conversationhttp.DraftStreamHandler, error) {
+func newDraftStreamHandler(pool *postgres.Pool) (*conversationhttp.DraftStreamHandler, error) {
 	if pool == nil {
 		return nil, errors.New("answer draft stream database is unavailable")
 	}
-	repository, err := conversationpostgres.NewDraftStreamRepository(pool)
+	repository, err := conversationpostgres.NewGORMDraftStreamRepository(pool)
 	if err != nil {
 		return nil, err
 	}
 	return conversationhttp.NewDraftStreamHandler(repository), nil
 }
 
-func newWorkflowService(pool *pgxpool.Pool) (*workflowapplication.Service, error) {
+func newWorkflowService(pool *postgres.Pool) (*workflowapplication.Service, error) {
 	service, _, err := newWorkflowComponents(pool, config.Defaults())
 	return service, err
 }
 
 type apiRuntimeRepositoryFactory struct {
-	pool     *pgxpool.Pool
-	inserter riveradapter.JobInserter
+	pool    *postgres.Pool
+	options riveradapter.Options
+	fence   riveradapter.ScopedEnqueueFence
+}
+
+// apiEnqueueFence 显式保持静态配置无 rollout 锁、受管配置必须有真实事务围栏的边界。
+func apiEnqueueFence(cfg config.Config, fences []riveradapter.ScopedEnqueueFence) (riveradapter.ScopedEnqueueFence, error) {
+	if len(fences) > 1 {
+		return nil, errors.New("workflow enqueue fence is ambiguous")
+	}
+	if len(fences) == 1 {
+		if fences[0] == nil {
+			return nil, errors.New("workflow enqueue fence is unavailable")
+		}
+		return fences[0], nil
+	}
+	if cfg.ModelSettingsMode == config.ModelSettingsModeStatic {
+		return riveradapter.NewStaticScopedEnqueueFence(), nil
+	}
+	return nil, errors.New("managed workflow enqueue fence is unavailable")
 }
 
 // newAPIRuntimeRepositoryFactory 使用同一 pool 与 Worker 配置创建可复用的 Runtime Repository factory。
-func newAPIRuntimeRepositoryFactory(pool *pgxpool.Pool, cfg config.Config, enqueueFences ...riveradapter.EnqueueFence) (*apiRuntimeRepositoryFactory, error) {
+func newAPIRuntimeRepositoryFactory(pool *postgres.Pool, cfg config.Config, enqueueFences ...riveradapter.ScopedEnqueueFence) (*apiRuntimeRepositoryFactory, error) {
 	if pool == nil {
 		return nil, errors.New("workflow database is unavailable")
 	}
@@ -1751,39 +1871,32 @@ func newAPIRuntimeRepositoryFactory(pool *pgxpool.Pool, cfg config.Config, enque
 		JobTimeout: cfg.WorkerJobTimeout, RescueStuckJobsAfter: cfg.WorkerRescueStuckJobsAfter,
 		SoftStopTimeout: cfg.WorkerSoftStopTimeout,
 	}
-	if len(enqueueFences) > 0 {
-		riverOptions.EnqueueFence = enqueueFences[0]
-	}
-	client, err := riveradapter.NewClientWithOptions(pool, nil, riverOptions)
+	fence, err := apiEnqueueFence(cfg, enqueueFences)
 	if err != nil {
 		return nil, err
 	}
-	inserter, err := riveradapter.NewJobInserter(client)
-	if err != nil {
-		return nil, err
-	}
-	return &apiRuntimeRepositoryFactory{pool: pool, inserter: inserter}, nil
+	return &apiRuntimeRepositoryFactory{pool: pool, options: riverOptions, fence: fence}, nil
 }
 
-func (factory *apiRuntimeRepositoryFactory) newRepository(hooks workflowpostgres.RuntimeRepositoryHooks) (*workflowpostgres.RuntimeRepository, error) {
-	if factory == nil || factory.pool == nil || factory.inserter == nil {
+func (factory *apiRuntimeRepositoryFactory) newRepository(hooks workflowpostgres.GORMRuntimeRepositoryHooks) (*workflowpostgres.GORMRuntimeRepository, error) {
+	if factory == nil || factory.pool == nil || factory.fence == nil {
 		return nil, errors.New("workflow runtime repository factory is unavailable")
 	}
-	return workflowpostgres.NewRuntimeRepositoryWithHooks(factory.pool, factory.inserter, hooks)
+	return workflowpostgres.NewGORMRuntimeRepositoryWithHooks(factory.pool, factory.options, factory.fence, hooks)
 }
 
 // newAPIArtifactWorkflowComponents 按 Agent、terminal hook、权威 Runtime、Generation 的顺序消除构造环。
 func newAPIArtifactWorkflowComponents(
-	pool *pgxpool.Pool,
+	pool *postgres.Pool,
 	cfg config.Config,
-	workspaces *workspacepostgres.Repository,
+	workspaces workspaceruntimegrant.GORMRepositoryPort,
 	files workspacedomain.FileScanner,
-	cancellation workflowapplication.CancellationSafetyGuard,
+	cancellation workflowapplication.ScopedCancellationSafetyGuard,
 	ids foundation.IDGenerator,
 	clock foundation.Clock,
 	workspaceAnalysis *apiWorkspaceAnalysisRuntimeHooks,
-	enqueueFences ...riveradapter.EnqueueFence,
-) (*workflowapplication.Service, *workflowpostgres.RuntimeRepository, *artifactpostgres.SectionGenerationRepository, error) {
+	enqueueFences ...riveradapter.ScopedEnqueueFence,
+) (*workflowapplication.Service, *workflowpostgres.GORMRuntimeRepository, *artifactpostgres.GORMSectionGenerationRepository, error) {
 	factory, err := newAPIRuntimeRepositoryFactory(pool, cfg, enqueueFences...)
 	if err != nil {
 		return nil, nil, nil, err
@@ -1796,7 +1909,7 @@ func newAPIArtifactWorkflowComponents(
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	runtime, err := factory.newRepository(workflowpostgres.RuntimeRepositoryHooks{
+	runtime, err := factory.newRepository(workflowpostgres.GORMRuntimeRepositoryHooks{
 		CancellationSafety: cancellation,
 		Terminal:           terminalHooks,
 		Control:            controlHook,
@@ -1815,7 +1928,7 @@ func newAPIArtifactWorkflowComponents(
 	return service, runtime, generation, nil
 }
 
-func newWorkflowComponents(pool *pgxpool.Pool, cfg config.Config, guards ...workflowapplication.CancellationSafetyGuard) (*workflowapplication.Service, *workflowpostgres.RuntimeRepository, error) {
+func newWorkflowComponents(pool *postgres.Pool, cfg config.Config, guards ...workflowapplication.ScopedCancellationSafetyGuard) (*workflowapplication.Service, *workflowpostgres.GORMRuntimeRepository, error) {
 	if len(guards) > 1 {
 		return nil, nil, errors.New("workflow accepts at most one cancellation guard")
 	}
@@ -1823,7 +1936,7 @@ func newWorkflowComponents(pool *pgxpool.Pool, cfg config.Config, guards ...work
 	if err != nil {
 		return nil, nil, err
 	}
-	hooks := workflowpostgres.RuntimeRepositoryHooks{}
+	hooks := workflowpostgres.GORMRuntimeRepositoryHooks{}
 	if len(guards) == 1 {
 		hooks.CancellationSafety = guards[0]
 	}
@@ -1832,8 +1945,8 @@ func newWorkflowComponents(pool *pgxpool.Pool, cfg config.Config, guards ...work
 
 func newWorkflowComponentsWithFactory(
 	factory *apiRuntimeRepositoryFactory,
-	hooks workflowpostgres.RuntimeRepositoryHooks,
-) (*workflowapplication.Service, *workflowpostgres.RuntimeRepository, error) {
+	hooks workflowpostgres.GORMRuntimeRepositoryHooks,
+) (*workflowapplication.Service, *workflowpostgres.GORMRuntimeRepository, error) {
 	if factory == nil || factory.pool == nil {
 		return nil, nil, errors.New("workflow runtime repository factory is unavailable")
 	}
@@ -1850,13 +1963,13 @@ func newWorkflowComponentsWithFactory(
 
 func newWorkflowServiceWithRuntime(
 	factory *apiRuntimeRepositoryFactory,
-	runtimeRepository *workflowpostgres.RuntimeRepository,
+	runtimeRepository *workflowpostgres.GORMRuntimeRepository,
 	chatEnabled bool,
 ) (*workflowapplication.Service, error) {
 	if factory == nil || factory.pool == nil || runtimeRepository == nil {
 		return nil, errors.New("workflow runtime dependencies are unavailable")
 	}
-	legacyRepository, err := workflowpostgres.NewRepository(factory.pool)
+	repository, err := workflowpostgres.NewGORMRepository(factory.pool)
 	if err != nil {
 		return nil, err
 	}
@@ -1888,7 +2001,7 @@ func newWorkflowServiceWithRuntime(
 	if err := definitions.Freeze(); err != nil {
 		return nil, err
 	}
-	service, err := workflowapplication.NewRuntimeService(legacyRepository, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, workflowapplication.RuntimeDependencies{Definitions: definitions, Starter: runtimeRepository, State: runtimeRepository, Human: runtimeRepository})
+	service, err := workflowapplication.NewRuntimeService(repository, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, workflowapplication.RuntimeDependencies{Definitions: definitions, Starter: runtimeRepository, State: runtimeRepository, Human: runtimeRepository})
 	if err != nil {
 		return nil, err
 	}
@@ -1956,11 +2069,11 @@ func firstError(values ...error) error {
 }
 
 // configureCollectionHealth 组装 Collection/Health 的真实 API seam；构造失败时由调用方显式保持路由不可用。
-func configureCollectionHealth(database *postgres.Pool, cfg config.Config, collectionHandler **collectionhttp.Handler, healthHandler **healthhttp.Handler, runtime *workflowpostgres.RuntimeRepository) error {
+func configureCollectionHealth(database *postgres.Pool, cfg config.Config, collectionHandler **collectionhttp.Handler, healthHandler **healthhttp.Handler, runtime *workflowpostgres.GORMRuntimeRepository) error {
 	if database == nil || collectionHandler == nil || healthHandler == nil {
 		return errors.New("collection and health composition dependencies are unavailable")
 	}
-	repository, err := collectionpostgres.NewRepository(database.DB())
+	repository, err := collectionpostgres.NewGORMRepository(database)
 	if err != nil {
 		return err
 	}
@@ -1974,11 +2087,11 @@ func configureCollectionHealth(database *postgres.Pool, cfg config.Config, colle
 	}
 	*collectionHandler = collectionhttp.NewHandler(service, cfg.GraphQueryTimeout)
 
-	issueRepository, err := healthpostgres.NewSmartCollectionIssueRepository(database.DB(), membership, foundation.NewUUIDGenerator(nil))
+	issueRepository, err := healthpostgres.NewGORMIssueRepository(database, membership, foundation.NewUUIDGenerator(nil), repository)
 	if err != nil {
 		return err
 	}
-	readRepository, err := healthpostgres.NewReadRepository(database.DB())
+	readRepository, err := healthpostgres.NewGORMReadRepository(database)
 	if err != nil {
 		return err
 	}
@@ -1995,7 +2108,7 @@ func configureCollectionHealth(database *postgres.Pool, cfg config.Config, colle
 		return err
 	}
 
-	factReader, err := healthpostgres.NewFactReader(database.DB(), membership)
+	factReader, err := healthpostgres.NewGORMFactReader(database, membership)
 	if err != nil {
 		return err
 	}
@@ -2006,11 +2119,11 @@ func configureCollectionHealth(database *postgres.Pool, cfg config.Config, colle
 	var scanService *healthapplication.ScanService
 	var scheduleService *healthapplication.ScheduleService
 	if runtime != nil {
-		healthEvents, err := eventspostgres.NewStore(database.DB())
+		healthEvents, err := eventspostgres.NewGORMStore(database)
 		if err != nil {
 			return err
 		}
-		scanRepository, err := healthpostgres.NewScanRepository(database.DB(), runtime, healthEvents, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, healthcollection.DurableBindingVerifier{})
+		scanRepository, err := healthpostgres.NewGORMScanRepository(database, runtime, healthEvents, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, repository)
 		if err != nil {
 			return err
 		}
@@ -2018,7 +2131,7 @@ func configureCollectionHealth(database *postgres.Pool, cfg config.Config, colle
 		if err != nil {
 			return err
 		}
-		scheduleRepository, err := healthpostgres.NewScheduleRepository(database.DB(), foundation.NewUUIDGenerator(nil))
+		scheduleRepository, err := healthpostgres.NewGORMScheduleRepository(database, foundation.NewUUIDGenerator(nil))
 		if err != nil {
 			return err
 		}

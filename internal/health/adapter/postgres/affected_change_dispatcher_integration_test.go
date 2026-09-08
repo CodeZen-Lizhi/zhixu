@@ -7,7 +7,6 @@ import (
 	"errors"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,18 +14,18 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	healthapp "github.com/CodeZen-Lizhi/zhixu/internal/health/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/health/domain"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	workflowpostgres "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/postgres"
 	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
 	workflowapp "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestAffectedChangeDispatcherConcurrentClaimCreatesOneRuntime(t *testing.T) {
-	ctx, pool, workspaceID := newAffectedChangeTestWorkspace(t, "concurrent")
-	runtime := newAffectedChangeTestRuntime(t, pool)
-	repository, _, _ := newAffectedChangeTestRepository(t, pool, runtime, time.Minute)
+	ctx, platform, workspaceID := newAffectedChangeTestWorkspace(t, "concurrent")
+	pool := platform.DB()
+	runtime := newAffectedChangeTestRuntime(t, platform)
+	repository, _, _ := newAffectedChangeTestRepository(t, platform, runtime, time.Minute)
 	insertAffectedChangeReceipt(t, ctx, pool, workspaceID, "concurrent")
 
 	start := make(chan struct{})
@@ -65,9 +64,10 @@ func TestAffectedChangeDispatcherConcurrentClaimCreatesOneRuntime(t *testing.T) 
 }
 
 func TestAffectedChangeDispatcherRuntimeFailureRollsBackAndRestartPublishes(t *testing.T) {
-	ctx, pool, workspaceID := newAffectedChangeTestWorkspace(t, "runtime-failure")
-	workingRuntime := newAffectedChangeTestRuntime(t, pool)
-	failingRepository, _, registry := newAffectedChangeTestRepository(t, pool, affectedChangeFailRuntime{}, time.Minute)
+	ctx, platform, workspaceID := newAffectedChangeTestWorkspace(t, "runtime-failure")
+	pool := platform.DB()
+	workingRuntime := newAffectedChangeTestRuntime(t, platform)
+	failingRepository, _, registry := newAffectedChangeTestRepository(t, platform, affectedChangeFailRuntime{}, time.Minute)
 	insertAffectedChangeReceipt(t, ctx, pool, workspaceID, "runtime-failure")
 	if _, found, err := failingRepository.DispatchNext(ctx); !found || err == nil {
 		t.Fatalf("found=%v err=%v", found, err)
@@ -87,15 +87,15 @@ func TestAffectedChangeDispatcherRuntimeFailureRollsBackAndRestartPublishes(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	events, err := eventspostgres.NewStore(pool)
+	events, err := eventspostgres.NewGORMStore(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
-	scanRepository, err := NewScanRepository(pool, workingRuntime, events, foundation.NewUUIDGenerator(nil), foundation.SystemClock{})
+	scanRepository, err := NewGORMScanRepository(platform, workingRuntime, events, foundation.NewUUIDGenerator(nil), foundation.SystemClock{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	restarted, err := newAffectedChangeDispatchRepository(scanRepository, planner, time.Minute)
+	restarted, err := NewGORMAffectedChangeDispatchRepository(scanRepository, planner)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,9 +107,10 @@ func TestAffectedChangeDispatcherRuntimeFailureRollsBackAndRestartPublishes(t *t
 }
 
 func TestAffectedChangeDispatcherDefersActiveWorkspaceScanThenBindsOwnScan(t *testing.T) {
-	ctx, pool, workspaceID := newAffectedChangeTestWorkspace(t, "active-scan")
-	runtime := newAffectedChangeTestRuntime(t, pool)
-	repository, scans, registry := newAffectedChangeTestRepository(t, pool, runtime, 5*time.Millisecond)
+	ctx, platform, workspaceID := newAffectedChangeTestWorkspace(t, "active-scan")
+	pool := platform.DB()
+	runtime := newAffectedChangeTestRuntime(t, platform)
+	repository, scans, registry := newAffectedChangeTestRepository(t, platform, runtime, 5*time.Millisecond)
 	service, err := healthapp.NewScanService(scans, scans)
 	if err != nil {
 		t.Fatal(err)
@@ -161,9 +162,10 @@ func TestAffectedChangeDispatcherPersistsSchemaAndSourcePoison(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			ctx, pool, workspaceID := newAffectedChangeTestWorkspace(t, "poison-"+test.name)
-			runtime := newAffectedChangeTestRuntime(t, pool)
-			repository, _, _ := newAffectedChangeTestRepository(t, pool, runtime, time.Minute)
+			ctx, platform, workspaceID := newAffectedChangeTestWorkspace(t, "poison-"+test.name)
+			pool := platform.DB()
+			runtime := newAffectedChangeTestRuntime(t, platform)
+			repository, _, _ := newAffectedChangeTestRepository(t, platform, runtime, time.Minute)
 			insertAffectedChangeReceipt(t, ctx, pool, workspaceID, "poison-"+test.name)
 			connection, err := pool.Acquire(ctx)
 			if err != nil {
@@ -204,10 +206,12 @@ func TestAffectedChangeDispatcherPersistsSchemaAndSourcePoison(t *testing.T) {
 }
 
 func TestAffectedChangeDispatcherRecoversCommitResponseLoss(t *testing.T) {
-	ctx, pool, workspaceID := newAffectedChangeTestWorkspace(t, "commit-loss")
-	runtime := newAffectedChangeTestRuntime(t, pool)
-	lossDB := &affectedChangeCommitLossDB{Pool: pool}
-	repository, _, _ := newAffectedChangeTestRepository(t, lossDB, runtime, time.Minute)
+	ctx, platform, workspaceID := newAffectedChangeTestWorkspace(t, "commit-loss")
+	pool := platform.DB()
+	runtime := newAffectedChangeTestRuntime(t, platform)
+	repository, _, _ := newAffectedChangeTestRepository(t, platform, runtime, time.Minute)
+	lossDB := &healthCommitLossUnitOfWork{UnitOfWork: repository.database.unitOfWork}
+	repository.database.unitOfWork = lossDB
 	insertAffectedChangeReceipt(t, ctx, pool, workspaceID, "commit-loss")
 	result, found, err := repository.DispatchNext(ctx)
 	if err != nil || !found || result.Outcome != healthapp.AffectedChangeDispatchPublished || !lossDB.lost.Load() {
@@ -217,9 +221,10 @@ func TestAffectedChangeDispatcherRecoversCommitResponseLoss(t *testing.T) {
 }
 
 func TestAffectedChangeDispatcherPublishesLexicalDegradation(t *testing.T) {
-	ctx, pool, workspaceID := newAffectedChangeTestWorkspace(t, "lexical-degradation")
-	runtime := newAffectedChangeTestRuntime(t, pool)
-	repository, _, _ := newAffectedChangeTestRepository(t, pool, runtime, time.Minute)
+	ctx, platform, workspaceID := newAffectedChangeTestWorkspace(t, "lexical-degradation")
+	pool := platform.DB()
+	runtime := newAffectedChangeTestRuntime(t, platform)
+	repository, _, _ := newAffectedChangeTestRepository(t, platform, runtime, time.Minute)
 	indexID, err := foundation.NewUUIDGenerator(nil).New()
 	if err != nil {
 		t.Fatal(err)
@@ -299,10 +304,11 @@ func (affectedChangeTestDetector) ScanPage(context.Context, healthapp.PageReques
 	return healthapp.Page{Complete: true}, nil
 }
 
-func newAffectedChangeTestWorkspace(t *testing.T, suffix string) (context.Context, *pgxpool.Pool, foundation.ID) {
+func newAffectedChangeTestWorkspace(t *testing.T, suffix string) (context.Context, *platformpostgres.Pool, foundation.ID) {
 	t.Helper()
 	ctx := context.Background()
-	pool := newHealthRiverTestPool(t, ctx)
+	platform := requireHealthIntegrationPlatform(t)
+	pool := platform.DB()
 	workspaceID, err := foundation.NewUUIDGenerator(nil).New()
 	if err != nil {
 		t.Fatal(err)
@@ -315,27 +321,19 @@ func newAffectedChangeTestWorkspace(t *testing.T, suffix string) (context.Contex
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { cleanupHealthIntegrationWorkspace(t, pool, workspaceID) })
-	return ctx, pool, workspaceID
+	return ctx, platform, workspaceID
 }
 
-func newAffectedChangeTestRuntime(t *testing.T, pool *pgxpool.Pool) ScanRuntimeStarter {
+func newAffectedChangeTestRuntime(t *testing.T, pool *platformpostgres.Pool) workflowapp.ScopedRuntimeStarter {
 	t.Helper()
-	client, err := riveradapter.NewClient(pool, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	inserter, err := riveradapter.NewJobInserter(client)
-	if err != nil {
-		t.Fatal(err)
-	}
-	runtime, err := workflowpostgres.NewRuntimeRepository(pool, inserter)
+	runtime, err := workflowpostgres.NewGORMRuntimeRepositoryWithHooks(pool, riveradapter.DefaultOptions(), healthGORMAllowEnqueueFence{}, workflowpostgres.GORMRuntimeRepositoryHooks{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return runtime
 }
 
-func newAffectedChangeTestRepository(t *testing.T, db scanDB, runtime ScanRuntimeStarter, backoff time.Duration) (*AffectedChangeDispatchRepository, *ScanRepository, *healthapp.Registry) {
+func newAffectedChangeTestRepository(t *testing.T, pool *platformpostgres.Pool, runtime workflowapp.ScopedRuntimeStarter, backoff time.Duration) (*GORMAffectedChangeDispatchRepository, *GORMScanRepository, *healthapp.Registry) {
 	t.Helper()
 	registry, err := healthapp.NewRegistry([]healthapp.Detector{affectedChangeTestDetector{}}, nil)
 	if err != nil {
@@ -345,18 +343,19 @@ func newAffectedChangeTestRepository(t *testing.T, db scanDB, runtime ScanRuntim
 	if err != nil {
 		t.Fatal(err)
 	}
-	events, err := eventspostgres.NewStore(db)
+	events, err := eventspostgres.NewGORMStore(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
-	scans, err := NewScanRepository(db, runtime, events, foundation.NewUUIDGenerator(nil), foundation.SystemClock{})
+	scans, err := NewGORMScanRepository(pool, runtime, events, foundation.NewUUIDGenerator(nil), foundation.SystemClock{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	repository, err := newAffectedChangeDispatchRepository(scans, planner, backoff)
+	repository, err := NewGORMAffectedChangeDispatchRepository(scans, planner)
 	if err != nil {
 		t.Fatal(err)
 	}
+	repository.core.backoff = backoff
 	return repository, scans, registry
 }
 
@@ -410,54 +409,6 @@ func assertAffectedChangeRuntimeCounts(t *testing.T, ctx context.Context, pool *
 
 type affectedChangeFailRuntime struct{}
 
-func (affectedChangeFailRuntime) StartTx(context.Context, pgx.Tx, workflowapp.RuntimeStartRequest) (workflowapp.RuntimeStartResult, error) {
+func (affectedChangeFailRuntime) StartScoped(context.Context, foundation.TransactionScope, workflowapp.RuntimeStartRequest) (workflowapp.RuntimeStartResult, error) {
 	return workflowapp.RuntimeStartResult{}, foundation.NewError(foundation.ErrorRetryableFailure, "HEALTH_AFFECTED_RUNTIME_INJECTED", true, errors.New("injected runtime failure"))
-}
-
-type affectedChangeCommitLossDB struct {
-	Pool *pgxpool.Pool
-	lost atomic.Bool
-}
-
-func (database *affectedChangeCommitLossDB) Exec(ctx context.Context, query string, args ...any) (pgconn.CommandTag, error) {
-	return database.Pool.Exec(ctx, query, args...)
-}
-
-func (database *affectedChangeCommitLossDB) Query(ctx context.Context, query string, args ...any) (pgx.Rows, error) {
-	return database.Pool.Query(ctx, query, args...)
-}
-
-func (database *affectedChangeCommitLossDB) QueryRow(ctx context.Context, query string, args ...any) pgx.Row {
-	return database.Pool.QueryRow(ctx, query, args...)
-}
-
-func (database *affectedChangeCommitLossDB) Begin(ctx context.Context) (pgx.Tx, error) {
-	tx, err := database.Pool.Begin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return &affectedChangeCommitLossTx{Tx: tx, database: database}, nil
-}
-
-func (database *affectedChangeCommitLossDB) BeginTx(ctx context.Context, options pgx.TxOptions) (pgx.Tx, error) {
-	tx, err := database.Pool.BeginTx(ctx, options)
-	if err != nil {
-		return nil, err
-	}
-	return &affectedChangeCommitLossTx{Tx: tx, database: database}, nil
-}
-
-type affectedChangeCommitLossTx struct {
-	pgx.Tx
-	database *affectedChangeCommitLossDB
-}
-
-func (transaction *affectedChangeCommitLossTx) Commit(ctx context.Context) error {
-	if err := transaction.Tx.Commit(ctx); err != nil {
-		return err
-	}
-	if !transaction.database.lost.Swap(true) {
-		return errors.New("injected health affected-change commit response loss")
-	}
-	return nil
 }

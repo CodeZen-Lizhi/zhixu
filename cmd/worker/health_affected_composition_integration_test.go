@@ -18,9 +18,6 @@ import (
 
 func TestWorkerHealthAffectedChangeCompositionConsumesTypedOutboxExactlyOnce(t *testing.T) {
 	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a PostgreSQL admin database")
-	}
 	ctx := context.Background()
 	pool := newMigratedWorkerTestPool(t, databaseURL)
 	components, err := newWorkerComponents(pool, config.Defaults(), slog.New(slog.NewTextHandler(io.Discard, nil)), observability.NewMemoryMetrics())
@@ -41,17 +38,17 @@ func TestWorkerHealthAffectedChangeCompositionConsumesTypedOutboxExactlyOnce(t *
 	}
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	rootPath := "/tmp/worker-health-affected-" + string(workspaceID)
-	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(
+	if _, err := pool.DB().Exec(ctx, `INSERT INTO core.workspace(
 		id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at)
-		VALUES($1,'worker-health-affected',$2,$2,$3,'test',1,$3,$3)`, string(workspaceID), rootPath, now); err != nil {
+		VALUES($1,'worker-health-affected',$2,$2,$3,'active',1,$3,$3)`, string(workspaceID), rootPath, now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO core.topic(
+	if _, err := pool.DB().Exec(ctx, `INSERT INTO core.topic(
 		id,workspace_id,name,normalized_name,description,status,version,created_at,updated_at)
 		VALUES($1,$2,'worker affected topic','worker affected topic','','ACTIVE',1,$3,$3)`, string(topicID), string(workspaceID), now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO core.knowledge_command_receipt(
+	if _, err := pool.DB().Exec(ctx, `INSERT INTO core.knowledge_command_receipt(
 		workspace_id,idempotency_key,request_hash,command_type,aggregate_type,aggregate_id,aggregate_version,created_at)
 		VALUES($1,'worker-health-affected', $2,'topic.create','TOPIC',$3,1,$4)`,
 		string(workspaceID), strings.Repeat("a", 64), string(topicID), now); err != nil {
@@ -74,7 +71,7 @@ func TestWorkerHealthAffectedChangeCompositionConsumesTypedOutboxExactlyOnce(t *
 	}
 
 	var scans, runs, nodes, jobs, published, legacy int
-	if err := pool.QueryRow(ctx, `SELECT
+	if err := pool.DB().QueryRow(ctx, `SELECT
 		(SELECT count(*) FROM ops.health_scan WHERE workspace_id=$1),
 		(SELECT count(*) FROM workflow.run WHERE workspace_id=$1),
 		(SELECT count(*) FROM workflow.node_run node JOIN workflow.run run ON run.id=node.run_id WHERE run.workspace_id=$1),

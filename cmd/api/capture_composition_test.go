@@ -6,21 +6,31 @@ import (
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	workspacepostgres "github.com/CodeZen-Lizhi/zhixu/internal/workspace/adapter/postgres"
 	workspacedomain "github.com/CodeZen-Lizhi/zhixu/internal/workspace/domain"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestNewCaptureHandlerRequiresProductionDependencies(t *testing.T) {
-	if handler, err := newCaptureHandler(nil, captureManagedContentWriterFake{}, time.Second); err == nil || handler != nil {
+	pool := apiConstructorPool(t)
+	sources, err := workspacepostgres.NewGORMRepository(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if handler, err := newCaptureHandler(nil, captureManagedContentWriterFake{}, sources, time.Second); err == nil || handler != nil {
 		t.Fatalf("missing database handler=%#v err=%v", handler, err)
 	}
-	if handler, err := newCaptureHandler(&pgxpool.Pool{}, nil, time.Second); err == nil || handler != nil {
+	if handler, err := newCaptureHandler(pool, nil, sources, time.Second); err == nil || handler != nil {
 		t.Fatalf("missing content writer handler=%#v err=%v", handler, err)
 	}
 }
 
 func TestNewCaptureHandlerComposesProductionDependencies(t *testing.T) {
-	handler, err := newCaptureHandler(&pgxpool.Pool{}, captureManagedContentWriterFake{}, time.Second)
+	pool := apiConstructorPool(t)
+	sources, err := workspacepostgres.NewGORMRepository(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := newCaptureHandler(pool, captureManagedContentWriterFake{}, sources, time.Second)
 	if err != nil || handler == nil || !handler.Available() {
 		t.Fatalf("handler=%#v err=%v", handler, err)
 	}

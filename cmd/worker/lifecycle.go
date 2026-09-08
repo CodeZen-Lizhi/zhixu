@@ -75,6 +75,7 @@ func newLifecycleController(client riverLifecycle, dispatcher dispatcherLifecycl
 	return &lifecycleController{client: client, dispatcher: dispatcher, state: lifecycleIdle, stopDone: make(chan struct{})}, nil
 }
 
+// startWorkerRuntime 返回启动结果，以及失败时是否已确认所有消费者停止。
 func startWorkerRuntime(
 	processContext context.Context,
 	resumeQueue bool,
@@ -84,19 +85,20 @@ func startWorkerRuntime(
 	queue workerQueueController,
 	readiness workerStartupReadiness,
 	health workerStartupHealth,
-) error {
+	shutdownContexts ...func() context.Context,
+) (bool, error) {
 	if !resumeQueue {
 		pauseContext, cancelPause := context.WithTimeout(processContext, queueResumeTimeout)
 		pauseErr := queue.PauseQueue(pauseContext)
 		cancelPause()
 		if pauseErr != nil {
 			readiness.BeginShutdown()
-			return errors.Join(pauseErr, health.Close())
+			return true, errors.Join(pauseErr, health.Close())
 		}
 	}
 	if err := lifecycle.Start(processContext); err != nil {
 		readiness.BeginShutdown()
-		return errors.Join(err, health.Close())
+		return false, errors.Join(err, health.Close())
 	}
 	if resumeQueue {
 		resumeContext, cancelResume := context.WithTimeout(processContext, queueResumeTimeout)
@@ -104,15 +106,22 @@ func startWorkerRuntime(
 		cancelResume()
 		if resumeErr != nil {
 			readiness.BeginShutdown()
-			shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), hardStopTimeout)
-			defer cancelShutdown()
+			var shutdownContext context.Context
+			if len(shutdownContexts) > 0 && shutdownContexts[0] != nil {
+				// The process owner shares this deadline with background runtime cleanup.
+				shutdownContext = shutdownContexts[0]()
+			} else {
+				var cancelShutdown context.CancelFunc
+				shutdownContext, cancelShutdown = context.WithTimeout(context.Background(), hardStopTimeout)
+				defer cancelShutdown()
+			}
 			lifecycleErr := lifecycle.Shutdown(shutdownContext, shutdownGraceful)
 			healthErr := health.Close()
-			return errors.Join(resumeErr, lifecycleErr, healthErr)
+			return lifecycleErr == nil, errors.Join(resumeErr, lifecycleErr, healthErr)
 		}
 	}
 	readiness.SetRiverStarted(true)
-	return nil
+	return false, nil
 }
 
 func nilLifecycleDependency(value any) bool {

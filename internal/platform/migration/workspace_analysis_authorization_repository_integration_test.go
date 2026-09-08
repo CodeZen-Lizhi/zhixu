@@ -10,14 +10,20 @@ import (
 	"testing"
 	"time"
 
+	agentpostgres "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/postgres"
 	agentdomain "github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
+	auditpostgres "github.com/CodeZen-Lizhi/zhixu/internal/audit/adapter/postgres"
+	auditapplication "github.com/CodeZen-Lizhi/zhixu/internal/audit/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/capability"
 	conversationworkflow "github.com/CodeZen-Lizhi/zhixu/internal/conversation/workflow"
+	eventspostgres "github.com/CodeZen-Lizhi/zhixu/internal/events/adapter/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/catalog"
 	toolspostgres "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/postgres"
 	toolsapplication "github.com/CodeZen-Lizhi/zhixu/internal/tools/application"
 	toolsdomain "github.com/CodeZen-Lizhi/zhixu/internal/tools/domain"
+	workflowpostgres "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/postgres"
 	workflowdomain "github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -29,10 +35,10 @@ func TestWorkspaceAnalysisToolAuthorizationReconcileAndFailureSettlement(t *test
 	defer cleanup()
 
 	prepareWorkspaceAnalysisToolAuthorizationRuntime(t, ctx, pool)
-	repository, err := toolspostgres.NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime := openMigrationRuntimePool(t, ctx, pool)
+	defer runtime.Close()
+	pool = runtime.DB()
+	repository := newWorkspaceAnalysisMigrationToolsRepository(t, runtime)
 	definition := workspaceAnalysisGitReceiptDefinition(t)
 	command := workspaceAnalysisGitAuthorizationCommand(
 		definition,
@@ -120,10 +126,10 @@ func TestWorkspaceAnalysisToolAuthorizationReplacementAttemptChargesUnknown(t *t
 	defer cleanup()
 
 	prepareWorkspaceAnalysisToolAuthorizationRuntime(t, ctx, pool)
-	repository, err := toolspostgres.NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime := openMigrationRuntimePool(t, ctx, pool)
+	defer runtime.Close()
+	pool = runtime.DB()
+	repository := newWorkspaceAnalysisMigrationToolsRepository(t, runtime)
 	definition := workspaceAnalysisGitReceiptDefinition(t)
 	first := workspaceAnalysisGitAuthorizationCommand(
 		definition,
@@ -178,10 +184,10 @@ func TestWorkspaceAnalysisToolAuthorizationRejectsPreAuthorizationDeadlineWithou
 	defer cleanup()
 
 	prepareWorkspaceAnalysisToolAuthorizationRuntimeWithRunAge(t, ctx, pool, 13*time.Minute+30*time.Second)
-	repository, err := toolspostgres.NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime := openMigrationRuntimePool(t, ctx, pool)
+	defer runtime.Close()
+	pool = runtime.DB()
+	repository := newWorkspaceAnalysisMigrationToolsRepository(t, runtime)
 	command := workspaceAnalysisGitAuthorizationCommand(
 		workspaceAnalysisGitReceiptDefinition(t),
 		"83000000-0000-4000-8000-000000000126",
@@ -219,6 +225,52 @@ func TestWorkspaceAnalysisToolAuthorizationRejectsPreAuthorizationDeadlineWithou
 	}
 }
 
+type workspaceAnalysisMigrationToolsRepository struct {
+	*toolspostgres.GORMRepository
+	*toolspostgres.GORMWorkspaceAnalysisRepository
+}
+
+func newWorkspaceAnalysisMigrationToolsRepository(t *testing.T, pool *platformpostgres.Pool) *workspaceAnalysisMigrationToolsRepository {
+	t.Helper()
+	policy, err := workflowpostgres.NewGORMToolExecutionPolicySnapshot(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovery, err := workflowpostgres.NewGORMToolCallRecoveryFence(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	core, err := toolspostgres.NewGORMRepository(pool, policy, recovery)
+	if err != nil {
+		t.Fatal(err)
+	}
+	execution, err := workflowpostgres.NewGORMWorkspaceAnalysisExecutionFence(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := agentpostgres.NewGORMRepository(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := eventspostgres.NewGORMStore(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auditStore, err := auditpostgres.NewGORMStore(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	audit, err := auditapplication.NewRecorder(auditStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	analysis, err := toolspostgres.NewGORMWorkspaceAnalysisRepository(pool, execution, agent, agent, agent, events, audit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &workspaceAnalysisMigrationToolsRepository{GORMRepository: core, GORMWorkspaceAnalysisRepository: analysis}
+}
+
 func prepareWorkspaceAnalysisToolAuthorizationRuntime(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	t.Helper()
 	prepareWorkspaceAnalysisToolAuthorizationRuntimeWithRunAge(t, ctx, pool, 0)
@@ -233,8 +285,8 @@ func prepareWorkspaceAnalysisToolAuthorizationRuntimeWithRunAge(
 	t.Helper()
 	provider := workspaceAnalysisMigrationProvider(t, pool)
 	insertWorkspaceAnalysisLegacyQuestion(t, ctx, pool)
-	if err := provider.UpTo(ctx, 85); err != nil {
-		t.Fatalf("apply 00085: %v", err)
+	if err := provider.UpTo(ctx, 89); err != nil {
+		t.Fatalf("apply workspace analysis runtime migrations through 00089: %v", err)
 	}
 	definition := conversationworkflow.RegisteredWorkspaceAnalysisDefinition()
 	snapshot, err := catalog.WorkspaceAnalysisToolCatalogSnapshot()

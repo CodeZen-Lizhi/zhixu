@@ -42,26 +42,6 @@ func (recorder *Recorder) Record(ctx context.Context, event domain.Event) (domai
 	return validateRecordedEvent(redacted, persisted, replayed)
 }
 
-// RecordTx 在调用方事务内校验并追加审计事件；不会提交或回滚事务。
-func (recorder *Recorder) RecordTx(ctx context.Context, transaction any, event domain.Event) (domain.Event, bool, error) {
-	if err := recorder.ready(ctx); err != nil {
-		return domain.Event{}, false, err
-	}
-	appender, ok := recorder.repository.(Appender)
-	if !ok || nilAppender(appender) {
-		return domain.Event{}, false, foundation.NewError(foundation.ErrorDependencyUnavailable, domain.ErrorCodeTransactionUnavailable, true, errors.New("audit transaction appender is unavailable"))
-	}
-	redacted, err := event.Redacted()
-	if err != nil {
-		return domain.Event{}, false, err
-	}
-	persisted, replayed, err := appender.AppendTx(ctx, transaction, redacted)
-	if err != nil {
-		return domain.Event{}, false, err
-	}
-	return validateRecordedEvent(redacted, persisted, replayed)
-}
-
 // RecordScoped validates and appends an Audit event in an opaque caller-owned
 // transaction. It does not commit or roll back the transaction.
 func (recorder *Recorder) RecordScoped(ctx context.Context, scope foundation.TransactionScope, event domain.Event) (domain.Event, bool, error) {
@@ -127,19 +107,6 @@ func validateRecordedEvent(event, persisted domain.Event, replayed bool) (domain
 		return domain.Event{}, false, foundation.NewError(foundation.ErrorConsistencyViolation, domain.ErrorCodeCorrupt, false, errors.New("audit repository returned a different event binding"))
 	}
 	return persisted, replayed, nil
-}
-
-func nilAppender(appender Appender) bool {
-	if appender == nil {
-		return true
-	}
-	value := reflect.ValueOf(appender)
-	switch value.Kind() {
-	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
-		return value.IsNil()
-	default:
-		return false
-	}
 }
 
 func nilScopedAppender(appender ScopedAppender) bool {

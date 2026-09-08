@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -14,27 +13,18 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"gorm.io/gorm"
 )
 
 func TestRepositoryListProposalsWithPostgres(t *testing.T) {
-	databaseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
-	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
+	platform, ctx := newChangeControlMigrationTestPool(t)
+	pool := platform.DB()
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-
-	repository, err := NewRepository(tx)
+	repository, err := NewGORMRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +65,14 @@ func TestRepositoryListProposalsWithPostgres(t *testing.T) {
 	})
 	planNow := now.Add(48 * time.Hour)
 	seedProposalListPlanFixtures(t, ctx, tx, otherWorkspaceID, planNow)
-	assertProposalListPlans(t, ctx, tx, otherWorkspaceID, planNow)
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	database, err := platform.GORM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertProposalListPlans(t, ctx, database, otherWorkspaceID, planNow)
 
 	firstPage, hasMore, err := repository.ListProposals(ctx, domain.ProposalListQuery{WorkspaceID: workspaceID, Limit: 2})
 	if err != nil {
@@ -127,7 +124,7 @@ type proposalListFixture struct {
 func insertProposalListWorkspace(t *testing.T, ctx context.Context, tx pgx.Tx, id foundation.ID, suffix string, now time.Time) {
 	t.Helper()
 	root := "/tmp/zhixu-m9-" + suffix
-	if _, err := tx.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,$2,$3,$3,$4,'test',1,$4,$4)`, string(id), suffix, root, now); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,$2,$3,$3,$4,'inactive',1,$4,$4)`, string(id), suffix, root, now); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -178,7 +175,7 @@ func insertProposalListFixture(t *testing.T, ctx context.Context, tx pgx.Tx, fix
 	}
 }
 
-func assertProposalListIDs(t *testing.T, repository *Repository, ctx context.Context, query domain.ProposalListQuery, want ...foundation.ID) {
+func assertProposalListIDs(t *testing.T, repository *GORMRepository, ctx context.Context, query domain.ProposalListQuery, want ...foundation.ID) {
 	t.Helper()
 	items, hasMore, err := repository.ListProposals(ctx, query)
 	if err != nil {
@@ -221,15 +218,15 @@ func seedProposalListPlanFixtures(t *testing.T, ctx context.Context, tx pgx.Tx, 
 	}
 }
 
-func assertProposalListPlans(t *testing.T, ctx context.Context, tx pgx.Tx, workspaceID foundation.ID, newest time.Time) {
+func assertProposalListPlans(t *testing.T, ctx context.Context, database *gorm.DB, workspaceID foundation.ID, newest time.Time) {
 	t.Helper()
-	indexAvailable := proposalListIndexAvailable(t, ctx, tx)
+	indexAvailable := proposalListIndexAvailable(t, ctx, database)
 	if !indexAvailable {
 		t.Log("proposal list updated_at index is absent; validating the migration-29 compatibility plan separately from the M9 performance gate")
 	}
-	assertProposalListPlan(t, ctx, tx, "first page", domain.ProposalListQuery{WorkspaceID: workspaceID, Limit: 2}, indexAvailable)
+	assertProposalListPlan(t, ctx, database, "first page", domain.ProposalListQuery{WorkspaceID: workspaceID, Limit: 2}, indexAvailable)
 	cursorTime := newest.Add(-256 * time.Second)
-	assertProposalListPlan(t, ctx, tx, "cursor page", domain.ProposalListQuery{
+	assertProposalListPlan(t, ctx, database, "cursor page", domain.ProposalListQuery{
 		WorkspaceID: workspaceID,
 		CursorTime:  &cursorTime,
 		CursorID:    proposalListPlanID(256),
@@ -237,20 +234,20 @@ func assertProposalListPlans(t *testing.T, ctx context.Context, tx pgx.Tx, works
 	}, indexAvailable)
 }
 
-func proposalListIndexAvailable(t *testing.T, ctx context.Context, tx pgx.Tx) bool {
+func proposalListIndexAvailable(t *testing.T, ctx context.Context, database *gorm.DB) bool {
 	t.Helper()
 	var exists bool
-	if err := tx.QueryRow(ctx, `SELECT to_regclass($1) IS NOT NULL`, "change_control.idx_proposal_workspace_updated_id").Scan(&exists); err != nil {
+	if err := database.WithContext(ctx).Raw(`SELECT to_regclass(?) IS NOT NULL`, "change_control.idx_proposal_workspace_updated_id").Row().Scan(&exists); err != nil {
 		t.Fatal(err)
 	}
 	return exists
 }
 
-func assertProposalListPlan(t *testing.T, ctx context.Context, tx pgx.Tx, label string, request domain.ProposalListQuery, performanceIndexAvailable bool) {
+func assertProposalListPlan(t *testing.T, ctx context.Context, database *gorm.DB, label string, request domain.ProposalListQuery, performanceIndexAvailable bool) {
 	t.Helper()
 	query, args := buildProposalListQuery(request)
 	var raw []byte
-	if err := tx.QueryRow(ctx, `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, COSTS OFF) `+query, args...).Scan(&raw); err != nil {
+	if err := database.WithContext(ctx).Raw(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, COSTS OFF) `+query, args...).Row().Scan(&raw); err != nil {
 		t.Fatal(err)
 	}
 	var documents []struct {

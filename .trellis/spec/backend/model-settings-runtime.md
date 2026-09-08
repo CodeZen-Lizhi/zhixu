@@ -9,7 +9,7 @@
 - 修改 `internal/modelsettings`、`internal/platform/secretstore`、模型 Factory/Transport、API/Worker Composition Root、
   Workflow Claim/Attempt、Retrieval Search/Reindex、`cmd/modelctl`、`deploy/compose.yml`、
   `deploy/compose.bootstrap.yml` 或根目录 `zhixu` 时，必须应用本规范。
-- 修改 staged `GORMRepository`、`BootstrapGORM`、scoped Audit/Local Runtime 或 River enqueue fence 时，也必须应用本规范。
+- 修改 `GORMRepository`、`BootstrapGORM`、scoped Audit/Local Runtime 或 River enqueue fence 时，也必须应用本规范。
 - 本规范只覆盖开发 Compose 的 managed 模式；普通二进制 static Env/YAML 模式继续兼容，revision 固定为 `0`。
 
 ### 2. Signatures
@@ -25,7 +25,7 @@
   caller 不提交 revision。Retrieval 以持久 Index/Embedding provenance 获取兼容 generation。
 - Revision、Activation Store、Runtime Store、participant 与 generation lifecycle 是模块内部 seam；正常 Apply 由
   Activation Coordinator 驱动。`zhixu-modelctl` 不再写旧 validating/draining 状态，仅保留兼容的检查/恢复边界。
-- staged GORM 组合入口固定接收一个 `*platformpostgres.Pool`；`GORMRepository.CheckEnqueue` 只接收 caller-owned
+- GORM 组合入口固定接收一个 `*platformpostgres.Pool`；`GORMRepository.CheckEnqueue` 只接收 caller-owned
   `foundation.TransactionScope`，不能接收裸 `*gorm.DB`、`*sql.Tx` 或 `pgx.Tx`。
 - 稳态 Compose 固定为 `docker compose --profile workspace-runtime -f deploy/compose.yml ...`；bootstrap
   仅由 launcher 以 `-f deploy/compose.yml -f deploy/compose.bootstrap.yml` 合并渲染和执行。
@@ -52,12 +52,12 @@
   不能合并业务上下文或跨用途打开密文。
 - Settings Audit 与 revision 保存同事务，只包含 action、revision、Provider 与 key-configured；禁止 Endpoint、draft、
   密文、Secret、Key 长度或 instance id。
-- staged GORM 的 Model Settings、Audit、managed Local Runtime、UnitOfWork 与 scoped River inserter 必须从同一个
+- GORM 的 Model Settings、Audit、managed Local Runtime、UnitOfWork 与 scoped River inserter 必须从同一个
   `platformpostgres.Pool` 构造。Revision+Audit、Activation+Local Runtime、enqueue fence+River insert 都使用同一个
   caller-owned `TransactionScope`；只有 UnitOfWork 可以 commit/rollback，协作者不得另开事务或降级到 root connection。
 - `foundation.TransactionScope` 当前不携带 Pool identity：nil 和已结束 scope 必须拒绝，仍活跃但来自另一 Pool 的 scope
-  无法由协作者可靠识别。因此同池 Composition 和同池 Testcontainers fixture 是强制边界，Final 切线前 staged GORM
-  入口不得进入 `cmd/**` 生产组合；不得用第二 Pool、no-op fence 或事务外 fallback 代替该约束。
+  无法由协作者可靠识别。因此同池 Composition 和同池 Testcontainers fixture 是强制边界。API/Worker/CLI 已统一使用
+  GORM 组合，managed 模式必须注入真实 Model Settings fence；不得用第二 Pool、no-op fence 或事务外 fallback 代替该约束。
 - 远程模型只允许 HTTPS，使用 `Proxy=nil`、禁止 redirect、逐新连接重解析的专用 Transport。A/AAAA 任一地址为
   loopback、私网、link-local、multicast、unspecified 或保留地址时整组拒绝；仅 Ollama preset 可访问精确
   `http://127.0.0.1:11434` relay。
@@ -145,7 +145,7 @@
   TLS hostname/SNI、精确 loopback relay。
 - PostgreSQL：fresh `00079` Atlas Up、append-only revision、同事务 Audit、并发 PUT/Start、state/runtime/participant
   锁序和 CAS、DB-time stale takeover、commit/fail/recovery、Attempt Claim binding/replay；SQL 必须参数化并用真实 PostgreSQL 验证。
-- staged GORM 精简门禁复用现有 Testcontainers fixture：从同一个 Pool 构造全部 scoped 协作者，至少覆盖一次
+- GORM 精简门禁复用现有 Testcontainers fixture：从同一个 Pool 构造全部 scoped 协作者，至少覆盖一次
   Revision+Audit、Activation+Local Runtime、fence+River 的提交/回滚，以及 singleton 锁冲突和事务结束后释放；完整
   双进程、commit ambiguity、连接释放与 EXPLAIN 只在对应风险被直接修改或出现失败信号时追加。作为 child 验收证据的
   场景必须使用 `FailWhenUnavailable`；只有明确标为可选的本地 smoke 才能在容器 provider 不可用时 skip。

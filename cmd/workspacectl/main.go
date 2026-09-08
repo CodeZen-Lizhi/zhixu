@@ -134,14 +134,14 @@ func run(arguments []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	auditStore, err := auditpostgres.NewStore(database.DB())
+	auditStore, err := auditpostgres.NewGORMStore(database)
 	if err != nil {
 		writeFailure(stderr, &workspacecontrol.Fault{
 			Code: "WORKSPACE_CONTROL_REPOSITORY_UNAVAILABLE", Message: "Workspace 控制存储不可用", Retryable: true,
 		})
 		return 1
 	}
-	repository, err := workspacepostgres.NewRepository(database.DB(), workspacepostgres.WithAuditAppender(auditStore))
+	repository, err := workspacepostgres.NewGORMRepository(database, workspacepostgres.WithGORMScopedAuditAppender(auditStore))
 	if err != nil {
 		writeFailure(stderr, &workspacecontrol.Fault{
 			Code: "WORKSPACE_CONTROL_REPOSITORY_UNAVAILABLE", Message: "Workspace 控制存储不可用", Retryable: true,

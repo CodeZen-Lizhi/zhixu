@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	agenteino "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/eino"
 	agentapplication "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
 	agentdomain "github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/app"
@@ -29,6 +30,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
 	platformmodels "github.com/CodeZen-Lizhi/zhixu/internal/platform/models"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	retrievalpostgres "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/adapter/postgres"
 	retrievalapplication "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/application"
 	retrievaldomain "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
@@ -47,16 +49,14 @@ const artifactGenerationSentinel = "artifact-generation-success-sentinel"
 // durable River delivery, immutable Artifact finalization, and retrieval isolation as one product flow.
 func TestArtifactGenerationSucceedsThroughPublicHTTPAndRiverWorker(t *testing.T) {
 	databaseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL for the Artifact Generation success integration gate")
-	}
 	ctx, cancel := context.WithTimeout(t.Context(), 55*time.Second)
 	defer cancel()
-	pool := newMigratedWorkerTestPool(t, databaseURL)
-	seedRAGConversationKnowledge(t, ctx, pool, t.TempDir())
+	database := newMigratedWorkerTestPool(t, databaseURL)
+	pool := database.DB()
+	seedRAGConversationKnowledge(t, ctx, database, t.TempDir())
 
 	model := &artifactGenerationRequestAwareModel{}
-	router, workerClient := newArtifactGenerationSuccessRuntime(t, pool, model)
+	router, workerClient := newArtifactGenerationSuccessRuntime(t, database, model)
 	server := httptest.NewServer(router)
 	defer server.Close()
 	if err := workerClient.Start(ctx); err != nil {
@@ -161,7 +161,7 @@ func TestArtifactGenerationSucceedsThroughPublicHTTPAndRiverWorker(t *testing.T)
 		t.Fatalf("generation replay called model=%d times", calls)
 	}
 
-	searchRepository, err := retrievalpostgres.NewSearchRepository(pool)
+	searchRepository, err := retrievalpostgres.NewGORMSearchRepository(database)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,17 +181,9 @@ func TestArtifactGenerationSucceedsThroughPublicHTTPAndRiverWorker(t *testing.T)
 	}
 }
 
-func newArtifactGenerationSuccessRuntime(t *testing.T, pool *pgxpool.Pool, model agentapplication.ChatModel) (http.Handler, *riveradapter.Client) {
+func newArtifactGenerationSuccessRuntime(t *testing.T, pool *platformpostgres.Pool, model agentapplication.ChatModel) (http.Handler, *riveradapter.Client) {
 	t.Helper()
-	workspaces, err := workspacepostgres.NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
-	insertClient, err := riveradapter.NewClient(pool, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	inserter, err := riveradapter.NewJobInserter(insertClient)
+	workspaces, err := workspacepostgres.NewGORMRepository(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +191,7 @@ func newArtifactGenerationSuccessRuntime(t *testing.T, pool *pgxpool.Pool, model
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtime, err := workflowpostgres.NewRuntimeRepositoryWithHooks(pool, inserter, workflowpostgres.RuntimeRepositoryHooks{Terminal: terminal})
+	runtime, err := workflowpostgres.NewGORMRuntimeRepositoryWithHooks(pool, riveradapter.DefaultOptions(), riveradapter.NewStaticScopedEnqueueFence(), workflowpostgres.GORMRuntimeRepositoryHooks{Terminal: terminal})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,7 +206,11 @@ func newArtifactGenerationSuccessRuntime(t *testing.T, pool *pgxpool.Pool, model
 		Model:    agentdomain.ModelRef{AdapterName: "integration", AdapterVersion: "v1", ModelID: cfg.ChatModel, ModelVersion: cfg.ChatModelVersion},
 		Timeout:  10 * time.Second, MaxRequestBytes: cfg.ChatMaxRequestBytes, MaxResponseBytes: cfg.ChatMaxResponseBytes,
 	}
-	components, err := newArtifactWorkflowComponents(pool, workspaces, runtime, agentRepository, terminal, model, contract, nil, foundation.NewUUIDGenerator(nil), foundation.SystemClock{})
+	scheduler, err := agenteino.NewStructuredPhaseScheduler(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	components, err := newArtifactWorkflowComponents(pool, workspaces, runtime, agentRepository, terminal, model, contract, scheduler, foundation.NewUUIDGenerator(nil), foundation.SystemClock{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,12 +243,12 @@ func newArtifactGenerationSuccessRuntime(t *testing.T, pool *pgxpool.Pool, model
 	if err := riveradapter.AddRuntimeWorkerSafely(workers, runtimeWorker); err != nil {
 		t.Fatal(err)
 	}
-	workerClient, err := riveradapter.NewClient(pool, workers)
+	workerClient, err := riveradapter.NewClient(pool.DB(), workers)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	artifactRepository, err := artifactpostgres.NewRepository(pool)
+	artifactRepository, err := artifactpostgres.NewGORMRepository(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,7 +260,7 @@ func newArtifactGenerationSuccessRuntime(t *testing.T, pool *pgxpool.Pool, model
 	if err != nil {
 		t.Fatal(err)
 	}
-	workflowRepository, err := workflowpostgres.NewRepository(pool)
+	workflowRepository, err := workflowpostgres.NewGORMRepository(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -418,6 +414,7 @@ func artifactGenerationGET(t *testing.T, ctx context.Context, client *http.Clien
 	if err != nil {
 		t.Fatal(err)
 	}
+	request.Header.Set("X-Workspace-ID", string(ragSmokeWorkspaceID))
 	return artifactGenerationRequest(t, client, request, want)
 }
 

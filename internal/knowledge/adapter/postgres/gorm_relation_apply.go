@@ -21,10 +21,8 @@ import (
 	"gorm.io/gorm"
 )
 
-// GORMApprovedRelationApplyRepository is the staged GORM implementation of
-// the atomic approved Proposal to Knowledge Relation protocol. Production
-// composition continues to use the legacy adapter until the PostgreSQL
-// compatibility gate passes.
+// GORMApprovedRelationApplyRepository applies an approved Proposal to its
+// canonical Knowledge Relation in one opaque transaction.
 type GORMApprovedRelationApplyRepository struct {
 	database   *gorm.DB
 	unitOfWork foundation.UnitOfWork

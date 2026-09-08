@@ -14,8 +14,7 @@ import (
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 )
 
-// GORMBootstrapResult contains the staged shared-pool dependencies. Only the
-// Final migration may introduce this result into production composition.
+// GORMBootstrapResult contains the shared-pool dependencies for one process.
 type GORMBootstrapResult struct {
 	Service         *modelsettingsapplication.Service
 	Manager         modelsettingsapplication.SettingsManager
@@ -26,7 +25,7 @@ type GORMBootstrapResult struct {
 }
 
 // BootstrapGORM builds Model Settings, Audit, and optional Local Runtime
-// adapters from one platform Pool without changing the legacy Bootstrap path.
+// adapters from one platform Pool.
 func BootstrapGORM(
 	ctx context.Context,
 	database *platformpostgres.Pool,

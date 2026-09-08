@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -44,10 +43,11 @@ func TestWorkspaceAnalysisReceiptRepositoryAtomicCompletionReplayAndCommitRecove
 	definition := workspaceAnalysisGitReceiptDefinition(t)
 	authorizeWorkspaceAnalysisGitReceiptOperation(t, ctx, pool, definition.DefinitionHash)
 
-	repository, err := toolspostgres.NewRepository(&workspaceAnalysisReceiptCommitLossDB{pool: pool})
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime := openMigrationRuntimePool(t, ctx, pool)
+	defer runtime.Close()
+	pool = runtime.DB()
+	armMigrationCommitResponseLoss(t, runtime)
+	repository := newWorkspaceAnalysisMigrationToolsRepository(t, runtime)
 	command := workspaceAnalysisGitReceiptCompletion(definition)
 	result, err := repository.FinalizeCallWithReceipt(ctx, command)
 	if err != nil {
@@ -106,10 +106,11 @@ func TestWorkspaceAnalysisReceiptFailureRepositoryAtomicClosureReplayAndCommitRe
 	definition := workspaceAnalysisGitReceiptDefinition(t)
 	authorizeWorkspaceAnalysisGitReceiptOperation(t, ctx, pool, definition.DefinitionHash)
 
-	repository, err := toolspostgres.NewRepository(&workspaceAnalysisReceiptCommitLossDB{pool: pool})
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime := openMigrationRuntimePool(t, ctx, pool)
+	defer runtime.Close()
+	pool = runtime.DB()
+	armMigrationCommitResponseLoss(t, runtime)
+	repository := newWorkspaceAnalysisMigrationToolsRepository(t, runtime)
 	command := workspaceAnalysisGitReceiptFailureCompletion(definition)
 	result, err := repository.FinalizeCallWithReceiptFailure(ctx, command)
 	if err != nil {
@@ -161,10 +162,10 @@ func TestWorkspaceAnalysisReceiptRepositorySearchPrivateBindingPersistenceAndRol
 		defer cleanup()
 
 		definition := prepareWorkspaceAnalysisSearchReceiptOperation(t, ctx, pool)
-		repository, err := toolspostgres.NewRepository(pool)
-		if err != nil {
-			t.Fatal(err)
-		}
+		runtime := openMigrationRuntimePool(t, ctx, pool)
+		defer runtime.Close()
+		pool = runtime.DB()
+		repository := newWorkspaceAnalysisMigrationToolsRepository(t, runtime)
 		command := workspaceAnalysisSearchReceiptCompletion(definition)
 		result, err := repository.FinalizeCallWithReceipt(ctx, command)
 		if err != nil {
@@ -225,10 +226,10 @@ func TestWorkspaceAnalysisReceiptRepositorySearchPrivateBindingPersistenceAndRol
 			defer cleanup()
 
 			definition := prepareWorkspaceAnalysisSearchReceiptOperation(t, ctx, pool)
-			repository, err := toolspostgres.NewRepository(pool)
-			if err != nil {
-				t.Fatal(err)
-			}
+			runtime := openMigrationRuntimePool(t, ctx, pool)
+			defer runtime.Close()
+			pool = runtime.DB()
+			repository := newWorkspaceAnalysisMigrationToolsRepository(t, runtime)
 			command := workspaceAnalysisSearchReceiptCompletion(definition)
 			test.mutate(&command)
 			if _, err := repository.FinalizeCallWithReceipt(ctx, command); err == nil {
@@ -549,29 +550,4 @@ func receiptRepositoryErrorCode(err error) string {
 		return classified.Code
 	}
 	return ""
-}
-
-type workspaceAnalysisReceiptCommitLossDB struct {
-	pool *pgxpool.Pool
-	lost atomic.Bool
-}
-
-func (database *workspaceAnalysisReceiptCommitLossDB) Begin(ctx context.Context) (pgx.Tx, error) {
-	tx, err := database.pool.Begin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if !database.lost.Swap(true) {
-		return &workspaceAnalysisReceiptCommitLossTx{Tx: tx}, nil
-	}
-	return tx, nil
-}
-
-type workspaceAnalysisReceiptCommitLossTx struct{ pgx.Tx }
-
-func (tx *workspaceAnalysisReceiptCommitLossTx) Commit(ctx context.Context) error {
-	if err := tx.Tx.Commit(ctx); err != nil {
-		return err
-	}
-	return errors.New("simulated workspace analysis receipt commit response loss")
 }

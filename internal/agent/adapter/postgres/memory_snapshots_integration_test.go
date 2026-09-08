@@ -196,7 +196,7 @@ func TestRepositoryRAGMemorySnapshotFinalizeCommitResponseLossIntegration(t *tes
 		name string
 		open func(*testing.T, *platformpostgres.Pool) (application.RAGMemorySnapshotRepository, func())
 	}{
-		{name: "legacy", open: openLegacyRAGMemorySnapshotRepositoryWithCommitLossIntegration},
+
 		{name: "gorm", open: openGORMRAGMemorySnapshotRepositoryWithCommitLossIntegration},
 	} {
 		t.Run(variant.name, func(t *testing.T) {
@@ -224,7 +224,7 @@ func TestRepositoryRAGMemorySnapshotFinalizeCommitResponseLossIntegration(t *tes
 			if err == nil {
 				t.Fatal("commit response loss was reported as success")
 			}
-			if variant.name == "gorm" && agentErrorCode(err) != gormMemorySnapshotResultUnknownCode {
+			if agentErrorCode(err) != gormMemorySnapshotResultUnknownCode {
 				t.Fatalf("GORM commit response loss code=%s err=%v", agentErrorCode(err), err)
 			}
 			ready := assertRAGMemorySnapshotState(t, ctx, pool, snapshot.WorkspaceID, snapshot.ID, domain.RAGMemorySnapshotReady, run.ID, "")
@@ -234,19 +234,6 @@ func TestRepositoryRAGMemorySnapshotFinalizeCommitResponseLossIntegration(t *tes
 			assertRAGMemoryModelRunCount(t, ctx, pool, snapshot.NodeAttemptID, 1)
 		})
 	}
-}
-
-func openLegacyRAGMemorySnapshotRepositoryWithCommitLossIntegration(
-	t *testing.T,
-	platform *platformpostgres.Pool,
-) (application.RAGMemorySnapshotRepository, func()) {
-	t.Helper()
-	database := &workspaceAnalysisModelCommitLossDB{DB: platform.DB()}
-	repository, err := NewRepository(database)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return repository, func() { database.injectNext.Store(true) }
 }
 
 func openGORMRAGMemorySnapshotRepositoryWithCommitLossIntegration(
@@ -307,7 +294,7 @@ func seedRAGMemoryNodeKind(t *testing.T, ctx context.Context, pool *pgxpool.Pool
 
 func assertRAGMemorySnapshotState(t *testing.T, ctx context.Context, pool *pgxpool.Pool, workspaceID, snapshotID foundation.ID, status domain.RAGMemorySnapshotStatus, modelRunID foundation.ID, errorCode string) domain.RAGMemorySnapshot {
 	t.Helper()
-	snapshot, err := loadRAGMemorySnapshotByID(ctx, pool, workspaceID, snapshotID, false)
+	snapshot, err := scanRAGMemorySnapshot(pool.QueryRow(ctx, `SELECT `+ragMemorySnapshotColumns+` FROM agent.rag_memory_snapshot WHERE workspace_id=$1 AND id=$2`, string(workspaceID), string(snapshotID)))
 	if err != nil {
 		t.Fatal(err)
 	}

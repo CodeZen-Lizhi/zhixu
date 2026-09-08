@@ -4,6 +4,7 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"strings"
 	"testing"
@@ -16,7 +17,8 @@ import (
 
 func TestIssueRepositoryObservationReopenDecisionAndHistory(t *testing.T) {
 	ctx := context.Background()
-	pool := newHealthIntegrationPool(t)
+	platform := requireHealthIntegrationPlatform(t)
+	pool := platform.DB()
 	workspaceID := repositoryTestID(t, "71000000-0000-4000-8000-000000000001")
 	cleanupHealthIntegrationWorkspace(t, pool, workspaceID)
 	t.Cleanup(func() { cleanupHealthIntegrationWorkspace(t, pool, workspaceID) })
@@ -41,7 +43,10 @@ func TestIssueRepositoryObservationReopenDecisionAndHistory(t *testing.T) {
 		repositoryTestID(t, "72000000-0000-4000-8000-000000000006"),
 		repositoryTestID(t, "72000000-0000-4000-8000-000000000007"),
 	}}
-	repository, err := NewIssueRepository(tx, ids)
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	repository, err := NewGORMIssueRepository(platform, ids)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +76,7 @@ func TestIssueRepositoryObservationReopenDecisionAndHistory(t *testing.T) {
 	}
 	availableRepairOptions := []domain.RepairOption{{Code: "health.repair.verify-provenance", Title: "绑定来源并重新验证", Available: true}}
 	proposalID := repositoryTestID(t, "71000000-0000-4000-8000-000000000008")
-	if _, err := tx.Exec(ctx, `INSERT INTO change_control.proposal(id,workspace_id,proposal_type,risk_level,status,idempotency_key,request_hash,version,created_at,updated_at) VALUES($1,$2,'knowledge_change','HIGH','ready_for_review','health-repair-proposal',repeat('e',64),1,$3,$3)`, string(proposalID), string(workspaceID), now); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO change_control.proposal(id,workspace_id,proposal_type,risk_level,status,idempotency_key,request_hash,version,created_at,updated_at) VALUES($1,$2,'knowledge_change','HIGH','ready_for_review','health-repair-proposal',repeat('e',64),1,$3,$3)`, string(proposalID), string(workspaceID), now); err != nil {
 		t.Fatal(err)
 	}
 	proposalDecision := domain.IssueDecision{ExpectedVersion: reopened.Version, IdempotencyKey: "health-proposal-1", Action: domain.IssueDecisionCreateRepairProposal, ProposalID: &proposalID, RepairOptionCode: availableRepairOptions[0].Code}
@@ -106,7 +111,7 @@ func TestIssueRepositoryObservationReopenDecisionAndHistory(t *testing.T) {
 		t.Fatal("stale expected version unexpectedly succeeded")
 	}
 	var observations, evidence, decisions int
-	if err := tx.QueryRow(ctx, `SELECT
+	if err := pool.QueryRow(ctx, `SELECT
  (SELECT count(*) FROM ops.health_issue_observation WHERE workspace_id=$1 AND issue_id=$2),
  (SELECT count(*) FROM ops.health_issue_evidence e JOIN ops.health_issue_observation o ON o.id=e.observation_id WHERE o.workspace_id=$1 AND o.issue_id=$2),
  (SELECT count(*) FROM ops.health_issue_decision WHERE workspace_id=$1 AND issue_id=$2)`, string(workspaceID), string(issueID)).Scan(&observations, &evidence, &decisions); err != nil {
@@ -116,17 +121,19 @@ func TestIssueRepositoryObservationReopenDecisionAndHistory(t *testing.T) {
 		t.Fatalf("history observations=%d evidence=%d decisions=%d", observations, evidence, decisions)
 	}
 	otherWorkspace := repositoryTestID(t, "71000000-0000-4000-8000-000000000007")
-	if _, err := tx.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'health-other',$2,$2,$3,'inactive',1,$3,$3)`, string(otherWorkspace), "/tmp/health-other-"+string(otherWorkspace), now); err != nil {
+	t.Cleanup(func() { cleanupHealthIntegrationWorkspace(t, pool, otherWorkspace) })
+	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'health-other',$2,$2,$3,'inactive',1,$3,$3)`, string(otherWorkspace), "/tmp/health-other-"+string(otherWorkspace), now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repository.GetIssue(ctx, otherWorkspace, issueID, nil); !errors.Is(err, pgx.ErrNoRows) {
+	if _, err := repository.GetIssue(ctx, otherWorkspace, issueID, nil); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("cross workspace read err=%v", err)
 	}
 }
 
 func TestIssueRepositoryConcurrentDecisionReplaysWinner(t *testing.T) {
 	ctx := context.Background()
-	pool := newHealthIntegrationPool(t)
+	platform := requireHealthIntegrationPlatform(t)
+	pool := platform.DB()
 	workspaceID := repositoryTestID(t, "73000000-0000-4000-8000-000000000001")
 	cleanupHealthIntegrationWorkspace(t, pool, workspaceID)
 	t.Cleanup(func() { cleanupHealthIntegrationWorkspace(t, pool, workspaceID) })
@@ -142,14 +149,14 @@ func TestIssueRepositoryConcurrentDecisionReplaysWinner(t *testing.T) {
 	}
 	defer func() { _ = seedTx.Rollback(context.Background()) }()
 	seedIssueRepositoryFacts(t, ctx, seedTx, workspaceID, topicID, definitionID, runID, scanID, now)
-	seedRepository, err := NewIssueRepository(seedTx)
+	if err := seedTx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	seedRepository, err := NewGORMIssueRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := seedRepository.UpsertObservation(ctx, workspaceID, scanID, issueID, repositoryObservation(topicID, strings.Repeat("f", 64), "topic is missing a supporting source"), nil, now); err != nil {
-		t.Fatal(err)
-	}
-	if err := seedTx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
 	decision := domain.IssueDecision{ExpectedVersion: 1, IdempotencyKey: "health-concurrent-ignore", Action: domain.IssueDecisionIgnore, Reason: "confirmed acceptable exception"}
@@ -157,7 +164,7 @@ func TestIssueRepositoryConcurrentDecisionReplaysWinner(t *testing.T) {
 	start := make(chan struct{})
 	for range 2 {
 		go func() {
-			repository, repositoryErr := NewIssueRepository(pool)
+			repository, repositoryErr := NewGORMIssueRepository(platform)
 			if repositoryErr != nil {
 				results <- repositoryErr
 				return
@@ -184,7 +191,8 @@ func TestIssueRepositoryConcurrentDecisionReplaysWinner(t *testing.T) {
 
 func TestIssueRepositoryResolveMissingFinalizesOnlyAutoResolvableStatusesAndCounters(t *testing.T) {
 	ctx := context.Background()
-	pool := newHealthIntegrationPool(t)
+	platform := requireHealthIntegrationPlatform(t)
+	pool := platform.DB()
 	workspaceID := repositoryTestID(t, "74000000-0000-4000-8000-000000000001")
 	cleanupHealthIntegrationWorkspace(t, pool, workspaceID)
 	t.Cleanup(func() { cleanupHealthIntegrationWorkspace(t, pool, workspaceID) })
@@ -222,7 +230,10 @@ func TestIssueRepositoryResolveMissingFinalizesOnlyAutoResolvableStatusesAndCoun
 		t.Fatal(err)
 	}
 
-	repository, err := NewIssueRepository(tx)
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	repository, err := NewGORMIssueRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,7 +276,7 @@ func TestIssueRepositoryResolveMissingFinalizesOnlyAutoResolvableStatusesAndCoun
 			decision.DeferredUntil = &deferUntil
 		case domain.IssueStatusProposalCreated:
 			proposalID := repositoryTestID(t, "76000000-0000-4000-8000-000000000001")
-			if _, err := tx.Exec(ctx, `INSERT INTO change_control.proposal(id,workspace_id,proposal_type,risk_level,status,idempotency_key,request_hash,version,created_at,updated_at) VALUES($1,$2,'knowledge_change','HIGH','ready_for_review','resolve-status-proposal',repeat('a',64),1,$3,$3)`, string(proposalID), string(workspaceID), now); err != nil {
+			if _, err := pool.Exec(ctx, `INSERT INTO change_control.proposal(id,workspace_id,proposal_type,risk_level,status,idempotency_key,request_hash,version,created_at,updated_at) VALUES($1,$2,'knowledge_change','HIGH','ready_for_review','resolve-status-proposal',repeat('a',64),1,$3,$3)`, string(proposalID), string(workspaceID), now); err != nil {
 				t.Fatal(err)
 			}
 			decision.Action, decision.ProposalID, decision.RepairOptionCode = domain.IssueDecisionCreateRepairProposal, &proposalID, options[0].Code
@@ -278,7 +289,7 @@ func TestIssueRepositoryResolveMissingFinalizesOnlyAutoResolvableStatusesAndCoun
 			t.Fatal(err)
 		}
 	}
-	if _, err := tx.Exec(ctx, `DELETE FROM ops.health_scan_seen_identity WHERE scan_id=$1`, string(scanID)); err != nil {
+	if _, err := pool.Exec(ctx, `DELETE FROM ops.health_scan_seen_identity WHERE scan_id=$1`, string(scanID)); err != nil {
 		t.Fatal(err)
 	}
 	resolved, err := repository.ResolveMissingForCompleteScan(ctx, workspaceID, scanID, "health.detector.missing_source")
@@ -288,7 +299,7 @@ func TestIssueRepositoryResolveMissingFinalizesOnlyAutoResolvableStatusesAndCoun
 	var unresolved int
 	var silentStatuses int
 	var scanResolved, coverageResolved int64
-	if err := tx.QueryRow(ctx, `SELECT
+	if err := pool.QueryRow(ctx, `SELECT
  (SELECT count(*) FROM ops.health_issue WHERE workspace_id=$1 AND detector_id='health.detector.missing_source' AND status<>'RESOLVED'),
  (SELECT count(*) FROM ops.health_issue WHERE workspace_id=$1 AND detector_id='health.detector.missing_source' AND status IN ('DEFERRED','PROPOSAL_CREATED','IGNORED','FALSE_POSITIVE')),
 	 (SELECT resolved_count FROM ops.health_scan WHERE id=$2),

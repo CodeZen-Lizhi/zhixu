@@ -51,10 +51,7 @@ func TestRepositorySourceRefreshLeaseBlocksSameWorkspaceUntilRelease(t *testing.
 		t.Fatal(err)
 	}
 	defer secondPool.Close()
-	secondRepository, err := NewRepository(secondPool)
-	if err != nil {
-		t.Fatal(err)
-	}
+	secondRepository := &retrievalPGXNativeCapabilities{database: secondPool}
 	type acquisition struct {
 		lease interface{ Release(context.Context) error }
 		err   error

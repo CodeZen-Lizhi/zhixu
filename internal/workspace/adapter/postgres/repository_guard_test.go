@@ -3,8 +3,10 @@ package workspacepostgres
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
+	"io"
 	"reflect"
 	"strings"
 	"testing"
@@ -13,11 +15,13 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/rootgrant"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workspace/domain"
-	"github.com/jackc/pgx/v5"
+	gormpostgres "gorm.io/driver/postgres"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 func TestBuildSourceVersionListQueryExcludesTombstonedSources(t *testing.T) {
-	query, _ := buildSourceVersionListQuery(domain.SourceVersionListQuery{
+	query, _ := buildGORMSourceVersionListQuery(domain.SourceVersionListQuery{
 		WorkspaceID: foundation.ID("00000000-0000-4000-8000-000000000001"),
 		Limit:       1,
 	})
@@ -27,9 +31,13 @@ func TestBuildSourceVersionListQueryExcludesTombstonedSources(t *testing.T) {
 }
 
 func TestManagedRepositoryRejectsRootListingBeforeDatabaseAccess(t *testing.T) {
-	repository := &Repository{managed: true}
+	repository, err := newActiveWorkspaceTestRepository(t, &activeWorkspaceTestDB{row: activeWorkspaceTestRow{err: errors.New("unexpected query")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository.managed = true
 
-	_, err := repository.ListWorkspaceRoots(context.Background())
+	_, err = repository.ListWorkspaceRoots(context.Background())
 	var classified *foundation.Error
 	if !errors.As(err, &classified) || classified.Kind != foundation.ErrorPermissionDenied || classified.Code != rootgrant.ErrorCodeRootNotGranted {
 		t.Fatalf("ListWorkspaceRoots() error=%v", err)
@@ -52,7 +60,7 @@ func TestGORMClassifiersRejectCompletedTransactions(t *testing.T) {
 func TestRepositoryGetActiveWorkspaceRequiresUniqueActiveRow(t *testing.T) {
 	t.Run("unique", func(t *testing.T) {
 		database := &activeWorkspaceTestDB{row: activeWorkspaceTestRow{values: activeWorkspaceValues(1)}}
-		repository, err := NewRepository(database)
+		repository, err := newActiveWorkspaceTestRepository(t, database)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -70,8 +78,8 @@ func TestRepositoryGetActiveWorkspaceRequiresUniqueActiveRow(t *testing.T) {
 	})
 
 	t.Run("none", func(t *testing.T) {
-		database := &activeWorkspaceTestDB{row: activeWorkspaceTestRow{err: pgx.ErrNoRows}}
-		repository, err := NewRepository(database)
+		database := &activeWorkspaceTestDB{row: activeWorkspaceTestRow{err: sql.ErrNoRows}}
+		repository, err := newActiveWorkspaceTestRepository(t, database)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -82,7 +90,7 @@ func TestRepositoryGetActiveWorkspaceRequiresUniqueActiveRow(t *testing.T) {
 	t.Run("multiple", func(t *testing.T) {
 		database := &activeWorkspaceTestDB{row: activeWorkspaceTestRow{values: activeWorkspaceValues(2)}}
 		resolver := &activeWorkspaceGrantResolver{}
-		repository, err := NewRepository(database, WithRootGrantResolver(resolver, true))
+		repository, err := newActiveWorkspaceTestRepository(t, database, WithGORMRootGrantResolver(resolver, true))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -98,7 +106,7 @@ func TestRepositoryGetActiveWorkspaceUsesManagedGrantResolver(t *testing.T) {
 	grantErr := foundation.NewError(foundation.ErrorPermissionDenied, rootgrant.ErrorCodeRootNotGranted, false, errors.New("grant mismatch"))
 	resolver := &activeWorkspaceGrantResolver{err: grantErr}
 	database := &activeWorkspaceTestDB{row: activeWorkspaceTestRow{values: activeWorkspaceValues(1)}}
-	repository, err := NewRepository(database, WithRootGrantResolver(resolver, true))
+	repository, err := newActiveWorkspaceTestRepository(t, database, WithGORMRootGrantResolver(resolver, true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,8 +119,12 @@ func TestRepositoryGetActiveWorkspaceUsesManagedGrantResolver(t *testing.T) {
 
 func TestRepositoryGetActiveWorkspaceFailsClosedWithoutManagedGrantResolver(t *testing.T) {
 	database := &activeWorkspaceTestDB{row: activeWorkspaceTestRow{values: activeWorkspaceValues(1)}}
-	repository := &Repository{db: database, managed: true}
-	_, err := repository.GetActiveWorkspace(context.Background())
+	repository, err := newActiveWorkspaceTestRepository(t, database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository.managed = true
+	_, err = repository.GetActiveWorkspace(context.Background())
 	requireRepositoryError(t, err, foundation.ErrorDependencyUnavailable, rootgrant.ErrorCodeGrantStale)
 }
 
@@ -125,47 +137,97 @@ func requireRepositoryError(t *testing.T, err error, kind foundation.ErrorKind, 
 }
 
 type activeWorkspaceTestDB struct {
-	row       pgx.Row
+	row       activeWorkspaceTestRow
 	query     string
 	arguments []any
 }
 
-func (database *activeWorkspaceTestDB) QueryRow(_ context.Context, query string, arguments ...any) pgx.Row {
+func newActiveWorkspaceTestRepository(t *testing.T, fixture *activeWorkspaceTestDB, options ...GORMRepositoryOption) (*GORMRepository, error) {
+	t.Helper()
+	database := sql.OpenDB(fixture)
+	t.Cleanup(func() { _ = database.Close() })
+	root, err := gorm.Open(gormpostgres.New(gormpostgres.Config{Conn: database}), &gorm.Config{
+		DisableAutomaticPing:   true,
+		SkipDefaultTransaction: true,
+		Logger:                 logger.Discard,
+	})
+	if err != nil {
+		return nil, err
+	}
+	repository := &GORMRepository{database: root, unitOfWork: fixture}
+	for _, option := range options {
+		if err := option(repository); err != nil {
+			return nil, err
+		}
+	}
+	return repository, nil
+}
+
+func (database *activeWorkspaceTestDB) QueryContext(_ context.Context, query string, arguments []driver.NamedValue) (driver.Rows, error) {
 	database.query = query
-	database.arguments = append([]any(nil), arguments...)
-	return database.row
+	database.arguments = make([]any, len(arguments))
+	for index, argument := range arguments {
+		database.arguments[index] = argument.Value
+	}
+	if database.row.err != nil {
+		return nil, database.row.err
+	}
+	row := database.row
+	return &row, nil
 }
 
-func (*activeWorkspaceTestDB) Query(context.Context, string, ...any) (pgx.Rows, error) {
-	return nil, errors.New("unexpected Query call")
+func (database *activeWorkspaceTestDB) Connect(context.Context) (driver.Conn, error) {
+	return database, nil
 }
 
-func (*activeWorkspaceTestDB) Begin(context.Context) (pgx.Tx, error) {
+func (database *activeWorkspaceTestDB) Driver() driver.Driver { return database }
+
+func (database *activeWorkspaceTestDB) Open(string) (driver.Conn, error) { return database, nil }
+
+func (*activeWorkspaceTestDB) Prepare(string) (driver.Stmt, error) {
+	return nil, errors.New("unexpected Prepare call")
+}
+
+func (*activeWorkspaceTestDB) Close() error { return nil }
+
+func (*activeWorkspaceTestDB) Begin() (driver.Tx, error) {
 	return nil, errors.New("unexpected Begin call")
+}
+
+func (*activeWorkspaceTestDB) Within(context.Context, foundation.TransactionOptions, foundation.TransactionFunc) error {
+	return errors.New("unexpected transaction call")
 }
 
 type activeWorkspaceTestRow struct {
 	values []any
 	err    error
+	read   bool
 }
 
-func (row activeWorkspaceTestRow) Scan(destinations ...any) error {
-	if row.err != nil {
-		return row.err
+func (row *activeWorkspaceTestRow) Columns() []string {
+	columns := make([]string, len(row.values))
+	for index := range columns {
+		columns[index] = fmt.Sprintf("column_%d", index)
 	}
+	return columns
+}
+
+func (*activeWorkspaceTestRow) Close() error { return nil }
+
+func (row *activeWorkspaceTestRow) Next(destinations []driver.Value) error {
+	if row.read {
+		return io.EOF
+	}
+	row.read = true
 	if len(destinations) != len(row.values) {
 		return fmt.Errorf("scan destinations=%d values=%d", len(destinations), len(row.values))
 	}
 	for index, value := range row.values {
-		destination := reflect.ValueOf(destinations[index])
-		if destination.Kind() != reflect.Pointer || destination.IsNil() {
-			return fmt.Errorf("destination %d is not a pointer", index)
+		converted, err := driver.DefaultParameterConverter.ConvertValue(value)
+		if err != nil {
+			return err
 		}
-		source := reflect.ValueOf(value)
-		if !source.IsValid() || !source.Type().AssignableTo(destination.Elem().Type()) {
-			return fmt.Errorf("value %d type %T cannot scan into %T", index, value, destinations[index])
-		}
-		destination.Elem().Set(source)
+		destinations[index] = converted
 	}
 	return nil
 }
@@ -194,5 +256,7 @@ func (resolver *activeWorkspaceGrantResolver) Resolve(_ context.Context, workspa
 	return nil, resolver.err
 }
 
-var _ DB = (*activeWorkspaceTestDB)(nil)
+var _ driver.Connector = (*activeWorkspaceTestDB)(nil)
+var _ driver.QueryerContext = (*activeWorkspaceTestDB)(nil)
+var _ foundation.UnitOfWork = (*activeWorkspaceTestDB)(nil)
 var _ RootGrantResolver = (*activeWorkspaceGrantResolver)(nil)

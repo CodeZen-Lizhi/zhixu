@@ -11,7 +11,6 @@ import (
 	eventsdomain "github.com/CodeZen-Lizhi/zhixu/internal/events/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
-	"github.com/jackc/pgx/v5/pgconn"
 )
 
 const (
@@ -22,7 +21,7 @@ const (
 		WHERE workspace_id=?::uuid AND source_event_ref=?`
 )
 
-// GORMRAGProgressStore is the staged scoped-transaction implementation of RAG progress persistence.
+// GORMRAGProgressStore is the scoped-transaction implementation of RAG progress persistence.
 type GORMRAGProgressStore struct {
 	unitOfWork foundation.UnitOfWork
 	events     eventsapplication.ScopedAppender
@@ -168,31 +167,28 @@ func classifyGORMRAGProgressFailure(ctx context.Context, cause error) error {
 			contextCause,
 		)
 	}
-	var postgresError *pgconn.PgError
-	if errors.As(cause, &postgresError) {
-		switch postgresError.Code {
-		case "40001", "40P01", "55P03":
-			return foundation.NewError(
-				foundation.ErrorRetryableFailure,
-				agentapplication.ErrorCodeRAGProgressUnknown,
-				true,
-				cause,
-			)
-		case "23505":
-			return foundation.NewError(
-				foundation.ErrorVersionConflict,
-				agentapplication.ErrorCodeRAGProgressUnknown,
-				false,
-				cause,
-			)
-		case "23503", "23514", "55000":
-			return foundation.NewError(
-				foundation.ErrorConsistencyViolation,
-				agentapplication.ErrorCodeRAGProgressUnknown,
-				false,
-				cause,
-			)
-		}
+	switch platformpostgres.SQLState(cause) {
+	case "40001", "40P01", "55P03":
+		return foundation.NewError(
+			foundation.ErrorRetryableFailure,
+			agentapplication.ErrorCodeRAGProgressUnknown,
+			true,
+			cause,
+		)
+	case "23505":
+		return foundation.NewError(
+			foundation.ErrorVersionConflict,
+			agentapplication.ErrorCodeRAGProgressUnknown,
+			false,
+			cause,
+		)
+	case "23503", "23514", "55000":
+		return foundation.NewError(
+			foundation.ErrorConsistencyViolation,
+			agentapplication.ErrorCodeRAGProgressUnknown,
+			false,
+			cause,
+		)
 	}
 	if errors.Is(cause, sql.ErrTxDone) {
 		return foundation.NewError(

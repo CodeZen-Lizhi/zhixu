@@ -65,7 +65,7 @@ func TestStartAPIModelRuntimeDoesNotActivateBeforeControllerSignal(t *testing.T)
 	release := make(chan struct{})
 	runStarted := make(chan struct{})
 	controller := &fakeAPIModelRuntimeController{active: active, release: release, runStarted: runStarted}
-	errorsChannel := startAPIModelRuntime(ctx, controller)
+	errorsChannel, stopped := startAPIModelRuntime(ctx, controller)
 	select {
 	case <-runStarted:
 	case <-time.After(time.Second):
@@ -88,12 +88,23 @@ func TestStartAPIModelRuntimeDoesNotActivateBeforeControllerSignal(t *testing.T)
 		t.Fatalf("activation failed: %v", err)
 	}
 	close(release)
+	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), time.Second)
+	defer cancelShutdown()
+	if err := waitAPIModelRuntime(shutdownContext, stopped); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestStartAPIModelRuntimeReportsFailureBeforeActivation(t *testing.T) {
 	want := errors.New("registration failed")
 	controller := &fakeAPIModelRuntimeController{active: make(chan struct{}), runErr: want}
-	if err := <-startAPIModelRuntime(context.Background(), controller); !errors.Is(err, want) {
+	errorsChannel, stopped := startAPIModelRuntime(context.Background(), controller)
+	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), time.Second)
+	defer cancelShutdown()
+	if err := waitAPIModelRuntime(shutdownContext, stopped); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-errorsChannel; !errors.Is(err, want) {
 		t.Fatalf("error=%v", err)
 	}
 }
@@ -105,7 +116,7 @@ func TestStartAPIModelRuntimeReportsOwnershipLossAfterActivation(t *testing.T) {
 	close(active)
 	runResult := make(chan error, 1)
 	controller := &fakeAPIModelRuntimeController{active: active, runResult: runResult}
-	errorsChannel := startAPIModelRuntime(ctx, controller)
+	errorsChannel, stopped := startAPIModelRuntime(ctx, controller)
 	ownershipLost := foundation.NewError(
 		foundation.ErrorVersionConflict,
 		modelsettingsdomain.ErrorCodeRuntimeConflict,
@@ -121,28 +132,85 @@ func TestStartAPIModelRuntimeReportsOwnershipLossAfterActivation(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("runtime ownership loss did not terminate the API watcher path")
 	}
+	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), time.Second)
+	defer cancelShutdown()
+	if err := waitAPIModelRuntime(shutdownContext, stopped); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestStartAPIActivationCoordinatorReportsFatalAndUnexpectedStop(t *testing.T) {
 	want := errors.New("activation ownership lost")
-	if err := <-startAPIActivationCoordinator(context.Background(), fakeAPIActivationCoordinator{runErr: want}); !errors.Is(err, want) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	errorsChannel, stopped := startAPIActivationCoordinator(ctx, fakeAPIActivationCoordinator{runErr: want})
+	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), time.Second)
+	defer cancelShutdown()
+	if err := waitAPIModelRuntime(shutdownContext, stopped); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-errorsChannel; !errors.Is(err, want) {
 		t.Fatalf("fatal error=%v", err)
 	}
 
-	if err := <-startAPIActivationCoordinator(context.Background(), fakeAPIActivationCoordinator{}); err == nil || !strings.Contains(err.Error(), "stopped unexpectedly") {
+	errorsChannel, stopped = startAPIActivationCoordinator(context.Background(), fakeAPIActivationCoordinator{})
+	if err := waitAPIModelRuntime(shutdownContext, stopped); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-errorsChannel; err == nil || !strings.Contains(err.Error(), "stopped unexpectedly") {
 		t.Fatalf("unexpected stop error=%v", err)
 	}
 }
 
 func TestStartAPIActivationCoordinatorIgnoresNormalCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	coordinator := fakeAPIActivationCoordinator{waitForCancellation: true}
-	errorsChannel := startAPIActivationCoordinator(ctx, coordinator)
+	defer cancel()
+	cleanupStarted := make(chan struct{})
+	cleanupRelease := make(chan struct{})
+	cleanupReleased := false
+	defer func() {
+		if !cleanupReleased {
+			close(cleanupRelease)
+		}
+	}()
+	coordinator := fakeAPIActivationCoordinator{waitForCancellation: true, onReturn: func() {
+		close(cleanupStarted)
+		<-cleanupRelease
+	}}
+	coordinatorErrors, coordinatorStopped := startAPIActivationCoordinator(ctx, coordinator)
+	controllerErrors, controllerStopped := startAPIModelRuntime(ctx, &fakeAPIModelRuntimeController{active: make(chan struct{})})
 	cancel()
 	select {
-	case err := <-errorsChannel:
-		t.Fatalf("normal cancellation reported as fatal: %v", err)
-	case <-time.After(20 * time.Millisecond):
+	case <-cleanupStarted:
+	case <-time.After(time.Second):
+		t.Fatal("coordinator did not begin cleanup after cancellation")
+	}
+	expiredContext, cancelExpired := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancelExpired()
+	if err := waitAPIModelRuntime(expiredContext, nil, controllerStopped, coordinatorStopped); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("blocked cleanup did not preserve the shutdown deadline: %v", err)
+	}
+	select {
+	case <-coordinatorStopped:
+		t.Fatal("coordinator completion was reported before cleanup finished")
+	default:
+	}
+	close(cleanupRelease)
+	cleanupReleased = true
+	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), time.Second)
+	defer cancelShutdown()
+	if err := waitAPIModelRuntime(shutdownContext, controllerStopped, coordinatorStopped); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitAPIModelRuntime(expiredContext, nil, controllerStopped, coordinatorStopped); err != nil {
+		t.Fatalf("completed runtimes should not wait for another shutdown budget: %v", err)
+	}
+	for _, failures := range []<-chan error{controllerErrors, coordinatorErrors} {
+		select {
+		case err := <-failures:
+			t.Fatalf("normal cancellation reported as fatal: %v", err)
+		default:
+		}
 	}
 }
 
@@ -165,6 +233,9 @@ func TestAPIRunWaitsForManagedRuntimeBeforeListenAndServeAndReturnsOnRuntimeErro
 	var managedGuard *ast.IfStmt
 	ast.Inspect(runBody, func(node ast.Node) bool {
 		switch typed := node.(type) {
+		case *ast.DeferStmt:
+			// Cleanup drains late errors after consumers stop; it is not a startup branch.
+			return false
 		case *ast.CallExpr:
 			if identifier, ok := typed.Fun.(*ast.Ident); ok && identifier.Name == "startAPIModelRuntime" {
 				startPosition = typed.Pos()
@@ -319,14 +390,19 @@ type fakeAPIModelRuntimeController struct {
 type fakeAPIActivationCoordinator struct {
 	runErr              error
 	waitForCancellation bool
+	onReturn            func()
 }
 
 func (coordinator fakeAPIActivationCoordinator) Run(ctx context.Context) error {
+	if coordinator.onReturn != nil {
+		defer coordinator.onReturn()
+	}
 	if coordinator.runErr != nil {
 		return coordinator.runErr
 	}
 	if coordinator.waitForCancellation {
 		<-ctx.Done()
+		return ctx.Err()
 	}
 	return nil
 }
@@ -345,7 +421,7 @@ func (controller *fakeAPIModelRuntimeController) Run(ctx context.Context) error 
 		case err := <-controller.runResult:
 			return err
 		case <-ctx.Done():
-			return nil
+			return ctx.Err()
 		}
 	}
 	if controller.release != nil {
@@ -353,11 +429,11 @@ func (controller *fakeAPIModelRuntimeController) Run(ctx context.Context) error 
 		case <-controller.release:
 			return nil
 		case <-ctx.Done():
-			return nil
+			return ctx.Err()
 		}
 	}
 	<-ctx.Done()
-	return nil
+	return ctx.Err()
 }
 
 func findFunctionBody(file *ast.File, name string) *ast.BlockStmt {

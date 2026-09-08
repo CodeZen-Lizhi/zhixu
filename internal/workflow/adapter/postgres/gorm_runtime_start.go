@@ -21,10 +21,6 @@ const gormStartRunSelect = `SELECT ` + gormStartRunColumns + ` FROM workflow.run
 const gormStartNodeColumns = `id::text,run_id::text,node_key,node_type,status,attempt,input::text,output::text,idempotency_key,input_schema_version,output_schema_version,dispatch_no,lease_owner,lease_until,version,created_at,updated_at,completed_at`
 const gormStartNodeSelect = `SELECT ` + gormStartNodeColumns + ` FROM workflow.node_run`
 
-type gormRuntimeStartScanner interface {
-	Scan(...any) error
-}
-
 // Start 在一个平台 UoW 中原子创建或重放 Definition、Run、根 Node、Outbox 和 River Job。
 func (repository *GORMRuntimeRepository) Start(ctx context.Context, request application.RuntimeStartRequest) (application.RuntimeStartResult, error) {
 	if err := validateGORMRuntimeStartRequest(request); err != nil {
@@ -399,7 +395,7 @@ WHERE id=? AND kind=? AND args->>'node_run_id'=? AND (args->>'dispatch_no')::int
 	}, true, nil
 }
 
-func scanGORMStartRun(row gormRuntimeStartScanner) (domain.Run, error) {
+func scanGORMStartRun(row workflowRowScanner) (domain.Run, error) {
 	var run domain.Run
 	var id, workspaceID, definitionID, status string
 	var input workflowJSONB
@@ -440,7 +436,7 @@ func scanGORMStartRun(row gormRuntimeStartScanner) (domain.Run, error) {
 	return run, nil
 }
 
-func scanGORMStartNode(row gormRuntimeStartScanner) (domain.NodeRun, error) {
+func scanGORMStartNode(row workflowRowScanner) (domain.NodeRun, error) {
 	var node domain.NodeRun
 	var id, runID, status string
 	var input workflowJSONB

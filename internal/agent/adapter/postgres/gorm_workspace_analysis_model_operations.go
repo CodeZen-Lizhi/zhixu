@@ -11,12 +11,10 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
-	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
 )
 
-// GORMWorkspaceAnalysisRepository 是 Workspace Analysis 模型操作的 staged GORM
-// 实现。生产 Composition 仍使用 legacy Repository，直到 Final 统一切换。
+// GORMWorkspaceAnalysisRepository 在同一平台事务中持久化 Workspace Analysis 模型操作。
 type GORMWorkspaceAnalysisRepository struct {
 	database   *gorm.DB
 	unitOfWork foundation.UnitOfWork
@@ -99,8 +97,7 @@ func translateGORMWorkspaceAnalysisModelFenceError(ctx context.Context, err erro
 			}
 			return foundation.NewError(foundation.ErrorRetryableFailure, "AGENT_DATABASE_TIMEOUT", true, preservedCause)
 		}
-		var postgresError *pgconn.PgError
-		if errors.As(cause, &postgresError) || errors.Is(cause, sql.ErrTxDone) {
+		if platformpostgres.SQLState(cause) != "" || errors.Is(cause, sql.ErrTxDone) {
 			return classifyGORM(ctx, cause)
 		}
 		switch classified.Kind {
@@ -177,7 +174,7 @@ func validateGORMWorkspaceAnalysisModelFenceSnapshotBinding(
 	return nil
 }
 
-// fenceSnapshotFromScoped 把 Workflow fence 快照映射为 legacy fence 形状，使全部
+// fenceSnapshotFromScoped 把 Workflow fence 快照映射为模型操作 fence 投影，使全部
 // 既有纯校验器（定义绑定、租约活性、执行 fence）原样复用。
 func fenceSnapshotFromScoped(
 	snapshot workflowapplication.WorkspaceAnalysisExecutionFenceSnapshot,

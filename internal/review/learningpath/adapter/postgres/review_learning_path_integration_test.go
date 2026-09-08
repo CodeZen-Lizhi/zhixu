@@ -24,9 +24,9 @@ import (
 	gormlogger "gorm.io/gorm/logger"
 )
 
-func TestReviewLearningPathPostgreSQLLegacyAndGORMCreateReadParity(t *testing.T) {
+func TestReviewLearningPathPostgreSQLCreateReadAndReplay(t *testing.T) {
 	runReviewPathIntegrationVariants(t, func(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fixture reviewPathFixture, store pathapp.Store) {
-		bridge, _ := newReviewPathProductionBridge(t, pool, fixture.contentHash)
+		bridge, _ := newReviewPathProductionBridge(t, fixture.platform, fixture.contentHash)
 		service := newReviewPathService(t, store, bridge)
 		command := pathapp.CreateReviewCommand{
 			WorkspaceID: fixture.workspaceID, ReviewAnswerID: fixture.answerID,
@@ -99,7 +99,7 @@ func TestReviewLearningPathPostgreSQLGORMConcurrentSameAndDifferentKeys(t *testi
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			runReviewPathGORMIntegration(t, func(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fixture reviewPathFixture, store pathapp.Store) {
-				bridge, _ := newReviewPathProductionBridge(t, pool, fixture.contentHash)
+				bridge, _ := newReviewPathProductionBridge(t, fixture.platform, fixture.contentHash)
 				firstService := newReviewPathService(t, store, bridge)
 				secondService := newReviewPathService(t, store, bridge)
 				start := make(chan struct{})
@@ -160,7 +160,7 @@ func TestReviewLearningPathPostgreSQLGORMHistoryTriggerRollback(t *testing.T) {
 		if !ok {
 			t.Fatalf("GORM variant returned %T", store)
 		}
-		bridge, _ := newReviewPathProductionBridge(t, pool, fixture.contentHash)
+		bridge, _ := newReviewPathProductionBridge(t, fixture.platform, fixture.contentHash)
 		service := newReviewPathService(t, repository, bridge)
 		created, err := service.CreateForReview(ctx, pathapp.CreateReviewCommand{
 			WorkspaceID: fixture.workspaceID, ReviewAnswerID: fixture.answerID,
@@ -202,7 +202,7 @@ func TestReviewLearningPathPostgreSQLGORMCompleteResponseLossReplay(t *testing.T
 		lossUnitOfWork := &reviewPathPostCommitErrorUnitOfWork{inner: repository.unitOfWork, err: commitLoss}
 		lossRepository := *repository
 		lossRepository.unitOfWork = lossUnitOfWork
-		bridge, _ := newReviewPathProductionBridge(t, pool, fixture.contentHash)
+		bridge, _ := newReviewPathProductionBridge(t, fixture.platform, fixture.contentHash)
 		entered := make(chan reviewPathCompleteCall, 1)
 		release := make(chan struct{})
 		lossService := newReviewPathService(t, &reviewPathBlockingCompleteStore{
@@ -258,7 +258,7 @@ func TestReviewLearningPathPostgreSQLGORMCancellationAndUniqueReceiptRollback(t 
 			t.Fatalf("GORM cancellation error=%v", err)
 		}
 
-		bridge, _ := newReviewPathProductionBridge(t, pool, fixture.contentHash)
+		bridge, _ := newReviewPathProductionBridge(t, fixture.platform, fixture.contentHash)
 		service := newReviewPathService(t, repository, bridge)
 		created, err := service.CreateForReview(ctx, pathapp.CreateReviewCommand{
 			WorkspaceID: fixture.workspaceID, ReviewAnswerID: fixture.answerID,
@@ -399,7 +399,7 @@ func TestReviewLearningPathPostgreSQLGORMStatementBoundsForeignKeyAndPlans(t *te
 			t.Fatalf("GORM review snapshot statements=%d, want 3", statements)
 		}
 
-		bridge, _ := newReviewPathProductionBridge(t, pool, fixture.contentHash)
+		bridge, _ := newReviewPathProductionBridge(t, fixture.platform, fixture.contentHash)
 		service := newReviewPathService(t, repository, bridge)
 		created, err := service.CreateForReview(ctx, pathapp.CreateReviewCommand{
 			WorkspaceID: fixture.workspaceID, ReviewAnswerID: fixture.answerID,
@@ -501,43 +501,30 @@ func TestReviewLearningPathPostgreSQLConcurrentSameAndDifferentKeys(t *testing.T
 		t.Run(testCase.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
-			pool := newReviewPathTestDatabase(t, ctx)
-			fixture := seedReviewPathFixture(t, ctx, pool)
-
-			firstConnection, err := pool.Acquire(ctx)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer firstConnection.Release()
-			secondConnection, err := pool.Acquire(ctx)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer secondConnection.Release()
+			platform := newReviewPathTestDatabase(t, ctx)
+			pool := platform.DB()
+			fixture := seedReviewPathFixture(t, ctx, platform)
 
 			arrived := make(chan struct{}, 2)
 			issuing := make(chan struct{})
 			release := make(chan struct{})
 			firstBarrier := &reviewPathSQLBarrier{
-				match: "SELECT id::text FROM core.workspace", arrived: arrived,
+				match: "FROM core.workspace", arrived: arrived,
 				issuing: issuing, release: release,
 			}
 			secondBarrier := &reviewPathSQLBarrier{
-				match: "SELECT id::text FROM core.workspace", arrived: arrived,
+				match: "FROM core.workspace", arrived: arrived,
 				issuing: issuing, release: release,
 			}
-			firstRepository, err := NewRepository(&reviewPathBarrierDB{DB: firstConnection, barrier: firstBarrier})
+			repository, err := NewGORMRepository(platform)
 			if err != nil {
 				t.Fatal(err)
 			}
-			secondRepository, err := NewRepository(&reviewPathBarrierDB{DB: secondConnection, barrier: secondBarrier})
-			if err != nil {
-				t.Fatal(err)
-			}
-			firstBridge, _ := newReviewPathProductionBridge(t, firstConnection, fixture.contentHash)
-			secondBridge, _ := newReviewPathProductionBridge(t, secondConnection, fixture.contentHash)
-			firstService := newReviewPathService(t, firstRepository, firstBridge)
-			secondService := newReviewPathService(t, secondRepository, secondBridge)
+			store := reviewPathSQLBarrierStore(t, repository, nil)
+			firstBridge, _ := newReviewPathProductionBridge(t, platform, fixture.contentHash)
+			secondBridge, _ := newReviewPathProductionBridge(t, platform, fixture.contentHash)
+			firstService := newReviewPathService(t, store, firstBridge)
+			secondService := newReviewPathService(t, store, secondBridge)
 
 			lockTx, err := pool.Begin(ctx)
 			if err != nil {
@@ -551,8 +538,8 @@ func TestReviewLearningPathPostgreSQLConcurrentSameAndDifferentKeys(t *testing.T
 			}
 
 			outcomes := make(chan reviewPathCreateOutcome, 2)
-			go runReviewPathCreate(ctx, outcomes, firstService, fixture, testCase.firstKey)
-			go runReviewPathCreate(ctx, outcomes, secondService, fixture, testCase.secondKey)
+			go runReviewPathCreate(context.WithValue(ctx, reviewPathBarrierContextKey{}, firstBarrier), outcomes, firstService, fixture, testCase.firstKey)
+			go runReviewPathCreate(context.WithValue(ctx, reviewPathBarrierContextKey{}, secondBarrier), outcomes, secondService, fixture, testCase.secondKey)
 			waitReviewPathSignal(t, ctx, arrived, "first create did not reach the Workspace row lock")
 			waitReviewPathSignal(t, ctx, arrived, "second create did not reach the Workspace row lock")
 			close(release)
@@ -612,7 +599,7 @@ func TestReviewLearningPathPostgreSQLConcurrentSameAndDifferentKeys(t *testing.T
 func TestReviewLearningPathPostgreSQLMaintenanceFencesLateHoldAndComplete(t *testing.T) {
 	t.Run("maintenance wins before late Artifact hold", func(t *testing.T) {
 		runReviewPathIntegrationVariants(t, func(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fixture reviewPathFixture, repository pathapp.Store) {
-			productionBridge, _ := newReviewPathProductionBridge(t, pool, fixture.contentHash)
+			productionBridge, _ := newReviewPathProductionBridge(t, fixture.platform, fixture.contentHash)
 			entered := make(chan pathapp.DraftRequest, 1)
 			release := make(chan struct{})
 			service := newReviewPathService(t, repository, &reviewPathBlockingBridge{
@@ -649,7 +636,7 @@ func TestReviewLearningPathPostgreSQLMaintenanceFencesLateHoldAndComplete(t *tes
 
 	t.Run("maintenance wins before Complete", func(t *testing.T) {
 		runReviewPathIntegrationVariants(t, func(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fixture reviewPathFixture, repository pathapp.Store) {
-			bridge, artifactRepository := newReviewPathProductionBridge(t, pool, fixture.contentHash)
+			bridge, artifactRepository := newReviewPathProductionBridge(t, fixture.platform, fixture.contentHash)
 			entered := make(chan reviewPathCompleteCall, 1)
 			release := make(chan struct{})
 			blockingStore := &reviewPathBlockingCompleteStore{
@@ -689,7 +676,7 @@ func TestReviewLearningPathPostgreSQLMaintenanceFencesLateHoldAndComplete(t *tes
 
 func TestReviewLearningPathPostgreSQLCompleteWinsBeforeMaintenance(t *testing.T) {
 	runReviewPathIntegrationVariants(t, func(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fixture reviewPathFixture, repository pathapp.Store) {
-		bridge, artifactRepository := newReviewPathProductionBridge(t, pool, fixture.contentHash)
+		bridge, artifactRepository := newReviewPathProductionBridge(t, fixture.platform, fixture.contentHash)
 		staleAt := time.Now().UTC().Add(-25 * time.Hour)
 		completeEntered := make(chan reviewPathCompleteCall, 1)
 		completeRelease := make(chan struct{})
@@ -706,7 +693,7 @@ func TestReviewLearningPathPostgreSQLCompleteWinsBeforeMaintenance(t *testing.T)
 
 		maintenanceArrived := make(chan struct{}, 1)
 		maintenanceRelease := make(chan struct{})
-		maintenanceRepository := reviewPathMaintenanceBarrierStore(t, ctx, pool, repository, &reviewPathSQLBarrier{
+		maintenanceRepository := reviewPathSQLBarrierStore(t, repository, &reviewPathSQLBarrier{
 			match: "WITH candidates AS (", arrived: maintenanceArrived, release: maintenanceRelease,
 		})
 		type maintenanceOutcome struct {
@@ -751,28 +738,39 @@ func TestReviewLearningPathPostgreSQLCompleteWinsBeforeMaintenance(t *testing.T)
 func TestReviewLearningPathPostgreSQLCompleteResponseLossReplay(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	pool := newReviewPathTestDatabase(t, ctx)
-	fixture := seedReviewPathFixture(t, ctx, pool)
-	lossDB := &reviewPathCommitLossDB{DB: pool}
-	lossRepository, err := NewRepository(lossDB)
+	platform := newReviewPathTestDatabase(t, ctx)
+	pool := platform.DB()
+	fixture := seedReviewPathFixture(t, ctx, platform)
+	repository, err := NewGORMRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
-	bridge, _ := newReviewPathProductionBridge(t, pool, fixture.contentHash)
-	lossService := newReviewPathService(t, lossRepository, bridge)
+	lossUnitOfWork := &reviewPathPostCommitErrorUnitOfWork{
+		inner: repository.unitOfWork,
+		err:   errors.New("simulated Review Path completion response loss"),
+	}
+	lossRepository := *repository
+	lossRepository.unitOfWork = lossUnitOfWork
+	bridge, _ := newReviewPathProductionBridge(t, platform, fixture.contentHash)
+	entered := make(chan reviewPathCompleteCall, 1)
+	release := make(chan struct{})
+	lossService := newReviewPathService(t, &reviewPathBlockingCompleteStore{
+		Store: &lossRepository, entered: entered, release: release,
+	}, bridge)
 	command := pathapp.CreateReviewCommand{
 		WorkspaceID: fixture.workspaceID, ReviewAnswerID: fixture.answerID,
 		IdempotencyKey: "review-path-response-loss",
 	}
-	if _, err := lossService.CreateForReview(ctx, command); err == nil ||
-		reviewPathErrorCode(err) != pathdomain.ErrorCodeDependencyUnavailable || !lossDB.lost.Load() {
-		t.Fatalf("Complete response-loss error=%v", err)
+	outcomes := make(chan reviewPathCreateOutcome, 1)
+	go runReviewPathCreate(ctx, outcomes, lossService, fixture, command.IdempotencyKey)
+	waitReviewPathCompleteCall(t, ctx, entered)
+	lossUnitOfWork.armed.Store(true)
+	close(release)
+	outcome := waitReviewPathCreate(t, ctx, outcomes)
+	if outcome.err == nil || reviewPathErrorCode(outcome.err) != pathdomain.ErrorCodeDependencyUnavailable || !lossUnitOfWork.lost.Load() {
+		t.Fatalf("Complete response-loss error=%v", outcome.err)
 	}
 
-	repository, err := NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
 	service := newReviewPathService(t, repository, bridge)
 	replayed, err := service.CreateForReview(ctx, command)
 	if err != nil || !replayed.Replayed {
@@ -807,7 +805,7 @@ func testReviewPathAbandonedReopenAndAttemptFence(
 	fixture reviewPathFixture,
 	repository pathapp.Store,
 ) {
-	bridge, artifactRepository := newReviewPathProductionBridge(t, pool, fixture.contentHash)
+	bridge, artifactRepository := newReviewPathProductionBridge(t, fixture.platform, fixture.contentHash)
 	completeEntered := make(chan reviewPathCompleteCall, 1)
 	completeRelease := make(chan struct{})
 	blockingStore := &reviewPathBlockingCompleteStore{
@@ -1143,47 +1141,39 @@ func seedReviewPathMaintenancePlanRows(
 	}
 }
 
-func reviewPathMaintenanceBarrierStore(
+func reviewPathSQLBarrierStore(
 	t *testing.T,
-	ctx context.Context,
-	pool *pgxpool.Pool,
 	store pathapp.Store,
 	barrier *reviewPathSQLBarrier,
 ) pathapp.Store {
 	t.Helper()
-	switch repository := store.(type) {
-	case *Repository:
-		connection, err := pool.Acquire(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(connection.Release)
-		wrapped, err := NewRepository(&reviewPathBarrierDB{DB: connection, barrier: barrier})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return wrapped
-	case *GORMRepository:
-		const callbackName = "review_path:maintenance_barrier"
-		rowCallbacks := repository.database.Callback().Row()
-		if err := rowCallbacks.Before("gorm:row").Register(callbackName, func(database *gorm.DB) {
-			if database != nil && database.Statement != nil {
-				barrier.wait(database.Statement.Context, database.Statement.SQL.String())
-			}
-		}); err != nil {
-			t.Fatalf("register GORM maintenance barrier: %v", err)
-		}
-		t.Cleanup(func() {
-			if err := rowCallbacks.Remove(callbackName); err != nil {
-				t.Errorf("remove GORM maintenance barrier: %v", err)
-			}
-		})
-		return repository
-	default:
+	repository, ok := store.(*GORMRepository)
+	if !ok {
 		t.Fatalf("unsupported Review Path store %T", store)
-		return nil
 	}
+	const callbackName = "review_path:sql_barrier"
+	rowCallbacks := repository.database.Callback().Row()
+	if err := rowCallbacks.Before("gorm:row").Register(callbackName, func(database *gorm.DB) {
+		if database == nil || database.Statement == nil {
+			return
+		}
+		scopedBarrier, _ := database.Statement.Context.Value(reviewPathBarrierContextKey{}).(*reviewPathSQLBarrier)
+		if scopedBarrier == nil {
+			scopedBarrier = barrier
+		}
+		scopedBarrier.wait(database.Statement.Context, database.Statement.SQL.String())
+	}); err != nil {
+		t.Fatalf("register GORM SQL barrier: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := rowCallbacks.Remove(callbackName); err != nil {
+			t.Errorf("remove GORM SQL barrier: %v", err)
+		}
+	})
+	return repository
 }
+
+type reviewPathBarrierContextKey struct{}
 
 type reviewPathSQLBarrier struct {
 	match   string
@@ -1215,29 +1205,6 @@ func (barrier *reviewPathSQLBarrier) wait(ctx context.Context, query string) {
 			}
 		}
 	})
-}
-
-type reviewPathBarrierDB struct {
-	DB
-	barrier *reviewPathSQLBarrier
-}
-
-func (database *reviewPathBarrierDB) Begin(ctx context.Context) (pgx.Tx, error) {
-	tx, err := database.DB.Begin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return &reviewPathBarrierTx{Tx: tx, barrier: database.barrier}, nil
-}
-
-type reviewPathBarrierTx struct {
-	pgx.Tx
-	barrier *reviewPathSQLBarrier
-}
-
-func (tx *reviewPathBarrierTx) QueryRow(ctx context.Context, query string, args ...any) pgx.Row {
-	tx.barrier.wait(ctx, query)
-	return tx.Tx.QueryRow(ctx, query, args...)
 }
 
 type reviewPathBlockingBridge struct {
@@ -1362,43 +1329,6 @@ func (unitOfWork *reviewPathPostCommitErrorUnitOfWork) Within(
 	}
 	if unitOfWork.armed.Load() && unitOfWork.lost.CompareAndSwap(false, true) {
 		return unitOfWork.err
-	}
-	return nil
-}
-
-type reviewPathCommitLossDB struct {
-	DB
-	lost atomic.Bool
-}
-
-func (database *reviewPathCommitLossDB) Begin(ctx context.Context) (pgx.Tx, error) {
-	tx, err := database.DB.Begin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return &reviewPathCommitLossTx{Tx: tx, database: database}, nil
-}
-
-type reviewPathCommitLossTx struct {
-	pgx.Tx
-	database *reviewPathCommitLossDB
-	terminal bool
-}
-
-func (tx *reviewPathCommitLossTx) Exec(ctx context.Context, query string, args ...any) (pgconn.CommandTag, error) {
-	tag, err := tx.Tx.Exec(ctx, query, args...)
-	if err == nil && strings.Contains(query, "SET status='COMPLETED'") {
-		tx.terminal = true
-	}
-	return tag, err
-}
-
-func (tx *reviewPathCommitLossTx) Commit(ctx context.Context) error {
-	if err := tx.Tx.Commit(ctx); err != nil {
-		return err
-	}
-	if tx.terminal && tx.database.lost.CompareAndSwap(false, true) {
-		return errors.New("simulated Review Path completion response loss")
 	}
 	return nil
 }

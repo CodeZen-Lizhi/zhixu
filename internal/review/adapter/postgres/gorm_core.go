@@ -11,12 +11,10 @@ import (
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	reviewapp "github.com/CodeZen-Lizhi/zhixu/internal/review/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/review/domain"
-	"github.com/jackc/pgx/v5"
 	"gorm.io/gorm"
 )
 
-// GORMRepository is the staged Review Core implementation backed by one
-// shared platform Pool. Production composition remains on Repository.
+// GORMRepository persists Review Core using the shared platform Pool and unit of work.
 type GORMRepository struct {
 	database   *gorm.DB
 	unitOfWork foundation.UnitOfWork
@@ -132,7 +130,7 @@ func gormReviewExec(ctx context.Context, database *gorm.DB, query string, argume
 }
 
 func gormReviewNoRows(err error) bool {
-	return errors.Is(err, sql.ErrNoRows) || errors.Is(err, pgx.ErrNoRows) || errors.Is(err, gorm.ErrRecordNotFound)
+	return errors.Is(err, sql.ErrNoRows) || errors.Is(err, gorm.ErrRecordNotFound)
 }
 
 func gormReviewClassify(ctx context.Context, err error, fallbackCode string) error {

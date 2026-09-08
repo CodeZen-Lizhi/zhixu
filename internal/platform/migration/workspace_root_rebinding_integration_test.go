@@ -29,58 +29,22 @@ type workspaceRootRebindHarness struct {
 	missingAudit func() (workspaceRootGrantRepository, error)
 }
 
-type workspaceRootRebindVariant struct {
-	name string
-	open func(*platformpostgres.Pool) (workspaceRootRebindHarness, error)
-}
-
-func runWorkspaceRootRebindVariants(t *testing.T, test func(*testing.T, *platformpostgres.Pool, context.Context, workspaceRootRebindHarness)) {
+func runWorkspaceRootRebindIntegration(t *testing.T, test func(*testing.T, *platformpostgres.Pool, context.Context, workspaceRootRebindHarness)) {
 	t.Helper()
-	variants := []workspaceRootRebindVariant{
-		{name: "legacy", open: openLegacyWorkspaceRootRebindHarness},
-		{name: "gorm", open: openGORMWorkspaceRootRebindHarness},
-	}
-	for _, variant := range variants {
-		variant := variant
-		t.Run(variant.name, func(t *testing.T) {
-			fixture := testdb.Require(t, testdb.Config{
-				ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
-				Availability:     testdb.FailWhenUnavailable,
-				MaxConns:         16,
-			})
-			harness, err := variant.open(fixture.Pool())
-			if err != nil {
-				t.Fatal(err)
-			}
-			ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
-			defer cancel()
-			test(t, fixture.Pool(), ctx, harness)
+	t.Run("gorm", func(t *testing.T) {
+		fixture := testdb.Require(t, testdb.Config{
+			ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
+			Availability:     testdb.FailWhenUnavailable,
+			MaxConns:         16,
 		})
-	}
-}
-
-func openLegacyWorkspaceRootRebindHarness(platform *platformpostgres.Pool) (workspaceRootRebindHarness, error) {
-	auditStore, err := auditpostgres.NewStore(platform.DB())
-	if err != nil {
-		return workspaceRootRebindHarness{}, err
-	}
-	repository, err := workspacepostgres.NewRepository(platform.DB(), workspacepostgres.WithAuditAppender(auditStore))
-	if err != nil {
-		return workspaceRootRebindHarness{}, err
-	}
-	return workspaceRootRebindHarness{
-		repository: repository,
-		failing: func(failure error) (workspaceRootGrantRepository, error) {
-			return workspacepostgres.NewRepository(platform.DB(), workspacepostgres.WithAuditAppender(
-				failAfterWorkspaceRootRebindAuditAppender{delegate: auditStore, err: failure},
-			))
-		},
-		missingAudit: func() (workspaceRootGrantRepository, error) {
-			return workspacepostgres.NewRepository(platform.DB(), workspacepostgres.WithAuditAppender(
-				omitWorkspaceRootRebindAuditAppender{},
-			))
-		},
-	}, nil
+		harness, err := openGORMWorkspaceRootRebindHarness(fixture.Pool())
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+		defer cancel()
+		test(t, fixture.Pool(), ctx, harness)
+	})
 }
 
 func openGORMWorkspaceRootRebindHarness(platform *platformpostgres.Pool) (workspaceRootRebindHarness, error) {
@@ -108,11 +72,11 @@ func openGORMWorkspaceRootRebindHarness(platform *platformpostgres.Pool) (worksp
 }
 
 func TestWorkspaceRootRebindingIsAuditedIdempotentAndFailClosed(t *testing.T) {
-	runWorkspaceRootRebindVariants(t, testWorkspaceRootRebindingIsAuditedIdempotentAndFailClosed)
+	runWorkspaceRootRebindIntegration(t, testWorkspaceRootRebindingIsAuditedIdempotentAndFailClosed)
 }
 
 func TestWorkspaceRootRebindingSerializesReverseFingerprints(t *testing.T) {
-	runWorkspaceRootRebindVariants(t, testWorkspaceRootRebindingSerializesReverseFingerprints)
+	runWorkspaceRootRebindIntegration(t, testWorkspaceRootRebindingSerializesReverseFingerprints)
 }
 
 func testWorkspaceRootRebindingSerializesReverseFingerprints(t *testing.T, platform *platformpostgres.Pool, ctx context.Context, harness workspaceRootRebindHarness) {
@@ -476,27 +440,12 @@ old_workspace_version,new_workspace_version)
 	requireWorkspaceRootGrantPoolReleased(t, platform)
 }
 
-type failAfterWorkspaceRootRebindAuditAppender struct {
-	delegate auditapplication.Appender
-	err      error
-}
-
 type failAfterWorkspaceRootRebindScopedAuditAppender struct {
 	delegate auditapplication.ScopedAppender
 	err      error
 }
 
-type omitWorkspaceRootRebindAuditAppender struct{}
-
 type omitWorkspaceRootRebindScopedAuditAppender struct{}
-
-func (omitWorkspaceRootRebindAuditAppender) AppendTx(
-	_ context.Context,
-	_ any,
-	event auditdomain.Event,
-) (auditdomain.Event, bool, error) {
-	return event, false, nil
-}
 
 func (omitWorkspaceRootRebindScopedAuditAppender) AppendScoped(
 	_ context.Context,
@@ -512,18 +461,6 @@ func (appender failAfterWorkspaceRootRebindScopedAuditAppender) AppendScoped(
 	event auditdomain.Event,
 ) (auditdomain.Event, bool, error) {
 	created, replayed, err := appender.delegate.AppendScoped(ctx, scope, event)
-	if err != nil {
-		return auditdomain.Event{}, false, err
-	}
-	return created, replayed, appender.err
-}
-
-func (appender failAfterWorkspaceRootRebindAuditAppender) AppendTx(
-	ctx context.Context,
-	transaction any,
-	event auditdomain.Event,
-) (auditdomain.Event, bool, error) {
-	created, replayed, err := appender.delegate.AppendTx(ctx, transaction, event)
 	if err != nil {
 		return auditdomain.Event{}, false, err
 	}

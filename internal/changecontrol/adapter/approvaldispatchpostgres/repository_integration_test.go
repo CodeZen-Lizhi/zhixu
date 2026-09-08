@@ -6,8 +6,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
-	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -23,21 +21,20 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	modelsettingspostgres "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/adapter/postgres"
 	modelcrypto "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/crypto"
-	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	workflowpostgres "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/postgres"
 	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
 	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestApprovalDispatchAtomicallyCreatesAndReplaysWorkflowRiverBinding(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := newApprovalDispatchTestDatabase(t, ctx)
-	defer cleanup()
-	repository, dispatcher := approvalDispatchFixture(t, ctx, pool)
+	platform := newApprovalDispatchTestDatabase(t)
+	pool := platform.DB()
+	repository, dispatcher := approvalDispatchFixture(t, platform)
 	workspaceID, proposal := createDispatchProposal(t, ctx, pool, repository, "atomic")
 	head := "abcdef0123456789abcdef0123456789abcdef01"
 	command := changedispatch.Command{WorkspaceID: workspaceID, Approval: domain.Approval{
@@ -66,6 +63,10 @@ func TestApprovalDispatchAtomicallyCreatesAndReplaysWorkflowRiverBinding(t *test
 	var replayed int
 	for call := range calls {
 		if call.err != nil {
+			var postgresError *pgconn.PgError
+			if errors.As(call.err, &postgresError) {
+				t.Fatalf("dispatch err=%v PostgreSQL=%s constraint=%s", call.err, postgresError.Code, postgresError.ConstraintName)
+			}
 			t.Fatal(call.err)
 		}
 		if first.WorkflowRunID == "" {
@@ -99,7 +100,7 @@ func TestApprovalDispatchAtomicallyCreatesAndReplaysWorkflowRiverBinding(t *test
 	}
 	otherWorkspaceID := mustDispatchID(t)
 	rootPath := "/tmp/approval-dispatch-other-" + string(otherWorkspaceID)
-	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'Approval Dispatch Other',$2,$2,CURRENT_TIMESTAMP,'test',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(otherWorkspaceID), rootPath); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'Approval Dispatch Other',$2,$2,CURRENT_TIMESTAMP,'inactive',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(otherWorkspaceID), rootPath); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE workflow.run SET workspace_id=$2 WHERE id=$1`, string(first.WorkflowRunID), string(otherWorkspaceID)); err == nil {
@@ -122,7 +123,7 @@ func TestApprovalDispatchAtomicallyCreatesAndReplaysWorkflowRiverBinding(t *test
 }
 
 // TestGORMApprovalDispatchAtomicallyBindsWorkflowAndRiver is the focused
-// PostgreSQL gate for the staged Approval Dispatch adapter. It keeps one
+// PostgreSQL gate for the GORM Approval Dispatch adapter. It keeps one
 // shared platform Pool across Change Control, Model Settings, Workflow,
 // Events, and River so the caller-owned scope is exercised end to end.
 func TestGORMApprovalDispatchAtomicallyBindsWorkflowAndRiver(t *testing.T) {
@@ -218,14 +219,14 @@ func TestGORMApprovalDispatchAtomicallyBindsWorkflowAndRiver(t *testing.T) {
 
 func TestApprovalDispatchRollsBackDecisionWhenRuntimeFails(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := newApprovalDispatchTestDatabase(t, ctx)
-	defer cleanup()
-	repository, err := changecontrolpostgres.NewRepository(pool)
+	platform := newApprovalDispatchTestDatabase(t)
+	pool := platform.DB()
+	repository, err := changecontrolpostgres.NewGORMRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
 	workspaceID, proposal := createDispatchProposal(t, ctx, pool, repository, "rollback")
-	dispatcher, err := NewApprovalDispatchRepository(pool, failingApprovalRuntime{}, foundation.NewUUIDGenerator(nil), foundation.SystemClock{})
+	dispatcher, err := NewGORMApprovalDispatchRepository(platform, failingApprovalRuntime{}, foundation.NewUUIDGenerator(nil), foundation.SystemClock{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,9 +247,9 @@ func TestApprovalDispatchRollsBackDecisionWhenRuntimeFails(t *testing.T) {
 
 func TestApprovalDispatchRejectedNeverCreatesWorkflow(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := newApprovalDispatchTestDatabase(t, ctx)
-	defer cleanup()
-	repository, dispatcher := approvalDispatchEventFixture(t, ctx, pool)
+	platform := newApprovalDispatchTestDatabase(t)
+	pool := platform.DB()
+	repository, dispatcher := approvalDispatchFixture(t, platform)
 	workspaceID, proposal := createDispatchProposal(t, ctx, pool, repository, "rejected")
 	command := changedispatch.Command{WorkspaceID: workspaceID, Approval: domain.Approval{
 		ID: mustDispatchID(t), ProposalID: proposal.ID, RevisionID: proposal.Revision.ID,
@@ -295,26 +296,12 @@ func TestApprovalDispatchRejectedNeverCreatesWorkflow(t *testing.T) {
 
 func TestApprovalDispatchRecoversCommitResponseLossByExactReplay(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := newApprovalDispatchTestDatabase(t, ctx)
-	defer cleanup()
-	repository, normal := approvalDispatchFixture(t, ctx, pool)
+	platform := newApprovalDispatchTestDatabase(t)
+	pool := platform.DB()
+	repository, normal := approvalDispatchFixture(t, platform)
 	workspaceID, proposal := createDispatchProposal(t, ctx, pool, repository, "response-loss")
-	client, err := riveradapter.NewClient(pool, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	inserter, err := riveradapter.NewJobInserter(client)
-	if err != nil {
-		t.Fatal(err)
-	}
-	runtime, err := workflowpostgres.NewRuntimeRepository(pool, inserter)
-	if err != nil {
-		t.Fatal(err)
-	}
-	lost, err := NewApprovalDispatchRepository(dispatchCommitResponseLossDB{pool: pool}, runtime, foundation.NewUUIDGenerator(nil), foundation.SystemClock{})
-	if err != nil {
-		t.Fatal(err)
-	}
+	lost := *normal
+	lost.unitOfWork = dispatchCommitResponseLossUnitOfWork{UnitOfWork: normal.unitOfWork}
 	head := "abcdef0123456789abcdef0123456789abcdef01"
 	command := changedispatch.Command{WorkspaceID: workspaceID, Approval: domain.Approval{
 		ID: mustDispatchID(t), ProposalID: proposal.ID, RevisionID: proposal.Revision.ID,
@@ -332,85 +319,51 @@ func TestApprovalDispatchRecoversCommitResponseLossByExactReplay(t *testing.T) {
 
 type failingApprovalRuntime struct{}
 
-func (failingApprovalRuntime) StartTx(context.Context, pgx.Tx, workflowapplication.RuntimeStartRequest) (workflowapplication.RuntimeStartResult, error) {
+func (failingApprovalRuntime) StartScoped(context.Context, foundation.TransactionScope, workflowapplication.RuntimeStartRequest) (workflowapplication.RuntimeStartResult, error) {
 	return workflowapplication.RuntimeStartResult{}, foundation.NewError(foundation.ErrorRetryableFailure, "WORKFLOW_RIVER_JOB_INSERT_FAILED", true, errors.New("injected runtime failure"))
 }
 
-type dispatchCommitResponseLossDB struct{ pool *pgxpool.Pool }
+type dispatchCommitResponseLossUnitOfWork struct{ foundation.UnitOfWork }
 
-func (d dispatchCommitResponseLossDB) Query(ctx context.Context, sql string, arguments ...any) (pgx.Rows, error) {
-	return d.pool.Query(ctx, sql, arguments...)
-}
-
-func (d dispatchCommitResponseLossDB) QueryRow(ctx context.Context, sql string, arguments ...any) pgx.Row {
-	return d.pool.QueryRow(ctx, sql, arguments...)
-}
-
-func (d dispatchCommitResponseLossDB) Begin(ctx context.Context) (pgx.Tx, error) {
-	tx, err := d.pool.Begin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return dispatchCommitResponseLossTx{Tx: tx}, nil
-}
-
-type dispatchCommitResponseLossTx struct{ pgx.Tx }
-
-func (tx dispatchCommitResponseLossTx) Commit(ctx context.Context) error {
-	if err := tx.Tx.Commit(ctx); err != nil {
+func (unit dispatchCommitResponseLossUnitOfWork) Within(ctx context.Context, options foundation.TransactionOptions, work foundation.TransactionFunc) error {
+	if err := unit.UnitOfWork.Within(ctx, options, work); err != nil {
 		return err
 	}
 	return errors.New("injected approval dispatch commit response loss")
 }
 
-func approvalDispatchFixture(t *testing.T, ctx context.Context, pool *pgxpool.Pool) (*changecontrolpostgres.Repository, *ApprovalDispatchRepository) {
+func approvalDispatchFixture(t *testing.T, platform *platformpostgres.Pool) (*changecontrolpostgres.GORMRepository, *GORMApprovalDispatchRepository) {
 	t.Helper()
-	repository, err := changecontrolpostgres.NewRepository(pool)
+	sealer, err := modelcrypto.NewSealer(bytes.Repeat([]byte{0x2a}, 32))
 	if err != nil {
 		t.Fatal(err)
 	}
-	client, err := riveradapter.NewClient(pool, nil)
+	audit, err := auditpostgres.NewGORMStore(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
-	inserter, err := riveradapter.NewJobInserter(client)
+	settings, err := modelsettingspostgres.NewGORMRepository(platform,
+		modelsettingspostgres.WithGORMSecretSealer(sealer), modelsettingspostgres.WithGORMAuditAppender(audit),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtime, err := workflowpostgres.NewRuntimeRepository(pool, inserter)
+	events, err := eventspostgres.NewGORMStore(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
-	dispatcher, err := NewApprovalDispatchRepository(pool, runtime, foundation.NewUUIDGenerator(nil), foundation.SystemClock{})
+	repository, err := changecontrolpostgres.NewGORMRepository(platform, events)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return repository, dispatcher
-}
-
-func approvalDispatchEventFixture(t *testing.T, ctx context.Context, pool *pgxpool.Pool) (*changecontrolpostgres.Repository, *ApprovalDispatchRepository) {
-	t.Helper()
-	events, err := eventspostgres.NewStore(pool)
+	runtime, err := workflowpostgres.NewGORMRuntimeRepositoryWithHooks(
+		platform, riveradapter.DefaultOptions(), settings,
+		workflowpostgres.GORMRuntimeRepositoryHooks{CancellationSafety: repository},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	repository, err := changecontrolpostgres.NewRepository(pool, events)
-	if err != nil {
-		t.Fatal(err)
-	}
-	client, err := riveradapter.NewClient(pool, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	inserter, err := riveradapter.NewJobInserter(client)
-	if err != nil {
-		t.Fatal(err)
-	}
-	runtime, err := workflowpostgres.NewRuntimeRepository(pool, inserter)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dispatcher, err := NewApprovalDispatchRepository(pool, runtime, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, events)
+	dispatcher, err := NewGORMApprovalDispatchRepository(platform, runtime, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, events)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -458,49 +411,12 @@ func mustDispatchID(t *testing.T) foundation.ID {
 	return id
 }
 
-func newApprovalDispatchTestDatabase(t *testing.T, ctx context.Context) (*pgxpool.Pool, func()) {
+func newApprovalDispatchTestDatabase(t *testing.T) *platformpostgres.Pool {
 	t.Helper()
-	baseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
-	if baseURL == "" {
-		t.Fatal("ZHIXU_TEST_DATABASE_URL is required for Approval Dispatch integration tests")
-	}
-	parsed, err := url.Parse(baseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	admin, err := pgxpool.New(ctx, baseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	name := fmt.Sprintf("zhixu_approval_dispatch_%d", time.Now().UnixNano())
-	identifier := pgx.Identifier{name}.Sanitize()
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+identifier); err != nil {
-		admin.Close()
-		t.Fatal(err)
-	}
-	parsed.Path = "/" + name
-	pool, err := pgxpool.New(ctx, parsed.String())
-	if err != nil {
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier)
-		admin.Close()
-		t.Fatal(err)
-	}
-	runner, err := platformmigration.NewAtlasEmbeddedRunner(pool)
-	if err != nil {
-		pool.Close()
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-		t.Fatal(err)
-	}
-	if err := runner.Up(ctx); err != nil {
-		pool.Close()
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-		t.Fatal(err)
-	}
-	return pool, func() {
-		pool.Close()
-		_, _ = admin.Exec(context.Background(), "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-	}
+	fixture := testdb.Require(t, testdb.Config{
+		ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
+		Availability:     testdb.FailWhenUnavailable,
+		MaxConns:         16,
+	})
+	return fixture.Pool()
 }

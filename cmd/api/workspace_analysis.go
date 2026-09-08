@@ -14,26 +14,26 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	modelsettingsruntime "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/runtime"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	toolcatalog "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/catalog"
 	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const apiWorkspaceAnalysisRuntimeActorRef = "api:workspace-analysis-runtime"
 
 type apiWorkspaceAnalysisRuntimeHooks struct {
-	terminal workflowapplication.WorkflowTerminalHook
-	control  workflowapplication.WorkflowControlHook
+	terminal workflowapplication.ScopedWorkflowTerminalHook
+	control  workflowapplication.ScopedWorkflowControlHook
 }
 
 func newAPIWorkspaceAnalysisRuntimeHooks(
-	database *pgxpool.Pool,
-	events eventsapplication.Appender,
+	database *platformpostgres.Pool,
+	events eventsapplication.ScopedAppender,
 ) (*apiWorkspaceAnalysisRuntimeHooks, error) {
 	if database == nil || events == nil {
 		return nil, workspaceAnalysisAPIUnavailable(errors.New("workspace analysis API runtime hook dependencies are unavailable"))
 	}
-	auditRepository, err := auditpostgres.NewRepository(database)
+	auditRepository, err := auditpostgres.NewGORMStore(database)
 	if err != nil {
 		return nil, workspaceAnalysisAPIUnavailable(err)
 	}
@@ -41,7 +41,7 @@ func newAPIWorkspaceAnalysisRuntimeHooks(
 	if err != nil {
 		return nil, workspaceAnalysisAPIUnavailable(err)
 	}
-	terminal, err := conversationpostgres.NewWorkspaceAnalysisCancellationTerminalHookWithAudit(
+	terminal, err := conversationpostgres.NewGORMWorkspaceAnalysisCancellationTerminalHookWithAudit(
 		events,
 		foundation.NewUUIDGenerator(nil),
 		auditRecorder,
@@ -50,7 +50,7 @@ func newAPIWorkspaceAnalysisRuntimeHooks(
 	if err != nil {
 		return nil, workspaceAnalysisAPIUnavailable(err)
 	}
-	control, err := conversationpostgres.NewWorkspaceAnalysisCancellationAuditHook(auditRecorder)
+	control, err := conversationpostgres.NewGORMWorkspaceAnalysisCancellationAuditHook(auditRecorder)
 	if err != nil {
 		return nil, workspaceAnalysisAPIUnavailable(err)
 	}
@@ -58,16 +58,16 @@ func newAPIWorkspaceAnalysisRuntimeHooks(
 }
 
 func composeAPIWorkflowRuntimeHooks(
-	artifactTerminal workflowapplication.WorkflowTerminalHook,
+	artifactTerminal workflowapplication.ScopedWorkflowTerminalHook,
 	workspaceAnalysis *apiWorkspaceAnalysisRuntimeHooks,
-) (workflowapplication.WorkflowTerminalHook, workflowapplication.WorkflowControlHook, error) {
-	terminalHooks := []workflowapplication.WorkflowTerminalHook{artifactTerminal}
-	var control workflowapplication.WorkflowControlHook
+) (workflowapplication.ScopedWorkflowTerminalHook, workflowapplication.ScopedWorkflowControlHook, error) {
+	terminalHooks := []workflowapplication.ScopedWorkflowTerminalHook{artifactTerminal}
+	var control workflowapplication.ScopedWorkflowControlHook
 	if workspaceAnalysis != nil {
 		terminalHooks = append(terminalHooks, workspaceAnalysis.terminal)
 		control = workspaceAnalysis.control
 	}
-	terminal, err := workflowapplication.NewCompositeWorkflowTerminalHook(terminalHooks...)
+	terminal, err := workflowapplication.NewCompositeScopedWorkflowTerminalHook(terminalHooks...)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -77,10 +77,10 @@ func composeAPIWorkflowRuntimeHooks(
 // newAPIWorkspaceAnalysisRunStarter 组合本地冻结合同与事务内 Worker 广告检查。
 // 该函数不探测 Worker；是否可接单由每次 Question 派发持有的数据库事务决定。
 func newAPIWorkspaceAnalysisRunStarter(
-	database *pgxpool.Pool,
+	database *platformpostgres.Pool,
 	cfg config.Config,
 	models *modelsettingsruntime.Models,
-) (agentapplication.WorkspaceAnalysisRunStarter, error) {
+) (agentapplication.ScopedWorkspaceAnalysisRunStarter, error) {
 	if database == nil || models == nil || !cfg.WorkspaceAnalysisAPIEnabled {
 		return nil, workspaceAnalysisAPIUnavailable(errors.New("workspace analysis API dependencies or feature flag are unavailable"))
 	}
@@ -93,11 +93,11 @@ func newAPIWorkspaceAnalysisRunStarter(
 		return nil, workspaceAnalysisAPIUnavailable(err)
 	}
 	definition := conversationworkflow.RegisteredWorkspaceAnalysisDefinition()
-	repository, err := agentpostgres.NewRepository(database)
+	repository, err := agentpostgres.NewGORMRepository(database)
 	if err != nil {
 		return nil, workspaceAnalysisAPIUnavailable(err)
 	}
-	runService, err := agentapplication.NewWorkspaceAnalysisRunService(
+	runService, err := agentapplication.NewScopedWorkspaceAnalysisRunService(
 		repository,
 		foundation.NewUUIDGenerator(nil),
 		agentapplication.WorkspaceAnalysisRunStartConfig{
@@ -119,7 +119,7 @@ func newAPIWorkspaceAnalysisRunStarter(
 	if err != nil {
 		return nil, workspaceAnalysisAPIUnavailable(err)
 	}
-	starter, err := agentapplication.NewWorkspaceAnalysisCapabilityCheckedRunStarter(
+	starter, err := agentapplication.NewScopedWorkspaceAnalysisCapabilityCheckedRunStarter(
 		repository,
 		runService,
 		agentapplication.WorkspaceAnalysisCapabilityContract{

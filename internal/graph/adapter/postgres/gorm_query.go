@@ -10,6 +10,7 @@ import (
 	graphapp "github.com/CodeZen-Lizhi/zhixu/internal/graph/application"
 	graphdomain "github.com/CodeZen-Lizhi/zhixu/internal/graph/domain"
 	knowledge "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
+	"github.com/lib/pq"
 	"gorm.io/gorm"
 )
 
@@ -51,9 +52,9 @@ func gormGlobalWindow(ctx context.Context, database *gorm.DB, request graphdomai
 	}
 	includeClaims := len(request.Filter.NodeTypes) == 0 || containsNodeType(request.Filter.NodeTypes, knowledge.NodeTypeClaim)
 	rows, err := gormGraphRawRows(ctx, database, globalClusterSQL,
-		string(request.WorkspaceID), ids(request.Filter.TopicIDs), stringsOf(claimStatuses), includeClaims,
-		request.Filter.ClaimMinConfidence, stringsOf(relationStatuses), stringsOf(request.Filter.RelationTypes),
-		request.Filter.RelationMinConfidence, request.Filter.UpdatedAfter, globalWindowLimit,
+		sql.Named("p1", string(request.WorkspaceID)), sql.Named("p2", pq.Array(ids(request.Filter.TopicIDs))), sql.Named("p3", pq.Array(stringsOf(claimStatuses))), sql.Named("p4", includeClaims),
+		sql.Named("p5", request.Filter.ClaimMinConfidence), sql.Named("p6", pq.Array(stringsOf(relationStatuses))), sql.Named("p7", pq.Array(stringsOf(request.Filter.RelationTypes))),
+		sql.Named("p8", request.Filter.RelationMinConfidence), sql.Named("p9", request.Filter.UpdatedAfter), sql.Named("p10", globalWindowLimit),
 	)
 	if err != nil {
 		return graphapp.GlobalResultWindow{}, classifyGORM(ctx, err)
@@ -124,7 +125,7 @@ func (repository *GORMRepository) SearchNodes(ctx context.Context, request graph
 
 func gormSearchNodes(ctx context.Context, database *gorm.DB, request graphdomain.NodeSearchRequest, topicQuery, claimQuery string) (graphdomain.NodeSearchResult, error) {
 	matches := make([]graphdomain.NodeSearchMatch, 0, request.Limit*2)
-	topicRows, err := gormGraphRawRows(ctx, database, topicSearchSQL, string(request.WorkspaceID), topicQuery, request.Limit)
+	topicRows, err := gormGraphRawRows(ctx, database, topicSearchSQL, sql.Named("p1", string(request.WorkspaceID)), sql.Named("p2", topicQuery), sql.Named("p3", request.Limit))
 	if err != nil {
 		return graphdomain.NodeSearchResult{}, classifyGORM(ctx, err)
 	}
@@ -144,7 +145,7 @@ func gormSearchNodes(ctx context.Context, database *gorm.DB, request graphdomain
 		return graphdomain.NodeSearchResult{}, classifyGORM(ctx, err)
 	}
 
-	claimRows, err := gormGraphRawRows(ctx, database, claimSearchSQL, string(request.WorkspaceID), claimQuery, request.Limit)
+	claimRows, err := gormGraphRawRows(ctx, database, claimSearchSQL, sql.Named("p1", string(request.WorkspaceID)), sql.Named("p2", claimQuery), sql.Named("p3", request.Limit))
 	if err != nil {
 		return graphdomain.NodeSearchResult{}, classifyGORM(ctx, err)
 	}
@@ -206,7 +207,7 @@ func (repository *GORMRepository) NodeDetail(ctx context.Context, workspaceID fo
 func gormNodeDetail(ctx context.Context, database *gorm.DB, workspaceID foundation.ID, ref knowledge.NodeRef) (graphdomain.GraphNode, error) {
 	switch ref.Type {
 	case knowledge.NodeTypeTopic:
-		row, err := gormGraphRawRow(ctx, database, topicDetailSQL, string(workspaceID), string(ref.ID))
+		row, err := gormGraphRawRow(ctx, database, topicDetailSQL, sql.Named("p1", string(workspaceID)), sql.Named("p2", string(ref.ID)))
 		if err != nil {
 			return graphdomain.GraphNode{}, classifyGORM(ctx, err)
 		}
@@ -219,7 +220,7 @@ func gormNodeDetail(ctx context.Context, database *gorm.DB, workspaceID foundati
 		}
 		return graphdomain.GraphNode{Topic: &node}, nil
 	case knowledge.NodeTypeClaim:
-		row, err := gormGraphRawRow(ctx, database, claimDetailSQL, string(workspaceID), string(ref.ID))
+		row, err := gormGraphRawRow(ctx, database, claimDetailSQL, sql.Named("p1", string(workspaceID)), sql.Named("p2", string(ref.ID)))
 		if err != nil {
 			return graphdomain.GraphNode{}, classifyGORM(ctx, err)
 		}
@@ -256,7 +257,7 @@ func (repository *GORMRepository) RelationDetail(ctx context.Context, workspaceI
 }
 
 func gormRelationDetail(ctx context.Context, database *gorm.DB, workspaceID, relationID foundation.ID) (graphdomain.RelationDetail, error) {
-	row, err := gormGraphRawRow(ctx, database, relationDetailSQL, string(workspaceID), string(relationID))
+	row, err := gormGraphRawRow(ctx, database, relationDetailSQL, sql.Named("p1", string(workspaceID)), sql.Named("p2", string(relationID)))
 	if err != nil {
 		return graphdomain.RelationDetail{}, classifyGORM(ctx, err)
 	}
@@ -316,7 +317,7 @@ func (repository *GORMRepository) RelationEvidenceWindow(ctx context.Context, wo
 }
 
 func gormRelationEvidenceWindow(ctx context.Context, database *gorm.DB, workspaceID, relationID foundation.ID) (graphapp.RelationEvidenceResultWindow, error) {
-	rows, err := gormGraphRawRows(ctx, database, relationEvidenceWindowSQL, string(workspaceID), string(relationID), graphapp.MaxResultWindowItems+1)
+	rows, err := gormGraphRawRows(ctx, database, relationEvidenceWindowSQL, sql.Named("p1", string(workspaceID)), sql.Named("p2", string(relationID)), sql.Named("p3", graphapp.MaxResultWindowItems+1))
 	if err != nil {
 		return graphapp.RelationEvidenceResultWindow{}, classifyGORM(ctx, err)
 	}

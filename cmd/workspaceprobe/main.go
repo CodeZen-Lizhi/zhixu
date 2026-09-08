@@ -73,7 +73,7 @@ func run(arguments []string) int {
 		fmt.Fprintln(os.Stderr, "workspace candidate database is unavailable")
 		return candidateprobe.ExitDatabaseUnavailable
 	}
-	repository, err := workspacepostgres.NewRepository(database.DB())
+	repository, err := workspacepostgres.NewGORMRepository(database)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "workspace candidate control repository is unavailable")
 		return candidateprobe.ExitDatabaseUnavailable

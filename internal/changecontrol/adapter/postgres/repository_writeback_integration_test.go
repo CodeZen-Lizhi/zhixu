@@ -1,24 +1,29 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
+	auditpostgres "github.com/CodeZen-Lizhi/zhixu/internal/audit/adapter/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	modelsettingspostgres "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/adapter/postgres"
+	modelsettingsapplication "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/application"
+	modelcrypto "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/crypto"
+	modelsettingsdomain "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/domain"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	reindexcontract "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/contract"
 	workflowpostgres "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/postgres"
 	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
 	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
 	workflowdomain "github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -33,7 +38,7 @@ func TestRepositoryWritebackCreateReplayAndIdentityConflict(t *testing.T) {
 	if created.Status != domain.WritebackStatusPrepared || created.Version != 1 || created.ID != fixture.executionID || created.ApprovedGitHead != fixture.gitHead || created.ApprovedChangeHash != fixture.changeHash {
 		t.Fatalf("created execution=%#v", created)
 	}
-	assertProposalState(t, fixture.ctx, fixture.tx, fixture.proposalID, domain.StatusApplying, 4)
+	assertProposalState(t, fixture.ctx, fixture.pool, fixture.proposalID, domain.StatusApplying, 4)
 
 	queried, err := fixture.repository.GetWritebackExecution(fixture.ctx, fixture.executionID)
 	if err != nil || queried.ID != created.ID || queried.Version != created.Version || queried.Status != created.Status {
@@ -43,7 +48,7 @@ func TestRepositoryWritebackCreateReplayAndIdentityConflict(t *testing.T) {
 	if err != nil || replayed.ID != created.ID || replayed.Version != created.Version || replayed.Status != created.Status {
 		t.Fatalf("replayed=%#v err=%v", replayed, err)
 	}
-	assertProposalState(t, fixture.ctx, fixture.tx, fixture.proposalID, domain.StatusApplying, 4)
+	assertProposalState(t, fixture.ctx, fixture.pool, fixture.proposalID, domain.StatusApplying, 4)
 
 	conflicting := fixture.create
 	conflicting.ResultHash = strings.Repeat("e", 64)
@@ -82,14 +87,21 @@ func TestRepositoryFindWritebackExecutionByKeyIsExactAndWorkspaceScoped(t *testi
 
 func TestRepositorySafeToCancelWorkflowNodeRequiresSafeCheckpoint(t *testing.T) {
 	fixture := newWritebackFixture(t)
-	if safe, err := fixture.repository.SafeToCancelWorkflowNode(fixture.ctx, fixture.tx, fixture.nodeID); err != nil || !safe {
+	safeToCancel := func() (safe bool, err error) {
+		err = fixture.repository.unitOfWork.Within(fixture.ctx, foundation.TransactionOptions{}, func(ctx context.Context, scope foundation.TransactionScope) error {
+			safe, err = fixture.repository.SafeToCancelWorkflowNodeScoped(ctx, scope, fixture.nodeID)
+			return err
+		})
+		return safe, err
+	}
+	if safe, err := safeToCancel(); err != nil || !safe {
 		t.Fatalf("node before atomic begin safe=%t err=%v", safe, err)
 	}
 	created, err := fixture.repository.CreateWritebackExecution(fixture.ctx, fixture.create)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if safe, err := fixture.repository.SafeToCancelWorkflowNode(fixture.ctx, fixture.tx, fixture.nodeID); err != nil || safe {
+	if safe, err := safeToCancel(); err != nil || safe {
 		t.Fatalf("prepared execution safe=%t err=%v", safe, err)
 	}
 	failed, err := fixture.repository.CheckpointWritebackExecution(fixture.ctx, domain.CheckpointWriteback{
@@ -99,10 +111,10 @@ func TestRepositorySafeToCancelWorkflowNodeRequiresSafeCheckpoint(t *testing.T) 
 	if err != nil || failed.Status != domain.WritebackStatusApplyFailed {
 		t.Fatalf("failed=%#v err=%v", failed, err)
 	}
-	if safe, err := fixture.repository.SafeToCancelWorkflowNode(fixture.ctx, fixture.tx, fixture.nodeID); err != nil || !safe {
+	if safe, err := safeToCancel(); err != nil || !safe {
 		t.Fatalf("terminal execution safe=%t err=%v", safe, err)
 	}
-	if _, err := fixture.repository.SafeToCancelWorkflowNode(fixture.ctx, nil, fixture.nodeID); !hasCode(err, "WRITEBACK_CANCELLATION_TRANSACTION_INVALID") {
+	if _, err := fixture.repository.SafeToCancelWorkflowNodeScoped(fixture.ctx, nil, fixture.nodeID); !hasCode(err, "WRITEBACK_CANCELLATION_TRANSACTION_INVALID") {
 		t.Fatalf("invalid transaction err=%v", err)
 	}
 }
@@ -132,9 +144,9 @@ func TestRepositoryBeginWritebackAtomicDoubleConsumeAndReplay(t *testing.T) {
 	if created.Status != domain.WritebackStatusPrepared || created.ID == "" || created.ResultHash != wantResultHash {
 		t.Fatalf("created=%#v", created)
 	}
-	assertProposalState(t, fixture.ctx, fixture.tx, fixture.proposalID, domain.StatusApplying, 4)
+	assertProposalState(t, fixture.ctx, fixture.pool, fixture.proposalID, domain.StatusApplying, 4)
 	var writeStatus, gitStatus string
-	if err := fixture.tx.QueryRow(fixture.ctx, `SELECT (SELECT status FROM change_control.tool_authorization WHERE id=$1),(SELECT status FROM change_control.tool_authorization WHERE id=$2)`, string(fixture.writeAuthorizationID), string(fixture.gitAuthorizationID)).Scan(&writeStatus, &gitStatus); err != nil {
+	if err := fixture.pool.QueryRow(fixture.ctx, `SELECT (SELECT status FROM change_control.tool_authorization WHERE id=$1),(SELECT status FROM change_control.tool_authorization WHERE id=$2)`, string(fixture.writeAuthorizationID), string(fixture.gitAuthorizationID)).Scan(&writeStatus, &gitStatus); err != nil {
 		t.Fatal(err)
 	}
 	if writeStatus != string(domain.AuthorizationConsumed) || gitStatus != string(domain.AuthorizationConsumed) {
@@ -157,7 +169,7 @@ func TestWorkflowCancellationWaitsForWritebackRecoveryCheckpoint(t *testing.T) {
 	fixture := newWritebackFixture(t)
 	fixture.bindProposalToRun(t)
 	deliveryID := "cancel-safety-delivery"
-	if _, err := fixture.tx.Exec(fixture.ctx, `
+	if _, err := fixture.pool.Exec(fixture.ctx, `
 		INSERT INTO workflow.node_attempt(
 			id,node_run_id,attempt_no,dispatch_no,retry_no,river_job_id,river_job_attempt,
 			delivery_id,lease_owner,lease_until,status,started_at,heartbeat_at
@@ -188,15 +200,22 @@ func TestWorkflowCancellationWaitsForWritebackRecoveryCheckpoint(t *testing.T) {
 	if err != nil || created.Status != domain.WritebackStatusPrepared {
 		t.Fatalf("created=%#v err=%v", created, err)
 	}
-	if err := fixture.tx.Commit(fixture.ctx); err != nil {
-		t.Fatal(err)
-	}
 
-	changeRepository, err := NewRepository(fixture.pool)
+	changeRepository, err := NewGORMRepository(fixture.platform)
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtimeRepository, err := workflowpostgres.NewRuntimeRepository(fixture.pool, cancellationSafetyJobInserter{}, changeRepository)
+	settings := newChangeControlModelSettings(t, fixture.platform)
+	if _, err := settings.RegisterRuntime(fixture.ctx, modelsettingsapplication.RuntimeRegistration{
+		Role: modelsettingsdomain.RuntimeRoleWorker, InstanceID: fixture.nextID(t),
+		AppliedRevision: 0, Phase: modelsettingsdomain.RuntimePhaseActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runtimeRepository, err := workflowpostgres.NewGORMRuntimeRepositoryWithHooks(
+		fixture.platform, riveradapter.DefaultOptions(), settings,
+		workflowpostgres.GORMRuntimeRepositoryHooks{CancellationSafety: changeRepository},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -298,23 +317,23 @@ func TestRepositoryBeginWritebackRollsBackBothAuthorizations(t *testing.T) {
 		t.Fatal("invalid execution id unexpectedly succeeded")
 	}
 	var writeStatus, gitStatus, proposalStatus string
-	if err := fixture.tx.QueryRow(fixture.ctx, `SELECT (SELECT status FROM change_control.tool_authorization WHERE id=$1),(SELECT status FROM change_control.tool_authorization WHERE id=$2),(SELECT status FROM change_control.proposal WHERE id=$3)`, string(fixture.writeAuthorizationID), string(fixture.gitAuthorizationID), string(fixture.proposalID)).Scan(&writeStatus, &gitStatus, &proposalStatus); err != nil {
+	if err := fixture.pool.QueryRow(fixture.ctx, `SELECT (SELECT status FROM change_control.tool_authorization WHERE id=$1),(SELECT status FROM change_control.tool_authorization WHERE id=$2),(SELECT status FROM change_control.proposal WHERE id=$3)`, string(fixture.writeAuthorizationID), string(fixture.gitAuthorizationID), string(fixture.proposalID)).Scan(&writeStatus, &gitStatus, &proposalStatus); err != nil {
 		t.Fatal(err)
 	}
 	if writeStatus != string(domain.AuthorizationIssued) || gitStatus != string(domain.AuthorizationIssued) || proposalStatus != string(domain.StatusApproved) {
 		t.Fatalf("rollback statuses write=%s git=%s proposal=%s", writeStatus, gitStatus, proposalStatus)
 	}
-	assertRowCount(t, fixture.ctx, fixture.tx, `SELECT count(*) FROM change_control.writeback_execution WHERE workspace_id=$1`, 0, string(fixture.workspaceID))
+	assertRowCount(t, fixture.ctx, fixture.pool, `SELECT count(*) FROM change_control.writeback_execution WHERE workspace_id=$1`, 0, string(fixture.workspaceID))
 }
 
 func TestRepositoryBeginWritebackRejectsProposalBoundToDifferentRun(t *testing.T) {
 	fixture := newWritebackFixture(t)
 	otherRunID := fixture.nextID(t)
 	var definitionID string
-	if err := fixture.tx.QueryRow(fixture.ctx, `SELECT definition_id::text FROM workflow.run WHERE id=$1`, string(fixture.runID)).Scan(&definitionID); err != nil {
+	if err := fixture.pool.QueryRow(fixture.ctx, `SELECT definition_id::text FROM workflow.run WHERE id=$1`, string(fixture.runID)).Scan(&definitionID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.tx.Exec(fixture.ctx, `INSERT INTO workflow.run(id,workspace_id,definition_id,status,input,version,created_at,updated_at) VALUES($1,$2,$3,'running','{}',1,$4,$4)`, string(otherRunID), string(fixture.workspaceID), definitionID, fixture.now); err != nil {
+	if _, err := fixture.pool.Exec(fixture.ctx, `INSERT INTO workflow.run(id,workspace_id,definition_id,status,input,version,created_at,updated_at) VALUES($1,$2,$3,'running','{}',1,$4,$4)`, string(otherRunID), string(fixture.workspaceID), definitionID, fixture.now); err != nil {
 		t.Fatal(err)
 	}
 	begin := domain.BeginWriteback{
@@ -326,7 +345,7 @@ func TestRepositoryBeginWritebackRejectsProposalBoundToDifferentRun(t *testing.T
 	if _, err := fixture.repository.BeginWriteback(fixture.ctx, begin); !hasCode(err, "WRITEBACK_IDENTITY_CONFLICT") {
 		t.Fatalf("proposal bound to another run err=%v", err)
 	}
-	assertRowCount(t, fixture.ctx, fixture.tx, `SELECT count(*) FROM change_control.writeback_execution WHERE workspace_id=$1`, 0, string(fixture.workspaceID))
+	assertRowCount(t, fixture.ctx, fixture.pool, `SELECT count(*) FROM change_control.writeback_execution WHERE workspace_id=$1`, 0, string(fixture.workspaceID))
 }
 
 func TestRepositoryBeginWritebackRejectsPreviouslyConsumedAuthorizationsWithoutExecution(t *testing.T) {
@@ -351,17 +370,14 @@ func TestRepositoryBeginWritebackRejectsPreviouslyConsumedAuthorizationsWithoutE
 	if _, err := fixture.repository.BeginWriteback(fixture.ctx, begin); !hasCode(err, "WRITEBACK_AUTHORIZATION_ALREADY_CONSUMED") {
 		t.Fatalf("previously consumed authorizations started writeback: %v", err)
 	}
-	assertRowCount(t, fixture.ctx, fixture.tx, `SELECT count(*) FROM change_control.writeback_execution WHERE workspace_id=$1`, 0, string(fixture.workspaceID))
-	assertProposalState(t, fixture.ctx, fixture.tx, fixture.proposalID, domain.StatusApproved, 3)
+	assertRowCount(t, fixture.ctx, fixture.pool, `SELECT count(*) FROM change_control.writeback_execution WHERE workspace_id=$1`, 0, string(fixture.workspaceID))
+	assertProposalState(t, fixture.ctx, fixture.pool, fixture.proposalID, domain.StatusApproved, 3)
 }
 
 func TestRepositoryBeginWritebackConcurrentReplayCreatesOneExecution(t *testing.T) {
 	fixture := newWritebackFixture(t)
 	fixture.bindProposalToRun(t)
-	if err := fixture.tx.Commit(fixture.ctx); err != nil {
-		t.Fatal(err)
-	}
-	repository, err := NewRepository(fixture.pool)
+	repository, err := NewGORMRepository(fixture.platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -423,13 +439,13 @@ func TestRepositoryWritebackPreparedCheckpointsAndLease(t *testing.T) {
 	if err := fixture.repository.ValidateWritebackLease(fixture.ctx, execution.ID, "wrong-owner"); !hasCode(err, "WRITEBACK_LEASE_LOST") {
 		t.Fatalf("invalid lease accepted: %v", err)
 	}
-	if _, err := fixture.tx.Exec(fixture.ctx, `UPDATE workflow.node_run SET lease_until=CURRENT_TIMESTAMP-interval '1 second' WHERE id=$1`, string(fixture.nodeID)); err != nil {
+	if _, err := fixture.pool.Exec(fixture.ctx, `UPDATE workflow.node_run SET lease_until=CURRENT_TIMESTAMP-interval '1 second' WHERE id=$1`, string(fixture.nodeID)); err != nil {
 		t.Fatal(err)
 	}
 	if err := fixture.repository.ValidateWritebackLease(fixture.ctx, execution.ID, "test-owner"); !hasCode(err, "WRITEBACK_LEASE_LOST") {
 		t.Fatalf("expired lease accepted: %v", err)
 	}
-	if _, err := fixture.tx.Exec(fixture.ctx, `UPDATE workflow.node_run SET lease_until=CURRENT_TIMESTAMP+interval '1 hour' WHERE id=$1`, string(fixture.nodeID)); err != nil {
+	if _, err := fixture.pool.Exec(fixture.ctx, `UPDATE workflow.node_run SET lease_until=CURRENT_TIMESTAMP+interval '1 hour' WHERE id=$1`, string(fixture.nodeID)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := fixture.repository.CheckpointWritebackExecution(fixture.ctx, domain.CheckpointWriteback{ExecutionID: execution.ID, ExpectedVersion: execution.Version, Status: domain.WritebackStatusFileApplied, ResultHash: execution.ResultHash}); !hasCode(err, "WRITEBACK_STATUS_CONFLICT") {
@@ -494,7 +510,7 @@ func TestRepositoryWritebackCheckpointAndPublish(t *testing.T) {
 	if err != nil || fileApplied.Status != domain.WritebackStatusFileApplied || fileApplied.Version != 2 || fileApplied.TemporaryRef != "tmp/writeback" || fileApplied.BackupRef != "backup/writeback" {
 		t.Fatalf("file applied=%#v err=%v", fileApplied, err)
 	}
-	assertProposalState(t, fixture.ctx, fixture.tx, fixture.proposalID, domain.StatusApplying, 4)
+	assertProposalState(t, fixture.ctx, fixture.pool, fixture.proposalID, domain.StatusApplying, 4)
 
 	if _, err := fixture.repository.CheckpointWritebackExecution(fixture.ctx, domain.CheckpointWriteback{
 		ExecutionID: created.ID, ExpectedVersion: 1, Status: domain.WritebackStatusGitCommitted,
@@ -516,43 +532,43 @@ func TestRepositoryWritebackCheckpointAndPublish(t *testing.T) {
 	if err != nil || gitCommitted.Status != domain.WritebackStatusGitCommitted || gitCommitted.Version != 3 || gitCommitted.GitCommit != fixture.commitHash || gitCommitted.ParentGitCommit != fixture.parentCommitHash || gitCommitted.DiffHash != fixture.diffHash {
 		t.Fatalf("git committed=%#v err=%v", gitCommitted, err)
 	}
-	assertProposalState(t, fixture.ctx, fixture.tx, fixture.proposalID, domain.StatusApplied, 5)
+	assertProposalState(t, fixture.ctx, fixture.pool, fixture.proposalID, domain.StatusApplied, 5)
 
 	publish := fixture.publishCommand(t, gitCommitted)
-	conflictTx, err := fixture.tx.Begin(fixture.ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	conflictRepository, err := NewRepository(conflictTx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := conflictTx.Exec(fixture.ctx, `
-		INSERT INTO workflow.outbox_event(id,workspace_id,run_id,event_type,idempotency_key,payload,occurred_at)
-		VALUES($1,$2,$3,$4,$5,$6,CURRENT_TIMESTAMP)`,
-		string(fixture.nextID(t)), string(fixture.workspaceID), string(fixture.runID), publish.Event.Type, publish.Event.IdempotencyKey, publish.Event.Payload); err != nil {
-		t.Fatal(err)
-	}
+	conflictRepository := *fixture.repository
+	conflictRepository.unitOfWork = writebackTestUnitOfWork(func(ctx context.Context, options foundation.TransactionOptions, work foundation.TransactionFunc) error {
+		return fixture.repository.unitOfWork.Within(ctx, options, func(callbackCtx context.Context, scope foundation.TransactionScope) error {
+			tx, err := platformpostgres.GORMTransaction(scope)
+			if err != nil {
+				return err
+			}
+			if err := tx.WithContext(callbackCtx).Exec(`
+				INSERT INTO workflow.outbox_event(id,workspace_id,run_id,event_type,idempotency_key,payload,occurred_at)
+				VALUES(?::uuid,?::uuid,?::uuid,?,?,?::jsonb,CURRENT_TIMESTAMP)`,
+				string(fixture.nextID(t)), string(fixture.workspaceID), string(fixture.runID), publish.Event.Type,
+				publish.Event.IdempotencyKey, changeControlJSONB(publish.Event.Payload)).Error; err != nil {
+				return err
+			}
+			return work(callbackCtx, scope)
+		})
+	})
 	if _, err := conflictRepository.PublishWriteback(fixture.ctx, publish); !hasCode(err, "WRITEBACK_PUBLISH_BINDING_CONFLICT") {
 		t.Fatalf("conflicting outbox publish err=%v", err)
 	}
-	assertRowCount(t, fixture.ctx, conflictTx, `SELECT count(*) FROM change_control.proposal_commit WHERE writeback_execution_id=$1`, 0, string(created.ID))
-	afterRollback, err := conflictRepository.GetWritebackExecution(fixture.ctx, created.ID)
+	assertRowCount(t, fixture.ctx, fixture.pool, `SELECT count(*) FROM change_control.proposal_commit WHERE writeback_execution_id=$1`, 0, string(created.ID))
+	afterRollback, err := fixture.repository.GetWritebackExecution(fixture.ctx, created.ID)
 	if err != nil || afterRollback.Status != domain.WritebackStatusGitCommitted || afterRollback.Version != 3 {
 		t.Fatalf("execution after rolled back publish=%#v err=%v", afterRollback, err)
 	}
-	assertProposalState(t, fixture.ctx, conflictTx, fixture.proposalID, domain.StatusApplied, 5)
-	if err := conflictTx.Rollback(fixture.ctx); err != nil {
-		t.Fatal(err)
-	}
+	assertProposalState(t, fixture.ctx, fixture.pool, fixture.proposalID, domain.StatusApplied, 5)
 
 	published, err := fixture.repository.PublishWriteback(fixture.ctx, publish)
 	if err != nil || published.Replayed || published.Execution.Status != domain.WritebackStatusVerifying || published.Execution.Version != 4 || published.Commit.ID != publish.Commit.ID || published.Commit.GitCommit != fixture.commitHash {
 		t.Fatalf("published=%#v err=%v", published, err)
 	}
-	assertProposalState(t, fixture.ctx, fixture.tx, fixture.proposalID, domain.StatusVerifying, 6)
-	assertRowCount(t, fixture.ctx, fixture.tx, `SELECT count(*) FROM change_control.proposal_commit WHERE writeback_execution_id=$1`, 1, string(created.ID))
-	assertRowCount(t, fixture.ctx, fixture.tx, `SELECT count(*) FROM workflow.outbox_event WHERE id=$1 AND idempotency_key=$2`, 1, string(publish.Event.ID), publish.Event.IdempotencyKey)
+	assertProposalState(t, fixture.ctx, fixture.pool, fixture.proposalID, domain.StatusVerifying, 6)
+	assertRowCount(t, fixture.ctx, fixture.pool, `SELECT count(*) FROM change_control.proposal_commit WHERE writeback_execution_id=$1`, 1, string(created.ID))
+	assertRowCount(t, fixture.ctx, fixture.pool, `SELECT count(*) FROM workflow.outbox_event WHERE id=$1 AND idempotency_key=$2`, 1, string(publish.Event.ID), publish.Event.IdempotencyKey)
 
 	replayed, err := fixture.repository.PublishWriteback(fixture.ctx, publish)
 	if err != nil || !replayed.Replayed || replayed.Execution.Version != published.Execution.Version || replayed.Commit.ID != published.Commit.ID {
@@ -571,13 +587,18 @@ func TestRepositoryWritebackCheckpointAndPublish(t *testing.T) {
 	}
 }
 
+const testWritebackInsert = `INSERT INTO change_control.writeback_execution(
+	id,workspace_id,workflow_run_id,node_run_id,proposal_id,revision_id,approval_id,write_authorization_id,git_authorization_id,
+	target_path,target_mode,base_hash,result_hash,approved_change_hash,approved_git_head,status,idempotency_key,temporary_ref,backup_ref,version,created_at,updated_at
+) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)`
+
 func TestWritebackSQLConstraints(t *testing.T) {
 	fixture := newWritebackFixture(t)
 	badBinding := fixture.create
-	assertSQLRejected(t, fixture.ctx, fixture.tx, writebackInsert,
+	assertSQLRejected(t, fixture.ctx, fixture.pool, testWritebackInsert,
 		string(fixture.nextID(t)), string(badBinding.WorkspaceID), string(badBinding.WorkflowRunID), string(badBinding.NodeRunID),
 		string(badBinding.ProposalID), string(badBinding.RevisionID), string(badBinding.ApprovalID),
-		string(badBinding.GitAuthorizationID), string(badBinding.WriteAuthorizationID), badBinding.TargetPath,
+		string(badBinding.GitAuthorizationID), string(badBinding.WriteAuthorizationID), badBinding.TargetPath, string(domain.NormalizeTargetMode(badBinding.TargetMode)),
 		badBinding.BaseHash, badBinding.ResultHash, fixture.changeHash, fixture.gitHead,
 		string(domain.WritebackStatusPrepared), "sql-cross-binding", nil, nil, int64(1), fixture.now, fixture.now,
 	)
@@ -586,9 +607,9 @@ func TestWritebackSQLConstraints(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertSQLRejected(t, fixture.ctx, fixture.tx, `UPDATE change_control.writeback_execution SET target_path='other.md',updated_at=CURRENT_TIMESTAMP,version=version+1 WHERE id=$1`, string(created.ID))
-	assertSQLRejected(t, fixture.ctx, fixture.tx, `DELETE FROM change_control.writeback_execution WHERE id=$1`, string(created.ID))
-	assertSQLRejected(t, fixture.ctx, fixture.tx, `UPDATE change_control.writeback_execution SET status='needs_revision',failure_code='INVALID_GIT_INTENT',base_blob_id=$2,result_blob_id=$3,base_mode='100644',updated_at=CURRENT_TIMESTAMP,version=version+1 WHERE id=$1`, string(created.ID), fixture.gitHead, strings.Repeat("e", len(fixture.gitHead)))
+	assertSQLRejected(t, fixture.ctx, fixture.pool, `UPDATE change_control.writeback_execution SET target_path='other.md',updated_at=CURRENT_TIMESTAMP,version=version+1 WHERE id=$1`, string(created.ID))
+	assertSQLRejected(t, fixture.ctx, fixture.pool, `DELETE FROM change_control.writeback_execution WHERE id=$1`, string(created.ID))
+	assertSQLRejected(t, fixture.ctx, fixture.pool, `UPDATE change_control.writeback_execution SET status='needs_revision',failure_code='INVALID_GIT_INTENT',base_blob_id=$2,result_blob_id=$3,base_mode='100644',updated_at=CURRENT_TIMESTAMP,version=version+1 WHERE id=$1`, string(created.ID), fixture.gitHead, strings.Repeat("e", len(fixture.gitHead)))
 
 	fileApplied, err := fixture.repository.CheckpointWritebackExecution(fixture.ctx, domain.CheckpointWriteback{ExecutionID: created.ID, ExpectedVersion: 1, Status: domain.WritebackStatusFileApplied, ResultHash: fixture.resultHash})
 	if err != nil {
@@ -611,12 +632,12 @@ func TestWritebackSQLConstraints(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertSQLRejected(t, fixture.ctx, fixture.tx, `
+	assertSQLRejected(t, fixture.ctx, fixture.pool, `
 		INSERT INTO workflow.outbox_event(id,workspace_id,run_id,event_type,idempotency_key,payload,occurred_at)
 		VALUES($1,$2,$3,$4,$5,$6,CURRENT_TIMESTAMP)`,
 		string(invalidPayload.Event.ID), string(fixture.workspaceID), string(fixture.runID), invalidPayload.Event.Type, invalidPayload.Event.IdempotencyKey, invalidPayload.Event.Payload,
 	)
-	assertSQLRejected(t, fixture.ctx, fixture.tx, `
+	assertSQLRejected(t, fixture.ctx, fixture.pool, `
 		INSERT INTO change_control.proposal_commit(
 			id,workspace_id,writeback_execution_id,proposal_id,revision_id,approval_id,git_commit,parent_git_commit,target_path,diff_hash,result_hash,created_at
 		) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,CURRENT_TIMESTAMP)`,
@@ -628,22 +649,19 @@ func TestWritebackSQLConstraints(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertSQLRejected(t, fixture.ctx, fixture.tx, `UPDATE change_control.proposal_commit SET target_path='other.md' WHERE id=$1`, string(published.Commit.ID))
-	assertSQLRejected(t, fixture.ctx, fixture.tx, `DELETE FROM change_control.proposal_commit WHERE id=$1`, string(published.Commit.ID))
+	assertSQLRejected(t, fixture.ctx, fixture.pool, `UPDATE change_control.proposal_commit SET target_path='other.md' WHERE id=$1`, string(published.Commit.ID))
+	assertSQLRejected(t, fixture.ctx, fixture.pool, `DELETE FROM change_control.proposal_commit WHERE id=$1`, string(published.Commit.ID))
 	var outboxID string
-	if err := fixture.tx.QueryRow(fixture.ctx, `SELECT id::text FROM workflow.outbox_event WHERE idempotency_key=$1`, domain.ExpectedWritebackReindexKey(published.Execution)).Scan(&outboxID); err != nil {
+	if err := fixture.pool.QueryRow(fixture.ctx, `SELECT id::text FROM workflow.outbox_event WHERE idempotency_key=$1`, domain.ExpectedWritebackReindexKey(published.Execution)).Scan(&outboxID); err != nil {
 		t.Fatal(err)
 	}
-	assertSQLRejected(t, fixture.ctx, fixture.tx, `UPDATE workflow.outbox_event SET payload='{}' WHERE id=$1`, outboxID)
-	assertSQLRejected(t, fixture.ctx, fixture.tx, `DELETE FROM workflow.outbox_event WHERE id=$1`, outboxID)
+	assertSQLRejected(t, fixture.ctx, fixture.pool, `UPDATE workflow.outbox_event SET payload='{}' WHERE id=$1`, outboxID)
+	assertSQLRejected(t, fixture.ctx, fixture.pool, `DELETE FROM workflow.outbox_event WHERE id=$1`, outboxID)
 }
 
 func TestRepositoryWritebackCreateAndAuthorizationConsumeDoNotDeadlock(t *testing.T) {
 	fixture := newWritebackFixture(t)
-	if err := fixture.tx.Commit(fixture.ctx); err != nil {
-		t.Fatal(err)
-	}
-	repository, err := NewRepository(fixture.pool)
+	repository, err := NewGORMRepository(fixture.platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -706,10 +724,7 @@ func TestRepositoryCheckpointAndLegacyInsertUseConsistentLockOrder(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.tx.Commit(fixture.ctx); err != nil {
-		t.Fatal(err)
-	}
-	repository, err := NewRepository(fixture.pool)
+	repository, err := NewGORMRepository(fixture.platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -734,10 +749,10 @@ func TestRepositoryCheckpointAndLegacyInsertUseConsistentLockOrder(t *testing.T)
 	}()
 	go func() {
 		<-start
-		_, insertErr := fixture.pool.Exec(ctx, writebackInsert,
+		_, insertErr := fixture.pool.Exec(ctx, testWritebackInsert,
 			string(candidate.ID), string(candidate.WorkspaceID), string(candidate.WorkflowRunID), string(candidate.NodeRunID),
 			string(candidate.ProposalID), string(candidate.RevisionID), string(candidate.ApprovalID),
-			string(candidate.WriteAuthorizationID), string(candidate.GitAuthorizationID), candidate.TargetPath,
+			string(candidate.WriteAuthorizationID), string(candidate.GitAuthorizationID), candidate.TargetPath, string(domain.NormalizeTargetMode(candidate.TargetMode)),
 			candidate.BaseHash, candidate.ResultHash, candidate.ApprovedChangeHash, candidate.ApprovedGitHead,
 			string(domain.WritebackStatusPrepared), candidate.IdempotencyKey, candidate.TemporaryRef, candidate.BackupRef,
 			int64(1), fixture.now, fixture.now)
@@ -766,8 +781,8 @@ func TestRepositoryCheckpointAndLegacyInsertUseConsistentLockOrder(t *testing.T)
 type writebackFixture struct {
 	ctx        context.Context
 	pool       *pgxpool.Pool
-	tx         pgx.Tx
-	repository *Repository
+	platform   *platformpostgres.Pool
+	repository *GORMRepository
 	next       func() foundation.ID
 	now        time.Time
 
@@ -781,30 +796,36 @@ type writebackFixture struct {
 	create                                       domain.CreateWriteback
 }
 
-type cancellationSafetyJobInserter struct{}
+type writebackTestUnitOfWork func(context.Context, foundation.TransactionOptions, foundation.TransactionFunc) error
 
-func (cancellationSafetyJobInserter) InsertTx(context.Context, any, riveradapter.NodeJobArgs, riveradapter.InsertOptions) (workflowapplication.JobReceipt, error) {
-	return workflowapplication.JobReceipt{JobID: 1}, nil
+func (work writebackTestUnitOfWork) Within(ctx context.Context, options foundation.TransactionOptions, callback foundation.TransactionFunc) error {
+	return work(ctx, options, callback)
+}
+
+func newChangeControlModelSettings(t *testing.T, platform *platformpostgres.Pool) *modelsettingspostgres.GORMRepository {
+	t.Helper()
+	sealer, err := modelcrypto.NewSealer(bytes.Repeat([]byte{0x2a}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	audit, err := auditpostgres.NewGORMStore(platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings, err := modelsettingspostgres.NewGORMRepository(platform,
+		modelsettingspostgres.WithGORMSecretSealer(sealer), modelsettingspostgres.WithGORMAuditAppender(audit),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return settings
 }
 
 func newWritebackFixture(t *testing.T) *writebackFixture {
 	t.Helper()
-	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
-	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = tx.Rollback(ctx) })
-	repository, err := NewRepository(tx)
+	platform, ctx := newChangeControlMigrationTestPool(t)
+	pool := platform.DB()
+	repository, err := NewGORMRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -817,12 +838,12 @@ func newWritebackFixture(t *testing.T) *writebackFixture {
 		return id
 	}
 	var now time.Time
-	if err := tx.QueryRow(ctx, `SELECT CURRENT_TIMESTAMP`).Scan(&now); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT CURRENT_TIMESTAMP`).Scan(&now); err != nil {
 		t.Fatal(err)
 	}
 	now = now.UTC()
 	fixture := &writebackFixture{
-		ctx: ctx, pool: pool, tx: tx, repository: repository, next: next, now: now,
+		ctx: ctx, pool: pool, platform: platform, repository: repository, next: next, now: now,
 		workspaceID: next(), runID: next(), nodeID: next(), proposalID: next(), revisionID: next(), approvalID: next(),
 		writeAuthorizationID: next(), gitAuthorizationID: next(), executionID: next(),
 		targetPath: "docs/writeback.md",
@@ -840,16 +861,16 @@ func newWritebackFixture(t *testing.T) *writebackFixture {
 	if _, err := workflowapplication.DecodeCanonicalGraph(definitionGraph); err != nil {
 		t.Fatalf("writeback fixture graph is not canonical: %v", err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'Writeback Test',$2,$2,$3,'test',1,$3,$3)`, string(fixture.workspaceID), rootPath, now); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'Writeback Test',$2,$2,$3,'inactive',1,$3,$3)`, string(fixture.workspaceID), rootPath, now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO workflow.definition(id,workspace_id,key,version,graph,created_at) VALUES($1,$2,$3,1,$4,$5)`, string(definitionID), string(fixture.workspaceID), "writeback-"+string(definitionID), definitionGraph, now); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO workflow.definition(id,workspace_id,key,version,graph,created_at) VALUES($1,$2,$3,1,$4,$5)`, string(definitionID), string(fixture.workspaceID), "writeback-"+string(definitionID), definitionGraph, now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO workflow.run(id,workspace_id,definition_id,status,input,version,created_at,updated_at) VALUES($1,$2,$3,'running','{}',1,$4,$4)`, string(fixture.runID), string(fixture.workspaceID), string(definitionID), now); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO workflow.run(id,workspace_id,definition_id,status,input,version,created_at,updated_at) VALUES($1,$2,$3,'running','{}',1,$4,$4)`, string(fixture.runID), string(fixture.workspaceID), string(definitionID), now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO workflow.node_run(id,run_id,node_key,node_type,status,attempt,input,version,created_at,updated_at,lease_owner,lease_until,idempotency_key,input_schema_version,output_schema_version,dispatch_no) VALUES($1,$2,'writeback','tool','running',1,'{}',1,$3,$3,'test-owner',$4,$5,1,1,1)`, string(fixture.nodeID), string(fixture.runID), now, now.Add(time.Hour), "writeback-node-"+string(fixture.nodeID)); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO workflow.node_run(id,run_id,node_key,node_type,status,attempt,input,version,created_at,updated_at,lease_owner,lease_until,idempotency_key,input_schema_version,output_schema_version,dispatch_no) VALUES($1,$2,'writeback','tool','running',1,'{}',1,$3,$3,'test-owner',$4,$5,1,1,1)`, string(fixture.nodeID), string(fixture.runID), now, now.Add(time.Hour), "writeback-node-"+string(fixture.nodeID)); err != nil {
 		t.Fatal(err)
 	}
 	content := "writeback result"
@@ -907,14 +928,14 @@ func (f *writebackFixture) createAuthorization(t *testing.T, id foundation.ID, t
 
 func (f *writebackFixture) bindProposalToRun(t *testing.T) {
 	t.Helper()
-	tag, err := f.tx.Exec(f.ctx, `UPDATE change_control.proposal SET workflow_run_id=$2,updated_at=$3,version=version+1 WHERE id=$1 AND status='approved' AND workflow_run_id IS NULL`, string(f.proposalID), string(f.runID), f.now)
+	tag, err := f.pool.Exec(f.ctx, `UPDATE change_control.proposal SET workflow_run_id=$2,updated_at=$3,version=version+1 WHERE id=$1 AND status='approved' AND workflow_run_id IS NULL`, string(f.proposalID), string(f.runID), f.now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if tag.RowsAffected() == 0 {
 		return
 	}
-	if _, err := f.tx.Exec(f.ctx, `
+	if _, err := f.pool.Exec(f.ctx, `
 		INSERT INTO change_control.proposal_revision_dispatch(
 			workspace_id,proposal_id,revision_id,approval_id,workflow_run_id,created_at
 		) VALUES($1,$2,$3,$4,$5,$6)`,
@@ -955,7 +976,7 @@ func (f *writebackFixture) nextID(t *testing.T) foundation.ID {
 	return f.next()
 }
 
-func assertProposalState(t *testing.T, ctx context.Context, tx pgx.Tx, proposalID foundation.ID, expectedStatus domain.ProposalStatus, expectedVersion int64) {
+func assertProposalState(t *testing.T, ctx context.Context, tx changeControlTestSQL, proposalID foundation.ID, expectedStatus domain.ProposalStatus, expectedVersion int64) {
 	t.Helper()
 	var status string
 	var version int64
@@ -967,7 +988,7 @@ func assertProposalState(t *testing.T, ctx context.Context, tx pgx.Tx, proposalI
 	}
 }
 
-func assertRowCount(t *testing.T, ctx context.Context, tx pgx.Tx, query string, expected int, arguments ...any) {
+func assertRowCount(t *testing.T, ctx context.Context, tx changeControlTestSQL, query string, expected int, arguments ...any) {
 	t.Helper()
 	var count int
 	if err := tx.QueryRow(ctx, query, arguments...).Scan(&count); err != nil {
@@ -978,7 +999,7 @@ func assertRowCount(t *testing.T, ctx context.Context, tx pgx.Tx, query string, 
 	}
 }
 
-func assertSQLRejected(t *testing.T, ctx context.Context, parent pgx.Tx, query string, arguments ...any) {
+func assertSQLRejected(t *testing.T, ctx context.Context, parent changeControlTestSQL, query string, arguments ...any) {
 	t.Helper()
 	tx, err := parent.Begin(ctx)
 	if err != nil {

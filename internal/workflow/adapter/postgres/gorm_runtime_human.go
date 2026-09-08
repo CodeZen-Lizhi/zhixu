@@ -122,7 +122,7 @@ func (repository *GORMRuntimeRepository) waitForHuman(
 
 // SubmitHuman resolves one task, completes its node, and activates successors
 // in one scoped transaction. Expiry is committed before the conflict is
-// returned, matching the legacy behavior.
+// returned.
 func (repository *GORMRuntimeRepository) SubmitHuman(ctx context.Context, command application.HumanDecisionTransition) (application.HumanTransitionResult, error) {
 	var result application.HumanTransitionResult
 	callbackSucceeded := false

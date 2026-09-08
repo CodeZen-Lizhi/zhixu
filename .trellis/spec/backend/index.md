@@ -2,6 +2,9 @@
 
 本目录是 Go API、Worker、领域模块、数据库、Adapter、Workflow 和可观测性实现的规范入口。M1 已建立可运行骨架；后续业务模块必须继续遵守这里的边界，并以真实代码和任务验收结果为准。
 
+TODO 10 已将应用持久化统一为共享 GORM/UoW。修改 Repository、跨 owner 事务、连接生命周期或 Composition 前，
+先读 [`gorm-persistence.md`](./gorm-persistence.md)；pgx 底层例外、模型/Schema 边界由 `make persistence-check` 检查。
+
 ADR-0027 将 Eino 设为正式生产 AI Runtime：Chat、OpenAI-Compatible/Ollama Embedding 和五个 Structured
 Scheduler 固定使用 Eino。新 `/chat` 使用 RAG v2，由 Eino Graph、classic `ChatModelAgent`、冻结只读 ToolsNode
 和无工具 final-answer Stream 承担通用内层编排；草稿经 PostgreSQL/SSE 传递，Finalizer 仅在正式 Answer 原子提交时
@@ -91,7 +94,7 @@ Go race/vet/tidy、OpenAPI 与 Web lint/typecheck/test/build 门禁通过。
 | [进程配置加载契约](./config-loading.md) | 实例化 Viper、validator、YAML/env 严格边界、process profile、Secret 与 Rollout 归属 | defaults/YAML/env 迁移已锁定；[维护者总览](../../../docs/architecture/application-contracts.md) 已同步，无全局 Viper、热更新或数据库 Rollout 状态读取 |
 | [Gin HTTP 边界规范](./http-boundary.md) | 唯一 Engine、stdlib bridge、路由/OpenAPI 对等、Middleware、recovery 与 SSE flush | Gin v1.12.0 已迁移；operation 集合由可执行 inventory 精确对等，Chi 已移除 |
 | [宿主机 Workspace 精确授权契约](./workspace-root-grant.md) | 一次性 Workspace Control、不可变 Root identity、单 Grant 状态机、exact bind 与 Docker 固定入口 | Root/Docker 控制由本机命令保护；运行时只允许 API/Worker 精确 source=target 授权，Web 以 Active Workspace API 为事实源 |
-| [模型设置与热运行时契约](./model-settings-runtime.md) | desired/active/applied revision、AEAD、generation lease、双进程热激活与 Docker 生命周期 | managed Settings 无重启生效、冻结任务绑定、staged GORM 同池 scope 和真实容器身份门禁 |
+| [模型设置与热运行时契约](./model-settings-runtime.md) | desired/active/applied revision、AEAD、generation lease、双进程热激活与 Docker 生命周期 | managed Settings 无重启生效、冻结任务绑定、GORM 同池 scope 和真实容器身份门禁 |
 | [Eino Chat Adapter 契约](./eino-chat-adapter.md) | Eino Chat、wire/响应、安全传输、调用级 Callback telemetry、错误矩阵与升级门禁 | 生产固定 Eino，真实 Provider/发布验收独立记录 |
 | [Eino Embedding Adapter 契约](./eino-embedding-adapter.md) | Eino OpenAI-Compatible/Ollama、wire 向量交叉校验、安全传输、错误矩阵与升级门禁 | 生产固定 Eino，真实 Provider/发布验收独立记录 |
 | [Eino Structured Scheduler 契约](./eino-structured-scheduler.md) | Application phase-scheduler Port、固定短 Graph、五消费者编排、错误/预算/审计门禁 | 生产固定 Eino；构建失败 fail closed |
@@ -106,6 +109,7 @@ Go race/vet/tidy、OpenAPI 与 Web lint/typecheck/test/build 门禁通过。
 | [Git 远端同步契约](./git-sync-contract.md) | HTTPS Remote、AEAD Token、SSRF/AskPass、Run/Attempt/Outbox、受控 Fetch/Fast-forward/Push、post-check、自动调度与索引分离 | Domain/Application/Git/PostgreSQL/API/Worker、安全与 migration 门禁已验证；真实浏览器已覆盖桌面/390x844 配置、持久运行恢复、分叉冲突、有界预览和重试 |
 | [可恢复异步 Export 契约](./export-contract.md) | Tagged Job、Collection scan、附件 ZIP、prepared result、流式下载、Audit 与清理 | Collection Markdown/Metadata JSON 和 Workspace Attachments ZIP 已交付并关闭 AC-33；Evaluation/Audit 内容导出保持 deferred |
 | [数据库开发规范](./database-guidelines.md) | pgx/GORM/Atlas/River、参数化查询、事务、迁移和约束 | 已记录 Testcontainers PostgreSQL 工厂、外部 admin 隔离、清理与 TODO10 接入契约，以及 M7-03 Collection/Health、M8 Review/Interview/Shared Path/Memory、M9 Workspace 列表的持久化、receipt、可见性与 PG/EXPLAIN 门禁 |
+| [GORM 持久化契约](./gorm-persistence.md) | 单池、模型、跨 owner scope、错误、关闭顺序和 pgx 例外 | 最终 Composition 与可执行 persistence-check 门禁 |
 | [错误处理规范](./error-handling.md) | 领域错误、Retry 分类、Problem Details、SSE 错误 | 已记录 Tool 稳定错误、M9 Proposal detail/summary Approval 空值契约与 M10 Auth 的稳定 Problem Details 边界 |
 | [日志与审计规范](./logging-guidelines.md) | slog JSON、OTel/OTLP Trace/Metrics、Prometheus、脱敏和 Audit | 显式 Provider、双 signal 启动探针、API 本地 `/metrics`、API/Worker OTLP Metrics、River consumer span 与环境隔离合同已验证；目标环境后端观察仍需发布授权 |
 | [质量与交付规范](./quality-guidelines.md) | 禁止模式、测试金字塔、安全、Review 和门禁 | 已记录 Testcontainers 工厂的真实 PG、Docker smoke、资源清理与 TODO10 分批接入门禁，以及 M7 Graph/Collection/Health、M8 Review/Interview/Shared Path/Memory 和 M9 Export 的跨层、fault、浏览器与独立审查门禁 |
@@ -139,7 +143,7 @@ Go race/vet/tidy、OpenAPI 与 Web lint/typecheck/test/build 门禁通过。
   不得改变 Provider/Model/Adapter 身份。
 - API 与 Worker 的 Embedding Adapter 必须由同一 Configured Embedder Factory 构造，禁止两套配置转换。
 - Eino Chat/Embedding/Provider SDK 类型只允许位于 `internal/platform/models`，Eino Graph 类型只允许位于
-  `internal/agent/adapter/eino`；领域层不依赖 HTTP、pgx/sqlc、River、模型 SDK、文件系统实现或具体 Git 命令。
+  `internal/agent/adapter/eino`；领域层不依赖 HTTP、GORM/pgx/SQL、River、模型 SDK、文件系统实现或具体 Git 命令。
 - 正式知识唯一写入路径是 Proposal → Evidence Validation → Approval → Version Check → Atomic Write → Git Commit → Reindex → Regression Validation。
 - 长任务进入持久化 Workflow；River 只负责投递/领取可运行节点，不取代 Workflow 领域状态。
 - 跨文件/Git/DB 的一致性通过有序 Saga、Outbox、幂等和补偿处理；失败必须可解释、可审计、可恢复。

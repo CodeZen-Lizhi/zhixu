@@ -18,13 +18,13 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/health/domain"
 	workflowpostgres "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/postgres"
 	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestHealthScanRepositoryRuntimeReplayAdvanceFinishAndCancellation(t *testing.T) {
 	ctx := context.Background()
-	pool := newHealthIntegrationPool(t)
+	platform := requireHealthIntegrationPlatform(t)
+	pool := platform.DB()
 	ids := foundation.NewUUIDGenerator(nil)
 	workspaceID, err := ids.New()
 	if err != nil {
@@ -37,23 +37,19 @@ VALUES($1,'health-scan-runtime',$2,$2,$3,'inactive',1,$3,$3)`, string(workspaceI
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { cleanupHealthIntegrationWorkspace(t, pool, workspaceID) })
-	client, err := riveradapter.NewClient(pool, nil)
+	runtime, err := workflowpostgres.NewGORMRuntimeRepositoryWithHooks(platform, riveradapter.DefaultOptions(), healthGORMAllowEnqueueFence{}, workflowpostgres.GORMRuntimeRepositoryHooks{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	inserter, err := riveradapter.NewJobInserter(client)
+	events, err := eventspostgres.NewGORMStore(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtime, err := workflowpostgres.NewRuntimeRepository(pool, inserter)
+	repository, err := NewGORMScanRepository(platform, runtime, events, ids, foundation.FixedClock{Value: now})
 	if err != nil {
 		t.Fatal(err)
 	}
-	events, err := eventspostgres.NewStore(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
-	repository, err := NewScanRepository(pool, runtime, events, ids, foundation.FixedClock{Value: now})
+	unitOfWork, err := platform.UnitOfWork()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,34 +117,26 @@ VALUES($1,'health-scan-runtime',$2,$2,$3,'inactive',1,$3,$3)`, string(workspaceI
 	if err != nil {
 		t.Fatal(err)
 	}
-	tx, err := pool.Begin(ctx)
+	guard, err := NewGORMScanCancellationGuard(platform, events)
 	if err != nil {
 		t.Fatal(err)
 	}
-	guard, err := NewScanCancellationGuard(events)
-	if err != nil {
-		_ = tx.Rollback(ctx)
-		t.Fatal(err)
-	}
-	safe, err := guard.SafeToCancelWorkflowNode(ctx, tx, nodeID)
+	var safe bool
+	err = unitOfWork.Within(ctx, foundation.TransactionOptions{}, func(ctx context.Context, scope foundation.TransactionScope) error {
+		var err error
+		safe, err = guard.SafeToCancelWorkflowNodeScoped(ctx, scope, nodeID)
+		return err
+	})
 	if err != nil || !safe {
-		_ = tx.Rollback(ctx)
 		t.Fatalf("safe=%v err=%v", safe, err)
 	}
-	if err := tx.Commit(ctx); err != nil {
-		t.Fatal(err)
-	}
-	replayTx, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	safe, err = guard.SafeToCancelWorkflowNode(ctx, replayTx, nodeID)
+	err = unitOfWork.Within(ctx, foundation.TransactionOptions{}, func(ctx context.Context, scope foundation.TransactionScope) error {
+		var err error
+		safe, err = guard.SafeToCancelWorkflowNodeScoped(ctx, scope, nodeID)
+		return err
+	})
 	if err != nil || !safe {
-		_ = replayTx.Rollback(ctx)
 		t.Fatalf("cancel replay safe=%v err=%v", safe, err)
-	}
-	if err := replayTx.Commit(ctx); err != nil {
-		t.Fatal(err)
 	}
 	cancelled, err := service.Get(ctx, workspaceID, cancellable.Scan.ID)
 	if err != nil || cancelled.Status != domain.ScanStatusCancelled || cancelled.Coverage[0].Status != domain.DetectorCoverageStatusCancelled {
@@ -162,12 +150,12 @@ VALUES($1,'health-scan-runtime',$2,$2,$3,'inactive',1,$3,$3)`, string(workspaceI
 		t.Fatal(err)
 	}
 	injected := errors.New("injected health completion event append failure")
-	repository.events = &healthScanEventAppenderFake{err: injected}
+	repository.core.events = &healthScanEventAppenderFake{err: injected}
 	failure := &domain.FailureSummary{Stage: "detector", Code: "HEALTH_DETECTOR_FAILED"}
 	if _, err := service.Finish(ctx, healthapp.ScanTerminal{ScanID: rollbackScan.Scan.ID, WorkspaceID: workspaceID, ExpectedVersion: rollbackScan.Scan.Version, Status: domain.ScanStatusFailed, LastError: failure}); !errors.Is(err, injected) {
 		t.Fatalf("finish append failure=%v", err)
 	}
-	repository.events = events
+	repository.core.events = events
 	rolledBack, err := service.Get(ctx, workspaceID, rollbackScan.Scan.ID)
 	if err != nil || rolledBack.Status != domain.ScanStatusPending || rolledBack.Version != rollbackScan.Scan.Version || rolledBack.CompletedAt != nil {
 		t.Fatalf("rolled back scan=%#v err=%v", rolledBack, err)
@@ -194,35 +182,29 @@ VALUES($1,'health-scan-runtime',$2,$2,$3,'inactive',1,$3,$3)`, string(workspaceI
 	if err != nil {
 		t.Fatal(err)
 	}
-	failingGuard, err := NewScanCancellationGuard(&healthScanEventAppenderFake{err: injected})
+	failingGuard, err := NewGORMScanCancellationGuard(platform, &healthScanEventAppenderFake{err: injected})
 	if err != nil {
 		t.Fatal(err)
 	}
-	cancelRollbackTx, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if safe, err := failingGuard.SafeToCancelWorkflowNode(ctx, cancelRollbackTx, nodeID); safe || !errors.Is(err, injected) {
-		_ = cancelRollbackTx.Rollback(ctx)
+	err = unitOfWork.Within(ctx, foundation.TransactionOptions{}, func(ctx context.Context, scope foundation.TransactionScope) error {
+		var err error
+		safe, err = failingGuard.SafeToCancelWorkflowNodeScoped(ctx, scope, nodeID)
+		return err
+	})
+	if safe || !errors.Is(err, injected) {
 		t.Fatalf("cancel append failure safe=%v err=%v", safe, err)
-	}
-	if err := cancelRollbackTx.Rollback(ctx); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
-		t.Fatal(err)
 	}
 	cancelRolledBack, err := service.Get(ctx, workspaceID, cancelRollbackScan.Scan.ID)
 	if err != nil || cancelRolledBack.Status != domain.ScanStatusPending || cancelRolledBack.Version != cancelRollbackScan.Scan.Version {
 		t.Fatalf("cancel rolled back scan=%#v err=%v", cancelRolledBack, err)
 	}
-	cancelCommitTx, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if safe, err := guard.SafeToCancelWorkflowNode(ctx, cancelCommitTx, nodeID); err != nil || !safe {
-		_ = cancelCommitTx.Rollback(ctx)
+	err = unitOfWork.Within(ctx, foundation.TransactionOptions{}, func(ctx context.Context, scope foundation.TransactionScope) error {
+		var err error
+		safe, err = guard.SafeToCancelWorkflowNodeScoped(ctx, scope, nodeID)
+		return err
+	})
+	if err != nil || !safe {
 		t.Fatalf("cancel retry safe=%v err=%v", safe, err)
-	}
-	if err := cancelCommitTx.Commit(ctx); err != nil {
-		t.Fatal(err)
 	}
 	cancelCommitted, err := service.Get(ctx, workspaceID, cancelRollbackScan.Scan.ID)
 	if err != nil {
@@ -271,26 +253,19 @@ func assertHealthScanCompletionEvent(t *testing.T, ctx context.Context, pool *pg
 
 func TestHealthScanRepositoryPreventsConcurrentScopeAcrossIdempotencyKeys(t *testing.T) {
 	ctx := context.Background()
-	pool := newHealthRiverTestPool(t, ctx)
+	platform := requireHealthIntegrationPlatform(t)
+	pool := platform.DB()
 	workspaceID, _ := seedHealthRiverFixture(t, ctx, pool)
 
-	client, err := riveradapter.NewClient(pool, nil)
+	runtime, err := workflowpostgres.NewGORMRuntimeRepositoryWithHooks(platform, riveradapter.DefaultOptions(), healthGORMAllowEnqueueFence{}, workflowpostgres.GORMRuntimeRepositoryHooks{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	inserter, err := riveradapter.NewJobInserter(client)
+	events, err := eventspostgres.NewGORMStore(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtime, err := workflowpostgres.NewRuntimeRepository(pool, inserter)
-	if err != nil {
-		t.Fatal(err)
-	}
-	events, err := eventspostgres.NewStore(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
-	repository, err := NewScanRepository(pool, runtime, events, foundation.NewUUIDGenerator(nil), foundation.SystemClock{})
+	repository, err := NewGORMScanRepository(platform, runtime, events, foundation.NewUUIDGenerator(nil), foundation.SystemClock{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,25 +306,18 @@ func TestHealthScanRepositoryPreventsConcurrentScopeAcrossIdempotencyKeys(t *tes
 
 func TestHealthScanFinishRecoversCommitResponseLossWithoutDuplicatingCompletionEvent(t *testing.T) {
 	ctx := context.Background()
-	pool := newHealthRiverTestPool(t, ctx)
+	platform := requireHealthIntegrationPlatform(t)
+	pool := platform.DB()
 	workspaceID, _ := seedHealthRiverFixture(t, ctx, pool)
-	client, err := riveradapter.NewClient(pool, nil)
+	runtime, err := workflowpostgres.NewGORMRuntimeRepositoryWithHooks(platform, riveradapter.DefaultOptions(), healthGORMAllowEnqueueFence{}, workflowpostgres.GORMRuntimeRepositoryHooks{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	inserter, err := riveradapter.NewJobInserter(client)
+	events, err := eventspostgres.NewGORMStore(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtime, err := workflowpostgres.NewRuntimeRepository(pool, inserter)
-	if err != nil {
-		t.Fatal(err)
-	}
-	events, err := eventspostgres.NewStore(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
-	repository, err := NewScanRepository(pool, runtime, events, foundation.NewUUIDGenerator(nil), foundation.SystemClock{})
+	repository, err := NewGORMScanRepository(platform, runtime, events, foundation.NewUUIDGenerator(nil), foundation.SystemClock{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -375,8 +343,8 @@ func TestHealthScanFinishRecoversCommitResponseLossWithoutDuplicatingCompletionE
 	if err != nil {
 		t.Fatal(err)
 	}
-	lossDB := &healthScanCommitLossDB{Pool: pool}
-	repository.db = lossDB
+	lossDB := &healthCommitLossUnitOfWork{UnitOfWork: repository.database.unitOfWork}
+	repository.database.unitOfWork = lossDB
 	terminal := healthapp.ScanTerminal{ScanID: covered.ID, WorkspaceID: workspaceID, ExpectedVersion: covered.Version, Status: domain.ScanStatusSucceeded}
 	finished, err := service.Finish(ctx, terminal)
 	if err != nil || !lossDB.lost.Load() || finished.Status != domain.ScanStatusSucceeded {
@@ -389,30 +357,17 @@ func TestHealthScanFinishRecoversCommitResponseLossWithoutDuplicatingCompletionE
 	assertHealthScanCompletionEvent(t, ctx, pool, finished, "succeeded")
 }
 
-type healthScanCommitLossDB struct {
-	*pgxpool.Pool
+type healthCommitLossUnitOfWork struct {
+	foundation.UnitOfWork
 	lost atomic.Bool
 }
 
-func (database *healthScanCommitLossDB) Begin(ctx context.Context) (pgx.Tx, error) {
-	tx, err := database.Pool.Begin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return &healthScanCommitLossTx{Tx: tx, database: database}, nil
-}
-
-type healthScanCommitLossTx struct {
-	pgx.Tx
-	database *healthScanCommitLossDB
-}
-
-func (tx *healthScanCommitLossTx) Commit(ctx context.Context) error {
-	if err := tx.Tx.Commit(ctx); err != nil {
+func (database *healthCommitLossUnitOfWork) Within(ctx context.Context, options foundation.TransactionOptions, work foundation.TransactionFunc) error {
+	if err := database.UnitOfWork.Within(ctx, options, work); err != nil {
 		return err
 	}
-	if tx.database.lost.CompareAndSwap(false, true) {
-		return errors.New("injected health scan finish commit response loss")
+	if database.lost.CompareAndSwap(false, true) {
+		return errors.New("injected health commit response loss")
 	}
 	return nil
 }

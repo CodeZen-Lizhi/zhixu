@@ -36,7 +36,7 @@ type exportTransaction interface {
 	QueryRow(context.Context, string, ...any) exportRow
 	Commit(context.Context) error
 	Rollback(context.Context) error
-	SideFactTransaction() any
+	Scope() foundation.TransactionScope
 }
 
 type exportDatabase interface {
@@ -44,61 +44,22 @@ type exportDatabase interface {
 	Begin(context.Context) (exportTransaction, error)
 }
 
-// Option 配置同事务的 Export side-fact appender。
-type Option func(*Repository) error
-
-// WithEventAppender 配置 Export 生命周期 Server Event 追加器。
-func WithEventAppender(appender eventsapplication.Appender) Option {
-	return func(repository *Repository) error {
-		if isNilDependency(appender) {
-			return invalid(errors.New("export event appender is nil"))
-		}
-		if !isNilDependency(repository.events) {
-			return invalid(errors.New("export event appender is duplicated"))
-		}
-		repository.events = appender
-		return nil
-	}
-}
-
-// WithAuditAppender 配置下载统计同事务 Audit 追加器。
-func WithAuditAppender(appender auditapplication.Appender) Option {
-	return func(repository *Repository) error {
-		if isNilDependency(appender) {
-			return invalid(errors.New("export audit appender is nil"))
-		}
-		if !isNilDependency(repository.audit) {
-			return invalid(errors.New("export audit appender is duplicated"))
-		}
-		repository.audit = appender
-		return nil
-	}
-}
-
-// Repository 持久化导出 Job，并执行 DB-time 租约、prepared 和 cleanup CAS。
-type Repository struct {
+// exportRepository keeps the single explicit SQL implementation for Export
+// DB-time leases, prepared results, cleanup CAS, and transactional side facts.
+type exportRepository struct {
 	db     exportDatabase
-	events eventsapplication.Appender
-	audit  auditapplication.Appender
+	events eventsapplication.ScopedAppender
+	audit  auditapplication.ScopedAppender
 }
 
-func newRepository(db exportDatabase, options ...Option) (*Repository, error) {
+func newRepository(db exportDatabase) (*exportRepository, error) {
 	if isNilDependency(db) {
 		return nil, unavailable(errors.New("export database is nil"))
 	}
-	repository := &Repository{db: db}
-	for _, option := range options {
-		if option == nil {
-			return nil, invalid(errors.New("export repository option is nil"))
-		}
-		if err := option(repository); err != nil {
-			return nil, err
-		}
-	}
-	return repository, nil
+	return &exportRepository{db: db}, nil
 }
 
-var _ exportapp.Repository = (*Repository)(nil)
+var _ exportapp.Repository = (*exportRepository)(nil)
 
 const selectColumns = `id::text,workspace_id::text,kind,schema_version,query_definition,fields,status,
 file_path,file_hash,error_code,idempotency_key,request_hash,request_ttl_seconds,version,

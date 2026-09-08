@@ -7,25 +7,30 @@ import (
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/retrieval/application"
 	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
 )
 
-type typedInserterFunc func(context.Context, any, Args, riveradapter.InsertOptions) (riveradapter.JobReceipt, error)
+type inserterTestScope struct{ identity int }
 
-func (f typedInserterFunc) InsertTx(ctx context.Context, tx any, args Args, options riveradapter.InsertOptions) (riveradapter.JobReceipt, error) {
+func (inserterTestScope) TransactionScope() {}
+
+type typedInserterFunc func(context.Context, foundation.TransactionScope, Args, riveradapter.InsertOptions) (riveradapter.JobReceipt, error)
+
+func (f typedInserterFunc) InsertTx(ctx context.Context, tx foundation.TransactionScope, args Args, options riveradapter.InsertOptions) (riveradapter.JobReceipt, error) {
 	return f(ctx, tx, args, options)
 }
 
 func TestApplicationInserterMapsOnlyDeliveryIdentity(t *testing.T) {
 	t.Parallel()
 	var got Args
-	transport := &Inserter{typed: typedInserterFunc(func(_ context.Context, _ any, args Args, _ riveradapter.InsertOptions) (riveradapter.JobReceipt, error) {
+	transport := &ScopedInserter{typed: typedInserterFunc(func(_ context.Context, _ foundation.TransactionScope, args Args, _ riveradapter.InsertOptions) (riveradapter.JobReceipt, error) {
 		got = args
 		return riveradapter.JobReceipt{JobID: 43, Duplicate: true}, nil
 	})}
-	inserter := &ApplicationInserter{transport: transport}
-	receipt, err := inserter.InsertTx(context.Background(), &struct{}{}, application.ReindexJob{
+	inserter := &ScopedApplicationInserter{transport: transport}
+	receipt, err := inserter.InsertScoped(context.Background(), &inserterTestScope{identity: 1}, application.ReindexJob{
 		DeliveryID: "10000000-0000-4000-8000-000000000001", DispatchNo: 7,
 	})
 	if err != nil {
@@ -41,21 +46,21 @@ func TestInserterInsertsValidatedArgsWithUTCSchedule(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tx := &struct{}{}
+	tx := &inserterTestScope{identity: 1}
 	scheduledAt := time.Date(2026, time.July, 18, 10, 30, 0, 0, time.FixedZone("UTC+8", 8*60*60))
 	var (
-		gotTx      any
+		gotTx      foundation.TransactionScope
 		gotArgs    Args
 		gotOptions riveradapter.InsertOptions
 	)
-	inserter := &Inserter{typed: typedInserterFunc(func(_ context.Context, transaction any, inserted Args, options riveradapter.InsertOptions) (riveradapter.JobReceipt, error) {
+	inserter := &ScopedInserter{typed: typedInserterFunc(func(_ context.Context, transaction foundation.TransactionScope, inserted Args, options riveradapter.InsertOptions) (riveradapter.JobReceipt, error) {
 		gotTx = transaction
 		gotArgs = inserted
 		gotOptions = options
 		return riveradapter.JobReceipt{JobID: 41}, nil
 	})}
 
-	receipt, err := inserter.InsertTx(context.Background(), tx, args, scheduledAt)
+	receipt, err := inserter.InsertScoped(context.Background(), tx, args, scheduledAt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +68,7 @@ func TestInserterInsertsValidatedArgsWithUTCSchedule(t *testing.T) {
 		t.Fatalf("receipt=%+v", receipt)
 	}
 	if gotTx != tx || gotArgs != args {
-		t.Fatalf("tx=%p args=%#v", gotTx, gotArgs)
+		t.Fatalf("tx=%#v args=%#v", gotTx, gotArgs)
 	}
 	if !gotOptions.ScheduledAt.Equal(scheduledAt.UTC()) || gotOptions.ScheduledAt.Location() != time.UTC {
 		t.Fatalf("scheduled_at=%s location=%s", gotOptions.ScheduledAt, gotOptions.ScheduledAt.Location())
@@ -75,11 +80,11 @@ func TestInserterPreservesDuplicateReceipt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	inserter := &Inserter{typed: typedInserterFunc(func(context.Context, any, Args, riveradapter.InsertOptions) (riveradapter.JobReceipt, error) {
+	inserter := &ScopedInserter{typed: typedInserterFunc(func(context.Context, foundation.TransactionScope, Args, riveradapter.InsertOptions) (riveradapter.JobReceipt, error) {
 		return riveradapter.JobReceipt{JobID: 42, Duplicate: true}, nil
 	})}
 
-	receipt, err := inserter.InsertTx(context.Background(), &struct{}{}, args, time.Time{})
+	receipt, err := inserter.InsertScoped(context.Background(), &inserterTestScope{identity: 1}, args, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,11 +99,11 @@ func TestInserterPreservesSharedInserterError(t *testing.T) {
 		t.Fatal(err)
 	}
 	expected := foundation.NewError(foundation.ErrorRetryableFailure, "WORKFLOW_RIVER_JOB_INSERT_FAILED", true, errors.New("injected insert failure"))
-	inserter := &Inserter{typed: typedInserterFunc(func(context.Context, any, Args, riveradapter.InsertOptions) (riveradapter.JobReceipt, error) {
+	inserter := &ScopedInserter{typed: typedInserterFunc(func(context.Context, foundation.TransactionScope, Args, riveradapter.InsertOptions) (riveradapter.JobReceipt, error) {
 		return riveradapter.JobReceipt{}, expected
 	})}
 
-	_, err = inserter.InsertTx(context.Background(), &struct{}{}, args, time.Time{})
+	_, err = inserter.InsertScoped(context.Background(), &inserterTestScope{identity: 1}, args, time.Time{})
 	if !errors.Is(err, expected) || errorCode(err) != "WORKFLOW_RIVER_JOB_INSERT_FAILED" {
 		t.Fatalf("error=%v", err)
 	}
@@ -106,12 +111,12 @@ func TestInserterPreservesSharedInserterError(t *testing.T) {
 
 func TestInserterRejectsInvalidArgsBeforeTransaction(t *testing.T) {
 	called := false
-	inserter := &Inserter{typed: typedInserterFunc(func(context.Context, any, Args, riveradapter.InsertOptions) (riveradapter.JobReceipt, error) {
+	inserter := &ScopedInserter{typed: typedInserterFunc(func(context.Context, foundation.TransactionScope, Args, riveradapter.InsertOptions) (riveradapter.JobReceipt, error) {
 		called = true
 		return riveradapter.JobReceipt{}, nil
 	})}
 
-	_, err := inserter.InsertTx(context.Background(), nil, Args{}, time.Time{})
+	_, err := inserter.InsertScoped(context.Background(), nil, Args{}, time.Time{})
 	if errorCode(err) != "REINDEX_JOB_SCHEMA_INVALID" {
 		t.Fatalf("error=%v", err)
 	}
@@ -121,7 +126,7 @@ func TestInserterRejectsInvalidArgsBeforeTransaction(t *testing.T) {
 }
 
 func TestNewInserterPreservesNilClientError(t *testing.T) {
-	_, err := NewInserter(nil)
+	_, err := NewScopedInserter(&platformpostgres.Pool{}, nil, nil)
 	var classified *foundation.Error
 	if !errors.As(err, &classified) || classified.Code != "WORKFLOW_RIVER_CLIENT_MISSING" || classified.Kind != foundation.ErrorDependencyUnavailable {
 		t.Fatalf("error=%v", err)
@@ -129,8 +134,8 @@ func TestNewInserterPreservesNilClientError(t *testing.T) {
 }
 
 func TestNilInserterValidatesArgsBeforePreservingSharedError(t *testing.T) {
-	var inserter *Inserter
-	if _, err := inserter.InsertTx(context.Background(), nil, Args{}, time.Time{}); errorCode(err) != "REINDEX_JOB_SCHEMA_INVALID" {
+	var inserter *ScopedInserter
+	if _, err := inserter.InsertScoped(context.Background(), nil, Args{}, time.Time{}); errorCode(err) != "REINDEX_JOB_SCHEMA_INVALID" {
 		t.Fatalf("invalid args error=%v", err)
 	}
 
@@ -138,7 +143,7 @@ func TestNilInserterValidatesArgsBeforePreservingSharedError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = inserter.InsertTx(context.Background(), nil, args, time.Time{})
+	_, err = inserter.InsertScoped(context.Background(), nil, args, time.Time{})
 	var classified *foundation.Error
 	if !errors.As(err, &classified) || classified.Code != "WORKFLOW_RIVER_INSERTER_MISSING" || classified.Kind != foundation.ErrorDependencyUnavailable {
 		t.Fatalf("error=%v", err)

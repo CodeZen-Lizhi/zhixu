@@ -6,7 +6,6 @@ import (
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/filesystem"
 	workspacepostgres "github.com/CodeZen-Lizhi/zhixu/internal/workspace/adapter/postgres"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestNewMemoryHandlerFailsClosedWithoutDatabase(t *testing.T) {
@@ -17,7 +16,7 @@ func TestNewMemoryHandlerFailsClosedWithoutDatabase(t *testing.T) {
 }
 
 func TestNewMemoryHandlerComposesProductionDependencies(t *testing.T) {
-	handler, err := newMemoryHandler(&pgxpool.Pool{}, time.Second)
+	handler, err := newMemoryHandler(apiConstructorPool(t), time.Second)
 	if err != nil || handler == nil || !handler.Available() {
 		t.Fatalf("handler=%#v err=%v", handler, err)
 	}
@@ -31,7 +30,7 @@ func TestNewMemoryServiceFailsClosedWithoutDatabase(t *testing.T) {
 }
 
 func TestNewMemoryServiceComposesEffectiveContextDependency(t *testing.T) {
-	service, err := newMemoryService(&pgxpool.Pool{})
+	service, err := newMemoryService(apiConstructorPool(t))
 	if err != nil || service == nil {
 		t.Fatalf("service=%#v err=%v", service, err)
 	}
@@ -45,7 +44,7 @@ func TestNewInterviewHandlerFailsClosedWithoutDatabase(t *testing.T) {
 }
 
 func TestNewInterviewHandlerFailsClosedWithoutCitationDependencies(t *testing.T) {
-	handler, err := newInterviewHandler(&pgxpool.Pool{}, nil, nil, time.Second)
+	handler, err := newInterviewHandler(apiConstructorPool(t), nil, nil, time.Second)
 	if err == nil || handler != nil {
 		t.Fatalf("handler=%#v err=%v", handler, err)
 	}
@@ -59,8 +58,8 @@ func TestNewInterviewServiceFailsClosedWithoutCitationDependencies(t *testing.T)
 }
 
 func TestNewInterviewServiceComposesProductionDependencies(t *testing.T) {
-	pool := &pgxpool.Pool{}
-	workspaces, err := workspacepostgres.NewRepository(pool)
+	pool := apiConstructorPool(t)
+	workspaces, err := workspacepostgres.NewGORMRepository(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,8 +74,8 @@ func TestNewInterviewServiceComposesProductionDependencies(t *testing.T) {
 }
 
 func TestNewInterviewHandlerComposesProductionDependencies(t *testing.T) {
-	pool := &pgxpool.Pool{}
-	workspaces, err := workspacepostgres.NewRepository(pool)
+	pool := apiConstructorPool(t)
+	workspaces, err := workspacepostgres.NewGORMRepository(pool)
 	if err != nil {
 		t.Fatal(err)
 	}

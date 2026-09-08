@@ -17,8 +17,6 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	healthapp "github.com/CodeZen-Lizhi/zhixu/internal/health/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/health/domain"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -48,75 +46,70 @@ func (recorder *healthStatementRecorder) snapshot() []string {
 }
 
 type detectorPageInstrumentedDB struct {
-	*pgxpool.Pool
+	healthIssueDB
 	recorder *healthStatementRecorder
 	barrier  *detectorPageUpsertBarrier
 }
 
-func (database *detectorPageInstrumentedDB) Begin(ctx context.Context) (pgx.Tx, error) {
-	tx, err := database.Pool.Begin(ctx)
-	if err != nil {
-		return nil, err
+func (database *detectorPageInstrumentedDB) Within(ctx context.Context, options foundation.TransactionOptions, work func(context.Context, healthTransaction) error) error {
+	began := false
+	err := database.healthIssueDB.Within(ctx, options, func(ctx context.Context, tx healthTransaction) error {
+		began = true
+		if database.recorder != nil {
+			database.recorder.record("begin")
+		}
+		tx.healthSQL = &detectorPageInstrumentedTx{healthSQL: tx.healthSQL, recorder: database.recorder, barrier: database.barrier}
+		return work(ctx, tx)
+	})
+	if began && database.recorder != nil {
+		if err != nil {
+			database.recorder.record("rollback")
+		} else {
+			database.recorder.record("commit")
+		}
 	}
-	if database.recorder != nil {
-		database.recorder.record("begin")
-	}
-	return &detectorPageInstrumentedTx{Tx: tx, recorder: database.recorder, barrier: database.barrier}, nil
+	return err
 }
 
 type detectorPageInstrumentedTx struct {
-	pgx.Tx
-	recorder  *healthStatementRecorder
-	barrier   *detectorPageUpsertBarrier
-	completed atomic.Bool
+	healthSQL
+	recorder *healthStatementRecorder
+	barrier  *detectorPageUpsertBarrier
 }
 
-func (tx *detectorPageInstrumentedTx) Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error) {
+func (tx *detectorPageInstrumentedTx) Exec(ctx context.Context, sql string, arguments ...any) (healthResult, error) {
 	if tx.barrier != nil {
 		tx.barrier.wait(ctx, sql)
 	}
 	if tx.recorder != nil {
 		tx.recorder.record(sql)
 	}
-	return tx.Tx.Exec(ctx, sql, arguments...)
+	return tx.healthSQL.Exec(ctx, sql, arguments...)
 }
 
-func (tx *detectorPageInstrumentedTx) Query(ctx context.Context, sql string, arguments ...any) (pgx.Rows, error) {
+func (tx *detectorPageInstrumentedTx) Query(ctx context.Context, sql string, arguments ...any) (healthRows, error) {
 	if tx.barrier != nil {
 		tx.barrier.wait(ctx, sql)
 	}
 	if tx.recorder != nil {
 		tx.recorder.record(sql)
 	}
-	return tx.Tx.Query(ctx, sql, arguments...)
+	return tx.healthSQL.Query(ctx, sql, arguments...)
 }
 
-func (tx *detectorPageInstrumentedTx) QueryRow(ctx context.Context, sql string, arguments ...any) pgx.Row {
+func (tx *detectorPageInstrumentedTx) QueryRow(ctx context.Context, sql string, arguments ...any) healthRow {
 	if tx.barrier != nil {
 		tx.barrier.wait(ctx, sql)
 	}
 	if tx.recorder != nil {
 		tx.recorder.record(sql)
 	}
-	return tx.Tx.QueryRow(ctx, sql, arguments...)
-}
-
-func (tx *detectorPageInstrumentedTx) Commit(ctx context.Context) error {
-	if tx.completed.CompareAndSwap(false, true) && tx.recorder != nil {
-		tx.recorder.record("commit")
-	}
-	return tx.Tx.Commit(ctx)
-}
-
-func (tx *detectorPageInstrumentedTx) Rollback(ctx context.Context) error {
-	if tx.completed.CompareAndSwap(false, true) && tx.recorder != nil {
-		tx.recorder.record("rollback")
-	}
-	return tx.Tx.Rollback(ctx)
+	return tx.healthSQL.QueryRow(ctx, sql, arguments...)
 }
 
 func TestIssueRepositoryReconcileDetectorPageUsesFixedStatementCount(t *testing.T) {
-	pool := newHealthIntegrationPool(t)
+	platform := requireHealthIntegrationPlatform(t)
+	pool := platform.DB()
 	for caseIndex, observationCount := range []int{1, 25, 100} {
 		t.Run(fmt.Sprintf("observations_%d", observationCount), func(t *testing.T) {
 			ctx := context.Background()
@@ -129,7 +122,7 @@ func TestIssueRepositoryReconcileDetectorPageUsesFixedStatementCount(t *testing.
 			seedDetectorPageScan(t, ctx, pool, workspaceID, scanID, detectorPageID(0x82000000+caseIndex, 2), detectorPageID(0x82000000+caseIndex, 3), now)
 
 			observations := make([]domain.IssueObservation, 0, observationCount)
-			seedRepository, err := NewIssueRepository(pool)
+			seedRepository, err := NewGORMIssueRepository(platform)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -166,10 +159,11 @@ func TestIssueRepositoryReconcileDetectorPageUsesFixedStatementCount(t *testing.
 					expected.Reopened++
 				}
 			}
-			repository, err := NewIssueRepository(&detectorPageInstrumentedDB{Pool: pool, recorder: recorder})
+			repository, err := NewGORMIssueRepository(platform)
 			if err != nil {
 				t.Fatal(err)
 			}
+			repository.core.db = &detectorPageInstrumentedDB{healthIssueDB: repository.database, recorder: recorder}
 			recorder.reset()
 			result, err := repository.ReconcileDetectorPage(ctx, healthapp.DetectorPageReconcileRequest{
 				WorkspaceID: workspaceID, ScanID: scanID, DetectorID: "health.detector.missing_source",
@@ -206,7 +200,8 @@ FROM ops.health_issue issue WHERE issue.workspace_id=$1 AND issue.id=$2`, string
 
 func TestIssueRepositoryReconcileDetectorPageDuplicateReopenUsesOriginalVersionCAS(t *testing.T) {
 	ctx := context.Background()
-	pool := newHealthIntegrationPool(t)
+	platform := requireHealthIntegrationPlatform(t)
+	pool := platform.DB()
 	workspaceID := detectorPageID(0x8a000000, 1)
 	scanID := detectorPageID(0x8a000000, 2)
 	topicID := detectorPageID(0x8a000000, 3)
@@ -215,7 +210,7 @@ func TestIssueRepositoryReconcileDetectorPageDuplicateReopenUsesOriginalVersionC
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	seedDetectorPageScan(t, ctx, pool, workspaceID, scanID, detectorPageID(0x8a000000, 4), detectorPageID(0x8a000000, 5), now)
 	seedDetectorPageTopic(t, ctx, pool, workspaceID, topicID, 0, now)
-	seedRepository, err := NewIssueRepository(pool)
+	seedRepository, err := NewGORMIssueRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +220,7 @@ func TestIssueRepositoryReconcileDetectorPageDuplicateReopenUsesOriginalVersionC
 	}
 	changed := initial
 	changed.DetectorVersion = "detector/v2"
-	repository, err := NewIssueRepository(pool)
+	repository, err := NewGORMIssueRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,11 +288,11 @@ func (barrier *detectorPageUpsertBarrier) wait(ctx context.Context, sql string) 
 }
 
 func TestIssueRepositoryConcurrentNewIdentityRollsBackLosingPage(t *testing.T) {
-	pool := newHealthIntegrationPool(t)
+	platform := requireHealthIntegrationPlatform(t)
+	pool := platform.DB()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	barrier := &detectorPageUpsertBarrier{ready: make(chan struct{}), release: make(chan struct{})}
-	database := &detectorPageInstrumentedDB{Pool: pool, barrier: barrier}
 	workspaceID := detectorPageID(0x85000000, 1)
 	firstScanID := detectorPageID(0x85000000, 2)
 	secondScanID := detectorPageID(0x85000000, 3)
@@ -318,11 +313,12 @@ func TestIssueRepositoryConcurrentNewIdentityRollsBackLosingPage(t *testing.T) {
 	results := make(chan pageResult, 2)
 	for _, scanID := range []foundation.ID{firstScanID, secondScanID} {
 		go func(scanID foundation.ID) {
-			repository, repositoryErr := NewIssueRepository(database)
+			repository, repositoryErr := NewGORMIssueRepository(platform)
 			if repositoryErr != nil {
 				results <- pageResult{err: repositoryErr}
 				return
 			}
+			repository.core.db = &detectorPageInstrumentedDB{healthIssueDB: repository.database, barrier: barrier}
 			result, reconcileErr := repository.ReconcileDetectorPage(ctx, healthapp.DetectorPageReconcileRequest{
 				WorkspaceID: workspaceID, ScanID: scanID, DetectorID: "health.detector.missing_source",
 				Observations: []domain.IssueObservation{observation}, ObservedAt: now.Add(time.Second),

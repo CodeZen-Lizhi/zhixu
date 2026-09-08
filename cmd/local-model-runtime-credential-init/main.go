@@ -129,7 +129,8 @@ func secureCredentialFile(path string, chmod chmodFunc, chown chownFunc) error {
 
 // validateRuntimeRole accepts only the migration-marked capability role with
 // the exact target-database ACLs required by the manager. It rejects ownership,
-// role settings, membership, dangerous attributes, or any extra direct grant.
+// role settings, membership, dangerous attributes, extra direct grants, and
+// PUBLIC grants that expose protected ops data beyond the runtime contract.
 func validateRuntimeRole(ctx context.Context, database roleStatusQuerier) error {
 	if ctx == nil || database == nil {
 		return errors.New("runtime database role validation is unavailable")
@@ -216,7 +217,7 @@ func validateRuntimeRole(ctx context.Context, database roleStatusQuerier) error 
 			FROM pg_namespace namespace
 			JOIN pg_roles role ON role.rolname=$1
 			CROSS JOIN LATERAL aclexplode(COALESCE(namespace.nspacl, acldefault('n', namespace.nspowner))) privilege
-			WHERE privilege.grantee=role.oid
+			WHERE (privilege.grantee=role.oid OR (privilege.grantee=0 AND namespace.nspname='ops'))
 				  AND NOT (namespace.nspname='ops' AND privilege.privilege_type='USAGE' AND NOT privilege.is_grantable)
 			UNION ALL
 			SELECT 1
@@ -224,7 +225,7 @@ func validateRuntimeRole(ctx context.Context, database roleStatusQuerier) error 
 			JOIN pg_namespace namespace ON namespace.oid=relation.relnamespace
 			JOIN pg_roles role ON role.rolname=$1
 			CROSS JOIN LATERAL aclexplode(COALESCE(relation.relacl, acldefault('r', relation.relowner))) privilege
-			WHERE privilege.grantee=role.oid
+			WHERE (privilege.grantee=role.oid OR (privilege.grantee=0 AND namespace.nspname='ops'))
 			  AND NOT (namespace.nspname='ops'
 			           AND relation.relname IN ('managed_ollama_runtime','managed_ollama_holds','managed_ollama_operations','managed_ollama_revision_requirements')
 				           AND privilege.privilege_type='SELECT' AND NOT privilege.is_grantable)
@@ -235,7 +236,7 @@ func validateRuntimeRole(ctx context.Context, database roleStatusQuerier) error 
 			JOIN pg_namespace namespace ON namespace.oid=relation.relnamespace
 			JOIN pg_roles role ON role.rolname=$1
 			CROSS JOIN LATERAL aclexplode(attribute.attacl) privilege
-			WHERE privilege.grantee=role.oid
+			WHERE (privilege.grantee=role.oid OR (privilege.grantee=0 AND namespace.nspname='ops'))
 			  AND NOT (namespace.nspname='ops' AND relation.relname='model_settings_state'
 			           AND attribute.attname IN ('singleton','phase','active_revision','target_revision','previous_active_revision','version')
 				           AND privilege.privilege_type='SELECT' AND NOT privilege.is_grantable)

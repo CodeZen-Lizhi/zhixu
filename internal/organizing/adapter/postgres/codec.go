@@ -2,7 +2,6 @@ package postgres
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,13 +11,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	organizingapp "github.com/CodeZen-Lizhi/zhixu/internal/organizing/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/organizing/domain"
-	"github.com/jackc/pgx/v5"
 )
-
-type queryer interface {
-	Query(context.Context, string, ...any) (pgx.Rows, error)
-	QueryRow(context.Context, string, ...any) pgx.Row
-}
 
 type scanner interface{ Scan(...any) error }
 

@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -21,12 +20,9 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/application"
 	modelcrypto "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/crypto"
 	"github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/domain"
-	"github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestGORMRepositorySaveDesiredRollbackAndScopedEnqueueFence(t *testing.T) {
@@ -178,8 +174,7 @@ func TestGORMRepositorySaveDesiredRollbackAndScopedEnqueueFence(t *testing.T) {
 		if _, execErr := competitor.Exec(callbackCtx, `SELECT phase FROM ops.model_settings_state WHERE singleton=true FOR UPDATE NOWAIT`); execErr == nil {
 			return errors.New("GORM enqueue fence did not hold the singleton lock")
 		} else {
-			var postgresError *pgconn.PgError
-			if !errors.As(execErr, &postgresError) || postgresError.Code != "55P03" {
+			if platformpostgres.SQLState(execErr) != "55P03" {
 				return fmt.Errorf("unexpected competing lock error: %w", execErr)
 			}
 		}
@@ -382,17 +377,15 @@ func (store failingGORMActivationTxStore) SeedActivationPreparation(ctx context.
 var _ localmodelruntime.ScopedTxLifecycle = failingGORMActivationLifecycle{}
 
 func TestRepositoryRevisionRolloutRuntimeAndEnqueueFence(t *testing.T) {
-	t.Skip("superseded by the hot-activation repository protocol integration test")
 	ctx := context.Background()
-	pool, cleanup := newModelSettingsTestDatabase(t, ctx)
-	defer cleanup()
+	pool := newModelSettingsTestDatabase(t)
 	repository, _, auditStore := newConfiguredModelSettingsRepository(t, pool, 7)
 
 	snapshot, err := repository.Snapshot(ctx, 20*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.DesiredRevision != 0 || snapshot.ActiveRevision != 0 || !snapshot.RestartRequired ||
+	if snapshot.DesiredRevision != 0 || snapshot.ActiveRevision != 0 || !snapshot.ApplyRequired || snapshot.RestartRequired ||
 		snapshot.ChatCapability != domain.CapabilityDisabled || snapshot.EmbeddingCapability != domain.CapabilityDisabled {
 		t.Fatalf("unexpected bootstrap snapshot: %+v", snapshot)
 	}
@@ -418,7 +411,7 @@ func TestRepositoryRevisionRolloutRuntimeAndEnqueueFence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.DesiredRevision != 1 || snapshot.ActiveRevision != 0 || !snapshot.RestartRequired {
+	if snapshot.DesiredRevision != 1 || snapshot.ActiveRevision != 0 || !snapshot.ApplyRequired || snapshot.RestartRequired {
 		t.Fatalf("first save snapshot desired=%d active=%d restart=%t", snapshot.DesiredRevision, snapshot.ActiveRevision, snapshot.RestartRequired)
 	}
 	firstNonce, firstCiphertext := storedChatEnvelope(t, ctx, pool, 1)
@@ -470,11 +463,16 @@ func TestRepositoryRevisionRolloutRuntimeAndEnqueueFence(t *testing.T) {
 	assertModelSettingsErrorCode(t, err, domain.ErrorCodeRevisionConflict)
 
 	rolloutID := mustModelSettingsID(t, "a1000000-0000-4000-8000-000000000001")
-	rollout, err := repository.BeginRollout(ctx, application.BeginRolloutCommand{RolloutID: rolloutID, LeaseDuration: 30 * time.Second})
+	started, err := repository.StartActivation(ctx, application.StartActivationCommand{
+		RolloutID: rolloutID, TargetRevision: snapshot.DesiredRevision,
+		ExpectedDesiredRevision: snapshot.DesiredRevision, ExpectedStateVersion: snapshot.Rollout.Version,
+		LeaseDuration: 30 * time.Second, FreshWithin: 20 * time.Second,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rollout.Phase != domain.RolloutPhaseValidating || rollout.TargetRevision != 2 || rollout.PreviousActiveRevision != 0 {
+	rollout := started.State
+	if rollout.Phase != domain.RolloutPhasePreparing || rollout.TargetRevision != 2 || rollout.PreviousActiveRevision != 0 {
 		t.Fatalf("unexpected begun rollout: %s", rollout)
 	}
 	assertEnqueueAllowed(t, ctx, pool, repository)
@@ -485,50 +483,47 @@ func TestRepositoryRevisionRolloutRuntimeAndEnqueueFence(t *testing.T) {
 	})
 	assertModelSettingsErrorCode(t, err, domain.ErrorCodeRolloutInProgress)
 
-	rollout, err = repository.AdvanceRollout(ctx, application.AdvanceRolloutCommand{
-		RolloutID: rolloutID, ExpectedPhase: domain.RolloutPhaseValidating,
-		NextPhase: domain.RolloutPhaseDraining, LeaseDuration: 30 * time.Second,
+	participants := registerPreparedParticipants(t, ctx, repository, rolloutID, 2)
+	rollout, err = repository.AdvanceActivation(ctx, application.AdvanceActivationCommand{
+		RolloutID: rolloutID, ExpectedPhase: domain.RolloutPhasePreparing,
+		ExpectedVersion: rollout.Version, NextPhase: domain.RolloutPhaseArming,
+		LeaseDuration: 30 * time.Second, FreshWithin: 20 * time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	assertEnqueueBlocked(t, ctx, pool, repository)
-	for _, runtime := range []struct {
-		role       domain.RuntimeRole
-		instanceID foundation.ID
-	}{
-		{domain.RuntimeRoleAPI, mustModelSettingsID(t, "a2000000-0000-4000-8000-000000000001")},
-		{domain.RuntimeRoleWorker, mustModelSettingsID(t, "a2000000-0000-4000-8000-000000000002")},
-	} {
-		if _, err := repository.SetRuntimePhase(ctx, application.RuntimePhaseCommand{
-			Role: runtime.role, InstanceID: runtime.instanceID, RolloutID: &rolloutID,
-			ExpectedPhase: domain.RuntimePhaseActive, NextPhase: domain.RuntimePhaseQuiescing,
-		}); err != nil {
+	for _, role := range []domain.RuntimeRole{domain.RuntimeRoleAPI, domain.RuntimeRoleWorker} {
+		participant := participants[role]
+		participant, err = repository.TransitionParticipant(ctx, application.ParticipantTransitionCommand{
+			RolloutID: rolloutID, Role: role, InstanceID: participant.InstanceID, TargetRevision: 2,
+			ExpectedPhase: domain.ParticipantPhasePrepared, ExpectedVersion: participant.Version,
+			NextPhase: domain.ParticipantPhaseArmed,
+		})
+		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := repository.SetRuntimePhase(ctx, application.RuntimePhaseCommand{
-			Role: runtime.role, InstanceID: runtime.instanceID, RolloutID: &rolloutID,
-			ExpectedPhase: domain.RuntimePhaseQuiescing, NextPhase: domain.RuntimePhaseQuiesced,
-		}); err != nil {
-			t.Fatal(err)
-		}
+		participants[role] = participant
 	}
-	rollout, err = repository.AdvanceRollout(ctx, application.AdvanceRolloutCommand{
-		RolloutID: rolloutID, ExpectedPhase: domain.RolloutPhaseDraining,
-		NextPhase: domain.RolloutPhaseApplying, LeaseDuration: 30 * time.Second,
+	rollout, err = repository.CommitActivation(ctx, application.CommitActivationCommand{
+		RolloutID: rolloutID, ExpectedVersion: rollout.Version,
+		FreshWithin: 20 * time.Second, LeaseDuration: 30 * time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	registerCandidateRuntimes(t, ctx, repository, rolloutID, 2)
-	rollout, err = repository.AdvanceRollout(ctx, application.AdvanceRolloutCommand{
-		RolloutID: rolloutID, ExpectedPhase: domain.RolloutPhaseApplying,
-		NextPhase: domain.RolloutPhaseVerifying, LeaseDuration: 30 * time.Second,
-	})
-	if err != nil {
-		t.Fatal(err)
+	for _, role := range []domain.RuntimeRole{domain.RuntimeRoleAPI, domain.RuntimeRoleWorker} {
+		participant := participants[role]
+		if _, err := repository.AcknowledgeActivation(ctx, application.ActivationAcknowledgement{
+			RolloutID: rolloutID, Role: role, InstanceID: participant.InstanceID, TargetRevision: 2,
+			ExpectedStateVersion: rollout.Version, ExpectedParticipantVersion: participant.Version,
+		}); err != nil {
+			t.Fatal(err)
+		}
 	}
-	rollout, err = repository.CommitRollout(ctx, application.CommitRolloutCommand{RolloutID: rolloutID, FreshWithin: 20 * time.Second})
+	rollout, err = repository.FinalizeActivation(ctx, application.FinalizeActivationCommand{
+		RolloutID: rolloutID, ExpectedVersion: rollout.Version, FreshWithin: 20 * time.Second,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -539,37 +534,40 @@ func TestRepositoryRevisionRolloutRuntimeAndEnqueueFence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.ActiveRevision != 2 || snapshot.DesiredRevision != 2 || snapshot.RestartRequired ||
+	if snapshot.ActiveRevision != 2 || snapshot.DesiredRevision != 2 || snapshot.ApplyRequired || snapshot.RestartRequired ||
 		snapshot.ChatCapability != domain.CapabilityConfigured || snapshot.EmbeddingCapability != domain.CapabilityConfigured {
 		t.Fatalf("unexpected committed snapshot: %+v", snapshot)
 	}
 	assertEnqueueAllowed(t, ctx, pool, repository)
 
+	snapshot, err = repository.SaveDesired(ctx, application.SaveCommand{
+		ExpectedRevision: 2, Settings: settings, ChatSecret: domain.KeepSecret(),
+		EmbeddingSecret: domain.KeepSecret(), CreatedBy: "integration-test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	abortID := mustModelSettingsID(t, "a1000000-0000-4000-8000-000000000002")
-	if _, err := repository.BeginRollout(ctx, application.BeginRolloutCommand{RolloutID: abortID, LeaseDuration: 30 * time.Second}); err != nil {
+	started, err = repository.StartActivation(ctx, application.StartActivationCommand{
+		RolloutID: abortID, TargetRevision: snapshot.DesiredRevision,
+		ExpectedDesiredRevision: snapshot.DesiredRevision, ExpectedStateVersion: snapshot.Rollout.Version,
+		LeaseDuration: 30 * time.Second, FreshWithin: 20 * time.Second,
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repository.AdvanceRollout(ctx, application.AdvanceRolloutCommand{
-		RolloutID: abortID, ExpectedPhase: domain.RolloutPhaseValidating,
-		NextPhase: domain.RolloutPhaseDraining, LeaseDuration: 30 * time.Second,
+	registerPreparedParticipants(t, ctx, repository, abortID, snapshot.DesiredRevision)
+	rollout, err = repository.AdvanceActivation(ctx, application.AdvanceActivationCommand{
+		RolloutID: abortID, ExpectedPhase: domain.RolloutPhasePreparing, ExpectedVersion: started.State.Version,
+		NextPhase: domain.RolloutPhaseArming, LeaseDuration: 30 * time.Second, FreshWithin: 20 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.FailActivation(ctx, application.FailActivationCommand{
+		RolloutID: abortID, ExpectedPhase: domain.RolloutPhaseArming,
+		ExpectedVersion: rollout.Version, ErrorCode: "MODEL_SETTINGS_TEST_ABORTED",
 	}); err != nil {
-		t.Fatal(err)
-	}
-	for _, runtime := range []struct {
-		role       domain.RuntimeRole
-		instanceID foundation.ID
-	}{
-		{domain.RuntimeRoleAPI, mustModelSettingsID(t, "a3000000-0000-4000-8000-000000000001")},
-		{domain.RuntimeRoleWorker, mustModelSettingsID(t, "a3000000-0000-4000-8000-000000000002")},
-	} {
-		if _, err := repository.SetRuntimePhase(ctx, application.RuntimePhaseCommand{
-			Role: runtime.role, InstanceID: runtime.instanceID, RolloutID: &abortID,
-			ExpectedPhase: domain.RuntimePhaseActive, NextPhase: domain.RuntimePhaseQuiescing,
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := repository.FailRollout(ctx, application.FailRolloutCommand{RolloutID: abortID, ErrorCode: "MODEL_SETTINGS_TEST_ABORTED"}); err != nil {
 		t.Fatal(err)
 	}
 	snapshot, err = repository.Snapshot(ctx, 20*time.Second)
@@ -578,85 +576,88 @@ func TestRepositoryRevisionRolloutRuntimeAndEnqueueFence(t *testing.T) {
 	}
 	if snapshot.Rollout.Phase != domain.RolloutPhaseFailed || snapshot.Runtime.API.Phase != domain.RuntimePhaseActive ||
 		snapshot.Runtime.Worker.Phase != domain.RuntimePhaseActive || snapshot.ActiveRevision != 2 {
-		t.Fatalf("abort did not restore previous runtime ownership: %+v", snapshot)
+		t.Fatalf("abort did not preserve previous runtime ownership: %+v", snapshot)
 	}
 	assertEnqueueAllowed(t, ctx, pool, repository)
 
 	expiredID := mustModelSettingsID(t, "a1000000-0000-4000-8000-000000000003")
-	if _, err := repository.BeginRollout(ctx, application.BeginRolloutCommand{RolloutID: expiredID, LeaseDuration: 30 * time.Second}); err != nil {
+	if _, err := repository.StartActivation(ctx, application.StartActivationCommand{
+		RolloutID: expiredID, TargetRevision: snapshot.DesiredRevision,
+		ExpectedDesiredRevision: snapshot.DesiredRevision, ExpectedStateVersion: snapshot.Rollout.Version,
+		LeaseDuration: 30 * time.Second, FreshWithin: 20 * time.Second,
+	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, `UPDATE ops.model_settings_state
+	if _, err := pool.DB().Exec(ctx, `UPDATE ops.model_settings_state
 SET lease_expires_at=clock_timestamp()-interval '1 second',version=version+1,updated_at=clock_timestamp()
 WHERE singleton=true`); err != nil {
 		t.Fatal(err)
 	}
-	_, err = repository.RenewRollout(ctx, application.RenewRolloutCommand{
-		RolloutID: expiredID, ExpectedPhase: domain.RolloutPhaseValidating, LeaseDuration: 30 * time.Second,
-	})
-	assertModelSettingsErrorCode(t, err, domain.ErrorCodeRolloutLeaseExpired)
-	recoveredState, recovered, err := repository.RecoverExpiredRollout(ctx)
+	snapshot, err = repository.Snapshot(ctx, 20*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !recovered || recoveredState.Phase != domain.RolloutPhaseFailed || recoveredState.LastErrorCode != domain.ErrorCodeRolloutLeaseExpired {
-		t.Fatalf("expired recovery state=%s recovered=%t", recoveredState, recovered)
+	_, err = repository.RenewActivation(ctx, application.RenewActivationCommand{
+		RolloutID: expiredID, ExpectedPhase: domain.RolloutPhasePreparing,
+		ExpectedVersion: snapshot.Rollout.Version, LeaseDuration: 30 * time.Second,
+	})
+	assertModelSettingsErrorCode(t, err, domain.ErrorCodeActivationLeaseExpired)
+	recovered, err := repository.RecoverActivation(ctx, application.RecoverActivationCommand{LeaseDuration: 30 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.Action != domain.ActivationRecoveryFailedPreCommit || recovered.State.Phase != domain.RolloutPhaseFailed || recovered.State.LastErrorCode != domain.ErrorCodeActivationLeaseExpired {
+		t.Fatalf("expired recovery=%+v", recovered)
 	}
 	assertEnqueueAllowed(t, ctx, pool, repository)
 }
 
-func TestRepositoryCommitRolloutRequiresPreparedRuntimes(t *testing.T) {
-	t.Skip("superseded by the hot-activation repository protocol integration test")
+func TestRepositoryCommitActivationRequiresArmedRuntimes(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := newModelSettingsTestDatabase(t, ctx)
-	defer cleanup()
+	pool := newModelSettingsTestDatabase(t)
 	repository, _, _ := newConfiguredModelSettingsRepository(t, pool, 14)
-
-	if _, err := repository.SaveDesired(ctx, application.SaveCommand{
+	registerActiveRuntimes(t, ctx, repository, 0)
+	saved, err := repository.SaveDesired(ctx, application.SaveCommand{
 		ExpectedRevision: 0,
 		Settings:         domain.CanonicalDisabledSettings(),
-		ChatSecret:       domain.KeepSecret(),
-		EmbeddingSecret:  domain.KeepSecret(),
-		CreatedBy:        "commit-guard-test",
-	}); err != nil {
+		ChatSecret:       domain.KeepSecret(), EmbeddingSecret: domain.KeepSecret(),
+		CreatedBy: "commit-guard-test",
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 	rolloutID := mustModelSettingsID(t, "a1000000-0000-4000-8000-000000000014")
-	if _, err := repository.BeginRollout(ctx, application.BeginRolloutCommand{
-		RolloutID: rolloutID, LeaseDuration: 30 * time.Second,
-	}); err != nil {
+	started, err := repository.StartActivation(ctx, application.StartActivationCommand{
+		RolloutID: rolloutID, TargetRevision: saved.DesiredRevision,
+		ExpectedDesiredRevision: saved.DesiredRevision, ExpectedStateVersion: saved.Rollout.Version,
+		LeaseDuration: 30 * time.Second, FreshWithin: 20 * time.Second,
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
-	for _, transition := range []struct {
-		from domain.RolloutPhase
-		to   domain.RolloutPhase
-	}{
-		{from: domain.RolloutPhaseValidating, to: domain.RolloutPhaseDraining},
-		{from: domain.RolloutPhaseDraining, to: domain.RolloutPhaseApplying},
-		{from: domain.RolloutPhaseApplying, to: domain.RolloutPhaseVerifying},
-	} {
-		if _, err := repository.AdvanceRollout(ctx, application.AdvanceRolloutCommand{
-			RolloutID: rolloutID, ExpectedPhase: transition.from,
-			NextPhase: transition.to, LeaseDuration: 30 * time.Second,
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	_, err := repository.CommitRollout(ctx, application.CommitRolloutCommand{
-		RolloutID: rolloutID, FreshWithin: 20 * time.Second,
+	registerPreparedParticipants(t, ctx, repository, rolloutID, saved.DesiredRevision)
+	arming, err := repository.AdvanceActivation(ctx, application.AdvanceActivationCommand{
+		RolloutID: rolloutID, ExpectedPhase: domain.RolloutPhasePreparing, ExpectedVersion: started.State.Version,
+		NextPhase: domain.RolloutPhaseArming, LeaseDuration: 30 * time.Second, FreshWithin: 20 * time.Second,
 	})
-	assertModelSettingsErrorCode(t, err, domain.ErrorCodeRuntimeNotPrepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = repository.CommitActivation(ctx, application.CommitActivationCommand{
+		RolloutID: rolloutID, ExpectedVersion: arming.Version,
+		LeaseDuration: 30 * time.Second, FreshWithin: 20 * time.Second,
+	})
+	assertModelSettingsErrorCode(t, err, domain.ErrorCodeRuntimeNotReady)
 	snapshot, err := repository.Snapshot(ctx, 20*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.ActiveRevision != 0 || snapshot.DesiredRevision != 1 || snapshot.Rollout.Phase != domain.RolloutPhaseVerifying {
+	if snapshot.ActiveRevision != 0 || snapshot.DesiredRevision != 1 || snapshot.Rollout.Phase != domain.RolloutPhaseArming {
 		t.Fatalf("failed commit changed publication state: %+v", snapshot)
 	}
 }
 
-func assertModelSettingsAudit(t *testing.T, ctx context.Context, store *auditpostgres.Store) {
+func assertModelSettingsAudit(t *testing.T, ctx context.Context, store *auditpostgres.GORMStore) {
 	t.Helper()
 	events, err := store.List(ctx, auditdomain.ListQuery{Limit: 10})
 	if err != nil {
@@ -692,8 +693,7 @@ func assertModelSettingsAudit(t *testing.T, ctx context.Context, store *auditpos
 
 func TestRepositoryConcurrentDesiredSaveUsesExpectedRevision(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := newModelSettingsTestDatabase(t, ctx)
-	defer cleanup()
+	pool := newModelSettingsTestDatabase(t)
 	repository, _, auditStore := newConfiguredModelSettingsRepository(t, pool, 8)
 	start := make(chan struct{})
 	results := make(chan error, 2)
@@ -741,39 +741,53 @@ func TestRepositoryConcurrentDesiredSaveUsesExpectedRevision(t *testing.T) {
 	}
 }
 
-func TestRepositoryEnqueueFenceSerializesDraining(t *testing.T) {
-	t.Skip("superseded by the hot-activation repository protocol integration test")
-	pool, cleanup := newModelSettingsTestDatabase(t, context.Background())
-	defer cleanup()
+func TestRepositoryEnqueueFenceSerializesArming(t *testing.T) {
+	pool := newModelSettingsTestDatabase(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	repository, _, _ := newConfiguredModelSettingsRepository(t, pool, 11)
-	rolloutID := mustModelSettingsID(t, "a1000000-0000-4000-8000-000000000010")
-	if _, err := repository.BeginRollout(ctx, application.BeginRolloutCommand{RolloutID: rolloutID, LeaseDuration: 30 * time.Second}); err != nil {
-		t.Fatal(err)
-	}
-	tx, err := pool.Begin(ctx)
+	registerActiveRuntimes(t, ctx, repository, 0)
+	saved, err := repository.SaveDesired(ctx, application.SaveCommand{
+		ExpectedRevision: 0, Settings: domain.CanonicalDisabledSettings(),
+		ChatSecret: domain.KeepSecret(), EmbeddingSecret: domain.KeepSecret(), CreatedBy: "fence-test",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer tx.Rollback(context.Background()) //nolint:errcheck
-	if err := repository.CheckEnqueue(ctx, tx); err != nil {
-		t.Fatalf("validating should continue serving the old active runtime: %v", err)
+	rolloutID := mustModelSettingsID(t, "a1000000-0000-4000-8000-000000000010")
+	started, err := repository.StartActivation(ctx, application.StartActivationCommand{
+		RolloutID: rolloutID, TargetRevision: saved.DesiredRevision,
+		ExpectedDesiredRevision: saved.DesiredRevision, ExpectedStateVersion: saved.Rollout.Version,
+		LeaseDuration: 30 * time.Second, FreshWithin: 20 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registerPreparedParticipants(t, ctx, repository, rolloutID, saved.DesiredRevision)
+	unitOfWork, err := pool.UnitOfWork()
+	if err != nil {
+		t.Fatal(err)
 	}
 	advanced := make(chan error, 1)
-	go func() {
-		_, advanceErr := repository.AdvanceRollout(ctx, application.AdvanceRolloutCommand{
-			RolloutID: rolloutID, ExpectedPhase: domain.RolloutPhaseValidating,
-			NextPhase: domain.RolloutPhaseDraining, LeaseDuration: 30 * time.Second,
-		})
-		advanced <- advanceErr
-	}()
-	select {
-	case advanceErr := <-advanced:
-		t.Fatalf("draining advanced before the fenced producer transaction completed: %v", advanceErr)
-	case <-time.After(150 * time.Millisecond):
-	}
-	if err := tx.Commit(ctx); err != nil {
+	err = unitOfWork.Within(ctx, foundation.TransactionOptions{}, func(callbackCtx context.Context, scope foundation.TransactionScope) error {
+		if err := repository.CheckEnqueue(callbackCtx, scope); err != nil {
+			return fmt.Errorf("preparing should continue serving the old active runtime: %w", err)
+		}
+		go func() {
+			_, advanceErr := repository.AdvanceActivation(ctx, application.AdvanceActivationCommand{
+				RolloutID: rolloutID, ExpectedPhase: domain.RolloutPhasePreparing, ExpectedVersion: started.State.Version,
+				NextPhase: domain.RolloutPhaseArming, LeaseDuration: 30 * time.Second, FreshWithin: 20 * time.Second,
+			})
+			advanced <- advanceErr
+		}()
+		select {
+		case advanceErr := <-advanced:
+			return fmt.Errorf("arming advanced before the fenced producer transaction completed: %v", advanceErr)
+		case <-time.After(150 * time.Millisecond):
+		}
+		return nil
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -782,16 +796,14 @@ func TestRepositoryEnqueueFenceSerializesDraining(t *testing.T) {
 			t.Fatal(advanceErr)
 		}
 	case <-ctx.Done():
-		t.Fatalf("draining did not acquire the state fence: %v", ctx.Err())
+		t.Fatalf("arming did not acquire the state fence: %v", ctx.Err())
 	}
 	assertEnqueueBlocked(t, ctx, pool, repository)
 }
 
 func TestRepositoryRuntimeOwnershipAndStaleness(t *testing.T) {
-	t.Skip("superseded by the database-time stale takeover integration test")
 	ctx := context.Background()
-	pool, cleanup := newModelSettingsTestDatabase(t, ctx)
-	defer cleanup()
+	pool := newModelSettingsTestDatabase(t)
 	repository, _, _ := newConfiguredModelSettingsRepository(t, pool, 12)
 	oldAPI := mustModelSettingsID(t, "a2000000-0000-4000-8000-000000000010")
 	newAPI := mustModelSettingsID(t, "a2000000-0000-4000-8000-000000000011")
@@ -799,20 +811,29 @@ func TestRepositoryRuntimeOwnershipAndStaleness(t *testing.T) {
 	for _, registration := range []application.RuntimeRegistration{
 		{Role: domain.RuntimeRoleAPI, InstanceID: oldAPI, AppliedRevision: 0, Phase: domain.RuntimePhaseActive},
 		{Role: domain.RuntimeRoleWorker, InstanceID: worker, AppliedRevision: 0, Phase: domain.RuntimePhaseActive},
-		{Role: domain.RuntimeRoleAPI, InstanceID: newAPI, AppliedRevision: 0, Phase: domain.RuntimePhaseActive},
 	} {
 		if _, err := repository.RegisterRuntime(ctx, registration); err != nil {
 			t.Fatal(err)
 		}
 	}
-	_, err := repository.HeartbeatRuntime(ctx, application.RuntimeHeartbeat{Role: domain.RuntimeRoleAPI, InstanceID: oldAPI})
+	replacement := application.RuntimeRegistration{
+		Role: domain.RuntimeRoleAPI, InstanceID: newAPI, AppliedRevision: 0, Phase: domain.RuntimePhaseActive,
+	}
+	_, err := repository.RegisterRuntime(ctx, replacement)
 	assertModelSettingsErrorCode(t, err, domain.ErrorCodeRuntimeConflict)
+	backdateModelSettingsTakeoverHeartbeats(t, ctx, pool, domain.RuntimeRoleAPI, "",
+		application.DefaultRuntimeFreshWithin+time.Second)
+	if _, err := repository.RegisterRuntime(ctx, replacement); err != nil {
+		t.Fatal(err)
+	}
+	_, err = repository.HeartbeatRuntime(ctx, application.RuntimeHeartbeat{Role: domain.RuntimeRoleAPI, InstanceID: oldAPI})
+	assertModelSettingsErrorCode(t, err, domain.ErrorCodeRuntimeOwnershipLost)
 	time.Sleep(1100 * time.Millisecond)
 	snapshot, err := repository.Snapshot(ctx, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.Runtime.API.Fresh || snapshot.Runtime.Worker.Fresh || !snapshot.RestartRequired {
+	if snapshot.Runtime.API.Fresh || snapshot.Runtime.Worker.Fresh || !snapshot.ApplyRequired || snapshot.RestartRequired {
 		t.Fatalf("stale runtime snapshot was reported ready: %+v", snapshot.Runtime)
 	}
 	if _, err := repository.HeartbeatRuntime(ctx, application.RuntimeHeartbeat{Role: domain.RuntimeRoleAPI, InstanceID: newAPI}); err != nil {
@@ -825,15 +846,14 @@ func TestRepositoryRuntimeOwnershipAndStaleness(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !snapshot.Runtime.API.Fresh || !snapshot.Runtime.Worker.Fresh || snapshot.RestartRequired {
+	if !snapshot.Runtime.API.Fresh || !snapshot.Runtime.Worker.Fresh || snapshot.ApplyRequired || snapshot.RestartRequired {
 		t.Fatalf("current runtime owners were not reported ready: %+v", snapshot.Runtime)
 	}
 }
 
 func TestRepositoryWrongKeyAndCiphertextSubstitutionFailClosed(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := newModelSettingsTestDatabase(t, ctx)
-	defer cleanup()
+	pool := newModelSettingsTestDatabase(t)
 	repository, _, auditStore := newConfiguredModelSettingsRepository(t, pool, 9)
 	chatAction, err := domain.ReplaceSecret("database-secret-canary")
 	if err != nil {
@@ -855,18 +875,18 @@ func TestRepositoryWrongKeyAndCiphertextSubstitutionFailClosed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wrongRepository, err := NewRepository(pool, WithSecretSealer(wrong), WithAuditAppender(auditStore))
+	wrongRepository, err := NewGORMRepository(pool, WithGORMSecretSealer(wrong), WithGORMAuditAppender(auditStore))
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, err = wrongRepository.LoadRevision(ctx, 1)
 	assertSecretFailureWithoutCanary(t, err)
-	if _, err := pool.Exec(ctx, `UPDATE ops.model_settings_revisions
+	if _, err := pool.DB().Exec(ctx, `UPDATE ops.model_settings_revisions
 	SET chat_secret_ciphertext=set_byte(chat_secret_ciphertext,0,get_byte(chat_secret_ciphertext,0)#1)
 	WHERE revision=1`); err == nil {
 		t.Fatal("append-only revision allowed ciphertext mutation")
 	}
-	_, err = pool.Exec(ctx, `INSERT INTO ops.model_settings_revisions(
+	_, err = pool.DB().Exec(ctx, `INSERT INTO ops.model_settings_revisions(
 	revision,chat_provider,chat_base_url,chat_model,chat_model_version,chat_adapter_version,
 	chat_timeout_microseconds,chat_max_request_bytes,chat_max_response_bytes,
 	chat_secret_key_id,chat_secret_nonce,chat_secret_ciphertext,
@@ -903,24 +923,23 @@ func TestRepositoryWrongKeyAndCiphertextSubstitutionFailClosed(t *testing.T) {
 
 func TestRepositoryAuditFailureRollsBackRevisionStateAndAudit(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := newModelSettingsTestDatabase(t, ctx)
-	defer cleanup()
+	pool := newModelSettingsTestDatabase(t)
 	sealer, err := modelcrypto.NewSealer(bytes.Repeat([]byte{13}, 32))
 	if err != nil {
 		t.Fatal(err)
 	}
-	auditStore, err := auditpostgres.NewStore(pool)
+	auditStore, err := auditpostgres.NewGORMStore(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
-	auditAdapter, err := NewSettingsAuditAppender(auditStore)
+	auditAdapter, err := NewGORMSettingsAuditAppender(auditStore)
 	if err != nil {
 		t.Fatal(err)
 	}
 	injected := errors.New("injected post-audit failure")
-	repository, err := NewRepository(pool,
-		WithSecretSealer(sealer),
-		WithSettingsAuditAppender(failAfterSettingsAuditAppender{delegate: auditAdapter, err: injected}),
+	repository, err := NewGORMRepository(pool,
+		WithGORMSecretSealer(sealer),
+		WithGORMScopedSettingsAuditAppender(failAfterSettingsAuditAppender{delegate: auditAdapter, err: injected}),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -948,18 +967,18 @@ func TestRepositoryAuditFailureRollsBackRevisionStateAndAudit(t *testing.T) {
 }
 
 type failAfterSettingsAuditAppender struct {
-	delegate application.SettingsAuditAppender
+	delegate application.ScopedSettingsAuditAppender
 	err      error
 }
 
-func (appender failAfterSettingsAuditAppender) AppendModelSettingsChangeTx(ctx context.Context, transaction any, change application.ModelSettingsChange) error {
-	if err := appender.delegate.AppendModelSettingsChangeTx(ctx, transaction, change); err != nil {
+func (appender failAfterSettingsAuditAppender) AppendModelSettingsChangeScoped(ctx context.Context, scope foundation.TransactionScope, change application.ModelSettingsChange) error {
+	if err := appender.delegate.AppendModelSettingsChangeScoped(ctx, scope, change); err != nil {
 		return err
 	}
 	return appender.err
 }
 
-func registerActiveRuntimes(t *testing.T, ctx context.Context, repository *Repository, revision int64) {
+func registerActiveRuntimes(t *testing.T, ctx context.Context, repository *GORMRepository, revision int64) {
 	t.Helper()
 	for _, registration := range []application.RuntimeRegistration{
 		{Role: domain.RuntimeRoleAPI, InstanceID: mustModelSettingsID(t, "a2000000-0000-4000-8000-000000000001"), AppliedRevision: revision, Phase: domain.RuntimePhaseActive},
@@ -971,16 +990,27 @@ func registerActiveRuntimes(t *testing.T, ctx context.Context, repository *Repos
 	}
 }
 
-func registerCandidateRuntimes(t *testing.T, ctx context.Context, repository *Repository, rolloutID foundation.ID, revision int64) {
+func registerPreparedParticipants(t *testing.T, ctx context.Context, repository *GORMRepository, rolloutID foundation.ID, revision int64) map[domain.RuntimeRole]domain.ParticipantRecord {
 	t.Helper()
-	for _, registration := range []application.RuntimeRegistration{
-		{Role: domain.RuntimeRoleAPI, InstanceID: mustModelSettingsID(t, "a3000000-0000-4000-8000-000000000001"), AppliedRevision: revision, RolloutID: &rolloutID, Phase: domain.RuntimePhasePrepared},
-		{Role: domain.RuntimeRoleWorker, InstanceID: mustModelSettingsID(t, "a3000000-0000-4000-8000-000000000002"), AppliedRevision: revision, RolloutID: &rolloutID, Phase: domain.RuntimePhasePrepared},
+	participants := make(map[domain.RuntimeRole]domain.ParticipantRecord, 2)
+	for _, registration := range []application.ParticipantRegistration{
+		{Role: domain.RuntimeRoleAPI, InstanceID: mustModelSettingsID(t, "a2000000-0000-4000-8000-000000000001"), TargetRevision: revision, RolloutID: rolloutID, InitialPhase: domain.ParticipantPhasePreparing},
+		{Role: domain.RuntimeRoleWorker, InstanceID: mustModelSettingsID(t, "a2000000-0000-4000-8000-000000000002"), TargetRevision: revision, RolloutID: rolloutID, InitialPhase: domain.ParticipantPhasePreparing},
 	} {
-		if _, err := repository.RegisterRuntime(ctx, registration); err != nil {
+		participant, err := repository.RegisterParticipant(ctx, registration)
+		if err != nil {
 			t.Fatal(err)
 		}
+		participant, err = repository.TransitionParticipant(ctx, application.ParticipantTransitionCommand{
+			RolloutID: rolloutID, Role: registration.Role, InstanceID: registration.InstanceID, TargetRevision: revision,
+			ExpectedPhase: domain.ParticipantPhasePreparing, ExpectedVersion: participant.Version, NextPhase: domain.ParticipantPhasePrepared,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		participants[registration.Role] = participant
 	}
+	return participants
 }
 
 func configuredTestSettings() domain.Settings {
@@ -996,7 +1026,7 @@ func configuredTestSettings() domain.Settings {
 	return settings
 }
 
-func storedChatEnvelope(t *testing.T, ctx context.Context, pool *pgxpool.Pool, revision int64) ([]byte, []byte) {
+func storedChatEnvelope(t *testing.T, ctx context.Context, pool *platformpostgres.Pool, revision int64) ([]byte, []byte) {
 	t.Helper()
 	var nonce, ciphertext []byte
 	if err := pool.QueryRow(ctx, `SELECT chat_secret_nonce,chat_secret_ciphertext
@@ -1006,24 +1036,23 @@ FROM ops.model_settings_revisions WHERE revision=$1`, revision).Scan(&nonce, &ci
 	return nonce, ciphertext
 }
 
-func assertEnqueueBlocked(t *testing.T, ctx context.Context, pool *pgxpool.Pool, repository *Repository) {
+func assertEnqueueBlocked(t *testing.T, ctx context.Context, pool *platformpostgres.Pool, repository *GORMRepository) {
 	t.Helper()
-	tx, err := pool.Begin(ctx)
+	unitOfWork, err := pool.UnitOfWork()
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer tx.Rollback(ctx) //nolint:errcheck
-	assertModelSettingsErrorCode(t, repository.CheckEnqueue(ctx, tx), domain.ErrorCodeEnqueuePaused)
+	err = unitOfWork.Within(ctx, foundation.TransactionOptions{}, repository.CheckEnqueue)
+	assertModelSettingsErrorCode(t, err, domain.ErrorCodeEnqueuePaused)
 }
 
-func assertEnqueueAllowed(t *testing.T, ctx context.Context, pool *pgxpool.Pool, repository *Repository) {
+func assertEnqueueAllowed(t *testing.T, ctx context.Context, pool *platformpostgres.Pool, repository *GORMRepository) {
 	t.Helper()
-	tx, err := pool.Begin(ctx)
+	unitOfWork, err := pool.UnitOfWork()
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer tx.Rollback(ctx) //nolint:errcheck
-	if err := repository.CheckEnqueue(ctx, tx); err != nil {
+	if err := unitOfWork.Within(ctx, foundation.TransactionOptions{}, repository.CheckEnqueue); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -1044,17 +1073,17 @@ func assertSecretFailureWithoutCanary(t *testing.T, err error) {
 	}
 }
 
-func newConfiguredModelSettingsRepository(t *testing.T, pool *pgxpool.Pool, keyByte byte) (*Repository, *modelcrypto.Sealer, *auditpostgres.Store) {
+func newConfiguredModelSettingsRepository(t *testing.T, pool *platformpostgres.Pool, keyByte byte) (*GORMRepository, *modelcrypto.Sealer, *auditpostgres.GORMStore) {
 	t.Helper()
 	sealer, err := modelcrypto.NewSealer(bytes.Repeat([]byte{keyByte}, 32))
 	if err != nil {
 		t.Fatal(err)
 	}
-	auditStore, err := auditpostgres.NewStore(pool)
+	auditStore, err := auditpostgres.NewGORMStore(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
-	repository, err := NewRepository(pool, WithSecretSealer(sealer), WithAuditAppender(auditStore))
+	repository, err := NewGORMRepository(pool, WithGORMSecretSealer(sealer), WithGORMAuditAppender(auditStore))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1070,42 +1099,12 @@ func mustModelSettingsID(t *testing.T, value string) foundation.ID {
 	return id
 }
 
-func newModelSettingsTestDatabase(t *testing.T, ctx context.Context) (*pgxpool.Pool, func()) {
+func newModelSettingsTestDatabase(t *testing.T) *platformpostgres.Pool {
 	t.Helper()
-	baseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
-	if baseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL for model settings repository integration tests")
-	}
-	parsed, err := url.Parse(baseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	admin, err := pgxpool.New(ctx, baseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	name := fmt.Sprintf("zhixu_model_settings_%d", time.Now().UnixNano())
-	identifier := pgx.Identifier{name}.Sanitize()
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+identifier); err != nil {
-		admin.Close()
-		t.Fatal(err)
-	}
-	parsed.Path = "/" + name
-	pool, err := pgxpool.New(ctx, parsed.String())
-	if err != nil {
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier)
-		admin.Close()
-		t.Fatal(err)
-	}
-	if err := migration.MigrateAtlas(ctx, pool); err != nil {
-		pool.Close()
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier)
-		admin.Close()
-		t.Fatal(err)
-	}
-	return pool, func() {
-		pool.Close()
-		_, _ = admin.Exec(context.Background(), "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-	}
+	fixture := testdb.Require(t, testdb.Config{
+		ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
+		MaxConns:         8,
+		Availability:     testdb.FailWhenUnavailable,
+	})
+	return fixture.Pool()
 }

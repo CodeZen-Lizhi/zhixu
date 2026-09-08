@@ -6,8 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -19,21 +17,12 @@ import (
 	graphapp "github.com/CodeZen-Lizhi/zhixu/internal/graph/application"
 	graphdomain "github.com/CodeZen-Lizhi/zhixu/internal/graph/domain"
 	graphfixture "github.com/CodeZen-Lizhi/zhixu/internal/graph/testfixture"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestSmartCollectionScanUsesDurableCrossPageSnapshotAndFailsClosedOnDrift(t *testing.T) {
 	ctx := context.Background()
-	databaseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
-	}
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
-	fixture, err := graphfixture.SeedFunctional(ctx, pool)
+	pool := newGraphTestPool(t, 12)
+	fixture, err := graphfixture.SeedFunctional(ctx, pool.Pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +47,7 @@ func TestSmartCollectionScanUsesDurableCrossPageSnapshotAndFailsClosedOnDrift(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	planner, err := NewSmartCollectionScanPlanner(service)
+	planner, err := NewGORMSmartCollectionScanPlanner(service)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +60,7 @@ func TestSmartCollectionScanUsesDurableCrossPageSnapshotAndFailsClosedOnDrift(t 
 	}
 	scanID := smartCollectionIntegrationID(t)
 	scope := smartCollectionScope(plan)
-	firstRepository, err := NewSmartCollectionScanPageRepository(service, pool)
+	firstRepository, err := NewGORMSmartCollectionScanPageRepository(pool.platform, service)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +84,7 @@ func TestSmartCollectionScanUsesDurableCrossPageSnapshotAndFailsClosedOnDrift(t 
 	// 模拟 Worker 进程重启：Collection repository 会获得新的 HTTP cursor key，
 	// 但 scan 只依赖持久 LastNode keyset，必须继续同一 binding。
 	restartedService := newSmartCollectionService(t, pool, now.Add(time.Second))
-	restartedRepository, err := NewSmartCollectionScanPageRepository(restartedService, pool)
+	restartedRepository, err := NewGORMSmartCollectionScanPageRepository(pool.platform, restartedService)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +134,7 @@ func TestSmartCollectionScanUsesDurableCrossPageSnapshotAndFailsClosedOnDrift(t 
 			return updateErr
 		},
 	}
-	snapshotRepository, err := NewSmartCollectionScanPageRepository(mutatingReader, pool)
+	snapshotRepository, err := NewGORMSmartCollectionScanPageRepository(pool.platform, mutatingReader)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,16 +184,8 @@ func TestSmartCollectionScanUsesDurableCrossPageSnapshotAndFailsClosedOnDrift(t 
 
 func TestSmartCollectionScanStartsRealWorkflowReplaysAndRejectsPlanToStartDrift(t *testing.T) {
 	ctx := context.Background()
-	databaseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
-	}
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
-	fixture, err := graphfixture.SeedFunctional(ctx, pool)
+	pool := newGraphTestPool(t, 12)
+	fixture, err := graphfixture.SeedFunctional(ctx, pool.Pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,11 +204,11 @@ func TestSmartCollectionScanStartsRealWorkflowReplaysAndRejectsPlanToStartDrift(
 	if err != nil {
 		t.Fatal(err)
 	}
-	planner, err := NewSmartCollectionScanPlanner(service)
+	planner, err := NewGORMSmartCollectionScanPlanner(service)
 	if err != nil {
 		t.Fatal(err)
 	}
-	commandService := newSmartCollectionCommandService(t, ctx, pool, planner, nil)
+	commandService := newSmartCollectionCommandService(t, ctx, pool, planner, false)
 	request := graphapp.SemanticLinkSmartCollectionScanRequest{
 		WorkspaceID: fixture.WorkspaceID, CollectionID: created.Collection.ID, IdempotencyKey: "smart-collection-workflow-start",
 	}
@@ -245,11 +226,10 @@ func TestSmartCollectionScanStartsRealWorkflowReplaysAndRejectsPlanToStartDrift(
 	if !replayed.Replayed || replayed.Scan.ID != started.Scan.ID || replayed.Scan.WorkflowRunID != started.Scan.WorkflowRunID {
 		t.Fatalf("replayed=%+v started=%+v", replayed, started)
 	}
-	assertScanRuntimeFacts(t, ctx, pool, fixture.WorkspaceID, started.Scan.WorkflowRunID, started.Scan.ID)
+	assertScanRuntimeFacts(t, ctx, pool.Pool, fixture.WorkspaceID, started.Scan.WorkflowRunID, started.Scan.ID)
 
 	// Start transaction commit 响应丢失后必须从 PostgreSQL receipt 恢复同一 Scan/Run。
-	lossDB := scanCommitLossDB{pool: pool}
-	lossService := newSmartCollectionCommandService(t, ctx, pool, planner, &lossDB)
+	lossService := newSmartCollectionCommandService(t, ctx, pool, planner, true)
 	lossRequest := request
 	lossRequest.IdempotencyKey = "smart-collection-workflow-loss"
 	recovered, err := lossService.StartSmartCollectionScan(ctx, lossRequest)
@@ -269,11 +249,11 @@ func TestSmartCollectionScanStartsRealWorkflowReplaysAndRejectsPlanToStartDrift(
 			return updateErr
 		},
 	}
-	stalePlanner, err := NewSmartCollectionScanPlanner(mutatingReader)
+	stalePlanner, err := NewGORMSmartCollectionScanPlanner(mutatingReader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	staleService := newSmartCollectionCommandService(t, ctx, pool, stalePlanner, nil)
+	staleService := newSmartCollectionCommandService(t, ctx, pool, stalePlanner, false)
 	staleRequest := request
 	staleRequest.IdempotencyKey = "smart-collection-workflow-stale"
 	if _, err := staleService.StartSmartCollectionScan(ctx, staleRequest); !hasFoundationCode(err, collectionapp.ErrorCodeCursorStale) {
@@ -334,9 +314,9 @@ func (reader *mutateAfterDurableRead) ReadDurableScanPage(ctx context.Context, r
 	return page, nil
 }
 
-func newSmartCollectionService(t *testing.T, pool *pgxpool.Pool, now time.Time) *collectionapp.Service {
+func newSmartCollectionService(t *testing.T, pool *graphTestPool, now time.Time) *collectionapp.Service {
 	t.Helper()
-	repository, err := collectionpostgres.NewRepository(pool)
+	repository, err := collectionpostgres.NewGORMRepository(pool.platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -355,17 +335,17 @@ func (smartCollectionUnusedTopicPlanner) PlanTopicScan(context.Context, foundati
 	return graphapp.SemanticLinkTopicScanPlan{}, errors.New("topic planner is not used by smart collection integration")
 }
 
-func newSmartCollectionCommandService(t *testing.T, ctx context.Context, pool *pgxpool.Pool, planner graphapp.SemanticLinkSmartCollectionScanPlanner, lossDB *scanCommitLossDB) *graphapp.SemanticLinkScanCommandService {
+func newSmartCollectionCommandService(t *testing.T, ctx context.Context, pool *graphTestPool, planner graphapp.SemanticLinkSmartCollectionScanPlanner, loseCommitResponse bool) *graphapp.SemanticLinkScanCommandService {
 	t.Helper()
 	planners, err := graphapp.NewSemanticLinkScanPlannerSet(smartCollectionUnusedTopicPlanner{}, planner)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var repository *SemanticLinkScanRepository
-	if lossDB == nil {
+	var repository *GORMSemanticLinkScanRepository
+	if !loseCommitResponse {
 		repository = newSemanticLinkScanTestRepository(t, ctx, pool)
 	} else {
-		repository = newSemanticLinkScanTestRepositoryWithDB(t, ctx, *lossDB, lossDB.pool)
+		repository = newSemanticLinkScanTestRepositoryWithCommitLoss(t, ctx, pool)
 	}
 	scans, err := graphapp.NewSemanticLinkScanService(repository, repository)
 	if err != nil {
@@ -386,7 +366,7 @@ func smartCollectionScope(plan graphapp.SemanticLinkSmartCollectionScanPlan) gra
 	}
 }
 
-func registerSmartCollectionScanCleanup(t *testing.T, pool *pgxpool.Pool, workspaceID foundation.ID) {
+func registerSmartCollectionScanCleanup(t *testing.T, pool *graphTestPool, workspaceID foundation.ID) {
 	t.Helper()
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -416,7 +396,7 @@ func registerSmartCollectionScanCleanup(t *testing.T, pool *pgxpool.Pool, worksp
 			t.Errorf("cleanup smart collection facts: %v", err)
 			return
 		}
-		if err := graphfixture.CleanupSemanticLinkBrowser(ctx, pool, workspaceID); err != nil {
+		if err := graphfixture.CleanupSemanticLinkBrowser(ctx, pool.Pool, workspaceID); err != nil {
 			t.Errorf("cleanup smart collection graph fixture: %v", err)
 		}
 	})

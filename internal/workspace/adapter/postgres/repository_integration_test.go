@@ -26,43 +26,22 @@ type workspaceIntegrationRepository interface {
 	domain.GitCaptureRepository
 }
 
-type workspaceIntegrationVariant struct {
-	name string
-	open func(*testing.T, *platformpostgres.Pool) workspaceIntegrationRepository
-}
-
-func runWorkspaceIntegrationVariants(t *testing.T, test func(*testing.T, *platformpostgres.Pool, context.Context, workspaceIntegrationRepository)) {
+func runWorkspaceIntegration(t *testing.T, test func(*testing.T, *platformpostgres.Pool, context.Context, workspaceIntegrationRepository)) {
 	t.Helper()
-	variants := []workspaceIntegrationVariant{
-		{name: "legacy", open: openLegacyWorkspaceIntegrationRepository},
-		{name: "gorm", open: openGORMWorkspaceIntegrationRepository},
-	}
-	for _, variant := range variants {
-		variant := variant
-		t.Run(variant.name, func(t *testing.T) {
-			fixture := testdb.Require(t, testdb.Config{
-				ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
-				Availability:     testdb.FailWhenUnavailable,
-				MaxConns:         16,
-			})
-			platform := fixture.Pool()
-			if platform == nil || platform.DB() == nil {
-				t.Fatal("PostgreSQL fixture did not provide a shared platform pool")
-			}
-			ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
-			defer cancel()
-			test(t, platform, ctx, variant.open(t, platform))
+	t.Run("gorm", func(t *testing.T) {
+		fixture := testdb.Require(t, testdb.Config{
+			ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
+			Availability:     testdb.FailWhenUnavailable,
+			MaxConns:         16,
 		})
-	}
-}
-
-func openLegacyWorkspaceIntegrationRepository(t *testing.T, platform *platformpostgres.Pool) workspaceIntegrationRepository {
-	t.Helper()
-	repository, err := workspacepostgres.NewRepository(platform.DB())
-	if err != nil {
-		t.Fatal(err)
-	}
-	return repository
+		platform := fixture.Pool()
+		if platform == nil || platform.DB() == nil {
+			t.Fatal("PostgreSQL fixture did not provide a shared platform pool")
+		}
+		ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+		defer cancel()
+		test(t, platform, ctx, openGORMWorkspaceIntegrationRepository(t, platform))
+	})
 }
 
 func openGORMWorkspaceIntegrationRepository(t *testing.T, platform *platformpostgres.Pool) workspaceIntegrationRepository {
@@ -75,7 +54,7 @@ func openGORMWorkspaceIntegrationRepository(t *testing.T, platform *platformpost
 }
 
 func TestRepositoryWorkspaceAndSourceVersionLifecycle(t *testing.T) {
-	runWorkspaceIntegrationVariants(t, testRepositoryWorkspaceAndSourceVersionLifecycle)
+	runWorkspaceIntegration(t, testRepositoryWorkspaceAndSourceVersionLifecycle)
 }
 
 func testRepositoryWorkspaceAndSourceVersionLifecycle(t *testing.T, platform *platformpostgres.Pool, ctx context.Context, repository workspaceIntegrationRepository) {
@@ -198,7 +177,7 @@ func testRepositoryWorkspaceAndSourceVersionLifecycle(t *testing.T, platform *pl
 }
 
 func TestRepositoryGetSourceMaterialRejectsLegacyAndCrossScopeRows(t *testing.T) {
-	runWorkspaceIntegrationVariants(t, testRepositoryGetSourceMaterialRejectsLegacyAndCrossScopeRows)
+	runWorkspaceIntegration(t, testRepositoryGetSourceMaterialRejectsLegacyAndCrossScopeRows)
 }
 
 func testRepositoryGetSourceMaterialRejectsLegacyAndCrossScopeRows(t *testing.T, platform *platformpostgres.Pool, ctx context.Context, repository workspaceIntegrationRepository) {
@@ -257,7 +236,7 @@ func testRepositoryGetSourceMaterialRejectsLegacyAndCrossScopeRows(t *testing.T,
 }
 
 func TestRepositoryDatabaseConstraints(t *testing.T) {
-	runWorkspaceIntegrationVariants(t, testRepositoryDatabaseConstraints)
+	runWorkspaceIntegration(t, testRepositoryDatabaseConstraints)
 }
 
 func testRepositoryDatabaseConstraints(t *testing.T, platform *platformpostgres.Pool, ctx context.Context, repository workspaceIntegrationRepository) {
@@ -285,7 +264,7 @@ func testRepositoryDatabaseConstraints(t *testing.T, platform *platformpostgres.
 }
 
 func TestRepositorySourceRegistrationConflictsAndBatchRollback(t *testing.T) {
-	runWorkspaceIntegrationVariants(t, testRepositorySourceRegistrationConflictsAndBatchRollback)
+	runWorkspaceIntegration(t, testRepositorySourceRegistrationConflictsAndBatchRollback)
 }
 
 func testRepositorySourceRegistrationConflictsAndBatchRollback(t *testing.T, platform *platformpostgres.Pool, ctx context.Context, repository workspaceIntegrationRepository) {
@@ -415,7 +394,7 @@ func TestGORMScopedSourceWriterUsesCallerOwnedUnitOfWork(t *testing.T) {
 }
 
 func TestRepositoryPreservesContextCauseAndReleasesConnections(t *testing.T) {
-	runWorkspaceIntegrationVariants(t, testRepositoryPreservesContextCauseAndReleasesConnections)
+	runWorkspaceIntegration(t, testRepositoryPreservesContextCauseAndReleasesConnections)
 }
 
 func testRepositoryPreservesContextCauseAndReleasesConnections(t *testing.T, platform *platformpostgres.Pool, ctx context.Context, repository workspaceIntegrationRepository) {
@@ -431,7 +410,7 @@ func testRepositoryPreservesContextCauseAndReleasesConnections(t *testing.T, pla
 	if err == nil || len(roots) != 0 || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("deadline ListWorkspaceRoots() roots=%#v error=%v", roots, err)
 	}
-	if _, isGORM := repository.(*workspacepostgres.GORMRepository); isGORM && !errors.Is(err, deadlineCause) {
+	if !errors.Is(err, deadlineCause) {
 		t.Fatalf("GORM deadline error lost caller cause: %v", err)
 	}
 
@@ -471,7 +450,7 @@ func testRepositoryPreservesContextCauseAndReleasesConnections(t *testing.T, pla
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled RegisterSourceVersions() error=%v", err)
 	}
-	if _, isGORM := repository.(*workspacepostgres.GORMRepository); isGORM && !errors.Is(err, cancelCause) {
+	if !errors.Is(err, cancelCause) {
 		t.Fatalf("GORM canceled error lost caller cause: %v", err)
 	}
 	if err := blocker.Rollback(context.Background()); err != nil {

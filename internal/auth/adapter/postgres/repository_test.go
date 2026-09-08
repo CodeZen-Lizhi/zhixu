@@ -2,7 +2,10 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
+	"database/sql/driver"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -11,8 +14,9 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/auth/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/capability"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
+	gormpostgres "gorm.io/driver/postgres"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 func TestDecodeScopesRejectsNonCanonicalPersistedJSON(t *testing.T) {
@@ -34,7 +38,7 @@ func TestDecodeScopesRejectsNonCanonicalPersistedJSON(t *testing.T) {
 
 func TestAPITokenListQualifiesUUIDKeysetAndSortColumns(t *testing.T) {
 	database := &queryCaptureDB{}
-	repository, err := NewRepository(database)
+	repository, err := newAuthTestRepository(t, database)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +51,7 @@ func TestAPITokenListQualifiesUUIDKeysetAndSortColumns(t *testing.T) {
 	if err == nil {
 		t.Fatal("captured list query unexpectedly succeeded")
 	}
-	if !strings.Contains(database.query, "WHERE (token.created_at,token.id)<($1,$2::uuid)") {
+	if !strings.Contains(database.query, "WHERE (token.created_at,token.id) < ($1,$2::uuid)") {
 		t.Fatalf("api token keyset columns are not qualified: %s", database.query)
 	}
 	if !strings.Contains(database.query, "ORDER BY token.created_at DESC,token.id DESC") {
@@ -56,7 +60,7 @@ func TestAPITokenListQualifiesUUIDKeysetAndSortColumns(t *testing.T) {
 }
 
 func TestRevokeMissingAPITokenReturnsNotFound(t *testing.T) {
-	repository, err := NewRepository(&zeroRowsDB{})
+	repository, err := newAuthTestRepository(t, &zeroRowsDB{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +73,7 @@ func TestRevokeMissingAPITokenReturnsNotFound(t *testing.T) {
 
 func TestCheckVerifiesBothCredentialTables(t *testing.T) {
 	database := &checkDB{}
-	repository, err := NewRepository(database)
+	repository, err := newAuthTestRepository(t, database)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,65 +92,91 @@ func TestCheckVerifiesBothCredentialTables(t *testing.T) {
 	}
 }
 
-type queryCaptureDB struct{ query string }
-
-func (database *queryCaptureDB) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
-	return pgconn.CommandTag{}, errors.New("unexpected exec")
+func newAuthTestRepository(t *testing.T, connection driver.Conn) (*GORMRepository, error) {
+	t.Helper()
+	database := sql.OpenDB(authTestConnector{connection: connection})
+	t.Cleanup(func() { _ = database.Close() })
+	root, err := gorm.Open(gormpostgres.New(gormpostgres.Config{Conn: database}), &gorm.Config{
+		DisableAutomaticPing:   true,
+		SkipDefaultTransaction: true,
+		Logger:                 logger.Discard,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return NewGORMRepository(root)
 }
 
-func (database *queryCaptureDB) Query(_ context.Context, query string, _ ...any) (pgx.Rows, error) {
+type authTestConnector struct{ connection driver.Conn }
+
+func (connector authTestConnector) Connect(context.Context) (driver.Conn, error) {
+	return connector.connection, nil
+}
+
+func (connector authTestConnector) Driver() driver.Driver { return connector }
+
+func (connector authTestConnector) Open(string) (driver.Conn, error) {
+	return connector.connection, nil
+}
+
+type authTestConnection struct{}
+
+func (authTestConnection) Prepare(string) (driver.Stmt, error) {
+	return nil, errors.New("unexpected prepare")
+}
+
+func (authTestConnection) Close() error { return nil }
+
+func (authTestConnection) Begin() (driver.Tx, error) {
+	return nil, errors.New("unexpected begin")
+}
+
+type queryCaptureDB struct {
+	authTestConnection
+	query string
+}
+
+func (database *queryCaptureDB) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
 	database.query = query
 	return nil, errors.New("stop after capturing query")
 }
 
-func (database *queryCaptureDB) QueryRow(context.Context, string, ...any) pgx.Row {
-	panic("unexpected query row")
-}
+type zeroRowsDB struct{ authTestConnection }
 
-type zeroRowsDB struct{}
-
-func (*zeroRowsDB) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
-	return pgconn.NewCommandTag("UPDATE 0"), nil
-}
-
-func (*zeroRowsDB) Query(context.Context, string, ...any) (pgx.Rows, error) {
-	return nil, errors.New("unexpected query")
-}
-
-func (*zeroRowsDB) QueryRow(context.Context, string, ...any) pgx.Row {
-	panic("unexpected query row")
+func (*zeroRowsDB) ExecContext(context.Context, string, []driver.NamedValue) (driver.Result, error) {
+	return driver.RowsAffected(0), nil
 }
 
 type checkDB struct {
+	authTestConnection
 	query string
 	err   error
 }
 
-func (*checkDB) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
-	return pgconn.CommandTag{}, errors.New("unexpected exec")
-}
-
-func (*checkDB) Query(context.Context, string, ...any) (pgx.Rows, error) {
-	return nil, errors.New("unexpected query")
-}
-
-func (database *checkDB) QueryRow(_ context.Context, query string, _ ...any) pgx.Row {
+func (database *checkDB) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
 	database.query = query
-	return checkRow{err: database.err}
+	if database.err != nil {
+		return nil, database.err
+	}
+	return &checkRow{}, nil
 }
 
-type checkRow struct{ err error }
+type checkRow struct{ read bool }
 
-func (row checkRow) Scan(destinations ...any) error {
-	if row.err != nil {
-		return row.err
+func (*checkRow) Columns() []string { return []string{"session_exists", "token_exists"} }
+
+func (*checkRow) Close() error { return nil }
+
+func (row *checkRow) Next(destinations []driver.Value) error {
+	if row.read {
+		return io.EOF
 	}
-	for _, destination := range destinations {
-		value, ok := destination.(*bool)
-		if !ok {
-			return errors.New("unexpected scan destination")
-		}
-		*value = false
+	row.read = true
+	if len(destinations) != 2 {
+		return errors.New("unexpected scan destination")
+	}
+	for index := range destinations {
+		destinations[index] = false
 	}
 	return nil
 }

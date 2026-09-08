@@ -28,7 +28,7 @@ func TestWorkspaceAnalysisBuiltinDefinitionReturnsOnlyCanonicalExactContracts(t 
 }
 
 func TestWorkspaceAnalysisAuthorityReadersRejectUntrustedIdentityBeforeDatabase(t *testing.T) {
-	repository := &Repository{}
+	repository := &GORMWorkspaceAnalysisRepository{}
 	if _, err := repository.LoadSearchKnowledgeV2Receipt(context.Background(), "not-an-id", authorityTestID(2)); authorityErrorCode(err) != toolsdomain.ErrorCodeResultReceiptInvalid {
 		t.Fatalf("search error=%v", err)
 	}

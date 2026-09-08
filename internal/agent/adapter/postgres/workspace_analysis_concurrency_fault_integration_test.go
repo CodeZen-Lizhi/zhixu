@@ -10,6 +10,7 @@ import (
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	workflowpostgres "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/postgres"
 	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
 	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
@@ -26,10 +27,11 @@ func TestWorkspaceAnalysisConcurrentModelAuthorizationKeepsOneBudgetReservation(
 
 func testWorkspaceAnalysisConcurrentModelAuthorizationKeepsOneBudgetReservation(
 	t *testing.T,
-	pool *pgxpool.Pool,
+	platform *platformpostgres.Pool,
 	ctx context.Context,
 	repository workspaceAnalysisModelRepositoryIntegrationStore,
 ) {
+	pool := platform.DB()
 	fixture := seedWorkspaceAnalysisModelOperationIntegration(t, ctx, pool)
 
 	start := make(chan struct{})
@@ -80,17 +82,20 @@ func testWorkspaceAnalysisConcurrentModelAuthorizationKeepsOneBudgetReservation(
 // authorization that wins leaves exactly one complete operation/call/reservation
 // bundle, and subsequent authorization is rejected by the persisted cancel flag.
 func TestWorkspaceAnalysisCancellationRacingModelAuthorizationHasNoOrphanFacts(t *testing.T) {
-	testWorkspaceAnalysisModelRepositoryIntegrationVariants(t, testWorkspaceAnalysisCancellationRacingModelAuthorizationHasNoOrphanFacts)
+	platform, ctx := newAgentPlatformIntegrationPool(t)
+	repository := openGORMWorkspaceAnalysisModelRepositoryIntegration(t, platform)
+	testWorkspaceAnalysisCancellationRacingModelAuthorizationHasNoOrphanFacts(t, platform, ctx, repository)
 }
 
 func testWorkspaceAnalysisCancellationRacingModelAuthorizationHasNoOrphanFacts(
 	t *testing.T,
-	pool *pgxpool.Pool,
+	platform *platformpostgres.Pool,
 	ctx context.Context,
 	repository workspaceAnalysisModelRepositoryIntegrationStore,
 ) {
+	pool := platform.DB()
 	fixture := seedWorkspaceAnalysisModelOperationIntegration(t, ctx, pool)
-	cancel := newWorkspaceAnalysisConcurrentCancelCoordinator(t, pool)
+	cancel := newWorkspaceAnalysisConcurrentCancelCoordinator(t, platform)
 
 	start := make(chan struct{})
 	authorizationResult := make(chan workspaceAnalysisConcurrentAuthorizationResult, 1)
@@ -153,17 +158,9 @@ type workspaceAnalysisConcurrentAuthorizationResult struct {
 	err    error
 }
 
-func newWorkspaceAnalysisConcurrentCancelCoordinator(t *testing.T, pool *pgxpool.Pool) *workflowapplication.RuntimeCoordinator {
+func newWorkspaceAnalysisConcurrentCancelCoordinator(t *testing.T, pool *platformpostgres.Pool) *workflowapplication.RuntimeCoordinator {
 	t.Helper()
-	client, err := riveradapter.NewClient(pool, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	inserter, err := riveradapter.NewJobInserter(client)
-	if err != nil {
-		t.Fatal(err)
-	}
-	runtime, err := workflowpostgres.NewRuntimeRepository(pool, inserter)
+	runtime, err := workflowpostgres.NewGORMRuntimeRepositoryWithHooks(pool, riveradapter.DefaultOptions(), riveradapter.NewStaticScopedEnqueueFence(), workflowpostgres.GORMRuntimeRepositoryHooks{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -142,7 +142,7 @@ func (repository *GORMRuntimeRepository) GetRunDefinition(ctx context.Context, w
 	return definition, nil
 }
 
-func scanGORMRuntimeOutputDefinition(row gormRuntimeStartScanner) (domain.Definition, error) {
+func scanGORMRuntimeOutputDefinition(row workflowRowScanner) (domain.Definition, error) {
 	var definition domain.Definition
 	var id, workspaceID string
 	var graphJSON workflowJSONB

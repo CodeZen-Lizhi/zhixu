@@ -139,11 +139,11 @@ func (transaction *gormTx) QueryRow(ctx context.Context, query string, arguments
 	return gormRow{row: statement.Row()}
 }
 
-func (transaction *gormTx) SideFactTransaction() any {
+func (transaction *gormTx) Scope() foundation.TransactionScope {
 	if transaction == nil {
 		return nil
 	}
-	return transaction
+	return transaction.scope
 }
 
 type gormRow struct {

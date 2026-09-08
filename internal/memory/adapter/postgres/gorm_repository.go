@@ -11,14 +11,11 @@ import (
 	memoryapp "github.com/CodeZen-Lizhi/zhixu/internal/memory/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/memory/domain"
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/lib/pq"
 	"gorm.io/gorm"
 )
 
-// GORMRepository is the staged GORM implementation of Memory persistence.
-// Production composition remains on Repository until the PostgreSQL gate passes.
+// GORMRepository persists Memory using one shared GORM root and Unit of Work.
 type GORMRepository struct {
 	database   *gorm.DB
 	unitOfWork foundation.UnitOfWork
@@ -537,7 +534,7 @@ func gormMemoryRawRows(database *gorm.DB, query string, args ...any) (*sql.Rows,
 }
 
 func gormMemoryNoRows(err error) bool {
-	return errors.Is(err, sql.ErrNoRows) || errors.Is(err, pgx.ErrNoRows) || errors.Is(err, gorm.ErrRecordNotFound)
+	return errors.Is(err, sql.ErrNoRows) || errors.Is(err, gorm.ErrRecordNotFound)
 }
 
 func gormMemoryClassify(ctx context.Context, err error) error {
@@ -549,10 +546,16 @@ func gormMemoryClassify(ctx context.Context, err error) error {
 		return err
 	}
 	if ctx != nil && ctx.Err() != nil {
-		if errors.Is(ctx.Err(), context.Canceled) {
-			return foundation.NewError(foundation.ErrorNonRetryableFailure, domain.ErrorCodeUnavailable, false, ctx.Err())
+		cause := context.Cause(ctx)
+		if cause == nil {
+			cause = ctx.Err()
+		} else if !errors.Is(cause, ctx.Err()) {
+			cause = errors.Join(ctx.Err(), cause)
 		}
-		return unavailable(ctx.Err())
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return foundation.NewError(foundation.ErrorNonRetryableFailure, domain.ErrorCodeUnavailable, false, cause)
+		}
+		return unavailable(cause)
 	}
 	if errors.Is(err, context.Canceled) {
 		return foundation.NewError(foundation.ErrorNonRetryableFailure, domain.ErrorCodeUnavailable, false, err)
@@ -566,16 +569,13 @@ func gormMemoryClassify(ctx context.Context, err error) error {
 	if gormMemoryNoRows(err) {
 		return notFound(err)
 	}
-	var postgresError *pgconn.PgError
-	if errors.As(err, &postgresError) {
-		switch postgresError.Code {
-		case "23505":
-			return idempotencyConflict(err)
-		case "23503", "23514", "23502", "22P02", "55000":
-			return inconsistent(err)
-		case "40001", "40P01", "55P03", "08000", "08003", "08006", "57P01", "57014":
-			return foundation.NewError(foundation.ErrorRetryableFailure, domain.ErrorCodeUnavailable, true, err)
-		}
+	switch platformpostgres.SQLState(err) {
+	case "23505":
+		return idempotencyConflict(err)
+	case "23503", "23514", "23502", "22P02", "55000":
+		return inconsistent(err)
+	case "40001", "40P01", "55P03", "08000", "08003", "08006", "57P01", "57014":
+		return foundation.NewError(foundation.ErrorRetryableFailure, domain.ErrorCodeUnavailable, true, err)
 	}
 	return unavailable(err)
 }

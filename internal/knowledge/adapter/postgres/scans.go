@@ -1,64 +1,15 @@
 package postgres
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
-	"github.com/jackc/pgx/v5"
 )
 
 type rowScanner interface{ Scan(...any) error }
-
-func getTopic(ctx context.Context, queryer queryRower, workspaceID, topicID foundation.ID) (domain.Topic, error) {
-	topic, err := scanTopic(queryer.QueryRow(ctx, `
-		SELECT id::text,workspace_id::text,name,normalized_name,description,status,
-			merged_into_topic_id::text,version,created_at,updated_at
-		FROM core.topic WHERE workspace_id=$1 AND id=$2`, string(workspaceID), string(topicID)))
-	if err != nil {
-		return domain.Topic{}, err
-	}
-	rows, err := queryRows(ctx, queryer, `
-		SELECT alias,normalized_alias
-		FROM core.topic_alias
-		WHERE workspace_id=$1 AND topic_id=$2
-		ORDER BY normalized_alias,id`, string(workspaceID), string(topicID))
-	if err != nil {
-		return domain.Topic{}, err
-	}
-	defer rows.Close()
-	topic.Aliases = make([]domain.TopicAlias, 0)
-	for rows.Next() {
-		var alias domain.TopicAlias
-		if err := rows.Scan(&alias.Name, &alias.NormalizedName); err != nil {
-			return domain.Topic{}, err
-		}
-		topic.Aliases = append(topic.Aliases, alias)
-	}
-	if err := rows.Err(); err != nil {
-		return domain.Topic{}, err
-	}
-	if err := domain.ValidateTopic(topic); err != nil {
-		return domain.Topic{}, consistency(domain.ErrorCodeTopicInvalid, err)
-	}
-	return topic, nil
-}
-
-type rowQueryer interface {
-	Query(context.Context, string, ...any) (pgx.Rows, error)
-}
-
-func queryRows(ctx context.Context, queryer any, sql string, args ...any) (pgx.Rows, error) {
-	rows, ok := queryer.(rowQueryer)
-	if !ok {
-		return nil, errors.New("knowledge query boundary does not support rows")
-	}
-	return rows.Query(ctx, sql, args...)
-}
 
 func scanTopic(row rowScanner) (domain.Topic, error) {
 	var topic domain.Topic
@@ -121,57 +72,11 @@ func scanClaimSource(row rowScanner) (domain.ClaimSource, error) {
 	return source, nil
 }
 
-func loadClaimResult(ctx context.Context, queryer interface {
-	queryRower
-	rowQueryer
-}, workspaceID, claimID foundation.ID) (domain.ClaimResult, error) {
-	claim, err := scanClaim(queryer.QueryRow(ctx, claimSelect+` WHERE workspace_id=$1 AND id=$2`, string(workspaceID), string(claimID)))
-	if err != nil {
-		return domain.ClaimResult{}, err
-	}
-	sources, err := loadClaimSources(ctx, queryer, workspaceID, []foundation.ID{claimID})
-	if err != nil {
-		return domain.ClaimResult{}, err
-	}
-	if err := domain.ValidateClaimAggregate(claim, sources[claimID]); err != nil {
-		return domain.ClaimResult{}, consistency(domain.ErrorCodeClaimInvalid, err)
-	}
-	return domain.ClaimResult{Claim: claim, Sources: sources[claimID]}, nil
-}
-
 const claimSelect = `
 	SELECT id::text,workspace_id::text,statement,normalized_statement,applicability,
 		applicability_schema_version,applicability_hash,status,confidence_score,confidence_factors,
 		fingerprint,version,created_at,updated_at
 	FROM core.claim`
-
-func loadClaimSources(ctx context.Context, queryer rowQueryer, workspaceID foundation.ID, claimIDs []foundation.ID) (map[foundation.ID][]domain.ClaimSource, error) {
-	result := make(map[foundation.ID][]domain.ClaimSource, len(claimIDs))
-	for _, id := range claimIDs {
-		result[id] = []domain.ClaimSource{}
-	}
-	if len(claimIDs) == 0 {
-		return result, nil
-	}
-	rows, err := queryer.Query(ctx, `
-		SELECT id::text,workspace_id::text,claim_id::text,source_version_id::text,source_span_id::text,
-			support_type,reason,evidence_hash,model_run_ref,created_at
-		FROM core.claim_source
-		WHERE workspace_id=$1 AND claim_id=ANY($2::uuid[])
-		ORDER BY claim_id,created_at,id`, string(workspaceID), idsAsStrings(claimIDs))
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		source, err := scanClaimSource(rows)
-		if err != nil {
-			return nil, err
-		}
-		result[source.ClaimID] = append(result[source.ClaimID], source)
-	}
-	return result, rows.Err()
-}
 
 func scanRelation(row rowScanner) (domain.Relation, error) {
 	var relation domain.Relation
@@ -233,60 +138,11 @@ func scanRelationEvidence(row rowScanner) (domain.RelationEvidence, error) {
 	return evidence, nil
 }
 
-func loadRelationResult(ctx context.Context, queryer interface {
-	queryRower
-	rowQueryer
-}, workspaceID, relationID foundation.ID) (domain.RelationResult, error) {
-	relation, err := scanRelation(queryer.QueryRow(ctx, relationSelect+` WHERE workspace_id=$1 AND id=$2`, string(workspaceID), string(relationID)))
-	if err != nil {
-		return domain.RelationResult{}, err
-	}
-	evidence, err := loadRelationEvidence(ctx, queryer, workspaceID, []foundation.ID{relationID})
-	if err != nil {
-		return domain.RelationResult{}, err
-	}
-	if err := domain.ValidateRelationAggregate(relation, evidence[relationID]); err != nil {
-		return domain.RelationResult{}, consistency(domain.ErrorCodeRelationInvalid, err)
-	}
-	return domain.RelationResult{Relation: relation, Evidence: evidence[relationID]}, nil
-}
-
 const relationSelect = `
 	SELECT id::text,workspace_id::text,source_node_type,source_node_id::text,target_node_type,target_node_id::text,
 		relation_type,status,confirmation_method,confirmation_ref,confidence_score,valid_from,valid_to,
 		fingerprint,evidence_fingerprint,version,created_at,updated_at
 	FROM core.relation`
-
-func loadRelationEvidence(ctx context.Context, queryer rowQueryer, workspaceID foundation.ID, relationIDs []foundation.ID) (map[foundation.ID][]domain.RelationEvidence, error) {
-	result := make(map[foundation.ID][]domain.RelationEvidence, len(relationIDs))
-	for _, id := range relationIDs {
-		result[id] = []domain.RelationEvidence{}
-	}
-	if len(relationIDs) == 0 {
-		return result, nil
-	}
-	rows, err := queryer.Query(ctx, `
-		SELECT evidence.id::text,evidence.workspace_id::text,evidence.relation_id::text,
-			evidence.source_version_id::text,evidence.source_span_id::text,evidence.reason,
-			evidence.applicability,evidence.applicability_schema_version,evidence.applicability_hash,
-			evidence.evidence_hash,evidence.model_run_ref,evidence.confirmation_method,evidence.confirmed_by,
-			evidence.created_at
-		FROM core.relation_evidence evidence
-		WHERE evidence.workspace_id=$1 AND evidence.relation_id=ANY($2::uuid[])
-		ORDER BY evidence.relation_id,evidence.created_at,evidence.id`, string(workspaceID), idsAsStrings(relationIDs))
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		evidence, err := scanRelationEvidence(rows)
-		if err != nil {
-			return nil, err
-		}
-		result[evidence.RelationID] = append(result[evidence.RelationID], evidence)
-	}
-	return result, rows.Err()
-}
 
 type storedConflict struct {
 	Conflict   domain.Conflict
@@ -349,52 +205,6 @@ func scanConflictMember(row rowScanner) (domain.ConflictMember, error) {
 	return member, nil
 }
 
-func loadConflictResult(ctx context.Context, queryer interface {
-	queryRower
-	rowQueryer
-}, workspaceID, conflictID foundation.ID) (domain.ConflictResult, error) {
-	stored, err := scanConflict(queryer.QueryRow(ctx, conflictSelect+` WHERE workspace_id=$1 AND id=$2`, string(workspaceID), string(conflictID)))
-	if err != nil {
-		return domain.ConflictResult{}, err
-	}
-	members, err := loadConflictMembers(ctx, queryer, workspaceID, []foundation.ID{conflictID})
-	if err != nil {
-		return domain.ConflictResult{}, err
-	}
-	if err := validateStoredConflict(stored, members[conflictID]); err != nil {
-		return domain.ConflictResult{}, err
-	}
-	return domain.ConflictResult{Conflict: stored.Conflict, Members: members[conflictID]}, nil
-}
-
-func loadConflictMembers(ctx context.Context, queryer rowQueryer, workspaceID foundation.ID, conflictIDs []foundation.ID) (map[foundation.ID][]domain.ConflictMember, error) {
-	result := make(map[foundation.ID][]domain.ConflictMember, len(conflictIDs))
-	for _, id := range conflictIDs {
-		result[id] = []domain.ConflictMember{}
-	}
-	if len(conflictIDs) == 0 {
-		return result, nil
-	}
-	rows, err := queryer.Query(ctx, `
-		SELECT conflict_id::text,claim_id::text,workspace_id::text,applicability,
-			applicability_schema_version,applicability_hash,position_summary,created_at
-		FROM core.conflict_member
-		WHERE workspace_id=$1 AND conflict_id=ANY($2::uuid[])
-		ORDER BY conflict_id,claim_id`, string(workspaceID), idsAsStrings(conflictIDs))
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		member, err := scanConflictMember(rows)
-		if err != nil {
-			return nil, err
-		}
-		result[member.ConflictID] = append(result[member.ConflictID], member)
-	}
-	return result, rows.Err()
-}
-
 func validateStoredConflict(stored storedConflict, members []domain.ConflictMember) error {
 	terminal := stored.Conflict.Status == domain.ConflictStatusResolved || stored.Conflict.Status == domain.ConflictStatusAcceptedDivergence
 	if terminal != (stored.ResolvedAt != nil) {
@@ -429,11 +239,4 @@ func pointerEqual[T comparable](left, right *T) bool {
 		return left == nil && right == nil
 	}
 	return *left == *right
-}
-
-func requireReceiptVersion(receipt *commandReceipt, currentVersion int64) error {
-	if receipt.AggregateVersion <= 0 || currentVersion < receipt.AggregateVersion {
-		return consistency(errorCodeStorageConsistency, fmt.Errorf("receipt version %d exceeds aggregate version %d", receipt.AggregateVersion, currentVersion))
-	}
-	return nil
 }

@@ -404,12 +404,8 @@ func (repository *GORMRepository) SaveImpactReport(ctx context.Context, report d
 	return persisted, replayed, nil
 }
 
-func (repository *GORMRepository) SaveImpactReportWithAudit(ctx context.Context, report domain.ImpactReport, idempotencyKey string, _ knowledgeapp.ImpactAuditPort) (domain.ImpactReport, bool, error) {
-	return domain.ImpactReport{}, false, impactUnavailable(errors.New("legacy impact audit port is unavailable for GORM persistence"))
-}
-
 // SaveImpactReportWithScopedAudit persists the report and audit record inside
-// one opaque scope. The scoped port cannot be replaced with the legacy any Tx API.
+// one opaque scope owned by the repository unit of work.
 func (repository *GORMRepository) SaveImpactReportWithScopedAudit(ctx context.Context, report domain.ImpactReport, idempotencyKey string, audit knowledgeapp.ScopedImpactAuditPort) (domain.ImpactReport, bool, error) {
 	if err := repository.ready(ctx); err != nil {
 		return domain.ImpactReport{}, false, err
@@ -426,7 +422,7 @@ func (repository *GORMRepository) SaveImpactReportWithScopedAudit(ctx context.Co
 	var replayed bool
 	err := repository.within(ctx, foundation.TransactionOptions{}, domain.ErrorCodeImpactUnavailable, domain.ErrorCodeImpactUnavailable, classifyGORMKnowledge,
 		func(callbackCtx context.Context, scope foundation.TransactionScope, transaction *gorm.DB) error {
-			// Legacy service replay audits an already durable report without reapplying
+			// Replay audits an already durable report without reapplying
 			// the mutable v2 readiness gate. First writes still go through gormSaveImpactReport.
 			existing, found, loadErr := gormGetImpactReport(callbackCtx, transaction, report.WorkspaceID, report.SourceEventID, report.EffectiveAnalysisVersion())
 			if loadErr != nil {

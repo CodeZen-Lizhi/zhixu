@@ -3,13 +3,13 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"reflect"
 	"strings"
@@ -20,14 +20,23 @@ import (
 	artifactpostgres "github.com/CodeZen-Lizhi/zhixu/internal/artifact/adapter/postgres"
 	artifactapp "github.com/CodeZen-Lizhi/zhixu/internal/artifact/application"
 	artifactdomain "github.com/CodeZen-Lizhi/zhixu/internal/artifact/domain"
+	auditpostgres "github.com/CodeZen-Lizhi/zhixu/internal/audit/adapter/postgres"
 	collectionpostgres "github.com/CodeZen-Lizhi/zhixu/internal/collection/adapter/postgres"
 	collectiondomain "github.com/CodeZen-Lizhi/zhixu/internal/collection/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	knowledgepostgres "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/adapter/postgres"
 	knowledgedomain "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
-	organizingowner "github.com/CodeZen-Lizhi/zhixu/internal/organizing/adapter/owner"
+	modelsettingspostgres "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/adapter/postgres"
+	modelcrypto "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/crypto"
 	organizingapp "github.com/CodeZen-Lizhi/zhixu/internal/organizing/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/organizing/domain"
-	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
+	organizingworkflow "github.com/CodeZen-Lizhi/zhixu/internal/organizing/workflow"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
+	retrievalpostgres "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/adapter/postgres"
+	workflowpostgres "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/postgres"
+	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
+	workflowapp "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -472,7 +481,7 @@ func TestRepositoryPostgreSQLDraftTemplateSnapshotAndRuntimeLifecycle(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	artifactRepository, err := artifactpostgres.NewRepository(pool)
+	artifactRepository, err := artifactpostgres.NewGORMRepository(repository.platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -509,8 +518,43 @@ func TestRepositoryPostgreSQLDraftTemplateSnapshotAndRuntimeLifecycle(t *testing
 	if _, _, err := repository.BindRunResult(ctx, organizingapp.BindRunResultRecord{Result: wrongHashResult}); !organizingIntegrationError(err, foundation.ErrorConsistencyViolation, organizingapp.ErrorCodeResultInvalid) {
 		t.Fatalf("wrong result hash error=%v", err)
 	}
+	terminalHook, err := organizingworkflow.NewScopedTerminalHook(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminalOutput, err := json.Marshal(map[string]any{
+		"schema_version": 1, "result_id": runResult.ID, "run_binding_id": runResult.RunBindingID,
+		"snapshot_id": runResult.SnapshotID, "kind": runResult.Kind,
+		"result_ref": runResult.ResultRef, "result_hash": runResult.ResultHash,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminalEvent := workflowapp.WorkflowNodeTerminalEvent{
+		WorkspaceID: workspaceA, WorkflowRunID: workflowRunID, NodeRunID: workflowNodeRunID,
+		NodeAttemptID: organizingIntegrationID(79), NodeKind: organizingworkflow.TopicArtifactNodeKind,
+		Outcome: workflowapp.WorkflowTerminalOutcomeSucceeded, TerminalOutput: string(terminalOutput), TerminalAt: runResult.CreatedAt,
+	}
+	rollbackTerminal := errors.New("rollback organizing terminal result with workflow")
+	err = repository.unitOfWork.Within(ctx, foundation.TransactionOptions{}, func(ctx context.Context, scope foundation.TransactionScope) error {
+		if err := terminalHook.OnWorkflowNodeTerminalScoped(ctx, scope, terminalEvent); err != nil {
+			return err
+		}
+		return rollbackTerminal
+	})
+	if !errors.Is(err, rollbackTerminal) {
+		t.Fatalf("terminal rollback=%v", err)
+	}
+	if _, err := repository.GetRunResult(ctx, workspaceA, workflowRunID); !organizingIntegrationError(err, foundation.ErrorNotFound, organizingapp.ErrorCodeNotFound) {
+		t.Fatalf("rolled-back terminal result error=%v", err)
+	}
+	if err := repository.unitOfWork.Within(ctx, foundation.TransactionOptions{}, func(ctx context.Context, scope foundation.TransactionScope) error {
+		return terminalHook.OnWorkflowNodeTerminalScoped(ctx, scope, terminalEvent)
+	}); err != nil {
+		t.Fatalf("terminal commit=%v", err)
+	}
 	boundResult, replayed, err := repository.BindRunResult(ctx, organizingapp.BindRunResultRecord{Result: runResult})
-	if err != nil || replayed || !reflect.DeepEqual(boundResult, runResult) {
+	if err != nil || !replayed || !reflect.DeepEqual(boundResult, runResult) {
 		t.Fatalf("bind result=%#v replayed=%v err=%v", boundResult, replayed, err)
 	}
 	resultProjection, err := repository.GetRunProjection(ctx, workspaceA, confirmed.Snapshot.ID)
@@ -597,6 +641,94 @@ func TestRepositoryPostgreSQLDraftTemplateSnapshotAndRuntimeLifecycle(t *testing
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM organizing.workflow_start_outbox`).Scan(&outboxCount); err != nil || outboxCount != 1 {
 		t.Fatalf("outbox count=%d err=%v", outboxCount, err)
 	}
+
+	t.Run("scoped workflow and River start rolls back and replays atomically", func(t *testing.T) {
+		outboxID := createOrganizingPendingStart(t, ctx, repository, workspaceB, builtInTemplates[2], builtInRevisions[2], 9000, now)
+		lease, claimed, err := repository.ClaimStart(ctx, "organizing-scoped-start", time.Minute)
+		if err != nil || !claimed || lease.ID != outboxID {
+			t.Fatalf("atomic start lease=%#v claimed=%v err=%v", lease, claimed, err)
+		}
+		sealer, err := modelcrypto.NewSealer(bytes.Repeat([]byte{0x2a}, 32))
+		if err != nil {
+			t.Fatal(err)
+		}
+		audit, err := auditpostgres.NewGORMStore(repository.platform)
+		if err != nil {
+			t.Fatal(err)
+		}
+		settings, err := modelsettingspostgres.NewGORMRepository(repository.platform,
+			modelsettingspostgres.WithGORMSecretSealer(sealer), modelsettingspostgres.WithGORMAuditAppender(audit))
+		if err != nil {
+			t.Fatal(err)
+		}
+		runtime, err := workflowpostgres.NewGORMRuntimeRepositoryWithHooks(repository.platform,
+			riveradapter.DefaultOptions(), settings, workflowpostgres.GORMRuntimeRepositoryHooks{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		bindings, err := workflowpostgres.NewGORMRuntimeBindingReader(repository.platform)
+		if err != nil {
+			t.Fatal(err)
+		}
+		starts, err := NewGORMStartRepository(repository.platform, runtime, bindings)
+		if err != nil {
+			t.Fatal(err)
+		}
+		definition := organizingworkflow.RegisteredDefinitions()[2]
+		definition.GraphHash, err = workflowapp.ComputeCanonicalGraphHash(definition.Graph)
+		if err != nil {
+			t.Fatal(err)
+		}
+		input, err := json.Marshal(organizingworkflow.StartInput{SnapshotID: lease.SnapshotID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		request, err := workflowapp.BuildRuntimeStartRequest(foundation.NewUUIDGenerator(nil), foundation.SystemClock{},
+			workspaceB, organizingapp.StartIdempotencyKey(lease.SnapshotID), input, definition)
+		if err != nil {
+			t.Fatal(err)
+		}
+		record := organizingworkflow.AtomicStartRecord{Lease: lease, Request: request,
+			BindingID: runBinding.ID, StartedAt: request.Run.CreatedAt}
+		if _, _, err := starts.StartWorkflow(ctx, record); !organizingIntegrationError(err, foundation.ErrorConsistencyViolation, organizingapp.ErrorCodeResultInvalid) {
+			t.Fatalf("duplicate binding must roll back Workflow/River start: %v", err)
+		}
+		var runs, nodes, events, jobs int
+		if err := pool.QueryRow(ctx, `SELECT
+			(SELECT count(*) FROM workflow.run WHERE id=$1),
+			(SELECT count(*) FROM workflow.node_run WHERE id=$2),
+			(SELECT count(*) FROM workflow.outbox_event WHERE id=$3),
+			(SELECT count(*) FROM workflow.river_job WHERE kind=$4 AND args->>'node_run_id'=$2::text)`,
+			string(request.Run.ID), string(request.FirstNode.ID), string(request.Event.ID), riveradapter.NodeJobKind).
+			Scan(&runs, &nodes, &events, &jobs); err != nil {
+			t.Fatal(err)
+		}
+		if runs != 0 || nodes != 0 || events != 0 || jobs != 0 {
+			t.Fatalf("partial atomic start run=%d node=%d event=%d job=%d", runs, nodes, events, jobs)
+		}
+		pending, err := repository.GetRunProjection(ctx, workspaceB, lease.SnapshotID)
+		if err != nil || pending.Status != organizingapp.StartPending || pending.Binding != nil {
+			t.Fatalf("rolled-back start projection=%#v err=%v", pending, err)
+		}
+		record.BindingID = organizingIntegrationID(9042)
+		started, replayed, err := starts.StartWorkflow(ctx, record)
+		if err != nil || replayed || started.WorkflowRunID != request.Run.ID || started.ID != record.BindingID {
+			t.Fatalf("atomic start=%#v replayed=%v err=%v", started, replayed, err)
+		}
+		record.BindingID = organizingIntegrationID(9043)
+		replayedBinding, replayed, err := starts.StartWorkflow(ctx, record)
+		if err != nil || !replayed || !reflect.DeepEqual(replayedBinding, started) {
+			t.Fatalf("atomic start replay=%#v replayed=%v err=%v", replayedBinding, replayed, err)
+		}
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM workflow.river_job
+			WHERE kind=$1 AND args->>'node_run_id'=$2`, riveradapter.NodeJobKind, string(request.FirstNode.ID)).Scan(&jobs); err != nil || jobs != 1 {
+			t.Fatalf("atomic start job count=%d err=%v", jobs, err)
+		}
+		projection, err := repository.GetRunProjection(ctx, workspaceB, lease.SnapshotID)
+		if err != nil || projection.Status != organizingapp.StartStarted || projection.Binding == nil || projection.Binding.ID != started.ID {
+			t.Fatalf("atomic start projection=%#v err=%v", projection, err)
+		}
+	})
 }
 
 func TestConfirmDraftPostgreSQLRejectsOwnerDriftAtomicallyAndReplaysWithoutFence(t *testing.T) {
@@ -645,7 +777,7 @@ func TestConfirmDraftPostgreSQLRejectsOwnerDriftAtomicallyAndReplaysWithoutFence
 		organizingIntegrationFatal(t, err)
 	}
 
-	countingFence := &organizingDelegatingFence{delegate: new(organizingowner.Adapter)}
+	countingFence := &organizingDelegatingFence{delegate: repository.fence}
 	snapshotID, outboxID := organizingIntegrationID(313), organizingIntegrationID(315)
 	record := organizingapp.ConfirmRecord{
 		Binding: organizingBinding(workspaceID, draft.ID, "fence-confirm", "fence-confirm", organizingapp.CommandConfirmDraft, 3),
@@ -747,7 +879,7 @@ func TestConfirmDraftPostgreSQLRejectsFrozenEvidenceAfterActiveIndexDrift(t *tes
 	}
 
 	retireOrganizingFenceIndex(t, ctx, pool, fixture.indexID, now.Add(4*time.Minute))
-	fence := &organizingDelegatingFence{delegate: new(organizingowner.Adapter)}
+	fence := &organizingDelegatingFence{delegate: repository.fence}
 	snapshotID, outboxID := organizingIntegrationID(343), organizingIntegrationID(345)
 	record := organizingapp.ConfirmRecord{
 		Binding: organizingBinding(workspaceID, draft.ID, "evidence-confirm", "evidence-confirm", organizingapp.CommandConfirmDraft, 3),
@@ -853,7 +985,7 @@ func TestConfirmDraftPostgreSQLRevalidatesCollectionWithoutLeakingStatementTimeo
 		string(query.CanonicalJSON), query.Hash, now); err != nil {
 		organizingIntegrationFatal(t, err)
 	}
-	collectionRepository, err := collectionpostgres.NewRepository(pool)
+	collectionRepository, err := collectionpostgres.NewGORMRepository(repository.platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -868,7 +1000,7 @@ func TestConfirmDraftPostgreSQLRevalidatesCollectionWithoutLeakingStatementTimeo
 	if err := pool.QueryRow(ctx, `SHOW statement_timeout`).Scan(&baselineTimeout); err != nil {
 		t.Fatal(err)
 	}
-	fence := &organizingStatementTimeoutFence{delegate: new(organizingowner.Adapter)}
+	fence := &organizingStatementTimeoutFence{delegate: repository.fence}
 	record := seedOrganizingConfirmRecordWithReference(t, ctx, repository, workspaceID, templates[0], revisions[0], fence, reference, 400, now)
 	confirmed, err := repository.ConfirmDraft(ctx, record)
 	if err != nil || confirmed.Replayed || confirmed.Snapshot.ID != record.SnapshotID {
@@ -886,7 +1018,7 @@ func TestConfirmDraftPostgreSQLRevalidatesCollectionWithoutLeakingStatementTimeo
 		updated_at=EXCLUDED.updated_at`, string(workspaceID), now.Add(5*time.Minute)); err != nil {
 		organizingIntegrationFatal(t, err)
 	}
-	staleFence := &organizingDelegatingFence{delegate: new(organizingowner.Adapter)}
+	staleFence := &organizingDelegatingFence{delegate: repository.fence}
 	staleRecord := seedOrganizingConfirmRecordWithReference(t, ctx, repository, workspaceID, templates[0], revisions[0], staleFence, reference, 410, now.Add(6*time.Minute))
 	if _, err := repository.ConfirmDraft(ctx, staleRecord); !organizingIntegrationError(
 		err, foundation.ErrorVersionConflict, organizingapp.ErrorCodeMaterialStale,
@@ -1044,56 +1176,39 @@ func TestRepositoryPostgreSQLSerializesIdempotentCreateAndDraftCAS(t *testing.T)
 	}
 }
 
-func newOrganizingIntegrationRepository(t *testing.T, ctx context.Context) (*Repository, *pgxpool.Pool) {
-	t.Helper()
-	pool := newOrganizingIntegrationDatabase(t, ctx)
-	repository, err := NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return repository, pool
+type organizingIntegrationRepository struct {
+	*GORMRepository
+	platform *platformpostgres.Pool
+	fence    *GORMFrozenMaterialFence
 }
 
-func newOrganizingIntegrationDatabase(t *testing.T, ctx context.Context) *pgxpool.Pool {
+func newOrganizingIntegrationRepository(t *testing.T, ctx context.Context) (*organizingIntegrationRepository, *pgxpool.Pool) {
 	t.Helper()
-	baseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
-	if baseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a disposable PostgreSQL instance")
-	}
-	parsed, err := url.Parse(baseURL)
+	pool := newOrganizingIntegrationPlatform(t, ctx)
+	repository, err := NewGORMRepository(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
-	admin, err := pgxpool.New(ctx, baseURL)
+	sources, err := retrievalpostgres.NewGORMSearchRepository(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
-	name := fmt.Sprintf("zhixu_organizing_%d", time.Now().UnixNano())
-	identifier := pgx.Identifier{name}.Sanitize()
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+identifier); err != nil {
-		admin.Close()
+	claims, err := knowledgepostgres.NewGORMRepository(pool)
+	if err != nil {
 		t.Fatal(err)
 	}
-	parsed.Path = "/" + name
-	pool, err := pgxpool.New(ctx, parsed.String())
+	fence, err := NewGORMFrozenMaterialFence(sources, claims)
 	if err != nil {
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		pool.Close()
-		_, _ = admin.Exec(context.Background(), "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-	})
-	runner, err := platformmigration.NewAtlasEmbeddedRunner(pool)
-	if err == nil {
-		err = runner.Up(ctx)
-	}
-	if err != nil {
-		organizingIntegrationFatal(t, err)
-	}
-	return pool
+	return &organizingIntegrationRepository{GORMRepository: repository, platform: pool, fence: fence}, pool.DB()
+}
+
+func newOrganizingIntegrationPlatform(t *testing.T, _ context.Context) *platformpostgres.Pool {
+	t.Helper()
+	return testdb.Require(t, testdb.Config{
+		ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
+	}).Pool()
 }
 
 func seedOrganizingWorkspace(t *testing.T, ctx context.Context, pool *pgxpool.Pool, id foundation.ID, name string) {
@@ -1330,7 +1445,7 @@ func assertOrganizingConfirmationAbsent(
 	}
 }
 
-func createOrganizingPendingStart(t *testing.T, ctx context.Context, repository *Repository, workspaceID foundation.ID,
+func createOrganizingPendingStart(t *testing.T, ctx context.Context, repository organizingapp.DraftRepository, workspaceID foundation.ID,
 	template domain.Template, revision domain.TemplateRevision, idBase int, now time.Time,
 ) foundation.ID {
 	t.Helper()
@@ -1487,9 +1602,9 @@ type organizingIntegrationFence struct {
 	err   error
 }
 
-func (fence *organizingIntegrationFence) VerifyFrozen(
+func (fence *organizingIntegrationFence) VerifyFrozenScoped(
 	context.Context,
-	any,
+	foundation.TransactionScope,
 	foundation.ID,
 	[]domain.MaterialRef,
 ) error {
@@ -1498,7 +1613,7 @@ func (fence *organizingIntegrationFence) VerifyFrozen(
 }
 
 type organizingDelegatingFence struct {
-	delegate organizingapp.FrozenMaterialFence
+	delegate organizingapp.ScopedFrozenMaterialFence
 	calls    int
 }
 
@@ -1514,31 +1629,31 @@ type confirmIntegrationCall struct {
 }
 
 type organizingStatementTimeoutFence struct {
-	delegate         organizingapp.FrozenMaterialFence
+	delegate         organizingapp.ScopedFrozenMaterialFence
 	statementTimeout string
 	calls            int
 }
 
-func (fence *organizingStatementTimeoutFence) VerifyFrozen(
+func (fence *organizingStatementTimeoutFence) VerifyFrozenScoped(
 	ctx context.Context,
-	transaction any,
+	scope foundation.TransactionScope,
 	workspaceID foundation.ID,
 	references []domain.MaterialRef,
 ) error {
 	fence.calls++
-	if err := fence.delegate.VerifyFrozen(ctx, transaction, workspaceID, references); err != nil {
+	if err := fence.delegate.VerifyFrozenScoped(ctx, scope, workspaceID, references); err != nil {
 		return err
 	}
-	tx, ok := transaction.(pgx.Tx)
-	if !ok {
-		return errors.New("organizing test fence did not receive pgx transaction")
+	tx, err := platformpostgres.GORMTransaction(scope)
+	if err != nil {
+		return err
 	}
-	return tx.QueryRow(ctx, `SHOW statement_timeout`).Scan(&fence.statementTimeout)
+	return tx.WithContext(ctx).Raw(`SHOW statement_timeout`).Row().Scan(&fence.statementTimeout)
 }
 
-func (fence *organizingBlockingFence) VerifyFrozen(
+func (fence *organizingBlockingFence) VerifyFrozenScoped(
 	ctx context.Context,
-	_ any,
+	_ foundation.TransactionScope,
 	_ foundation.ID,
 	_ []domain.MaterialRef,
 ) error {
@@ -1553,14 +1668,14 @@ func (fence *organizingBlockingFence) VerifyFrozen(
 	return nil
 }
 
-func (fence *organizingDelegatingFence) VerifyFrozen(
+func (fence *organizingDelegatingFence) VerifyFrozenScoped(
 	ctx context.Context,
-	transaction any,
+	scope foundation.TransactionScope,
 	workspaceID foundation.ID,
 	references []domain.MaterialRef,
 ) error {
 	fence.calls++
-	return fence.delegate.VerifyFrozen(ctx, transaction, workspaceID, references)
+	return fence.delegate.VerifyFrozenScoped(ctx, scope, workspaceID, references)
 }
 
 func organizingIntegrationPostgresCode(t *testing.T, err error, code string) {
@@ -1605,11 +1720,11 @@ func waitForOrganizingAdvisoryLock(t *testing.T, ctx context.Context, pool *pgxp
 func seedOrganizingConfirmRecord(
 	t *testing.T,
 	ctx context.Context,
-	repository *Repository,
+	repository organizingapp.DraftRepository,
 	workspaceID foundation.ID,
 	template domain.Template,
 	revision domain.TemplateRevision,
-	fence organizingapp.FrozenMaterialFence,
+	fence organizingapp.ScopedFrozenMaterialFence,
 	seed int,
 	now time.Time,
 ) organizingapp.ConfirmRecord {
@@ -1621,11 +1736,11 @@ func seedOrganizingConfirmRecord(
 func seedOrganizingConfirmRecordWithReference(
 	t *testing.T,
 	ctx context.Context,
-	repository *Repository,
+	repository organizingapp.DraftRepository,
 	workspaceID foundation.ID,
 	template domain.Template,
 	revision domain.TemplateRevision,
-	fence organizingapp.FrozenMaterialFence,
+	fence organizingapp.ScopedFrozenMaterialFence,
 	reference domain.MaterialRef,
 	seed int,
 	now time.Time,

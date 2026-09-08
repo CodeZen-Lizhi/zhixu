@@ -14,7 +14,6 @@ import (
 	organizingapp "github.com/CodeZen-Lizhi/zhixu/internal/organizing/application"
 	organizingdomain "github.com/CodeZen-Lizhi/zhixu/internal/organizing/domain"
 	organizingworkflow "github.com/CodeZen-Lizhi/zhixu/internal/organizing/workflow"
-	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
 	"github.com/jackc/pgx/v5"
@@ -24,7 +23,8 @@ import (
 
 func TestOrganizingTerminalHookBindsResultAfterSucceededStateInSameTransaction(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := newRuntimeTestDatabase(t, ctx)
+	platformPool, cleanup := newGORMRuntimeTestDatabase(t, ctx)
+	pool := platformPool.DB()
 	defer cleanup()
 
 	workspaceID := foundation.ID("a8000000-0000-4000-8000-000000000001")
@@ -41,7 +41,7 @@ func TestOrganizingTerminalHookBindsResultAfterSucceededStateInSameTransaction(t
 		string(workspaceID), "/tmp/organizing-terminal"); err != nil {
 		t.Fatal(err)
 	}
-	organizingRepository, err := organizingpostgres.NewRepository(pool)
+	organizingRepository, err := organizingpostgres.NewGORMRepository(platformPool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,18 +55,11 @@ func TestOrganizingTerminalHookBindsResultAfterSucceededStateInSameTransaction(t
 		t.Fatalf("claim=%+v found=%v err=%v", lease, found, err)
 	}
 
-	client, err := riveradapter.NewClient(pool, nil)
+	terminal, err := organizingworkflow.NewScopedTerminalHook(organizingRepository)
 	if err != nil {
 		t.Fatal(err)
 	}
-	inserter, err := riveradapter.NewJobInserter(client)
-	if err != nil {
-		t.Fatal(err)
-	}
-	runtime, err := NewRuntimeRepositoryWithHooks(pool, inserter, RuntimeRepositoryHooks{Terminal: organizingworkflow.NewTerminalHook()})
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime := newGORMRuntimeTestRepository(t, platformPool, GORMRuntimeRepositoryHooks{Terminal: terminal})
 	request := organizingTerminalStartRequest(t, workspaceID, snapshotID)
 	started, err := runtime.Start(ctx, request)
 	if err != nil {

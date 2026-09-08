@@ -15,19 +15,21 @@ import (
 	changecontrolpostgres "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/adapter/postgres"
 	changecontroldomain "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	reindexcontract "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/contract"
 	workflowdomain "github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestRepositoryPostgreSQLPublicationReservationCompletionReplayAndReads(t *testing.T) {
-	runAuthoringIntegrationVariants(t, testRepositoryPostgreSQLPublicationReservationCompletionReplayAndReads)
+	runAuthoringIntegration(t, testRepositoryPostgreSQLPublicationReservationCompletionReplayAndReads)
 }
 
-func testRepositoryPostgreSQLPublicationReservationCompletionReplayAndReads(t *testing.T, variant authoringIntegrationVariant) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+func testRepositoryPostgreSQLPublicationReservationCompletionReplayAndReads(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
-	repository, pool := variant.open(t)
+	repository, platform := openAuthoringIntegration(t)
+	pool := platform.DB()
 	workspaceID := authoringIntegrationID(300)
 	otherWorkspaceID := authoringIntegrationID(301)
 	seedAuthoringWorkspace(t, ctx, pool, workspaceID, "authoring-publication")
@@ -62,7 +64,7 @@ func testRepositoryPostgreSQLPublicationReservationCompletionReplayAndReads(t *t
 
 	proposalID := authoringIntegrationID(306)
 	proposalRevisionID := authoringIntegrationID(307)
-	seedAuthoringPublicationProposal(t, ctx, pool, reserved.Reservation, content, proposalID, proposalRevisionID, now.Add(3*time.Second))
+	seedAuthoringPublicationProposal(t, ctx, platform, reserved.Reservation, content, proposalID, proposalRevisionID, now.Add(3*time.Second))
 	completed, err := repository.CompletePublication(ctx, authoringapp.CompletePublicationRecord{
 		Binding: binding, ReservationID: reserved.Reservation.ID, PublicationID: authoringIntegrationID(308),
 		ProposalID: proposalID, ProposalRevisionID: proposalRevisionID, CompletedAt: now.Add(4 * time.Second),
@@ -116,7 +118,7 @@ func testRepositoryPostgreSQLPublicationReservationCompletionReplayAndReads(t *t
 	}
 	mismatchProposalID := authoringIntegrationID(313)
 	mismatchProposalRevisionID := authoringIntegrationID(314)
-	seedAuthoringPublicationProposal(t, ctx, pool, mismatchReservation.Reservation, mismatchContent+" changed",
+	seedAuthoringPublicationProposal(t, ctx, platform, mismatchReservation.Reservation, mismatchContent+" changed",
 		mismatchProposalID, mismatchProposalRevisionID, now.Add(12*time.Second))
 	_, err = repository.CompletePublication(ctx, authoringapp.CompletePublicationRecord{
 		Binding: mismatchBinding, ReservationID: mismatchReservation.Reservation.ID, PublicationID: authoringIntegrationID(315),
@@ -141,13 +143,14 @@ func testRepositoryPostgreSQLPublicationReservationCompletionReplayAndReads(t *t
 }
 
 func TestRepositoryPostgreSQLPublicationFinalizerPublishesAndMarksRecovery(t *testing.T) {
-	runAuthoringIntegrationVariants(t, testRepositoryPostgreSQLPublicationFinalizerPublishesAndMarksRecovery)
+	runAuthoringIntegration(t, testRepositoryPostgreSQLPublicationFinalizerPublishesAndMarksRecovery)
 }
 
-func testRepositoryPostgreSQLPublicationFinalizerPublishesAndMarksRecovery(t *testing.T, variant authoringIntegrationVariant) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+func testRepositoryPostgreSQLPublicationFinalizerPublishesAndMarksRecovery(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
-	repository, pool := variant.open(t)
+	repository, platform := openAuthoringIntegration(t)
+	pool := platform.DB()
 	workspaceID := authoringIntegrationID(800)
 	seedAuthoringWorkspace(t, ctx, pool, workspaceID, "authoring-finalizer")
 	var now time.Time
@@ -161,7 +164,7 @@ func testRepositoryPostgreSQLPublicationFinalizerPublishesAndMarksRecovery(t *te
 	targetRevisionID := authoringIntegrationID(803)
 	previousContent := "# Published\n\nVersion one."
 	targetContent := "# Published\n\nVersion two."
-	seedAuthoringPublishedDocumentRevisions(t, ctx, pool, workspaceID, documentID, previousRevisionID,
+	seedAuthoringPublishedDocumentRevisions(t, ctx, platform, workspaceID, documentID, previousRevisionID,
 		targetRevisionID, "notes/published.md", previousContent, targetContent, 1800, now)
 	binding := authoringPublishBinding(t, workspaceID, documentID, targetRevisionID, "replace-published")
 	preparation, err := repository.ReservePublication(ctx, authoringapp.ReservePublicationRecord{
@@ -171,7 +174,7 @@ func testRepositoryPostgreSQLPublicationFinalizerPublishesAndMarksRecovery(t *te
 		preparation.Reservation.BaseVersion != authoringdomain.ComputeContentHash(previousContent) {
 		t.Fatalf("replace preparation=%#v err=%v", preparation, err)
 	}
-	proposal := seedAuthoringPublicationProposal(t, ctx, pool, preparation.Reservation, targetContent,
+	proposal := seedAuthoringPublicationProposal(t, ctx, platform, preparation.Reservation, targetContent,
 		authoringIntegrationID(805), authoringIntegrationID(806), now.Add(3*time.Second))
 	completed, err := repository.CompletePublication(ctx, authoringapp.CompletePublicationRecord{
 		Binding: binding, ReservationID: preparation.Reservation.ID, PublicationID: authoringIntegrationID(807),
@@ -180,7 +183,7 @@ func testRepositoryPostgreSQLPublicationFinalizerPublishesAndMarksRecovery(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	gitCommit := seedAuthoringProposalCommit(t, ctx, pool, proposal, preparation.Reservation, targetContent, 820, now.Add(5*time.Second))
+	gitCommit := seedAuthoringProposalCommit(t, ctx, platform, proposal, preparation.Reservation, targetContent, 820, now.Add(5*time.Second))
 	missed, err := repository.ReconcilePublications(ctx, authoringapp.ReconcileQuery{
 		WorkspaceID: workspaceID, ProposalID: authoringIntegrationID(808),
 		ProposalRevisionID: authoringIntegrationID(809), Limit: 1, Now: now.Add(6 * time.Second),
@@ -226,7 +229,7 @@ func testRepositoryPostgreSQLPublicationFinalizerPublishesAndMarksRecovery(t *te
 	recoveryTargetID := authoringIntegrationID(852)
 	recoveryPreviousContent := "# Recovery\n\nVersion one."
 	recoveryTargetContent := "# Recovery\n\nVersion two."
-	seedAuthoringPublishedDocumentRevisions(t, ctx, pool, workspaceID, recoveryDocumentID, recoveryPreviousID,
+	seedAuthoringPublishedDocumentRevisions(t, ctx, platform, workspaceID, recoveryDocumentID, recoveryPreviousID,
 		recoveryTargetID, "notes/recovery.md", recoveryPreviousContent, recoveryTargetContent, 1900, now.Add(10*time.Second))
 	recoveryBinding := authoringPublishBinding(t, workspaceID, recoveryDocumentID, recoveryTargetID, "replace-recovery")
 	recoveryPreparation, err := repository.ReservePublication(ctx, authoringapp.ReservePublicationRecord{
@@ -235,7 +238,7 @@ func testRepositoryPostgreSQLPublicationFinalizerPublishesAndMarksRecovery(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	recoveryProposal := seedAuthoringPublicationProposal(t, ctx, pool, recoveryPreparation.Reservation,
+	recoveryProposal := seedAuthoringPublicationProposal(t, ctx, platform, recoveryPreparation.Reservation,
 		recoveryTargetContent, authoringIntegrationID(854), authoringIntegrationID(855), now.Add(13*time.Second))
 	recoveryPublication, err := repository.CompletePublication(ctx, authoringapp.CompletePublicationRecord{
 		Binding: recoveryBinding, ReservationID: recoveryPreparation.Reservation.ID, PublicationID: authoringIntegrationID(856),
@@ -244,7 +247,7 @@ func testRepositoryPostgreSQLPublicationFinalizerPublishesAndMarksRecovery(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	seedAuthoringProposalCommit(t, ctx, pool, recoveryProposal, recoveryPreparation.Reservation,
+	seedAuthoringProposalCommit(t, ctx, platform, recoveryProposal, recoveryPreparation.Reservation,
 		recoveryTargetContent, 870, now.Add(15*time.Second))
 	if _, err := pool.Exec(ctx, `UPDATE core.document
 		SET lifecycle_status='ARCHIVED',version=version+1,updated_at=$1
@@ -272,13 +275,14 @@ func testRepositoryPostgreSQLPublicationFinalizerPublishesAndMarksRecovery(t *te
 }
 
 func TestRepositoryPostgreSQLRestorePublicationAppendsRevisionAndReplays(t *testing.T) {
-	runAuthoringIntegrationVariants(t, testRepositoryPostgreSQLRestorePublicationAppendsRevisionAndReplays)
+	runAuthoringIntegration(t, testRepositoryPostgreSQLRestorePublicationAppendsRevisionAndReplays)
 }
 
-func testRepositoryPostgreSQLRestorePublicationAppendsRevisionAndReplays(t *testing.T, variant authoringIntegrationVariant) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+func testRepositoryPostgreSQLRestorePublicationAppendsRevisionAndReplays(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
-	repository, pool := variant.open(t)
+	repository, platform := openAuthoringIntegration(t)
+	pool := platform.DB()
 	workspaceID := authoringIntegrationID(2100)
 	seedAuthoringWorkspace(t, ctx, pool, workspaceID, "authoring-restore-finalizer")
 	var now time.Time
@@ -291,7 +295,7 @@ func testRepositoryPostgreSQLRestorePublicationAppendsRevisionAndReplays(t *test
 	draftRevisionID := authoringIntegrationID(2103)
 	currentContent := "# Restore\n\nCurrent publication."
 	targetContent := "# Restore\n\nEarlier verified content."
-	seedAuthoringPublishedDocumentRevisions(t, ctx, pool, workspaceID, documentID, currentRevisionID,
+	seedAuthoringPublishedDocumentRevisions(t, ctx, platform, workspaceID, documentID, currentRevisionID,
 		draftRevisionID, "notes/restore.md", currentContent, "# Restore\n\nUnpublished draft.", 2120, now)
 	detail, err := repository.GetDocumentDetail(ctx, workspaceID, documentID)
 	if err != nil || detail.CurrentRevision == nil {
@@ -341,7 +345,7 @@ func testRepositoryPostgreSQLRestorePublicationAppendsRevisionAndReplays(t *test
 			CreatedAt: now.Add(2 * time.Second),
 		},
 	}
-	changeControlRepository, err := changecontrolpostgres.NewRepository(pool)
+	changeControlRepository, err := changecontrolpostgres.NewGORMRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -353,7 +357,7 @@ func testRepositoryPostgreSQLRestorePublicationAppendsRevisionAndReplays(t *test
 		WorkspaceID: workspaceID, TargetPath: detail.Document.CanonicalPath,
 		TargetMode: authoringdomain.ProposalTargetReplace, BaseVersion: restore.CurrentContentHash,
 	}
-	gitCommit := seedAuthoringProposalCommit(t, ctx, pool, proposal, reservation, targetContent,
+	gitCommit := seedAuthoringProposalCommit(t, ctx, platform, proposal, reservation, targetContent,
 		writebackIDsStart, now.Add(3*time.Second))
 	writebackID := authoringIntegrationID(writebackIDsStart + 6)
 	check := authoringapp.RestoreWritebackCheck{
@@ -464,16 +468,17 @@ func seedAuthoringDraftDocumentRevision(
 func seedAuthoringPublishedDocumentRevisions(
 	t *testing.T,
 	ctx context.Context,
-	pool *pgxpool.Pool,
+	platform *platformpostgres.Pool,
 	workspaceID, documentID, previousRevisionID, targetRevisionID foundation.ID,
 	targetPath, previousContent, targetContent string,
 	idStart int,
 	createdAt time.Time,
 ) {
 	t.Helper()
+	pool := platform.DB()
 	seedAuthoringDraftDocumentRevision(t, ctx, pool, workspaceID, documentID, previousRevisionID, 1,
 		targetPath, "Published document", previousContent, "", createdAt)
-	repository, err := NewRepository(pool)
+	repository, err := NewGORMRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -484,7 +489,7 @@ func seedAuthoringPublishedDocumentRevisions(
 	if err != nil {
 		t.Fatal(err)
 	}
-	proposal := seedAuthoringPublicationProposal(t, ctx, pool, preparation.Reservation, previousContent,
+	proposal := seedAuthoringPublicationProposal(t, ctx, platform, preparation.Reservation, previousContent,
 		authoringIntegrationID(idStart+1), authoringIntegrationID(idStart+2), createdAt.Add(2*time.Millisecond))
 	if _, err := repository.CompletePublication(ctx, authoringapp.CompletePublicationRecord{
 		Binding: binding, ReservationID: preparation.Reservation.ID, PublicationID: authoringIntegrationID(idStart + 3),
@@ -492,7 +497,7 @@ func seedAuthoringPublishedDocumentRevisions(
 	}); err != nil {
 		t.Fatal(err)
 	}
-	seedAuthoringProposalCommit(t, ctx, pool, proposal, preparation.Reservation, previousContent,
+	seedAuthoringProposalCommit(t, ctx, platform, proposal, preparation.Reservation, previousContent,
 		idStart+10, createdAt.Add(4*time.Millisecond))
 	advanced, err := repository.ReconcilePublications(ctx, authoringapp.ReconcileQuery{
 		WorkspaceID: workspaceID, DocumentID: documentID, Limit: 1, Now: createdAt.Add(5 * time.Millisecond),
@@ -507,7 +512,7 @@ func seedAuthoringPublishedDocumentRevisions(
 func seedAuthoringProposalCommit(
 	t *testing.T,
 	ctx context.Context,
-	pool *pgxpool.Pool,
+	platform *platformpostgres.Pool,
 	proposal changecontroldomain.Proposal,
 	reservation authoringapp.PublicationReservation,
 	content string,
@@ -515,7 +520,8 @@ func seedAuthoringProposalCommit(
 	createdAt time.Time,
 ) string {
 	t.Helper()
-	repository, err := changecontrolpostgres.NewRepository(pool)
+	pool := platform.DB()
+	repository, err := changecontrolpostgres.NewGORMRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -696,14 +702,14 @@ func authoringIntegrationDigest(value string) string {
 func seedAuthoringPublicationProposal(
 	t *testing.T,
 	ctx context.Context,
-	pool *pgxpool.Pool,
+	platform *platformpostgres.Pool,
 	reservation authoringapp.PublicationReservation,
 	content string,
 	proposalID, proposalRevisionID foundation.ID,
 	createdAt time.Time,
 ) changecontroldomain.Proposal {
 	t.Helper()
-	repository, err := changecontrolpostgres.NewRepository(pool)
+	repository, err := changecontrolpostgres.NewGORMRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}

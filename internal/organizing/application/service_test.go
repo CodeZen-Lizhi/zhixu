@@ -867,7 +867,7 @@ func (resolver *organizingFixedMaterialResolver) Freeze(context.Context, foundat
 	return append([]domain.MaterialRef(nil), resolver.frozen...), nil
 }
 
-func (*organizingFixedMaterialResolver) VerifyFrozen(context.Context, any, foundation.ID, []domain.MaterialRef) error {
+func (*organizingFixedMaterialResolver) VerifyFrozenScoped(context.Context, foundation.TransactionScope, foundation.ID, []domain.MaterialRef) error {
 	return errors.New("VerifyFrozen must run inside the repository transaction")
 }
 
@@ -885,7 +885,7 @@ func (resolver *organizingCountingMaterialResolver) Freeze(context.Context, foun
 	resolver.freezeCalls++
 	return nil, errors.New("unexpected Freeze")
 }
-func (resolver *organizingCountingMaterialResolver) VerifyFrozen(context.Context, any, foundation.ID, []domain.MaterialRef) error {
+func (resolver *organizingCountingMaterialResolver) VerifyFrozenScoped(context.Context, foundation.TransactionScope, foundation.ID, []domain.MaterialRef) error {
 	return errors.New("unexpected VerifyFrozen")
 }
 
@@ -895,7 +895,7 @@ func (organizingNoopMaterialResolver) Resolve(context.Context, foundation.ID, []
 func (organizingNoopMaterialResolver) Freeze(context.Context, foundation.ID, []domain.MaterialRef) ([]domain.MaterialRef, error) {
 	return nil, errors.New("unexpected Freeze")
 }
-func (organizingNoopMaterialResolver) VerifyFrozen(context.Context, any, foundation.ID, []domain.MaterialRef) error {
+func (organizingNoopMaterialResolver) VerifyFrozenScoped(context.Context, foundation.TransactionScope, foundation.ID, []domain.MaterialRef) error {
 	return errors.New("unexpected VerifyFrozen")
 }
 

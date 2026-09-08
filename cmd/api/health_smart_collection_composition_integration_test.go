@@ -6,10 +6,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -27,11 +25,10 @@ import (
 	healthdomain "github.com/CodeZen-Lizhi/zhixu/internal/health/domain"
 	healthhttp "github.com/CodeZen-Lizhi/zhixu/internal/health/http"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
-	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	workflowapp "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
 	"github.com/gin-gonic/gin"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -40,7 +37,7 @@ func TestAPIHealthSmartCollectionCompositionStartsAndRejectsStaleBinding(t *test
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	workspaceID, topicID := seedAPIHealthCollectionFixture(t, ctx, database.DB())
-	service := newAPIHealthCollectionService(t, database.DB())
+	service := newAPIHealthCollectionService(t, database)
 	created, err := service.Create(ctx, collectionapp.CreateCommand{
 		WorkspaceID: workspaceID, Name: "API Health Collection", Query: topicCollectionQuery(),
 		ViewType: collectiondomain.ViewTypeList, IdempotencyKey: "api-health-collection-create",
@@ -53,27 +50,31 @@ func TestAPIHealthSmartCollectionCompositionStartsAndRejectsStaleBinding(t *test
 		t.Fatal(err)
 	}
 
-	events, err := eventspostgres.NewStore(database.DB())
+	events, err := eventspostgres.NewGORMStore(database)
 	if err != nil {
 		t.Fatal(err)
 	}
-	changeControlRepository, err := changecontrolpostgres.NewRepository(database.DB())
+	changeControlRepository, err := changecontrolpostgres.NewGORMRepository(database, events)
 	if err != nil {
 		t.Fatal(err)
 	}
-	healthCancellationGuard, err := healthpostgres.NewScanCancellationGuard(events)
+	healthCancellationGuard, err := healthpostgres.NewGORMScanCancellationGuard(database, events)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cancellationGuard, err := workflowapp.NewCompositeCancellationSafetyGuard(
+	graphCancellationGuard, err := graphpostgres.NewGORMRepository(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancellationGuard, err := workflowapp.NewCompositeScopedCancellationSafetyGuard(
 		changeControlRepository,
-		graphpostgres.NewSemanticLinkScanCancellationGuard(),
+		graphCancellationGuard,
 		healthCancellationGuard,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, runtime, err := newWorkflowComponents(database.DB(), config.Defaults(), cancellationGuard)
+	_, runtime, err := newWorkflowComponents(database, config.Defaults(), cancellationGuard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,9 +206,9 @@ func smartCollectionHealthStartBody(t *testing.T, workspaceID foundation.ID, bin
 	return body
 }
 
-func newAPIHealthCollectionService(t *testing.T, pool *pgxpool.Pool) *collectionapp.Service {
+func newAPIHealthCollectionService(t *testing.T, pool *platformpostgres.Pool) *collectionapp.Service {
 	t.Helper()
-	repository, err := collectionpostgres.NewRepository(pool)
+	repository, err := collectionpostgres.NewGORMRepository(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,7 +239,7 @@ func seedAPIHealthCollectionFixture(t *testing.T, ctx context.Context, pool *pgx
 	}
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	root := "/tmp/api-health-composition-" + string(workspaceID)
-	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'api-health-composition',$2,$2,$3,'test',1,$3,$3)`, string(workspaceID), root, now); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'api-health-composition',$2,$2,$3,'inactive',1,$3,$3)`, string(workspaceID), root, now); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `INSERT INTO core.topic(id,workspace_id,name,normalized_name,description,status,version,created_at,updated_at) VALUES($1,$2,'api health topic','api health topic','','ACTIVE',1,$3,$3)`, string(topicID), string(workspaceID), now); err != nil {
@@ -249,47 +250,8 @@ func seedAPIHealthCollectionFixture(t *testing.T, ctx context.Context, pool *pgx
 
 func newMigratedAPIHealthTestPool(t *testing.T) *platformpostgres.Pool {
 	t.Helper()
-	baseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
-	if baseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a PostgreSQL admin database")
-	}
-	ctx := context.Background()
-	parsed, err := url.Parse(baseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	admin, err := pgxpool.New(ctx, baseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	name := fmt.Sprintf("zhixu_api_health_%d", time.Now().UnixNano())
-	identifier := pgx.Identifier{name}.Sanitize()
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+identifier); err != nil {
-		admin.Close()
-		t.Fatal(err)
-	}
-	parsed.Path = "/" + name
-	databaseURL := parsed.String()
-	migrationPool, err := platformpostgres.OpenMigration(ctx, databaseURL, 4, 0)
-	if err == nil {
-		err = platformmigration.MigrateAtlas(ctx, migrationPool.DB())
-		migrationPool.Close()
-	}
-	if err != nil {
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-		t.Fatal(err)
-	}
-	database, err := platformpostgres.Open(ctx, databaseURL, 4, 0)
-	if err != nil {
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		database.Close()
-		_, _ = admin.Exec(context.Background(), "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-	})
-	return database
+	return testdb.Require(t, testdb.Config{
+		ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
+		MaxConns:         4,
+	}).Pool()
 }

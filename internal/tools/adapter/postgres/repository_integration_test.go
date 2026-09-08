@@ -7,33 +7,37 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/capability"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	"github.com/CodeZen-Lizhi/zhixu/internal/tools/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/tools/domain"
+	workflowpostgres "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/postgres"
 	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
 	workflowdomain "github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestRepositoryPolicyRefusedStartCASUnknownTimelineAndSecretBoundary(t *testing.T) {
-	pool, ctx := newToolRepositoryIntegrationPool(t)
-	repository, err := NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testToolRepositoryVariants(t, testRepositoryPolicyRefusedStartCASUnknownTimelineAndSecretBoundary)
+}
+
+func testRepositoryPolicyRefusedStartCASUnknownTimelineAndSecretBoundary(
+	t *testing.T,
+	platform *platformpostgres.Pool,
+	ctx context.Context,
+	variant toolRepositoryIntegrationVariant,
+) {
+	pool := platform.DB()
+	repository := variant.open(t, platform, false)
 	primary := seedToolRuntime(t, ctx, pool, 1, toolTestID(1))
 	secondary := seedToolRuntime(t, ctx, pool, 2, primary.workspaceID)
 	otherWorkspaceID := toolTestID(31)
@@ -271,11 +275,7 @@ func TestRepositoryPolicyRefusedStartCASUnknownTimelineAndSecretBoundary(t *test
 		if err != nil || started.Disposition != application.StartCallCreated {
 			t.Fatalf("response loss start=%#v err=%v", started, err)
 		}
-		faultDB := &commitResponseLossDB{pool: pool}
-		faultRepository, err := NewRepository(faultDB)
-		if err != nil {
-			t.Fatal(err)
-		}
+		faultRepository := variant.open(t, platform, true)
 		completed := successfulReadCall(started.Call, hash64('4'))
 		result, err := faultRepository.FinalizeCall(ctx, application.FinalizeCallCommand{ExpectedVersion: 1, Call: completed})
 		if err != nil || !result.Replayed || result.Call.Status != domain.CallSucceeded {
@@ -285,10 +285,7 @@ func TestRepositoryPolicyRefusedStartCASUnknownTimelineAndSecretBoundary(t *test
 
 	t.Run("started response loss recovers canonical call", func(t *testing.T) {
 		fixture := seedToolRuntime(t, ctx, pool, 64, primary.workspaceID)
-		faultRepository, err := NewRepository(&commitResponseLossDB{pool: pool})
-		if err != nil {
-			t.Fatal(err)
-		}
+		faultRepository := variant.open(t, platform, true)
 		call := startedCall(fixture, 1, toolTestID(1641), searchToolRef, "", hash64('5'))
 		result, err := faultRepository.StartCall(ctx, startCommand(fixture, call))
 		if err != nil || result.Disposition != application.StartCallReplayed || result.Call.ID != call.ID || result.Call.Status != domain.CallStarted {
@@ -298,10 +295,7 @@ func TestRepositoryPolicyRefusedStartCASUnknownTimelineAndSecretBoundary(t *test
 
 	t.Run("refused response loss recovers canonical call", func(t *testing.T) {
 		fixture := seedToolRuntime(t, ctx, pool, 65, primary.workspaceID)
-		faultRepository, err := NewRepository(&commitResponseLossDB{pool: pool})
-		if err != nil {
-			t.Fatal(err)
-		}
+		faultRepository := variant.open(t, platform, true)
 		call := refusedCall(fixture, 1, toolTestID(1651), "UnknownTool", hash64('6'))
 		result, err := faultRepository.RecordRefused(ctx, application.RecordRefusedCommand{Identity: fixture.identity, Call: call})
 		if err != nil || !result.Replayed || result.Call.ID != call.ID || result.Call.Status != domain.CallRefused {
@@ -428,11 +422,17 @@ func TestToolCallInsertGuardLocksAndValidatesRuntimeFence(t *testing.T) {
 }
 
 func TestRepositoryListsStaleStartedWithSkipLockedAndRecoversUnknown(t *testing.T) {
-	pool, ctx := newToolRepositoryIntegrationPool(t)
-	repository, err := NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testToolRepositoryVariants(t, testRepositoryListsStaleStartedWithSkipLockedAndRecoversUnknown)
+}
+
+func testRepositoryListsStaleStartedWithSkipLockedAndRecoversUnknown(
+	t *testing.T,
+	platform *platformpostgres.Pool,
+	ctx context.Context,
+	variant toolRepositoryIntegrationVariant,
+) {
+	pool := platform.DB()
+	repository := variant.open(t, platform, false)
 	fixture := seedToolRuntime(t, ctx, pool, 60, toolTestID(601))
 	call := startedCall(fixture, 1, toolTestID(1601), searchToolRef, "", hash64('7'))
 	started, err := repository.StartCall(ctx, startCommand(fixture, call))
@@ -503,11 +503,17 @@ func TestRepositoryListsStaleStartedWithSkipLockedAndRecoversUnknown(t *testing.
 }
 
 func TestRepositoryTrustedWritePreservesOriginalAttemptAndBypassesGenericRecovery(t *testing.T) {
-	pool, ctx := newToolRepositoryIntegrationPool(t)
-	repository, err := NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testToolRepositoryVariants(t, testRepositoryTrustedWritePreservesOriginalAttemptAndBypassesGenericRecovery)
+}
+
+func testRepositoryTrustedWritePreservesOriginalAttemptAndBypassesGenericRecovery(
+	t *testing.T,
+	platform *platformpostgres.Pool,
+	ctx context.Context,
+	variant toolRepositoryIntegrationVariant,
+) {
+	pool := platform.DB()
+	repository := variant.open(t, platform, false)
 	fixture := seedTrustedWriteRuntime(t, ctx, pool, 62, toolTestID(621))
 	receiptID := toolTestID(1621)
 	call := trustedWriteStartedCall(fixture, fixture.attemptID, toolTestID(1622), receiptID)
@@ -619,11 +625,17 @@ func TestRepositoryTrustedWritePreservesOriginalAttemptAndBypassesGenericRecover
 }
 
 func TestRepositoryStaleRecoverySkipsConcurrentHeartbeatAndRechecksFreshLease(t *testing.T) {
-	pool, ctx := newToolRepositoryIntegrationPool(t)
-	repository, err := NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testToolRepositoryVariants(t, testRepositoryStaleRecoverySkipsConcurrentHeartbeatAndRechecksFreshLease)
+}
+
+func testRepositoryStaleRecoverySkipsConcurrentHeartbeatAndRechecksFreshLease(
+	t *testing.T,
+	platform *platformpostgres.Pool,
+	ctx context.Context,
+	variant toolRepositoryIntegrationVariant,
+) {
+	pool := platform.DB()
+	repository := variant.open(t, platform, false)
 	fixture := seedToolRuntime(t, ctx, pool, 63, toolTestID(631))
 	call := startedCall(fixture, 1, toolTestID(1631), searchToolRef, "", hash64('5'))
 	started, err := repository.StartCall(ctx, startCommand(fixture, call))
@@ -868,7 +880,7 @@ func assertTerminalBindingCAS(
 	t *testing.T,
 	ctx context.Context,
 	pool *pgxpool.Pool,
-	repository *Repository,
+	repository application.ToolCallRepository,
 	fixture toolRuntimeFixture,
 	callNo int,
 	callID foundation.ID,
@@ -968,74 +980,74 @@ func errorCode(err error) string {
 	return ""
 }
 
-type commitResponseLossDB struct {
-	pool *pgxpool.Pool
-	lost atomic.Bool
+type toolRepositoryIntegrationRepository interface {
+	application.WorkflowPolicyReader
+	application.ToolCallRepository
+	application.TrustedWriteCallRepository
 }
 
-func (database *commitResponseLossDB) Begin(ctx context.Context) (pgx.Tx, error) {
-	tx, err := database.pool.Begin(ctx)
+type toolRepositoryIntegrationVariant struct {
+	name string
+	open func(*testing.T, *platformpostgres.Pool, bool) toolRepositoryIntegrationRepository
+}
+
+func testToolRepositoryVariants(
+	t *testing.T,
+	test func(*testing.T, *platformpostgres.Pool, context.Context, toolRepositoryIntegrationVariant),
+) {
+	t.Helper()
+	for _, variant := range []toolRepositoryIntegrationVariant{
+
+		{name: "gorm", open: openGORMToolRepositoryIntegration},
+	} {
+		t.Run(variant.name, func(t *testing.T) {
+			platform, ctx := newToolRepositoryIntegrationPlatform(t)
+			test(t, platform, ctx, variant)
+		})
+	}
+}
+
+func openGORMToolRepositoryIntegration(
+	t *testing.T,
+	platform *platformpostgres.Pool,
+	commitResponseLoss bool,
+) toolRepositoryIntegrationRepository {
+	t.Helper()
+	policy, err := workflowpostgres.NewGORMToolExecutionPolicySnapshot(platform)
 	if err != nil {
-		return nil, err
+		t.Fatal(err)
 	}
-	if !database.lost.Swap(true) {
-		return &commitResponseLossTx{Tx: tx}, nil
+	recovery, err := workflowpostgres.NewGORMToolCallRecoveryFence(platform)
+	if err != nil {
+		t.Fatal(err)
 	}
-	return tx, nil
+	repository, err := NewGORMRepository(platform, policy, recovery)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if commitResponseLoss {
+		fault := &toolRepositoryPostCommitUnitOfWork{
+			inner: repository.unitOfWork,
+			err:   errors.New("simulated response loss after commit"),
+		}
+		fault.armed.Store(true)
+		repository.unitOfWork = fault
+	}
+	return repository
 }
 
-type commitResponseLossTx struct{ pgx.Tx }
-
-func (tx *commitResponseLossTx) Commit(ctx context.Context) error {
-	if err := tx.Tx.Commit(ctx); err != nil {
-		return err
-	}
-	return errors.New("simulated response loss after commit")
+func newToolRepositoryIntegrationPlatform(t *testing.T) (*platformpostgres.Pool, context.Context) {
+	t.Helper()
+	fixture := testdb.Require(t, testdb.Config{
+		ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
+		Availability:     testdb.FailWhenUnavailable,
+		MaxConns:         16,
+	})
+	return fixture.Pool(), t.Context()
 }
 
 func newToolRepositoryIntegrationPool(t *testing.T) (*pgxpool.Pool, context.Context) {
 	t.Helper()
-	baseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
-	if baseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL for Tool repository integration tests")
-	}
-	ctx := context.Background()
-	parsed, err := url.Parse(baseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	admin, err := pgxpool.New(ctx, baseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	databaseName := fmt.Sprintf("zhixu_tools_%d", time.Now().UnixNano())
-	identifier := pgx.Identifier{databaseName}.Sanitize()
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+identifier); err != nil {
-		admin.Close()
-		t.Fatal(err)
-	}
-	parsed.Path = "/" + databaseName
-	databaseURL := parsed.String()
-	migrationPool, err := platformpostgres.OpenMigration(ctx, databaseURL, 4, 0)
-	if err == nil {
-		err = platformmigration.MigrateAtlas(ctx, migrationPool.DB())
-		migrationPool.Close()
-	}
-	if err != nil {
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-		t.Fatal(err)
-	}
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		pool.Close()
-		_, _ = admin.Exec(context.Background(), "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-	})
-	return pool, ctx
+	platform, ctx := newToolRepositoryIntegrationPlatform(t)
+	return platform.DB(), ctx
 }

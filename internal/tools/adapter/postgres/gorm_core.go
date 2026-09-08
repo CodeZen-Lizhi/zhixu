@@ -17,8 +17,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// GORMRepository is the staged Tools persistence implementation. Production
-// composition remains on Repository until the PostgreSQL parity gate passes.
+// GORMRepository persists Tool calls through the shared platform Pool.
 type GORMRepository struct {
 	database       *gorm.DB
 	unitOfWork     foundation.UnitOfWork

@@ -18,6 +18,7 @@ import (
 	artifactapp "github.com/CodeZen-Lizhi/zhixu/internal/artifact/application"
 	artifactdomain "github.com/CodeZen-Lizhi/zhixu/internal/artifact/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	reviewdomain "github.com/CodeZen-Lizhi/zhixu/internal/review/domain"
 	pathartifact "github.com/CodeZen-Lizhi/zhixu/internal/review/learningpath/adapter/artifact"
@@ -27,6 +28,7 @@ import (
 )
 
 type reviewPathFixture struct {
+	platform        *platformpostgres.Pool
 	workspaceID     foundation.ID
 	answerID        foundation.ID
 	cardID          foundation.ID
@@ -38,75 +40,47 @@ type reviewPathFixture struct {
 	contentHash     string
 }
 
-func newReviewPathTestDatabase(t *testing.T, ctx context.Context) *pgxpool.Pool {
+func newReviewPathTestDatabase(t *testing.T, ctx context.Context) *platformpostgres.Pool {
 	t.Helper()
 	fixture := testdb.Require(t, testdb.Config{MaxConns: 16, Availability: testdb.FailWhenUnavailable})
 	platform := fixture.Pool()
 	if platform == nil || platform.DB() == nil {
 		t.Fatal("shared PostgreSQL fixture did not provide a platform pool")
 	}
-	return platform.DB()
+	return platform
 }
 
-// runReviewPathIntegrationVariants exercises legacy and staged stores against
-// isolated migrated databases supplied by the shared platform Pool factory.
+// runReviewPathIntegrationVariants runs the final GORM store against a migrated shared Pool.
 func runReviewPathIntegrationVariants(t *testing.T, scenario func(*testing.T, context.Context, *pgxpool.Pool, reviewPathFixture, pathapp.Store)) {
 	t.Helper()
-	for _, name := range []string{"legacy-pgx", "gorm"} {
-		name := name
-		t.Run(name, func(t *testing.T) {
-			runReviewPathIntegrationVariant(t, name, scenario)
-		})
-	}
+	t.Run("gorm", func(t *testing.T) {
+		runReviewPathGORMIntegration(t, scenario)
+	})
 }
 
 func runReviewPathGORMIntegration(t *testing.T, scenario func(*testing.T, context.Context, *pgxpool.Pool, reviewPathFixture, pathapp.Store)) {
 	t.Helper()
-	runReviewPathIntegrationVariant(t, "gorm", scenario)
-}
-
-func runReviewPathIntegrationVariant(
-	t *testing.T,
-	name string,
-	scenario func(*testing.T, context.Context, *pgxpool.Pool, reviewPathFixture, pathapp.Store),
-) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 55*time.Second)
 	defer cancel()
-	fixture := testdb.Require(t, testdb.Config{MaxConns: 16, Availability: testdb.FailWhenUnavailable})
-	platform := fixture.Pool()
-	if platform == nil || platform.DB() == nil {
-		t.Fatal("shared PostgreSQL fixture did not provide a platform pool")
+	platform := newReviewPathTestDatabase(t, ctx)
+	if _, err := platform.GORM(); err != nil {
+		t.Fatalf("shared PostgreSQL fixture did not provide a GORM root: %v", err)
 	}
-	var store pathapp.Store
-	switch name {
-	case "legacy-pgx":
-		legacy, err := NewRepository(platform.DB())
-		if err != nil {
-			t.Fatal(err)
-		}
-		store = legacy
-	case "gorm":
-		if _, err := platform.GORM(); err != nil {
-			t.Fatalf("shared PostgreSQL fixture did not provide a GORM root: %v", err)
-		}
-		if _, err := platform.UnitOfWork(); err != nil {
-			t.Fatalf("shared PostgreSQL fixture did not provide a Unit of Work: %v", err)
-		}
-		gormStore, err := NewGORMRepository(platform)
-		if err != nil {
-			t.Fatal(err)
-		}
-		store = gormStore
-	default:
-		t.Fatalf("unknown Review Learning Path integration variant %q", name)
+	if _, err := platform.UnitOfWork(); err != nil {
+		t.Fatalf("shared PostgreSQL fixture did not provide a Unit of Work: %v", err)
 	}
-	scenario(t, ctx, platform.DB(), seedReviewPathFixture(t, ctx, platform.DB()), store)
+	store, err := NewGORMRepository(platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scenario(t, ctx, platform.DB(), seedReviewPathFixture(t, ctx, platform), store)
 }
 
-func seedReviewPathFixture(t *testing.T, ctx context.Context, pool *pgxpool.Pool) reviewPathFixture {
+func seedReviewPathFixture(t *testing.T, ctx context.Context, platform *platformpostgres.Pool) reviewPathFixture {
 	t.Helper()
+	pool := platform.DB()
 	fixture := reviewPathFixture{
+		platform:        platform,
 		workspaceID:     reviewPathIntegrationID(1),
 		answerID:        reviewPathIntegrationID(15),
 		cardID:          reviewPathIntegrationID(13),
@@ -278,11 +252,11 @@ func seedReviewPathFixture(t *testing.T, ctx context.Context, pool *pgxpool.Pool
 
 func newReviewPathProductionBridge(
 	t *testing.T,
-	db artifactpostgres.DB,
+	platform *platformpostgres.Pool,
 	contentHash string,
-) (*pathartifact.Bridge, *artifactpostgres.Repository) {
+) (*pathartifact.Bridge, *artifactpostgres.GORMRepository) {
 	t.Helper()
-	repository, err := artifactpostgres.NewRepository(db)
+	repository, err := artifactpostgres.NewGORMRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -4,17 +4,16 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"log/slog"
-	"net/url"
 	"os"
 	"testing"
-	"time"
 
 	agentworkflow "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/workflow"
 	agentapplication "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
 	artifactworkflow "github.com/CodeZen-Lizhi/zhixu/internal/artifact/workflow"
+	auditpostgres "github.com/CodeZen-Lizhi/zhixu/internal/audit/adapter/postgres"
+	auditapplication "github.com/CodeZen-Lizhi/zhixu/internal/audit/application"
 	changecontrolworkflow "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/workflow"
 	conversationworkflow "github.com/CodeZen-Lizhi/zhixu/internal/conversation/workflow"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
@@ -22,24 +21,19 @@ import (
 	memoryapplication "github.com/CodeZen-Lizhi/zhixu/internal/memory/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/gitcli"
-	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	toolworkflow "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/workflow"
 	toolsapplication "github.com/CodeZen-Lizhi/zhixu/internal/tools/application"
 	toolsdomain "github.com/CodeZen-Lizhi/zhixu/internal/tools/domain"
 	workspacepostgres "github.com/CodeZen-Lizhi/zhixu/internal/workspace/adapter/postgres"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestWorkerToolCompositionSeparatesContractsExecutorsAndTrustedAudit(t *testing.T) {
 	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated PostgreSQL database")
-	}
 	pool := newMigratedWorkerTestPool(t, databaseURL)
-	workspaceRepository, err := workspacepostgres.NewRepository(pool)
+	workspaceRepository, err := workspacepostgres.NewGORMRepository(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +52,9 @@ func TestWorkerToolCompositionSeparatesContractsExecutorsAndTrustedAudit(t *test
 
 	cfg := config.Defaults()
 	cfg.ToolRuntimeMode = config.ToolModeEnabled
-	enabled, err := newToolRuntimeComponents(pool, cfg, workspaceRepository, gitInspector)
+	cfg.WorkspaceAnalysisWorkerEnabled = true
+	enabled, err := newToolRuntimeComponents(pool, cfg, workspaceRepository, gitInspector,
+		toolRuntimeCompositionInput{workspaceAnalysisAudit: newWorkerTestAuditRecorder(t, pool)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,64 +133,47 @@ func TestWorkerToolCompositionSeparatesContractsExecutorsAndTrustedAudit(t *test
 	}
 }
 
-func newMigratedWorkerTestPool(t *testing.T, baseURL string) *pgxpool.Pool {
+func newMigratedWorkerTestPool(t *testing.T, baseURL string) *platformpostgres.Pool {
 	t.Helper()
-	ctx := context.Background()
-	parsed, err := url.Parse(baseURL)
+	return testdb.Require(t, testdb.Config{ExternalAdminURL: baseURL, MaxConns: 8}).Pool()
+}
+
+func newWorkerTestAuditRecorder(t *testing.T, pool *platformpostgres.Pool) *auditapplication.Recorder {
+	t.Helper()
+	store, err := auditpostgres.NewGORMStore(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
-	admin, err := pgxpool.New(ctx, baseURL)
+	recorder, err := auditapplication.NewRecorder(store)
 	if err != nil {
 		t.Fatal(err)
 	}
-	name := fmt.Sprintf("zhixu_worker_rag_%d", time.Now().UnixNano())
-	identifier := pgx.Identifier{name}.Sanitize()
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+identifier); err != nil {
-		admin.Close()
-		t.Fatal(err)
-	}
-	parsed.Path = "/" + name
-	databaseURL := parsed.String()
-	migrationPool, err := platformpostgres.OpenMigration(ctx, databaseURL, 4, 0)
-	if err == nil {
-		err = platformmigration.MigrateAtlas(ctx, migrationPool.DB())
-		migrationPool.Close()
-	}
+	return recorder
+}
+
+func newWorkerTestMemoryRepository(t *testing.T, pool *platformpostgres.Pool) *memorypostgres.GORMRepository {
+	t.Helper()
+	database, err := pool.GORM()
 	if err != nil {
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
 		t.Fatal(err)
 	}
-	pool, err := pgxpool.New(ctx, databaseURL)
+	unitOfWork, err := pool.UnitOfWork()
 	if err != nil {
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
 		t.Fatal(err)
 	}
-	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
+	repository, err := memorypostgres.NewGORMRepository(database, unitOfWork)
+	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		pool.Close()
-		_, _ = admin.Exec(context.Background(), "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-	})
-	return pool
+	return repository
 }
 
 func TestWorkerChatCompositionUsesEinoSchedulersAndRegistersRelationAndRAGTogether(t *testing.T) {
 	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated PostgreSQL database")
-	}
 	pool := newMigratedWorkerTestPool(t, databaseURL)
 	var requiredTables int
 	var tableNames string
-	if err := pool.QueryRow(context.Background(), `
+	if err := pool.DB().QueryRow(context.Background(), `
 		SELECT count(*),COALESCE(string_agg(table_schema||'.'||table_name,',' ORDER BY table_schema,table_name),'')
 		FROM information_schema.tables
 		WHERE (table_schema,table_name) IN (
@@ -202,14 +181,11 @@ func TestWorkerChatCompositionUsesEinoSchedulersAndRegistersRelationAndRAGTogeth
 		)`).Scan(&requiredTables, &tableNames); err != nil || requiredTables != 4 {
 		t.Fatalf("required RAG PostgreSQL table count=%d tables=%q err=%v", requiredTables, tableNames, err)
 	}
-	workspaceRepository, err := workspacepostgres.NewRepository(pool)
+	workspaceRepository, err := workspacepostgres.NewGORMRepository(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
-	memoryRepository, err := memorypostgres.NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
+	memoryRepository := newWorkerTestMemoryRepository(t, pool)
 	memoryService, err := memoryapplication.NewService(memoryapplication.Dependencies{
 		Repository: memoryRepository,
 		IDs:        foundation.NewUUIDGenerator(nil),
@@ -245,11 +221,13 @@ func TestWorkerChatCompositionUsesEinoSchedulersAndRegistersRelationAndRAGTogeth
 	cfg.ChatModel = "composition-test"
 	cfg.ChatModelVersion = "composition-test-v1"
 	cfg.ToolRuntimeMode = config.ToolModeEnabled
+	cfg.WorkspaceAnalysisWorkerEnabled = true
 	gitInspector, err := gitcli.NewWritebackClient(gitcli.New(""), workspaceRepository)
 	if err != nil {
 		t.Fatal(err)
 	}
-	enabled, err := newToolRuntimeComponents(pool, cfg, workspaceRepository, gitInspector)
+	enabled, err := newToolRuntimeComponents(pool, cfg, workspaceRepository, gitInspector,
+		toolRuntimeCompositionInput{workspaceAnalysisAudit: newWorkerTestAuditRecorder(t, pool)})
 	if err != nil {
 		t.Fatal(err)
 	}

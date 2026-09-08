@@ -16,8 +16,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// GORMRepository is the staged Artifact persistence implementation. Production
-// composition remains on Repository until the TODO9 equivalence gate passes.
+// GORMRepository persists Artifact facts through the shared platform Pool.
 type GORMRepository struct {
 	database   *gorm.DB
 	unitOfWork foundation.UnitOfWork
@@ -505,8 +504,8 @@ func (repository *GORMRepository) GetExport(ctx context.Context, workspaceID, ar
 	return record, nil
 }
 
-// ListSectionGenerations reads the same recovery projection as the legacy
-// repository while using the shared GORM transaction boundary.
+// ListSectionGenerations reads the recovery projection in one repeatable-read,
+// read-only transaction through the shared GORM boundary.
 func (repository *GORMRepository) ListSectionGenerations(ctx context.Context, workspaceID, artifactID foundation.ID) (artifactapp.SectionGenerationSnapshot, error) {
 	if err := repository.ready(); err != nil {
 		return artifactapp.SectionGenerationSnapshot{}, err

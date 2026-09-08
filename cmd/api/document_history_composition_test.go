@@ -9,25 +9,25 @@ import (
 	changecontrolapplication "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/gitcli"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	workspacedomain "github.com/CodeZen-Lizhi/zhixu/internal/workspace/domain"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestNewDocumentHistoryHandlerRequiresEveryProductionDependency(t *testing.T) {
 	workspaces := documentHistoryWorkspaceRepositoryFake{}
 	proposals := &changecontrolapplication.Service{}
-	lookup := &changecontrolpostgres.Repository{}
+	lookup := &changecontrolpostgres.GORMRepository{}
 	for _, test := range []struct {
 		name       string
-		pool       *pgxpool.Pool
+		pool       *platformpostgres.Pool
 		workspaces gitcli.WorkspaceRepository
 		proposals  *changecontrolapplication.Service
-		lookup     *changecontrolpostgres.Repository
+		lookup     *changecontrolpostgres.GORMRepository
 	}{
 		{name: "database", workspaces: workspaces, proposals: proposals, lookup: lookup},
-		{name: "workspace repository", pool: &pgxpool.Pool{}, proposals: proposals, lookup: lookup},
-		{name: "proposal service", pool: &pgxpool.Pool{}, workspaces: workspaces, lookup: lookup},
-		{name: "proposal lookup", pool: &pgxpool.Pool{}, workspaces: workspaces, proposals: proposals},
+		{name: "workspace repository", pool: apiConstructorPool(t), proposals: proposals, lookup: lookup},
+		{name: "proposal service", pool: apiConstructorPool(t), workspaces: workspaces, lookup: lookup},
+		{name: "proposal lookup", pool: apiConstructorPool(t), workspaces: workspaces, proposals: proposals},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if handler, err := newDocumentHistoryHandler(test.pool, test.workspaces, test.proposals, test.lookup, time.Second); err == nil || handler != nil {
@@ -39,10 +39,10 @@ func TestNewDocumentHistoryHandlerRequiresEveryProductionDependency(t *testing.T
 
 func TestNewDocumentHistoryHandlerComposesProductionBoundaries(t *testing.T) {
 	handler, err := newDocumentHistoryHandler(
-		&pgxpool.Pool{},
+		apiConstructorPool(t),
 		documentHistoryWorkspaceRepositoryFake{},
 		&changecontrolapplication.Service{},
-		&changecontrolpostgres.Repository{},
+		&changecontrolpostgres.GORMRepository{},
 		time.Second,
 	)
 	if err != nil || handler == nil || !handler.Available() {

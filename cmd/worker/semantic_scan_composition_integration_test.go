@@ -15,9 +15,6 @@ import (
 
 func TestWorkerRegistersTopicV1AndSmartCollectionV2SemanticScans(t *testing.T) {
 	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a PostgreSQL admin database")
-	}
 	pool := newMigratedWorkerTestPool(t, databaseURL)
 	components, err := newWorkerComponents(pool, config.Defaults(), slog.New(slog.NewTextHandler(io.Discard, nil)), observability.NewMemoryMetrics())
 	if err != nil {

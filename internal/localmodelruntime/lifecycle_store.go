@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	"github.com/jackc/pgx/v5"
 )
 
 // LifecycleStore is the narrow persistence seam shared by the supervisor and
@@ -45,28 +44,11 @@ type TestPreparationStore interface {
 	CompleteTestProbe(context.Context, TestProbeCompletionCommand) (OperationRecord, error)
 }
 
-// TxLifecycle is the legacy unbound form used by callers that own a pgx
-// transaction. It remains temporarily for the Model Settings legacy adapter;
-// new code must use ScopedTxLifecycle so a concrete driver type does not cross
-// an application boundary.
-type TxLifecycle interface {
-	SeedActivationPreparation(context.Context, pgx.Tx, ActivationPreparationCommand) (ActivationPreparation, error)
-	ReadOperationByRollout(context.Context, pgx.Tx, foundation.ID) (OperationRecord, error)
-	ReadOperationByTarget(context.Context, pgx.Tx, int64) (OperationRecord, error)
-	CompleteActivationPreparation(context.Context, pgx.Tx, foundation.ID, string, bool) (OperationRecord, error)
-}
-
-var _ TxLifecycle = (*PostgresStore)(nil)
-
-// ScopedTxLifecycle is the database-neutral transaction seam for the staged
-// GORM implementation. The returned TxStore never owns commit or rollback;
-// the caller retains transaction ownership.
+// ScopedTxLifecycle binds lifecycle operations to a caller-owned transaction.
+// The returned TxStore never owns commit or rollback.
 type ScopedTxLifecycle interface {
 	WithScope(foundation.TransactionScope) (TxStore, error)
 }
-
-// WithTx binds lifecycle operations to an existing PostgreSQL transaction.
-func (store *PostgresStore) WithTx(tx pgx.Tx) TxStore { return &txStore{tx: tx} }
 
 // ManagerStore owns the singleton supervisor lease.
 type ManagerStore interface {

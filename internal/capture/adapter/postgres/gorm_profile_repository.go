@@ -24,7 +24,7 @@ type GORMProfileRepository struct {
 	modelRuns  agentapp.ScopedModelRunFinalizer
 }
 
-// NewGORMProfileRepository creates the staged GORM Profile repository from one
+// NewGORMProfileRepository creates the GORM Profile repository from one
 // shared platform Pool and the Agent-owned scoped Model Run port.
 func NewGORMProfileRepository(
 	pool *platformpostgres.Pool,

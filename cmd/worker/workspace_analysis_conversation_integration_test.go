@@ -38,6 +38,7 @@ import (
 	knowledgeapplication "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
 	platformfilesystem "github.com/CodeZen-Lizhi/zhixu/internal/platform/filesystem"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	retrievalpostgres "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/adapter/postgres"
 	retrievalworkspace "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/adapter/workspace"
 	retrievalapplication "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/application"
@@ -65,18 +66,16 @@ const workspaceAnalysisSmokeAnswer = "The approved recovery evidence requires du
 // receipts, candidate persistence and final publication remain production code.
 func TestPublicConversationRunsThroughRiverWorkspaceAnalysis(t *testing.T) {
 	baseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
-	if baseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL for the Workspace Analysis Conversation integration gate")
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 55*time.Second)
 	defer cancel()
-	pool := newMigratedWorkerTestPool(t, baseURL)
+	database := newMigratedWorkerTestPool(t, baseURL)
+	pool := database.DB()
 	root := t.TempDir()
 	seedWorkspaceAnalysisGitRepository(t, ctx, root)
-	seedWorkspaceAnalysisConversationKnowledge(t, ctx, pool, root)
+	seedWorkspaceAnalysisConversationKnowledge(t, ctx, database, root)
 
 	model := &workspaceAnalysisRequestAwareModel{}
-	router, workerClient := newWorkspaceAnalysisConversationIntegrationRuntime(t, pool, model, nil)
+	router, workerClient := newWorkspaceAnalysisConversationIntegrationRuntime(t, database, model, nil)
 	server := httptest.NewServer(router)
 	defer server.Close()
 	if err := workerClient.Start(ctx); err != nil {
@@ -121,20 +120,18 @@ func TestPublicConversationRunsThroughRiverWorkspaceAnalysis(t *testing.T) {
 // reuse the original logical Tool operation without observing Git a second time.
 func TestPublicConversationWorkspaceAnalysisReceiptLossLeaseReclaimReusesGitReceipt(t *testing.T) {
 	baseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
-	if baseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL for the Workspace Analysis receipt-loss integration gate")
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 55*time.Second)
 	defer cancel()
-	pool := newMigratedWorkerTestPool(t, baseURL)
+	database := newMigratedWorkerTestPool(t, baseURL)
+	pool := database.DB()
 	root := t.TempDir()
 	seedWorkspaceAnalysisGitRepository(t, ctx, root)
-	seedWorkspaceAnalysisConversationKnowledge(t, ctx, pool, root)
+	seedWorkspaceAnalysisConversationKnowledge(t, ctx, database, root)
 
 	model := &workspaceAnalysisRequestAwareModel{}
 	completionLoss := &failFirstWorkspaceAnalysisCompletion{}
 	gitExecutions := &workspaceAnalysisToolExecutionCounter{}
-	router, workerClient := newWorkspaceAnalysisConversationIntegrationRuntime(t, pool, model, &workspaceAnalysisConversationRuntimeFault{
+	router, workerClient := newWorkspaceAnalysisConversationIntegrationRuntime(t, database, model, &workspaceAnalysisConversationRuntimeFault{
 		decorateCoordinator: completionLoss.decorate,
 		toolExecutions:      gitExecutions,
 	})
@@ -194,7 +191,7 @@ func seedWorkspaceAnalysisGitRepository(t *testing.T, ctx context.Context, root 
 // seedWorkspaceAnalysisConversationKnowledge creates the same bounded
 // retrieval provenance as the RAG fixture, but with the verified Workspace
 // state required by ReadGitStatus@2.
-func seedWorkspaceAnalysisConversationKnowledge(t *testing.T, ctx context.Context, pool *pgxpool.Pool, root string) {
+func seedWorkspaceAnalysisConversationKnowledge(t *testing.T, ctx context.Context, pool *platformpostgres.Pool, root string) {
 	t.Helper()
 	content := []byte("Approved recovery replays durable facts without duplicating provider work.")
 	digest := sha256.Sum256(content)
@@ -227,11 +224,11 @@ func seedWorkspaceAnalysisConversationKnowledge(t *testing.T, ctx context.Contex
 		{`INSERT INTO retrieval.index_manifest_source(index_version_id,workspace_id,source_id,source_version_id,parse_projection_id,selection_status,created_at) VALUES($1,$2,$3,$4,$5,'included',$6)`, []any{string(ragSmokeIndexID), string(ragSmokeWorkspaceID), string(ragSmokeSourceID), string(ragSmokeSourceVersionID), string(ragSmokeProjectionID), at}},
 	}
 	for _, statement := range statements {
-		if _, err := pool.Exec(ctx, statement.sql, statement.args...); err != nil {
+		if _, err := pool.DB().Exec(ctx, statement.sql, statement.args...); err != nil {
 			t.Fatal(err)
 		}
 	}
-	retrievalRepository, err := retrievalpostgres.NewRepository(pool)
+	retrievalRepository, err := retrievalpostgres.NewGORMRepository(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,28 +251,28 @@ func seedWorkspaceAnalysisConversationKnowledge(t *testing.T, ctx context.Contex
 
 func newWorkspaceAnalysisConversationIntegrationRuntime(
 	t *testing.T,
-	pool *pgxpool.Pool,
+	pool *platformpostgres.Pool,
 	model workspaceAnalysisIntegrationModel,
 	fault *workspaceAnalysisConversationRuntimeFault,
 ) (http.Handler, *riveradapter.Client) {
 	t.Helper()
-	events, err := eventspostgres.NewStore(pool)
+	events, err := eventspostgres.NewGORMStore(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
-	conversationRepository, err := conversationpostgres.NewRepository(pool, events)
+	conversationRepository, err := conversationpostgres.NewGORMRepository(pool, events)
 	if err != nil {
 		t.Fatal(err)
 	}
-	agentRepository, err := agentpostgres.NewRepository(pool)
+	agentRepository, err := agentpostgres.NewGORMRepository(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
-	workspaceRepository, err := workspacepostgres.NewRepository(pool)
+	workspaceRepository, err := workspacepostgres.NewGORMRepository(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
-	searchRepository, err := retrievalpostgres.NewSearchRepository(pool)
+	searchRepository, err := retrievalpostgres.NewGORMSearchRepository(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -291,7 +288,7 @@ func newWorkspaceAnalysisConversationIntegrationRuntime(
 	if err != nil {
 		t.Fatal(err)
 	}
-	knowledgeRepository, err := knowledgepostgres.NewRepository(pool)
+	knowledgeRepository, err := knowledgepostgres.NewGORMRepository(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,9 +296,23 @@ func newWorkspaceAnalysisConversationIntegrationRuntime(
 	if err != nil {
 		t.Fatal(err)
 	}
-	toolRepository, err := toolpostgres.NewRepository(pool)
+	executionFence, err := workflowpostgres.NewGORMWorkspaceAnalysisExecutionFence(pool)
 	if err != nil {
 		t.Fatal(err)
+	}
+	analysisRepository, err := agentpostgres.NewGORMWorkspaceAnalysisRepository(pool, executionFence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auditRecorder := newWorkerTestAuditRecorder(t, pool)
+	analysisTools, err := toolpostgres.NewGORMWorkspaceAnalysisRepository(
+		pool, executionFence, agentRepository, agentRepository, agentRepository, events, auditRecorder,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolRepository := &workerToolRepository{
+		GORMRepository: newWorkerTestToolRepository(t, pool), GORMWorkspaceAnalysisRepository: analysisTools,
 	}
 	toolContracts, err := toolcatalog.NewFrozenContractRegistry()
 	if err != nil {
@@ -344,7 +355,7 @@ func newWorkspaceAnalysisConversationIntegrationRuntime(
 	if err != nil {
 		t.Fatal(err)
 	}
-	finalizerStore, err := conversationpostgres.NewWorkspaceAnalysisFinalizer(pool, events, foundation.NewUUIDGenerator(nil))
+	finalizerStore, err := conversationpostgres.NewGORMWorkspaceAnalysisFinalizer(pool, events, foundation.NewUUIDGenerator(nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -352,7 +363,7 @@ func newWorkspaceAnalysisConversationIntegrationRuntime(
 	if err != nil {
 		t.Fatal(err)
 	}
-	draftStreams, err := conversationpostgres.NewDraftStreamRepository(pool)
+	draftStreams, err := conversationpostgres.NewGORMDraftStreamRepository(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -360,12 +371,12 @@ func newWorkspaceAnalysisConversationIntegrationRuntime(
 	if err != nil {
 		t.Fatal(err)
 	}
-	modelOperations := agentapplication.WorkspaceAnalysisModelOperationRepository(agentRepository)
+	modelOperations := agentapplication.WorkspaceAnalysisModelOperationRepository(analysisRepository)
 	if fault != nil && fault.modelOperationRepository != nil {
-		fault.modelOperationRepository.Repository = agentRepository
+		fault.modelOperationRepository.GORMWorkspaceAnalysisRepository = analysisRepository
 		modelOperations = fault.modelOperationRepository
 	}
-	planner, err := agentapplication.NewWorkspaceAnalysisRetrievalPlanRunner(agentapplication.WorkspaceAnalysisRetrievalPlanRunnerDependencies{Model: model, Catalog: catalog, Repository: agentRepository, IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{}})
+	planner, err := agentapplication.NewWorkspaceAnalysisRetrievalPlanRunner(agentapplication.WorkspaceAnalysisRetrievalPlanRunnerDependencies{Model: model, Catalog: catalog, Repository: analysisRepository, IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -381,19 +392,11 @@ func newWorkspaceAnalysisConversationIntegrationRuntime(
 	if err != nil {
 		t.Fatal(err)
 	}
-	insertClient, err := riveradapter.NewClient(pool, nil)
+	cancellationTerminal, err := conversationpostgres.NewGORMWorkspaceAnalysisCancellationTerminalHook(events, foundation.NewUUIDGenerator(nil))
 	if err != nil {
 		t.Fatal(err)
 	}
-	inserter, err := riveradapter.NewJobInserter(insertClient)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cancellationTerminal, err := conversationpostgres.NewWorkspaceAnalysisCancellationTerminalHook(events, foundation.NewUUIDGenerator(nil))
-	if err != nil {
-		t.Fatal(err)
-	}
-	runtimeRepository, err := workflowpostgres.NewRuntimeRepositoryWithHooks(pool, inserter, workflowpostgres.RuntimeRepositoryHooks{Terminal: cancellationTerminal})
+	runtimeRepository, err := workflowpostgres.NewGORMRuntimeRepositoryWithHooks(pool, riveradapter.DefaultOptions(), riveradapter.NewStaticScopedEnqueueFence(), workflowpostgres.GORMRuntimeRepositoryHooks{Terminal: cancellationTerminal})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -418,7 +421,7 @@ func newWorkspaceAnalysisConversationIntegrationRuntime(
 	if err != nil {
 		t.Fatal(err)
 	}
-	components.workspaceReview, err = agentworkflow.NewWorkspaceAnalysisReviewPublishExecutor(agentworkflow.WorkspaceAnalysisReviewPublishExecutorDependencies{Context: conversationRepository, Runs: agentRepository, Inputs: runtimeRepository, Stages: runtimeRepository, Candidates: agentRepository, Evidence: toolRepository, Validation: toolRepository, Review: review, Finalizer: finalizer, Clock: foundation.SystemClock{}})
+	components.workspaceReview, err = agentworkflow.NewWorkspaceAnalysisReviewPublishExecutor(agentworkflow.WorkspaceAnalysisReviewPublishExecutorDependencies{Context: conversationRepository, Runs: agentRepository, Inputs: runtimeRepository, Stages: runtimeRepository, Candidates: analysisRepository, Evidence: toolRepository, Validation: toolRepository, Review: review, Finalizer: finalizer, Clock: foundation.SystemClock{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -483,15 +486,15 @@ func newWorkspaceAnalysisConversationIntegrationRuntime(
 	if err := riveradapter.AddRuntimeWorkerSafely(workers, runtimeWorker); err != nil {
 		t.Fatal(err)
 	}
-	workerClient, err := riveradapter.NewClient(pool, workers)
+	workerClient, err := riveradapter.NewClient(pool.DB(), workers)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var starter agentapplication.WorkspaceAnalysisRunStarter = newWorkspaceAnalysisIntegrationRunStarter(t, agentRepository, catalog)
+	var starter agentapplication.ScopedWorkspaceAnalysisRunStarter = newWorkspaceAnalysisIntegrationRunStarter(t, agentRepository, catalog)
 	if fault != nil && fault.decorateRunStarter != nil {
 		starter = fault.decorateRunStarter(starter)
 	}
-	dispatcher, err := conversationpostgres.NewQuestionDispatcherWithWorkspaceAnalysis(pool, runtimeRepository, events, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, starter)
+	dispatcher, err := conversationpostgres.NewGORMQuestionDispatcherWithWorkspaceAnalysis(pool, runtimeRepository, events, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, starter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -501,7 +504,7 @@ func newWorkspaceAnalysisConversationIntegrationRuntime(
 	}
 	conversationHandler := conversationhttp.NewHandler(service, conversationhttp.NewCursorCodec())
 	eventHandler := eventshttp.NewHandler(events, eventshttp.StreamConfig{PollInterval: 10 * time.Millisecond, HeartbeatInterval: 100 * time.Millisecond})
-	workflowRepository, err := workflowpostgres.NewRepository(pool)
+	workflowRepository, err := workflowpostgres.NewGORMRepository(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -513,7 +516,7 @@ func newWorkspaceAnalysisConversationIntegrationRuntime(
 	return router, workerClient
 }
 
-func newWorkspaceAnalysisIntegrationRunStarter(t *testing.T, repository *agentpostgres.Repository, catalog *agentapplication.RuntimeCatalog) *agentapplication.WorkspaceAnalysisRunService {
+func newWorkspaceAnalysisIntegrationRunStarter(t *testing.T, repository *agentpostgres.GORMRepository, catalog *agentapplication.RuntimeCatalog) *agentapplication.ScopedWorkspaceAnalysisRunService {
 	t.Helper()
 	if repository == nil || catalog == nil {
 		t.Fatal("workspace analysis integration dependencies are unavailable")
@@ -523,7 +526,7 @@ func newWorkspaceAnalysisIntegrationRunStarter(t *testing.T, repository *agentpo
 		t.Fatal(err)
 	}
 	cfg := config.Defaults()
-	starter, err := agentapplication.NewWorkspaceAnalysisRunService(repository, foundation.NewUUIDGenerator(nil), agentapplication.WorkspaceAnalysisRunStartConfig{
+	starter, err := agentapplication.NewScopedWorkspaceAnalysisRunService(repository, foundation.NewUUIDGenerator(nil), agentapplication.WorkspaceAnalysisRunStartConfig{
 		DefinitionHash: conversationworkflow.RegisteredWorkspaceAnalysisDefinition().GraphHash, ToolCatalogHash: tools.Hash, ConfigRevision: 1,
 		Timeouts:                        agentapplication.WorkspaceAnalysisV1Timeouts{PlanModelTimeout: 2 * time.Second, SynthesisModelTimeout: 2 * time.Second, ReviewModelTimeout: 2 * time.Second, GitToolTimeout: tools.ReadGitStatusTimeout, SearchToolTimeout: tools.SearchKnowledgeTimeout, SourceReadToolTimeout: tools.ReadSourceTimeout, ValidateCitationToolTimeout: tools.ValidateCitationTimeout},
 		SynthesisProfileMaxOutputTokens: int(agentapplication.WorkspaceAnalysisV1SynthesisMaxOutputTokens),
@@ -713,7 +716,7 @@ type workspaceAnalysisConversationRuntimeFault struct {
 	decorateCoordinator      func(*workflowapplication.RuntimeCoordinator) riveradapter.RuntimeExecutionCoordinator
 	decorateTool             func(toolsdomain.ToolRef, toolsapplication.Executor) toolsapplication.Executor
 	decorateInspect          func(workflowapplication.Executor) workflowapplication.Executor
-	decorateRunStarter       func(agentapplication.WorkspaceAnalysisRunStarter) agentapplication.WorkspaceAnalysisRunStarter
+	decorateRunStarter       func(agentapplication.ScopedWorkspaceAnalysisRunStarter) agentapplication.ScopedWorkspaceAnalysisRunStarter
 	modelOperationRepository *workspaceAnalysisCancelBeforeCandidateFinalizer
 	toolExecutions           *workspaceAnalysisToolExecutionCounter
 }

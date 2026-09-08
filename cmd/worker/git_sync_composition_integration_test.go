@@ -24,11 +24,8 @@ import (
 
 func TestGitSyncWorkerProductionCompositionAndEmptyDispatch(t *testing.T) {
 	baseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
-	if baseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a PostgreSQL admin database")
-	}
 	pool := newMigratedWorkerTestPool(t, baseURL)
-	workspaceRepository, err := workspacepostgres.NewRepository(pool)
+	workspaceRepository, err := workspacepostgres.NewGORMRepository(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,7 +33,7 @@ func TestGitSyncWorkerProductionCompositionAndEmptyDispatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	locker, err := gitoperation.NewPostgresLocker(pool)
+	locker, err := gitoperation.NewPostgresLocker(pool.DB())
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -30,7 +30,9 @@ func TestWorkspaceAnalysisRunLoaderRequiresExactWorkspaceExecutionBinding(t *tes
 	)`); err != nil {
 		t.Fatalf("insert second workspace: %v", err)
 	}
-	repository, err := agentpostgres.NewRepository(pool)
+	runtime := openMigrationRuntimePool(t, ctx, pool)
+	defer runtime.Close()
+	repository, err := agentpostgres.NewGORMRepository(runtime)
 	if err != nil {
 		t.Fatal(err)
 	}

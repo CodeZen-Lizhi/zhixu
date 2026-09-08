@@ -11,7 +11,6 @@ import (
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/retrieval/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
-	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
 )
 
@@ -29,7 +28,6 @@ var (
 )
 
 // NewGORMRepository derives the GORM root and UoW from one platform Pool.
-// Production composition remains on Repository until the TODO 9 parity gate.
 func NewGORMRepository(pool *platformpostgres.Pool) (*GORMRepository, error) {
 	database, unitOfWork, err := gormRetrievalDependencies(pool)
 	if err != nil {
@@ -316,9 +314,8 @@ func classifyGORMRetrieval(ctx context.Context, cause error, code string) error 
 	if gormRetrievalNoRows(cause) {
 		return notFound(code, cause)
 	}
-	var postgresError *pgconn.PgError
-	if errors.As(cause, &postgresError) {
-		switch postgresError.Code {
+	if state := platformpostgres.SQLState(cause); state != "" {
+		switch state {
 		case "40001", "40P01", "55P03":
 			return foundation.NewError(foundation.ErrorRetryableFailure, code, true, cause)
 		case "23505":

@@ -26,42 +26,19 @@ type captureRepositoryIntegrationRepository interface {
 	captureapp.ProcessingRepository
 }
 
-type captureRepositoryIntegrationVariant struct {
-	name string
-	open func(*testing.T, *platformpostgres.Pool) captureRepositoryIntegrationRepository
-}
-
-func testCaptureRepositoryVariants(
+func withCaptureRepositoryIntegration(
 	t *testing.T,
 	test func(*testing.T, *platformpostgres.Pool, context.Context, captureRepositoryIntegrationRepository),
 ) {
 	t.Helper()
-	variants := []captureRepositoryIntegrationVariant{
-		{name: "legacy", open: openLegacyCaptureRepositoryIntegration},
-		{name: "gorm", open: openGORMCaptureRepositoryIntegration},
-	}
-	for _, variant := range variants {
-		t.Run(variant.name, func(t *testing.T) {
-			fixture := testdb.Require(t, testdb.Config{
-				Availability: testdb.FailWhenUnavailable,
-				MaxConns:     12,
-			})
-			platform := fixture.Pool()
-			test(t, platform, context.Background(), variant.open(t, platform))
+	t.Run("gorm", func(t *testing.T) {
+		fixture := testdb.Require(t, testdb.Config{
+			Availability: testdb.FailWhenUnavailable,
+			MaxConns:     12,
 		})
-	}
-}
-
-func openLegacyCaptureRepositoryIntegration(
-	t *testing.T,
-	platform *platformpostgres.Pool,
-) captureRepositoryIntegrationRepository {
-	t.Helper()
-	repository, err := capturepostgres.NewRepository(platform.DB())
-	if err != nil {
-		t.Fatal(err)
-	}
-	return repository
+		platform := fixture.Pool()
+		test(t, platform, context.Background(), openGORMCaptureRepositoryIntegration(t, platform))
+	})
 }
 
 func openGORMCaptureRepositoryIntegration(
@@ -81,7 +58,7 @@ func openGORMCaptureRepositoryIntegration(
 }
 
 func TestCaptureRepositoryConcurrentCreateExactReplayAndAtomicFacts(t *testing.T) {
-	testCaptureRepositoryVariants(t, testCaptureRepositoryConcurrentCreateExactReplayAndAtomicFacts)
+	withCaptureRepositoryIntegration(t, testCaptureRepositoryConcurrentCreateExactReplayAndAtomicFacts)
 }
 
 func testCaptureRepositoryConcurrentCreateExactReplayAndAtomicFacts(
@@ -178,7 +155,7 @@ func testCaptureRepositoryConcurrentCreateExactReplayAndAtomicFacts(
 }
 
 func TestCaptureRepositoryRetryExactReplayAndAtomicOutbox(t *testing.T) {
-	testCaptureRepositoryVariants(t, testCaptureRepositoryRetryExactReplayAndAtomicOutbox)
+	withCaptureRepositoryIntegration(t, testCaptureRepositoryRetryExactReplayAndAtomicOutbox)
 }
 
 func testCaptureRepositoryRetryExactReplayAndAtomicOutbox(
@@ -265,7 +242,7 @@ func testCaptureRepositoryRetryExactReplayAndAtomicOutbox(
 }
 
 func TestCaptureRepositoryAllowsAttemptOneInSuccessiveWorkflowRuns(t *testing.T) {
-	testCaptureRepositoryVariants(t, testCaptureRepositoryAllowsAttemptOneInSuccessiveWorkflowRuns)
+	withCaptureRepositoryIntegration(t, testCaptureRepositoryAllowsAttemptOneInSuccessiveWorkflowRuns)
 }
 
 func testCaptureRepositoryAllowsAttemptOneInSuccessiveWorkflowRuns(
@@ -359,7 +336,7 @@ func testCaptureRepositoryAllowsAttemptOneInSuccessiveWorkflowRuns(
 }
 
 func TestCaptureRepositoryOutboxLeaseLifecycle(t *testing.T) {
-	testCaptureRepositoryVariants(t, testCaptureRepositoryOutboxLeaseLifecycle)
+	withCaptureRepositoryIntegration(t, testCaptureRepositoryOutboxLeaseLifecycle)
 }
 
 func testCaptureRepositoryOutboxLeaseLifecycle(
@@ -487,7 +464,7 @@ func testCaptureRepositoryOutboxLeaseLifecycle(
 }
 
 func TestCaptureRepositoryMaterializeURLAtomicRollbackAndStageAdvance(t *testing.T) {
-	testCaptureRepositoryVariants(t, testCaptureRepositoryMaterializeURLAtomicRollbackAndStageAdvance)
+	withCaptureRepositoryIntegration(t, testCaptureRepositoryMaterializeURLAtomicRollbackAndStageAdvance)
 }
 
 func testCaptureRepositoryMaterializeURLAtomicRollbackAndStageAdvance(
@@ -678,7 +655,7 @@ func requireCapturePoolReleased(t *testing.T, platform *platformpostgres.Pool) {
 }
 
 func TestCaptureRepositoryPreservesContextCauseAndReusesConnection(t *testing.T) {
-	testCaptureRepositoryVariants(t, testCaptureRepositoryPreservesContextCauseAndReusesConnection)
+	withCaptureRepositoryIntegration(t, testCaptureRepositoryPreservesContextCauseAndReusesConnection)
 }
 
 func testCaptureRepositoryPreservesContextCauseAndReusesConnection(
@@ -736,7 +713,7 @@ func testCaptureRepositoryPreservesContextCauseAndReusesConnection(
 }
 
 func TestCaptureRepositoryRejectsCorruptRowsWithoutPartialEntity(t *testing.T) {
-	testCaptureRepositoryVariants(t, testCaptureRepositoryRejectsCorruptRowsWithoutPartialEntity)
+	withCaptureRepositoryIntegration(t, testCaptureRepositoryRejectsCorruptRowsWithoutPartialEntity)
 }
 
 func testCaptureRepositoryRejectsCorruptRowsWithoutPartialEntity(
@@ -792,7 +769,7 @@ func testCaptureRepositoryRejectsCorruptRowsWithoutPartialEntity(
 }
 
 func TestCaptureRepositoryTargetQueryPlansUseDeclaredIndexes(t *testing.T) {
-	testCaptureRepositoryVariants(t, testCaptureRepositoryTargetQueryPlansUseDeclaredIndexes)
+	withCaptureRepositoryIntegration(t, testCaptureRepositoryTargetQueryPlansUseDeclaredIndexes)
 }
 
 func testCaptureRepositoryTargetQueryPlansUseDeclaredIndexes(

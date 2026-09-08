@@ -1,7 +1,6 @@
 package postgres
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,7 +13,6 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation/strictjson"
 	memoryapp "github.com/CodeZen-Lizhi/zhixu/internal/memory/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/memory/domain"
-	"github.com/jackc/pgx/v5"
 )
 
 var memoryReceiptLimits = strictjson.Limits{
@@ -106,24 +104,6 @@ func scanPersistedCommand(row scanner, workspaceID foundation.ID, invalidMessage
 		return persistedCommand{}, inconsistent(errors.New(invalidMessage))
 	}
 	return command, nil
-}
-
-func loadCommand(ctx context.Context, db interface {
-	QueryRow(context.Context, string, ...any) pgx.Row
-}, workspaceID foundation.ID, key string) (persistedCommand, bool, error) {
-	command, err := scanPersistedCommand(
-		db.QueryRow(ctx, `SELECT owner_principal_kind,owner_principal_id::text,request_hash,command_type,memory_id::text,expected_version,memory_version,response::text
-			FROM learning.memory_command WHERE workspace_id=$1 AND idempotency_key=$2 FOR UPDATE`, string(workspaceID), key),
-		workspaceID,
-		"memory command row is invalid",
-	)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return persistedCommand{}, false, nil
-	}
-	if err != nil {
-		return persistedCommand{}, false, classify(err)
-	}
-	return command, true, nil
 }
 
 func commandResult(command persistedCommand) (memoryapp.CommandResult, error) {

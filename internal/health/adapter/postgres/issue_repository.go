@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -13,31 +14,23 @@ import (
 	healthapp "github.com/CodeZen-Lizhi/zhixu/internal/health/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/health/detector"
 	"github.com/CodeZen-Lizhi/zhixu/internal/health/domain"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 )
 
 const issueFingerprintSchemaVersion = "health-issue-fingerprint/v1"
 
-// IssueDB 是 Issue repository 所需的最小 PostgreSQL 事务边界。
-type IssueDB interface {
-	Begin(context.Context) (pgx.Tx, error)
-	Query(context.Context, string, ...any) (pgx.Rows, error)
-	QueryRow(context.Context, string, ...any) pgx.Row
-}
-
 // IssueRepository 持久化 Issue、Observation、Evidence 和 CAS Decision。
 type IssueRepository struct {
-	db              IssueDB
+	db              healthIssueDB
 	generator       foundation.IDGenerator
 	membership      healthapp.SmartCollectionMembershipPort
-	bindingVerifier SmartCollectionBindingVerifier
+	bindingVerifier scopedHealthBindingVerifier
 }
 
 var _ healthapp.DetectorPageStore = (*IssueRepository)(nil)
 
-// NewIssueRepository 构造 Health Issue repository；可注入 ID generator 以便确定性测试。
-func NewIssueRepository(db IssueDB, generators ...foundation.IDGenerator) (*IssueRepository, error) {
+// newIssueRepository 构造 Health Issue repository；可注入 ID generator 以便确定性测试。
+func newIssueRepository(db healthIssueDB, generators ...foundation.IDGenerator) (*IssueRepository, error) {
 	if db == nil {
 		return nil, errors.New("health issue database is nil")
 	}
@@ -48,16 +41,11 @@ func NewIssueRepository(db IssueDB, generators ...foundation.IDGenerator) (*Issu
 	return &IssueRepository{db: db, generator: generator}, nil
 }
 
-// NewSmartCollectionIssueRepository 构造会以 Collection durable membership 约束 missing-set 的 repository。
-func NewSmartCollectionIssueRepository(db IssueDB, membership healthapp.SmartCollectionMembershipPort, generators ...foundation.IDGenerator) (*IssueRepository, error) {
-	return newSmartCollectionIssueRepository(db, membership, nil, generators...)
-}
-
-func newSmartCollectionIssueRepository(db IssueDB, membership healthapp.SmartCollectionMembershipPort, verifier SmartCollectionBindingVerifier, generators ...foundation.IDGenerator) (*IssueRepository, error) {
-	if membership == nil {
-		return nil, errors.New("health smart-collection membership is nil")
+func newSmartCollectionIssueRepository(db healthIssueDB, membership healthapp.SmartCollectionMembershipPort, verifier scopedHealthBindingVerifier, generators ...foundation.IDGenerator) (*IssueRepository, error) {
+	if isNilHealthDependency(membership) || isNilHealthDependency(verifier) {
+		return nil, errors.New("health smart-collection membership and scoped verifier are required")
 	}
-	repository, err := NewIssueRepository(db, generators...)
+	repository, err := newIssueRepository(db, generators...)
 	if err != nil {
 		return nil, err
 	}
@@ -81,11 +69,17 @@ func (repository *IssueRepository) UpsertObservation(ctx context.Context, worksp
 	if len(repairOptions) == 0 {
 		repairOptions = healthapp.RepairOptionsForIssue(observation.Type)
 	}
-	tx, err := repository.db.Begin(ctx)
+	result, err := withHealthTransaction(ctx, repository.db, foundation.TransactionOptions{}, func(ctx context.Context, tx healthTransaction) (healthapp.ReconcileResult, error) {
+		issue, outcome, err := repository.upsertObservationTx(ctx, tx, workspaceID, scanID, issueID, observation, repairOptions, observedAt, identity)
+		return healthapp.ReconcileResult{Issue: issue, Outcome: outcome}, err
+	})
 	if err != nil {
 		return domain.Issue{}, "", err
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	return result.Issue, result.Outcome, nil
+}
+
+func (repository *IssueRepository) upsertObservationTx(ctx context.Context, tx healthTransaction, workspaceID, scanID, issueID foundation.ID, observation domain.IssueObservation, repairOptions []domain.RepairOption, observedAt time.Time, identity string) (domain.Issue, domain.ObservationOutcome, error) {
 	current, found, err := repository.loadIssueForUpdate(ctx, tx, workspaceID, identity, repairOptions)
 	if err != nil {
 		return domain.Issue{}, "", err
@@ -121,9 +115,6 @@ func (repository *IssueRepository) UpsertObservation(ctx context.Context, worksp
 	if err := repository.insertObservation(ctx, tx, result.Issue, scanID, observation, observedAt); err != nil {
 		return domain.Issue{}, "", err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return domain.Issue{}, "", err
-	}
 	return result.Issue, outcome, nil
 }
 
@@ -140,11 +131,16 @@ func (repository *IssueRepository) ReconcileDetectorPage(ctx context.Context, re
 			return healthapp.DetectorPageReconcileResult{}, err
 		}
 	}
-	tx, err := repository.db.Begin(ctx)
+	result, err := withHealthTransaction(ctx, repository.db, foundation.TransactionOptions{}, func(ctx context.Context, tx healthTransaction) (healthapp.DetectorPageReconcileResult, error) {
+		return repository.reconcileDetectorPageTx(ctx, tx, request)
+	})
 	if err != nil {
 		return healthapp.DetectorPageReconcileResult{}, err
 	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
+	return result, nil
+}
+
+func (repository *IssueRepository) reconcileDetectorPageTx(ctx context.Context, tx healthTransaction, request healthapp.DetectorPageReconcileRequest) (healthapp.DetectorPageReconcileResult, error) {
 	var scanWorkspace string
 	var detectorStatus string
 	if err := tx.QueryRow(ctx, `SELECT scan.workspace_id::text,coverage.status
@@ -177,9 +173,6 @@ FOR UPDATE OF scan,coverage`, string(request.ScanID), string(request.WorkspaceID
 		return healthapp.DetectorPageReconcileResult{}, err
 	}
 	if err := insertDetectorPageHistory(ctx, tx, history, evidence); err != nil {
-		return healthapp.DetectorPageReconcileResult{}, err
-	}
-	if err := tx.Commit(ctx); err != nil {
 		return healthapp.DetectorPageReconcileResult{}, err
 	}
 	return result, nil
@@ -276,7 +269,7 @@ func detectorPageIdentities(workspaceID foundation.ID, observations []domain.Iss
 	return identities, prepared, nil
 }
 
-func (repository *IssueRepository) loadIssuesForUpdate(ctx context.Context, tx pgx.Tx, workspaceID foundation.ID, identities []string) (map[string]domain.Issue, error) {
+func (repository *IssueRepository) loadIssuesForUpdate(ctx context.Context, tx healthTransaction, workspaceID foundation.ID, identities []string) (map[string]domain.Issue, error) {
 	rows, err := tx.Query(ctx, `WITH locked AS MATERIALIZED (
 	SELECT i.id,i.workspace_id,i.type,i.target_type,i.target_id,i.detector_id,i.identity_hash,i.fingerprint,
 	       i.detector_version,i.severity,i.evidence_summary,i.status,i.status_reason,i.deferred_until,
@@ -504,7 +497,7 @@ func detectorPageIssueInput(issue domain.Issue, expectedVersion int64) (detector
 	return row, nil
 }
 
-func upsertDetectorPageIssues(ctx context.Context, tx pgx.Tx, issues []detectorPageIssueRow) error {
+func upsertDetectorPageIssues(ctx context.Context, tx healthTransaction, issues []detectorPageIssueRow) error {
 	payload, err := json.Marshal(issues)
 	if err != nil {
 		return err
@@ -575,7 +568,7 @@ verified AS (
 	return nil
 }
 
-func insertDetectorPageHistory(ctx context.Context, tx pgx.Tx, history []detectorPageHistoryRow, evidence []detectorPageEvidenceRow) error {
+func insertDetectorPageHistory(ctx context.Context, tx healthTransaction, history []detectorPageHistoryRow, evidence []detectorPageEvidenceRow) error {
 	historyPayload, err := json.Marshal(history)
 	if err != nil {
 		return err
@@ -629,8 +622,8 @@ func insertDetectorPageHistory(ctx context.Context, tx pgx.Tx, history []detecto
 }
 
 func detectorPageWriteError(err error) error {
-	var postgresError *pgconn.PgError
-	if errors.As(err, &postgresError) && postgresError.Code != "23505" && postgresError.Code != "40001" && postgresError.Code != "40P01" {
+	state := platformpostgres.SQLState(err)
+	if state != "" && state != "23505" && state != "40001" && state != "40P01" {
 		return err
 	}
 	return foundation.NewError(foundation.ErrorVersionConflict, domain.ErrorCodeIssueTransitionInvalid, true, err)
@@ -641,11 +634,16 @@ func (repository *IssueRepository) ResolveMissingForCompleteScan(ctx context.Con
 	if repository == nil || repository.db == nil || !validRepositoryID(workspaceID) || !validRepositoryID(scanID) || detectorID == "" {
 		return 0, errors.New("health missing-set resolution request is invalid")
 	}
-	tx, err := repository.db.Begin(ctx)
+	resolved, err := withHealthTransaction(ctx, repository.db, foundation.TransactionOptions{}, func(ctx context.Context, tx healthTransaction) (int64, error) {
+		return repository.resolveMissingForCompleteScanTx(ctx, tx, workspaceID, scanID, detectorID)
+	})
 	if err != nil {
 		return 0, err
 	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
+	return resolved, nil
+}
+
+func (repository *IssueRepository) resolveMissingForCompleteScanTx(ctx context.Context, tx healthTransaction, workspaceID, scanID foundation.ID, detectorID string) (int64, error) {
 	scan, err := loadScanByID(ctx, tx, workspaceID, scanID, true)
 	if err != nil {
 		return 0, err
@@ -713,16 +711,9 @@ WHERE id=$1 AND workspace_id=$2 AND status='RUNNING'`, string(scanID), string(wo
 		}
 	}
 	if scan.Scope.Type == domain.ScanScopeTypeSmartCollection {
-		if repository.bindingVerifier != nil {
-			if err := repository.bindingVerifier.Verify(ctx, tx, binding); err != nil {
-				return 0, err
-			}
-		} else if err := revalidateSmartCollectionScope(ctx, repository.membership, binding); err != nil {
+		if err := repository.bindingVerifier.VerifyBindingScoped(ctx, tx.scope, binding); err != nil {
 			return 0, err
 		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return 0, err
 	}
 	return resolved, nil
 }
@@ -744,7 +735,7 @@ func (repository *IssueRepository) GetIssue(ctx context.Context, workspaceID, is
 		return domain.Issue{}, err
 	}
 	if !found {
-		return domain.Issue{}, pgx.ErrNoRows
+		return domain.Issue{}, sql.ErrNoRows
 	}
 	return issue, nil
 }
@@ -758,11 +749,16 @@ func (repository *IssueRepository) ApplyDecision(ctx context.Context, workspaceI
 	if err != nil {
 		return domain.Issue{}, err
 	}
-	tx, err := repository.db.Begin(ctx)
+	issue, err := withHealthTransaction(ctx, repository.db, foundation.TransactionOptions{}, func(ctx context.Context, tx healthTransaction) (domain.Issue, error) {
+		return repository.applyDecisionTx(ctx, tx, workspaceID, issueID, decision, at, repairOptions, requestHash)
+	})
 	if err != nil {
 		return domain.Issue{}, err
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	return issue, nil
+}
+
+func (repository *IssueRepository) applyDecisionTx(ctx context.Context, tx healthTransaction, workspaceID, issueID foundation.ID, decision domain.IssueDecision, at time.Time, repairOptions []domain.RepairOption, requestHash string) (domain.Issue, error) {
 	if receipt, found, receiptErr := repository.loadDecisionReceipt(ctx, tx, workspaceID, decision.IdempotencyKey); receiptErr != nil {
 		return domain.Issue{}, receiptErr
 	} else if found {
@@ -773,7 +769,7 @@ func (repository *IssueRepository) ApplyDecision(ctx context.Context, workspaceI
 		if err != nil {
 			return domain.Issue{}, err
 		}
-		return domain.Issue{}, pgx.ErrNoRows
+		return domain.Issue{}, sql.ErrNoRows
 	}
 	if receipt, found, receiptErr := repository.loadDecisionReceipt(ctx, tx, workspaceID, decision.IdempotencyKey); receiptErr != nil {
 		return domain.Issue{}, receiptErr
@@ -797,9 +793,6 @@ func (repository *IssueRepository) ApplyDecision(ctx context.Context, workspaceI
 	if err := repository.updateIssue(ctx, tx, updated); err != nil {
 		return domain.Issue{}, err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return domain.Issue{}, err
-	}
 	return updated, nil
 }
 
@@ -809,11 +802,11 @@ type decisionReceipt struct {
 }
 
 func (repository *IssueRepository) loadDecisionReceipt(ctx context.Context, queryer interface {
-	QueryRow(context.Context, string, ...any) pgx.Row
+	QueryRow(context.Context, string, ...any) healthRow
 }, workspaceID foundation.ID, idempotencyKey string) (decisionReceipt, bool, error) {
 	var issueID, requestHash string
 	err := queryer.QueryRow(ctx, `SELECT issue_id::text,request_hash FROM ops.health_issue_decision WHERE workspace_id=$1 AND idempotency_key=$2`, string(workspaceID), idempotencyKey).Scan(&issueID, &requestHash)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, sql.ErrNoRows) {
 		return decisionReceipt{}, false, nil
 	}
 	if err != nil {
@@ -822,7 +815,7 @@ func (repository *IssueRepository) loadDecisionReceipt(ctx context.Context, quer
 	return decisionReceipt{IssueID: foundation.ID(issueID), RequestHash: requestHash}, true, nil
 }
 
-func (repository *IssueRepository) replayDecision(ctx context.Context, tx pgx.Tx, workspaceID, issueID foundation.ID, requestHash string, repairOptions []domain.RepairOption, receipt decisionReceipt) (domain.Issue, error) {
+func (repository *IssueRepository) replayDecision(ctx context.Context, tx healthTransaction, workspaceID, issueID foundation.ID, requestHash string, repairOptions []domain.RepairOption, receipt decisionReceipt) (domain.Issue, error) {
 	if receipt.IssueID != issueID || receipt.RequestHash != requestHash {
 		return domain.Issue{}, foundation.NewError(foundation.ErrorVersionConflict, domain.ErrorCodeIssueDecisionInvalid, false, errors.New("health decision idempotency key is bound to a different request"))
 	}
@@ -831,28 +824,25 @@ func (repository *IssueRepository) replayDecision(ctx context.Context, tx pgx.Tx
 		return domain.Issue{}, err
 	}
 	if !found {
-		return domain.Issue{}, pgx.ErrNoRows
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return domain.Issue{}, err
+		return domain.Issue{}, sql.ErrNoRows
 	}
 	return issue, nil
 }
 
-func (repository *IssueRepository) loadIssueForUpdate(ctx context.Context, tx pgx.Tx, workspaceID foundation.ID, identity string, repairOptions []domain.RepairOption) (domain.Issue, bool, error) {
+func (repository *IssueRepository) loadIssueForUpdate(ctx context.Context, tx healthTransaction, workspaceID foundation.ID, identity string, repairOptions []domain.RepairOption) (domain.Issue, bool, error) {
 	if identity == "" {
 		return domain.Issue{}, false, errors.New("health issue identity is required")
 	}
 	return repository.loadIssue(ctx, tx, workspaceID, foundation.ID(""), repairOptions, true, identity)
 }
 
-func (repository *IssueRepository) loadIssueForUpdateByID(ctx context.Context, tx pgx.Tx, workspaceID, issueID foundation.ID, repairOptions []domain.RepairOption) (domain.Issue, bool, error) {
+func (repository *IssueRepository) loadIssueForUpdateByID(ctx context.Context, tx healthTransaction, workspaceID, issueID foundation.ID, repairOptions []domain.RepairOption) (domain.Issue, bool, error) {
 	return repository.loadIssue(ctx, tx, workspaceID, issueID, repairOptions, true)
 }
 
 func (repository *IssueRepository) loadIssue(ctx context.Context, queryer interface {
-	QueryRow(context.Context, string, ...any) pgx.Row
-	Query(context.Context, string, ...any) (pgx.Rows, error)
+	QueryRow(context.Context, string, ...any) healthRow
+	Query(context.Context, string, ...any) (healthRows, error)
 }, workspaceID, issueID foundation.ID, repairOptions []domain.RepairOption, forUpdate bool, identities ...string) (domain.Issue, bool, error) {
 	where := "i.id=$2"
 	second := string(issueID)
@@ -877,7 +867,7 @@ func (repository *IssueRepository) loadIssue(ctx context.Context, queryer interf
  i.repair_proposal_created_at,i.version,i.first_detected_at,i.last_detected_at,i.last_verified_at,i.resolved_at,i.created_at,i.updated_at
  FROM ops.health_issue i WHERE i.workspace_id=$1 AND `+where+lockClause, string(workspaceID), second).Scan(
 		&issue.ID, &issue.WorkspaceID, &issueType, &targetType, &targetID, &detectorID, &identityHash, &fingerprint, &detectorVersion, &severity, &issue.EvidenceSummary, &status, &statusReason, &deferredUntil, &repairID, &repairOptionCode, &repairBindingFingerprint, &repairBindingObjectVersions, &repairProposalCreatedAt, &issue.Version, &issue.FirstDetectedAt, &issue.LastDetectedAt, &issue.LastVerifiedAt, &resolvedAt, &issue.CreatedAt, &issue.UpdatedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Issue{}, false, nil
 	}
 	if err != nil {
@@ -910,12 +900,13 @@ func (repository *IssueRepository) loadIssue(ctx context.Context, queryer interf
 }
 
 func (repository *IssueRepository) loadLatestObservation(ctx context.Context, queryer interface {
-	Query(context.Context, string, ...any) (pgx.Rows, error)
+	Query(context.Context, string, ...any) (healthRows, error)
 }, issue *domain.Issue) error {
 	rows, err := queryer.Query(ctx, `SELECT o.target_versions FROM ops.health_issue_observation o WHERE o.workspace_id=$1 AND o.issue_id=$2 AND o.fingerprint=$3`, string(issue.WorkspaceID), string(issue.ID), issue.Fingerprint)
 	if err != nil {
 		return err
 	}
+	defer rows.Close()
 	if rows.Next() {
 		var raw []byte
 		if err := rows.Scan(&raw); err != nil {
@@ -947,7 +938,7 @@ func (repository *IssueRepository) loadLatestObservation(ctx context.Context, qu
 	return rows.Err()
 }
 
-func (repository *IssueRepository) insertIssue(ctx context.Context, tx pgx.Tx, issue domain.Issue) error {
+func (repository *IssueRepository) insertIssue(ctx context.Context, tx healthTransaction, issue domain.Issue) error {
 	proposalVersions, err := proposalObjectVersions(issue.Proposal)
 	if err != nil {
 		return err
@@ -958,7 +949,7 @@ func (repository *IssueRepository) insertIssue(ctx context.Context, tx pgx.Tx, i
 	return err
 }
 
-func (repository *IssueRepository) updateIssue(ctx context.Context, tx pgx.Tx, issue domain.Issue) error {
+func (repository *IssueRepository) updateIssue(ctx context.Context, tx healthTransaction, issue domain.Issue) error {
 	if issue.Version < 2 {
 		return errors.New("health issue update version is invalid")
 	}
@@ -976,7 +967,7 @@ func (repository *IssueRepository) updateIssue(ctx context.Context, tx pgx.Tx, i
 	return nil
 }
 
-func (repository *IssueRepository) updateLastVerifiedAt(ctx context.Context, tx pgx.Tx, issue domain.Issue) error {
+func (repository *IssueRepository) updateLastVerifiedAt(ctx context.Context, tx healthTransaction, issue domain.Issue) error {
 	commandTag, err := tx.Exec(ctx, `UPDATE ops.health_issue SET last_verified_at=$3 WHERE workspace_id=$1 AND id=$2 AND version=$4`, string(issue.WorkspaceID), string(issue.ID), issue.LastVerifiedAt.UTC(), issue.Version)
 	if err != nil {
 		return err
@@ -987,7 +978,7 @@ func (repository *IssueRepository) updateLastVerifiedAt(ctx context.Context, tx 
 	return nil
 }
 
-func (repository *IssueRepository) insertObservation(ctx context.Context, tx pgx.Tx, issue domain.Issue, scanID foundation.ID, observation domain.IssueObservation, observedAt time.Time) error {
+func (repository *IssueRepository) insertObservation(ctx context.Context, tx healthTransaction, issue domain.Issue, scanID foundation.ID, observation domain.IssueObservation, observedAt time.Time) error {
 	observationID, err := repository.generator.New()
 	if err != nil {
 		return err
@@ -1004,7 +995,7 @@ func (repository *IssueRepository) insertObservation(ctx context.Context, tx pgx
 	var insertedID string
 	err = tx.QueryRow(ctx, `INSERT INTO ops.health_issue_observation(id,workspace_id,issue_id,issue_version,scan_id,detector_version,fingerprint_schema_version,fingerprint,evidence_fingerprint,target_versions,severity,observed_at)
  VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(issue_id,fingerprint) DO NOTHING RETURNING id::text`, string(observationID), string(issue.WorkspaceID), string(issue.ID), issue.Version, string(scanID), observation.DetectorVersion, issueFingerprintSchemaVersion, fingerprint, evidenceFingerprint, versions, string(observation.Severity), observedAt.UTC()).Scan(&insertedID)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
 	if err != nil {
@@ -1119,7 +1110,7 @@ func proposalCreatedAt(binding *domain.ProposalBinding) any {
 }
 
 func issueDatabaseTime(ctx context.Context, queryer interface {
-	QueryRow(context.Context, string, ...any) pgx.Row
+	QueryRow(context.Context, string, ...any) healthRow
 }) (time.Time, error) {
 	var now time.Time
 	if err := queryer.QueryRow(ctx, `SELECT CURRENT_TIMESTAMP`).Scan(&now); err != nil {

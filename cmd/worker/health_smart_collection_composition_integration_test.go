@@ -21,15 +21,13 @@ import (
 	healthworkflow "github.com/CodeZen-Lizhi/zhixu/internal/health/workflow"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/observability"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	workflowapp "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestWorkerHealthSmartCollectionCompositionExecutesDetectorAndFailsClosedOnDrift(t *testing.T) {
 	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a PostgreSQL admin database")
-	}
 	ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
 	defer cancel()
 	pool := newMigratedWorkerTestPool(t, databaseURL)
@@ -45,7 +43,7 @@ func TestWorkerHealthSmartCollectionCompositionExecutesDetectorAndFailsClosedOnD
 		t.Fatalf("health executor=%T err=%v", executor, err)
 	}
 
-	workspaceID, topicID := seedWorkerHealthCollectionFixture(t, ctx, pool)
+	workspaceID, topicID := seedWorkerHealthCollectionFixture(t, ctx, pool.DB())
 	service := newWorkerHealthCollectionService(t, pool)
 	created, err := service.Create(ctx, collectionapp.CreateCommand{
 		WorkspaceID: workspaceID, Name: "Worker Health Collection", Query: workerEmptyClaimCollectionQuery(),
@@ -62,14 +60,14 @@ func TestWorkerHealthSmartCollectionCompositionExecutesDetectorAndFailsClosedOnD
 	if err != nil {
 		t.Fatal(err)
 	}
-	execution := workerHealthExecution(t, ctx, pool, started.Scan)
+	execution := workerHealthExecution(t, ctx, pool.DB(), started.Scan)
 	result, err := executor.Execute(ctx, execution)
 	if err != nil || len(result.Output) == 0 {
 		t.Fatalf("health smart-collection execute output=%s err=%v", result.Output, err)
 	}
 	var scanStatus, orphanStatus string
 	var orphanPage int64
-	if err := pool.QueryRow(ctx, `SELECT scan.status,coverage.status,COALESCE((coverage.checkpoint->>'page')::bigint,0)
+	if err := pool.DB().QueryRow(ctx, `SELECT scan.status,coverage.status,COALESCE((coverage.checkpoint->>'page')::bigint,0)
 		FROM ops.health_scan scan JOIN ops.health_scan_detector coverage ON coverage.scan_id=scan.id AND coverage.workspace_id=scan.workspace_id
 		WHERE scan.id=$1 AND scan.workspace_id=$2 AND coverage.detector_id='health.detector.orphan'`, string(started.Scan.ID), string(workspaceID)).Scan(&scanStatus, &orphanStatus, &orphanPage); err != nil {
 		t.Fatal(err)
@@ -77,7 +75,7 @@ func TestWorkerHealthSmartCollectionCompositionExecutesDetectorAndFailsClosedOnD
 	if scanStatus != string(healthdomain.ScanStatusPartial) || orphanStatus != string(healthdomain.DetectorCoverageStatusSucceeded) || orphanPage < 1 {
 		t.Fatalf("scan status=%q orphan status=%q page=%d", scanStatus, orphanStatus, orphanPage)
 	}
-	assertWorkerHealthCompletionEvent(t, ctx, pool, started.Scan.ID, workspaceID, "partial")
+	assertWorkerHealthCompletionEvent(t, ctx, pool.DB(), started.Scan.ID, workspaceID, "partial")
 
 	stableBinding, err := service.PlanDurableScan(ctx, workspaceID, created.Collection.ID)
 	if err != nil {
@@ -87,19 +85,19 @@ func TestWorkerHealthSmartCollectionCompositionExecutesDetectorAndFailsClosedOnD
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, `UPDATE core.topic SET version=version+1,updated_at=updated_at+interval '1 second' WHERE workspace_id=$1 AND id=$2`, string(workspaceID), string(topicID)); err != nil {
+	if _, err := pool.DB().Exec(ctx, `UPDATE core.topic SET version=version+1,updated_at=updated_at+interval '1 second' WHERE workspace_id=$1 AND id=$2`, string(workspaceID), string(topicID)); err != nil {
 		t.Fatal(err)
 	}
-	_, err = executor.Execute(ctx, workerHealthExecution(t, ctx, pool, staleStarted.Scan))
+	_, err = executor.Execute(ctx, workerHealthExecution(t, ctx, pool.DB(), staleStarted.Scan))
 	var classified *foundation.Error
 	if !errors.As(err, &classified) || classified.Code != healthdomain.ErrorCodeScanScopeStale {
 		t.Fatalf("stale worker execution error=%v", err)
 	}
 	var staleStatus string
-	if err := pool.QueryRow(ctx, `SELECT status FROM ops.health_scan WHERE id=$1 AND workspace_id=$2`, string(staleStarted.Scan.ID), string(workspaceID)).Scan(&staleStatus); err != nil || staleStatus != string(healthdomain.ScanStatusFailed) {
+	if err := pool.DB().QueryRow(ctx, `SELECT status FROM ops.health_scan WHERE id=$1 AND workspace_id=$2`, string(staleStarted.Scan.ID), string(workspaceID)).Scan(&staleStatus); err != nil || staleStatus != string(healthdomain.ScanStatusFailed) {
 		t.Fatalf("stale scan status=%q err=%v", staleStatus, err)
 	}
-	assertWorkerHealthCompletionEvent(t, ctx, pool, staleStarted.Scan.ID, workspaceID, "failed")
+	assertWorkerHealthCompletionEvent(t, ctx, pool.DB(), staleStarted.Scan.ID, workspaceID, "failed")
 }
 
 func assertWorkerHealthCompletionEvent(t *testing.T, ctx context.Context, pool *pgxpool.Pool, scanID, workspaceID foundation.ID, wantStatus string) {
@@ -154,9 +152,9 @@ func workerSmartCollectionStart(workspaceID foundation.ID, binding collectionapp
 	}
 }
 
-func newWorkerHealthCollectionService(t *testing.T, pool *pgxpool.Pool) *collectionapp.Service {
+func newWorkerHealthCollectionService(t *testing.T, pool *platformpostgres.Pool) *collectionapp.Service {
 	t.Helper()
-	repository, err := collectionpostgres.NewRepository(pool)
+	repository, err := collectionpostgres.NewGORMRepository(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +185,7 @@ func seedWorkerHealthCollectionFixture(t *testing.T, ctx context.Context, pool *
 	}
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	root := "/tmp/worker-health-composition-" + string(workspaceID)
-	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'worker-health-composition',$2,$2,$3,'test',1,$3,$3)`, string(workspaceID), root, now); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,'worker-health-composition',$2,$2,$3,'active',1,$3,$3)`, string(workspaceID), root, now); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `INSERT INTO core.topic(id,workspace_id,name,normalized_name,description,status,version,created_at,updated_at) VALUES($1,$2,'worker health topic','worker health topic','','ACTIVE',1,$3,$3)`, string(topicID), string(workspaceID), now); err != nil {

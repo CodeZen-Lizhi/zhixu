@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"time"
 
@@ -13,14 +14,11 @@ import (
 	reviewdomain "github.com/CodeZen-Lizhi/zhixu/internal/review/domain"
 	pathapp "github.com/CodeZen-Lizhi/zhixu/internal/review/learningpath/application"
 	pathdomain "github.com/CodeZen-Lizhi/zhixu/internal/review/learningpath/domain"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/lib/pq"
 	"gorm.io/gorm"
 )
 
-// GORMRepository 是共享 Learning Path 的 staged GORM Store。
-// TODO 9 通过前，生产 Composition 继续使用 legacy Repository。
+// GORMRepository 使用共享平台连接池和 Unit of Work 持久化 Learning Path。
 type GORMRepository struct {
 	database   *gorm.DB
 	unitOfWork foundation.UnitOfWork
@@ -35,11 +33,11 @@ func NewGORMRepository(pool *platformpostgres.Pool) (*GORMRepository, error) {
 	}
 	database, err := pool.GORM()
 	if err != nil {
-		return nil, gormLearningPathUnavailable(errors.New("learning path GORM database is unavailable"))
+		return nil, gormLearningPathUnavailable(fmt.Errorf("learning path GORM database is unavailable: %w", err))
 	}
 	unitOfWork, err := pool.UnitOfWork()
 	if err != nil {
-		return nil, gormLearningPathUnavailable(errors.New("learning path GORM unit of work is unavailable"))
+		return nil, gormLearningPathUnavailable(fmt.Errorf("learning path GORM unit of work is unavailable: %w", err))
 	}
 	if !validLearningPathGORMDatabase(database) || nilLearningPathUnitOfWork(unitOfWork) {
 		return nil, gormLearningPathUnavailable(errors.New("learning path GORM dependencies are unavailable"))
@@ -943,7 +941,7 @@ func gormInsertStepReceipt(ctx context.Context, tx *gorm.DB, workspaceID foundat
 }
 
 func gormLearningPathNoRows(err error) bool {
-	return errors.Is(err, sql.ErrNoRows) || errors.Is(err, gorm.ErrRecordNotFound) || errors.Is(err, pgx.ErrNoRows)
+	return errors.Is(err, sql.ErrNoRows) || errors.Is(err, gorm.ErrRecordNotFound)
 }
 
 func gormLearningPathClassify(ctx context.Context, err error) error {
@@ -960,16 +958,13 @@ func gormLearningPathClassify(ctx context.Context, err error) error {
 		}
 		return foundation.NewError(foundation.ErrorDependencyUnavailable, pathdomain.ErrorCodeDependencyUnavailable, true, cause)
 	}
-	var postgresError *pgconn.PgError
-	if errors.As(err, &postgresError) {
-		switch postgresError.Code {
-		case "23505":
-			return pathdomain.ConflictError(pathdomain.ErrorCodeIdempotencyConflict, "learning path state already exists")
-		case "23503", "23514", "23502", "22001", "22P02":
-			return foundation.NewError(foundation.ErrorConsistencyViolation, pathdomain.ErrorCodePersistenceInvalid, false, err)
-		case "40001", "40P01":
-			return foundation.NewError(foundation.ErrorRetryableFailure, pathdomain.ErrorCodeDependencyUnavailable, true, err)
-		}
+	switch platformpostgres.SQLState(err) {
+	case "23505":
+		return foundation.NewError(foundation.ErrorVersionConflict, pathdomain.ErrorCodeIdempotencyConflict, false, err)
+	case "23503", "23514", "23502", "22001", "22P02":
+		return foundation.NewError(foundation.ErrorConsistencyViolation, pathdomain.ErrorCodePersistenceInvalid, false, err)
+	case "40001", "40P01":
+		return foundation.NewError(foundation.ErrorRetryableFailure, pathdomain.ErrorCodeDependencyUnavailable, true, err)
 	}
 	return gormLearningPathUnavailable(err)
 }
@@ -986,10 +981,10 @@ func gormLearningPathContextCause(ctx context.Context, err error) error {
 		return cause
 	}
 	if errors.Is(err, context.Canceled) {
-		return context.Canceled
+		return err
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		return context.DeadlineExceeded
+		return err
 	}
 	if errors.Is(err, sql.ErrTxDone) {
 		return err

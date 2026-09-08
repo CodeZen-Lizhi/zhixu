@@ -21,7 +21,8 @@ import (
 
 func TestReadRepositoryIssueHistoryIsBoundedStableAndUsesFixedStatements(t *testing.T) {
 	ctx := context.Background()
-	pool := newHealthIntegrationPool(t)
+	platform := requireHealthIntegrationPlatform(t)
+	pool := platform.DB()
 
 	workspaceID := newHealthReadTestID(t)
 	topicID := newHealthReadTestID(t)
@@ -38,7 +39,10 @@ func TestReadRepositoryIssueHistoryIsBoundedStableAndUsesFixedStatements(t *test
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
 	seedBoundedHistoryFacts(t, ctx, tx, workspaceID, topicID, definitionID, runID, scanID, now)
-	seedRepository, err := NewIssueRepository(tx)
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	seedRepository, err := NewGORMIssueRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,9 +67,6 @@ func TestReadRepositoryIssueHistoryIsBoundedStableAndUsesFixedStatements(t *test
 			t.Fatalf("observation %d: %v", index, err)
 		}
 	}
-	if err := tx.Commit(ctx); err != nil {
-		t.Fatal(err)
-	}
 	if _, err := pool.Exec(ctx, `ANALYZE ops.health_issue_observation; ANALYZE ops.health_issue_decision; ANALYZE ops.health_issue_evidence`); err != nil {
 		t.Fatal(err)
 	}
@@ -82,10 +83,11 @@ func TestReadRepositoryIssueHistoryIsBoundedStableAndUsesFixedStatements(t *test
 		[]any{string(workspaceID), evidenceIDs}, "health_issue_evidence", "idx_ops_health_issue_evidence_observation", "")
 
 	recorder := &healthStatementRecorder{}
-	readRepository, err := NewReadRepository(&healthStatementReadDB{ReadDB: pool, recorder: recorder})
+	readRepository, err := NewGORMReadRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
+	readRepository.core.db = &healthStatementReadDB{healthReadDB: readRepository.database, recorder: recorder}
 	codec, err := healthapp.NewIssueCursorCodec([]byte(strings.Repeat("k", 32)))
 	if err != nil {
 		t.Fatal(err)
@@ -178,18 +180,18 @@ func TestReadRepositoryIssueHistoryIsBoundedStableAndUsesFixedStatements(t *test
 }
 
 type healthStatementReadDB struct {
-	ReadDB
+	healthReadDB
 	recorder *healthStatementRecorder
 }
 
-func (database *healthStatementReadDB) Query(ctx context.Context, query string, args ...any) (pgx.Rows, error) {
+func (database *healthStatementReadDB) Query(ctx context.Context, query string, args ...any) (healthRows, error) {
 	database.recorder.record(query)
-	return database.ReadDB.Query(ctx, query, args...)
+	return database.healthReadDB.Query(ctx, query, args...)
 }
 
-func (database *healthStatementReadDB) QueryRow(ctx context.Context, query string, args ...any) pgx.Row {
+func (database *healthStatementReadDB) QueryRow(ctx context.Context, query string, args ...any) healthRow {
 	database.recorder.record(query)
-	return database.ReadDB.QueryRow(ctx, query, args...)
+	return database.healthReadDB.QueryRow(ctx, query, args...)
 }
 
 type healthHistoryExplainPlan struct {
@@ -200,7 +202,7 @@ type healthHistoryExplainPlan struct {
 	Plans        []healthHistoryExplainPlan `json:"Plans"`
 }
 
-func assertHealthHistoryIndexPlan(t *testing.T, ctx context.Context, database ReadDB, query string, args []any, relation, index, rangeColumn string) {
+func assertHealthHistoryIndexPlan(t *testing.T, ctx context.Context, database *pgxpool.Pool, query string, args []any, relation, index, rangeColumn string) {
 	t.Helper()
 	var raw []byte
 	if err := database.QueryRow(ctx, query, args...).Scan(&raw); err != nil {
@@ -236,7 +238,7 @@ func visitHealthHistoryPlan(plan healthHistoryExplainPlan, visit func(healthHist
 	}
 }
 
-func healthHistoryObservationIDs(t *testing.T, ctx context.Context, database ReadDB, workspaceID, issueID foundation.ID, limit int) []string {
+func healthHistoryObservationIDs(t *testing.T, ctx context.Context, database *pgxpool.Pool, workspaceID, issueID foundation.ID, limit int) []string {
 	t.Helper()
 	rows, err := database.Query(ctx, `SELECT observation.id::text FROM ops.health_issue_observation observation WHERE observation.workspace_id=$1 AND observation.issue_id=$2 ORDER BY observation.observed_at DESC,observation.id ASC LIMIT $3`, string(workspaceID), string(issueID), limit)
 	if err != nil {
@@ -285,23 +287,23 @@ VALUES($1,$2,'WORKSPACE',$2,1,'health-scope/workspace/v1',$3,'health-bounded-his
 }
 
 type healthTrendCountingDB struct {
-	*pgxpool.Pool
+	healthReadDB
 	trendQueries int
 	queries      int
 	queryRows    int
 }
 
-func (database *healthTrendCountingDB) Query(ctx context.Context, query string, args ...any) (pgx.Rows, error) {
+func (database *healthTrendCountingDB) Query(ctx context.Context, query string, args ...any) (healthRows, error) {
 	database.queries++
 	if strings.Contains(query, "WITH utc_days AS") {
 		database.trendQueries++
 	}
-	return database.Pool.Query(ctx, query, args...)
+	return database.healthReadDB.Query(ctx, query, args...)
 }
 
-func (database *healthTrendCountingDB) QueryRow(ctx context.Context, query string, args ...any) pgx.Row {
+func (database *healthTrendCountingDB) QueryRow(ctx context.Context, query string, args ...any) healthRow {
 	database.queryRows++
-	return database.Pool.QueryRow(ctx, query, args...)
+	return database.healthReadDB.QueryRow(ctx, query, args...)
 }
 
 func seedHealthReadWorkspace(t *testing.T, ctx context.Context, pool *pgxpool.Pool, workspaceID foundation.ID) {

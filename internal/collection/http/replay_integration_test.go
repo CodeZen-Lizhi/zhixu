@@ -27,9 +27,6 @@ func TestCollectionHTTPExactReplayAfterMutationAndArchive(t *testing.T) {
 		name string
 		open func(*platformpostgres.Pool) (collectionapp.Repository, error)
 	}{
-		{name: "legacy", open: func(pool *platformpostgres.Pool) (collectionapp.Repository, error) {
-			return postgres.NewRepository(pool.DB())
-		}},
 		{name: "gorm", open: func(pool *platformpostgres.Pool) (collectionapp.Repository, error) {
 			return postgres.NewGORMRepository(pool)
 		}},

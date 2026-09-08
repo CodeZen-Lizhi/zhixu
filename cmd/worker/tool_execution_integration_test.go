@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,7 +18,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/capability"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/gitcli"
-	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	toolagent "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/agent"
 	toolcatalog "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/catalog"
 	toolpostgres "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/postgres"
@@ -32,7 +31,6 @@ import (
 	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
 	workflowdomain "github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
 	workspacepostgres "github.com/CodeZen-Lizhi/zhixu/internal/workspace/adapter/postgres"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/rivertype"
@@ -41,8 +39,8 @@ import (
 func TestPersistedWorkflowRiverToolRequestExecutesRefusesAndReplays(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
-	pool, cleanup := newToolRiverDatabase(t, ctx)
-	defer cleanup()
+	database := newMigratedWorkerTestPool(t, os.Getenv("ZHIXU_TEST_DATABASE_URL"))
+	pool := database.DB()
 
 	ids := foundation.NewUUIDGenerator(nil)
 	workspaceID := mustToolSmokeID(t, ids)
@@ -62,7 +60,7 @@ func TestPersistedWorkflowRiverToolRequestExecutesRefusesAndReplays(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	workspaceRepository, err := workspacepostgres.NewRepository(pool)
+	workspaceRepository, err := workspacepostgres.NewGORMRepository(database)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,10 +83,7 @@ func TestPersistedWorkflowRiverToolRequestExecutesRefusesAndReplays(t *testing.T
 	if err := executionRegistry.Freeze(); err != nil {
 		t.Fatal(err)
 	}
-	toolRepository, err := toolpostgres.NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
+	toolRepository := newWorkerTestToolRepository(t, database)
 	executionService, err := toolsapplication.NewExecutionService(executionRegistry, toolRepository, toolRepository, ids, foundation.SystemClock{})
 	if err != nil {
 		t.Fatal(err)
@@ -131,15 +126,9 @@ func TestPersistedWorkflowRiverToolRequestExecutesRefusesAndReplays(t *testing.T
 		t.Fatal(err)
 	}
 
-	insertClient, err := riveradapter.NewClient(pool, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	jobInserter, err := riveradapter.NewJobInserter(insertClient)
-	if err != nil {
-		t.Fatal(err)
-	}
-	runtimeRepository, err := workflowpostgres.NewRuntimeRepository(pool, jobInserter)
+	runtimeRepository, err := workflowpostgres.NewGORMRuntimeRepositoryWithHooks(
+		database, riveradapter.DefaultOptions(), riveradapter.NewStaticScopedEnqueueFence(), workflowpostgres.GORMRuntimeRepositoryHooks{},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,11 +255,12 @@ func TestComposeWorkerConsumesPersistedReadGitStatusToolWorkflow(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
-	pool, err := pgxpool.New(ctx, databaseURL)
+	database, err := platformpostgres.Open(ctx, databaseURL, 8, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer pool.Close()
+	defer database.Close()
+	pool := database.DB()
 
 	ids := foundation.NewUUIDGenerator(nil)
 	workspaceID := mustToolSmokeID(t, ids)
@@ -293,15 +283,9 @@ func TestComposeWorkerConsumesPersistedReadGitStatusToolWorkflow(t *testing.T) {
 	}
 	riverOptions := riveradapter.DefaultOptions()
 	riverOptions.Queue = queue
-	insertClient, err := riveradapter.NewClientWithOptions(pool, nil, riverOptions)
-	if err != nil {
-		t.Fatal(err)
-	}
-	inserter, err := riveradapter.NewJobInserter(insertClient)
-	if err != nil {
-		t.Fatal(err)
-	}
-	runtimeRepository, err := workflowpostgres.NewRuntimeRepository(pool, inserter)
+	runtimeRepository, err := workflowpostgres.NewGORMRuntimeRepositoryWithHooks(
+		database, riverOptions, riveradapter.NewStaticScopedEnqueueFence(), workflowpostgres.GORMRuntimeRepositoryHooks{},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -454,7 +438,7 @@ func runToolSmokeGit(t *testing.T, ctx context.Context, root string, args ...str
 	return string(output)
 }
 
-func startToolRuntime(t *testing.T, ctx context.Context, repository *workflowpostgres.RuntimeRepository, ids foundation.IDGenerator, workspaceID foundation.ID, definition workflowdomain.RegisteredDefinition, key string, input json.RawMessage) workflowapplication.RuntimeStartResult {
+func startToolRuntime(t *testing.T, ctx context.Context, repository workflowapplication.RuntimeStarter, ids foundation.IDGenerator, workspaceID foundation.ID, definition workflowdomain.RegisteredDefinition, key string, input json.RawMessage) workflowapplication.RuntimeStartResult {
 	t.Helper()
 	request, err := workflowapplication.BuildRuntimeStartRequest(ids, foundation.SystemClock{}, workspaceID, key, input, definition)
 	if err != nil {
@@ -509,51 +493,21 @@ func mustToolSmokeID(t *testing.T, ids foundation.IDGenerator) foundation.ID {
 	return id
 }
 
-func newToolRiverDatabase(t *testing.T, ctx context.Context) (*pgxpool.Pool, func()) {
+func newWorkerTestToolRepository(t *testing.T, pool *platformpostgres.Pool) *toolpostgres.GORMRepository {
 	t.Helper()
-	baseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
-	if baseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL for real Tool River smoke")
-	}
-	parsed, err := url.Parse(baseURL)
+	policy, err := workflowpostgres.NewGORMToolExecutionPolicySnapshot(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
-	admin, err := pgxpool.New(ctx, baseURL)
+	recovery, err := workflowpostgres.NewGORMToolCallRecoveryFence(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
-	name := fmt.Sprintf("zhixu_tool_river_%d", time.Now().UnixNano())
-	identifier := pgx.Identifier{name}.Sanitize()
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+identifier); err != nil {
-		admin.Close()
-		t.Fatal(err)
-	}
-	parsed.Path = "/" + name
-	pool, err := pgxpool.New(ctx, parsed.String())
+	repository, err := toolpostgres.NewGORMRepository(pool, policy, recovery)
 	if err != nil {
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier)
-		admin.Close()
 		t.Fatal(err)
 	}
-	runner, err := platformmigration.NewAtlasEmbeddedRunner(pool)
-	if err != nil {
-		pool.Close()
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-		t.Fatal(err)
-	}
-	if err := runner.Up(ctx); err != nil {
-		pool.Close()
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-		t.Fatal(err)
-	}
-	return pool, func() {
-		pool.Close()
-		_, _ = admin.Exec(context.Background(), "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-	}
+	return repository
 }
 
 var _ toolsapplication.Executor = (*countingReceiptExecutor)(nil)

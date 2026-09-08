@@ -19,7 +19,7 @@ import (
 func TestDeliveryRuntimeClaimLeaseFenceAndCheckpointReplay(t *testing.T) {
 	_, database, ctx := newRetrievalTestRepository(t)
 	deliveryID, sourceVersionID := seedDeliveryRuntimeFixture(t, ctx, database.DB(), "a1000000")
-	repository, err := NewDeliveryRepository(database.DB(), &deliveryRuntimeIDs{values: []foundation.ID{
+	repository, err := NewGORMDeliveryRepository(database, &deliveryRuntimeIDs{values: []foundation.ID{
 		"a2000000-0000-4000-8000-000000000001", "a2000000-0000-4000-8000-000000000002",
 	}})
 	if err != nil {
@@ -85,7 +85,7 @@ func TestDeliveryRuntimeClaimLeaseFenceAndCheckpointReplay(t *testing.T) {
 func TestDeliveryRuntimeExpiredReclaimAndOldOwnerFailClosed(t *testing.T) {
 	_, database, ctx := newRetrievalTestRepository(t)
 	deliveryID, _ := seedDeliveryRuntimeFixture(t, ctx, database.DB(), "b1000000")
-	repository, err := NewDeliveryRepository(database.DB(), &deliveryRuntimeIDs{values: []foundation.ID{
+	repository, err := NewGORMDeliveryRepository(database, &deliveryRuntimeIDs{values: []foundation.ID{
 		"b2000000-0000-4000-8000-000000000001", "b2000000-0000-4000-8000-000000000002",
 	}})
 	if err != nil {
@@ -129,7 +129,7 @@ func TestDeliveryRuntimeExpiredReclaimAndOldOwnerFailClosed(t *testing.T) {
 func TestDeliveryRuntimeExpiredLeaseRejectsCheckpointResponseLossReplay(t *testing.T) {
 	_, database, ctx := newRetrievalTestRepository(t)
 	deliveryID, sourceVersionID := seedDeliveryRuntimeFixture(t, ctx, database.DB(), "b3000000")
-	repository, err := NewDeliveryRepository(database.DB(), &deliveryRuntimeIDs{values: []foundation.ID{
+	repository, err := NewGORMDeliveryRepository(database, &deliveryRuntimeIDs{values: []foundation.ID{
 		"b4000000-0000-4000-8000-000000000001",
 	}})
 	if err != nil {
@@ -162,7 +162,7 @@ func TestDeliveryRuntimeRejectsInvalidIngestionAttemptBinding(t *testing.T) {
 	_, database, ctx := newRetrievalTestRepository(t)
 	deliveryID, sourceVersionID := seedDeliveryRuntimeFixture(t, ctx, database.DB(), "b5000000")
 	projectionID, failedAttemptID := seedDeliveryRuntimeFailedIngestion(t, ctx, database.DB(), "b5000000", sourceVersionID)
-	repository, err := NewDeliveryRepository(database.DB(), &deliveryRuntimeIDs{values: []foundation.ID{
+	repository, err := NewGORMDeliveryRepository(database, &deliveryRuntimeIDs{values: []foundation.ID{
 		"b6000000-0000-4000-8000-000000000001",
 	}})
 	if err != nil {
@@ -203,7 +203,7 @@ func TestDeliveryRuntimeRetryAttemptInheritsFrozenIngestionWithoutChangingDelive
 	_, database, ctx := newRetrievalTestRepository(t)
 	deliveryID, sourceVersionID := seedDeliveryRuntimeFixture(t, ctx, database.DB(), "c3000000")
 	projectionID, ingestionAttemptID := seedDeliveryRuntimeSuccessfulIngestion(t, ctx, database.DB(), "c3000000", sourceVersionID)
-	repository, err := NewDeliveryRepository(database.DB(), &deliveryRuntimeIDs{values: []foundation.ID{
+	repository, err := NewGORMDeliveryRepository(database, &deliveryRuntimeIDs{values: []foundation.ID{
 		"c4000000-0000-4000-8000-000000000001", "c4000000-0000-4000-8000-000000000002",
 	}})
 	if err != nil {
@@ -300,7 +300,7 @@ func TestDeliveryRuntimeFailureClassesAndTerminalReplay(t *testing.T) {
 			_, database, ctx := newRetrievalTestRepository(t)
 			deliveryID, _ := seedDeliveryRuntimeFixture(t, ctx, database.DB(), test.prefix)
 			attemptID := foundation.ID(strings.Replace("f2000000-0000-4000-8000-000000000001", "f2", string(rune('a'+index))+"2", 1))
-			repository, err := NewDeliveryRepository(database.DB(), &deliveryRuntimeIDs{values: []foundation.ID{attemptID}})
+			repository, err := NewGORMDeliveryRepository(database, &deliveryRuntimeIDs{values: []foundation.ID{attemptID}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -360,7 +360,7 @@ func seedDeliveryRuntimeFixture(t *testing.T, ctx context.Context, database *pgx
 	deliveryID := foundation.ID(prefix + "-0000-4000-8000-000000000006")
 	batch := &pgx.Batch{}
 	batch.Queue(`INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at)
-		VALUES($1,$2,$3,$3,CURRENT_TIMESTAMP,'test',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "delivery-runtime-"+prefix, "/tmp/delivery-runtime-"+prefix)
+		VALUES($1,$2,$3,$3,CURRENT_TIMESTAMP,'inactive',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, string(workspaceID), "delivery-runtime-"+prefix, "/tmp/delivery-runtime-"+prefix)
 	batch.Queue(`INSERT INTO core.source(id,workspace_id,type,logical_name,original_location,created_at)
 		VALUES($1,$2,'file','runtime.md','runtime.md',CURRENT_TIMESTAMP)`, string(sourceID), string(workspaceID))
 	batch.Queue(`INSERT INTO core.content_artifact(id,workspace_id,content_hash,byte_size,managed_location,created_at)

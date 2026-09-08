@@ -18,7 +18,6 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	retrievaldomain "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/catalog"
-	toolspostgres "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/postgres"
 	toolsapplication "github.com/CodeZen-Lizhi/zhixu/internal/tools/application"
 	toolsdomain "github.com/CodeZen-Lizhi/zhixu/internal/tools/domain"
 	workflowapplication "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
@@ -30,10 +29,10 @@ func TestWorkspaceAnalysisToolExecutionAuthorizesPersistsAndReplaysWithoutReexec
 	defer cleanup()
 
 	prepareWorkspaceAnalysisToolAuthorizationRuntime(t, ctx, pool)
-	repository, err := toolspostgres.NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime := openMigrationRuntimePool(t, ctx, pool)
+	defer runtime.Close()
+	pool = runtime.DB()
+	repository := newWorkspaceAnalysisMigrationToolsRepository(t, runtime)
 	contract := workspaceAnalysisGitExecutionContract(t)
 	executor := &workspaceAnalysisGitExecutionStub{}
 	registry := toolsapplication.NewExecutionRegistry()
@@ -87,11 +86,11 @@ func TestWorkspaceAnalysisInspectNodeRecoversCanonicalReceiptAcrossReplacementAt
 	defer cleanup()
 
 	prepareWorkspaceAnalysisToolAuthorizationRuntime(t, ctx, pool)
-	toolRepository, err := toolspostgres.NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
-	agentRepository, err := agentpostgres.NewRepository(pool)
+	runtime := openMigrationRuntimePool(t, ctx, pool)
+	defer runtime.Close()
+	pool = runtime.DB()
+	toolRepository := newWorkspaceAnalysisMigrationToolsRepository(t, runtime)
+	agentRepository, err := agentpostgres.NewGORMRepository(runtime)
 	if err != nil {
 		t.Fatal(err)
 	}

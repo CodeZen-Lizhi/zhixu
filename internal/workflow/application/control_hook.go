@@ -1,7 +1,6 @@
 package application
 
 import (
-	"context"
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
@@ -17,11 +16,4 @@ type WorkflowControlEvent struct {
 	ExpectedVersion  int64
 	PersistedControl ControlPersistenceResult
 	OccurredAt       time.Time
-}
-
-// WorkflowControlHook 在 Runtime 当前事务内同步一个首次控制命令。
-// 实现方只处理自己拥有的 Workflow，其余 Run 必须 no-op，且不得提交事务或执行事务外副作用。
-type WorkflowControlHook interface {
-	// OnWorkflowControl 使用调用方持有的事务同步一个首次持久化的控制命令。
-	OnWorkflowControl(context.Context, any, WorkflowControlEvent) error
 }

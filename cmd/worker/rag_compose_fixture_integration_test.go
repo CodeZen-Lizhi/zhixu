@@ -15,6 +15,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	knowledgepostgres "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/adapter/postgres"
 	knowledgedomain "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	retrievalpostgres "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/adapter/postgres"
 	retrievalapplication "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/application"
 	retrievaldomain "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
@@ -33,10 +34,10 @@ func TestComposeRAGKnowledgeSeedCreatesOnlyEligibilityFacts(t *testing.T) {
 	databaseURL := testDatabaseURL(t)
 	pool := newMigratedWorkerTestPool(t, databaseURL)
 	ctx := context.Background()
-	fixture := seedComposeRAGProvenance(t, ctx, pool)
+	fixture := seedComposeRAGProvenance(t, ctx, pool.DB())
 	seeded := seedComposeRAGKnowledge(t, ctx, pool, fixture.WorkspaceID, fixture.SourceVersionID, fixture.SourceSpanID)
 
-	repository, err := knowledgepostgres.NewRepository(pool)
+	repository, err := knowledgepostgres.NewGORMRepository(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +52,7 @@ func TestComposeRAGKnowledgeSeedCreatesOnlyEligibilityFacts(t *testing.T) {
 	}
 	for _, table := range []string{"agent.conversation", "agent.question", "agent.answer", "workflow.run"} {
 		var count int
-		if err := pool.QueryRow(ctx, "SELECT count(*) FROM "+table).Scan(&count); err != nil || count != 0 {
+		if err := pool.DB().QueryRow(ctx, "SELECT count(*) FROM "+table).Scan(&count); err != nil || count != 0 {
 			t.Fatalf("seed created forbidden facts in %s: count=%d err=%v", table, count, err)
 		}
 	}
@@ -78,17 +79,17 @@ func TestComposeRAGKnowledgeSeedExternalFixture(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	pool, err := pgxpool.New(ctx, databaseURL)
+	pool, err := platformpostgres.Open(ctx, databaseURL, 8, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer pool.Close()
 	var workflowCountBefore int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM workflow.run`).Scan(&workflowCountBefore); err != nil {
+	if err := pool.DB().QueryRow(ctx, `SELECT count(*) FROM workflow.run`).Scan(&workflowCountBefore); err != nil {
 		t.Fatal(err)
 	}
 	seeded := seedComposeRAGKnowledge(t, ctx, pool, workspaceID, sourceVersionID, sourceSpanID)
-	repository, err := knowledgepostgres.NewRepository(pool)
+	repository, err := knowledgepostgres.NewGORMRepository(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,12 +104,12 @@ func TestComposeRAGKnowledgeSeedExternalFixture(t *testing.T) {
 	}
 	for _, table := range []string{"agent.conversation", "agent.question", "agent.answer"} {
 		var count int
-		if err := pool.QueryRow(ctx, "SELECT count(*) FROM "+table).Scan(&count); err != nil || count != 0 {
+		if err := pool.DB().QueryRow(ctx, "SELECT count(*) FROM "+table).Scan(&count); err != nil || count != 0 {
 			t.Fatalf("external seed created forbidden facts in %s: count=%d err=%v", table, count, err)
 		}
 	}
 	var workflowCountAfter int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM workflow.run`).Scan(&workflowCountAfter); err != nil || workflowCountAfter != workflowCountBefore {
+	if err := pool.DB().QueryRow(ctx, `SELECT count(*) FROM workflow.run`).Scan(&workflowCountAfter); err != nil || workflowCountAfter != workflowCountBefore {
 		t.Fatalf("external seed changed Workflow facts: before=%d after=%d err=%v", workflowCountBefore, workflowCountAfter, err)
 	}
 }
@@ -116,15 +117,12 @@ func TestComposeRAGKnowledgeSeedExternalFixture(t *testing.T) {
 func testDatabaseURL(t *testing.T) string {
 	t.Helper()
 	value := getenv("ZHIXU_TEST_DATABASE_URL")
-	if value == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a PostgreSQL admin database")
-	}
 	return value
 }
 
-func seedComposeRAGKnowledge(t *testing.T, ctx context.Context, pool *pgxpool.Pool, workspaceID, sourceVersionID, sourceSpanID foundation.ID) composeRAGKnowledgeFixture {
+func seedComposeRAGKnowledge(t *testing.T, ctx context.Context, pool *platformpostgres.Pool, workspaceID, sourceVersionID, sourceSpanID foundation.ID) composeRAGKnowledgeFixture {
 	t.Helper()
-	repository, err := knowledgepostgres.NewRepository(pool)
+	repository, err := knowledgepostgres.NewGORMRepository(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +189,7 @@ func seedComposeRAGKnowledge(t *testing.T, ctx context.Context, pool *pgxpool.Po
 // seedRAGConversationKnowledge creates the real Retrieval provenance and only
 // the missing formal-Knowledge qualification. Public APIs still own every
 // Conversation, Question, Answer, Workflow, Event and Feedback fact.
-func seedRAGConversationKnowledge(t *testing.T, ctx context.Context, pool *pgxpool.Pool, root string) {
+func seedRAGConversationKnowledge(t *testing.T, ctx context.Context, pool *platformpostgres.Pool, root string) {
 	t.Helper()
 	content := []byte("Approved recovery replays durable facts without duplicating provider work.")
 	digest := sha256.Sum256(content)
@@ -224,11 +222,11 @@ func seedRAGConversationKnowledge(t *testing.T, ctx context.Context, pool *pgxpo
 		{`INSERT INTO retrieval.index_manifest_source(index_version_id,workspace_id,source_id,source_version_id,parse_projection_id,selection_status,created_at) VALUES($1,$2,$3,$4,$5,'included',$6)`, []any{string(ragSmokeIndexID), string(ragSmokeWorkspaceID), string(ragSmokeSourceID), string(ragSmokeSourceVersionID), string(ragSmokeProjectionID), at}},
 	}
 	for _, statement := range statements {
-		if _, err := pool.Exec(ctx, statement.sql, statement.args...); err != nil {
+		if _, err := pool.DB().Exec(ctx, statement.sql, statement.args...); err != nil {
 			t.Fatal(err)
 		}
 	}
-	retrievalRepository, err := retrievalpostgres.NewRepository(pool)
+	retrievalRepository, err := retrievalpostgres.NewGORMRepository(pool)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -16,9 +16,9 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/gitcli"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	workspacepostgres "github.com/CodeZen-Lizhi/zhixu/internal/workspace/adapter/postgres"
 	workspacedomain "github.com/CodeZen-Lizhi/zhixu/internal/workspace/domain"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -28,25 +28,18 @@ func TestWritebackSagaRealFaultSmoke(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Safe Writeback v1 smoke requires local POSIX filesystem semantics")
 	}
-	databaseURL := os.Getenv("ZHIXU_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL to a migrated disposable PostgreSQL database")
-	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git executable is required")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	fixture := testdb.Require(t, testdb.Config{
+		ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")),
+		Availability:     testdb.FailWhenUnavailable,
+		MaxConns:         16,
+	})
+	platform := fixture.Pool()
+	pool := platform.DB()
 
 	ids := foundation.NewUUIDGenerator(nil)
 	nextID := func() foundation.ID {
@@ -79,19 +72,15 @@ func TestWritebackSagaRealFaultSmoke(t *testing.T) {
 	runFaultSmokeGit(t, ctx, root, "commit", "-m", "base")
 	baseGitHead := strings.TrimSpace(runFaultSmokeGit(t, ctx, root, "rev-parse", "HEAD"))
 
-	workspaceRepository, err := workspacepostgres.NewRepository(tx)
+	workspaceRepository, err := workspacepostgres.NewGORMRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var databaseNow time.Time
-	if err := tx.QueryRow(ctx, `SELECT CURRENT_TIMESTAMP`).Scan(&databaseNow); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT CURRENT_TIMESTAMP`).Scan(&databaseNow); err != nil {
 		t.Fatal(err)
 	}
 	databaseNow = databaseNow.UTC()
-	// 共享的真实 PostgreSQL 基准库可能已有一个 active Workspace；本测试在回滚事务内临时释放唯一约束。
-	if _, err := tx.Exec(ctx, `UPDATE core.workspace SET status='fault_smoke_inactive',version=version+1,updated_at=$1 WHERE status='active'`, databaseNow); err != nil {
-		t.Fatal(err)
-	}
 	if _, err := workspaceRepository.CreateWorkspace(ctx, workspacedomain.Workspace{
 		ID: workspaceID, Name: "Safe Writeback Fault Smoke", RootPath: root,
 		Git:    workspacedomain.GitBaseline{RepositoryPath: root, Branch: "main", Head: baseGitHead, CheckedAt: databaseNow},
@@ -99,17 +88,17 @@ func TestWritebackSagaRealFaultSmoke(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO workflow.definition(id,workspace_id,key,version,graph,created_at) VALUES($1,$2,$3,1,'{}',$4)`, string(definitionID), string(workspaceID), "fault-smoke-"+string(definitionID), databaseNow); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO workflow.definition(id,workspace_id,key,version,graph,created_at) VALUES($1,$2,$3,1,'{}',$4)`, string(definitionID), string(workspaceID), "fault-smoke-"+string(definitionID), databaseNow); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO workflow.run(id,workspace_id,definition_id,status,input,version,created_at,updated_at) VALUES($1,$2,$3,'running','{}',1,$4,$4)`, string(runID), string(workspaceID), string(definitionID), databaseNow); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO workflow.run(id,workspace_id,definition_id,status,input,version,created_at,updated_at) VALUES($1,$2,$3,'running','{}',1,$4,$4)`, string(runID), string(workspaceID), string(definitionID), databaseNow); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO workflow.node_run(id,run_id,node_key,node_type,status,attempt,input,lease_owner,lease_until,version,created_at,updated_at) VALUES($1,$2,'safe-writeback','side_effect','running',1,'{}','fault-worker',$3,1,$4,$4)`, string(nodeID), string(runID), databaseNow.Add(10*time.Minute), databaseNow); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO workflow.node_run(id,run_id,node_key,node_type,status,attempt,input,lease_owner,lease_until,version,created_at,updated_at) VALUES($1,$2,'safe-writeback','side_effect','running',1,'{}','fault-worker',$3,1,$4,$4)`, string(nodeID), string(runID), databaseNow.Add(10*time.Minute), databaseNow); err != nil {
 		t.Fatal(err)
 	}
 
-	changeRepository, err := changecontrolpostgres.NewRepository(tx)
+	changeRepository, err := changecontrolpostgres.NewGORMRepository(platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,10 +128,10 @@ func TestWritebackSagaRealFaultSmoke(t *testing.T) {
 	}
 	// Direct-node smoke bypasses ApprovalDispatch, so retain the legacy Proposal
 	// projection and create the exact current-revision dispatch binding.
-	if _, err := tx.Exec(ctx, `UPDATE change_control.proposal SET workflow_run_id=$2,version=version+1,updated_at=CURRENT_TIMESTAMP WHERE id=$1 AND workflow_run_id IS NULL`, string(created.Proposal.ID), string(runID)); err != nil {
+	if _, err := pool.Exec(ctx, `UPDATE change_control.proposal SET workflow_run_id=$2,version=version+1,updated_at=CURRENT_TIMESTAMP WHERE id=$1 AND workflow_run_id IS NULL`, string(created.Proposal.ID), string(runID)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.Exec(ctx, `
+	if _, err := pool.Exec(ctx, `
 		INSERT INTO change_control.proposal_revision_dispatch(
 			workspace_id,proposal_id,revision_id,approval_id,workflow_run_id,created_at
 		) VALUES($1,$2,$3,$4,$5,CURRENT_TIMESTAMP)`,
@@ -235,8 +224,8 @@ func TestWritebackSagaRealFaultSmoke(t *testing.T) {
 	if count := strings.TrimSpace(runFaultSmokeGit(t, ctx, root, "rev-list", "--count", "HEAD")); count != "2" {
 		t.Fatalf("commit count=%s want=2", count)
 	}
-	assertFaultSmokeCount(t, ctx, tx, `SELECT count(*) FROM change_control.proposal_commit WHERE writeback_execution_id=$1`, 1, string(begin.ExecutionID))
-	assertFaultSmokeCount(t, ctx, tx, `SELECT count(*) FROM workflow.outbox_event WHERE idempotency_key=$1`, 1, domain.ExpectedWritebackReindexKey(domain.WritebackExecution{WorkspaceID: workspaceID, ProposalID: created.Proposal.ID, RevisionID: created.Proposal.Revision.ID, GitCommit: result.GitCommit}))
+	assertFaultSmokeCount(t, ctx, pool, `SELECT count(*) FROM change_control.proposal_commit WHERE writeback_execution_id=$1`, 1, string(begin.ExecutionID))
+	assertFaultSmokeCount(t, ctx, pool, `SELECT count(*) FROM workflow.outbox_event WHERE idempotency_key=$1`, 1, domain.ExpectedWritebackReindexKey(domain.WritebackExecution{WorkspaceID: workspaceID, ProposalID: created.Proposal.ID, RevisionID: created.Proposal.Revision.ID, GitCommit: result.GitCommit}))
 }
 
 type faultWritebackRepository struct {
@@ -294,10 +283,10 @@ func runFaultSmokeGit(t *testing.T, ctx context.Context, root string, arguments 
 	return string(output)
 }
 
-func assertFaultSmokeCount(t *testing.T, ctx context.Context, tx pgx.Tx, query string, want int, arguments ...any) {
+func assertFaultSmokeCount(t *testing.T, ctx context.Context, pool *pgxpool.Pool, query string, want int, arguments ...any) {
 	t.Helper()
 	var count int
-	if err := tx.QueryRow(ctx, query, arguments...).Scan(&count); err != nil || count != want {
+	if err := pool.QueryRow(ctx, query, arguments...).Scan(&count); err != nil || count != want {
 		t.Fatalf("count=%d want=%d err=%v query=%s", count, want, err, query)
 	}
 }

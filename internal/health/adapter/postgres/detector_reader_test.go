@@ -9,19 +9,18 @@ import (
 	healthapp "github.com/CodeZen-Lizhi/zhixu/internal/health/application"
 	healthdetector "github.com/CodeZen-Lizhi/zhixu/internal/health/detector"
 	"github.com/CodeZen-Lizhi/zhixu/internal/health/domain"
-	"github.com/jackc/pgx/v5"
 )
 
 type detectorDB struct{ calls int }
 
-func (db *detectorDB) Query(context.Context, string, ...any) (pgx.Rows, error) {
+func (db *detectorDB) Query(context.Context, string, ...any) (healthRows, error) {
 	db.calls++
 	return nil, nil
 }
 
 func TestFactReaderRejectsUnavailableScopesBeforeQuery(t *testing.T) {
 	db := &detectorDB{}
-	reader, err := NewFactReader(db)
+	reader, err := newFactReader(db)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,7 +35,7 @@ func TestFactReaderRejectsUnavailableScopesBeforeQuery(t *testing.T) {
 
 func TestFactReaderRejectsUnsupportedDetectorScopeBeforeQuery(t *testing.T) {
 	db := &detectorDB{}
-	reader, err := NewFactReader(db)
+	reader, err := newFactReader(db)
 	if err != nil {
 		t.Fatal(err)
 	}

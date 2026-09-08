@@ -9,16 +9,16 @@ import (
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/gitcli"
-	"github.com/jackc/pgx/v5/pgxpool"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 )
 
 func TestNewGitSyncHandlerRequiresProductionDependencies(t *testing.T) {
 	keyFile := writeGitSyncKeyFile(t)
 	workspaces := documentHistoryWorkspaceRepositoryFake{}
-	pool := &pgxpool.Pool{}
+	pool := apiConstructorPool(t)
 	for _, test := range []struct {
 		name       string
-		pool       *pgxpool.Pool
+		pool       *platformpostgres.Pool
 		workspaces gitcli.WorkspaceRepository
 		keyFile    string
 	}{
@@ -37,7 +37,7 @@ func TestNewGitSyncHandlerRequiresProductionDependencies(t *testing.T) {
 
 func TestNewGitSyncHandlerComposesProductionBoundaries(t *testing.T) {
 	handler, err := newGitSyncHandler(
-		&pgxpool.Pool{}, documentHistoryWorkspaceRepositoryFake{}, writeGitSyncKeyFile(t), time.Second,
+		apiConstructorPool(t), documentHistoryWorkspaceRepositoryFake{}, writeGitSyncKeyFile(t), time.Second,
 	)
 	if err != nil || handler == nil || !handler.Available() {
 		t.Fatalf("handler=%#v err=%v", handler, err)
@@ -46,7 +46,7 @@ func TestNewGitSyncHandlerComposesProductionBoundaries(t *testing.T) {
 
 func TestNewGitSyncHandlerDoesNotExposeKeyPath(t *testing.T) {
 	keyFile := filepath.Join(t.TempDir(), "missing-git-sync.key")
-	_, err := newGitSyncHandler(&pgxpool.Pool{}, documentHistoryWorkspaceRepositoryFake{}, keyFile, time.Second)
+	_, err := newGitSyncHandler(apiConstructorPool(t), documentHistoryWorkspaceRepositoryFake{}, keyFile, time.Second)
 	if err == nil || bytes.Contains([]byte(err.Error()), []byte(keyFile)) {
 		t.Fatalf("error leaked key path: %v", err)
 	}

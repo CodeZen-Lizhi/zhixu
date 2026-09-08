@@ -23,7 +23,7 @@ func TestAuditStorePostgresAppendOnlyAndIdempotency(t *testing.T) {
 	defer cancel()
 	stores := requireAuditIntegrationStores(t)
 	pool := stores.platform.DB()
-	store := stores.legacy
+	store := stores.gorm
 
 	t.Run("exact replay and conflict", func(t *testing.T) {
 		event := integrationEvent(t, "exact")
@@ -188,43 +188,59 @@ func TestAuditStorePostgresAppendOnlyAndIdempotency(t *testing.T) {
 	})
 }
 
-func TestAuditGORMStorePostgresEquivalenceAndScopedTransaction(t *testing.T) {
+func TestAuditGORMStorePostgresReadContractAndScopedTransaction(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	stores := requireAuditIntegrationStores(t)
 	pool := stores.platform.DB()
 
-	t.Run("legacy and GORM paths exactly replay the same persisted facts", func(t *testing.T) {
-		legacyFirst := integrationEvent(t, "cross-legacy-first")
-		legacyCreated, replayed, err := stores.legacy.Append(ctx, legacyFirst)
-		if err != nil || replayed || legacyCreated.ID != legacyFirst.ID {
-			t.Fatalf("legacy initial append event=%#v replayed=%t err=%v", legacyCreated, replayed, err)
+	t.Run("store owned and caller scoped paths replay the same persisted facts", func(t *testing.T) {
+		scopedFirst := integrationEvent(t, "cross-scoped-first")
+		var scopedCreated domain.Event
+		var replayed bool
+		err := stores.unitOfWork.Within(ctx, foundation.TransactionOptions{}, func(callbackCtx context.Context, scope foundation.TransactionScope) error {
+			var err error
+			scopedCreated, replayed, err = stores.gorm.AppendScoped(callbackCtx, scope, scopedFirst)
+			return err
+		})
+		if err != nil || replayed || scopedCreated.ID != scopedFirst.ID {
+			t.Fatalf("scoped initial append event=%#v replayed=%t err=%v", scopedCreated, replayed, err)
 		}
-		gormRead, err := stores.gorm.Get(ctx, legacyFirst.ID)
-		if err != nil || !domain.EqualBinding(gormRead, legacyFirst) {
-			t.Fatalf("GORM read legacy event=%#v err=%v", gormRead, err)
+		gormRead, err := stores.gorm.Get(ctx, scopedFirst.ID)
+		if err != nil || !domain.EqualBinding(gormRead, scopedFirst) {
+			t.Fatalf("read scoped event=%#v err=%v", gormRead, err)
 		}
-		legacyRetry := legacyFirst
-		legacyRetry.ID = integrationID(t)
-		gormReplayed, replayed, err := stores.gorm.Append(ctx, legacyRetry)
-		if err != nil || !replayed || gormReplayed.ID != legacyFirst.ID || !domain.EqualBinding(gormReplayed, legacyFirst) {
-			t.Fatalf("GORM replay legacy event=%#v replayed=%t err=%v", gormReplayed, replayed, err)
+		scopedRetry := scopedFirst
+		scopedRetry.ID = integrationID(t)
+		gormReplayed, replayed, err := stores.gorm.Append(ctx, scopedRetry)
+		if err != nil || !replayed || gormReplayed.ID != scopedFirst.ID || !domain.EqualBinding(gormReplayed, scopedFirst) {
+			t.Fatalf("replay scoped event=%#v replayed=%t err=%v", gormReplayed, replayed, err)
 		}
 
-		gormFirst := integrationEvent(t, "cross-gorm-first")
+		gormFirst := integrationEvent(t, "cross-store-first")
 		gormCreated, replayed, err := stores.gorm.Append(ctx, gormFirst)
 		if err != nil || replayed || gormCreated.ID != gormFirst.ID {
-			t.Fatalf("GORM initial append event=%#v replayed=%t err=%v", gormCreated, replayed, err)
+			t.Fatalf("store initial append event=%#v replayed=%t err=%v", gormCreated, replayed, err)
 		}
-		legacyRead, err := stores.legacy.Get(ctx, gormFirst.ID)
-		if err != nil || !domain.EqualBinding(legacyRead, gormFirst) {
-			t.Fatalf("legacy read GORM event=%#v err=%v", legacyRead, err)
+		var scopedRead domain.Event
+		err = stores.unitOfWork.Within(ctx, foundation.TransactionOptions{ReadOnly: true}, func(callbackCtx context.Context, scope foundation.TransactionScope) error {
+			var err error
+			scopedRead, err = stores.gorm.GetScoped(callbackCtx, scope, gormFirst.ID)
+			return err
+		})
+		if err != nil || !domain.EqualBinding(scopedRead, gormFirst) {
+			t.Fatalf("scoped read store event=%#v err=%v", scopedRead, err)
 		}
 		gormRetry := gormFirst
 		gormRetry.ID = integrationID(t)
-		legacyReplayed, replayed, err := stores.legacy.Append(ctx, gormRetry)
-		if err != nil || !replayed || legacyReplayed.ID != gormFirst.ID || !domain.EqualBinding(legacyReplayed, gormFirst) {
-			t.Fatalf("legacy replay GORM event=%#v replayed=%t err=%v", legacyReplayed, replayed, err)
+		var scopedReplayed domain.Event
+		err = stores.unitOfWork.Within(ctx, foundation.TransactionOptions{}, func(callbackCtx context.Context, scope foundation.TransactionScope) error {
+			var err error
+			scopedReplayed, replayed, err = stores.gorm.AppendScoped(callbackCtx, scope, gormRetry)
+			return err
+		})
+		if err != nil || !replayed || scopedReplayed.ID != gormFirst.ID || !domain.EqualBinding(scopedReplayed, gormFirst) {
+			t.Fatalf("scoped replay store event=%#v replayed=%t err=%v", scopedReplayed, replayed, err)
 		}
 	})
 
@@ -494,7 +510,6 @@ func TestAuditGORMStorePostgresEquivalenceAndScopedTransaction(t *testing.T) {
 
 type auditIntegrationStores struct {
 	platform   *platformpostgres.Pool
-	legacy     *Store
 	gorm       *GORMStore
 	unitOfWork foundation.UnitOfWork
 }
@@ -506,10 +521,6 @@ func requireAuditIntegrationStores(t *testing.T) auditIntegrationStores {
 	if platform == nil || platform.DB() == nil {
 		t.Fatal("test database fixture did not provide a shared platform pool")
 	}
-	legacy, err := NewStore(platform.DB())
-	if err != nil {
-		t.Fatalf("NewStore from shared platform pool: %v", err)
-	}
 	gormStore, err := NewGORMStore(platform)
 	if err != nil {
 		t.Fatalf("NewGORMStore from shared platform pool: %v", err)
@@ -518,7 +529,7 @@ func requireAuditIntegrationStores(t *testing.T) auditIntegrationStores {
 	if err != nil {
 		t.Fatalf("UnitOfWork from shared platform pool: %v", err)
 	}
-	return auditIntegrationStores{platform: platform, legacy: legacy, gorm: gormStore, unitOfWork: unitOfWork}
+	return auditIntegrationStores{platform: platform, gorm: gormStore, unitOfWork: unitOfWork}
 }
 
 func mustGORMAppendError(ctx context.Context, store *GORMStore, event domain.Event) error {

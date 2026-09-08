@@ -2,8 +2,12 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"reflect"
 	"strings"
 	"testing"
@@ -11,12 +15,14 @@ import (
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
-	"github.com/jackc/pgx/v5"
+	gormpostgres "gorm.io/driver/postgres"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 func TestLoadSourceVersionReferenceUsesBoundParameterizedJoin(t *testing.T) {
 	database := &evidenceTestDB{row: evidenceTestRow{values: evidenceSourceRowValues("docs/evidence.md")}}
-	repository, err := NewSearchRepository(database)
+	repository, err := newEvidenceSearchRepository(t, database)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +65,7 @@ func TestLoadSourceVersionReferenceUsesBoundParameterizedJoin(t *testing.T) {
 
 func TestLoadSourceSpanReferenceUsesFullBindingJoin(t *testing.T) {
 	database := &evidenceTestDB{row: evidenceTestRow{values: evidenceSpanRowValues("docs/evidence.md")}}
-	repository, err := NewSearchRepository(database)
+	repository, err := newEvidenceSearchRepository(t, database)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,14 +85,14 @@ func TestLoadSourceSpanReferenceUsesFullBindingJoin(t *testing.T) {
 		"pp.id=svp.parse_projection_id",
 		"pp.content_artifact_id=ca.id",
 		"JOIN ingestion.source_span AS sp",
-		"sp.id=$3",
+		"sp.id=$2",
 		"sp.workspace_id=s.workspace_id",
 		"sp.content_artifact_id=ca.id",
 		"sp.parse_projection_id=pp.id",
 		"sp.parser_version=pp.parser_version",
 		"sp.schema_version=pp.schema_version",
 		"sv.original_content_location",
-		"WHERE sv.id=$2",
+		"WHERE sv.id=$3",
 	} {
 		if !strings.Contains(database.query, predicate) {
 			t.Fatalf("source span query missing %q:\n%s", predicate, database.query)
@@ -95,14 +101,14 @@ func TestLoadSourceSpanReferenceUsesFullBindingJoin(t *testing.T) {
 	if strings.Contains(strings.ToUpper(database.query), "SELECT *") {
 		t.Fatal("source span query uses SELECT *")
 	}
-	if !reflect.DeepEqual(database.args, []any{string(evidenceTestWorkspaceID), string(evidenceTestSourceVersionID), string(evidenceTestSpanID)}) {
+	if !reflect.DeepEqual(database.args, []any{string(evidenceTestWorkspaceID), string(evidenceTestSpanID), string(evidenceTestSourceVersionID)}) {
 		t.Fatalf("query args = %#v", database.args)
 	}
 }
 
 func TestLoadCitationSourceSpanReferenceUsesFullFrozenTupleInOneQuery(t *testing.T) {
 	database := &evidenceTestDB{row: evidenceTestRow{values: []any{citationReferenceJSON(t, "docs/evidence.md")}}}
-	repository, err := NewSearchRepository(database)
+	repository, err := newEvidenceSearchRepository(t, database)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,8 +135,8 @@ func TestLoadCitationSourceSpanReferenceUsesFullFrozenTupleInOneQuery(t *testing
 		}
 	}
 	wantArgs := []any{
-		[]string{string(evidenceTestWorkspaceID)}, []string{string(evidenceTestIndexID)}, []string{string(evidenceTestChunkID)},
-		[]string{string(evidenceTestSourceVersionID)}, []string{string(evidenceTestSpanID)},
+		evidenceArrayArgument(evidenceTestWorkspaceID), evidenceArrayArgument(evidenceTestIndexID), evidenceArrayArgument(evidenceTestChunkID),
+		evidenceArrayArgument(evidenceTestSourceVersionID), evidenceArrayArgument(evidenceTestSpanID),
 	}
 	if !reflect.DeepEqual(database.args, wantArgs) {
 		t.Fatalf("args=%#v", database.args)
@@ -147,7 +153,7 @@ func TestResolveProvenanceCitationReferencesUsesActiveIndexInOneQuery(t *testing
 		t.Fatal(err)
 	}
 	database := &evidenceTestDB{row: evidenceTestRow{values: []any{encoded}}}
-	repository, err := NewSearchRepository(database)
+	repository, err := newEvidenceSearchRepository(t, database)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +167,7 @@ func TestResolveProvenanceCitationReferencesUsesActiveIndexInOneQuery(t *testing
 			t.Fatalf("provenance query missing %q:\n%s", predicate, database.query)
 		}
 	}
-	wantArgs := []any{[]string{string(evidenceTestWorkspaceID)}, []string{string(evidenceTestSourceVersionID)}, []string{string(evidenceTestSpanID)}}
+	wantArgs := []any{evidenceArrayArgument(evidenceTestWorkspaceID), evidenceArrayArgument(evidenceTestSourceVersionID), evidenceArrayArgument(evidenceTestSpanID)}
 	if !reflect.DeepEqual(database.args, wantArgs) {
 		t.Fatalf("provenance args=%#v", database.args)
 	}
@@ -188,21 +194,21 @@ func TestEvidenceReferenceLoadsUnifyNotFoundAndFailClosed(t *testing.T) {
 	tests := []struct {
 		name string
 		row  evidenceTestRow
-		load func(*SearchRepository) error
+		load func(*GORMSearchRepository) error
 		kind foundation.ErrorKind
 		code string
 	}{
 		{
-			name: "source version missing", row: evidenceTestRow{err: pgx.ErrNoRows},
-			load: func(repository *SearchRepository) error {
+			name: "source version missing", row: evidenceTestRow{err: sql.ErrNoRows},
+			load: func(repository *GORMSearchRepository) error {
 				_, err := repository.LoadSourceVersionReference(context.Background(), evidenceTestWorkspaceID, evidenceTestSourceVersionID)
 				return err
 			},
 			kind: foundation.ErrorNotFound, code: evidenceReferenceNotFoundCode,
 		},
 		{
-			name: "span binding missing", row: evidenceTestRow{err: pgx.ErrNoRows},
-			load: func(repository *SearchRepository) error {
+			name: "span binding missing", row: evidenceTestRow{err: sql.ErrNoRows},
+			load: func(repository *GORMSearchRepository) error {
 				_, err := repository.LoadSourceSpanReference(context.Background(), evidenceTestWorkspaceID, evidenceTestSourceVersionID, evidenceTestSpanID)
 				return err
 			},
@@ -210,7 +216,7 @@ func TestEvidenceReferenceLoadsUnifyNotFoundAndFailClosed(t *testing.T) {
 		},
 		{
 			name: "damaged source version metadata", row: evidenceTestRow{values: evidenceSourceRowValuesWithVersionPath("docs/evidence.md", "docs/different.md")},
-			load: func(repository *SearchRepository) error {
+			load: func(repository *GORMSearchRepository) error {
 				_, err := repository.LoadSourceVersionReference(context.Background(), evidenceTestWorkspaceID, evidenceTestSourceVersionID)
 				return err
 			},
@@ -218,7 +224,7 @@ func TestEvidenceReferenceLoadsUnifyNotFoundAndFailClosed(t *testing.T) {
 		},
 		{
 			name: "damaged span metadata", row: evidenceTestRow{values: evidenceSpanRowValuesWithVersionPath("docs/evidence.md", "docs/different.md")},
-			load: func(repository *SearchRepository) error {
+			load: func(repository *GORMSearchRepository) error {
 				_, err := repository.LoadSourceSpanReference(context.Background(), evidenceTestWorkspaceID, evidenceTestSourceVersionID, evidenceTestSpanID)
 				return err
 			},
@@ -227,7 +233,7 @@ func TestEvidenceReferenceLoadsUnifyNotFoundAndFailClosed(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			repository, err := NewSearchRepository(&evidenceTestDB{row: test.row})
+			repository, err := newEvidenceSearchRepository(t, &evidenceTestDB{row: test.row})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -238,7 +244,7 @@ func TestEvidenceReferenceLoadsUnifyNotFoundAndFailClosed(t *testing.T) {
 
 func TestEvidenceReferenceLoadsRejectInvalidIDsBeforeQuery(t *testing.T) {
 	database := &evidenceTestDB{row: evidenceTestRow{err: errors.New("must not query")}}
-	repository, err := NewSearchRepository(database)
+	repository, err := newEvidenceSearchRepository(t, database)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -311,26 +317,73 @@ func evidenceSpanRowValuesWithVersionPath(relativePath, versionRelativePath stri
 	)
 }
 
+// evidenceTestDB 通过标准 database/sql driver 保留 SQL 和绑定参数断言。
 type evidenceTestDB struct {
-	row   pgx.Row
+	row   evidenceTestRow
 	query string
 	args  []any
 	calls int
 }
 
-func (database *evidenceTestDB) QueryRow(_ context.Context, query string, args ...any) pgx.Row {
+func newEvidenceSearchRepository(t *testing.T, database *evidenceTestDB) (*GORMSearchRepository, error) {
+	t.Helper()
+	sqlDB := sql.OpenDB(database)
+	t.Cleanup(func() {
+		if err := sqlDB.Close(); err != nil {
+			t.Errorf("close evidence SQL fixture: %v", err)
+		}
+	})
+	root, err := gorm.Open(gormpostgres.New(gormpostgres.Config{Conn: sqlDB}), &gorm.Config{
+		DisableAutomaticPing:   true,
+		SkipDefaultTransaction: true,
+		Logger:                 logger.Default.LogMode(logger.Silent),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &GORMSearchRepository{database: root, unitOfWork: evidenceUnusedUnitOfWork{}}, nil
+}
+
+type evidenceUnusedUnitOfWork struct{}
+
+func (evidenceUnusedUnitOfWork) Within(context.Context, foundation.TransactionOptions, foundation.TransactionFunc) error {
+	return errors.New("evidence reference reads must not open a transaction")
+}
+
+func (database *evidenceTestDB) Connect(context.Context) (driver.Conn, error) {
+	return database, nil
+}
+
+func (database *evidenceTestDB) Driver() driver.Driver            { return database }
+func (database *evidenceTestDB) Open(string) (driver.Conn, error) { return database, nil }
+func (*evidenceTestDB) Close() error                              { return nil }
+func (*evidenceTestDB) Prepare(string) (driver.Stmt, error) {
+	return nil, errors.New("unexpected prepared statement")
+}
+func (*evidenceTestDB) Begin() (driver.Tx, error) { return nil, errors.New("unexpected transaction") }
+
+func (database *evidenceTestDB) QueryContext(_ context.Context, query string, arguments []driver.NamedValue) (driver.Rows, error) {
 	database.calls++
 	database.query = query
-	database.args = append([]any(nil), args...)
-	return database.row
-}
-
-func (*evidenceTestDB) Query(context.Context, string, ...any) (pgx.Rows, error) {
-	return nil, errors.New("not implemented")
-}
-
-func (*evidenceTestDB) Begin(context.Context) (pgx.Tx, error) {
-	return nil, errors.New("not implemented")
+	database.args = make([]any, len(arguments))
+	for index, argument := range arguments {
+		database.args[index] = argument.Value
+	}
+	if errors.Is(database.row.err, sql.ErrNoRows) {
+		return &evidenceDriverRows{read: true}, nil
+	}
+	if database.row.err != nil {
+		return nil, database.row.err
+	}
+	values := make([]driver.Value, len(database.row.values))
+	for index, value := range database.row.values {
+		converted, err := driver.DefaultParameterConverter.ConvertValue(value)
+		if err != nil {
+			return nil, err
+		}
+		values[index] = converted
+	}
+	return &evidenceDriverRows{values: values}, nil
 }
 
 type evidenceTestRow struct {
@@ -338,25 +391,32 @@ type evidenceTestRow struct {
 	err    error
 }
 
-func (row evidenceTestRow) Scan(destinations ...any) error {
-	if row.err != nil {
-		return row.err
+type evidenceDriverRows struct {
+	values []driver.Value
+	read   bool
+}
+
+func (rows *evidenceDriverRows) Columns() []string {
+	columns := make([]string, len(rows.values))
+	for index := range columns {
+		columns[index] = fmt.Sprintf("column_%d", index)
 	}
-	if len(destinations) != len(row.values) {
-		return errors.New("unexpected scan destination count")
+	return columns
+}
+
+func (*evidenceDriverRows) Close() error { return nil }
+
+func (rows *evidenceDriverRows) Next(destinations []driver.Value) error {
+	if rows.read {
+		return io.EOF
 	}
-	for index, destination := range destinations {
-		value := reflect.ValueOf(destination)
-		if value.Kind() != reflect.Pointer || value.IsNil() {
-			return errors.New("scan destination is not a pointer")
-		}
-		source := reflect.ValueOf(row.values[index])
-		if !source.Type().AssignableTo(value.Elem().Type()) {
-			return errors.New("scan value type does not match destination")
-		}
-		value.Elem().Set(source)
-	}
+	rows.read = true
+	copy(destinations, rows.values)
 	return nil
+}
+
+func evidenceArrayArgument(id foundation.ID) string {
+	return "{\"" + string(id) + "\"}"
 }
 
 func requirePostgresEvidenceError(t *testing.T, err error, kind foundation.ErrorKind, code string) {

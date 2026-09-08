@@ -7,17 +7,18 @@ import (
 	"testing"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func newHealthIntegrationPool(t *testing.T) *pgxpool.Pool {
+func requireHealthIntegrationPlatform(t *testing.T) *platformpostgres.Pool {
 	t.Helper()
 	fixture := testdb.Require(t, testdb.Config{Availability: testdb.FailWhenUnavailable, MaxConns: 16})
 	if fixture == nil || fixture.Pool() == nil || fixture.Pool().DB() == nil {
 		t.Fatal("health PostgreSQL fixture did not provide a shared pool")
 	}
-	return fixture.Pool().DB()
+	return fixture.Pool()
 }
 
 // cleanupHealthIntegrationWorkspace 清理真实 PostgreSQL/River Health fixture。
@@ -49,6 +50,7 @@ func cleanupHealthIntegrationWorkspace(t *testing.T, pool *pgxpool.Pool, workspa
 		`DELETE FROM ops.health_issue_evidence WHERE workspace_id=$1`,
 		`DELETE FROM ops.health_issue_observation WHERE workspace_id=$1`,
 		`DELETE FROM ops.health_issue WHERE workspace_id=$1`,
+		`DELETE FROM change_control.proposal WHERE workspace_id=$1`,
 		`DELETE FROM ops.health_scan_seen_identity WHERE workspace_id=$1`,
 		`DELETE FROM ops.health_scan_detector WHERE workspace_id=$1`,
 		`DELETE FROM ops.health_scan WHERE workspace_id=$1`,

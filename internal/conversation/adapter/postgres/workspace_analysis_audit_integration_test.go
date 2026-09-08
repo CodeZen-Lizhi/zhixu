@@ -13,15 +13,15 @@ import (
 	auditapplication "github.com/CodeZen-Lizhi/zhixu/internal/audit/application"
 	auditdomain "github.com/CodeZen-Lizhi/zhixu/internal/audit/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	"github.com/jackc/pgx/v5/pgxpool"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 )
 
 func newWorkspaceAnalysisAuditIntegration(
 	t *testing.T,
-	pool *pgxpool.Pool,
-) (*auditapplication.Recorder, *auditpostgres.Store) {
+	pool *platformpostgres.Pool,
+) (*auditapplication.Recorder, *auditpostgres.GORMStore) {
 	t.Helper()
-	store, err := auditpostgres.NewStore(pool)
+	store, err := auditpostgres.NewGORMStore(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +35,7 @@ func newWorkspaceAnalysisAuditIntegration(
 func requireWorkspaceAnalysisAuditEventIntegration(
 	t *testing.T,
 	ctx context.Context,
-	store *auditpostgres.Store,
+	store *auditpostgres.GORMStore,
 	workspaceID foundation.ID,
 	idempotencyKey string,
 ) auditdomain.Event {

@@ -4,10 +4,13 @@ package migration
 
 import (
 	"context"
+	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	agentdomain "github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
@@ -16,9 +19,10 @@ import (
 	conversationdomain "github.com/CodeZen-Lizhi/zhixu/internal/conversation/domain"
 	eventspostgres "github.com/CodeZen-Lizhi/zhixu/internal/events/adapter/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	toolspostgres "github.com/CodeZen-Lizhi/zhixu/internal/tools/adapter/postgres"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/stdlib"
 )
 
 const (
@@ -52,9 +56,12 @@ func TestWorkspaceAnalysisPreoperationDeadlineFinalizerInitialGitCommitsBundleAn
 	)
 	insertWorkspaceAnalysisDeadlineDraft(t, ctx, pool)
 
+	runtime := openWorkspaceAnalysisDeadlineRuntime(t, ctx, pool)
+	t.Cleanup(runtime.Close)
+	pool = runtime.DB()
+	armMigrationCommitResponseLoss(t, runtime)
 	ids := &workspaceAnalysisDeadlineOneShotIDs{}
-	lossDB := &workspaceAnalysisDeadlineCommitResponseLossDB{Pool: pool, loseNext: true}
-	finalizer := newWorkspaceAnalysisDeadlineFinalizer(t, lossDB, pool, ids)
+	finalizer := newWorkspaceAnalysisDeadlineFinalizer(t, runtime, ids)
 	command := workspaceAnalysisDeadlineCommand(
 		workspaceAnalysisDeadlineInspectNodeID,
 		workspaceAnalysisDeadlineInspectTryID,
@@ -121,8 +128,11 @@ func TestWorkspaceAnalysisPreoperationDeadlineFinalizerDerivesPlanAfterGit(t *te
 		"workspace_analysis.retrieve",
 	)
 
+	runtime := openWorkspaceAnalysisDeadlineRuntime(t, ctx, pool)
+	t.Cleanup(runtime.Close)
+	pool = runtime.DB()
 	finalizer := newWorkspaceAnalysisDeadlineFinalizer(
-		t, pool, pool, foundation.NewUUIDGenerator(nil),
+		t, runtime, foundation.NewUUIDGenerator(nil),
 	)
 	output, replayed, err := finalizer.FinalizeTermination(ctx, workspaceAnalysisDeadlineCommand(
 		workspaceAnalysisDeadlineRetrieveNodeID,
@@ -309,10 +319,10 @@ func TestWorkspaceAnalysisDeadlineNextSlotDerivesFirstSourceFromSearchReceipt(t 
 
 	definition := workspaceAnalysisSearchReceiptDefinition(t)
 	authorizeWorkspaceAnalysisSearchReceiptOperation(t, ctx, pool, definition.DefinitionHash)
-	repository, err := toolspostgres.NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime := openMigrationRuntimePool(t, ctx, pool)
+	t.Cleanup(runtime.Close)
+	pool = runtime.DB()
+	repository := newWorkspaceAnalysisMigrationToolsRepository(t, runtime)
 	if _, err := repository.FinalizeCallWithReceipt(ctx, workspaceAnalysisSearchReceiptCompletion(definition)); err != nil {
 		t.Fatalf("complete SearchKnowledge receipt: %v", err)
 	}
@@ -350,10 +360,10 @@ func TestWorkspaceAnalysisDeadlineNextSlotCoversRemainingSourceOrdinals(t *testi
 	completion.Call.ResponseBytes = int64(len(completion.Output))
 	completion.Call.ResponseSummary = json.RawMessage(`{"item_count":3}`)
 	completion.PrivateBinding.Document = json.RawMessage(workspaceAnalysisDeadlineSelectedRefsBinding)
-	repository, err := toolspostgres.NewRepository(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime := openMigrationRuntimePool(t, ctx, pool)
+	t.Cleanup(runtime.Close)
+	pool = runtime.DB()
+	repository := newWorkspaceAnalysisMigrationToolsRepository(t, runtime)
 	if _, err := repository.FinalizeCallWithReceipt(ctx, completion); err != nil {
 		t.Fatalf("complete three-item SearchKnowledge receipt: %v", err)
 	}
@@ -431,10 +441,10 @@ func TestWorkspaceAnalysisDeadlineNextSlotRejectsSelectedRefAndPrefixDrift(t *te
 			completeWorkspaceAnalysisPlanOperation(t, ctx, pool, workspaceAnalysisRetrievalPlanDocument)
 			definition := workspaceAnalysisSearchReceiptDefinition(t)
 			authorizeWorkspaceAnalysisSearchReceiptOperation(t, ctx, pool, definition.DefinitionHash)
-			repository, err := toolspostgres.NewRepository(pool)
-			if err != nil {
-				t.Fatal(err)
-			}
+			runtime := openMigrationRuntimePool(t, ctx, pool)
+			t.Cleanup(runtime.Close)
+			pool = runtime.DB()
+			repository := newWorkspaceAnalysisMigrationToolsRepository(t, runtime)
 			completion := workspaceAnalysisSearchReceiptCompletion(definition)
 			if test.threeItemSearch {
 				completion.Output = json.RawMessage(workspaceAnalysisDeadlineSearchOutput)
@@ -792,8 +802,11 @@ func TestWorkspaceAnalysisPreoperationDeadlineFinalizerRejectsUnsafeAuthority(t 
 					"workspace_analysis.inspect",
 				)
 			}
+			runtime := openWorkspaceAnalysisDeadlineRuntime(t, ctx, pool)
+			t.Cleanup(runtime.Close)
+			pool = runtime.DB()
 			finalizer := newWorkspaceAnalysisDeadlineFinalizer(
-				t, pool, pool, foundation.NewUUIDGenerator(nil),
+				t, runtime, foundation.NewUUIDGenerator(nil),
 			)
 			_, replayed, err := finalizer.FinalizeTermination(ctx, workspaceAnalysisDeadlineCommand(
 				workspaceAnalysisDeadlineInspectNodeID,
@@ -951,18 +964,27 @@ func insertWorkspaceAnalysisDeadlineDraft(t *testing.T, ctx context.Context, poo
 	}
 }
 
+// Runtime finalizers use the current persisted row shape. The migration-only
+// scenarios retain their explicit 00085/00086 upgrade and replay boundaries.
+func openWorkspaceAnalysisDeadlineRuntime(t *testing.T, ctx context.Context, pool *pgxpool.Pool) *platformpostgres.Pool {
+	t.Helper()
+	if err := MigrateAtlasToVersion(ctx, pool, 0); err != nil {
+		t.Fatalf("apply current WorkspaceAnalysis runtime schema: %v", err)
+	}
+	return openMigrationRuntimePool(t, ctx, pool)
+}
+
 func newWorkspaceAnalysisDeadlineFinalizer(
 	t *testing.T,
-	db conversationpostgres.DB,
-	pool *pgxpool.Pool,
+	pool *platformpostgres.Pool,
 	ids foundation.IDGenerator,
-) *conversationpostgres.WorkspaceAnalysisFinalizer {
+) *conversationpostgres.GORMWorkspaceAnalysisFinalizer {
 	t.Helper()
-	events, err := eventspostgres.NewStore(pool)
+	events, err := eventspostgres.NewGORMStore(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
-	finalizer, err := conversationpostgres.NewWorkspaceAnalysisFinalizer(db, events, ids)
+	finalizer, err := conversationpostgres.NewGORMWorkspaceAnalysisFinalizer(pool, events, ids)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1001,32 +1023,80 @@ func (ids *workspaceAnalysisDeadlineOneShotIDs) New() (foundation.ID, error) {
 	return workspaceAnalysisDeadlineProofID, nil
 }
 
-type workspaceAnalysisDeadlineCommitResponseLossDB struct {
-	*pgxpool.Pool
-	loseNext bool
+// armMigrationCommitResponseLoss drops only the first successful commit response.
+// The stdlib connector borrows the existing physical pool and preserves the
+// *sql.Tx required by the production UnitOfWork and scoped participants.
+func armMigrationCommitResponseLoss(t *testing.T, pool *platformpostgres.Pool) {
+	t.Helper()
+	database, err := pool.GORM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	connector := &migrationCommitResponseLossConnector{Connector: stdlib.GetPoolConnector(pool.DB())}
+	injected := sql.OpenDB(connector)
+	// Idle connections belong to pgxpool, matching stdlib.OpenDBFromPool.
+	injected.SetMaxIdleConns(0)
+	rootPool, statementPool := database.ConnPool, database.Statement.ConnPool
+	database.ConnPool, database.Statement.ConnPool = injected, injected
+	t.Cleanup(func() {
+		database.ConnPool, database.Statement.ConnPool = rootPool, statementPool
+		if err := injected.Close(); err != nil {
+			t.Errorf("close migration response-loss SQL facade: %v", err)
+		}
+		if !connector.lost.Load() {
+			t.Error("migration commit response-loss injection was not exercised")
+		}
+	})
 }
 
-func (database *workspaceAnalysisDeadlineCommitResponseLossDB) Begin(ctx context.Context) (pgx.Tx, error) {
-	transaction, err := database.Pool.Begin(ctx)
+type migrationCommitResponseLossConnector struct {
+	driver.Connector
+	lost atomic.Bool
+}
+
+func (connector *migrationCommitResponseLossConnector) Connect(ctx context.Context) (driver.Conn, error) {
+	connection, err := connector.Connector.Connect(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if !database.loseNext {
-		return transaction, nil
+	stdlibConnection, ok := connection.(*stdlib.Conn)
+	if !ok {
+		_ = connection.Close()
+		return nil, fmt.Errorf("migration response-loss connection is %T, want *stdlib.Conn", connection)
 	}
-	database.loseNext = false
-	return workspaceAnalysisDeadlineCommitResponseLossTx{Tx: transaction}, nil
+	return &migrationCommitResponseLossConnection{Conn: stdlibConnection, lost: &connector.lost}, nil
 }
 
-type workspaceAnalysisDeadlineCommitResponseLossTx struct {
-	pgx.Tx
+type migrationCommitResponseLossConnection struct {
+	*stdlib.Conn
+	lost *atomic.Bool
 }
 
-func (transaction workspaceAnalysisDeadlineCommitResponseLossTx) Commit(ctx context.Context) error {
-	if err := transaction.Tx.Commit(ctx); err != nil {
+func (connection *migrationCommitResponseLossConnection) Begin() (driver.Tx, error) {
+	return connection.BeginTx(context.Background(), driver.TxOptions{})
+}
+
+func (connection *migrationCommitResponseLossConnection) BeginTx(ctx context.Context, options driver.TxOptions) (driver.Tx, error) {
+	transaction, err := connection.Conn.BeginTx(ctx, options)
+	if err != nil {
+		return nil, err
+	}
+	return &migrationCommitResponseLossTransaction{Tx: transaction, lost: connection.lost}, nil
+}
+
+type migrationCommitResponseLossTransaction struct {
+	driver.Tx
+	lost *atomic.Bool
+}
+
+func (transaction *migrationCommitResponseLossTransaction) Commit() error {
+	if err := transaction.Tx.Commit(); err != nil {
 		return err
 	}
-	return errors.New("injected workspace analysis deadline commit response loss")
+	if !transaction.lost.Swap(true) {
+		return errors.New("injected migration commit response loss")
+	}
+	return nil
 }
 
 func workspaceAnalysisDeadlineErrorChain(err error) string {

@@ -11,7 +11,6 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	healthapp "github.com/CodeZen-Lizhi/zhixu/internal/health/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/health/domain"
-	"github.com/jackc/pgx/v5"
 )
 
 func TestHealthScanCheckpointRoundTrip(t *testing.T) {
@@ -77,17 +76,17 @@ func TestHealthScanSmartCollectionVerifierMapsStaleAndPreservesExactCount(t *tes
 		SchemaVersion: "health-scope/smart-collection/v1", Hash: strings.Repeat("a", 64), ReadModelRevision: strings.Repeat("b", 64), ExactCount: 0,
 	}}
 	repository := &ScanRepository{}
-	if err := repository.verifySmartCollectionBinding(context.Background(), nil, request); !hasRepositoryCode(err, domain.ErrorCodeScanScopeUnavailable) {
+	if err := repository.verifySmartCollectionBinding(context.Background(), healthTransaction{}, request); !hasRepositoryCode(err, domain.ErrorCodeScanScopeUnavailable) {
 		t.Fatalf("missing verifier error = %v", err)
 	}
 
 	verifier := &smartCollectionVerifierFake{err: foundation.NewError(foundation.ErrorVersionConflict, "COLLECTION_CURSOR_STALE", false, errors.New("drift"))}
 	repository.verifier = verifier
-	if err := repository.verifySmartCollectionBinding(context.Background(), nil, request); !hasRepositoryCode(err, domain.ErrorCodeScanScopeStale) {
+	if err := repository.verifySmartCollectionBinding(context.Background(), healthTransaction{}, request); !hasRepositoryCode(err, domain.ErrorCodeScanScopeStale) {
 		t.Fatalf("stale verifier error = %v", err)
 	}
 	verifier.err = nil
-	if err := repository.verifySmartCollectionBinding(context.Background(), nil, request); err != nil {
+	if err := repository.verifySmartCollectionBinding(context.Background(), healthTransaction{}, request); err != nil {
 		t.Fatal(err)
 	}
 	if verifier.binding.ExactCount != 0 || verifier.binding.ReadModelRevision != request.Scope.ReadModelRevision {
@@ -100,7 +99,7 @@ type smartCollectionVerifierFake struct {
 	err     error
 }
 
-func (fake *smartCollectionVerifierFake) Verify(_ context.Context, _ pgx.Tx, binding healthapp.SmartCollectionBinding) error {
+func (fake *smartCollectionVerifierFake) VerifyBindingScoped(_ context.Context, _ foundation.TransactionScope, binding healthapp.SmartCollectionBinding) error {
 	fake.binding = binding
 	return fake.err
 }
@@ -132,7 +131,7 @@ func TestHealthScanCompletedEventUsesStableMinimalBindingForEveryTerminalStatus(
 		t.Run(strings.ToLower(string(status)), func(t *testing.T) {
 			appender := &healthScanEventAppenderFake{}
 			scan := domain.Scan{ID: scanID, WorkspaceID: workspaceID, WorkflowRunID: workflowRunID, Status: status, Version: 7}
-			if err := appendHealthScanCompletedEvent(context.Background(), nil, appender, scan, occurredAt); err != nil {
+			if err := appendHealthScanCompletedEvent(context.Background(), healthTransaction{}, appender, scan, occurredAt); err != nil {
 				t.Fatal(err)
 			}
 			request := appender.request
@@ -157,12 +156,12 @@ func TestHealthScanCompletedEventRejectsUnexpectedReplayAndReturnsAppendFailure(
 		Status:        domain.ScanStatusSucceeded, Version: 2,
 	}
 	appender := &healthScanEventAppenderFake{replayed: true}
-	if err := appendHealthScanCompletedEvent(context.Background(), nil, appender, scan, time.Now().UTC()); !hasRepositoryCode(err, domain.ErrorCodeScanInvalid) {
+	if err := appendHealthScanCompletedEvent(context.Background(), healthTransaction{}, appender, scan, time.Now().UTC()); !hasRepositoryCode(err, domain.ErrorCodeScanInvalid) {
 		t.Fatalf("unexpected replay error=%v", err)
 	}
 	injected := errors.New("injected SSE append failure")
 	appender = &healthScanEventAppenderFake{err: injected}
-	if err := appendHealthScanCompletedEvent(context.Background(), nil, appender, scan, time.Now().UTC()); !errors.Is(err, injected) {
+	if err := appendHealthScanCompletedEvent(context.Background(), healthTransaction{}, appender, scan, time.Now().UTC()); !errors.Is(err, injected) {
 		t.Fatalf("append failure=%v", err)
 	}
 }
@@ -173,7 +172,7 @@ type healthScanEventAppenderFake struct {
 	err      error
 }
 
-func (fake *healthScanEventAppenderFake) AppendTx(_ context.Context, _ any, request eventsdomain.AppendRequest) (eventsdomain.ServerEvent, bool, error) {
+func (fake *healthScanEventAppenderFake) AppendScoped(_ context.Context, _ foundation.TransactionScope, request eventsdomain.AppendRequest) (eventsdomain.ServerEvent, bool, error) {
 	fake.request = request
 	return eventsdomain.ServerEvent{}, fake.replayed, fake.err
 }

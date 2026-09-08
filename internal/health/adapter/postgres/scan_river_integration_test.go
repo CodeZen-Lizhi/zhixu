@@ -18,6 +18,7 @@ import (
 	healthworkflowadapter "github.com/CodeZen-Lizhi/zhixu/internal/health/adapter/workflow"
 	healthapp "github.com/CodeZen-Lizhi/zhixu/internal/health/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/health/domain"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	workflowpostgres "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/postgres"
 	riveradapter "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/river"
 	workflowapp "github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
@@ -30,10 +31,11 @@ import (
 func TestHealthScanRunsThroughRealRiverAndReplays(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	pool := newHealthRiverTestPool(t, ctx)
+	platform := requireHealthIntegrationPlatform(t)
+	pool := platform.DB()
 	workspaceID, topicID := seedHealthRiverFixture(t, ctx, pool)
 	detector := newHealthRiverDetector(topicID)
-	service, registry, coordinator := newHealthRiverRuntime(t, pool, detector)
+	service, registry, coordinator := newHealthRiverRuntime(t, platform, detector)
 	worker := startHealthRiverWorker(t, ctx, pool, registry, coordinator, "health-river-success")
 	defer stopHealthRiverWorker(worker)
 
@@ -52,10 +54,11 @@ func TestHealthScanRunsThroughRealRiverAndReplays(t *testing.T) {
 func TestHealthScanReplaysAfterWorkflowCompletionResponseLoss(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	pool := newHealthRiverTestPool(t, ctx)
+	platform := requireHealthIntegrationPlatform(t)
+	pool := platform.DB()
 	workspaceID, topicID := seedHealthRiverFixture(t, ctx, pool)
 	detector := newHealthRiverDetector(topicID)
-	service, registry, coordinator := newHealthRiverRuntime(t, pool, detector)
+	service, registry, coordinator := newHealthRiverRuntime(t, platform, detector)
 	started := startHealthRiverScan(t, ctx, service, registry, workspaceID, "health-completion-response-loss")
 	job := healthRiverJob(t, ctx, pool, started.Scan.WorkflowRunID)
 
@@ -82,12 +85,13 @@ func TestHealthScanReplaysAfterWorkflowCompletionResponseLoss(t *testing.T) {
 func TestHealthScanCancellationConvergesWithWorkflow(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	pool := newHealthRiverTestPool(t, ctx)
+	platform := requireHealthIntegrationPlatform(t)
+	pool := platform.DB()
 	workspaceID, topicID := seedHealthRiverFixture(t, ctx, pool)
 	detector := newHealthRiverDetector(topicID)
 	detector.block = true
 	detector.entered = make(chan struct{})
-	service, registry, coordinator := newHealthRiverRuntime(t, pool, detector)
+	service, registry, coordinator := newHealthRiverRuntime(t, platform, detector)
 	worker := startHealthRiverWorkerWithHeartbeat(t, ctx, pool, registry, coordinator, "health-river-cancel", 100*time.Millisecond)
 	defer stopHealthRiverWorker(worker)
 
@@ -118,11 +122,12 @@ func TestHealthScanRealRiverRetriesAndPersistsExhaustion(t *testing.T) {
 	t.Run("retry_recovers", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		pool := newHealthRiverTestPool(t, ctx)
+		platform := requireHealthIntegrationPlatform(t)
+		pool := platform.DB()
 		workspaceID, topicID := seedHealthRiverFixture(t, ctx, pool)
 		detector := newHealthRiverDetector(topicID)
 		detector.remainingFailures = 1
-		service, registry, coordinator := newHealthRiverRuntime(t, pool, detector)
+		service, registry, coordinator := newHealthRiverRuntime(t, platform, detector)
 		worker := startHealthRiverWorker(t, ctx, pool, registry, coordinator, "health-river-retry")
 		defer stopHealthRiverWorker(worker)
 
@@ -138,11 +143,12 @@ func TestHealthScanRealRiverRetriesAndPersistsExhaustion(t *testing.T) {
 	t.Run("retry_budget_exhausted", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		pool := newHealthRiverTestPool(t, ctx)
+		platform := requireHealthIntegrationPlatform(t)
+		pool := platform.DB()
 		workspaceID, topicID := seedHealthRiverFixture(t, ctx, pool)
 		detector := newHealthRiverDetector(topicID)
 		detector.alwaysFail = true
-		service, registry, coordinator := newHealthRiverRuntime(t, pool, detector)
+		service, registry, coordinator := newHealthRiverRuntime(t, platform, detector)
 		worker := startHealthRiverWorker(t, ctx, pool, registry, coordinator, "health-river-exhausted")
 		defer stopHealthRiverWorker(worker)
 
@@ -168,12 +174,13 @@ func TestHealthScanRealRiverRetriesAndPersistsExhaustion(t *testing.T) {
 func TestHealthScanCheckpointSurvivesWorkerRestart(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	pool := newHealthRiverTestPool(t, ctx)
+	platform := requireHealthIntegrationPlatform(t)
+	pool := platform.DB()
 	workspaceID, topicID := seedHealthRiverFixture(t, ctx, pool)
 	detector := newHealthRiverDetector(topicID)
 	detector.twoPages = true
 	detector.remainingFailures = 1
-	service, registry, coordinator := newHealthRiverRuntime(t, pool, detector)
+	service, registry, coordinator := newHealthRiverRuntime(t, platform, detector)
 	started := startHealthRiverScan(t, ctx, service, registry, workspaceID, "health-worker-restart")
 
 	firstWorker, err := riveradapter.NewRuntimeNodeWorker(registry, coordinator, "health-worker-before-restart", 10*time.Second, time.Second)
@@ -196,7 +203,7 @@ func TestHealthScanCheckpointSurvivesWorkerRestart(t *testing.T) {
 		t.Fatalf("checkpoint=%q run=%s", checkpoint, runStatus)
 	}
 
-	_, restartedRegistry, restartedCoordinator := newHealthRiverRuntime(t, pool, detector)
+	_, restartedRegistry, restartedCoordinator := newHealthRiverRuntime(t, platform, detector)
 	if err := waitForHealthRiverRetryDue(ctx, pool, started.Scan.WorkflowRunID); err != nil {
 		t.Fatal(err)
 	}
@@ -216,29 +223,21 @@ func TestHealthScanCheckpointSurvivesWorkerRestart(t *testing.T) {
 	assertHealthRiverSuccess(t, ctx, pool, started.Scan.ID, workspaceID, 1, 1)
 }
 
-func newHealthRiverRuntime(t *testing.T, pool *pgxpool.Pool, detector healthapp.Detector) (*healthapp.ScanService, *workflowapp.ExecutorRegistry, *workflowapp.RuntimeCoordinator) {
+func newHealthRiverRuntime(t *testing.T, pool *platformpostgres.Pool, detector healthapp.Detector) (*healthapp.ScanService, *workflowapp.ExecutorRegistry, *workflowapp.RuntimeCoordinator) {
 	t.Helper()
-	insertClient, err := riveradapter.NewClient(pool, nil)
+	events, err := eventspostgres.NewGORMStore(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
-	inserter, err := riveradapter.NewJobInserter(insertClient)
+	cancellationGuard, err := NewGORMScanCancellationGuard(pool, events)
 	if err != nil {
 		t.Fatal(err)
 	}
-	events, err := eventspostgres.NewStore(pool)
+	runtimeRepository, err := workflowpostgres.NewGORMRuntimeRepositoryWithHooks(pool, riveradapter.DefaultOptions(), healthGORMAllowEnqueueFence{}, workflowpostgres.GORMRuntimeRepositoryHooks{CancellationSafety: cancellationGuard})
 	if err != nil {
 		t.Fatal(err)
 	}
-	cancellationGuard, err := NewScanCancellationGuard(events)
-	if err != nil {
-		t.Fatal(err)
-	}
-	runtimeRepository, err := workflowpostgres.NewRuntimeRepository(pool, inserter, cancellationGuard)
-	if err != nil {
-		t.Fatal(err)
-	}
-	scanRepository, err := NewScanRepository(pool, runtimeRepository, events, foundation.NewUUIDGenerator(nil), foundation.SystemClock{})
+	scanRepository, err := NewGORMScanRepository(pool, runtimeRepository, events, foundation.NewUUIDGenerator(nil), foundation.SystemClock{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,7 +249,7 @@ func newHealthRiverRuntime(t *testing.T, pool *pgxpool.Pool, detector healthapp.
 	if err != nil {
 		t.Fatal(err)
 	}
-	issueRepository, err := NewIssueRepository(pool, foundation.NewUUIDGenerator(nil))
+	issueRepository, err := NewGORMIssueRepository(pool, foundation.NewUUIDGenerator(nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -304,11 +303,6 @@ func healthRiverStartCommandForCoverage(workspaceID foundation.ID, key string, c
 		MaxItems:       100,
 		IdempotencyKey: key,
 	}
-}
-
-func newHealthRiverTestPool(t *testing.T, ctx context.Context) *pgxpool.Pool {
-	t.Helper()
-	return newHealthIntegrationPool(t)
 }
 
 func seedHealthRiverFixture(t *testing.T, ctx context.Context, pool *pgxpool.Pool) (foundation.ID, foundation.ID) {

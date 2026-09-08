@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/capacity"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/retrieval/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
 	"github.com/jackc/pgx/v5"
@@ -395,7 +397,7 @@ func runRetrievalCapacityMethod(
 		return result, nil, nil, markFailure("open_method_pool", err)
 	}
 	defer methodPool.Close()
-	approximate, err := queryRetrievalCapacityNearest(ctx, methodPool, fixture, queryVector, request.Limit, false)
+	approximate, err := queryRetrievalCapacityNearest(ctx, methodPool.DB(), fixture, queryVector, request.Limit, false)
 	if err != nil {
 		return result, nil, nil, markFailure("query_ann", err)
 	}
@@ -409,11 +411,11 @@ func runRetrievalCapacityMethod(
 		EmbeddingVersion: fixture.Embedding, QueryEmbedding: queryVector,
 		Limit: summaryVectorCandidateLimit(request),
 	}
-	rawPlan, result.Explain, err = explainRetrievalVectorCapacity(ctx, methodPool, vectorRequest, indexName, method+".explain.json")
+	rawPlan, result.Explain, err = explainRetrievalVectorCapacity(ctx, methodPool.DB(), vectorRequest, indexName, method+".explain.json")
 	if err != nil {
 		return result, nil, rawPlan, markFailure("explain_ann", err)
 	}
-	repository, err := NewSearchRepository(methodPool)
+	repository, err := NewGORMSearchRepository(methodPool)
 	if err != nil {
 		return result, nil, rawPlan, markFailure("construct_repository", err)
 	}
@@ -482,7 +484,7 @@ func summaryVectorCandidateLimit(request domain.SearchRequest) int32 {
 	return request.Limit
 }
 
-func runRetrievalCapacityQuery(ctx context.Context, repository *SearchRepository, request application.LexicalSearchQuery) ([]domain.SearchCandidate, error) {
+func runRetrievalCapacityQuery(ctx context.Context, repository *GORMSearchRepository, request application.LexicalSearchQuery) ([]domain.SearchCandidate, error) {
 	queryContext, cancel := context.WithTimeout(ctx, retrievalCapacityQueryTimeout)
 	defer cancel()
 	return repository.SearchLexical(queryContext, request)
@@ -543,36 +545,41 @@ func dropRetrievalCapacityIndex(ctx context.Context, pool *pgxpool.Pool, indexNa
 	return err
 }
 
-func newRetrievalCapacityMethodPool(ctx context.Context, databaseURL, method string) (*pgxpool.Pool, error) {
-	config, err := pgxpool.ParseConfig(databaseURL)
-	if err != nil {
-		return nil, err
+func newRetrievalCapacityMethodPool(ctx context.Context, databaseURL, method string) (*platformpostgres.Pool, error) {
+	settings := [][2]string{{"plan_cache_mode", "force_custom_plan"}}
+	switch method {
+	case "hnsw":
+		settings = append(settings,
+			[2]string{"hnsw.ef_search", strconv.Itoa(retrievalCapacityHNSWEFSearch)},
+			[2]string{"hnsw.iterative_scan", "strict_order"},
+		)
+	case "ivfflat":
+		settings = append(settings,
+			[2]string{"ivfflat.probes", strconv.Itoa(retrievalCapacityIVFProbes)},
+			[2]string{"ivfflat.iterative_scan", "strict_order"},
+		)
+	default:
+		return nil, errors.New("Retrieval capacity ANN pool method is invalid")
 	}
-	config.MaxConns = 4
-	config.AfterConnect = func(connectionContext context.Context, connection *pgx.Conn) error {
-		settings := [][2]string{{"plan_cache_mode", "force_custom_plan"}}
-		switch method {
-		case "hnsw":
-			settings = append(settings,
-				[2]string{"hnsw.ef_search", strconv.Itoa(retrievalCapacityHNSWEFSearch)},
-				[2]string{"hnsw.iterative_scan", "strict_order"},
-			)
-		case "ivfflat":
-			settings = append(settings,
-				[2]string{"ivfflat.probes", strconv.Itoa(retrievalCapacityIVFProbes)},
-				[2]string{"ivfflat.iterative_scan", "strict_order"},
-			)
-		default:
-			return errors.New("Retrieval capacity ANN pool method is invalid")
+	// 固定测试参数由 PostgreSQL startup config 应用，GORM 与 EXPLAIN 共用同一物理池。
+	parsed, err := url.Parse(databaseURL)
+	if err == nil && (parsed.Scheme == "postgres" || parsed.Scheme == "postgresql") {
+		parameters, err := url.ParseQuery(parsed.RawQuery)
+		if err != nil {
+			return nil, errors.New("Retrieval capacity database URL parameters are invalid")
 		}
 		for _, setting := range settings {
-			if _, err := connection.Exec(connectionContext, `SELECT set_config($1,$2,false)`, setting[0], setting[1]); err != nil {
-				return err
-			}
+			parameters.Set(setting[0], setting[1])
 		}
-		return nil
+		parsed.RawQuery = parameters.Encode()
+		databaseURL = parsed.String()
+	} else {
+		// libpq keyword DSN 保留原样，追加值全部来自上方固定白名单。
+		for _, setting := range settings {
+			databaseURL += " " + setting[0] + "='" + setting[1] + "'"
+		}
 	}
-	return pgxpool.NewWithConfig(ctx, config)
+	return platformpostgres.Open(ctx, databaseURL, 4, 0)
 }
 
 type retrievalCapacityQueryDB interface {
@@ -906,7 +913,7 @@ func seedRetrievalCapacityFoundation(
 		}{
 			{`INSERT INTO core.workspace(
 				id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at
-			) VALUES($1,$2,$3,$3,$4,'test',1,$4,$4)`, []any{string(fixture.WorkspaceID), retrievalCapacityWorkspaceName, root, now}},
+			) VALUES($1,$2,$3,$3,$4,'inactive',1,$4,$4)`, []any{string(fixture.WorkspaceID), retrievalCapacityWorkspaceName, root, now}},
 			{`INSERT INTO core.content_artifact(id,workspace_id,content_hash,byte_size,managed_location,created_at)
 				VALUES($1,$2,$3,$4,$5,$6)`, []any{string(fixture.ArtifactID), string(fixture.WorkspaceID), contentHash, len(content), ".knowledge/sources/" + contentHash, now}},
 			{`INSERT INTO core.source(id,workspace_id,type,logical_name,original_location,created_at)
@@ -1204,7 +1211,7 @@ func cleanupRetrievalCapacity(ctx context.Context, pool *pgxpool.Pool, fixture r
 	if err != nil {
 		return err
 	}
-	if name != retrievalCapacityWorkspaceName || rootPath != root || repositoryPath != root || status != "test" || version != 1 {
+	if name != retrievalCapacityWorkspaceName || rootPath != root || repositoryPath != root || status != "inactive" || version != 1 {
 		return errors.New("Retrieval capacity cleanup workspace marker does not match")
 	}
 	if _, err := tx.Exec(ctx, `SET LOCAL session_replication_role = replica`); err != nil {

@@ -245,7 +245,7 @@ func (repository *GORMRepository) gormActivate(ctx context.Context, command doma
 				return classifyGORMRetrieval(callbackCtx, lockErr, "RETRIEVAL_ACTIVATION_LOCK_FAILED")
 			}
 			var activateErr error
-			result, activateErr = gormRetrievalActivateTx(callbackCtx, transaction, command, kind)
+			result, activateErr = gormRetrievalActivateTx(callbackCtx, transaction, command, kind, nil)
 			return activateErr
 		})
 	if err != nil {
@@ -254,31 +254,38 @@ func (repository *GORMRepository) gormActivate(ctx context.Context, command doma
 	return result, nil
 }
 
-func gormRetrievalActivateTx(ctx context.Context, transaction *gorm.DB, command domain.ActivationCommand, kind domain.ActivationKind) (domain.ActivationResult, error) {
+// locked 非空时沿用 Completion 已按跨 owner 锁序取得的 Index 行锁。
+func gormRetrievalActivateTx(ctx context.Context, transaction *gorm.DB, command domain.ActivationCommand, kind domain.ActivationKind, locked *activationLockedIndexes) (domain.ActivationResult, error) {
 	if existing, found, err := gormRetrievalLoadActivation(ctx, transaction, command.WorkspaceID, command.IdempotencyKey); err != nil {
 		return domain.ActivationResult{}, err
 	} else if found {
 		return gormRetrievalReplayActivation(ctx, transaction, command, kind, existing)
 	}
 
-	target, err := gormRetrievalLoadIndex(ctx, transaction, command.WorkspaceID, command.TargetIndexVersionID, true)
-	if gormRetrievalNoRows(err) {
-		return domain.ActivationResult{}, notFound("RETRIEVAL_INDEX_NOT_FOUND", err)
-	}
-	if err != nil {
-		return domain.ActivationResult{}, classifyGORMRetrieval(ctx, err, "RETRIEVAL_INDEX_QUERY_FAILED")
-	}
+	var target domain.IndexVersion
 	var current *domain.IndexVersion
-	row, rowErr := gormRetrievalRawRow(ctx, transaction, `SELECT `+indexColumns+`
-		FROM retrieval.index_version WHERE workspace_id=? AND status='active' FOR UPDATE`, string(command.WorkspaceID))
-	if rowErr != nil {
-		return domain.ActivationResult{}, classifyGORMRetrieval(ctx, rowErr, "RETRIEVAL_ACTIVE_QUERY_FAILED")
-	}
-	active, activeErr := scanGORMRetrievalIndex(row)
-	if activeErr == nil {
-		current = &active
-	} else if !gormRetrievalNoRows(activeErr) {
-		return domain.ActivationResult{}, classifyGORMRetrieval(ctx, activeErr, "RETRIEVAL_ACTIVE_QUERY_FAILED")
+	if locked != nil {
+		target, current = locked.target, locked.current
+	} else {
+		var err error
+		target, err = gormRetrievalLoadIndex(ctx, transaction, command.WorkspaceID, command.TargetIndexVersionID, true)
+		if gormRetrievalNoRows(err) {
+			return domain.ActivationResult{}, notFound("RETRIEVAL_INDEX_NOT_FOUND", err)
+		}
+		if err != nil {
+			return domain.ActivationResult{}, classifyGORMRetrieval(ctx, err, "RETRIEVAL_INDEX_QUERY_FAILED")
+		}
+		row, rowErr := gormRetrievalRawRow(ctx, transaction, `SELECT `+indexColumns+`
+			FROM retrieval.index_version WHERE workspace_id=? AND status='active' FOR UPDATE`, string(command.WorkspaceID))
+		if rowErr != nil {
+			return domain.ActivationResult{}, classifyGORMRetrieval(ctx, rowErr, "RETRIEVAL_ACTIVE_QUERY_FAILED")
+		}
+		active, activeErr := scanGORMRetrievalIndex(row)
+		if activeErr == nil {
+			current = &active
+		} else if !gormRetrievalNoRows(activeErr) {
+			return domain.ActivationResult{}, classifyGORMRetrieval(ctx, activeErr, "RETRIEVAL_ACTIVE_QUERY_FAILED")
+		}
 	}
 
 	if kind == domain.ActivationKindRollback {
@@ -337,7 +344,7 @@ func gormRetrievalActivateTx(ctx context.Context, transaction *gorm.DB, command 
 		}
 		previous = &updated
 	}
-	row, rowErr = gormRetrievalRawRow(ctx, transaction, `UPDATE retrieval.index_version
+	row, rowErr := gormRetrievalRawRow(ctx, transaction, `UPDATE retrieval.index_version
 		SET status='active',version=version+1,updated_at=?,activated_at=?
 		WHERE id=? AND workspace_id=? AND status=? AND version=? RETURNING `+indexColumns,
 		command.At.UTC(), command.At.UTC(), string(target.ID), string(command.WorkspaceID), string(target.Status), target.Version)

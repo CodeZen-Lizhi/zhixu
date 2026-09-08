@@ -40,7 +40,7 @@ func TestRiverSIGKILLRescueSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	inserter, err := NewJobInserter(insertClient)
+	inserter, err := NewScopedJobInserter(fixture.Pool(), insertClient, NewStaticScopedEnqueueFence())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,16 +52,17 @@ func TestRiverSIGKILLRescueSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tx, err := pool.Begin(ctx)
+	unitOfWork, err := fixture.Pool().UnitOfWork()
 	if err != nil {
 		t.Fatal(err)
 	}
-	receipt, err := inserter.InsertTx(ctx, tx, args, InsertOptions{})
+	var receipt JobReceipt
+	err = unitOfWork.Within(ctx, foundation.TransactionOptions{}, func(callbackCtx context.Context, scope foundation.TransactionScope) error {
+		var insertErr error
+		receipt, insertErr = inserter.InsertTx(callbackCtx, scope, args, InsertOptions{})
+		return insertErr
+	})
 	if err != nil {
-		_ = tx.Rollback(ctx)
-		t.Fatal(err)
-	}
-	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
 	defer func() {

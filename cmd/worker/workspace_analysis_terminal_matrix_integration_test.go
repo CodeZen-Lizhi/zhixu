@@ -73,9 +73,6 @@ type workspaceAnalysisTerminalScenario struct {
 // no valid v1 operation prefix can request beyond its frozen budget.
 func TestPublicConversationWorkspaceAnalysisReachableTerminalMatrixThroughRiver(t *testing.T) {
 	baseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
-	if baseURL == "" {
-		t.Skip("set ZHIXU_TEST_DATABASE_URL for the Workspace Analysis terminal matrix")
-	}
 
 	scenarios := []workspaceAnalysisTerminalScenario{
 		{
@@ -176,10 +173,11 @@ func runWorkspaceAnalysisTerminalScenario(t *testing.T, baseURL string, scenario
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	pool := newMigratedWorkerTestPool(t, baseURL)
+	database := newMigratedWorkerTestPool(t, baseURL)
+	pool := database.DB()
 	root := t.TempDir()
 	seedWorkspaceAnalysisGitRepository(t, ctx, root)
-	seedWorkspaceAnalysisConversationKnowledge(t, ctx, pool, root)
+	seedWorkspaceAnalysisConversationKnowledge(t, ctx, database, root)
 
 	probe := &workspaceAnalysisTerminalProbe{}
 	model := &workspaceAnalysisTerminalModel{mode: scenario.modelMode, probe: probe}
@@ -205,14 +203,14 @@ func runWorkspaceAnalysisTerminalScenario(t *testing.T, baseURL string, scenario
 		fault.modelOperationRepository = candidateFinalizationCancel
 	}
 	if scenario.deadline {
-		fault.decorateRunStarter = func(delegate agentapplication.WorkspaceAnalysisRunStarter) agentapplication.WorkspaceAnalysisRunStarter {
+		fault.decorateRunStarter = func(delegate agentapplication.ScopedWorkspaceAnalysisRunStarter) agentapplication.ScopedWorkspaceAnalysisRunStarter {
 			return workspaceAnalysisExpiredRunStarter{delegate: delegate, probe: probe}
 		}
 	}
 	if fault.decorateTool == nil && fault.decorateInspect == nil && fault.decorateRunStarter == nil && fault.modelOperationRepository == nil {
 		fault = nil
 	}
-	router, workerClient := newWorkspaceAnalysisConversationIntegrationRuntime(t, pool, model, fault)
+	router, workerClient := newWorkspaceAnalysisConversationIntegrationRuntime(t, database, model, fault)
 	server := httptest.NewServer(router)
 	defer server.Close()
 	if candidateFinalizationCancel != nil {
@@ -567,20 +565,20 @@ func (executor workspaceAnalysisRuntimeFailureExecutor) Execute(context.Context,
 }
 
 type workspaceAnalysisExpiredRunStarter struct {
-	delegate agentapplication.WorkspaceAnalysisRunStarter
+	delegate agentapplication.ScopedWorkspaceAnalysisRunStarter
 	probe    *workspaceAnalysisTerminalProbe
 }
 
 // The wrapper simulates a run that remained queued past its frozen deadline;
 // the production run service still derives and persists every terminal fact.
-func (starter workspaceAnalysisExpiredRunStarter) StartWorkspaceAnalysisRunTx(
+func (starter workspaceAnalysisExpiredRunStarter) StartWorkspaceAnalysisRunScoped(
 	ctx context.Context,
-	transaction any,
+	transaction foundation.TransactionScope,
 	command agentapplication.WorkspaceAnalysisRunStartCommand,
 ) (agentdomain.WorkspaceAnalysisRun, error) {
 	starter.probe.hit("runtime:expired-run")
 	command.CreatedAt = command.CreatedAt.Add(-2 * agentapplication.WorkspaceAnalysisV1MaxRunDuration)
-	return starter.delegate.StartWorkspaceAnalysisRunTx(ctx, transaction, command)
+	return starter.delegate.StartWorkspaceAnalysisRunScoped(ctx, transaction, command)
 }
 
 func doWorkspaceAnalysisTerminalCancel(t *testing.T, ctx context.Context, serverURL, workflowRunID string, version int64) {
@@ -1002,7 +1000,7 @@ func assertWorkspaceAnalysisTerminalCausality(
 // PostgreSQL finalizer so the Runner must observe the persisted cancellation
 // fence and settle its existing Call.
 type workspaceAnalysisCancelBeforeCandidateFinalizer struct {
-	*agentpostgres.Repository
+	*agentpostgres.GORMWorkspaceAnalysisRepository
 
 	pool  *pgxpool.Pool
 	probe *workspaceAnalysisTerminalProbe
@@ -1026,7 +1024,7 @@ func (repository *workspaceAnalysisCancelBeforeCandidateFinalizer) FinalizeWorks
 	if err := repository.persistCancelBeforeCandidate(ctx, command.Identity.WorkflowRunID, command.Identity.WorkspaceID); err != nil {
 		return agentapplication.WorkspaceAnalysisModelMutationResult{}, err
 	}
-	return repository.Repository.FinalizeWorkspaceAnalysisModelCandidate(ctx, command)
+	return repository.GORMWorkspaceAnalysisRepository.FinalizeWorkspaceAnalysisModelCandidate(ctx, command)
 }
 
 func (repository *workspaceAnalysisCancelBeforeCandidateFinalizer) persistCancelBeforeCandidate(
@@ -1039,7 +1037,7 @@ func (repository *workspaceAnalysisCancelBeforeCandidateFinalizer) persistCancel
 		return repository.triggerErr
 	}
 	repository.triggered = true
-	if repository.Repository == nil || repository.pool == nil || repository.probe == nil || repository.serverURL == "" {
+	if repository.GORMWorkspaceAnalysisRepository == nil || repository.pool == nil || repository.probe == nil || repository.serverURL == "" {
 		repository.triggerErr = errors.New("candidate finalization cancellation fixture is incomplete")
 		return repository.triggerErr
 	}

@@ -6,7 +6,7 @@ import (
 	"errors"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	"github.com/jackc/pgx/v5/pgconn"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	"gorm.io/gorm"
 )
 
@@ -28,16 +28,13 @@ func classifyGORMTools(ctx context.Context, cause error) error {
 		}
 		return foundation.NewError(foundation.ErrorRetryableFailure, ErrorCodeDatabaseTimeout, true, contextCause)
 	}
-	var postgresError *pgconn.PgError
-	if errors.As(cause, &postgresError) {
-		switch postgresError.Code {
-		case "40001", "40P01", "55P03":
-			return foundation.NewError(foundation.ErrorRetryableFailure, ErrorCodeDatabaseUnavailable, true, cause)
-		case "23505":
-			return idempotencyConflict(cause)
-		case "23503", "23514", "55000":
-			return consistency(cause)
-		}
+	switch platformpostgres.SQLState(cause) {
+	case "40001", "40P01", "55P03":
+		return foundation.NewError(foundation.ErrorRetryableFailure, ErrorCodeDatabaseUnavailable, true, cause)
+	case "23505":
+		return idempotencyConflict(cause)
+	case "23503", "23514", "55000":
+		return consistency(cause)
 	}
 	if errors.Is(cause, sql.ErrTxDone) {
 		return gormToolsUnavailable(cause)
@@ -46,8 +43,7 @@ func classifyGORMTools(ctx context.Context, cause error) error {
 }
 
 func classifyGORMToolsReceiptWrite(ctx context.Context, cause error) error {
-	var postgresError *pgconn.PgError
-	if errors.As(cause, &postgresError) && postgresError.Code == "23505" {
+	if platformpostgres.SQLState(cause) == "23505" {
 		return receiptConflict(cause)
 	}
 	return classifyGORMTools(ctx, cause)

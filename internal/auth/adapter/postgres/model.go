@@ -1,10 +1,13 @@
 package postgres
 
 import (
+	"encoding/json"
 	"errors"
+	"slices"
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/auth/domain"
+	"github.com/CodeZen-Lizhi/zhixu/internal/capability"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 )
 
@@ -95,4 +98,19 @@ func (record apiTokenRecord) toDomain() (domain.APIToken, error) {
 		return domain.APIToken{}, corrupt(errors.New("api token row is corrupt"))
 	}
 	return token, nil
+}
+
+func decodeScopes(raw string) ([]capability.Capability, error) {
+	var values []capability.Capability
+	if json.Unmarshal([]byte(raw), &values) != nil {
+		return nil, errors.New("scope json is invalid")
+	}
+	canonical, err := domain.CanonicalScopes(values)
+	if err != nil || !slices.Equal(canonical, values) {
+		if err != nil {
+			return nil, err
+		}
+		return nil, errors.New("scope json is not canonical")
+	}
+	return canonical, nil
 }

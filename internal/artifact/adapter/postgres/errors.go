@@ -7,7 +7,7 @@ import (
 
 	artifactapp "github.com/CodeZen-Lizhi/zhixu/internal/artifact/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	"github.com/jackc/pgx/v5/pgconn"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 )
 
 func requestInvalid(err error) error {
@@ -60,18 +60,15 @@ func classify(err error) error {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return unavailable(err)
 	}
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) {
-		switch pgErr.Code {
-		case "23505":
-			return idempotencyConflict(err)
-		case "23503", "23514", "23502", "22P02":
-			return inconsistent(err)
-		case "40001", "40P01", "55P03", "08000", "08003", "08006", "57P01", "57014":
-			return foundation.NewError(foundation.ErrorRetryableFailure, artifactapp.ErrorCodeDependencyUnavailable, true, err)
-		case "55000":
-			return inconsistent(err)
-		}
+	switch platformpostgres.SQLState(err) {
+	case "23505":
+		return idempotencyConflict(err)
+	case "23503", "23514", "23502", "22P02":
+		return inconsistent(err)
+	case "40001", "40P01", "55P03", "08000", "08003", "08006", "57P01", "57014":
+		return foundation.NewError(foundation.ErrorRetryableFailure, artifactapp.ErrorCodeDependencyUnavailable, true, err)
+	case "55000":
+		return inconsistent(err)
 	}
 	return unavailable(err)
 }

@@ -4,21 +4,22 @@ import (
 	"testing"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	workspacepostgres "github.com/CodeZen-Lizhi/zhixu/internal/workspace/adapter/postgres"
-	"github.com/jackc/pgx/v5/pgxpool"
+	workspaceruntimegrant "github.com/CodeZen-Lizhi/zhixu/internal/workspace/runtimegrant"
 )
 
 func TestNewExportHandlerRequiresDatabaseAndWorkspaceRepository(t *testing.T) {
 	cfg := config.Defaults()
-	pool := &pgxpool.Pool{}
-	workspaces, err := workspacepostgres.NewRepository(pool)
+	pool := apiConstructorPool(t)
+	workspaces, err := workspacepostgres.NewGORMRepository(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, test := range []struct {
 		name       string
-		pool       *pgxpool.Pool
-		workspaces *workspacepostgres.Repository
+		pool       *platformpostgres.Pool
+		workspaces workspaceruntimegrant.GORMRepositoryPort
 	}{
 		{name: "missing database", workspaces: workspaces},
 		{name: "missing workspace repository", pool: pool},
@@ -33,8 +34,8 @@ func TestNewExportHandlerRequiresDatabaseAndWorkspaceRepository(t *testing.T) {
 }
 
 func TestNewExportHandlerComposesProductionDependencies(t *testing.T) {
-	pool := &pgxpool.Pool{}
-	workspaces, err := workspacepostgres.NewRepository(pool)
+	pool := apiConstructorPool(t)
+	workspaces, err := workspacepostgres.NewGORMRepository(pool)
 	if err != nil {
 		t.Fatal(err)
 	}

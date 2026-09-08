@@ -26,7 +26,7 @@ var (
 )
 
 // LoadSearchKnowledgeV2Receipt loads the sole successful Search operation in
-// one legacy-equivalent UoW; Agent proves the operation closure and Tools proves the
+// one UoW; Agent proves the operation closure and Tools proves the
 // persisted Call/Receipt closure it owns.
 func (repository *GORMWorkspaceAnalysisRepository) LoadSearchKnowledgeV2Receipt(
 	ctx context.Context,

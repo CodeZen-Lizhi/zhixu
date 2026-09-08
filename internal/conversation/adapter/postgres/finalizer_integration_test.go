@@ -16,7 +16,9 @@ import (
 	eventspostgres "github.com/CodeZen-Lizhi/zhixu/internal/events/adapter/postgres"
 	eventsdomain "github.com/CodeZen-Lizhi/zhixu/internal/events/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"gorm.io/gorm"
 )
 
 func TestAnswerFinalizerAtomicallyPublishesRefusalAndExactlyReplaysConcurrently(t *testing.T) {
@@ -328,21 +330,22 @@ func TestAnswerFinalizerDraftLeaseUsesWallClock(t *testing.T) {
 		SET lease_until=$2,heartbeat_at=clock_timestamp() WHERE id=$1`, string(fixture.lookup.NodeAttemptID), leaseUntil); err != nil {
 		t.Fatal(err)
 	}
-	tx, err := fixture.pool.Begin(fixture.ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = tx.Rollback(fixture.ctx) }()
 	command := fixture.command(agentapplication.RAGTerminalProposal{})
-	lockedUntil, err := lockActiveDraftClaim(fixture.ctx, tx, command, draft)
+	err := withinConversationTransaction(fixture.ctx, fixture.finalizer.uow, foundation.TransactionOptions{}, func(ctx context.Context, tx *gorm.DB, _ foundation.TransactionScope) error {
+		lockedUntil, err := gormLockActiveDraftClaim(ctx, tx, command, draft)
+		if err != nil {
+			return err
+		}
+		if err := tx.WithContext(ctx).Exec(`SELECT pg_sleep(0.15)`).Error; err != nil {
+			return err
+		}
+		if err := gormValidateActiveDraftClaimLease(ctx, tx, lockedUntil); finalizerErrorCode(err) != ErrorCodeAnswerFinalizeConflict {
+			t.Fatalf("expired long-transaction finalizer claim error = %v", err)
+		}
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
-	}
-	if _, err := tx.Exec(fixture.ctx, `SELECT pg_sleep(0.15)`); err != nil {
-		t.Fatal(err)
-	}
-	if err := validateActiveDraftClaimLease(fixture.ctx, tx, lockedUntil); finalizerErrorCode(err) != ErrorCodeAnswerFinalizeConflict {
-		t.Fatalf("expired long-transaction finalizer claim error = %v", err)
 	}
 }
 
@@ -423,7 +426,7 @@ func TestAnswerFinalizerFailsClosedForWorkspaceAndAttemptBinding(t *testing.T) {
 
 func TestAnswerFinalizerLookupDetectsTerminalModelRunWithPendingAnswer(t *testing.T) {
 	fixture := newFinalizerFixture(t, false)
-	repository, err := agentpostgres.NewRepository(fixture.pool)
+	repository, err := agentpostgres.NewGORMRepository(fixture.shared)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -447,19 +450,19 @@ func TestAnswerFinalizerRecoversExactReplayAfterCommitResponseLoss(t *testing.T)
 	fixture := newFinalizerFixture(t, false)
 	proposal := seedFinalizerCompletedProposal(t, fixture)
 	draft := insertFinalizerDraft(t, fixture, agentapplication.DraftStreamCompleted)
-	agentRepository, err := agentpostgres.NewRepository(fixture.pool)
+	agentRepository, err := agentpostgres.NewGORMRepository(fixture.shared)
 	if err != nil {
 		t.Fatal(err)
 	}
-	events, err := eventspostgres.NewStore(fixture.pool)
+	events, err := eventspostgres.NewGORMStore(fixture.shared)
 	if err != nil {
 		t.Fatal(err)
 	}
-	lossDB := &conversationCommitResponseLossDB{Pool: fixture.pool, loseNext: true}
-	finalizer, err := NewAnswerFinalizer(lossDB, agentRepository, events, foundation.FixedClock{Value: fixture.run.CreatedAt.Add(30 * time.Second)})
+	finalizer, err := NewGORMAnswerFinalizer(fixture.shared, agentRepository, events, foundation.FixedClock{Value: fixture.run.CreatedAt.Add(30 * time.Second)})
 	if err != nil {
 		t.Fatal(err)
 	}
+	finalizer.uow = &conversationCommitResponseLossDB{UnitOfWork: finalizer.uow, loseNext: true}
 	command := fixture.command(proposal)
 	command.Draft = &draft
 	if _, _, err := finalizer.Finalize(fixture.ctx, command); finalizerErrorCode(err) != conversationapplication.ErrorCodeAnswerFinalizationUnknown {
@@ -485,19 +488,19 @@ func TestAnswerFinalizerRecoversExactReplayAfterCommitResponseLoss(t *testing.T)
 func TestAnswerFinalizerRecoversAbortedDraftReplayAfterCommitResponseLoss(t *testing.T) {
 	fixture := newFinalizerFixture(t, false)
 	draft := insertFinalizerDraft(t, fixture, agentapplication.DraftStreamActive)
-	agentRepository, err := agentpostgres.NewRepository(fixture.pool)
+	agentRepository, err := agentpostgres.NewGORMRepository(fixture.shared)
 	if err != nil {
 		t.Fatal(err)
 	}
-	events, err := eventspostgres.NewStore(fixture.pool)
+	events, err := eventspostgres.NewGORMStore(fixture.shared)
 	if err != nil {
 		t.Fatal(err)
 	}
-	lossDB := &conversationCommitResponseLossDB{Pool: fixture.pool, loseNext: true}
-	finalizer, err := NewAnswerFinalizer(lossDB, agentRepository, events, foundation.FixedClock{Value: fixture.run.CreatedAt.Add(30 * time.Second)})
+	finalizer, err := NewGORMAnswerFinalizer(fixture.shared, agentRepository, events, foundation.FixedClock{Value: fixture.run.CreatedAt.Add(30 * time.Second)})
 	if err != nil {
 		t.Fatal(err)
 	}
+	finalizer.uow = &conversationCommitResponseLossDB{UnitOfWork: finalizer.uow, loseNext: true}
 	command := fixture.command(finalizerRefusalProposal(fixture.run.ID))
 	command.Draft = &draft
 	if _, _, err := finalizer.Finalize(fixture.ctx, command); finalizerErrorCode(err) != conversationapplication.ErrorCodeAnswerFinalizationUnknown {
@@ -523,7 +526,8 @@ func TestAnswerFinalizerRecoversAbortedDraftReplayAfterCommitResponseLoss(t *tes
 type finalizerFixture struct {
 	ctx        context.Context
 	pool       *pgxpool.Pool
-	finalizer  *AnswerFinalizer
+	shared     *platformpostgres.Pool
+	finalizer  *GORMAnswerFinalizer
 	lookup     conversationapplication.AnswerPublicationLookup
 	dispatched conversationapplication.SubmitQuestionResult
 	run        agentdomain.ModelRun
@@ -531,14 +535,14 @@ type finalizerFixture struct {
 
 func newFinalizerFixture(t *testing.T, failingEvent bool) finalizerFixture {
 	t.Helper()
-	repository, pool, ctx := newConversationTestRepository(t)
+	repository, shared, pool, ctx := newConversationTestRepository(t)
 	workspaceID, conversationID := conversationPostgresID(800), conversationPostgresID(801)
 	seedConversationWorkspaces(t, ctx, pool, workspaceID)
 	createdAt := time.Now().UTC().Add(-time.Minute).Truncate(time.Microsecond)
 	if _, err := repository.CreateConversation(ctx, conversationCreateRecord(t, workspaceID, conversationID, "Finalizer", "finalizer", createdAt)); err != nil {
 		t.Fatal(err)
 	}
-	dispatched, err := newQuestionDispatcherIntegration(t, pool).SubmitQuestion(ctx, questionDispatchRecord(t, workspaceID, conversationID, "Need evidence?", "finalizer-question"))
+	dispatched, err := newQuestionDispatcherIntegration(t, shared).SubmitQuestion(ctx, questionDispatchRecord(t, workspaceID, conversationID, "Need evidence?", "finalizer-question"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -557,7 +561,7 @@ func newFinalizerFixture(t *testing.T, failingEvent bool) finalizerFixture {
 		NodeAttemptID: attemptID, ConversationID: conversationID, QuestionID: dispatched.Question.ID, AnswerID: dispatched.Answer.ID}
 	run := finalizerTestRun(lookup, createdAt.Add(2*time.Second))
 	run.ID = conversationPostgresID(803)
-	agentRepository, err := agentpostgres.NewRepository(pool)
+	agentRepository, err := agentpostgres.NewGORMRepository(shared)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -596,21 +600,21 @@ func newFinalizerFixture(t *testing.T, failingEvent bool) finalizerFixture {
 	if _, _, err := agentRepository.CompleteModelCall(ctx, agentapplication.CompleteModelCallCommand{WorkspaceID: workspaceID, ExpectedVersion: 1, Call: call}); err != nil {
 		t.Fatal(err)
 	}
-	events, err := eventspostgres.NewStore(pool)
+	events, err := eventspostgres.NewGORMStore(shared)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var appender interface {
-		AppendTx(context.Context, any, eventsdomain.AppendRequest) (eventsdomain.ServerEvent, bool, error)
+		AppendScoped(context.Context, foundation.TransactionScope, eventsdomain.AppendRequest) (eventsdomain.ServerEvent, bool, error)
 	} = events
 	if failingEvent {
 		appender = finalizerFailingAppender{}
 	}
-	finalizer, err := NewAnswerFinalizer(pool, agentRepository, appender, foundation.FixedClock{Value: createdAt.Add(10 * time.Second)})
+	finalizer, err := NewGORMAnswerFinalizer(shared, agentRepository, appender, foundation.FixedClock{Value: createdAt.Add(10 * time.Second)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return finalizerFixture{ctx: ctx, pool: pool, finalizer: finalizer, lookup: lookup, dispatched: dispatched, run: run}
+	return finalizerFixture{ctx: ctx, pool: pool, shared: shared, finalizer: finalizer, lookup: lookup, dispatched: dispatched, run: run}
 }
 
 func seedFinalizerCompletedProposal(t *testing.T, fixture finalizerFixture) agentapplication.RAGTerminalProposal {
@@ -683,7 +687,7 @@ func (fixture finalizerFixture) command(proposal agentapplication.RAGTerminalPro
 
 type finalizerFailingAppender struct{}
 
-func (finalizerFailingAppender) AppendTx(context.Context, any, eventsdomain.AppendRequest) (eventsdomain.ServerEvent, bool, error) {
+func (finalizerFailingAppender) AppendScoped(context.Context, foundation.TransactionScope, eventsdomain.AppendRequest) (eventsdomain.ServerEvent, bool, error) {
 	return eventsdomain.ServerEvent{}, false, foundation.NewError(foundation.ErrorDependencyUnavailable, "TEST_FINALIZER_EVENT_FAILURE", true, errors.New("injected"))
 }
 

@@ -7,9 +7,7 @@ import (
 	"time"
 
 	auditapplication "github.com/CodeZen-Lizhi/zhixu/internal/audit/application"
-	auditdomain "github.com/CodeZen-Lizhi/zhixu/internal/audit/domain"
 	eventsapplication "github.com/CodeZen-Lizhi/zhixu/internal/events/application"
-	eventsdomain "github.com/CodeZen-Lizhi/zhixu/internal/events/domain"
 	exportapp "github.com/CodeZen-Lizhi/zhixu/internal/export/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/export/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
@@ -17,18 +15,17 @@ import (
 	"gorm.io/gorm"
 )
 
-// GORMRepository is the staged Export implementation. It runs the existing
-// explicit Export SQL through the shared GORM/database/sql transaction
-// boundary; production composition remains on Repository until the Final child.
+// GORMRepository runs the explicit Export SQL core through the shared
+// GORM/database/sql transaction boundary and scoped side-fact appenders.
 type GORMRepository struct {
 	database   *gorm.DB
 	unitOfWork foundation.UnitOfWork
-	core       *Repository
+	core       *exportRepository
 	events     eventsapplication.ScopedAppender
 	audit      auditapplication.ScopedAppender
 }
 
-// GORMOption configures staged Export collaborators without exposing a
+// GORMOption configures Export collaborators without exposing a
 // concrete transaction type through the public constructor.
 type GORMOption func(*GORMRepository) error
 
@@ -60,9 +57,8 @@ func WithGORMAuditAppender(appender auditapplication.ScopedAppender) GORMOption 
 	}
 }
 
-// NewGORMRepository constructs a staged repository from the shared platform
-// pool. Optional appenders are retained for the scoped migration seam; no
-// appender owns or commits the transaction.
+// NewGORMRepository constructs Export persistence from the shared platform
+// pool. Side-fact appenders share its active transaction scope.
 func NewGORMRepository(pool *platformpostgres.Pool, options ...GORMOption) (*GORMRepository, error) {
 	if pool == nil {
 		return nil, unavailable(errors.New("export PostgreSQL pool is unavailable"))
@@ -100,13 +96,11 @@ func newGORMRepository(database *gorm.DB, unitOfWork foundation.UnitOfWork, opti
 		}
 	}
 	if !isNilDependency(repository.events) {
-		core.events = &gormEventAppender{scoped: repository.events}
+		core.events = repository.events
 	}
 	if !isNilDependency(repository.audit) {
-		core.audit = &gormAuditAppender{scoped: repository.audit}
+		core.audit = repository.audit
 	}
-	// The shared SQL core keeps the legacy and GORM paths behaviorally aligned;
-	// only their database and transaction adapters differ.
 	return repository, nil
 }
 
@@ -255,33 +249,3 @@ func preserveGORMExportContextCause(ctx context.Context, err error) error {
 }
 
 var _ exportapp.Repository = (*GORMRepository)(nil)
-
-type gormEventAppender struct {
-	scoped eventsapplication.ScopedAppender
-}
-
-func (appender *gormEventAppender) AppendTx(ctx context.Context, transaction any, request eventsdomain.AppendRequest) (eventsdomain.ServerEvent, bool, error) {
-	if appender == nil || isNilDependency(appender.scoped) {
-		return eventsdomain.ServerEvent{}, false, unavailable(errors.New("export lifecycle event appender is unavailable"))
-	}
-	tx, ok := transaction.(*gormTx)
-	if !ok || tx.scope == nil {
-		return eventsdomain.ServerEvent{}, false, unavailable(errors.New("export lifecycle transaction scope is unavailable"))
-	}
-	return appender.scoped.AppendScoped(ctx, tx.scope, request)
-}
-
-type gormAuditAppender struct {
-	scoped auditapplication.ScopedAppender
-}
-
-func (appender *gormAuditAppender) AppendTx(ctx context.Context, transaction any, event auditdomain.Event) (auditdomain.Event, bool, error) {
-	if appender == nil || isNilDependency(appender.scoped) {
-		return auditdomain.Event{}, false, unavailable(errors.New("export download audit appender is unavailable"))
-	}
-	tx, ok := transaction.(*gormTx)
-	if !ok || tx.scope == nil {
-		return auditdomain.Event{}, false, unavailable(errors.New("export audit transaction scope is unavailable"))
-	}
-	return appender.scoped.AppendScoped(ctx, tx.scope, event)
-}

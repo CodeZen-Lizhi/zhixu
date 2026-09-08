@@ -17,7 +17,7 @@ func TestImpactAnalyzeDeduplicatesSortsReplaysAndReturnsNoDraftsWithoutProposalR
 	health := impactApplicationObject(domain.ImpactObjectHealthIssue, testID(41), domain.ImpactActionRefreshHealth, false)
 	repository := &impactRepositoryStub{event: event, objects: []domain.ImpactObject{health, conflict, conflict}}
 	audit := &impactAuditStub{}
-	service, err := NewImpactServiceWithAudit(repository, &sequenceIDGenerator{ids: []foundation.ID{testID(50)}}, foundation.FixedClock{Value: testTime()}, audit)
+	service, err := NewScopedImpactServiceWithAudit(repository, &sequenceIDGenerator{ids: []foundation.ID{testID(50)}}, foundation.FixedClock{Value: testTime()}, audit)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +57,7 @@ func TestImpactAnalyzeUsesDistinctAuditIDsForDifferentHTTPIdempotencyKeys(t *tes
 	event := timelineApplicationEvent(testID(30), workspaceID, testTime())
 	repository := &impactRepositoryStub{event: event}
 	audit := &impactAuditStub{}
-	service, err := NewImpactServiceWithAudit(repository, &sequenceIDGenerator{ids: []foundation.ID{testID(50)}}, foundation.FixedClock{Value: testTime()}, audit)
+	service, err := NewScopedImpactServiceWithAudit(repository, &sequenceIDGenerator{ids: []foundation.ID{testID(50)}}, foundation.FixedClock{Value: testTime()}, audit)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func TestImpactAnalyzeRollsBackNewReportWhenTransactionalAuditFails(t *testing.T
 	repository := &impactRepositoryStub{event: event}
 	auditFailure := errors.New("audit write failed")
 	audit := &impactAuditStub{transactionError: auditFailure}
-	service, err := NewImpactServiceWithAudit(repository, &sequenceIDGenerator{ids: []foundation.ID{testID(50)}}, foundation.FixedClock{Value: testTime()}, audit)
+	service, err := NewScopedImpactServiceWithAudit(repository, &sequenceIDGenerator{ids: []foundation.ID{testID(50)}}, foundation.FixedClock{Value: testTime()}, audit)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestImpactAnalyzeRejectsSensitiveIdempotencyKeyBeforeWrites(t *testing.T) {
 	event := timelineApplicationEvent(testID(30), workspaceID, testTime())
 	repository := &impactRepositoryStub{event: event}
 	audit := &impactAuditStub{}
-	service, err := NewImpactServiceWithAudit(repository, &sequenceIDGenerator{ids: []foundation.ID{testID(50)}}, foundation.FixedClock{Value: testTime()}, audit)
+	service, err := NewScopedImpactServiceWithAudit(repository, &sequenceIDGenerator{ids: []foundation.ID{testID(50)}}, foundation.FixedClock{Value: testTime()}, audit)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +169,7 @@ func TestImpactAnalyzeRejectsCurrentV2FingerprintDriftBeforeAudit(t *testing.T) 
 	}
 	repository := &impactRepositoryStub{event: event, report: report}
 	audit := &impactAuditStub{}
-	service, err := NewImpactServiceWithAudit(repository, &sequenceIDGenerator{}, foundation.FixedClock{Value: testTime()}, audit)
+	service, err := NewScopedImpactServiceWithAudit(repository, &sequenceIDGenerator{}, foundation.FixedClock{Value: testTime()}, audit)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +224,7 @@ func TestImpactAnalyzeRejectsCurrentV2OwnerBindingDriftBeforeAudit(t *testing.T)
 	current := impactApplicationArtifactObject(testID(42), 3, testID(44), 2, strings.Repeat("b", 64))
 	repository := &impactRepositoryStub{event: event, report: report, objects: []domain.ImpactObject{current}}
 	audit := &impactAuditStub{}
-	service, err := NewImpactServiceWithAudit(repository, &sequenceIDGenerator{}, foundation.FixedClock{Value: testTime()}, audit)
+	service, err := NewScopedImpactServiceWithAudit(repository, &sequenceIDGenerator{}, foundation.FixedClock{Value: testTime()}, audit)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -306,7 +306,7 @@ func TestImpactAnalyzeUnavailableBeforeSelectorCompletionHasZeroSideEffects(t *t
 	event := timelineApplicationEvent(testID(30), workspaceID, testTime())
 	repository := &impactRepositoryStub{event: event, notReady: true}
 	audit := &impactAuditStub{}
-	service, err := NewImpactServiceWithAudit(repository, &sequenceIDGenerator{ids: []foundation.ID{testID(50)}}, foundation.FixedClock{Value: testTime()}, audit)
+	service, err := NewScopedImpactServiceWithAudit(repository, &sequenceIDGenerator{ids: []foundation.ID{testID(50)}}, foundation.FixedClock{Value: testTime()}, audit)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -342,7 +342,7 @@ func TestImpactAnalyzeReplaysCurrentV2BeforeReadinessAndHistoricalGetRemainsAvai
 	}
 	repository := &impactRepositoryStub{event: event, objects: []domain.ImpactObject{object}, report: &current, legacyReport: &legacy, notReady: true}
 	audit := &impactAuditStub{}
-	service, err := NewImpactServiceWithAudit(repository, &sequenceIDGenerator{}, foundation.FixedClock{Value: testTime()}, audit)
+	service, err := NewScopedImpactServiceWithAudit(repository, &sequenceIDGenerator{}, foundation.FixedClock{Value: testTime()}, audit)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,15 +402,21 @@ func (repository *impactRepositoryStub) SaveImpactReport(_ context.Context, repo
 	return report, false, nil
 }
 
-func (repository *impactRepositoryStub) SaveImpactReportWithAudit(ctx context.Context, report domain.ImpactReport, idempotencyKey string, audit ImpactAuditPort) (domain.ImpactReport, bool, error) {
+func (repository *impactRepositoryStub) SaveImpactReportWithScopedAudit(ctx context.Context, report domain.ImpactReport, idempotencyKey string, audit ScopedImpactAuditPort) (domain.ImpactReport, bool, error) {
 	previous := repository.report
-	persisted, replayed, err := repository.SaveImpactReport(ctx, report)
-	if err != nil {
-		return domain.ImpactReport{}, false, err
+	persisted, replayed := report, previous != nil
+	if replayed {
+		persisted = *previous
+	} else {
+		var err error
+		persisted, replayed, err = repository.SaveImpactReport(ctx, report)
+		if err != nil {
+			return domain.ImpactReport{}, false, err
+		}
 	}
 	record, err := BuildImpactAuditRecord(persisted, idempotencyKey, replayed)
 	if err == nil {
-		err = audit.RecordImpactAnalysisTx(ctx, struct{}{}, record)
+		err = audit.RecordImpactAnalysisScoped(ctx, impactTestScope{}, record)
 	}
 	if err != nil {
 		repository.report = previous
@@ -428,6 +434,10 @@ func (repository *impactRepositoryStub) GetImpactReportByID(_ context.Context, w
 	return domain.ImpactReport{}, foundation.NewError(foundation.ErrorNotFound, domain.ErrorCodeImpactNotFound, false, errors.New("not found"))
 }
 
+type impactTestScope struct{}
+
+func (impactTestScope) TransactionScope() {}
+
 type impactAuditStub struct {
 	records          []ImpactAuditRecord
 	transactionError error
@@ -439,7 +449,7 @@ func (audit *impactAuditStub) RecordImpactAnalysis(_ context.Context, record Imp
 	return nil
 }
 
-func (audit *impactAuditStub) RecordImpactAnalysisTx(_ context.Context, _ any, record ImpactAuditRecord) error {
+func (audit *impactAuditStub) RecordImpactAnalysisScoped(_ context.Context, _ foundation.TransactionScope, record ImpactAuditRecord) error {
 	audit.transactionCalls++
 	if audit.transactionError != nil {
 		return audit.transactionError

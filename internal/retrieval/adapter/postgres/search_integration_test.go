@@ -20,270 +20,294 @@ import (
 )
 
 func TestSearchRepositoryActiveFiltersAndBoundedProvenance(t *testing.T) {
-	repository, database, ctx := newRetrievalTestRepository(t)
-	searchRepository, err := NewSearchRepository(database.DB())
-	if err != nil {
-		t.Fatal(err)
-	}
-	now := time.Date(2026, 7, 19, 8, 0, 0, 0, time.UTC)
-	workspaceID := seedSnapshotWorkspace(t, ctx, database.DB(), 80, now)
-	target := seedSnapshotSourceVersion(t, ctx, database.DB(), workspaceID, 800, 1, true, now, now, 2)
-	setSearchSourcePath(t, ctx, database.DB(), target.SourceID, "docs/api/a.md")
-
-	sharedSources := make([]snapshotSourceFixture, 0, 9)
-	for ordinal := 810; ordinal < 819; ordinal++ {
-		shared := seedSnapshotSourceSharingProjection(t, ctx, database.DB(), workspaceID, ordinal, target, now)
-		path := fmt.Sprintf("docs/api/shared-%d.md", ordinal)
-		if ordinal == 818 {
-			path = "docs/apis/adjacent.md"
-		}
-		setSearchSourcePath(t, ctx, database.DB(), shared.SourceID, path)
-		sharedSources = append(sharedSources, shared)
-	}
-	other := seedSnapshotSourceVersion(t, ctx, database.DB(), workspaceID, 900, 1, true, now.Add(2*time.Hour), now.Add(2*time.Hour), 1)
-	setSearchSourcePath(t, ctx, database.DB(), other.SourceID, "docs/guide/b.md")
-	excluded := seedSnapshotSourceVersion(t, ctx, database.DB(), workspaceID, 901, 1, false, now, now, 1)
-	setSearchSourcePath(t, ctx, database.DB(), excluded.SourceID, "docs/excluded.md")
-
-	embedding := searchEmbedding(snapshotID(8000), domain.DistanceCosine, now)
-	active := createHybridSearchIndex(t, ctx, repository, workspaceID, target, embedding, 8001, 8002, now.Add(3*time.Hour))
-	loaded, err := searchRepository.LoadActiveSearchIndex(ctx, workspaceID)
-	if err != nil || loaded.Index.ID != active.ID || loaded.EmbeddingVersion == nil || loaded.Fusion == nil ||
-		loaded.EmbeddingVersion.ID != embedding.ID || loaded.Fusion.VectorCandidateLimit != 20 {
-		t.Fatalf("LoadActiveSearchIndex()=%#v err=%v", loaded, err)
-	}
-
-	lexicalQuery := application.LexicalSearchQuery{
-		WorkspaceID: workspaceID, IndexVersionID: active.ID, Query: "chunk", Limit: 20,
-	}
-	vectorQuery := application.VectorSearchQuery{
-		WorkspaceID: workspaceID, IndexVersionID: active.ID, EmbeddingVersion: embedding,
-		QueryEmbedding: []float32{1, 0, 0}, Limit: 20,
-	}
-	lexical, err := searchRepository.SearchLexical(ctx, lexicalQuery)
-	if err != nil {
-		t.Fatal(err)
-	}
-	vector, err := searchRepository.SearchVector(ctx, vectorQuery)
-	if err != nil {
-		t.Fatalf("%v cause=%v", err, errors.Unwrap(err))
-	}
-	if len(lexical) != 3 || len(vector) != 3 {
-		t.Fatalf("all candidates lexical=%d vector=%d", len(lexical), len(vector))
-	}
-	lexicalArguments := []any{
-		string(workspaceID), string(active.ID), strings.TrimSpace(lexicalQuery.Query), lexicalQuery.Limit,
-		domain.MaxEvidenceProvenance,
-	}
-	lexicalPlan := explainSearchQuery(t, ctx, database.DB(), fmt.Sprintf(
-		lexicalCandidateSQL, appendSearchFilter(&lexicalArguments, lexicalQuery.Filter), searchSnippetCharacterLimit, searchRerankCharacterLimit,
-	), lexicalArguments...)
-	for _, marker := range []string{
-		"uq_retrieval_index_version_active",
-		"idx_retrieval_projection_workspace_index_chunk",
-		"idx_retrieval_source_manifest_workspace_index_source",
-		"lexical_match_chunks",
-		"ranked_provenance",
-	} {
-		if !strings.Contains(lexicalPlan, marker) {
-			t.Fatalf("production lexical EXPLAIN did not expose %s", marker)
-		}
-	}
-	replayedLexical, err := searchRepository.SearchLexical(ctx, lexicalQuery)
-	if err != nil || len(replayedLexical) != len(lexical) {
-		t.Fatalf("replayed lexical=%d err=%v", len(replayedLexical), err)
-	}
-	for index := range lexical {
-		if lexical[index].ChunkID != replayedLexical[index].ChunkID || lexical[index].Lexical.Rank != replayedLexical[index].Lexical.Rank {
-			t.Fatalf("unstable lexical replay at %d", index)
-		}
-	}
-	connection, err := database.DB().Acquire(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer connection.Release()
-	connectionRepository, err := NewSearchRepository(connection)
-	if err != nil {
-		t.Fatal(err)
-	}
-	trigramOnlyQuery := lexicalQuery
-	trigramOnlyQuery.Query = "chunkk"
-	var thresholdResults [][]domain.SearchCandidate
-	for _, threshold := range []string{"0.99", "0.01"} {
-		if _, err := connection.Exec(ctx, `SELECT set_config('pg_trgm.similarity_threshold',$1,false)`, threshold); err != nil {
-			t.Fatal(err)
-		}
-		candidates, err := connectionRepository.SearchLexical(ctx, trigramOnlyQuery)
-		if err != nil {
-			t.Fatal(err)
-		}
-		thresholdResults = append(thresholdResults, candidates)
-	}
-	if len(thresholdResults[0]) == 0 || len(thresholdResults[0]) != len(thresholdResults[1]) {
-		t.Fatalf("session trigram threshold changed candidate count: low=%d high=%d", len(thresholdResults[1]), len(thresholdResults[0]))
-	}
-	for index := range thresholdResults[0] {
-		if thresholdResults[0][index].ChunkID != thresholdResults[1][index].ChunkID {
-			t.Fatalf("session trigram threshold changed candidate order at %d", index)
-		}
-	}
-	assertStableSearchRanks(t, lexical)
-	assertStableSearchRanks(t, vector)
-	assertSameSearchChunkSet(t, lexical, vector)
-	var sharedCandidate *domain.SearchCandidate
-	for index := range lexical {
-		if lexical[index].ParseProjectionID == target.ProjectionID {
-			sharedCandidate = &lexical[index]
-			break
-		}
-	}
-	if sharedCandidate == nil || len(sharedCandidate.Provenances) != domain.MaxEvidenceProvenance || !sharedCandidate.ProvenanceTruncated {
-		t.Fatalf("bounded shared candidate=%#v", sharedCandidate)
-	}
-	for index := 1; index < len(sharedCandidate.Provenances); index++ {
-		left, right := sharedCandidate.Provenances[index-1], sharedCandidate.Provenances[index]
-		if left.SourceID > right.SourceID || left.SourceID == right.SourceID && left.SourceVersionID > right.SourceVersionID {
-			t.Fatalf("provenance order=%#v", sharedCandidate.Provenances)
-		}
-	}
-
-	filter := domain.SearchFilter{SourceIDs: []foundation.ID{sharedSources[0].SourceID}}
-	lexicalQuery.Filter, vectorQuery.Filter = filter, filter
-	filteredLexical, err := searchRepository.SearchLexical(ctx, lexicalQuery)
-	if err != nil {
-		t.Fatal(err)
-	}
-	filteredVector, err := searchRepository.SearchVector(ctx, vectorQuery)
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertSameSearchChunkSet(t, filteredLexical, filteredVector)
-	if len(filteredLexical) != 2 {
-		t.Fatalf("source-filtered candidates=%d", len(filteredLexical))
-	}
-	for _, candidate := range filteredLexical {
-		if len(candidate.Provenances) != 1 || candidate.Provenances[0].SourceID != sharedSources[0].SourceID || candidate.ProvenanceTruncated {
-			t.Fatalf("source-filtered provenance=%#v", candidate)
-		}
-	}
-
-	filter = domain.SearchFilter{SourceVersionIDs: []foundation.ID{sharedSources[1].VersionID}}
-	lexicalQuery.Filter, vectorQuery.Filter = filter, filter
-	versionLexical, err := searchRepository.SearchLexical(ctx, lexicalQuery)
-	if err != nil {
-		t.Fatal(err)
-	}
-	versionVector, err := searchRepository.SearchVector(ctx, vectorQuery)
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertSameSearchChunkSet(t, versionLexical, versionVector)
-	if len(versionLexical) != 2 {
-		t.Fatalf("source-version-filtered candidates=%d", len(versionLexical))
-	}
-	for _, candidate := range versionLexical {
-		if len(candidate.Provenances) != 1 || candidate.Provenances[0].SourceVersionID != sharedSources[1].VersionID {
-			t.Fatalf("source-version-filtered provenance=%#v", candidate.Provenances)
-		}
-	}
-
-	filter = domain.SearchFilter{PathPrefixes: []string{"docs/api"}}
-	lexicalQuery.Filter, vectorQuery.Filter = filter, filter
-	pathLexical, err := searchRepository.SearchLexical(ctx, lexicalQuery)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pathVector, err := searchRepository.SearchVector(ctx, vectorQuery)
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertSameSearchChunkSet(t, pathLexical, pathVector)
-	if len(pathLexical) != 2 {
-		t.Fatalf("path-filtered candidates=%d", len(pathLexical))
-	}
-	for _, candidate := range pathLexical {
-		for _, provenance := range candidate.Provenances {
-			if strings.HasPrefix(provenance.RelativePath, "docs/apis/") {
-				t.Fatalf("adjacent path leaked into segment prefix: %#v", provenance)
+	for _, implementation := range []string{"gorm"} {
+		t.Run(implementation, func(t *testing.T) {
+			repository, database, ctx := newRetrievalTestStore(t, implementation, 1)
+			searchRepository, err := NewGORMSearchRepository(database)
+			if err != nil {
+				t.Fatal(err)
 			}
-		}
-	}
-	lexicalQuery.Filter = domain.SearchFilter{PathPrefixes: []string{"docs/api/a"}}
-	if candidates, queryErr := searchRepository.SearchLexical(ctx, lexicalQuery); queryErr != nil || len(candidates) != 0 {
-		t.Fatalf("partial segment candidates=%d err=%v", len(candidates), queryErr)
-	}
+			now := time.Date(2026, 7, 19, 8, 0, 0, 0, time.UTC)
+			workspaceID := seedSnapshotWorkspace(t, ctx, database.DB(), 80, now)
+			target := seedSnapshotSourceVersion(t, ctx, database.DB(), workspaceID, 800, 1, true, now, now, 2)
+			setSearchSourcePath(t, ctx, database.DB(), target.SourceID, "docs/api/a.md")
 
-	before := now.Add(time.Hour)
-	filter = domain.SearchFilter{CapturedAtBefore: &before}
-	lexicalQuery.Filter, vectorQuery.Filter = filter, filter
-	timeLexical, err := searchRepository.SearchLexical(ctx, lexicalQuery)
-	if err != nil {
-		t.Fatal(err)
-	}
-	timeVector, err := searchRepository.SearchVector(ctx, vectorQuery)
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertSameSearchChunkSet(t, timeLexical, timeVector)
-	if len(timeLexical) != 2 {
-		t.Fatalf("time-filtered candidates=%d", len(timeLexical))
-	}
-	from := now.Add(2 * time.Hour)
-	filter = domain.SearchFilter{CapturedAtFrom: &from}
-	lexicalQuery.Filter, vectorQuery.Filter = filter, filter
-	fromLexical, err := searchRepository.SearchLexical(ctx, lexicalQuery)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fromVector, err := searchRepository.SearchVector(ctx, vectorQuery)
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertSameSearchChunkSet(t, fromLexical, fromVector)
-	if len(fromLexical) != 1 || fromLexical[0].ParseProjectionID != other.ProjectionID {
-		t.Fatalf("inclusive-from candidates=%#v", fromLexical)
-	}
+			sharedSources := make([]snapshotSourceFixture, 0, 9)
+			for ordinal := 810; ordinal < 819; ordinal++ {
+				shared := seedSnapshotSourceSharingProjection(t, ctx, database.DB(), workspaceID, ordinal, target, now)
+				path := fmt.Sprintf("docs/api/shared-%d.md", ordinal)
+				if ordinal == 818 {
+					path = "docs/apis/adjacent.md"
+				}
+				setSearchSourcePath(t, ctx, database.DB(), shared.SourceID, path)
+				sharedSources = append(sharedSources, shared)
+			}
+			other := seedSnapshotSourceVersion(t, ctx, database.DB(), workspaceID, 900, 1, true, now.Add(2*time.Hour), now.Add(2*time.Hour), 1)
+			setSearchSourcePath(t, ctx, database.DB(), other.SourceID, "docs/guide/b.md")
+			excluded := seedSnapshotSourceVersion(t, ctx, database.DB(), workspaceID, 901, 1, false, now, now, 1)
+			setSearchSourcePath(t, ctx, database.DB(), excluded.SourceID, "docs/excluded.md")
 
-	buildingCommand := snapshotCommand(workspaceID, 8010, other, "search-building", now.Add(4*time.Hour))
-	buildingCommand.IndexVersion.EmbeddingVersionID = &embedding.ID
-	buildingCommand.IndexVersion.DegradedCapabilities = nil
-	buildingCommand.IndexVersion.FusionConfig = searchRRF(t)
-	building, err := repository.BeginWorkspaceSnapshot(ctx, buildingCommand)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := repository.BuildLexical(ctx, domain.LexicalBuildCommand{
-		WorkspaceID: workspaceID, IndexVersionID: building.IndexVersion.ID,
-		ExpectedIndexVersion: 1, At: now.Add(5 * time.Hour),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	lexicalQuery.IndexVersionID = building.IndexVersion.ID
-	lexicalQuery.Filter = domain.SearchFilter{}
-	if candidates, queryErr := searchRepository.SearchLexical(ctx, lexicalQuery); queryErr != nil || len(candidates) != 0 {
-		t.Fatalf("building lexical candidates=%d err=%v", len(candidates), queryErr)
-	}
-	vectorQuery.IndexVersionID = building.IndexVersion.ID
-	vectorQuery.Filter = domain.SearchFilter{}
-	if candidates, queryErr := searchRepository.SearchVector(ctx, vectorQuery); queryErr != nil || len(candidates) != 0 {
-		t.Fatalf("building vector candidates=%d err=%v", len(candidates), queryErr)
-	}
-	loaded, err = searchRepository.LoadActiveSearchIndex(ctx, workspaceID)
-	if err != nil || loaded.Index.ID != active.ID {
-		t.Fatalf("active after building=%#v err=%v", loaded, err)
-	}
+			embedding := searchEmbedding(snapshotID(8000), domain.DistanceCosine, now)
+			active := createHybridSearchIndex(t, ctx, repository, workspaceID, target, embedding, 8001, 8002, now.Add(3*time.Hour))
+			loaded, err := searchRepository.LoadActiveSearchIndex(ctx, workspaceID)
+			if err != nil || loaded.Index.ID != active.ID || loaded.EmbeddingVersion == nil || loaded.Fusion == nil ||
+				loaded.EmbeddingVersion.ID != embedding.ID || loaded.Fusion.VectorCandidateLimit != 20 {
+				t.Fatalf("LoadActiveSearchIndex()=%#v err=%v", loaded, err)
+			}
 
-	assertExplainUsesIndex(t, ctx, database.DB(), "idx_retrieval_projection_search_vector",
-		`SELECT index_version_id FROM retrieval.chunk_projection
-		 WHERE search_vector @@ websearch_to_tsquery('simple',$1)`, "chunk")
-	assertExplainUsesIndex(t, ctx, database.DB(), "idx_ingestion_canonical_chunk_content_trgm",
-		`SELECT id FROM ingestion.canonical_chunk WHERE content % $1`, "chunk")
+			lexicalQuery := application.LexicalSearchQuery{
+				WorkspaceID: workspaceID, IndexVersionID: active.ID, Query: "chunk", Limit: 20,
+			}
+			vectorQuery := application.VectorSearchQuery{
+				WorkspaceID: workspaceID, IndexVersionID: active.ID, EmbeddingVersion: embedding,
+				QueryEmbedding: []float32{1, 0, 0}, Limit: 20,
+			}
+			lexical, err := searchRepository.SearchLexical(ctx, lexicalQuery)
+			if err != nil {
+				t.Fatal(err)
+			}
+			vector, err := searchRepository.SearchVector(ctx, vectorQuery)
+			if err != nil {
+				t.Fatalf("%v cause=%v", err, errors.Unwrap(err))
+			}
+			if len(lexical) != 3 || len(vector) != 3 {
+				t.Fatalf("all candidates lexical=%d vector=%d", len(lexical), len(vector))
+			}
+			lexicalArguments := []any{
+				string(workspaceID), string(active.ID), strings.TrimSpace(lexicalQuery.Query), lexicalQuery.Limit,
+				domain.MaxEvidenceProvenance,
+			}
+			lexicalPlan := explainSearchQuery(t, ctx, database.DB(), fmt.Sprintf(
+				lexicalCandidateSQL, appendSearchFilter(&lexicalArguments, lexicalQuery.Filter), searchSnippetCharacterLimit, searchRerankCharacterLimit,
+			), lexicalArguments...)
+			for _, marker := range []string{
+				"uq_retrieval_index_version_active",
+				"idx_retrieval_projection_workspace_index_chunk",
+				"lexical_match_chunks",
+				"ranked_provenance",
+			} {
+				if !strings.Contains(lexicalPlan, marker) {
+					t.Fatalf("production lexical EXPLAIN did not expose %s:\n%s", marker, lexicalPlan)
+				}
+			}
+			// 小 fixture 也可选 included Source Version 的部分唯一索引；两者都以 Index 为边界。
+			if !strings.Contains(lexicalPlan, "idx_retrieval_source_manifest_workspace_index_source") &&
+				!strings.Contains(lexicalPlan, "uq_retrieval_source_manifest_version") {
+				t.Fatalf("production lexical EXPLAIN did not use a bounded source manifest index:\n%s", lexicalPlan)
+			}
+			replayedLexical, err := searchRepository.SearchLexical(ctx, lexicalQuery)
+			if err != nil || len(replayedLexical) != len(lexical) {
+				t.Fatalf("replayed lexical=%d err=%v", len(replayedLexical), err)
+			}
+			for index := range lexical {
+				if lexical[index].ChunkID != replayedLexical[index].ChunkID || lexical[index].Lexical.Rank != replayedLexical[index].Lexical.Rank {
+					t.Fatalf("unstable lexical replay at %d", index)
+				}
+			}
+			trigramOnlyQuery := lexicalQuery
+			trigramOnlyQuery.Query = "chunkk"
+			var thresholdResults [][]domain.SearchCandidate
+			var sessionPID uint32
+			for _, threshold := range []string{"0.99", "0.01"} {
+				connection, err := database.DB().Acquire(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if sessionPID == 0 {
+					sessionPID = connection.Conn().PgConn().PID()
+				}
+				if connection.Conn().PgConn().PID() != sessionPID {
+					connection.Release()
+					t.Fatal("trigram fixture changed PostgreSQL sessions")
+				}
+				_, configErr := connection.Exec(ctx, `SELECT set_config('pg_trgm.similarity_threshold',$1,false)`, threshold)
+				connection.Release()
+				if configErr != nil {
+					t.Fatal(configErr)
+				}
+				candidates, err := searchRepository.SearchLexical(ctx, trigramOnlyQuery)
+				if err != nil {
+					t.Fatal(err)
+				}
+				thresholdResults = append(thresholdResults, candidates)
+				connection, err = database.DB().Acquire(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var after string
+				readErr := connection.QueryRow(ctx, `SHOW pg_trgm.similarity_threshold`).Scan(&after)
+				sameSession := connection.Conn().PgConn().PID() == sessionPID
+				connection.Release()
+				if readErr != nil || after != threshold || !sameSession {
+					t.Fatalf("lexical transaction leaked session settings: threshold=%s want=%s same_session=%t err=%v", after, threshold, sameSession, readErr)
+				}
+			}
+			if len(thresholdResults[0]) == 0 || len(thresholdResults[0]) != len(thresholdResults[1]) {
+				t.Fatalf("session trigram threshold changed candidate count: low=%d high=%d", len(thresholdResults[1]), len(thresholdResults[0]))
+			}
+			for index := range thresholdResults[0] {
+				if thresholdResults[0][index].ChunkID != thresholdResults[1][index].ChunkID {
+					t.Fatalf("session trigram threshold changed candidate order at %d", index)
+				}
+			}
+			assertStableSearchRanks(t, lexical)
+			assertStableSearchRanks(t, vector)
+			assertSameSearchChunkSet(t, lexical, vector)
+			var sharedCandidate *domain.SearchCandidate
+			for index := range lexical {
+				if lexical[index].ParseProjectionID == target.ProjectionID {
+					sharedCandidate = &lexical[index]
+					break
+				}
+			}
+			if sharedCandidate == nil || len(sharedCandidate.Provenances) != domain.MaxEvidenceProvenance || !sharedCandidate.ProvenanceTruncated {
+				t.Fatalf("bounded shared candidate=%#v", sharedCandidate)
+			}
+			for index := 1; index < len(sharedCandidate.Provenances); index++ {
+				left, right := sharedCandidate.Provenances[index-1], sharedCandidate.Provenances[index]
+				if left.SourceID > right.SourceID || left.SourceID == right.SourceID && left.SourceVersionID > right.SourceVersionID {
+					t.Fatalf("provenance order=%#v", sharedCandidate.Provenances)
+				}
+			}
+
+			filter := domain.SearchFilter{SourceIDs: []foundation.ID{sharedSources[0].SourceID}}
+			lexicalQuery.Filter, vectorQuery.Filter = filter, filter
+			filteredLexical, err := searchRepository.SearchLexical(ctx, lexicalQuery)
+			if err != nil {
+				t.Fatal(err)
+			}
+			filteredVector, err := searchRepository.SearchVector(ctx, vectorQuery)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertSameSearchChunkSet(t, filteredLexical, filteredVector)
+			if len(filteredLexical) != 2 {
+				t.Fatalf("source-filtered candidates=%d", len(filteredLexical))
+			}
+			for _, candidate := range filteredLexical {
+				if len(candidate.Provenances) != 1 || candidate.Provenances[0].SourceID != sharedSources[0].SourceID || candidate.ProvenanceTruncated {
+					t.Fatalf("source-filtered provenance=%#v", candidate)
+				}
+			}
+
+			filter = domain.SearchFilter{SourceVersionIDs: []foundation.ID{sharedSources[1].VersionID}}
+			lexicalQuery.Filter, vectorQuery.Filter = filter, filter
+			versionLexical, err := searchRepository.SearchLexical(ctx, lexicalQuery)
+			if err != nil {
+				t.Fatal(err)
+			}
+			versionVector, err := searchRepository.SearchVector(ctx, vectorQuery)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertSameSearchChunkSet(t, versionLexical, versionVector)
+			if len(versionLexical) != 2 {
+				t.Fatalf("source-version-filtered candidates=%d", len(versionLexical))
+			}
+			for _, candidate := range versionLexical {
+				if len(candidate.Provenances) != 1 || candidate.Provenances[0].SourceVersionID != sharedSources[1].VersionID {
+					t.Fatalf("source-version-filtered provenance=%#v", candidate.Provenances)
+				}
+			}
+
+			filter = domain.SearchFilter{PathPrefixes: []string{"docs/api"}}
+			lexicalQuery.Filter, vectorQuery.Filter = filter, filter
+			pathLexical, err := searchRepository.SearchLexical(ctx, lexicalQuery)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pathVector, err := searchRepository.SearchVector(ctx, vectorQuery)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertSameSearchChunkSet(t, pathLexical, pathVector)
+			if len(pathLexical) != 2 {
+				t.Fatalf("path-filtered candidates=%d", len(pathLexical))
+			}
+			for _, candidate := range pathLexical {
+				for _, provenance := range candidate.Provenances {
+					if strings.HasPrefix(provenance.RelativePath, "docs/apis/") {
+						t.Fatalf("adjacent path leaked into segment prefix: %#v", provenance)
+					}
+				}
+			}
+			lexicalQuery.Filter = domain.SearchFilter{PathPrefixes: []string{"docs/api/a"}}
+			if candidates, queryErr := searchRepository.SearchLexical(ctx, lexicalQuery); queryErr != nil || len(candidates) != 0 {
+				t.Fatalf("partial segment candidates=%d err=%v", len(candidates), queryErr)
+			}
+
+			before := now.Add(time.Hour)
+			filter = domain.SearchFilter{CapturedAtBefore: &before}
+			lexicalQuery.Filter, vectorQuery.Filter = filter, filter
+			timeLexical, err := searchRepository.SearchLexical(ctx, lexicalQuery)
+			if err != nil {
+				t.Fatal(err)
+			}
+			timeVector, err := searchRepository.SearchVector(ctx, vectorQuery)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertSameSearchChunkSet(t, timeLexical, timeVector)
+			if len(timeLexical) != 2 {
+				t.Fatalf("time-filtered candidates=%d", len(timeLexical))
+			}
+			from := now.Add(2 * time.Hour)
+			filter = domain.SearchFilter{CapturedAtFrom: &from}
+			lexicalQuery.Filter, vectorQuery.Filter = filter, filter
+			fromLexical, err := searchRepository.SearchLexical(ctx, lexicalQuery)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fromVector, err := searchRepository.SearchVector(ctx, vectorQuery)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertSameSearchChunkSet(t, fromLexical, fromVector)
+			if len(fromLexical) != 1 || fromLexical[0].ParseProjectionID != other.ProjectionID {
+				t.Fatalf("inclusive-from candidates=%#v", fromLexical)
+			}
+
+			buildingCommand := snapshotCommand(workspaceID, 8010, other, "search-building", now.Add(4*time.Hour))
+			buildingCommand.IndexVersion.EmbeddingVersionID = &embedding.ID
+			buildingCommand.IndexVersion.DegradedCapabilities = nil
+			buildingCommand.IndexVersion.FusionConfig = searchRRF(t)
+			building, err := repository.BeginWorkspaceSnapshot(ctx, buildingCommand)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := repository.BuildLexical(ctx, domain.LexicalBuildCommand{
+				WorkspaceID: workspaceID, IndexVersionID: building.IndexVersion.ID,
+				ExpectedIndexVersion: 1, At: now.Add(5 * time.Hour),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			lexicalQuery.IndexVersionID = building.IndexVersion.ID
+			lexicalQuery.Filter = domain.SearchFilter{}
+			if candidates, queryErr := searchRepository.SearchLexical(ctx, lexicalQuery); queryErr != nil || len(candidates) != 0 {
+				t.Fatalf("building lexical candidates=%d err=%v", len(candidates), queryErr)
+			}
+			vectorQuery.IndexVersionID = building.IndexVersion.ID
+			vectorQuery.Filter = domain.SearchFilter{}
+			if candidates, queryErr := searchRepository.SearchVector(ctx, vectorQuery); queryErr != nil || len(candidates) != 0 {
+				t.Fatalf("building vector candidates=%d err=%v", len(candidates), queryErr)
+			}
+			loaded, err = searchRepository.LoadActiveSearchIndex(ctx, workspaceID)
+			if err != nil || loaded.Index.ID != active.ID {
+				t.Fatalf("active after building=%#v err=%v", loaded, err)
+			}
+
+			assertExplainUsesIndex(t, ctx, database.DB(), "idx_retrieval_projection_search_vector",
+				`SELECT index_version_id FROM retrieval.chunk_projection
+				 WHERE search_vector @@ websearch_to_tsquery('simple',$1)`, "chunk")
+			assertExplainUsesIndex(t, ctx, database.DB(), "idx_ingestion_canonical_chunk_content_trgm",
+				`SELECT id FROM ingestion.canonical_chunk WHERE content % $1`, "chunk")
+		})
+	}
 }
 
 func TestSearchRepositoryLoadsLegacyFTSOnlyWithoutInventingFusion(t *testing.T) {
 	repository, database, ctx := newRetrievalTestRepository(t)
-	searchRepository, err := NewSearchRepository(database.DB())
+	searchRepository, err := NewGORMSearchRepository(database)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +336,7 @@ func TestSearchRepositoryDistanceOperatorsAndExactExplain(t *testing.T) {
 	for index, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			repository, database, ctx := newRetrievalTestRepository(t)
-			searchRepository, err := NewSearchRepository(database.DB())
+			searchRepository, err := NewGORMSearchRepository(database)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -369,7 +393,7 @@ func TestSearchRepositoryDistanceOperatorsAndExactExplain(t *testing.T) {
 func createHybridSearchIndex(
 	t *testing.T,
 	ctx context.Context,
-	repository *Repository,
+	repository retrievalTestStore,
 	workspaceID foundation.ID,
 	target snapshotSourceFixture,
 	embedding domain.EmbeddingVersion,

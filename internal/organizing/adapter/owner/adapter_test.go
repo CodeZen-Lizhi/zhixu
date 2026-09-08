@@ -42,10 +42,10 @@ func TestNewRequiresEveryOwnerBoundary(t *testing.T) {
 	assertOwnerError(t, mustOwnerError(New(dependencies)), foundation.ErrorDependencyUnavailable, ErrorCodeOwnerDependencyUnavailable)
 }
 
-func TestVerifyFrozenRequiresCallerOwnedPostgreSQLTransaction(t *testing.T) {
+func TestVerifyFrozenRequiresCallerOwnedTransactionScope(t *testing.T) {
 	t.Parallel()
 	adapter := mustOwnerAdapter(t, newOwnerFake())
-	err := adapter.VerifyFrozen(context.Background(), struct{}{}, ownerID(1), []organizingdomain.MaterialRef{{
+	err := adapter.VerifyFrozenScoped(context.Background(), nil, ownerID(1), []organizingdomain.MaterialRef{{
 		Kind:            organizingdomain.MaterialSourceVersion,
 		SourceVersionID: ownerID(10),
 		ContentHash:     ownerHash(10),

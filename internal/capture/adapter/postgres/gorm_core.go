@@ -10,20 +10,17 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	workspaceapp "github.com/CodeZen-Lizhi/zhixu/internal/workspace/application"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
 )
 
-// GORMRepository is the staged Capture implementation backed by one shared
-// platform Pool. Production composition remains on Repository until TODO 9.
+// GORMRepository persists Capture facts through one shared platform Pool.
 type GORMRepository struct {
 	database        *gorm.DB
 	unitOfWork      foundation.UnitOfWork
 	workspaceWriter workspaceapp.ScopedSourceWriter
 }
 
-// NewGORMRepository constructs staged Capture persistence from one platform
+// NewGORMRepository constructs Capture persistence from one platform
 // Pool and a Workspace writer that joins caller-owned transaction scopes.
 func NewGORMRepository(pool *platformpostgres.Pool, workspaceWriter workspaceapp.ScopedSourceWriter) (*GORMRepository, error) {
 	if pool == nil || nilCaptureDependency(workspaceWriter) {
@@ -131,7 +128,11 @@ func gormCaptureRows(database *gorm.DB, query string, arguments ...any) (*sql.Ro
 }
 
 func gormCaptureNoRows(err error) bool {
-	return errors.Is(err, sql.ErrNoRows) || errors.Is(err, pgx.ErrNoRows) || errors.Is(err, gorm.ErrRecordNotFound)
+	return errors.Is(err, sql.ErrNoRows) || errors.Is(err, gorm.ErrRecordNotFound)
+}
+
+func isUniqueViolation(err error) bool {
+	return platformpostgres.SQLState(err) == "23505"
 }
 
 func classifyGORMCapture(ctx context.Context, err error, code string) error {
@@ -145,16 +146,13 @@ func classifyGORMCapture(ctx context.Context, err error, code string) error {
 	if cause := gormCaptureContextCause(ctx, err); cause != nil {
 		return foundation.NewError(foundation.ErrorDependencyUnavailable, code, false, cause)
 	}
-	var postgresError *pgconn.PgError
-	if errors.As(err, &postgresError) {
-		switch postgresError.Code {
-		case "23505":
-			return foundation.NewError(foundation.ErrorVersionConflict, code, false, err)
-		case "23503", "23514", "55000":
-			return foundation.NewError(foundation.ErrorConsistencyViolation, code, false, err)
-		case "40001", "40P01", "55P03":
-			return foundation.NewError(foundation.ErrorRetryableFailure, code, true, err)
-		}
+	switch platformpostgres.SQLState(err) {
+	case "23505":
+		return foundation.NewError(foundation.ErrorVersionConflict, code, false, err)
+	case "23503", "23514", "55000":
+		return foundation.NewError(foundation.ErrorConsistencyViolation, code, false, err)
+	case "40001", "40P01", "55P03":
+		return foundation.NewError(foundation.ErrorRetryableFailure, code, true, err)
 	}
 	if errors.Is(err, sql.ErrTxDone) {
 		return foundation.NewError(foundation.ErrorDependencyUnavailable, code, true, err)

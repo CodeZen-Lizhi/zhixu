@@ -7,9 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"net"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,16 +18,14 @@ import (
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	platformmigration "github.com/CodeZen-Lizhi/zhixu/internal/platform/migration"
-	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
-	"github.com/jackc/pgx/v5"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestTimelineProjectionWorkerStartupAndRestart(t *testing.T) {
 	testContext, cancel := context.WithTimeout(t.Context(), 4*time.Minute)
 	defer cancel()
-	databaseURL, pool := newTimelineWorkerTestDatabase(t, testContext)
+	databaseURL, pool := newTimelineWorkerTestDatabase(t)
 	workspaceID := seedTimelineWorkerPendingProjection(t, testContext, pool)
 	projectRoot, err := filepath.Abs("../..")
 	if err != nil {
@@ -287,48 +283,10 @@ func reserveTimelineWorkerAddress(t *testing.T) string {
 	return address
 }
 
-func newTimelineWorkerTestDatabase(t *testing.T, ctx context.Context) (string, *pgxpool.Pool) {
+func newTimelineWorkerTestDatabase(t *testing.T) (string, *pgxpool.Pool) {
 	t.Helper()
-	baseURL := strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL"))
-	if baseURL == "" {
-		t.Fatal("ZHIXU_TEST_DATABASE_URL is required for the Timeline Worker process smoke")
-	}
-	parsed, err := url.Parse(baseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	admin, err := pgxpool.New(ctx, baseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	databaseName := fmt.Sprintf("zhixu_timeline_worker_%d", time.Now().UnixNano())
-	identifier := pgx.Identifier{databaseName}.Sanitize()
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+identifier); err != nil {
-		admin.Close()
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		cleanupContext, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		_, _ = admin.Exec(cleanupContext, "DROP DATABASE "+identifier+" WITH (FORCE)")
-		admin.Close()
-	})
-	parsed.Path = "/" + databaseName
-	databaseURL := parsed.String()
-	migrationPool, err := platformpostgres.OpenMigration(ctx, databaseURL, 4, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer migrationPool.Close()
-	if err := platformmigration.MigrateAtlas(ctx, migrationPool.DB()); err != nil {
-		t.Fatal(err)
-	}
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
-	return databaseURL, pool
+	fixture := testdb.Require(t, testdb.Config{ExternalAdminURL: strings.TrimSpace(os.Getenv("ZHIXU_TEST_DATABASE_URL")), MaxConns: 8})
+	return fixture.DatabaseURL(), fixture.Pool().DB()
 }
 
 func seedTimelineWorkerPendingProjection(t *testing.T, ctx context.Context, pool *pgxpool.Pool) foundation.ID {
@@ -341,7 +299,7 @@ func seedTimelineWorkerPendingProjection(t *testing.T, ctx context.Context, pool
 	root := "/tmp/zhixu-timeline-worker-" + string(workspaceID)
 	if _, err := pool.Exec(ctx, `INSERT INTO core.workspace(
 id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at)
-VALUES($1,'timeline worker smoke',$2,$2,$3,'test',1,$3,$3)`, string(workspaceID), root, now); err != nil {
+VALUES($1,'timeline worker smoke',$2,$2,$3,'active',1,$3,$3)`, string(workspaceID), root, now); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `INSERT INTO ops.timeline_projection_outbox(

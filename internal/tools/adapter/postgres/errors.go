@@ -1,13 +1,7 @@
 // Package postgres 实现 Tool Call 与 Workflow Tool Policy 的 PostgreSQL Adapter。
 package postgres
 
-import (
-	"context"
-	"errors"
-
-	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	"github.com/jackc/pgx/v5/pgconn"
-)
+import "github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 
 const (
 	// ErrorCodeDatabaseUnavailable 表示 Tool PostgreSQL 依赖暂不可用。
@@ -39,34 +33,6 @@ const (
 	// ErrorCodeResultReceiptFinalizationUnknown 表示提交响应丢失且无法按精确身份证明事务结果。
 	ErrorCodeResultReceiptFinalizationUnknown = "TOOL_RESULT_RECEIPT_FINALIZATION_UNKNOWN"
 )
-
-func classify(cause error) error {
-	if cause == nil {
-		return nil
-	}
-	var classified *foundation.Error
-	if errors.As(cause, &classified) {
-		return cause
-	}
-	switch {
-	case errors.Is(cause, context.Canceled):
-		return foundation.NewError(foundation.ErrorNonRetryableFailure, ErrorCodeDatabaseCancelled, false, cause)
-	case errors.Is(cause, context.DeadlineExceeded):
-		return foundation.NewError(foundation.ErrorRetryableFailure, ErrorCodeDatabaseTimeout, true, cause)
-	}
-	var pgErr *pgconn.PgError
-	if errors.As(cause, &pgErr) {
-		switch pgErr.Code {
-		case "40001", "40P01", "55P03":
-			return foundation.NewError(foundation.ErrorRetryableFailure, ErrorCodeDatabaseUnavailable, true, cause)
-		case "23505":
-			return foundation.NewError(foundation.ErrorVersionConflict, ErrorCodeIdempotencyConflict, false, cause)
-		case "23503", "23514", "55000":
-			return consistency(cause)
-		}
-	}
-	return foundation.NewError(foundation.ErrorDependencyUnavailable, ErrorCodeDatabaseUnavailable, true, cause)
-}
 
 func notFound(cause error) error {
 	return foundation.NewError(foundation.ErrorNotFound, ErrorCodeCallNotFound, false, cause)
@@ -102,12 +68,4 @@ func receiptConflict(cause error) error {
 
 func receiptFinalizationUnknown(cause error) error {
 	return foundation.NewError(foundation.ErrorManualRecoveryRequired, ErrorCodeResultReceiptFinalizationUnknown, false, cause)
-}
-
-func classifyReceiptWrite(cause error) error {
-	var pgErr *pgconn.PgError
-	if errors.As(cause, &pgErr) && pgErr.Code == "23505" {
-		return receiptConflict(cause)
-	}
-	return classify(cause)
 }

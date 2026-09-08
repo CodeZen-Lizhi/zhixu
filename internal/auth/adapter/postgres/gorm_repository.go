@@ -13,8 +13,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// GORMRepository is the staged GORM implementation of the Auth persistence
-// contract. Production composition remains on Repository until TODO 9 passes.
+// GORMRepository persists the Auth contract through the shared GORM root.
 type GORMRepository struct {
 	database *gorm.DB
 }

@@ -13,19 +13,15 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
-	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestRepositoryListRunsWithPostgres(t *testing.T) {
 	ctx := context.Background()
 	fixture := testdb.Require(t, testdb.Config{Availability: testdb.FailWhenUnavailable, MaxConns: 8})
 	pool := fixture.Pool().DB()
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	repository, err := NewRepository(tx)
+	tx := pool
+	repository, err := NewGORMRepository(fixture.Pool())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +48,7 @@ func TestRepositoryListRunsWithPostgres(t *testing.T) {
 	insertWorkflowListHumanTask(t, ctx, tx, secondID, now.Add(7*time.Hour))
 	planNow := now.Add(48 * time.Hour)
 	seedWorkflowListPlanRuns(t, ctx, tx, otherWorkspaceID, otherDefinitionID, planNow)
-	assertWorkflowListPlans(t, ctx, tx, otherWorkspaceID, planNow)
+	assertWorkflowListPlans(t, ctx, tx, repository, otherWorkspaceID, planNow)
 
 	firstPage, hasMore, err := repository.ListRuns(ctx, domain.RunListQuery{WorkspaceID: workspaceID, Limit: 2})
 	if err != nil {
@@ -73,7 +69,7 @@ func TestRepositoryListRunsWithPostgres(t *testing.T) {
 	assertWorkflowListIDs(t, repository, ctx, domain.RunListQuery{WorkspaceID: workspaceID, Status: domain.RunStatusPaused, Limit: 10})
 }
 
-func insertWorkflowListWorkspace(t *testing.T, ctx context.Context, tx pgx.Tx, id foundation.ID, suffix string, now time.Time) {
+func insertWorkflowListWorkspace(t *testing.T, ctx context.Context, tx *pgxpool.Pool, id foundation.ID, suffix string, now time.Time) {
 	t.Helper()
 	root := "/tmp/zhixu-m9-" + suffix
 	if _, err := tx.Exec(ctx, `INSERT INTO core.workspace(id,name,root_path,git_repository_path,git_checked_at,status,version,created_at,updated_at) VALUES($1,$2,$3,$3,$4,'inactive',1,$4,$4)`, string(id), suffix, root, now); err != nil {
@@ -81,14 +77,14 @@ func insertWorkflowListWorkspace(t *testing.T, ctx context.Context, tx pgx.Tx, i
 	}
 }
 
-func insertWorkflowListDefinition(t *testing.T, ctx context.Context, tx pgx.Tx, id, workspaceID foundation.ID, key string, version int64, now time.Time) {
+func insertWorkflowListDefinition(t *testing.T, ctx context.Context, tx *pgxpool.Pool, id, workspaceID foundation.ID, key string, version int64, now time.Time) {
 	t.Helper()
 	if _, err := tx.Exec(ctx, `INSERT INTO workflow.definition(id,workspace_id,key,version,graph,created_at) VALUES($1,$2,$3,$4,'{}',$5)`, string(id), string(workspaceID), key, version, now); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func insertWorkflowListRun(t *testing.T, ctx context.Context, tx pgx.Tx, id, workspaceID, definitionID foundation.ID, status domain.RunStatus, updatedAt time.Time, completedAt *time.Time) {
+func insertWorkflowListRun(t *testing.T, ctx context.Context, tx *pgxpool.Pool, id, workspaceID, definitionID foundation.ID, status domain.RunStatus, updatedAt time.Time, completedAt *time.Time) {
 	t.Helper()
 	createdAt := updatedAt.Add(-time.Hour)
 	if _, err := tx.Exec(ctx, `INSERT INTO workflow.run(id,workspace_id,definition_id,status,input,version,created_at,updated_at,completed_at) VALUES($1,$2,$3,$4,'{}',1,$5,$6,$7)`, string(id), string(workspaceID), string(definitionID), string(status), createdAt, updatedAt, completedAt); err != nil {
@@ -96,7 +92,7 @@ func insertWorkflowListRun(t *testing.T, ctx context.Context, tx pgx.Tx, id, wor
 	}
 }
 
-func insertWorkflowListHumanTask(t *testing.T, ctx context.Context, tx pgx.Tx, runID foundation.ID, now time.Time) {
+func insertWorkflowListHumanTask(t *testing.T, ctx context.Context, tx *pgxpool.Pool, runID foundation.ID, now time.Time) {
 	t.Helper()
 	nodeID := workflowListID(31)
 	taskID := workflowListID(32)
@@ -108,7 +104,7 @@ func insertWorkflowListHumanTask(t *testing.T, ctx context.Context, tx pgx.Tx, r
 	}
 }
 
-func assertWorkflowListIDs(t *testing.T, repository *Repository, ctx context.Context, query domain.RunListQuery, want ...foundation.ID) {
+func assertWorkflowListIDs(t *testing.T, repository *GORMRepository, ctx context.Context, query domain.RunListQuery, want ...foundation.ID) {
 	t.Helper()
 	items, hasMore, err := repository.ListRuns(ctx, query)
 	if err != nil {
@@ -124,7 +120,7 @@ func assertWorkflowListIDs(t *testing.T, repository *Repository, ctx context.Con
 	}
 }
 
-func seedWorkflowListPlanRuns(t *testing.T, ctx context.Context, tx pgx.Tx, workspaceID, definitionID foundation.ID, newest time.Time) {
+func seedWorkflowListPlanRuns(t *testing.T, ctx context.Context, tx *pgxpool.Pool, workspaceID, definitionID foundation.ID, newest time.Time) {
 	t.Helper()
 	if _, err := tx.Exec(ctx, `INSERT INTO workflow.run(
 		id,workspace_id,definition_id,status,input,version,created_at,updated_at
@@ -141,31 +137,31 @@ func seedWorkflowListPlanRuns(t *testing.T, ctx context.Context, tx pgx.Tx, work
 	}
 }
 
-func assertWorkflowListPlans(t *testing.T, ctx context.Context, tx pgx.Tx, workspaceID foundation.ID, newest time.Time) {
+func assertWorkflowListPlans(t *testing.T, ctx context.Context, tx *pgxpool.Pool, repository *GORMRepository, workspaceID foundation.ID, newest time.Time) {
 	t.Helper()
 	performanceIndexesAvailable := workflowListIndexesAvailable(t, ctx, tx)
 	if !performanceIndexesAvailable {
 		t.Log("workflow list updated_at indexes are absent; validating the migration-29 compatibility plan separately from the M9 performance gate")
 	}
-	assertWorkflowListPlan(t, ctx, tx, "first page", domain.RunListQuery{
+	assertWorkflowListPlan(t, ctx, repository, "first page", domain.RunListQuery{
 		WorkspaceID: workspaceID,
 		Limit:       2,
 	}, []string{"idx_workflow_run_workspace_updated_id"}, performanceIndexesAvailable)
 	cursorTime := newest.Add(-256 * time.Second)
-	assertWorkflowListPlan(t, ctx, tx, "cursor page", domain.RunListQuery{
+	assertWorkflowListPlan(t, ctx, repository, "cursor page", domain.RunListQuery{
 		WorkspaceID: workspaceID,
 		CursorTime:  &cursorTime,
 		CursorID:    workflowListPlanID(256),
 		Limit:       2,
 	}, []string{"idx_workflow_run_workspace_updated_id"}, performanceIndexesAvailable)
-	assertWorkflowListPlan(t, ctx, tx, "selective status", domain.RunListQuery{
+	assertWorkflowListPlan(t, ctx, repository, "selective status", domain.RunListQuery{
 		WorkspaceID: workspaceID,
 		Status:      domain.RunStatusRunning,
 		Limit:       2,
 	}, []string{"idx_workflow_run_workspace_status_updated_id", "idx_workflow_run_control"}, performanceIndexesAvailable)
 }
 
-func workflowListIndexesAvailable(t *testing.T, ctx context.Context, tx pgx.Tx) bool {
+func workflowListIndexesAvailable(t *testing.T, ctx context.Context, tx *pgxpool.Pool) bool {
 	t.Helper()
 	for _, index := range []string{
 		"workflow.idx_workflow_run_workspace_updated_id",
@@ -182,11 +178,11 @@ func workflowListIndexesAvailable(t *testing.T, ctx context.Context, tx pgx.Tx) 
 	return true
 }
 
-func assertWorkflowListPlan(t *testing.T, ctx context.Context, tx pgx.Tx, label string, request domain.RunListQuery, allowedIndexes []string, performanceIndexesAvailable bool) {
+func assertWorkflowListPlan(t *testing.T, ctx context.Context, repository *GORMRepository, label string, request domain.RunListQuery, allowedIndexes []string, performanceIndexesAvailable bool) {
 	t.Helper()
-	query, args := buildRunListQuery(request)
+	query, args := buildGORMRunListQuery(request)
 	var raw []byte
-	if err := tx.QueryRow(ctx, `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, COSTS OFF) `+query, args...).Scan(&raw); err != nil {
+	if err := repository.database.WithContext(ctx).Raw(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, COSTS OFF) `+query, args...).Row().Scan(&raw); err != nil {
 		t.Fatal(err)
 	}
 	var documents []struct {

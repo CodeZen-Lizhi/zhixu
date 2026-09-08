@@ -114,23 +114,10 @@ type workspaceAnalysisModelRepositoryIntegrationVariant struct {
 
 func workspaceAnalysisModelRepositoryIntegrationVariants() []workspaceAnalysisModelRepositoryIntegrationVariant {
 	return []workspaceAnalysisModelRepositoryIntegrationVariant{
-		{name: "legacy", open: openLegacyWorkspaceAnalysisModelRepositoryIntegration,
-			openWithCommitLoss: openLegacyWorkspaceAnalysisModelRepositoryWithCommitLossIntegration},
+
 		{name: "gorm", open: openGORMWorkspaceAnalysisModelRepositoryIntegration,
 			openWithCommitLoss: openGORMWorkspaceAnalysisModelRepositoryWithCommitLossIntegration},
 	}
-}
-
-func openLegacyWorkspaceAnalysisModelRepositoryIntegration(
-	t *testing.T,
-	platform *platformpostgres.Pool,
-) workspaceAnalysisModelRepositoryIntegrationStore {
-	t.Helper()
-	repository, err := NewRepository(platform.DB())
-	if err != nil {
-		t.Fatal(err)
-	}
-	return repository
 }
 
 func openGORMWorkspaceAnalysisModelRepositoryIntegration(
@@ -147,19 +134,6 @@ func openGORMWorkspaceAnalysisModelRepositoryIntegration(
 		t.Fatal(err)
 	}
 	return repository
-}
-
-func openLegacyWorkspaceAnalysisModelRepositoryWithCommitLossIntegration(
-	t *testing.T,
-	platform *platformpostgres.Pool,
-) (workspaceAnalysisModelRepositoryIntegrationStore, func()) {
-	t.Helper()
-	database := &workspaceAnalysisModelCommitLossDB{DB: platform.DB()}
-	repository, err := NewRepository(database)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return repository, func() { database.injectNext.Store(true) }
 }
 
 func openGORMWorkspaceAnalysisModelRepositoryWithCommitLossIntegration(
@@ -181,27 +155,27 @@ func openGORMWorkspaceAnalysisModelRepositoryWithCommitLossIntegration(
 
 func testWorkspaceAnalysisModelRepositoryIntegrationVariants(
 	t *testing.T,
-	test func(*testing.T, *pgxpool.Pool, context.Context, workspaceAnalysisModelRepositoryIntegrationStore),
+	test func(*testing.T, *platformpostgres.Pool, context.Context, workspaceAnalysisModelRepositoryIntegrationStore),
 ) {
 	t.Helper()
 	for _, variant := range workspaceAnalysisModelRepositoryIntegrationVariants() {
 		t.Run(variant.name, func(t *testing.T) {
 			platform, ctx := newAgentPlatformIntegrationPool(t)
-			test(t, platform.DB(), ctx, variant.open(t, platform))
+			test(t, platform, ctx, variant.open(t, platform))
 		})
 	}
 }
 
 func testWorkspaceAnalysisModelRepositoryCommitLossIntegrationVariants(
 	t *testing.T,
-	test func(*testing.T, *pgxpool.Pool, context.Context, workspaceAnalysisModelRepositoryIntegrationStore, func()),
+	test func(*testing.T, *platformpostgres.Pool, context.Context, workspaceAnalysisModelRepositoryIntegrationStore, func()),
 ) {
 	t.Helper()
 	for _, variant := range workspaceAnalysisModelRepositoryIntegrationVariants() {
 		t.Run(variant.name, func(t *testing.T) {
 			platform, ctx := newAgentPlatformIntegrationPool(t)
 			repository, armCommitLoss := variant.openWithCommitLoss(t, platform)
-			test(t, platform.DB(), ctx, repository, armCommitLoss)
+			test(t, platform, ctx, repository, armCommitLoss)
 		})
 	}
 }
@@ -210,11 +184,12 @@ func TestWorkspaceAnalysisModelOperationCommitResponseLossRecoveryIntegration(t 
 	t.Run("authorization", func(t *testing.T) {
 		testWorkspaceAnalysisModelRepositoryCommitLossIntegrationVariants(t, func(
 			t *testing.T,
-			pool *pgxpool.Pool,
+			platform *platformpostgres.Pool,
 			ctx context.Context,
 			repository workspaceAnalysisModelRepositoryIntegrationStore,
 			armCommitLoss func(),
 		) {
+			pool := platform.DB()
 			fixture := seedWorkspaceAnalysisModelOperationIntegration(t, ctx, pool)
 			armCommitLoss()
 			recovered, err := repository.AuthorizeWorkspaceAnalysisModelCall(ctx, fixture.command)
@@ -229,11 +204,12 @@ func TestWorkspaceAnalysisModelOperationCommitResponseLossRecoveryIntegration(t 
 	t.Run("call finalization", func(t *testing.T) {
 		testWorkspaceAnalysisModelRepositoryCommitLossIntegrationVariants(t, func(
 			t *testing.T,
-			pool *pgxpool.Pool,
+			platform *platformpostgres.Pool,
 			ctx context.Context,
 			repository workspaceAnalysisModelRepositoryIntegrationStore,
 			armCommitLoss func(),
 		) {
+			pool := platform.DB()
 			fixture := seedWorkspaceAnalysisModelOperationIntegration(t, ctx, pool)
 			authorized, err := repository.AuthorizeWorkspaceAnalysisModelCall(ctx, fixture.command)
 			if err != nil {
@@ -255,11 +231,12 @@ func TestWorkspaceAnalysisModelOperationCommitResponseLossRecoveryIntegration(t 
 	t.Run("candidate finalization", func(t *testing.T) {
 		testWorkspaceAnalysisModelRepositoryCommitLossIntegrationVariants(t, func(
 			t *testing.T,
-			pool *pgxpool.Pool,
+			platform *platformpostgres.Pool,
 			ctx context.Context,
 			repository workspaceAnalysisModelRepositoryIntegrationStore,
 			armCommitLoss func(),
 		) {
+			pool := platform.DB()
 			fixture := seedWorkspaceAnalysisModelOperationIntegration(t, ctx, pool)
 			planAuthorization, err := repository.AuthorizeWorkspaceAnalysisModelCall(ctx, fixture.command)
 			if err != nil {
@@ -386,24 +363,7 @@ type workspaceAnalysisCapabilityIntegrationVariant struct {
 
 func workspaceAnalysisCapabilityIntegrationVariants() []workspaceAnalysisCapabilityIntegrationVariant {
 	return []workspaceAnalysisCapabilityIntegrationVariant{
-		{name: "legacy", open: func(t *testing.T, platform *platformpostgres.Pool) (
-			workspaceAnalysisCapabilityIntegrationStore,
-			func(context.Context, application.WorkspaceAnalysisCapabilityContract) error,
-		) {
-			t.Helper()
-			repository, err := NewRepository(platform.DB())
-			if err != nil {
-				t.Fatal(err)
-			}
-			return repository, func(ctx context.Context, contract application.WorkspaceAnalysisCapabilityContract) error {
-				tx, err := platform.DB().Begin(ctx)
-				if err != nil {
-					return err
-				}
-				defer func() { _ = tx.Rollback(context.Background()) }()
-				return repository.RequireWorkspaceAnalysisWorkerReadyTx(ctx, tx, contract)
-			}
-		}},
+
 		{name: "gorm", open: func(t *testing.T, platform *platformpostgres.Pool) (
 			workspaceAnalysisCapabilityIntegrationStore,
 			func(context.Context, application.WorkspaceAnalysisCapabilityContract) error,
@@ -517,58 +477,7 @@ var errWorkspaceAnalysisRunStartIntegrationRollback = errors.New("rollback works
 
 func workspaceAnalysisRunStarterIntegrationVariants() []workspaceAnalysisRunStarterIntegrationVariant {
 	return []workspaceAnalysisRunStarterIntegrationVariant{
-		{name: "legacy", open: func(
-			t *testing.T,
-			platform *platformpostgres.Pool,
-			config application.WorkspaceAnalysisRunStartConfig,
-			contract application.WorkspaceAnalysisCapabilityContract,
-		) workspaceAnalysisRunStarterIntegrationHarness {
-			t.Helper()
-			repository, err := NewRepository(platform.DB())
-			if err != nil {
-				t.Fatal(err)
-			}
-			service, err := application.NewWorkspaceAnalysisRunService(
-				repository,
-				workspaceAnalysisRunStartIntegrationIDGenerator{id: workspaceAnalysisRunStartIntegrationID(20)},
-				config,
-			)
-			if err != nil {
-				t.Fatal(err)
-			}
-			starter, err := application.NewWorkspaceAnalysisCapabilityCheckedRunStarter(repository, service, contract)
-			if err != nil {
-				t.Fatal(err)
-			}
-			return workspaceAnalysisRunStarterIntegrationHarness{
-				capability: repository,
-				loader:     repository,
-				start: func(ctx context.Context, command application.WorkspaceAnalysisRunStartCommand, rollback bool) (domain.WorkspaceAnalysisRun, error) {
-					tx, err := platform.DB().Begin(ctx)
-					if err != nil {
-						return domain.WorkspaceAnalysisRun{}, err
-					}
-					defer func() { _ = tx.Rollback(context.Background()) }()
-					if _, err := tx.Exec(ctx, workspaceAnalysisRunStartAnswerSQL(false), workspaceAnalysisRunStartAnswerArguments(command)...); err != nil {
-						return domain.WorkspaceAnalysisRun{}, err
-					}
-					run, err := starter.StartWorkspaceAnalysisRunTx(ctx, tx, command)
-					if err != nil {
-						return domain.WorkspaceAnalysisRun{}, err
-					}
-					if rollback {
-						if err := tx.Rollback(context.Background()); err != nil {
-							return domain.WorkspaceAnalysisRun{}, err
-						}
-						return run, nil
-					}
-					if err := tx.Commit(ctx); err != nil {
-						return domain.WorkspaceAnalysisRun{}, err
-					}
-					return run, nil
-				},
-			}
-		}},
+
 		{name: "gorm", open: func(
 			t *testing.T,
 			platform *platformpostgres.Pool,
@@ -775,10 +684,11 @@ func TestWorkspaceAnalysisModelOperationRejectsStaleFenceAndDeadlineIntegration(
 		t.Run(test.name, func(t *testing.T) {
 			testWorkspaceAnalysisModelRepositoryIntegrationVariants(t, func(
 				t *testing.T,
-				pool *pgxpool.Pool,
+				platform *platformpostgres.Pool,
 				ctx context.Context,
 				repository workspaceAnalysisModelRepositoryIntegrationStore,
 			) {
+				pool := platform.DB()
 				fixture := seedWorkspaceAnalysisModelOperationIntegrationWithRunAge(t, ctx, pool, test.runAge)
 				if test.mutate != nil {
 					test.mutate(&fixture.command)
@@ -815,7 +725,7 @@ func TestWorkspaceAnalysisModelOperationSuccessReplayLoadScopeAndCommitRecoveryI
 			platform, ctx := newAgentPlatformIntegrationPool(t)
 			repository, armCommitLoss := variant.openWithCommitLoss(t, platform)
 			testWorkspaceAnalysisModelOperationSuccessReplayLoadScopeAndCommitRecoveryIntegration(
-				t, platform.DB(), ctx, repository, armCommitLoss,
+				t, platform, ctx, repository, armCommitLoss,
 			)
 		})
 	}
@@ -823,11 +733,12 @@ func TestWorkspaceAnalysisModelOperationSuccessReplayLoadScopeAndCommitRecoveryI
 
 func testWorkspaceAnalysisModelOperationSuccessReplayLoadScopeAndCommitRecoveryIntegration(
 	t *testing.T,
-	pool *pgxpool.Pool,
+	platform *platformpostgres.Pool,
 	ctx context.Context,
 	repository workspaceAnalysisModelRepositoryIntegrationStore,
 	armCommitLoss func(),
 ) {
+	pool := platform.DB()
 	fixture := seedWorkspaceAnalysisModelOperationIntegration(t, ctx, pool)
 	checkpointQuery := application.WorkspaceAnalysisRetrievalPlanCheckpointQuery{
 		WorkspaceID: fixture.command.Identity.WorkspaceID, WorkflowRunID: fixture.command.Identity.WorkflowRunID,
@@ -891,10 +802,11 @@ func TestWorkspaceAnalysisModelOperationCandidateReplayAndLoadIntegration(t *tes
 
 func testWorkspaceAnalysisModelOperationCandidateReplayAndLoadIntegration(
 	t *testing.T,
-	pool *pgxpool.Pool,
+	platform *platformpostgres.Pool,
 	ctx context.Context,
 	repository workspaceAnalysisModelRepositoryIntegrationStore,
 ) {
+	pool := platform.DB()
 	fixture := seedWorkspaceAnalysisModelOperationIntegration(t, ctx, pool)
 
 	planAuthorization, err := repository.AuthorizeWorkspaceAnalysisModelCall(ctx, fixture.command)
@@ -967,10 +879,11 @@ func TestWorkspaceAnalysisModelOperationReviewPassedFailedAndCandidateBindingInt
 		t.Run(name, func(t *testing.T) {
 			testWorkspaceAnalysisModelRepositoryIntegrationVariants(t, func(
 				t *testing.T,
-				pool *pgxpool.Pool,
+				platform *platformpostgres.Pool,
 				ctx context.Context,
 				repository workspaceAnalysisModelRepositoryIntegrationStore,
 			) {
+				pool := platform.DB()
 				fixture := seedWorkspaceAnalysisModelOperationIntegration(t, ctx, pool)
 				planAuthorization, err := repository.AuthorizeWorkspaceAnalysisModelCall(ctx, fixture.command)
 				if err != nil {
@@ -1067,10 +980,11 @@ func TestWorkspaceAnalysisModelOperationFailureRefusalAndUnknownClosureIntegrati
 		t.Run(test.name, func(t *testing.T) {
 			testWorkspaceAnalysisModelRepositoryIntegrationVariants(t, func(
 				t *testing.T,
-				pool *pgxpool.Pool,
+				platform *platformpostgres.Pool,
 				ctx context.Context,
 				repository workspaceAnalysisModelRepositoryIntegrationStore,
 			) {
+				pool := platform.DB()
 				fixture := seedWorkspaceAnalysisModelOperationIntegration(t, ctx, pool)
 				authorized, err := repository.AuthorizeWorkspaceAnalysisModelCall(ctx, fixture.command)
 				if err != nil {
@@ -1135,16 +1049,17 @@ func TestWorkspaceAnalysisModelOperationCancellationSettlesAuthorizedCallIntegra
 		t.Run(test.name, func(t *testing.T) {
 			testWorkspaceAnalysisModelRepositoryIntegrationVariants(t, func(
 				t *testing.T,
-				pool *pgxpool.Pool,
+				platform *platformpostgres.Pool,
 				ctx context.Context,
 				repository workspaceAnalysisModelRepositoryIntegrationStore,
 			) {
+				pool := platform.DB()
 				fixture := seedWorkspaceAnalysisModelOperationIntegration(t, ctx, pool)
 				authorized, err := repository.AuthorizeWorkspaceAnalysisModelCall(ctx, fixture.command)
 				if err != nil {
 					t.Fatal(err)
 				}
-				cancel := newWorkspaceAnalysisConcurrentCancelCoordinator(t, pool)
+				cancel := newWorkspaceAnalysisConcurrentCancelCoordinator(t, platform)
 				if _, err := cancel.Cancel(ctx, workflowapplication.RunControlCommand{
 					WorkflowRunID:   fixture.command.Identity.WorkflowRunID,
 					ExpectedVersion: 1,
@@ -1212,10 +1127,11 @@ func TestWorkspaceAnalysisModelOperationCandidateCancellationConflictMarkerInteg
 
 func testWorkspaceAnalysisModelOperationCandidateCancellationConflictMarkerIntegration(
 	t *testing.T,
-	pool *pgxpool.Pool,
+	platform *platformpostgres.Pool,
 	ctx context.Context,
 	repository workspaceAnalysisModelRepositoryIntegrationStore,
 ) {
+	pool := platform.DB()
 	fixture := seedWorkspaceAnalysisModelOperationIntegration(t, ctx, pool)
 	planAuthorization, err := repository.AuthorizeWorkspaceAnalysisModelCall(ctx, fixture.command)
 	if err != nil {
@@ -1231,7 +1147,7 @@ func testWorkspaceAnalysisModelOperationCandidateCancellationConflictMarkerInteg
 	if err != nil {
 		t.Fatal(err)
 	}
-	cancel := newWorkspaceAnalysisConcurrentCancelCoordinator(t, pool)
+	cancel := newWorkspaceAnalysisConcurrentCancelCoordinator(t, platform)
 	if _, err := cancel.Cancel(ctx, workflowapplication.RunControlCommand{
 		WorkflowRunID:   synthesisAuthorizationCommand.Identity.WorkflowRunID,
 		ExpectedVersion: 1,
@@ -1292,16 +1208,17 @@ func TestWorkspaceAnalysisModelOperationCancellationMarkerRequiresActiveLeaseInt
 	t.Run("plan result with expired lease", func(t *testing.T) {
 		testWorkspaceAnalysisModelRepositoryIntegrationVariants(t, func(
 			t *testing.T,
-			pool *pgxpool.Pool,
+			platform *platformpostgres.Pool,
 			ctx context.Context,
 			repository workspaceAnalysisModelRepositoryIntegrationStore,
 		) {
+			pool := platform.DB()
 			fixture := seedWorkspaceAnalysisModelOperationIntegration(t, ctx, pool)
 			authorized, err := repository.AuthorizeWorkspaceAnalysisModelCall(ctx, fixture.command)
 			if err != nil {
 				t.Fatal(err)
 			}
-			persistWorkspaceAnalysisModelCancellation(t, ctx, pool, fixture.command.Identity.WorkflowRunID, "wa-model-stale-plan")
+			persistWorkspaceAnalysisModelCancellation(t, ctx, platform, fixture.command.Identity.WorkflowRunID, "wa-model-stale-plan")
 			expireWorkspaceAnalysisModelLease(t, ctx, pool, fixture.command.Identity)
 
 			_, err = repository.FinalizeWorkspaceAnalysisModelResult(
@@ -1314,10 +1231,11 @@ func TestWorkspaceAnalysisModelOperationCancellationMarkerRequiresActiveLeaseInt
 	t.Run("candidate with expired lease", func(t *testing.T) {
 		testWorkspaceAnalysisModelRepositoryIntegrationVariants(t, func(
 			t *testing.T,
-			pool *pgxpool.Pool,
+			platform *platformpostgres.Pool,
 			ctx context.Context,
 			repository workspaceAnalysisModelRepositoryIntegrationStore,
 		) {
+			pool := platform.DB()
 			fixture := seedWorkspaceAnalysisModelOperationIntegration(t, ctx, pool)
 			planAuthorization, err := repository.AuthorizeWorkspaceAnalysisModelCall(ctx, fixture.command)
 			if err != nil {
@@ -1333,7 +1251,7 @@ func TestWorkspaceAnalysisModelOperationCancellationMarkerRequiresActiveLeaseInt
 			if err != nil {
 				t.Fatal(err)
 			}
-			persistWorkspaceAnalysisModelCancellation(t, ctx, pool, synthesisCommand.Identity.WorkflowRunID, "wa-model-stale-candidate")
+			persistWorkspaceAnalysisModelCancellation(t, ctx, platform, synthesisCommand.Identity.WorkflowRunID, "wa-model-stale-candidate")
 			expireWorkspaceAnalysisModelLease(t, ctx, pool, synthesisCommand.Identity)
 
 			_, err = repository.FinalizeWorkspaceAnalysisModelCandidate(
@@ -1348,12 +1266,12 @@ func TestWorkspaceAnalysisModelOperationCancellationMarkerRequiresActiveLeaseInt
 func persistWorkspaceAnalysisModelCancellation(
 	t *testing.T,
 	ctx context.Context,
-	pool *pgxpool.Pool,
+	platform *platformpostgres.Pool,
 	workflowRunID foundation.ID,
 	idempotencyKey string,
 ) {
 	t.Helper()
-	cancel := newWorkspaceAnalysisConcurrentCancelCoordinator(t, pool)
+	cancel := newWorkspaceAnalysisConcurrentCancelCoordinator(t, platform)
 	if _, err := cancel.Cancel(ctx, workflowapplication.RunControlCommand{
 		WorkflowRunID: workflowRunID, ExpectedVersion: 1, IdempotencyKey: idempotencyKey,
 	}); err != nil {
@@ -2271,34 +2189,6 @@ func terminalWorkspaceAnalysisModelCallCommand(
 		ExpectedCallVersion: authorized.Call.Version, ExpectedRunVersion: authorized.Run.Version,
 		Call: call, Run: run,
 	}
-}
-
-type workspaceAnalysisModelCommitLossDB struct {
-	DB
-	injectNext atomic.Bool
-}
-
-func (database *workspaceAnalysisModelCommitLossDB) Begin(ctx context.Context) (pgx.Tx, error) {
-	tx, err := database.DB.Begin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return &workspaceAnalysisModelCommitLossTx{Tx: tx, injectNext: &database.injectNext}, nil
-}
-
-type workspaceAnalysisModelCommitLossTx struct {
-	pgx.Tx
-	injectNext *atomic.Bool
-}
-
-func (tx *workspaceAnalysisModelCommitLossTx) Commit(ctx context.Context) error {
-	if err := tx.Tx.Commit(ctx); err != nil {
-		return err
-	}
-	if tx.injectNext.CompareAndSwap(true, false) {
-		return errors.New("injected workspace analysis model commit response loss")
-	}
-	return nil
 }
 
 type workspaceAnalysisModelPostCommitErrorUnitOfWork struct {

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"strconv"
 	"strings"
 	"time"
@@ -14,12 +15,17 @@ import (
 	collectionapp "github.com/CodeZen-Lizhi/zhixu/internal/collection/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/collection/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
-	"github.com/jackc/pgx/v5"
+	"github.com/lib/pq"
+	"gorm.io/gorm"
 )
+
+const collectionItemColumns = `item.id,item.workspace_id,item.object_type,item.topic_id,
+item.title,item.summary,item.status,item.confidence,item.relation_type,item.health_issue_type,
+item.source_type,item.file_path,item.search_text,item.created_at,item.updated_at`
 
 const defaultCollectionStatementTimeout = 1500 * time.Millisecond
 
-const setLocalCollectionStatementTimeoutSQL = `SELECT pg_catalog.set_config('statement_timeout',$1,true)`
+const setLocalCollectionStatementTimeoutSQL = `SELECT pg_catalog.set_config('statement_timeout',?,true)`
 
 const unifiedItemCTE = `WITH item AS (
     SELECT t.id::text AS id, t.workspace_id::text AS workspace_id, 'TOPIC'::text AS object_type,
@@ -54,7 +60,7 @@ const unifiedItemCTE = `WITH item AS (
           AND i.status NOT IN ('RESOLVED','IGNORED','FALSE_POSITIVE')
 		ORDER BY i.updated_at DESC, i.id LIMIT 1
     ) hi ON true
-    WHERE t.workspace_id=$1
+    WHERE t.workspace_id=@workspace
     UNION ALL
     SELECT c.id::text, c.workspace_id::text, 'CLAIM'::text,
            membership.topic_id::text, c.statement, c.statement, c.status,
@@ -97,31 +103,31 @@ const unifiedItemCTE = `WITH item AS (
         WHERE cs.workspace_id=c.workspace_id AND cs.claim_id=c.id
 		ORDER BY cs.created_at DESC, cs.id LIMIT 1
     ) source_info ON true
-    WHERE c.workspace_id=$1
+    WHERE c.workspace_id=@workspace
 ) `
 
 const hydrateCollectionItemsSQL = `WITH requested AS (
     SELECT input.object_type,input.id,input.ordinality
-    FROM unnest($2::text[],$3::uuid[]) WITH ORDINALITY AS input(object_type,id,ordinality)
+    FROM unnest((@object_types)::text[],(@ids)::uuid[]) WITH ORDINALITY AS input(object_type,id,ordinality)
 ), topic_aliases AS (
     SELECT a.topic_id AS id,jsonb_agg(a.alias ORDER BY a.normalized_alias,a.id) AS aliases
     FROM core.topic_alias a
     JOIN requested requested_topic ON requested_topic.object_type='TOPIC' AND requested_topic.id=a.topic_id
-    WHERE a.workspace_id=$1
+    WHERE a.workspace_id=@workspace
     GROUP BY a.topic_id
 ), claim_details AS (
     SELECT c.id,c.applicability,c.applicability_schema_version,c.applicability_hash
     FROM core.claim c
     JOIN requested requested_claim ON requested_claim.object_type='CLAIM' AND requested_claim.id=c.id
-    WHERE c.workspace_id=$1
+    WHERE c.workspace_id=@workspace
 	), claim_sources_ranked AS (
 	SELECT cs.claim_id AS id,s.type,s.original_location,cs.support_type,cs.created_at,cs.id AS source_id,
 		row_number() OVER (PARTITION BY cs.claim_id ORDER BY cs.created_at DESC,cs.id) AS row_number
 	FROM core.claim_source cs
 	JOIN requested requested_claim ON requested_claim.object_type='CLAIM' AND requested_claim.id=cs.claim_id
 	JOIN core.source_version sv ON sv.id=cs.source_version_id
-	JOIN core.source s ON s.id=sv.source_id AND s.workspace_id=$1
-	WHERE cs.workspace_id=$1
+	JOIN core.source s ON s.id=sv.source_id AND s.workspace_id=@workspace
+	WHERE cs.workspace_id=@workspace
 	), claim_sources AS (
 	SELECT id,jsonb_agg(jsonb_build_object(
 		'source_type',type,'file_path',original_location,
@@ -134,12 +140,12 @@ const hydrateCollectionItemsSQL = `WITH requested AS (
     SELECT r.source_node_type AS object_type,r.source_node_id AS id,r.relation_type
     FROM core.relation r
     JOIN requested source_item ON source_item.object_type=r.source_node_type AND source_item.id=r.source_node_id
-    WHERE r.workspace_id=$1 AND r.status='CONFIRMED'
+    WHERE r.workspace_id=@workspace AND r.status='CONFIRMED'
     UNION ALL
     SELECT r.target_node_type,r.target_node_id,r.relation_type
     FROM core.relation r
     JOIN requested target_item ON target_item.object_type=r.target_node_type AND target_item.id=r.target_node_id
-    WHERE r.workspace_id=$1 AND r.status='CONFIRMED'
+    WHERE r.workspace_id=@workspace AND r.status='CONFIRMED'
 ), relation_types AS (
     SELECT object_type,id,to_jsonb(array_agg(DISTINCT relation_type ORDER BY relation_type)) AS types
     FROM relation_edges
@@ -151,7 +157,7 @@ const hydrateCollectionItemsSQL = `WITH requested AS (
            left(string_agg(i.evidence_summary,'; ' ORDER BY i.updated_at DESC,i.id),4096) AS evidence_summary
     FROM ops.health_issue i
     JOIN requested target_item ON target_item.object_type=i.target_type AND target_item.id=i.target_id
-    WHERE i.workspace_id=$1 AND i.status NOT IN ('RESOLVED','IGNORED','FALSE_POSITIVE')
+    WHERE i.workspace_id=@workspace AND i.status NOT IN ('RESOLVED','IGNORED','FALSE_POSITIVE')
     GROUP BY i.target_type,i.target_id
 )
 SELECT requested.object_type,requested.id::text,
@@ -179,66 +185,7 @@ type queryExecution struct {
 	scope             collectionapp.CursorScope
 }
 
-// ExecuteQuery 从 canonical Topic/Claim read model 计算 count 与有界结果页。
-func (r *Repository) ExecuteQuery(ctx context.Context, request collectionapp.ResultsQuery) (collectionapp.ResultPage, error) {
-	if r == nil || r.db == nil {
-		return collectionapp.ResultPage{}, unavailable(errors.New("collection repository is unavailable"))
-	}
-	if ctx == nil || !validID(request.WorkspaceID) || !validID(request.CollectionID) || request.Limit < 1 || request.Limit > 100 {
-		return collectionapp.ResultPage{}, requestInvalid(errors.New("collection result request is invalid"))
-	}
-	tx, err := r.beginner.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
-	if err != nil {
-		return collectionapp.ResultPage{}, classify(err)
-	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
-	if err := configureCollectionStatementTimeout(ctx, tx, defaultCollectionStatementTimeout); err != nil {
-		return collectionapp.ResultPage{}, classify(err)
-	}
-	page, err := r.executeQuerySnapshot(ctx, tx, request)
-	if err != nil {
-		return collectionapp.ResultPage{}, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return collectionapp.ResultPage{}, classify(err)
-	}
-	return page, nil
-}
-
-// ExecutePreview 对未保存 Query 执行与 saved results 相同的 read model。
-func (r *Repository) ExecutePreview(ctx context.Context, request collectionapp.PreviewQuery) (collectionapp.ResultPage, error) {
-	if r == nil || r.db == nil {
-		return collectionapp.ResultPage{}, unavailable(errors.New("collection repository is unavailable"))
-	}
-	if ctx == nil || !validID(request.WorkspaceID) || request.Limit < 1 || request.Limit > 100 {
-		return collectionapp.ResultPage{}, requestInvalid(errors.New("collection preview request is invalid"))
-	}
-	canonical, err := domain.CanonicalizeQuery(request.Query)
-	if err != nil {
-		return collectionapp.ResultPage{}, err
-	}
-	tx, err := r.beginner.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
-	if err != nil {
-		return collectionapp.ResultPage{}, classify(err)
-	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
-	if err := configureCollectionStatementTimeout(ctx, tx, defaultCollectionStatementTimeout); err != nil {
-		return collectionapp.ResultPage{}, classify(err)
-	}
-	page, err := r.executePlanSnapshot(ctx, tx, queryExecution{
-		workspaceID: request.WorkspaceID, queryHash: canonical.Hash, query: canonical.Definition,
-		limit: request.Limit, cursor: request.Cursor, scope: collectionapp.CursorScopePreview,
-	})
-	if err != nil {
-		return collectionapp.ResultPage{}, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return collectionapp.ResultPage{}, classify(err)
-	}
-	return page, nil
-}
-
-func (r *Repository) executeQuerySnapshot(ctx context.Context, db DB, request collectionapp.ResultsQuery) (collectionapp.ResultPage, error) {
+func (r *GORMRepository) executeQuerySnapshot(ctx context.Context, db *gorm.DB, request collectionapp.ResultsQuery) (collectionapp.ResultPage, error) {
 	collection, err := loadCollection(ctx, db, request.WorkspaceID, request.CollectionID, false)
 	if err != nil {
 		return collectionapp.ResultPage{}, err
@@ -250,7 +197,7 @@ func (r *Repository) executeQuerySnapshot(ctx context.Context, db DB, request co
 	})
 }
 
-func (r *Repository) executePlanSnapshot(ctx context.Context, db DB, execution queryExecution) (collectionapp.ResultPage, error) {
+func (r *GORMRepository) executePlanSnapshot(ctx context.Context, db *gorm.DB, execution queryExecution) (collectionapp.ResultPage, error) {
 	plan, err := collectionapp.CompileQuery(execution.query)
 	if err != nil {
 		return collectionapp.ResultPage{}, err
@@ -264,9 +211,9 @@ func (r *Repository) executePlanSnapshot(ctx context.Context, db DB, execution q
 	if err != nil {
 		return collectionapp.ResultPage{}, err
 	}
-	where, args := shiftWhere(plan.Where, append([]any{string(execution.workspaceID)}, plan.Args...))
+	where, args := plan.Where, collectionQueryArguments(execution.workspaceID, plan.Args)
 	countWhere := where
-	countArgs := append([]any(nil), args...)
+	countArgs := maps.Clone(args)
 	sortBytes, _ := json.Marshal(plan.Sort)
 	sortDigest := sha256.Sum256(sortBytes)
 	sortHash := hex.EncodeToString(sortDigest[:])
@@ -279,20 +226,20 @@ func (r *Repository) executePlanSnapshot(ctx context.Context, db DB, execution q
 		if decodeErr != nil {
 			return collectionapp.ResultPage{}, decodeErr
 		}
-		keyset, keysetArgs, keysetErr := buildKeysetPredicate(plan.Sort, cursor, len(args)+1)
+		keyset, keysetArgs, keysetErr := buildKeysetPredicate(plan.Sort, cursor)
 		if keysetErr != nil {
 			return collectionapp.ResultPage{}, keysetErr
 		}
 		where += " AND " + keyset
-		args = append(args, keysetArgs...)
+		maps.Copy(args, keysetArgs)
 	}
-	countSQL := "SELECT count(*) FROM (" + unifiedItemCTE + "SELECT * FROM item WHERE " + countWhere + ") counted"
+	countSQL := "SELECT count(*) FROM (" + unifiedItemCTE + "SELECT 1 FROM item WHERE " + countWhere + ") counted"
 	var count int64
-	if err := db.QueryRow(ctx, countSQL, countArgs...).Scan(&count); err != nil {
+	if err := db.WithContext(ctx).Raw(countSQL, countArgs).Row().Scan(&count); err != nil {
 		return collectionapp.ResultPage{}, classify(err)
 	}
 	pageSQL, pageArgs := buildCollectionPageQuery(plan, where, args, execution.limit+1)
-	rows, err := db.Query(ctx, pageSQL, pageArgs...)
+	rows, err := db.WithContext(ctx).Raw(pageSQL, pageArgs).Rows()
 	if err != nil {
 		return collectionapp.ResultPage{}, classify(err)
 	}
@@ -330,13 +277,15 @@ func (r *Repository) executePlanSnapshot(ctx context.Context, db DB, execution q
 	return page, nil
 }
 
-func buildCollectionPageQuery(plan collectionapp.QueryPlan, where string, args []any, limit int) (string, []any) {
+func buildCollectionPageQuery(plan collectionapp.QueryPlan, where string, args map[string]any, limit int) (string, map[string]any) {
 	sortSQL := make([]string, 0, len(plan.Sort))
 	for _, sortTerm := range plan.Sort {
 		sortSQL = append(sortSQL, sortTerm.Column+" "+sortTerm.Direction+" NULLS LAST")
 	}
-	pageSQL := unifiedItemCTE + "SELECT * FROM item WHERE " + where + " ORDER BY " + strings.Join(sortSQL, ", ") + fmt.Sprintf(" LIMIT $%d", len(args)+1)
-	return pageSQL, append(append([]any(nil), args...), limit)
+	pageSQL := unifiedItemCTE + "SELECT " + collectionItemColumns + " FROM item WHERE " + where + " ORDER BY " + strings.Join(sortSQL, ", ") + " LIMIT @limit"
+	pageArgs := maps.Clone(args)
+	pageArgs["limit"] = limit
+	return pageSQL, pageArgs
 }
 
 type revisionOptions struct {
@@ -350,7 +299,7 @@ type readModelRevisionVector struct {
 	health    int64
 }
 
-func loadReadModelRevisionVector(ctx context.Context, db DB, workspaceID foundation.ID) (readModelRevisionVector, error) {
+func loadReadModelRevisionVector(ctx context.Context, db *gorm.DB, workspaceID foundation.ID) (readModelRevisionVector, error) {
 	var vector readModelRevisionVector
 	const revisionSQL = `SELECT
  COALESCE(revision.knowledge_revision,0),
@@ -358,8 +307,8 @@ func loadReadModelRevisionVector(ctx context.Context, db DB, workspaceID foundat
  COALESCE(revision.health_revision,0)
 FROM core.workspace workspace
 LEFT JOIN core.workspace_read_model_revision revision ON revision.workspace_id=workspace.id
-WHERE workspace.id=$1`
-	if err := db.QueryRow(ctx, revisionSQL, string(workspaceID)).Scan(&vector.knowledge, &vector.conflict, &vector.health); err != nil {
+WHERE workspace.id=@workspace`
+	if err := db.WithContext(ctx).Raw(revisionSQL, map[string]any{"workspace": string(workspaceID)}).Row().Scan(&vector.knowledge, &vector.conflict, &vector.health); err != nil {
 		return readModelRevisionVector{}, classify(err)
 	}
 	return vector, nil
@@ -378,7 +327,7 @@ func hashReadModelRevision(vector readModelRevisionVector, options revisionOptio
 	return hex.EncodeToString(digest[:])
 }
 
-func readModelRevisionWithOptions(ctx context.Context, db DB, workspaceID foundation.ID, options revisionOptions) (string, error) {
+func readModelRevisionWithOptions(ctx context.Context, db *gorm.DB, workspaceID foundation.ID, options revisionOptions) (string, error) {
 	vector, err := loadReadModelRevisionVector(ctx, db, workspaceID)
 	if err != nil {
 		return "", err
@@ -386,7 +335,7 @@ func readModelRevisionWithOptions(ctx context.Context, db DB, workspaceID founda
 	return hashReadModelRevision(vector, options), nil
 }
 
-func readCollectionResultRevisions(ctx context.Context, db DB, workspaceID foundation.ID, plan collectionapp.QueryPlan) (string, string, error) {
+func readCollectionResultRevisions(ctx context.Context, db *gorm.DB, workspaceID foundation.ID, plan collectionapp.QueryPlan) (string, string, error) {
 	vector, err := loadReadModelRevisionVector(ctx, db, workspaceID)
 	if err != nil {
 		return "", "", err
@@ -396,32 +345,24 @@ func readCollectionResultRevisions(ctx context.Context, db DB, workspaceID found
 	return resultRevision, scanRevision, nil
 }
 
-func configureCollectionStatementTimeout(ctx context.Context, db DB, timeout time.Duration) error {
+func configureCollectionStatementTimeout(ctx context.Context, db *gorm.DB, timeout time.Duration) error {
 	if timeout < time.Millisecond {
 		return errors.New("collection statement timeout must be at least one millisecond")
 	}
-	_, err := db.Exec(ctx, setLocalCollectionStatementTimeoutSQL, strconv.FormatInt(timeout.Milliseconds(), 10)+"ms")
-	return err
+	return db.WithContext(ctx).Exec(setLocalCollectionStatementTimeoutSQL, strconv.FormatInt(timeout.Milliseconds(), 10)+"ms").Error
 }
 
-func shiftWhere(where string, args []any) (string, []any) {
-	var builder strings.Builder
-	for index := 0; index < len(where); {
-		if where[index] != '$' || index+1 >= len(where) || where[index+1] < '0' || where[index+1] > '9' {
-			builder.WriteByte(where[index])
-			index++
-			continue
+// collectionQueryArguments binds the compiler's named values without rewriting SQL.
+func collectionQueryArguments(workspaceID foundation.ID, values map[string]any) map[string]any {
+	args := make(map[string]any, len(values)+1)
+	for name, value := range values {
+		if array, ok := value.([]string); ok {
+			value = pq.Array(array)
 		}
-		end := index + 1
-		for end < len(where) && where[end] >= '0' && where[end] <= '9' {
-			end++
-		}
-		var number int
-		_, _ = fmt.Sscanf(where[index+1:end], "%d", &number)
-		builder.WriteString(fmt.Sprintf("$%d", number+1))
-		index = end
+		args[name] = value
 	}
-	return builder.String(), args
+	args["workspace"] = string(workspaceID)
+	return args
 }
 
 func scanItem(row interface{ Scan(...any) error }) (collectionapp.CollectionItem, error) {
@@ -450,7 +391,7 @@ func scanItem(row interface{ Scan(...any) error }) (collectionapp.CollectionItem
 	return item, nil
 }
 
-func hydrateCollectionItems(ctx context.Context, db DB, workspaceID foundation.ID, items []collectionapp.CollectionItem) error {
+func hydrateCollectionItems(ctx context.Context, db *gorm.DB, workspaceID foundation.ID, items []collectionapp.CollectionItem) error {
 	objectTypes := make([]string, len(items))
 	ids := make([]string, len(items))
 	positions := make(map[string]int, len(items))
@@ -464,13 +405,9 @@ func hydrateCollectionItems(ctx context.Context, db DB, workspaceID foundation.I
 		}
 		objectTypes[index], ids[index], positions[key] = item.ObjectType, string(item.ID), index
 	}
-	var rows pgx.Rows
-	var err error
-	if database, ok := db.(*gormDB); ok {
-		rows, err = database.hydrationRows(ctx, hydrateCollectionItemsSQL, string(workspaceID), objectTypes, ids)
-	} else {
-		rows, err = db.Query(ctx, hydrateCollectionItemsSQL, string(workspaceID), objectTypes, ids)
-	}
+	rows, err := db.WithContext(ctx).Raw(hydrateCollectionItemsSQL, map[string]any{
+		"workspace": string(workspaceID), "object_types": pq.Array(objectTypes), "ids": pq.Array(ids),
+	}).Rows()
 	if err != nil {
 		return classify(err)
 	}
@@ -478,7 +415,8 @@ func hydrateCollectionItems(ctx context.Context, db DB, workspaceID foundation.I
 	seen := make(map[string]struct{}, len(items))
 	for rows.Next() {
 		var objectType, id string
-		var aliasesRaw, applicability, sourceSummariesRaw, relationTypesRaw, healthIssueTypesRaw []byte
+		var aliasesRaw, sourceSummariesRaw, relationTypesRaw, healthIssueTypesRaw collectionJSONB
+		var applicability *collectionJSONB
 		var applicabilitySchemaVersion, applicabilityHash, maxSeverity, healthSummary *string
 		var healthIssueCount int64
 		if err := rows.Scan(&objectType, &id, &aliasesRaw, &applicability, &applicabilitySchemaVersion, &applicabilityHash, &sourceSummariesRaw, &relationTypesRaw, &healthIssueCount, &maxSeverity, &healthIssueTypesRaw, &healthSummary); err != nil {
@@ -494,7 +432,10 @@ func hydrateCollectionItems(ctx context.Context, db DB, workspaceID foundation.I
 		}
 		seen[key] = struct{}{}
 		item := &items[index]
-		item.Applicability = append(item.Applicability[:0], applicability...)
+		item.Applicability = nil
+		if applicability != nil {
+			item.Applicability = append(item.Applicability, (*applicability)...)
+		}
 		if applicabilitySchemaVersion != nil {
 			item.ApplicabilitySchemaVersion = *applicabilitySchemaVersion
 		}
@@ -533,7 +474,7 @@ func hydrateCollectionItems(ctx context.Context, db DB, workspaceID foundation.I
 	return nil
 }
 
-func buildKeysetPredicate(sortTerms []collectionapp.SortExpression, cursor collectionapp.ResultCursor, firstPlaceholder int) (string, []any, error) {
+func buildKeysetPredicate(sortTerms []collectionapp.SortExpression, cursor collectionapp.ResultCursor) (string, map[string]any, error) {
 	values := cursor.LastSortValues
 	if len(values) == 0 {
 		values = []*string{stringPointer(cursor.LastObjectType), stringPointer(string(cursor.LastID))}
@@ -542,23 +483,25 @@ func buildKeysetPredicate(sortTerms []collectionapp.SortExpression, cursor colle
 	if len(values) != len(sortTerms) {
 		return "", nil, requestInvalid(errors.New("collection cursor sort key is invalid"))
 	}
-	args := make([]any, len(values))
+	args := make(map[string]any, len(values))
 	for index, value := range values {
+		name := "cursor" + strconv.Itoa(index+1)
+		args[name] = nil
 		if value != nil {
-			args[index] = *value
+			args[name] = *value
 		}
 	}
 	branches := make([]string, 0, len(sortTerms))
 	for index, term := range sortTerms {
 		parts := make([]string, 0, index+1)
 		for prefix := 0; prefix < index; prefix++ {
-			parts = append(parts, sortTerms[prefix].Column+" IS NOT DISTINCT FROM "+typedPlaceholder(sortTerms[prefix].Column, firstPlaceholder+prefix))
+			parts = append(parts, sortTerms[prefix].Column+" IS NOT DISTINCT FROM "+typedPlaceholder(sortTerms[prefix].Column, prefix+1))
 		}
 		operator := ">"
 		if term.Direction == "DESC" {
 			operator = "<"
 		}
-		placeholder := typedPlaceholder(term.Column, firstPlaceholder+index)
+		placeholder := typedPlaceholder(term.Column, index+1)
 		parts = append(parts, "(("+term.Column+" "+operator+" "+placeholder+") OR ("+placeholder+" IS NOT NULL AND "+term.Column+" IS NULL))")
 		branches = append(branches, "("+strings.Join(parts, " AND ")+")")
 	}
@@ -566,7 +509,7 @@ func buildKeysetPredicate(sortTerms []collectionapp.SortExpression, cursor colle
 }
 
 func typedPlaceholder(column string, position int) string {
-	placeholder := fmt.Sprintf("$%d", position)
+	placeholder := fmt.Sprintf("(@cursor%d)", position)
 	switch column {
 	case "item.created_at", "item.updated_at":
 		return placeholder + "::timestamptz"
@@ -624,8 +567,3 @@ func cloneStringPointer(value *string) *string {
 	}
 	return stringPointer(*value)
 }
-
-var _ collectionapp.QueryRepository = (*Repository)(nil)
-var _ collectionapp.PreviewRepository = (*Repository)(nil)
-var _ = domain.QuerySchemaVersionV1
-var _ = pgx.ErrNoRows

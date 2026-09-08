@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
@@ -15,9 +14,7 @@ import (
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 )
 
-// GORMRepository is the staged Git Sync persistence implementation.  The
-// legacy pgx Repository remains the production implementation until the final
-// Composition gate is approved.
+// GORMRepository owns Git Sync persistence through the shared platform unit of work.
 type GORMRepository struct {
 	database   *gorm.DB
 	unitOfWork foundation.UnitOfWork
@@ -151,9 +148,8 @@ func classifyGORM(ctx context.Context, err error, code string) error {
 	if errors.Is(err, sql.ErrTxDone) {
 		return foundation.NewError(foundation.ErrorDependencyUnavailable, code, true, errGORMDatabaseFailure)
 	}
-	var postgresError *pgconn.PgError
-	if errors.As(err, &postgresError) {
-		switch postgresError.Code {
+	if sqlState := platformpostgres.SQLState(err); sqlState != "" {
+		switch sqlState {
 		case "40001", "40P01", "55P03", "57014", "53300":
 			return foundation.NewError(foundation.ErrorRetryableFailure, code, true, errGORMDatabaseFailure)
 		case "23503":
