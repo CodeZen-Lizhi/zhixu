@@ -152,6 +152,7 @@ type PublicationProposal struct {
 	BaseVersion    string
 	Content        string
 	ContentHash    string
+	CreatedByType  string
 	IdempotencyKey string
 }
 

@@ -80,6 +80,7 @@ import (
 	modelsettingsruntime "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/runtime"
 	organizingowner "github.com/CodeZen-Lizhi/zhixu/internal/organizing/adapter/owner"
 	organizingpostgres "github.com/CodeZen-Lizhi/zhixu/internal/organizing/adapter/postgres"
+	synthesispostgres "github.com/CodeZen-Lizhi/zhixu/internal/organizing/adapter/synthesispostgres"
 	organizingworkflow "github.com/CodeZen-Lizhi/zhixu/internal/organizing/workflow"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/filesystem"
@@ -220,6 +221,9 @@ type workerComponents struct {
 	captureProfile              agentCapabilityStatus
 	organizingExecutor          *organizingworkflow.Executor
 	organizingOutbox            organizingOutboxDispatchService
+	synthesisExecutor           *organizingworkflow.SynthesisExecutor
+	synthesisSources            *organizingworkflow.SynthesisDispatcher
+	synthesisInterview          workerSynthesisInterviewComponents
 	gitSyncWorker               *gitsyncapplication.Worker
 	gitSyncScheduler            *gitsyncapplication.AutoSyncScheduler
 	gitSyncCapability           agentCapabilityStatus
@@ -482,7 +486,10 @@ func run(configPath string, logger *slog.Logger) (runErr error) {
 					Mode: modelsettingsruntime.RuntimeModeManaged, Role: modelsettingsruntime.RuntimeRoleWorker,
 					Revision: *modelBinding.revision, InstanceID: *modelBinding.instanceID,
 				},
-				Value:       &workerRuntimeGeneration{models: configuredModels, executors: components.executors, sources: components.sourceProcessing},
+				Value: &workerRuntimeGeneration{
+					models: configuredModels, executors: components.executors, sources: components.sourceProcessing,
+					workspaceAnalysis: newWorkerWorkspaceAnalysisGeneration(components.workspaceAnalysisCapability, components.tools),
+				},
 				Unavailable: managedModels.Loaded.InitialPhase == modelsettingsdomain.RuntimePhaseUnavailable,
 			},
 			Factory: &workerRuntimeGenerationFactory{
@@ -534,7 +541,7 @@ func run(configPath string, logger *slog.Logger) (runErr error) {
 	readiness.SetRiverSchemaOK(true)
 	readiness.SetDefinitionsOK(components.definitions != nil)
 	readiness.SetExecutorsOK(components.executors != nil)
-	readiness.SetDependenciesOK(components.safeWriteback != nil && components.reindexWorker != nil && components.dispatcher != nil && components.timelineProject != nil && components.citationBackfill != nil && components.exportWorker != nil && components.exportService != nil && components.memoryExpiry != nil && components.interviewCompletion != nil && components.learningPathMaintenance != nil && components.draftStreams != nil && captureWorkflowReadiness(components) && organizingWorkflowReadiness(components) && gitSyncWorkerReadiness(components) && agentWorkflowReadiness(components) && artifactWorkflowReadiness(components))
+	readiness.SetDependenciesOK(components.safeWriteback != nil && components.reindexWorker != nil && components.dispatcher != nil && components.timelineProject != nil && components.citationBackfill != nil && components.exportWorker != nil && components.exportService != nil && components.memoryExpiry != nil && components.interviewCompletion != nil && components.learningPathMaintenance != nil && components.draftStreams != nil && captureWorkflowReadiness(components) && organizingWorkflowReadiness(components) && synthesisWorkflowReadiness(components) && gitSyncWorkerReadiness(components) && agentWorkflowReadiness(components) && artifactWorkflowReadiness(components))
 	toolEnabled := cfg.ToolRuntimeMode == config.ToolModeEnabled
 	toolContractsOK, toolExecutorsOK, toolDependenciesOK := toolWorkflowReadiness(components)
 	readiness.SetToolRuntimeState(toolEnabled, toolContractsOK, toolExecutorsOK, toolDependenciesOK)
@@ -639,7 +646,7 @@ func run(configPath string, logger *slog.Logger) (runErr error) {
 			modelSnapshot.Rollout.Phase == modelsettingsdomain.RolloutPhaseFailed
 	}
 	workspaceAnalysisCapability, err := newWorkerWorkspaceAnalysisCapability(
-		database, cfg, components, configuredModels,
+		database, cfg, components, configuredModels, modelHost,
 	)
 	if err != nil {
 		logger.Warn("workspace analysis worker capability is unavailable", "error_code", agentapplication.ErrorCodeWorkspaceAnalysisCapabilityUnavailable)
@@ -681,6 +688,11 @@ func run(configPath string, logger *slog.Logger) (runErr error) {
 	organizingContext, cancelOrganizing := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
 	_, _ = dispatchOrganizingOutbox(organizingContext, logger, components.organizingOutbox, organizingDispatchStartupPhase)
 	cancelOrganizing()
+	if modelDrain.ProducersEnabled() {
+		synthesisContext, cancelSynthesis := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
+		_, _ = dispatchSynthesisSources(synthesisContext, logger, components.synthesisSources, organizingDispatchStartupPhase)
+		cancelSynthesis()
+	}
 	timelineContext, cancelTimeline := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
 	_, _ = dispatchTimelineProjection(timelineContext, logger, components.timelineProject, timelineProjectionStartupPhase)
 	cancelTimeline()
@@ -710,6 +722,8 @@ func run(configPath string, logger *slog.Logger) (runErr error) {
 		"capture_workflow", components.captureExecutor != nil, "capture_outbox", components.captureOutbox != nil,
 		"capture_profile_available", components.captureProfile.available, "capture_profile_capability_code", components.captureProfile.code,
 		"organizing_workflow", components.organizingExecutor != nil, "organizing_outbox", components.organizingOutbox != nil,
+		"synthesis_workflow", components.synthesisExecutor != nil, "synthesis_sources", components.synthesisSources != nil,
+		"synthesis_interview_available", components.synthesisInterview.capability.available,
 		"git_sync_available", components.gitSyncCapability.available,
 		"git_sync_capability_code", components.gitSyncCapability.code,
 		"tool_runtime_enabled", components.tools.runtimeEnabled, "tool_executor_count", len(components.tools.enabledRefs),
@@ -791,6 +805,9 @@ func run(configPath string, logger *slog.Logger) (runErr error) {
 			organizingContext, cancelOrganizing := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
 			_, _ = dispatchOrganizingOutbox(organizingContext, logger, components.organizingOutbox, organizingDispatchPeriodicPhase)
 			cancelOrganizing()
+			synthesisContext, cancelSynthesis := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
+			_, _ = dispatchSynthesisSources(synthesisContext, logger, components.synthesisSources, organizingDispatchPeriodicPhase)
+			cancelSynthesis()
 		case <-ticker.C:
 			if err := ping(database, cfg.DatabasePingTimeout); err != nil {
 				readiness.SetDatabaseOK(false)
@@ -1027,7 +1044,7 @@ func startGitSyncDispatchLoop(
 	enabled func() bool,
 ) <-chan struct{} {
 	stopped := make(chan struct{})
-	if ctx == nil || logger == nil || scheduler == nil || worker == nil || interval <= 0 || timeout <= 0 {
+	if ctx == nil || logger == nil || nilLifecycleDependency(scheduler) || nilLifecycleDependency(worker) || interval <= 0 || timeout <= 0 {
 		close(stopped)
 		return stopped
 	}
@@ -1065,10 +1082,11 @@ func startGitSyncDispatchLoop(
 // dispatchGitSync first turns eligible approved writebacks into standard Runs,
 // then drains already durable outbox work even when scheduling reports a fault.
 func dispatchGitSync(ctx context.Context, logger *slog.Logger, scheduler gitSyncAutoScheduler, worker gitSyncOutboxWorker, phase string) (gitsyncapplication.AutoSyncBatchResult, int, error) {
-	if scheduler == nil && worker == nil {
+	schedulerMissing, workerMissing := nilLifecycleDependency(scheduler), nilLifecycleDependency(worker)
+	if schedulerMissing && workerMissing {
 		return gitsyncapplication.AutoSyncBatchResult{}, 0, nil
 	}
-	if scheduler == nil || worker == nil {
+	if schedulerMissing || workerMissing {
 		return gitsyncapplication.AutoSyncBatchResult{}, 0, errors.New("Git sync scheduler and worker must be configured together")
 	}
 	scheduleContext, cancelSchedule := context.WithTimeout(ctx, gitSyncScheduleTimeout)
@@ -1093,7 +1111,7 @@ func dispatchGitSync(ctx context.Context, logger *slog.Logger, scheduler gitSync
 // The worker itself persists retry and terminal state, so a transient dispatch
 // error is observed and retried on the next periodic tick.
 func dispatchGitSyncOutbox(ctx context.Context, logger *slog.Logger, worker gitSyncOutboxWorker, phase string) (int, error) {
-	if worker == nil {
+	if nilLifecycleDependency(worker) {
 		return 0, nil
 	}
 	processed := 0
@@ -1594,6 +1612,22 @@ func newWorkerComponentsWithModels(db *postgres.Pool, cfg config.Config, models 
 	if err != nil {
 		return workerComponents{}, err
 	}
+	synthesisStore, err := newSynthesisRuntimeStore(db, artifactAgentRepository)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	synthesisOwners, err := newSynthesisWorkerOwners(db, workspaceRepository, authoringRepository, writebackRepository, changeControlService, targetReader, synthesisStore)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	synthesisInterviewPersistence, err := newWorkerSynthesisInterviewPersistence(db, artifactAgentRepository)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	synthesisInterviewTerminal, err := synthesisInterviewPersistence.terminalHook()
+	if err != nil {
+		return workerComponents{}, err
+	}
 	workspaceAnalysisWorkerEnabled := cfg.WorkspaceAnalysisWorkerEnabled &&
 		toolComponents.workspaceAnalysisAudit != nil && toolComponents.workspaceAnalysisActorRef != ""
 	organizingRepository, err := organizingpostgres.NewGORMRepository(db)
@@ -1608,6 +1642,8 @@ func newWorkerComponentsWithModels(db *postgres.Pool, cfg config.Config, models 
 	terminalHookComponents := []workflowapplication.ScopedWorkflowTerminalHook{
 		artifactTerminal,
 		organizingTerminal,
+		synthesisStore,
+		synthesisInterviewTerminal,
 	}
 	if workspaceAnalysisWorkerEnabled {
 		workspaceAnalysisCancellationAudit, workspaceAnalysisControlErr := conversationpostgres.NewGORMWorkspaceAnalysisCancellationAuditHook(
@@ -1644,6 +1680,9 @@ func newWorkerComponentsWithModels(db *postgres.Pool, cfg config.Config, models 
 		ModelRuntimeFreshWithin: modelBinding.runtimeFreshWithin,
 	})
 	if err != nil {
+		return workerComponents{}, err
+	}
+	if err := synthesisInterviewPersistence.bindRuntime(runtimeRepository); err != nil {
 		return workerComponents{}, err
 	}
 	workflowRepository, err := workflowpostgres.NewGORMRepository(db)
@@ -1708,6 +1747,20 @@ func newWorkerComponentsWithModels(db *postgres.Pool, cfg config.Config, models 
 	if err != nil {
 		return workerComponents{}, err
 	}
+	synthesisExecutor, err := newSynthesisWorkerExecutor(synthesisOwners, synthesisStore, workflowRepository, artifactAgentRepository, agentComponents.model, agentComponents.contract, agentComponents.organizingScheduler)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	if err := registerSynthesisWorkerExecutors(executors, synthesisExecutor); err != nil {
+		return workerComponents{}, err
+	}
+	synthesisInterview, err := newWorkerSynthesisInterviewComponents(synthesisInterviewPersistence, workflowRepository, agentComponents)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	if err := registerWorkerSynthesisInterviewExecutor(executors, synthesisInterview); err != nil {
+		return workerComponents{}, err
+	}
 	captureProfileGenerator, captureProfileCapability, err := newCaptureProfileGenerator(
 		db, agentComponents.model, agentComponents.contract, artifactAgentRepository,
 		agentComponents.captureScheduler,
@@ -1743,6 +1796,7 @@ func newWorkerComponentsWithModels(db *postgres.Pool, cfg config.Config, models 
 			agentComponents.workspaceSynthesize = nil
 			agentComponents.workspaceValidate = nil
 			agentComponents.workspaceReview = nil
+			agentComponents.workspaceDynamic = agentworkflow.WorkspaceAnalysisV2Executors{}
 			agentComponents.workspaceAnalysisCapability = agentCapabilityStatus{code: agentapplication.ErrorCodeWorkspaceAnalysisCapabilityUnavailable}
 		}
 	}
@@ -1835,11 +1889,12 @@ func newWorkerComponentsWithModels(db *postgres.Pool, cfg config.Config, models 
 	var runtimeGeneration workerRuntimeGenerationBuilder
 	if cfg.ModelSettingsMode == config.ModelSettingsModeManaged {
 		runtimeGeneration = newWorkerRuntimeGenerationBuilder(
-			db, cfg, catalog, workspaceRepository, gitRepository,
+			db, agentConfig, catalog, workspaceRepository, gitRepository,
 			bootstrap, semanticScan, healthScan,
 			artifactAgentRepository, artifactTerminal, runtimeRepository, workflowRepository,
 			captureRepository, captureFetcher, memoryService,
 			organizingRepository, organizingArtifacts, organizingProposals, organizingRenderer, documentContentReader,
+			synthesisOwners, synthesisStore, synthesisInterviewPersistence,
 			metrics, toolComponents.workspaceAnalysisAudit, toolComponents.workspaceAnalysisActorRef,
 		)
 	}
@@ -1906,8 +1961,13 @@ func newWorkerComponentsWithModels(db *postgres.Pool, cfg config.Config, models 
 		if err := definitions.Register(agentworkflow.RegisteredRAGDefinitionV2()); err != nil {
 			return workerComponents{}, err
 		}
-		if agentComponents.workspaceAnalysisCapability.available && agentComponents.workspaceReview != nil {
+		if agentComponents.workspaceReview != nil {
 			if err := definitions.Register(conversationworkflow.RegisteredWorkspaceAnalysisDefinition()); err != nil {
+				agentComponents.workspaceAnalysisCapability = agentCapabilityStatus{code: agentapplication.ErrorCodeWorkspaceAnalysisCapabilityUnavailable}
+			}
+		}
+		if agentComponents.workspaceAnalysisCapability.available && agentComponents.workspaceDynamic.ReviewPublish != nil {
+			if err := definitions.Register(conversationworkflow.RegisteredWorkspaceAnalysisDefinitionV2()); err != nil {
 				agentComponents.workspaceAnalysisCapability = agentCapabilityStatus{code: agentapplication.ErrorCodeWorkspaceAnalysisCapabilityUnavailable}
 			}
 		}
@@ -1927,7 +1987,17 @@ func newWorkerComponentsWithModels(db *postgres.Pool, cfg config.Config, models 
 			return workerComponents{}, err
 		}
 	}
+	if err := registerSynthesisWorkerDefinitions(definitions); err != nil {
+		return workerComponents{}, err
+	}
+	if err := registerWorkerSynthesisInterviewDefinition(definitions); err != nil {
+		return workerComponents{}, err
+	}
 	if err := definitions.Freeze(); err != nil {
+		return workerComponents{}, err
+	}
+	synthesisSources, err := newSynthesisSourceDispatcher(db, synthesisOwners, synthesisStore, runtimeRepository, definitions)
+	if err != nil {
 		return workerComponents{}, err
 	}
 	workflowService, err := workflowapplication.NewRuntimeService(
@@ -2084,6 +2154,7 @@ func newWorkerComponentsWithModels(db *postgres.Pool, cfg config.Config, models 
 		workspaceAnalysisCapability: workspaceAnalysisCapability, artifact: artifactComponents,
 		captureExecutor: captureExecutor, captureOutbox: captureOutbox, captureProfile: captureProfileCapability,
 		organizingExecutor: organizingExecutor, organizingOutbox: organizingOutbox,
+		synthesisExecutor: synthesisExecutor, synthesisSources: synthesisSources, synthesisInterview: synthesisInterview,
 		gitSyncWorker: gitSyncWorker, gitSyncScheduler: gitSyncScheduler, gitSyncCapability: gitSyncCapability,
 		reindexWorker: reindex.worker, reindexRuntime: reindex.runtime, dispatcher: reindex.dispatcher,
 		runtimeClient: runtimeClient, definitions: definitions, executors: executors, runtimeGeneration: runtimeGeneration, sourceProcessing: sourceProcessing, semanticScan: semanticScan, healthScan: healthScan, healthScanStart: healthScanStartService, healthSchedule: healthSchedule, healthAffected: healthAffected, timelineProject: timelineProject, citationBackfill: citationBackfill,
@@ -2114,6 +2185,9 @@ func newWorkerRuntimeGenerationBuilder(
 	organizingProposals *organizingworkflow.ProposalOwner,
 	organizingRenderer *organizingworkflow.EvidenceRenderer,
 	documentContentReader *organizingowner.DocumentContentReader,
+	synthesisOwners synthesisWorkerOwners,
+	synthesisStore *synthesispostgres.Store,
+	synthesisInterviewPersistence *workerSynthesisInterviewPersistence,
 	metrics observability.Metrics,
 	workspaceAnalysisAudit *auditapplication.Recorder,
 	workspaceAnalysisActorRef string,
@@ -2160,6 +2234,20 @@ func newWorkerRuntimeGenerationBuilder(
 			db, cfg, workspaceRepository, memoryService, runtimeRepository, toolComponents, metrics, models,
 		)
 		if err != nil {
+			return nil, err
+		}
+		synthesisExecutor, err := newSynthesisWorkerExecutor(synthesisOwners, synthesisStore, workflowRepository, artifactAgentRepository, agentComponents.model, agentComponents.contract, agentComponents.organizingScheduler)
+		if err != nil {
+			return nil, err
+		}
+		if err := registerSynthesisWorkerExecutors(executors, synthesisExecutor); err != nil {
+			return nil, err
+		}
+		synthesisInterview, err := newWorkerSynthesisInterviewComponents(synthesisInterviewPersistence, workflowRepository, agentComponents)
+		if err != nil {
+			return nil, err
+		}
+		if err := registerWorkerSynthesisInterviewExecutor(executors, synthesisInterview); err != nil {
 			return nil, err
 		}
 		captureProfileGenerator, _, err := newCaptureProfileGenerator(
@@ -2246,7 +2334,10 @@ func newWorkerRuntimeGenerationBuilder(
 			sourceProcessing.store == nil || sourceProcessing.vectors == nil || sourceProcessing.regression == nil || sourceProcessing.refresher == nil {
 			return nil, workerRuntimeNotReadyError(errors.New("managed worker source-processing generation is incomplete"))
 		}
-		return &workerRuntimeGeneration{executors: executors, sources: sourceProcessing}, nil
+		return &workerRuntimeGeneration{
+			executors: executors, sources: sourceProcessing,
+			workspaceAnalysis: newWorkerWorkspaceAnalysisGeneration(agentComponents.workspaceAnalysisCapability, toolComponents),
+		}, nil
 	}
 }
 
@@ -2272,6 +2363,16 @@ func registerWorkerAgentExecutors(registry *workflowapplication.ExecutorRegistry
 }
 
 func registerWorkerWorkspaceAnalysisExecutors(
+	registry *workflowapplication.ExecutorRegistry,
+	components agentWorkflowComponents,
+) error {
+	if err := registerWorkerWorkspaceAnalysisV1Executors(registry, components); err != nil {
+		return err
+	}
+	return registerWorkerWorkspaceAnalysisV2Executors(registry, components.workspaceDynamic)
+}
+
+func registerWorkerWorkspaceAnalysisV1Executors(
 	registry *workflowapplication.ExecutorRegistry,
 	components agentWorkflowComponents,
 ) error {
@@ -2557,8 +2658,8 @@ func newToolRuntimeComponentsWithWorkspaceAnalysisAudit(
 	return components, nil
 }
 
-// newWorkspaceAnalysisToolExecutors constructs the four additional immutable
-// read-only Tool versions before they are registered. Keeping construction
+// newWorkspaceAnalysisToolExecutors constructs both immutable analysis Tool
+// version sets before they are registered. Keeping construction
 // separate prevents a partial optional Tool set from leaking into the fixed
 // RAG runtime when any Workspace Analysis dependency is unavailable.
 func newWorkspaceAnalysisToolExecutors(
@@ -2597,11 +2698,31 @@ func newWorkspaceAnalysisToolExecutors(
 	if err != nil {
 		return nil, err
 	}
+	dynamicGit, err := toolworkspace.NewReadGitStatusV3Executor(statusInspector)
+	if err != nil {
+		return nil, err
+	}
+	dynamicSearch, err := toolretrieval.NewSearchKnowledgeV3Executor(searchService, searchRepository)
+	if err != nil {
+		return nil, err
+	}
+	dynamicRead, err := toolretrieval.NewReadSourceV4Executor(repository, evidenceReference)
+	if err != nil {
+		return nil, err
+	}
+	dynamicCitation, err := toolretrieval.NewValidateCitationV4Executor(repository, evidenceReference, eligibility)
+	if err != nil {
+		return nil, err
+	}
 	return []toolExecutorRegistration{
 		{ref: toolsdomain.ToolRef{Name: "ReadGitStatus", Version: 2}, executor: gitStatusExecutor},
 		{ref: toolsdomain.ToolRef{Name: "SearchKnowledge", Version: 2}, executor: searchExecutor},
 		{ref: toolsdomain.ToolRef{Name: "ReadSource", Version: 3}, executor: readSourceExecutor},
 		{ref: toolsdomain.ToolRef{Name: "ValidateCitation", Version: 3}, executor: validateCitationExecutor},
+		{ref: toolsdomain.ToolRef{Name: "ReadGitStatus", Version: 3}, executor: dynamicGit},
+		{ref: toolsdomain.ToolRef{Name: "SearchKnowledge", Version: 3}, executor: dynamicSearch},
+		{ref: toolsdomain.ToolRef{Name: "ReadSource", Version: 4}, executor: dynamicRead},
+		{ref: toolsdomain.ToolRef{Name: "ValidateCitation", Version: 4}, executor: dynamicCitation},
 	}, nil
 }
 
@@ -2779,6 +2900,7 @@ type agentWorkflowComponents struct {
 	workspaceSynthesize         *agentworkflow.WorkspaceAnalysisSynthesizeExecutor
 	workspaceValidate           *agentworkflow.WorkspaceAnalysisValidateCitationsExecutor
 	workspaceReview             *agentworkflow.WorkspaceAnalysisReviewPublishExecutor
+	workspaceDynamic            agentworkflow.WorkspaceAnalysisV2Executors
 	model                       agentapplication.ChatModel
 	contract                    platformmodels.ChatContract
 	relationScheduler           agentapplication.StructuredPhaseScheduler
@@ -3034,6 +3156,7 @@ func newAgentWorkflowComponentsWithDependencies(
 	var workspaceSynthesize *agentworkflow.WorkspaceAnalysisSynthesizeExecutor
 	var workspaceValidate *agentworkflow.WorkspaceAnalysisValidateCitationsExecutor
 	var workspaceReview *agentworkflow.WorkspaceAnalysisReviewPublishExecutor
+	var workspaceDynamic agentworkflow.WorkspaceAnalysisV2Executors
 	workspaceAnalysisCapability := agentCapabilityStatus{}
 	if cfg.WorkspaceAnalysisWorkerEnabled {
 		workspaceAnalysisCapability.code = agentapplication.ErrorCodeWorkspaceAnalysisCapabilityUnavailable
@@ -3151,6 +3274,27 @@ func newAgentWorkflowComponentsWithDependencies(
 		if err != nil {
 			return err
 		}
+		decisions, err := agentapplication.NewWorkspaceAnalysisDecisionRunner(agentapplication.WorkspaceAnalysisDecisionRunnerDependencies{
+			Catalog: catalog, Repository: modelOperations,
+			IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{},
+		})
+		if err != nil {
+			return err
+		}
+		loop, err := agenteino.NewWorkspaceAnalysisLoopRuntime(runtimeChat.Model(), metrics)
+		if err != nil {
+			return err
+		}
+		workspaceDynamic, err = agentworkflow.NewWorkspaceAnalysisV2Executors(agentworkflow.WorkspaceAnalysisV2ExecutorDependencies{
+			Context: conversationRepository, Runs: repository, Inputs: runtimeRepository, Stages: runtimeRepository,
+			Journal: modelOperations, Catalog: catalog, Decisions: decisions, Runtime: loop,
+			Tools: tools.execution, ToolOutputs: tools.repository, Evidence: tools.repository,
+			Candidates: modelOperations, Validation: tools.repository,
+			Synthesis: synthesisRunner, Review: reviewRunner, Finalizer: workspaceFinalizer, Clock: foundation.SystemClock{},
+		})
+		if err != nil {
+			return err
+		}
 		return nil
 	}
 	if requireV2Runtime && runtimeRepository != nil && cfg.WorkspaceAnalysisWorkerEnabled &&
@@ -3164,11 +3308,13 @@ func newAgentWorkflowComponentsWithDependencies(
 			workspaceSynthesize = nil
 			workspaceValidate = nil
 			workspaceReview = nil
+			workspaceDynamic = agentworkflow.WorkspaceAnalysisV2Executors{}
 		}
 	}
 	return agentWorkflowComponents{
 		relation: relation, rag: rag, workspaceInspect: workspaceInspect,
 		workspaceRetrieve: workspaceRetrieve, workspaceRead: workspaceRead, workspaceSynthesize: workspaceSynthesize,
+		workspaceDynamic:  workspaceDynamic,
 		workspaceValidate: workspaceValidate, workspaceReview: workspaceReview,
 		model: model, contract: contract,
 		relationScheduler: relationScheduler, ragScheduler: ragScheduler, ragRuntimeScheduler: ragRuntimeScheduler,
@@ -3434,23 +3580,23 @@ func validateWorkspaceAnalysisWorkerRuntime(
 		}
 		return contract.Definition.Timeout, nil
 	}
-	gitTimeout, err := resolveTimeout(toolsdomain.ToolRef{Name: "ReadGitStatus", Version: 2})
+	gitTimeout, err := resolveTimeout(toolsdomain.ToolRef{Name: "ReadGitStatus", Version: 3})
 	if err != nil {
 		return err
 	}
-	searchTimeout, err := resolveTimeout(toolsdomain.ToolRef{Name: "SearchKnowledge", Version: 2})
+	searchTimeout, err := resolveTimeout(toolsdomain.ToolRef{Name: "SearchKnowledge", Version: 3})
 	if err != nil {
 		return err
 	}
-	readTimeout, err := resolveTimeout(toolsdomain.ToolRef{Name: "ReadSource", Version: 3})
+	readTimeout, err := resolveTimeout(toolsdomain.ToolRef{Name: "ReadSource", Version: 4})
 	if err != nil {
 		return err
 	}
-	validateTimeout, err := resolveTimeout(toolsdomain.ToolRef{Name: "ValidateCitation", Version: 3})
+	validateTimeout, err := resolveTimeout(toolsdomain.ToolRef{Name: "ValidateCitation", Version: 4})
 	if err != nil {
 		return err
 	}
-	deadlines, err := agentdomain.DeriveWorkspaceAnalysisV1Deadlines(agentdomain.WorkspaceAnalysisV1Timeouts{
+	deadlines, err := agentdomain.DeriveWorkspaceAnalysisV2Deadlines(agentdomain.WorkspaceAnalysisV2Timeouts{
 		PlanModelTimeout: modelCallTimeout, SynthesisModelTimeout: modelCallTimeout, ReviewModelTimeout: modelCallTimeout,
 		GitToolTimeout: gitTimeout, SearchToolTimeout: searchTimeout, SourceReadToolTimeout: readTimeout,
 		ValidateCitationToolTimeout: validateTimeout,
@@ -3501,11 +3647,11 @@ func newSourceProcessingComponents(db *postgres.Pool, cfg config.Config, workspa
 		Repository: workspaceRepository, ManagedFiles: files, CommittedFiles: files, CommittedGit: committedGit,
 		IDs: ids, Clock: clock,
 	})
-	gormDB, err := db.GORM()
+	sourceReadyOutbox, err := workflowpostgres.NewGORMSourceReadyOutbox(db)
 	if err != nil {
 		return sourceProcessingComponents{}, err
 	}
-	ingestionRepository, err := ingestionpostgres.NewGORMRepository(gormDB)
+	ingestionRepository, err := ingestionpostgres.NewGORMRepositoryWithSourceReady(db, sourceReadyOutbox)
 	if err != nil {
 		return sourceProcessingComponents{}, err
 	}

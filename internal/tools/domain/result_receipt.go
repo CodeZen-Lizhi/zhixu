@@ -360,6 +360,9 @@ func ValidateResultReceipt(receipt ResultReceipt, call ToolCall, definition Defi
 }
 
 func workspaceAnalysisResultReceiptContract(ref ToolRef) ResultReceiptContract {
+	if contract, ok := workspaceAnalysisDynamicResultReceiptContract(ref); ok {
+		return contract
+	}
 	switch ref {
 	case ToolRef{Name: "ReadGitStatus", Version: 2}:
 		return ResultReceiptContract{
@@ -417,7 +420,7 @@ func validateResultReceiptAuthorityWithin(
 		definition.MaxOutputBytes != contract.MaxOutputBytes || definition.RequiredCapability != capability.ReadLocal ||
 		definition.SideEffectLevel != SideEffectNone || definition.InvocationPolicy != InvocationTrustedWorkflowOnly ||
 		definition.ResultPersistencePolicy != ResultPersistenceCanonical || len(definition.AllowedWorkflows) != 1 ||
-		definition.AllowedWorkflows[0] != (WorkflowBinding{Key: workspaceAnalysisWorkflowKey, Version: workspaceAnalysisWorkflowVersion}) {
+		definition.AllowedWorkflows[0] != (WorkflowBinding{Key: workspaceAnalysisWorkflowKey, Version: WorkspaceAnalysisToolWorkflowVersion(definition.Ref)}) {
 		return ResultReceiptContract{}, invalid(ErrorCodeResultReceiptInvalid, "tool result receipt definition is not canonical or opted in")
 	}
 	if err := ValidateToolCall(call); err != nil {
@@ -472,6 +475,9 @@ func validateExactResultReceiptDocuments(
 	output json.RawMessage,
 	binding *ResultReceiptPrivateBinding,
 ) error {
+	if WorkspaceAnalysisToolWorkflowVersion(contract.Tool) == 2 {
+		return validateDynamicResultReceiptDocuments(contract, output, binding)
+	}
 	switch contract.Tool {
 	case ToolRef{Name: "ReadGitStatus", Version: 2}:
 		if _, err := decodeExactReceiptDocument(output, contract.MaxOutputBytes, validateReadGitStatusV2ReceiptOutput); err != nil {

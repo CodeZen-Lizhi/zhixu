@@ -23,6 +23,7 @@ export * from './ReviewApi';
 export * from './SearchApi';
 export * from './SemanticLinksApi';
 export * from './SourceSpansApi';
+export * from './SynthesisApi';
 export * from './SystemApi';
 export * from './TimelineApi';
 export * from './WorkspacesApi';

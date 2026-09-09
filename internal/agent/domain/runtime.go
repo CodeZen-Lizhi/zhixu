@@ -140,7 +140,9 @@ func ValidateModelRun(run ModelRun) error {
 	if run.MemoryContext.IsBound() && run.MemoryContext.Validate() != nil {
 		return invalid(ErrorCodeModelRunInvalid, "model run memory context snapshot is invalid")
 	}
-	if !retrievalBound && run.Schema.ID != RAGAnswerSchemaID && run.Schema.ID != OrganizingOutlineSchemaID && run.Schema.ID != OrganizingDocumentSchemaID {
+	if !retrievalBound && run.Schema.ID != RAGAnswerSchemaID && run.Schema.ID != OrganizingOutlineSchemaID && run.Schema.ID != OrganizingDocumentSchemaID &&
+		run.Schema.ID != SynthesisDeltaSchemaID && run.Schema.ID != SynthesisSemanticReviewSchemaID && run.Schema.ID != SynthesisNoteInterviewPlanSchemaID &&
+		run.Schema.ID != WorkspaceAnalysisDecisionSchemaID {
 		return invalid(ErrorCodeModelRunInvalid, "model run retrieval snapshot is required")
 	}
 	switch run.Status {
@@ -270,7 +272,8 @@ func validSuccessfulResultType(value string) bool {
 		value == ResultTypeArtifactSection || value == ResultTypeToolRequest || value == ResultTypeClarification ||
 		value == ResultTypeDocumentKnowledgeProfile || value == ResultTypeOrganizingOutline ||
 		value == ResultTypeOrganizingDocument || value == ResultTypeWorkspaceAnalysisPlan ||
-		value == ResultTypeWorkspaceAnalysisAnswer
+		value == ResultTypeWorkspaceAnalysisAnswer || value == ResultTypeSynthesisDelta ||
+		value == ResultTypeSynthesisSemanticReview || value == ResultTypeSynthesisNoteInterviewPlan || value == ResultTypeWorkspaceAnalysisDecision
 }
 
 func canonicalErrorCode(value string) bool {

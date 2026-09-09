@@ -354,12 +354,12 @@ func CanonicalizeWorkspaceAnalysisPublishedResult(status AnswerPublicationStatus
 	)
 	switch resultType {
 	case AnswerResultWorkspaceAnalysis:
-		decoded, decodeErr := decodeWorkspaceAnalysisAnswer(raw)
+		decoded, decodeErr := decodeWorkspaceAnalysisAnswerDocument(raw)
 		if decodeErr != nil {
 			return WorkspaceAnalysisPublishedResult{}, decodeErr
 		}
 		modelRunID = copyWorkspaceAnalysisID(&decoded.ModelRunRef)
-		document, err = json.Marshal(decoded)
+		document = decoded.Document
 	case AnswerResultWorkspaceAnalysisRefusal:
 		decoded, decodeErr := decodeWorkspaceAnalysisRefusal(raw)
 		if decodeErr != nil {

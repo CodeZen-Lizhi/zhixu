@@ -2,7 +2,9 @@ package application
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"log/slog"
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
@@ -69,6 +71,21 @@ type PrepareWorkspaceAnalysisToolOperationCommand struct {
 	CandidateOperationID    foundation.ID
 	RequestHash             string
 	ExpectedToolCatalogHash string
+	Arguments               json.RawMessage `json:"-"`
+	// RequireExisting prevents recovery from manufacturing a missing pending fact.
+	RequireExisting bool
+}
+
+func (PrepareWorkspaceAnalysisToolOperationCommand) String() string {
+	return "PrepareWorkspaceAnalysisToolOperationCommand{[REDACTED]}"
+}
+
+func (command PrepareWorkspaceAnalysisToolOperationCommand) GoString() string {
+	return command.String()
+}
+
+func (command PrepareWorkspaceAnalysisToolOperationCommand) LogValue() slog.Value {
+	return slog.StringValue(command.String())
 }
 
 // Validate 校验候选 Operation、逻辑槽位与冻结请求目录绑定。
@@ -422,9 +439,10 @@ func (query WorkspaceAnalysisRunToolAuthorityQuery) Validate() error {
 
 // WorkspaceAnalysisRunToolAuthority 是 Tools 可见的最小 Analysis Run 身份投影。
 type WorkspaceAnalysisRunToolAuthority struct {
-	AnalysisRunID foundation.ID
-	WorkspaceID   foundation.ID
-	WorkflowRunID foundation.ID
+	AnalysisRunID     foundation.ID
+	WorkspaceID       foundation.ID
+	WorkflowRunID     foundation.ID
+	DefinitionVersion int64
 }
 
 // Validate 校验 Run authority 投影的 owner 身份完整且不复用。
@@ -506,13 +524,14 @@ type WorkspaceAnalysisToolCandidateAuthority struct {
 	AnalysisRunID foundation.ID
 	CandidateHash string
 	CitationRefs  []string
+	SchemaVersion int64
 }
 
 // Validate 校验 Candidate 投影的身份、哈希与 E1..E3 引用集合。
 func (authority WorkspaceAnalysisToolCandidateAuthority) Validate() error {
 	if validateWorkspaceAnalysisModelQueryIDs(authority.CandidateID, authority.AnalysisRunID) != nil ||
 		!canonicalWorkspaceAnalysisSHA256(authority.CandidateHash) ||
-		!validWorkspaceAnalysisToolCitationRefs(authority.CitationRefs) {
+		!validWorkspaceAnalysisToolCitationRefsVersion(authority.CitationRefs, authority.SchemaVersion) {
 		return workspaceAnalysisToolInvalid(errors.New("workspace analysis tool candidate authority is invalid"))
 	}
 	return nil
@@ -588,6 +607,26 @@ func validWorkspaceAnalysisToolResult(result *domain.WorkspaceAnalysisOperationR
 }
 
 func validWorkspaceAnalysisToolCitationRefs(references []string) bool {
+	return validWorkspaceAnalysisToolCitationRefsVersion(references, 1)
+}
+
+func validWorkspaceAnalysisToolCitationRefsVersion(references []string, version int64) bool {
+	if version == 2 {
+		if len(references) < 1 || len(references) > domain.WorkspaceAnalysisV2MaxSourceReads {
+			return false
+		}
+		seen := map[string]bool{}
+		for _, ref := range references {
+			if !domain.ValidWorkspaceAnalysisV2EvidenceRef(ref) || seen[ref] {
+				return false
+			}
+			seen[ref] = true
+		}
+		return true
+	}
+	if version != 0 && version != 1 {
+		return false
+	}
 	if len(references) < 1 || len(references) > domain.WorkspaceAnalysisV1MaxSourceReads {
 		return false
 	}

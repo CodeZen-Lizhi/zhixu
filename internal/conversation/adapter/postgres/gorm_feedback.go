@@ -24,6 +24,7 @@ func (repository *GORMRepository) RecordFeedback(ctx context.Context, record con
 	err := withinConversationTransaction(ctx, repository.uow, foundation.TransactionOptions{}, func(ctx context.Context, tx *gorm.DB, _ foundation.TransactionScope) error {
 		answer, err := scanAnswerView(gormScanRow(tx.Raw(`SELECT `+answerViewColumns+`
 			FROM agent.answer a JOIN workflow.run w ON w.id=a.workflow_run_id AND w.workspace_id=a.workspace_id
+			JOIN workflow.definition d ON d.id=w.definition_id AND d.workspace_id=w.workspace_id
 			WHERE a.workspace_id=? AND a.id=? FOR UPDATE OF a`, string(record.Feedback.Request.WorkspaceID), string(record.Feedback.Request.AnswerID))))
 		if errors.Is(err, sql.ErrNoRows) {
 			return notFound(ErrorCodeAnswerNotFound, err)

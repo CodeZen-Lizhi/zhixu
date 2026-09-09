@@ -36,7 +36,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const expectedOpenAPIOperationCount = 189
+const expectedOpenAPIOperationCount = 211
 
 var openAPIOperationMethods = map[string]struct{}{
 	"delete":  {},
@@ -81,35 +81,37 @@ func completeRouteInventoryDependencies(t *testing.T) Dependencies {
 		t.Fatal(err)
 	}
 	return Dependencies{
-		Version:         "route-inventory-test",
-		Database:        fakePinger{},
-		Workspace:       workspacehttp.NewHandler(nil),
-		Workflow:        workflowhttp.NewHandler(nil),
-		ChangeControl:   changecontrolhttp.NewHandler(nil),
-		Collection:      collectionhttp.NewHandler(nil, time.Second),
-		Health:          healthhttp.NewHandler(nil, nil, nil, nil, nil),
-		Ingestion:       ingestionhttp.NewHandler(nil),
-		Retrieval:       retrievalhttp.NewHandler(nil, nil, nil),
-		Graph:           graphhttp.NewHandler(nil, time.Second),
-		Candidate:       graphhttp.NewCandidateHandler(nil, time.Second),
-		Conversation:    conversationhttp.NewHandler(nil, nil),
-		DraftStream:     conversationhttp.NewDraftStreamHandler(nil),
-		Events:          eventshttp.NewHandler(nil),
-		Export:          exporthttp.NewHandler(nil),
-		Review:          reviewhttp.NewHandler(nil, time.Second),
-		LearningPath:    learningpathhttp.NewHandler(nil, time.Second),
-		Memory:          memoryhttp.NewHandler(nil, time.Second),
-		Interview:       interviewhttp.NewHandler(nil, time.Second),
-		Knowledge:       knowledgehttp.NewHandler(nil, nil, time.Second),
-		Artifact:        artifacthttp.NewHandler(nil, nil, time.Second),
-		Authoring:       authoringhttp.NewHandler(nil, time.Second),
-		Capture:         capturehttp.NewHandler(nil, time.Second),
-		Organizing:      organizinghttp.NewHandler(nil, nil, nil, time.Second),
-		DocumentHistory: documenthistoryhttp.NewHandler(nil, time.Second),
-		GitSync:         gitsynchttp.NewHandler(nil, time.Second),
-		ModelSettings:   modelSettings,
-		Auth:            readyAuthHandler(t),
-		AuthRequired:    true,
+		Version:            "route-inventory-test",
+		Database:           fakePinger{},
+		Workspace:          workspacehttp.NewHandler(nil),
+		Workflow:           workflowhttp.NewHandler(nil),
+		ChangeControl:      changecontrolhttp.NewHandler(nil),
+		Collection:         collectionhttp.NewHandler(nil, time.Second),
+		Health:             healthhttp.NewHandler(nil, nil, nil, nil, nil),
+		Ingestion:          ingestionhttp.NewHandler(nil),
+		Retrieval:          retrievalhttp.NewHandler(nil, nil, nil),
+		Graph:              graphhttp.NewHandler(nil, time.Second),
+		Candidate:          graphhttp.NewCandidateHandler(nil, time.Second),
+		Conversation:       conversationhttp.NewHandler(nil, nil),
+		DraftStream:        conversationhttp.NewDraftStreamHandler(nil),
+		Events:             eventshttp.NewHandler(nil),
+		Export:             exporthttp.NewHandler(nil),
+		Review:             reviewhttp.NewHandler(nil, time.Second),
+		LearningPath:       learningpathhttp.NewHandler(nil, time.Second),
+		Memory:             memoryhttp.NewHandler(nil, time.Second),
+		Interview:          interviewhttp.NewHandler(nil, time.Second),
+		Knowledge:          knowledgehttp.NewHandler(nil, nil, time.Second),
+		Artifact:           artifacthttp.NewHandler(nil, nil, time.Second),
+		Authoring:          authoringhttp.NewHandler(nil, time.Second),
+		Capture:            capturehttp.NewHandler(nil, time.Second),
+		Organizing:         organizinghttp.NewHandler(nil, nil, nil, time.Second),
+		Synthesis:          organizinghttp.NewSynthesisHandler(nil, nil, time.Second),
+		SynthesisInterview: interviewhttp.NewNotePreparationHandler(nil),
+		DocumentHistory:    documenthistoryhttp.NewHandler(nil, time.Second),
+		GitSync:            gitsynchttp.NewHandler(nil, time.Second),
+		ModelSettings:      modelSettings,
+		Auth:               readyAuthHandler(t),
+		AuthRequired:       true,
 	}
 }
 

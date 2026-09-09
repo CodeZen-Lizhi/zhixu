@@ -40,6 +40,12 @@ const (
 	WorkspaceAnalysisCandidateSchemaID = "agent.workspace-analysis-candidate"
 	// WorkspaceAnalysisCandidateSchemaVersion 是候选持久表使用的数字 Schema 版本。
 	WorkspaceAnalysisCandidateSchemaVersion int64 = 1
+	// SynthesisDeltaSchemaID binds original parse excerpts to restricted note deltas.
+	SynthesisDeltaSchemaID = "agent.synthesis-delta"
+	// SynthesisSemanticReviewSchemaID independently reviews every delta assertion.
+	SynthesisSemanticReviewSchemaID = "agent.synthesis-semantic-review"
+	// SynthesisNoteInterviewPlanSchemaID plans an interview from a frozen published note.
+	SynthesisNoteInterviewPlanSchemaID = "agent.synthesis-note-interview-plan"
 	// OutputSchemaVersionV1 是项目自有 Agent 结构化输出的首个版本。
 	OutputSchemaVersionV1 = "v1"
 	// OutputSchemaVersionV2 是 RAG Answer 增量字段使用的第二个版本。
@@ -66,6 +72,12 @@ const (
 	ResultTypeWorkspaceAnalysisPlan = "workspace_analysis_plan"
 	// ResultTypeWorkspaceAnalysisAnswer 是工作区分析 Synthesis Candidate 的稳定终态类型。
 	ResultTypeWorkspaceAnalysisAnswer = "workspace_analysis_answer"
+	// ResultTypeSynthesisDelta is an accepted, source-bound incremental note proposal.
+	ResultTypeSynthesisDelta = "synthesis_delta"
+	// ResultTypeSynthesisSemanticReview includes accepted and rejected semantic reviews.
+	ResultTypeSynthesisSemanticReview = "synthesis_semantic_review"
+	// ResultTypeSynthesisNoteInterviewPlan is a frozen note interview question plan.
+	ResultTypeSynthesisNoteInterviewPlan = "synthesis_note_interview_plan"
 
 	maxOutputTextBytes = 16 * 1024
 	maxSummaryBytes    = 4 * 1024

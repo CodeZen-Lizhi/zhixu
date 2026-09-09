@@ -208,17 +208,19 @@ func ValidateWorkspaceAnalysisRun(run WorkspaceAnalysisRun) error {
 		ids = append(ids, *run.ReviewModelRunID)
 	}
 	if !canonicalUniqueIDs(ids, true) || run.DefinitionKey != workspaceAnalysisDefinitionKey ||
-		run.DefinitionVersion != workspaceAnalysisDefinitionVersion || !canonicalSHA256(run.DefinitionHash) ||
-		!canonicalSHA256(run.ToolCatalogHash) || run.PolicyVersion != WorkspaceAnalysisPolicyVersionV1 ||
+		!validWorkspaceAnalysisVersion(run.DefinitionVersion, run.PolicyVersion) || !canonicalSHA256(run.DefinitionHash) ||
+		!canonicalSHA256(run.ToolCatalogHash) ||
 		run.ConfigRevision < 0 || run.Version < 1 || run.CreatedAt.IsZero() || run.UpdatedAt.Before(run.CreatedAt) ||
 		!run.DeadlineAt.After(run.CreatedAt) {
 		return invalid(ErrorCodeWorkspaceAnalysisRunInvalid, "workspace analysis run identity, policy, or lifecycle is invalid")
 	}
-	deadlines, err := DeriveWorkspaceAnalysisV1Deadlines(run.Timeouts)
-	if err != nil || !run.DeadlineAt.Equal(run.CreatedAt.Add(deadlines.RunDeadline())) {
+	duration, err := workspaceAnalysisRunDuration(run)
+	if err != nil || !run.DeadlineAt.Equal(run.CreatedAt.Add(duration)) {
 		return invalid(ErrorCodeWorkspaceAnalysisRunInvalid, "workspace analysis run timeout snapshot or deadline drifted")
 	}
-	if !validWorkspaceAnalysisLimits(run.Limits) || !workspaceAnalysisAmountWithin(run.Reserved, run.Settled, run.Limits.Amount) {
+	validLimits := run.PolicyVersion == WorkspaceAnalysisPolicyVersionV1 && validWorkspaceAnalysisLimits(run.Limits) ||
+		run.PolicyVersion == WorkspaceAnalysisPolicyVersionV2 && validWorkspaceAnalysisV2Limits(run.Limits)
+	if !validLimits || !workspaceAnalysisAmountWithin(run.Reserved, run.Settled, run.Limits.Amount) {
 		return inconsistent(ErrorCodeWorkspaceAnalysisRunInvalid, "workspace analysis run budget exceeds its frozen limits")
 	}
 	if !run.Status.Active() && !run.Status.Terminal() {
@@ -241,6 +243,16 @@ func ValidateWorkspaceAnalysisRun(run WorkspaceAnalysisRun) error {
 		return inconsistent(ErrorCodeWorkspaceAnalysisRunInvalid, "successful workspace analysis run completed after its deadline")
 	}
 	if run.Status == WorkspaceAnalysisRunSucceeded {
+		if run.PolicyVersion == WorkspaceAnalysisPolicyVersionV2 {
+			if run.ValidationReceiptID == nil || run.ReviewModelRunID == nil ||
+				run.Settled.ModelCalls < WorkspaceAnalysisV2MinCompletedModelCalls || run.Settled.ModelCalls > WorkspaceAnalysisV2MaxModelCalls ||
+				run.Settled.ToolCalls < WorkspaceAnalysisV2MinCompletedToolCalls || run.Settled.ToolCalls > WorkspaceAnalysisV2MaxToolCalls ||
+				run.Settled.SourceReads < 1 || run.Settled.SourceReads > WorkspaceAnalysisV2MaxSourceReads ||
+				run.Settled.ModelCalls != run.Settled.ToolCalls+2 {
+				return inconsistent(ErrorCodeWorkspaceAnalysisRunInvalid, "successful workspace analysis v2 run proof or budget is incomplete")
+			}
+			return nil
+		}
 		if run.ValidationReceiptID == nil || run.ReviewModelRunID == nil ||
 			run.Settled.ModelCalls != WorkspaceAnalysisV1MaxModelCalls ||
 			run.Settled.ToolCalls < WorkspaceAnalysisV1MinCompletedToolCalls || run.Settled.ToolCalls > WorkspaceAnalysisV1MaxToolCalls ||
@@ -577,14 +589,14 @@ type WorkspaceAnalysisCandidateResult struct {
 // Validate 校验候选只包含有界正文、E1..E3 短引用和引用子集建议。
 func (result WorkspaceAnalysisCandidateResult) Validate() error {
 	if result.ResultType != ResultTypeWorkspaceAnalysisCandidate || result.SchemaID != WorkspaceAnalysisCandidateSchemaID ||
-		result.SchemaVersion != workspaceAnalysisCandidateDocumentVersion || !canonicalID(result.ModelRunRef) ||
+		(result.SchemaVersion != workspaceAnalysisCandidateDocumentVersion && result.SchemaVersion != "2") || !canonicalID(result.ModelRunRef) ||
 		!boundedText(result.Payload.AnswerMarkdown, maxWorkspaceAnalysisCandidateAnswerBytes, true) ||
-		!validWorkspaceAnalysisCandidateReferences(result.Payload.CitationRefs, true) {
+		!validWorkspaceAnalysisCandidateReferencesForVersion(result.Payload.CitationRefs, true, result.SchemaVersion) {
 		return invalid(ErrorCodeWorkspaceAnalysisCandidateInvalid, "workspace analysis candidate document is invalid")
 	}
 	if proposal := result.Payload.ProposalSuggestion; proposal != nil {
 		if !boundedText(proposal.Summary, maxWorkspaceAnalysisCandidateSummaryBytes, true) ||
-			!validWorkspaceAnalysisCandidateReferences(proposal.CitationRefs, true) ||
+			!validWorkspaceAnalysisCandidateReferencesForVersion(proposal.CitationRefs, true, result.SchemaVersion) ||
 			!workspaceAnalysisCandidateReferenceSubset(proposal.CitationRefs, result.Payload.CitationRefs) {
 			return invalid(ErrorCodeWorkspaceAnalysisCandidateInvalid, "workspace analysis candidate proposal is invalid")
 		}
@@ -688,10 +700,10 @@ func ValidateWorkspaceAnalysisCandidate(candidate WorkspaceAnalysisCandidate) er
 	limits.MaxStringBytes = maxWorkspaceAnalysisCandidateAnswerBytes
 	decoded, decodeErr := DecodeWorkspaceAnalysisCandidate(candidate.Document, limits)
 	if !canonicalUniqueIDs(ids, true) || candidate.SchemaID != WorkspaceAnalysisCandidateSchemaID ||
-		candidate.SchemaVersion != WorkspaceAnalysisCandidateSchemaVersion || candidate.CreatedAt.IsZero() ||
+		(candidate.SchemaVersion != WorkspaceAnalysisCandidateSchemaVersion && candidate.SchemaVersion != WorkspaceAnalysisCandidateSchemaVersionV2) || candidate.CreatedAt.IsZero() ||
 		candidate.DocumentBytes < 1 || candidate.DocumentBytes > MaxWorkspaceAnalysisCandidateBytes ||
 		candidate.DocumentBytes != int64(len(candidate.Document)) || decodeErr != nil ||
-		decoded.ModelRunRef != candidate.SynthesisModelRunID || !workspaceAnalysisCanonicalDocument(candidate.Document, decoded) ||
+		decoded.ModelRunRef != candidate.SynthesisModelRunID || decoded.SchemaVersion != fmt.Sprint(candidate.SchemaVersion) || !workspaceAnalysisCanonicalDocument(candidate.Document, decoded) ||
 		candidate.DocumentHash != workspaceAnalysisDocumentHash(candidate.Document) {
 		return invalid(ErrorCodeWorkspaceAnalysisCandidateInvalid, "workspace analysis candidate identity or document is invalid")
 	}
@@ -742,7 +754,7 @@ func ValidateWorkspaceAnalysisCandidateBinding(candidate WorkspaceAnalysisCandid
 	if err := ValidateModelRun(modelRun); err != nil {
 		return err
 	}
-	if candidate.WorkspaceID != run.WorkspaceID || candidate.AnalysisRunID != run.ID || candidate.AnswerID != run.AnswerID ||
+	if candidate.SchemaVersion != run.DefinitionVersion || candidate.WorkspaceID != run.WorkspaceID || candidate.AnalysisRunID != run.ID || candidate.AnswerID != run.AnswerID ||
 		candidate.SynthesisOperationID != operation.ID || operation.AnalysisRunID != run.ID ||
 		operation.Kind != WorkspaceAnalysisOperationAnswerSynthesis || operation.Call == nil ||
 		operation.Call.Kind != WorkspaceAnalysisOperationCallModel || operation.FirstNodeAttemptID == nil ||
@@ -854,6 +866,9 @@ func workspaceAnalysisReservationStatusMatchesOperation(reservation WorkspaceAna
 }
 
 func workspaceAnalysisReservationMatchesOperationPolicy(run WorkspaceAnalysisRun, reservation WorkspaceAnalysisBudgetReservation, kind WorkspaceAnalysisOperationKind) bool {
+	if run.PolicyVersion == WorkspaceAnalysisPolicyVersionV2 {
+		return workspaceAnalysisV2ReservationMatchesOperationPolicy(run, reservation, kind)
+	}
 	if reservation.CallKind == WorkspaceAnalysisOperationCallTool {
 		return (reservation.Reserved.SourceReads == 1) == (kind == WorkspaceAnalysisOperationSourceRead)
 	}

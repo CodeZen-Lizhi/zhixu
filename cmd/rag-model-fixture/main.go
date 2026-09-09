@@ -23,17 +23,18 @@ import (
 )
 
 const (
-	defaultAddress                               = "127.0.0.1:18080"
-	defaultModelVersion                          = "rag-smoke-v1"
-	maxRequestBytes                              = 4 << 20
-	maxWorkspaceAnalysisFixtureExcerptBytes      = 4 << 10
-	fixtureFinalAnswer                           = "Approved recovery requires durable replay without duplicate provider work."
-	fixtureWorkspaceAnalysisCandidate            = "The supplied workspace evidence supports this bounded fixture result [E1]."
-	workspaceAnalysisCandidateResponseSchemaName = "zhixu_workspace_analysis_candidate_v1"
-	defaultBarrierPoll                           = 50 * time.Millisecond
-	defaultBarrierWait                           = 2 * time.Minute
-	fixtureBarrierTokenBytes                     = 16
-	maxFixtureAnswerStreamFrameDelay             = 5 * time.Second
+	defaultAddress                                 = "127.0.0.1:18080"
+	defaultModelVersion                            = "rag-smoke-v1"
+	maxRequestBytes                                = 4 << 20
+	maxWorkspaceAnalysisFixtureExcerptBytes        = 4 << 10
+	fixtureFinalAnswer                             = "Approved recovery requires durable replay without duplicate provider work."
+	fixtureWorkspaceAnalysisCandidate              = "The supplied workspace evidence supports this bounded fixture result [E1]."
+	workspaceAnalysisCandidateResponseSchemaName   = "zhixu_workspace_analysis_candidate_v1"
+	workspaceAnalysisCandidateResponseSchemaNameV2 = "zhixu_workspace_analysis_candidate_v2"
+	defaultBarrierPoll                             = 50 * time.Millisecond
+	defaultBarrierWait                             = 2 * time.Minute
+	fixtureBarrierTokenBytes                       = 16
+	maxFixtureAnswerStreamFrameDelay               = 5 * time.Second
 )
 
 type schemaContract struct {
@@ -410,7 +411,13 @@ func serveChatWithConfig(w http.ResponseWriter, r *http.Request, modelVersion, a
 				rejectFixtureContract(w, stage, err, http.StatusGatewayTimeout)
 				return
 			}
-			serveWorkspaceAnalysisCandidateStream(w, modelVersion, evidenceRefs[0])
+			if request.ResponseFormat.JSONSchema.Name == workspaceAnalysisCandidateResponseSchemaNameV2 {
+				if err := serveWorkspaceAnalysisCandidateStreamV2(w, request, modelVersion, evidenceRefs); err != nil {
+					rejectFixtureContract(w, stage, err, http.StatusUnprocessableEntity)
+				}
+			} else {
+				serveWorkspaceAnalysisCandidateStream(w, modelVersion, evidenceRefs[0])
+			}
 			return
 		}
 		if err := config.barrier.wait(r.Context(), stage); err != nil {
@@ -457,12 +464,15 @@ func fixtureError(reason, message string) error {
 
 func fixtureRequestStage(request chatRequest) string {
 	if request.Stream {
-		if request.ResponseFormat.JSONSchema.Name == workspaceAnalysisCandidateResponseSchemaName {
+		if request.ResponseFormat.JSONSchema.Name == workspaceAnalysisCandidateResponseSchemaName || request.ResponseFormat.JSONSchema.Name == workspaceAnalysisCandidateResponseSchemaNameV2 {
 			return "workspace_analysis_candidate_stream"
 		}
 		return "answer_stream"
 	}
 	if request.ResponseFormat.Type == "json_schema" {
+		if stage := synthesisNotesFixtureStage(request.ResponseFormat.JSONSchema.Schema); stage != "" {
+			return stage
+		}
 		if isQueryPlanProviderSchemaV2(request.ResponseFormat.JSONSchema.Schema) {
 			return "structured_plan"
 		}
@@ -483,6 +493,14 @@ func fixtureRequestStage(request chatRequest) string {
 		}
 		return "structured_unknown"
 	}
+	if isWorkspaceAnalysisLoopFixtureRequest(request) {
+		input, _ := lastTaskInput(request.Messages)
+		question, _ := input["question"].(string)
+		if strings.Contains(strings.ToLower(question), "budget-loop") {
+			return "workspace_analysis_budget_decision"
+		}
+		return "workspace_analysis_decision"
+	}
 	if hasToolMessage(request.Messages) {
 		return "agent_followup"
 	}
@@ -500,6 +518,18 @@ func hasBearerCanary(values []string, apiKey string) bool {
 func serveStructuredChat(w http.ResponseWriter, request chatRequest, modelVersion string) error {
 	if len(request.Tools) != 0 || len(request.ToolChoice) != 0 || request.StreamOptions != nil || !request.ResponseFormat.JSONSchema.Strict {
 		return fixtureError("structured_contract_unsupported", "unsupported structured request contract")
+	}
+	if stage := synthesisNotesFixtureStage(request.ResponseFormat.JSONSchema.Schema); stage != "" {
+		input, err := lastTaskInput(request.Messages)
+		if err != nil {
+			return fixtureError("structured_input_missing", "missing task input")
+		}
+		content, err := synthesisNotesFixtureResponse(stage, input)
+		if err != nil {
+			return err
+		}
+		writeCompletion(w, modelVersion, content, nil, "stop")
+		return nil
 	}
 	if isModelSettingsConnectionSchema(request.ResponseFormat.JSONSchema.Schema) {
 		writeCompletion(w, modelVersion, `{"ok":true}`, nil, "stop")
@@ -600,6 +630,10 @@ func hasExactProviderStringArraySchema(raw json.RawMessage, minItems, maxItems, 
 }
 
 func isWorkspaceAnalysisCandidateProviderSchema(raw json.RawMessage) bool {
+	return isWorkspaceAnalysisCandidateProviderSchemaVersion(raw, "1", hasWorkspaceAnalysisCitationRefsSchema)
+}
+
+func isWorkspaceAnalysisCandidateProviderSchemaVersion(raw json.RawMessage, version string, validateRefs func(json.RawMessage) bool) bool {
 	var root map[string]json.RawMessage
 	if json.Unmarshal(raw, &root) != nil || !hasExactJSONKeys(root, "type", "additionalProperties", "required", "properties") ||
 		!jsonRawEquals(root["type"], "object") || !jsonRawEquals(root["additionalProperties"], false) ||
@@ -610,7 +644,7 @@ func isWorkspaceAnalysisCandidateProviderSchema(raw json.RawMessage) bool {
 	if json.Unmarshal(root["properties"], &properties) != nil || !hasExactJSONKeys(properties, "result_type", "schema_id", "schema_version", "payload") ||
 		!jsonRawEquals(properties["result_type"], map[string]any{"const": "workspace_analysis_candidate"}) ||
 		!jsonRawEquals(properties["schema_id"], map[string]any{"const": "agent.workspace-analysis-candidate"}) ||
-		!jsonRawEquals(properties["schema_version"], map[string]any{"const": "1"}) {
+		!jsonRawEquals(properties["schema_version"], map[string]any{"const": version}) {
 		return false
 	}
 	var payload map[string]json.RawMessage
@@ -622,10 +656,10 @@ func isWorkspaceAnalysisCandidateProviderSchema(raw json.RawMessage) bool {
 	var payloadProperties map[string]json.RawMessage
 	if json.Unmarshal(payload["properties"], &payloadProperties) != nil || !hasExactJSONKeys(payloadProperties, "answer_markdown", "citation_refs", "proposal_suggestion") ||
 		!hasExactStringSchema(payloadProperties["answer_markdown"], 1, 64*1024) ||
-		!hasWorkspaceAnalysisCitationRefsSchema(payloadProperties["citation_refs"]) {
+		!validateRefs(payloadProperties["citation_refs"]) {
 		return false
 	}
-	return hasWorkspaceAnalysisProposalSchema(payloadProperties["proposal_suggestion"])
+	return hasWorkspaceAnalysisProposalSchemaWithRefs(payloadProperties["proposal_suggestion"], validateRefs)
 }
 
 func isFaithfulnessReviewSchema(raw json.RawMessage) bool {
@@ -681,6 +715,10 @@ func hasFaithfulnessReviewItemsSchema(raw json.RawMessage) bool {
 }
 
 func hasWorkspaceAnalysisProposalSchema(raw json.RawMessage) bool {
+	return hasWorkspaceAnalysisProposalSchemaWithRefs(raw, hasWorkspaceAnalysisCitationRefsSchema)
+}
+
+func hasWorkspaceAnalysisProposalSchemaWithRefs(raw json.RawMessage, validateRefs func(json.RawMessage) bool) bool {
 	var variants struct {
 		AnyOf []json.RawMessage `json:"anyOf"`
 	}
@@ -695,7 +733,7 @@ func hasWorkspaceAnalysisProposalSchema(raw json.RawMessage) bool {
 	}
 	var properties map[string]json.RawMessage
 	return json.Unmarshal(proposal["properties"], &properties) == nil && hasExactJSONKeys(properties, "summary", "citation_refs") &&
-		hasExactStringSchema(properties["summary"], 1, 4*1024) && hasWorkspaceAnalysisCitationRefsSchema(properties["citation_refs"])
+		hasExactStringSchema(properties["summary"], 1, 4*1024) && validateRefs(properties["citation_refs"])
 }
 
 func hasWorkspaceAnalysisCitationRefsSchema(raw json.RawMessage) bool {
@@ -763,6 +801,9 @@ func jsonRawEquals(raw json.RawMessage, expected any) bool {
 }
 
 func serveAgentChat(w http.ResponseWriter, request chatRequest, modelVersion string) error {
+	if isWorkspaceAnalysisLoopFixtureRequest(request) {
+		return serveWorkspaceAnalysisLoopFixture(w, request, modelVersion)
+	}
 	if request.ResponseFormat.Type != "" || request.ResponseFormat.JSONSchema.Strict {
 		return fixtureError("agent_response_format_unexpected", "unsupported agent request contract")
 	}
@@ -811,9 +852,15 @@ func validateStreamRequest(request chatRequest) (bool, error) {
 		len(request.ResponseFormat.JSONSchema.Schema) == 0 {
 		return false, nil
 	}
-	if request.ResponseFormat.Type != "json_schema" || request.ResponseFormat.JSONSchema.Name != workspaceAnalysisCandidateResponseSchemaName ||
-		!request.ResponseFormat.JSONSchema.Strict || !isWorkspaceAnalysisCandidateProviderSchema(request.ResponseFormat.JSONSchema.Schema) {
+	validCandidate := request.ResponseFormat.JSONSchema.Name == workspaceAnalysisCandidateResponseSchemaName && isWorkspaceAnalysisCandidateProviderSchema(request.ResponseFormat.JSONSchema.Schema)
+	validCandidate = validCandidate || request.ResponseFormat.JSONSchema.Name == workspaceAnalysisCandidateResponseSchemaNameV2 && isWorkspaceAnalysisCandidateProviderSchemaV2(request.ResponseFormat.JSONSchema.Schema)
+	if request.ResponseFormat.Type != "json_schema" || !request.ResponseFormat.JSONSchema.Strict || !validCandidate {
 		return false, fixtureError("workspace_analysis_candidate_stream_contract_unsupported", "unsupported workspace analysis candidate stream contract")
+	}
+	input, err := lastTaskInput(request.Messages)
+	if err != nil || request.ResponseFormat.JSONSchema.Name == workspaceAnalysisCandidateResponseSchemaName && input["schema_version"] != float64(1) ||
+		request.ResponseFormat.JSONSchema.Name == workspaceAnalysisCandidateResponseSchemaNameV2 && input["schema_version"] != float64(2) {
+		return false, fixtureError("workspace_analysis_candidate_input_version_invalid", "workspace analysis candidate input version differs from its response schema")
 	}
 	return true, nil
 }
@@ -1158,6 +1205,9 @@ func workspaceAnalysisCandidateFixtureInput(messages []message) ([]string, error
 	if err != nil {
 		return nil, fixtureError("workspace_analysis_candidate_input_missing", "workspace analysis candidate input is missing")
 	}
+	if input["schema_version"] == float64(2) {
+		return workspaceAnalysisCandidateFixtureInputV2(input)
+	}
 	if !hasExactAnyKeys(input, "schema_version", "untrusted_data", "question", "history", "answer_depth", "output_format", "git_status", "search", "evidence") ||
 		input["schema_version"] != float64(1) || input["untrusted_data"] != true || !fixtureBoundedString(input["question"]) ||
 		workspaceAnalysisInputLeaksIdentity(input) {
@@ -1202,12 +1252,12 @@ func workspaceAnalysisCandidateFixtureInput(messages []message) ([]string, error
 }
 
 func isWorkspaceAnalysisReviewFixtureInput(input map[string]any) bool {
-	return input["schema_version"] == "agent-workspace-analysis-review-input/v1"
+	return input["schema_version"] == "agent-workspace-analysis-review-input/v1" || input["schema_version"] == "agent-workspace-analysis-review-input/v2"
 }
 
 func workspaceAnalysisReviewFixtureInput(input map[string]any) (string, []string, error) {
 	if !hasExactAnyKeys(input, "schema_version", "model_run_ref", "candidate", "review_targets", "evidence") ||
-		input["schema_version"] != "agent-workspace-analysis-review-input/v1" {
+		!isWorkspaceAnalysisReviewFixtureInput(input) {
 		return "", nil, fixtureError("workspace_analysis_review_input_invalid", "workspace analysis review input is invalid")
 	}
 	modelRunRef, ok := input["model_run_ref"].(string)
@@ -1218,7 +1268,11 @@ func workspaceAnalysisReviewFixtureInput(input map[string]any) (string, []string
 	if !ok || !hasExactAnyKeys(candidate, "answer_markdown", "citation_refs") || !fixtureBoundedString(candidate["answer_markdown"]) {
 		return "", nil, fixtureError("workspace_analysis_review_candidate_invalid", "workspace analysis review candidate is invalid")
 	}
-	refs, err := workspaceAnalysisFixtureEvidenceRefs(candidate["citation_refs"])
+	decodeRefs := workspaceAnalysisFixtureEvidenceRefs
+	if input["schema_version"] == "agent-workspace-analysis-review-input/v2" {
+		decodeRefs = workspaceAnalysisFixtureEvidenceRefsV2
+	}
+	refs, err := decodeRefs(candidate["citation_refs"])
 	if err != nil {
 		return "", nil, err
 	}
@@ -1231,7 +1285,7 @@ func workspaceAnalysisReviewFixtureInput(input map[string]any) (string, []string
 		target["kind"] != "FACTUAL" || target["text"] != candidate["answer_markdown"] {
 		return "", nil, fixtureError("workspace_analysis_review_targets_invalid", "workspace analysis review targets are invalid")
 	}
-	targetRefs, targetErr := workspaceAnalysisFixtureEvidenceRefs(target["citation_ids"])
+	targetRefs, targetErr := decodeRefs(target["citation_ids"])
 	if targetErr != nil || !sameFixtureStrings(targetRefs, refs) {
 		return "", nil, fixtureError("workspace_analysis_review_targets_invalid", "workspace analysis review targets are invalid")
 	}

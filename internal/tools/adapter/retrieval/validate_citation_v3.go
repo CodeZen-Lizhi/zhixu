@@ -13,6 +13,7 @@ import (
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation/strictjson"
 	knowledgedomain "github.com/CodeZen-Lizhi/zhixu/internal/knowledge/domain"
+	retrievalapplication "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/application"
 	retrievaldomain "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
 	toolsapplication "github.com/CodeZen-Lizhi/zhixu/internal/tools/application"
 	toolsdomain "github.com/CodeZen-Lizhi/zhixu/internal/tools/domain"
@@ -184,69 +185,9 @@ func (executor *ValidateCitationV3Executor) Execute(
 		return toolsapplication.ExecutorResult{}, resultError(errorCodeCitationResultInvalid, err)
 	}
 
-	queries := make([]retrievaldomain.CitationReferenceQuery, len(resolved.Identities))
-	for index, identity := range resolved.Identities {
-		queries[index] = retrievaldomain.CitationReferenceQuery{
-			WorkspaceID: request.Identity.WorkspaceID, IndexVersionID: identity.IndexVersionID, ChunkID: identity.ChunkID,
-			SourceVersionID: identity.SourceVersionID, SourceSpanID: identity.SourceSpanID,
-		}
-	}
-	opened, err := executor.reference.OpenCitationEvidenceBatch(ctx, queries)
+	results, err := validateWorkspaceAnalysisCitationIdentities(ctx, request.Identity.WorkspaceID, resolved.Identities, executor.reference, executor.eligibility)
 	if err != nil {
 		return toolsapplication.ExecutorResult{}, err
-	}
-	openedByQuery, err := indexOpenedCitations(request.Identity.WorkspaceID, queries, opened)
-	if err != nil {
-		return toolsapplication.ExecutorResult{}, resultError(errorCodeCitationResultInvalid, err)
-	}
-
-	results := make([]validateCitationV3Result, len(resolved.Identities))
-	eligibleQueries := make([]retrievaldomain.CitationReferenceQuery, 0, len(queries))
-	for index, identity := range resolved.Identities {
-		results[index] = validateCitationV3Result{
-			EvidenceRef: identity.EvidenceRef, ReasonCode: validateCitationReasonBindingMismatch, Valid: false,
-		}
-		openedItem := openedByQuery[queries[index]]
-		if openedItem.View.Excerpt == "" || !utf8.ValidString(openedItem.View.Excerpt) {
-			return toolsapplication.ExecutorResult{}, resultError(errorCodeCitationResultInvalid, errors.New("opened citation excerpt is invalid"))
-		}
-		if openedItem.View.Reference.ExcerptHash != identity.ContentHash {
-			continue
-		}
-		eligibleQueries = append(eligibleQueries, queries[index])
-	}
-
-	eligibilityByKey := map[string]knowledgedomain.ProvenanceEligibility{}
-	if len(eligibleQueries) > 0 {
-		provenance, provenanceErr := uniqueProvenance(eligibleQueries)
-		if provenanceErr != nil {
-			return toolsapplication.ExecutorResult{}, resultError(errorCodeCitationResultInvalid, provenanceErr)
-		}
-		eligibility, eligibilityErr := executor.eligibility.CheckEvidenceEligibility(ctx, knowledgedomain.EvidenceEligibilityQuery{
-			WorkspaceID: request.Identity.WorkspaceID,
-			Provenance:  provenance,
-		})
-		if eligibilityErr != nil {
-			return toolsapplication.ExecutorResult{}, eligibilityErr
-		}
-		eligibilityByKey, err = exactEligibility(provenance, eligibility)
-		if err != nil {
-			return toolsapplication.ExecutorResult{}, resultError(errorCodeCitationResultInvalid, err)
-		}
-	}
-	for index, identity := range resolved.Identities {
-		if openedByQuery[queries[index]].View.Reference.ExcerptHash != identity.ContentHash {
-			continue
-		}
-		eligibility := eligibilityByKey[provenanceKey(knowledgedomain.ProvenanceRef{
-			WorkspaceID: request.Identity.WorkspaceID, SourceVersionID: identity.SourceVersionID, SourceSpanID: identity.SourceSpanID,
-		})]
-		if eligibility.Eligibility == knowledgedomain.EvidenceIneligible {
-			results[index].ReasonCode = validateCitationReasonEvidenceIneligible
-			continue
-		}
-		results[index].ReasonCode = validateCitationReasonOK
-		results[index].Valid = true
 	}
 
 	return validateCitationV3ExecutorResult(input, resolved.Identities, results)
@@ -533,3 +474,96 @@ var (
 	_ toolsapplication.Executor  = (*ValidateCitationV3Executor)(nil)
 	_ ValidateCitationV3Resolver = (*ValidateCitationV3ReceiptResolver)(nil)
 )
+
+// validateWorkspaceAnalysisCitationIdentities shares the real batch-open and
+// Knowledge eligibility checks between both frozen tool contracts.
+func validateWorkspaceAnalysisCitationIdentities(ctx context.Context, workspaceID foundation.ID, identities []ReadSourceV3Identity, reference citationReference, eligibility evidenceEligibility) ([]validateCitationV3Result, error) {
+	queries := make([]retrievaldomain.CitationReferenceQuery, len(identities))
+	for index, identity := range identities {
+		queries[index] = retrievaldomain.CitationReferenceQuery{
+			WorkspaceID: workspaceID, IndexVersionID: identity.IndexVersionID, ChunkID: identity.ChunkID,
+			SourceVersionID: identity.SourceVersionID, SourceSpanID: identity.SourceSpanID,
+		}
+	}
+	uniqueQueries := make([]retrievaldomain.CitationReferenceQuery, 0, len(queries))
+	seenQueries := map[retrievaldomain.CitationReferenceQuery]bool{}
+	for _, query := range queries {
+		if !seenQueries[query] {
+			uniqueQueries = append(uniqueQueries, query)
+			seenQueries[query] = true
+		}
+	}
+	// The Evidence owner intentionally freezes each batch to one index. New
+	// searches may bind a different historical index, so keep batches separate.
+	groups := map[foundation.ID][]retrievaldomain.CitationReferenceQuery{}
+	indexes := []foundation.ID{}
+	for _, query := range uniqueQueries {
+		if _, exists := groups[query.IndexVersionID]; !exists {
+			indexes = append(indexes, query.IndexVersionID)
+		}
+		groups[query.IndexVersionID] = append(groups[query.IndexVersionID], query)
+	}
+	var opened []retrievalapplication.OpenedCitationEvidence
+	for _, indexID := range indexes {
+		batch, err := reference.OpenCitationEvidenceBatch(ctx, groups[indexID])
+		if err != nil {
+			return nil, err
+		}
+		opened = append(opened, batch...)
+	}
+	openedByQuery, err := indexOpenedCitations(workspaceID, uniqueQueries, opened)
+	if err != nil {
+		return nil, resultError(errorCodeCitationResultInvalid, err)
+	}
+
+	results := make([]validateCitationV3Result, len(identities))
+	eligibleQueries := make([]retrievaldomain.CitationReferenceQuery, 0, len(queries))
+	for index, identity := range identities {
+		results[index] = validateCitationV3Result{
+			EvidenceRef: identity.EvidenceRef, ReasonCode: validateCitationReasonBindingMismatch, Valid: false,
+		}
+		openedItem := openedByQuery[queries[index]]
+		if openedItem.View.Excerpt == "" || !utf8.ValidString(openedItem.View.Excerpt) {
+			return nil, resultError(errorCodeCitationResultInvalid, errors.New("opened citation excerpt is invalid"))
+		}
+		if openedItem.View.Reference.ExcerptHash != identity.ContentHash {
+			continue
+		}
+		eligibleQueries = append(eligibleQueries, queries[index])
+	}
+
+	eligibilityByKey := map[string]knowledgedomain.ProvenanceEligibility{}
+	if len(eligibleQueries) > 0 {
+		provenance, provenanceErr := uniqueProvenance(eligibleQueries)
+		if provenanceErr != nil {
+			return nil, resultError(errorCodeCitationResultInvalid, provenanceErr)
+		}
+		eligibility, eligibilityErr := eligibility.CheckEvidenceEligibility(ctx, knowledgedomain.EvidenceEligibilityQuery{
+			WorkspaceID: workspaceID,
+			Provenance:  provenance,
+		})
+		if eligibilityErr != nil {
+			return nil, eligibilityErr
+		}
+		eligibilityByKey, err = exactEligibility(provenance, eligibility)
+		if err != nil {
+			return nil, resultError(errorCodeCitationResultInvalid, err)
+		}
+	}
+	for index, identity := range identities {
+		if openedByQuery[queries[index]].View.Reference.ExcerptHash != identity.ContentHash {
+			continue
+		}
+		eligibility := eligibilityByKey[provenanceKey(knowledgedomain.ProvenanceRef{
+			WorkspaceID: workspaceID, SourceVersionID: identity.SourceVersionID, SourceSpanID: identity.SourceSpanID,
+		})]
+		if eligibility.Eligibility == knowledgedomain.EvidenceIneligible {
+			results[index].ReasonCode = validateCitationReasonEvidenceIneligible
+			continue
+		}
+		results[index].ReasonCode = validateCitationReasonOK
+		results[index].Valid = true
+	}
+
+	return results, nil
+}

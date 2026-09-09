@@ -7,6 +7,7 @@ export const workspaceQueryRoots = [
   "authoring",
   "document-history",
   "organizing",
+  "synthesis",
   "search",
   "rag",
   "collections",

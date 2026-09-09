@@ -143,6 +143,9 @@ func (service *Service) SubmitQuestion(ctx context.Context, command SubmitQuesti
 	if service == nil || isNilQuestionDispatcher(service.questions) {
 		return SubmitQuestionResult{}, submissionUnavailable()
 	}
+	if err := command.APIVersion.Validate(); err != nil {
+		return SubmitQuestionResult{}, err
+	}
 	request, err := conversationdomain.CanonicalizeQuestionRequest(command.Request)
 	if err != nil {
 		return SubmitQuestionResult{}, err
@@ -156,12 +159,15 @@ func (service *Service) SubmitQuestion(ctx context.Context, command SubmitQuesti
 		return SubmitQuestionResult{}, err
 	}
 	result, err := service.questions.SubmitQuestion(ctx, SubmitQuestionRecord{
-		Request: request, IdempotencyKey: idempotencyKey, RequestHash: requestHash,
+		Request: request, IdempotencyKey: idempotencyKey, RequestHash: requestHash, APIVersion: command.APIVersion,
 	})
 	if err != nil {
 		return SubmitQuestionResult{}, err
 	}
 	if err := validateSubmitQuestionResult(request, result); err != nil {
+		return SubmitQuestionResult{}, err
+	}
+	if err := command.APIVersion.CheckWorkflow(result.Workflow.DefinitionKey, result.Workflow.DefinitionVersion); err != nil {
 		return SubmitQuestionResult{}, err
 	}
 	return result, nil
@@ -215,6 +221,9 @@ func (service *Service) GetConversation(ctx context.Context, workspaceID, conver
 func (service *Service) ListTurns(ctx context.Context, query ListTurnsQuery) (TurnPage, error) {
 	if service == nil || service.repository == nil {
 		return TurnPage{}, serviceUnavailable()
+	}
+	if err := query.APIVersion.Validate(); err != nil {
+		return TurnPage{}, err
 	}
 	if err := validateScopedIDs(query.WorkspaceID, query.ConversationID); err != nil {
 		return TurnPage{}, err
@@ -345,6 +354,9 @@ func validateTurnPage(query ListTurnsQuery, page TurnPage) error {
 		if err := validateAnswerView(query.WorkspaceID, turn.Answer); err != nil ||
 			turn.Answer.Answer.ConversationID != query.ConversationID || turn.Answer.Answer.QuestionID != turn.Question.ID {
 			return resultInconsistent(err)
+		}
+		if err := query.APIVersion.CheckWorkflow(turn.Answer.Workflow.DefinitionKey, turn.Answer.Workflow.DefinitionVersion); err != nil {
+			return err
 		}
 		if index > 0 {
 			previous := page.Items[index-1].Question

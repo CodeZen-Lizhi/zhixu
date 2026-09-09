@@ -49,7 +49,7 @@ func (finalizer *WorkspaceAnalysisFinalizerWithMetrics) FinalizeSuccess(
 ) (conversationworkflow.WorkspaceAnalysisPublicationOutput, bool, error) {
 	output, replayed, err := finalizer.next.FinalizeSuccess(ctx, command)
 	if err == nil && !replayed {
-		finalizer.record(ctx, string(agentdomain.WorkspaceAnalysisRunSucceeded), string(agentdomain.WorkspaceAnalysisRunCompleted))
+		finalizer.record(ctx, command.DefinitionVersion, string(agentdomain.WorkspaceAnalysisRunSucceeded), string(agentdomain.WorkspaceAnalysisRunCompleted))
 	}
 	return output, replayed, err
 }
@@ -61,18 +61,23 @@ func (finalizer *WorkspaceAnalysisFinalizerWithMetrics) FinalizeTermination(
 ) (conversationworkflow.WorkspaceAnalysisPublicationOutput, bool, error) {
 	output, replayed, err := finalizer.next.FinalizeTermination(ctx, command)
 	if err == nil && !replayed {
-		finalizer.record(ctx, string(output.PublicationStatus), string(command.Reason))
+		finalizer.record(ctx, command.DefinitionVersion, string(output.PublicationStatus), string(command.Reason))
 	}
 	return output, replayed, err
 }
 
 func (finalizer *WorkspaceAnalysisFinalizerWithMetrics) record(
 	ctx context.Context,
+	definitionVersion int64,
 	status string,
 	reason string,
 ) {
 	defer func() { _ = recover() }()
-	measurement, err := observability.NewWorkspaceAnalysisOutcomeMeasurement(status, reason)
+	// Existing v1 callers omit the version in their lookup.
+	if definitionVersion == 0 {
+		definitionVersion = 1
+	}
+	measurement, err := observability.NewWorkspaceAnalysisOutcomeMeasurementForVersion(definitionVersion, status, reason)
 	if err != nil {
 		return
 	}

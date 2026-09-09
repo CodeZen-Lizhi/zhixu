@@ -107,8 +107,9 @@ const (
 
 // Scope 只允许按正式 Claim 或 Topic 限定选题范围。
 type Scope struct {
-	ClaimIDs []foundation.ID `json:"claim_ids,omitempty"`
-	TopicIDs []foundation.ID `json:"topic_ids,omitempty"`
+	ClaimIDs     []foundation.ID  `json:"claim_ids,omitempty"`
+	TopicIDs     []foundation.ID  `json:"topic_ids,omitempty"`
+	NoteRevision *NoteRevisionRef `json:"note_revision,omitempty"`
 }
 
 // Config 是创建 Interview Session 时冻结的设置。
@@ -158,21 +159,24 @@ type Session struct {
 
 // Question 是被持久化的、不可重新抽取的面试题快照。
 type Question struct {
-	ID               foundation.ID  `json:"id"`
-	WorkspaceID      foundation.ID  `json:"workspace_id"`
-	SessionID        foundation.ID  `json:"session_id"`
-	QuestionNo       int            `json:"question_no"`
-	FollowUpNo       int            `json:"follow_up_no"`
-	ParentQuestionID *foundation.ID `json:"parent_question_id,omitempty"`
-	ClaimID          foundation.ID  `json:"claim_id"`
-	TopicID          *foundation.ID `json:"topic_id,omitempty"`
-	Prompt           string         `json:"prompt"`
-	AnswerPoints     []string       `json:"answer_points"`
-	Evidence         []EvidenceRef  `json:"evidence"`
-	Status           QuestionStatus `json:"status"`
-	Fingerprint      string         `json:"fingerprint"`
-	CreatedAt        time.Time      `json:"created_at"`
-	AnsweredAt       *time.Time     `json:"answered_at,omitempty"`
+	ID               foundation.ID       `json:"id"`
+	WorkspaceID      foundation.ID       `json:"workspace_id"`
+	SessionID        foundation.ID       `json:"session_id"`
+	QuestionNo       int                 `json:"question_no"`
+	FollowUpNo       int                 `json:"follow_up_no"`
+	ParentQuestionID *foundation.ID      `json:"parent_question_id,omitempty"`
+	ClaimID          foundation.ID       `json:"claim_id"`
+	SourceKind       QuestionSourceKind  `json:"source_kind,omitempty"`
+	NoteSource       *NoteQuestionSource `json:"note_source,omitempty"`
+	FollowUpPlan     []NoteFollowUp      `json:"follow_up_plan,omitempty"`
+	TopicID          *foundation.ID      `json:"topic_id,omitempty"`
+	Prompt           string              `json:"prompt"`
+	AnswerPoints     []string            `json:"answer_points"`
+	Evidence         []EvidenceRef       `json:"evidence"`
+	Status           QuestionStatus      `json:"status"`
+	Fingerprint      string              `json:"fingerprint"`
+	CreatedAt        time.Time           `json:"created_at"`
+	AnsweredAt       *time.Time          `json:"answered_at,omitempty"`
 }
 
 // ScoreDimension 是 0..1 的可解释评分维度。
@@ -183,14 +187,15 @@ type ScoreDimension struct {
 
 // Score 是服务端确定性评分，始终保存对应题目的 Evidence。
 type Score struct {
-	SchemaVersion string         `json:"schema_version"`
-	Correctness   ScoreDimension `json:"correctness"`
-	Coverage      ScoreDimension `json:"coverage"`
-	Boundaries    ScoreDimension `json:"boundaries"`
-	Clarity       ScoreDimension `json:"clarity"`
-	Errors        []string       `json:"errors,omitempty"`
-	Omissions     []string       `json:"omissions,omitempty"`
-	Evidence      []EvidenceRef  `json:"evidence"`
+	SchemaVersion string              `json:"schema_version"`
+	Correctness   ScoreDimension      `json:"correctness"`
+	Coverage      ScoreDimension      `json:"coverage"`
+	Boundaries    ScoreDimension      `json:"boundaries"`
+	Clarity       ScoreDimension      `json:"clarity"`
+	Errors        []string            `json:"errors,omitempty"`
+	Omissions     []string            `json:"omissions,omitempty"`
+	Evidence      []EvidenceRef       `json:"evidence"`
+	NoteSource    *NoteQuestionSource `json:"note_source,omitempty"`
 }
 
 // TurnDecision 记录服务端基于本次评分作出的追问或切题决定。
@@ -217,10 +222,12 @@ type Turn struct {
 
 // Finding 是报告中可定位到 Claim/Evidence 的强项、弱项或表达问题。
 type Finding struct {
-	ClaimID  foundation.ID  `json:"claim_id"`
-	TopicID  *foundation.ID `json:"topic_id,omitempty"`
-	Detail   string         `json:"detail"`
-	Evidence []EvidenceRef  `json:"evidence"`
+	ClaimID    foundation.ID       `json:"claim_id"`
+	TopicID    *foundation.ID      `json:"topic_id,omitempty"`
+	Detail     string              `json:"detail"`
+	Evidence   []EvidenceRef       `json:"evidence"`
+	SourceKind QuestionSourceKind  `json:"source_kind,omitempty"`
+	NoteSource *NoteQuestionSource `json:"note_source,omitempty"`
 }
 
 // ReportSummary 聚合面试覆盖与评分计数。
@@ -245,17 +252,18 @@ type ArtifactBinding struct {
 
 // Report 是同一 Session 只能生成一次的可解释汇总事实。
 type Report struct {
-	ID            foundation.ID   `json:"id"`
-	WorkspaceID   foundation.ID   `json:"workspace_id"`
-	SessionID     foundation.ID   `json:"session_id"`
-	SchemaVersion string          `json:"schema_version"`
-	Summary       ReportSummary   `json:"summary"`
-	Strengths     []Finding       `json:"strengths"`
-	Gaps          []Finding       `json:"gaps"`
-	Expression    []Finding       `json:"expression"`
-	Evidence      []EvidenceRef   `json:"evidence"`
-	Artifact      ArtifactBinding `json:"artifact"`
-	CreatedAt     time.Time       `json:"created_at"`
+	ID            foundation.ID        `json:"id"`
+	WorkspaceID   foundation.ID        `json:"workspace_id"`
+	SessionID     foundation.ID        `json:"session_id"`
+	SchemaVersion string               `json:"schema_version"`
+	Summary       ReportSummary        `json:"summary"`
+	Strengths     []Finding            `json:"strengths"`
+	Gaps          []Finding            `json:"gaps"`
+	Expression    []Finding            `json:"expression"`
+	Evidence      []EvidenceRef        `json:"evidence"`
+	NoteSources   []NoteQuestionSource `json:"note_sources,omitempty"`
+	Artifact      ArtifactBinding      `json:"artifact"`
+	CreatedAt     time.Time            `json:"created_at"`
 }
 
 // LearningPath 是只保存学习步骤和进度的事实；它只引用 Artifact，绝不拥有文档或 Revision。
@@ -273,21 +281,23 @@ type LearningPath struct {
 
 // PathStep 是一条由可解释评分缺口产生的学习动作。
 type PathStep struct {
-	ID              foundation.ID  `json:"id"`
-	WorkspaceID     foundation.ID  `json:"workspace_id"`
-	PathID          foundation.ID  `json:"path_id"`
-	StepNo          int            `json:"step_no"`
-	ClaimID         foundation.ID  `json:"claim_id"`
-	TopicID         *foundation.ID `json:"topic_id,omitempty"`
-	SourceVersionID foundation.ID  `json:"source_version_id"`
-	SourceSpanID    foundation.ID  `json:"source_span_id"`
-	EvidenceHash    string         `json:"evidence_hash"`
-	Title           string         `json:"title"`
-	Rationale       string         `json:"rationale"`
-	Status          StepStatus     `json:"status"`
-	Version         int64          `json:"version"`
-	CreatedAt       time.Time      `json:"created_at"`
-	UpdatedAt       time.Time      `json:"updated_at"`
+	ID              foundation.ID       `json:"id"`
+	WorkspaceID     foundation.ID       `json:"workspace_id"`
+	PathID          foundation.ID       `json:"path_id"`
+	StepNo          int                 `json:"step_no"`
+	ClaimID         foundation.ID       `json:"claim_id"`
+	SourceKind      QuestionSourceKind  `json:"source_kind,omitempty"`
+	NoteSource      *NoteQuestionSource `json:"note_source,omitempty"`
+	TopicID         *foundation.ID      `json:"topic_id,omitempty"`
+	SourceVersionID foundation.ID       `json:"source_version_id"`
+	SourceSpanID    foundation.ID       `json:"source_span_id"`
+	EvidenceHash    string              `json:"evidence_hash"`
+	Title           string              `json:"title"`
+	Rationale       string              `json:"rationale"`
+	Status          StepStatus          `json:"status"`
+	Version         int64               `json:"version"`
+	CreatedAt       time.Time           `json:"created_at"`
+	UpdatedAt       time.Time           `json:"updated_at"`
 }
 
 // CanonicalConfig 返回副本并稳定排序 Scope 中的 ID，供请求哈希和持久化使用。
@@ -298,20 +308,43 @@ func CanonicalConfig(config Config) (Config, error) {
 	canonical := config
 	canonical.Scope.ClaimIDs = canonicalIDs(config.Scope.ClaimIDs)
 	canonical.Scope.TopicIDs = canonicalIDs(config.Scope.TopicIDs)
+	if config.Scope.NoteRevision != nil {
+		ref := *config.Scope.NoteRevision
+		canonical.Scope.NoteRevision = &ref
+	}
 	return canonical, nil
 }
 
 // ValidateConfig 校验必须由服务端冻结的面试设置。
 func ValidateConfig(config Config) error {
+	if err := ValidateConfigSettings(config); err != nil {
+		return err
+	}
+	return validateConfigScope(config.Scope)
+}
+
+// ValidateConfigSettings validates options independently of source selection.
+// The preparation command uses it before loading a real published note.
+func ValidateConfigSettings(config Config) error {
 	if config.SchemaVersion != SchemaVersion || !validRequiredText(config.Role, maxRoleBytes) || !validDifficulty(config.Difficulty) ||
 		config.DurationMinutes < 1 || config.DurationMinutes > maxDurationMinutes || config.QuestionCount < 1 || config.QuestionCount > maxQuestionCount ||
 		config.MaxFollowUps < 0 || config.MaxFollowUps > maxFollowUpsPerSession {
 		return invalid(ErrorCodeConfigInvalid, "interview configuration is invalid")
 	}
-	if len(config.Scope.ClaimIDs) == 0 && len(config.Scope.TopicIDs) == 0 {
+	return nil
+}
+
+func validateConfigScope(scope Scope) error {
+	if scope.NoteRevision != nil {
+		if len(scope.ClaimIDs) != 0 || len(scope.TopicIDs) != 0 || scope.NoteRevision.Validate() != nil {
+			return invalid(ErrorCodeConfigInvalid, "interview note scope is invalid")
+		}
+		return nil
+	}
+	if len(scope.ClaimIDs) == 0 && len(scope.TopicIDs) == 0 {
 		return invalid(ErrorCodeConfigInvalid, "interview scope is required")
 	}
-	if !validIDs(config.Scope.ClaimIDs) || !validIDs(config.Scope.TopicIDs) {
+	if !validIDs(scope.ClaimIDs) || !validIDs(scope.TopicIDs) {
 		return invalid(ErrorCodeConfigInvalid, "interview scope contains invalid or duplicate identifiers")
 	}
 	return nil
@@ -358,6 +391,9 @@ func ValidateSession(session Session) error {
 	if err := ValidateConfig(session.Config); err != nil {
 		return err
 	}
+	if session.Config.Scope.NoteRevision != nil && session.Config.Scope.NoteRevision.WorkspaceID != session.WorkspaceID {
+		return invalid(ErrorCodeConfigInvalid, "interview note scope belongs to another workspace")
+	}
 	if session.Status == SessionStatusActive && session.EndedAt != nil {
 		return invalid(ErrorCodeConfigInvalid, "active interview session cannot have an end time")
 	}
@@ -380,10 +416,13 @@ func SubmitAllowedAt(session Session, at time.Time) bool {
 // ValidateQuestion 校验冻结题目与其正式知识绑定。
 func ValidateQuestion(question Question) error {
 	if !validID(question.ID) || !validID(question.WorkspaceID) || !validID(question.SessionID) || question.QuestionNo < 1 || question.FollowUpNo < 0 ||
-		!validID(question.ClaimID) || !validIDPtr(question.TopicID) || !validQuestionStatus(question.Status) || !validRequiredText(question.Prompt, maxQuestionBytes) ||
-		len(question.AnswerPoints) == 0 || len(question.AnswerPoints) > maxAnswerPoints || len(question.Evidence) == 0 || len(question.Evidence) > MaxEvidenceItems ||
+		!validQuestionStatus(question.Status) || !validRequiredText(question.Prompt, maxQuestionBytes) ||
+		len(question.AnswerPoints) == 0 || len(question.AnswerPoints) > maxAnswerPoints || len(question.Evidence) > MaxEvidenceItems ||
 		!validHash(question.Fingerprint) || question.CreatedAt.IsZero() {
 		return invalid(ErrorCodeQuestionInvalid, "interview question is invalid")
+	}
+	if err := validateQuestionSource(question); err != nil {
+		return err
 	}
 	if question.FollowUpNo == 0 && question.ParentQuestionID != nil {
 		return invalid(ErrorCodeQuestionInvalid, "primary question cannot have a parent")
@@ -410,7 +449,7 @@ func ValidateQuestion(question Question) error {
 
 // ValidateScore 校验评分不含调用方伪造的内容且引用题目的全部 Evidence。
 func ValidateScore(score Score, evidence []EvidenceRef) error {
-	if score.SchemaVersion != ScoreSchemaVersion || len(score.Evidence) == 0 || len(score.Evidence) != len(evidence) ||
+	if score.SchemaVersion != ScoreSchemaVersion || score.NoteSource != nil || len(score.Evidence) == 0 || len(score.Evidence) != len(evidence) ||
 		len(score.Errors) > maxFeedbackItems || len(score.Omissions) > maxFeedbackItems {
 		return invalid(ErrorCodeScoreInvalid, "interview score shape is invalid")
 	}
@@ -436,7 +475,7 @@ func ValidateTurn(turn Turn, question Question) error {
 		!validRequiredText(turn.ScorerVersion, 128) || turn.CreatedAt.IsZero() {
 		return invalid(ErrorCodeTurnInvalid, "interview turn is invalid")
 	}
-	if err := ValidateScore(turn.Score, question.Evidence); err != nil {
+	if err := ValidateScoreForQuestion(turn.Score, question); err != nil {
 		return err
 	}
 	if turn.Decision.FollowUpCreated != (turn.Decision.FollowUpQuestionID != nil) || !validIDPtr(turn.Decision.FollowUpQuestionID) || !validIDPtr(turn.Decision.NextQuestionID) {
@@ -474,6 +513,9 @@ func ValidateReport(report Report) error {
 			return err
 		}
 	}
+	if err := validateReportNoteSources(report); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -499,10 +541,16 @@ func ValidateLearningPath(path LearningPath) error {
 
 // ValidatePathStep 校验步骤只引用确认 Claim 的既有 Evidence 标识。
 func ValidatePathStep(step PathStep) error {
-	if !validID(step.ID) || !validID(step.WorkspaceID) || !validID(step.PathID) || step.StepNo < 1 || !validID(step.ClaimID) || !validIDPtr(step.TopicID) ||
-		!validID(step.SourceVersionID) || !validID(step.SourceSpanID) || !validHash(step.EvidenceHash) || !validRequiredText(step.Title, maxPathTitleBytes) ||
+	if !validID(step.ID) || !validID(step.WorkspaceID) || !validID(step.PathID) || step.StepNo < 1 || !validRequiredText(step.Title, maxPathTitleBytes) ||
 		!validRequiredText(step.Rationale, maxPathRationaleBytes) || !validStepStatus(step.Status) || step.Version < 1 || step.CreatedAt.IsZero() || step.UpdatedAt.IsZero() || step.UpdatedAt.Before(step.CreatedAt) {
 		return invalid(ErrorCodePathInvalid, "learning path step is invalid")
+	}
+	if step.SourceKind == QuestionSourceNoteRevision {
+		return validateNotePathStepSource(step)
+	}
+	if (step.SourceKind != "" && step.SourceKind != QuestionSourceClaim) || step.NoteSource != nil || !validID(step.ClaimID) || !validIDPtr(step.TopicID) ||
+		!validID(step.SourceVersionID) || !validID(step.SourceSpanID) || !validHash(step.EvidenceHash) {
+		return invalid(ErrorCodePathInvalid, "learning path claim source is invalid")
 	}
 	return nil
 }
@@ -583,6 +631,15 @@ func validateFindings(findings []Finding) error {
 		return invalid(ErrorCodeReportInvalid, "interview report has too many findings")
 	}
 	for _, finding := range findings {
+		if finding.SourceKind == QuestionSourceNoteRevision {
+			if err := validateNoteFinding(finding); err != nil {
+				return err
+			}
+			continue
+		}
+		if (finding.SourceKind != "" && finding.SourceKind != QuestionSourceClaim) || finding.NoteSource != nil {
+			return invalid(ErrorCodeReportInvalid, "interview finding source union is invalid")
+		}
 		if !validID(finding.ClaimID) || !validIDPtr(finding.TopicID) || !validRequiredText(finding.Detail, maxPathRationaleBytes) || len(finding.Evidence) == 0 || len(finding.Evidence) > MaxEvidenceItems {
 			return invalid(ErrorCodeReportInvalid, "interview report finding is invalid")
 		}

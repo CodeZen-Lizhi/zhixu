@@ -48,6 +48,7 @@ type Service interface {
 type Handler struct {
 	service Service
 	cursors *CursorCodec
+	version application.APIVersion
 }
 
 // NewHandler 创建 Conversation HTTP Handler；依赖缺失时路由 fail closed。
@@ -60,11 +61,29 @@ func (handler *Handler) Routes(router gin.IRouter) {
 	router.POST("/conversations", httpapi.GinHandler(handler.createConversation))
 	router.GET("/conversations", httpapi.GinHandler(handler.listConversations))
 	router.GET("/conversations/:conversation_id", httpapi.GinHandler(handler.getConversation))
-	router.POST("/conversations/:conversation_id/questions", httpapi.GinHandler(handler.submitQuestion))
-	router.GET("/conversations/:conversation_id/turns", httpapi.GinHandler(handler.listTurns))
-	router.GET("/answers/:answer_id", httpapi.GinHandler(handler.getAnswer))
-	router.GET("/answers/:answer_id/analysis-timeline", httpapi.GinHandler(handler.getWorkspaceAnalysisTimeline))
+	handler.answerRoutes(router, application.APIVersionV1)
 	router.POST("/answers/:answer_id/feedback", httpapi.GinHandler(handler.submitFeedback))
+}
+
+// RoutesV2 exposes only the four endpoints whose response contracts include
+// dynamic Workspace Analysis. Shared Workflow, Source, feedback and SSE URLs
+// remain under v1.
+func (handler *Handler) RoutesV2(router gin.IRouter) {
+	handler.answerRoutes(router, application.APIVersionV2)
+}
+
+func (handler *Handler) answerRoutes(router gin.IRouter, version application.APIVersion) {
+	// Each registration owns its version. The same Handler can safely be
+	// registered under both groups without a mutable per-request version.
+	var versioned Handler
+	if handler != nil {
+		versioned = *handler
+	}
+	versioned.version = version
+	router.POST("/conversations/:conversation_id/questions", httpapi.GinHandler(versioned.submitQuestion))
+	router.GET("/conversations/:conversation_id/turns", httpapi.GinHandler(versioned.listTurns))
+	router.GET("/answers/:answer_id", httpapi.GinHandler(versioned.getAnswer))
+	router.GET("/answers/:answer_id/analysis-timeline", httpapi.GinHandler(versioned.getWorkspaceAnalysisTimeline))
 }
 
 type createConversationRequest struct {
@@ -301,13 +320,25 @@ func (handler *Handler) submitQuestion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	result, err := handler.service.SubmitQuestion(r.Context(), application.SubmitQuestionCommand{Request: request, IdempotencyKey: r.Header.Get("Idempotency-Key")})
+	result, err := handler.service.SubmitQuestion(r.Context(), application.SubmitQuestionCommand{Request: request, IdempotencyKey: r.Header.Get("Idempotency-Key"), APIVersion: handler.version})
 	if err != nil {
 		writeError(w, err)
 		return
 	}
+	if err := handler.version.CheckWorkflow(result.Workflow.DefinitionKey, result.Workflow.DefinitionVersion); err != nil {
+		writeError(w, err)
+		return
+	}
 	view := application.AnswerView{Answer: result.Answer, Workflow: result.Workflow}
-	response := acceptedQuestionResponse{Question: toQuestionResponse(result.Question), Answer: toAnswerResponse(view), StatusURL: answerStatusURL(result.Answer.ID, workspaceID)}
+	if result.Answer.PublicationStatus != conversationdomain.AnswerPublicationPending {
+		projection, err := conversationdomain.ProjectPublishedAnswer(result.Answer.ResultType, result.Answer.Result)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		view.AssistantText, view.Citations = projection.AssistantText, projection.Citations
+	}
+	response := acceptedQuestionResponse{Question: toQuestionResponse(result.Question), Answer: toAnswerResponse(view), StatusURL: answerStatusURL(result.Answer.ID, workspaceID, handler.version)}
 	status := http.StatusAccepted
 	if result.Replayed {
 		status = http.StatusOK
@@ -338,23 +369,31 @@ func (handler *Handler) listTurns(w http.ResponseWriter, r *http.Request) {
 		latest = true
 		limit = 1
 	}
-	cursor, err := handler.cursors.decodeTurn(r.URL.Query().Get("cursor"), workspaceID, conversationID)
+	cursor, err := handler.cursors.decodeTurn(r.URL.Query().Get("cursor"), workspaceID, conversationID, handler.version)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	page, err := handler.service.ListTurns(r.Context(), application.ListTurnsQuery{WorkspaceID: workspaceID, ConversationID: conversationID, Cursor: cursor, Limit: limit, Latest: latest})
+	page, err := handler.service.ListTurns(r.Context(), application.ListTurnsQuery{WorkspaceID: workspaceID, ConversationID: conversationID, Cursor: cursor, Limit: limit, Latest: latest, APIVersion: handler.version})
 	if err != nil {
 		writeError(w, err)
 		return
 	}
 	items := make([]turnResponse, len(page.Items))
 	for i, item := range page.Items {
+		if item.Answer == nil {
+			writeError(w, foundation.NewError(foundation.ErrorConsistencyViolation, "CONVERSATION_RESULT_INCONSISTENT", false, errors.New("turn answer is missing")))
+			return
+		}
+		if err := handler.version.CheckWorkflow(item.Answer.Workflow.DefinitionKey, item.Answer.Workflow.DefinitionVersion); err != nil {
+			writeError(w, err)
+			return
+		}
 		items[i] = turnResponse{Question: toQuestionResponse(item.Question), Answer: toAnswerResponse(*item.Answer)}
 	}
 	next := ""
 	if page.NextCursor != nil {
-		next, err = handler.cursors.encodeTurn(workspaceID, conversationID, *page.NextCursor)
+		next, err = handler.cursors.encodeTurn(workspaceID, conversationID, *page.NextCursor, handler.version)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -377,6 +416,10 @@ func (handler *Handler) getAnswer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	if err := handler.version.CheckWorkflow(view.Workflow.DefinitionKey, view.Workflow.DefinitionVersion); err != nil {
+		writeError(w, err)
+		return
+	}
 	if notModifiedWithTag(w, r, answerETag(view.Answer.Version, view.Workflow.Version, view.CurrentStage)) {
 		return
 	}
@@ -392,8 +435,12 @@ func (handler *Handler) getWorkspaceAnalysisTimeline(w http.ResponseWriter, r *h
 		writeError(w, err)
 		return
 	}
-	timeline, err := handler.service.GetWorkspaceAnalysisTimeline(r.Context(), application.WorkspaceAnalysisTimelineQuery{WorkspaceID: workspaceID, AnswerID: answerID})
+	timeline, err := handler.service.GetWorkspaceAnalysisTimeline(r.Context(), application.WorkspaceAnalysisTimelineQuery{WorkspaceID: workspaceID, AnswerID: answerID, APIVersion: handler.version})
 	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if err := handler.version.CheckTimeline(timeline); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -569,8 +616,8 @@ func formatOptionalTime(value *time.Time) *string {
 	text := formatTime(*value)
 	return &text
 }
-func answerStatusURL(answerID, workspaceID foundation.ID) string {
-	return "/api/v1/answers/" + url.PathEscape(string(answerID)) + "?workspace_id=" + url.QueryEscape(string(workspaceID))
+func answerStatusURL(answerID, workspaceID foundation.ID, version application.APIVersion) string {
+	return "/api/v" + strconv.Itoa(int(version)) + "/answers/" + url.PathEscape(string(answerID)) + "?workspace_id=" + url.QueryEscape(string(workspaceID))
 }
 func etag(version int64) string { return fmt.Sprintf("W/\"%d\"", version) }
 func notModified(w http.ResponseWriter, r *http.Request, version int64) bool {
@@ -610,6 +657,10 @@ func writeError(w http.ResponseWriter, err error) {
 		return
 	}
 	status := httpapi.StatusForErrorKind(classified.Kind)
+	if classified.Code == application.ErrorCodeAPIVersionUnsupported {
+		httpapi.WriteProblem(w, http.StatusConflict, classified.Code, "此分析任务需要使用 /api/v2 接口", false, nil)
+		return
+	}
 	if classified.Kind == foundation.ErrorNonRetryableFailure {
 		status = http.StatusServiceUnavailable
 	}

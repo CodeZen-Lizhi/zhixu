@@ -67,6 +67,7 @@ type WorkspaceAnalysisSynthesisEvidenceAuthority struct {
 	AnalysisRunID      foundation.ID                        `json:"-"`
 	EvidenceRefs       []string                             `json:"-"`
 	SearchReceipt      domain.ResultReceipt                 `json:"-"`
+	SearchReceipts     []domain.ResultReceipt               `json:"-"`
 	ReadSourceReceipts []domain.ResultReceipt               `json:"-"`
 	Evidence           []domain.ReadSourceV3ReceiptEvidence `json:"-"`
 }

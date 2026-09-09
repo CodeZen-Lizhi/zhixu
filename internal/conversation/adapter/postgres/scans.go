@@ -139,6 +139,8 @@ type answerScan struct {
 	workflowID, workflowStatus                                 *string
 	workflowVersion                                            *int64
 	workflowUpdatedAt                                          *time.Time
+	definitionKey                                              *string
+	definitionVersion                                          *int64
 	currentStage                                               *string
 }
 
@@ -148,6 +150,7 @@ func (scan *answerScan) destinations() []any {
 		&scan.modelRunID, &scan.publicationStatus, &scan.resultType, &scan.result, &scan.resultHash, &scan.retrievalSummary,
 		&scan.version, &scan.createdAt, &scan.updatedAt, &scan.publishedAt,
 		&scan.workflowID, &scan.workflowStatus, &scan.workflowVersion, &scan.workflowUpdatedAt,
+		&scan.definitionKey, &scan.definitionVersion,
 		&scan.currentStage,
 	}
 }
@@ -155,7 +158,8 @@ func (scan *answerScan) destinations() []any {
 func (scan *answerScan) build() (conversationapplication.AnswerView, error) {
 	if scan.id == nil || scan.workspaceID == nil || scan.conversationID == nil || scan.questionID == nil || scan.workflowRunID == nil ||
 		scan.publicationStatus == nil || scan.version == nil || scan.createdAt == nil || scan.updatedAt == nil ||
-		scan.workflowID == nil || scan.workflowStatus == nil || scan.workflowVersion == nil || scan.workflowUpdatedAt == nil {
+		scan.workflowID == nil || scan.workflowStatus == nil || scan.workflowVersion == nil || scan.workflowUpdatedAt == nil ||
+		scan.definitionKey == nil || *scan.definitionKey == "" || scan.definitionVersion == nil || *scan.definitionVersion < 1 {
 		return conversationapplication.AnswerView{}, consistency(ErrorCodePersistenceCorrupt, errors.New("turn is missing its answer or workflow projection"))
 	}
 	id, err := parseCanonicalID(*scan.id)
@@ -223,6 +227,7 @@ func (scan *answerScan) build() (conversationapplication.AnswerView, error) {
 		Answer: answer,
 		Workflow: conversationapplication.WorkflowRunView{
 			RunID: workflowID, Status: workflowdomain.RunStatus(*scan.workflowStatus), Version: *scan.workflowVersion, UpdatedAt: *scan.workflowUpdatedAt,
+			DefinitionKey: *scan.definitionKey, DefinitionVersion: *scan.definitionVersion,
 		},
 		AssistantText: projection.AssistantText,
 		Citations:     append([]agentdomain.Citation{}, projection.Citations...),

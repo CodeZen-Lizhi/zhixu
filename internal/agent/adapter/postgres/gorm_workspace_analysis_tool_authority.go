@@ -33,9 +33,10 @@ func (repository *GORMRepository) LoadWorkspaceAnalysisRunToolAuthorityScoped(
 		return application.WorkspaceAnalysisRunToolAuthority{}, found, err
 	}
 	authority := application.WorkspaceAnalysisRunToolAuthority{
-		AnalysisRunID: run.ID,
-		WorkspaceID:   run.WorkspaceID,
-		WorkflowRunID: run.WorkflowRunID,
+		AnalysisRunID:     run.ID,
+		WorkspaceID:       run.WorkspaceID,
+		WorkflowRunID:     run.WorkflowRunID,
+		DefinitionVersion: run.DefinitionVersion,
 	}
 	if err := authority.Validate(); err != nil {
 		return application.WorkspaceAnalysisRunToolAuthority{}, false, consistency(err)
@@ -168,7 +169,11 @@ func (repository *GORMRepository) CountWorkspaceAnalysisSourceReadOperationsScop
 	if err := row.Scan(&count); err != nil {
 		return 0, classifyGORM(ctx, err)
 	}
-	if count < 0 || count > int64(domain.WorkspaceAnalysisV1MaxSourceReads) {
+	maxReads := domain.WorkspaceAnalysisV1MaxSourceReads
+	if run.DefinitionVersion == 2 {
+		maxReads = domain.WorkspaceAnalysisV2MaxSourceReads
+	}
+	if count < 0 || count > int64(maxReads) {
 		return 0, consistency(errors.New("workspace analysis source read operation count is invalid"))
 	}
 	return int(count), nil
@@ -282,6 +287,7 @@ func (repository *GORMRepository) LoadWorkspaceAnalysisToolCandidateAuthoritySco
 		AnalysisRunID: candidate.AnalysisRunID,
 		CandidateHash: candidate.DocumentHash,
 		CitationRefs:  append([]string(nil), decoded.Payload.CitationRefs...),
+		SchemaVersion: candidate.SchemaVersion,
 	}
 	if err := authority.Validate(); err != nil {
 		return application.WorkspaceAnalysisToolCandidateAuthority{}, false, consistency(err)

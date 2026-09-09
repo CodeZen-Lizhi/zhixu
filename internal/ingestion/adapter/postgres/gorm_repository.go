@@ -14,9 +14,15 @@ import (
 )
 
 // GORMRepository persists Ingestion facts through the shared GORM root.
-type GORMRepository struct{ database *gorm.DB }
+type GORMRepository struct {
+	database    *gorm.DB
+	unitOfWork  foundation.UnitOfWork
+	sourceReady domain.SourceReadyAppender
+}
 
 // NewGORMRepository constructs an Ingestion repository from the shared GORM root.
+// Production parsing must use NewGORMRepositoryWithSourceReady so a successful
+// Attempt and its durable notification commit together.
 func NewGORMRepository(database *gorm.DB) (*GORMRepository, error) {
 	if !validIngestionGORMDatabase(database) {
 		return nil, foundation.NewError(foundation.ErrorDependencyUnavailable, "INGESTION_DATABASE_UNAVAILABLE", true, errors.New("GORM database is unavailable"))
@@ -89,9 +95,19 @@ func (r *GORMRepository) TransitionAttempt(ctx context.Context, transition domai
 	if err := r.ready(ctx); err != nil {
 		return domain.AttemptRecord{}, err
 	}
-	current, err := r.GetAttempt(ctx, transition.ID)
+	if r.unitOfWork != nil || r.sourceReady != nil {
+		return r.transitionAttemptWithSourceReady(ctx, transition)
+	}
+	return gormTransitionAttempt(ctx, r.database.WithContext(ctx), transition)
+}
+
+func gormTransitionAttempt(ctx context.Context, database *gorm.DB, transition domain.AttemptTransition) (domain.AttemptRecord, error) {
+	current, err := gormScanAttempt(database, gormGetAttemptSQL, string(transition.ID))
+	if gormNoRows(err) {
+		return domain.AttemptRecord{}, foundation.NewError(foundation.ErrorNotFound, "INGESTION_ATTEMPT_NOT_FOUND", false, err)
+	}
 	if err != nil {
-		return domain.AttemptRecord{}, err
+		return domain.AttemptRecord{}, gormClassify(ctx, err, "INGESTION_ATTEMPT_QUERY_FAILED")
 	}
 	if current.Version != transition.ExpectedVersion {
 		return domain.AttemptRecord{}, foundation.NewError(foundation.ErrorVersionConflict, "INGESTION_ATTEMPT_VERSION_CONFLICT", false, errors.New("attempt version changed"))
@@ -103,7 +119,7 @@ func (r *GORMRepository) TransitionAttempt(ctx context.Context, transition domai
 	if err != nil {
 		return domain.AttemptRecord{}, invalid("INGESTION_WARNINGS_INVALID", err)
 	}
-	record, err := gormScanAttempt(r.database.WithContext(ctx), gormTransitionAttemptSQL,
+	record, err := gormScanAttempt(database, gormTransitionAttemptSQL,
 		string(transition.Status), string(transition.SecurityStatus), optionalID(transition.ParseProjectionID),
 		transition.FailureStage, transition.ErrorCode, transition.Retryable, warnings,
 		utcPointer(transition.CompletedAt), string(transition.ID), transition.ExpectedVersion)

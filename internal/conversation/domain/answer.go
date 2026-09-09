@@ -164,13 +164,13 @@ func projectPublishedAnswer(resultType AnswerResultType, raw json.RawMessage) (P
 			document, err = json.Marshal(decoded)
 		}
 	case AnswerResultWorkspaceAnalysis:
-		var decoded WorkspaceAnalysisAnswerResult
-		decoded, err = decodeWorkspaceAnalysisAnswer(raw)
+		var decoded workspaceAnalysisDecodedAnswer
+		decoded, err = decodeWorkspaceAnalysisAnswerDocument(raw)
 		if err == nil {
 			modelRunID = decoded.ModelRunRef
-			assistantText = decoded.Payload.AnswerMarkdown
-			citations = append(citations, decoded.Payload.Citations...)
-			document, err = json.Marshal(decoded)
+			assistantText = decoded.AnswerMarkdown
+			citations = append(citations, decoded.Citations...)
+			document = decoded.Document
 		}
 	case AnswerResultWorkspaceAnalysisRefusal:
 		var decoded WorkspaceAnalysisRefusalResult
@@ -257,6 +257,19 @@ func validateWorkspaceAnalysisAnswerBundle(answer Answer, seen map[foundation.ID
 	if err != nil || published.Hash != answer.ResultHash || !bytes.Equal(answer.Result, published.Document) ||
 		(answer.ModelRunID == nil) != (published.ModelRunID == nil) {
 		return invalid(ErrorCodeAnswerInvalid, "workspace analysis answer result binding or hash is inconsistent", err)
+	}
+	if answer.ResultType == AnswerResultWorkspaceAnalysis {
+		decoded, decodeErr := decodeWorkspaceAnalysisAnswerDocument(answer.Result)
+		if decodeErr != nil {
+			return invalid(ErrorCodeAnswerInvalid, "workspace analysis answer result is inconsistent", decodeErr)
+		}
+		if decoded.SchemaVersion == WorkspaceAnalysisResultSchemaVersionV2 {
+			for _, citation := range decoded.Citations {
+				if citation.WorkspaceID != answer.WorkspaceID {
+					return invalid(ErrorCodeAnswerInvalid, "workspace analysis v2 citation scope is inconsistent", nil)
+				}
+			}
+		}
 	}
 	if published.ModelRunID == nil {
 		return nil

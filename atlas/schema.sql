@@ -153,6 +153,105 @@ CREATE TYPE workflow.river_job_state AS ENUM (
 
 
 --
+-- Name: append_workspace_analysis_operation_journal(); Type: FUNCTION; Schema: agent; Owner: -
+--
+
+CREATE FUNCTION agent.append_workspace_analysis_operation_journal() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE seq bigint; selected_decision_id uuid;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM agent.workspace_analysis_run WHERE id=NEW.analysis_run_id AND definition_version=2) THEN RETURN NEW; END IF;
+    PERFORM 1 FROM agent.workspace_analysis_run WHERE id=NEW.analysis_run_id FOR UPDATE;
+    SELECT COALESCE(max(sequence),0)+1 INTO seq FROM agent.workspace_analysis_journal WHERE analysis_run_id=NEW.analysis_run_id;
+    IF NEW.node_key='decide_next' AND NEW.call_kind='TOOL' THEN
+        SELECT id INTO selected_decision_id FROM agent.workspace_analysis_decision WHERE analysis_run_id=NEW.analysis_run_id AND ordinal=NEW.ordinal;
+    END IF;
+    INSERT INTO agent.workspace_analysis_journal(workspace_id,analysis_run_id,sequence,operation_id,decision_id,created_at)
+        VALUES(NEW.workspace_id,NEW.analysis_run_id,seq,NEW.id,selected_decision_id,NEW.created_at);
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: close_workspace_analysis_v2_decision_model(uuid, timestamp with time zone); Type: FUNCTION; Schema: agent; Owner: -
+--
+
+CREATE FUNCTION agent.close_workspace_analysis_v2_decision_model(target_model_id uuid, completed_at_value timestamp with time zone) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+DECLARE model agent.model_run%ROWTYPE;
+BEGIN
+    SELECT * INTO model FROM agent.model_run WHERE id=target_model_id FOR UPDATE;
+    IF model.id IS NULL OR model.output_schema_id<>'agent.workspace-analysis-decision' OR model.status<>'RUNNING' THEN
+        RAISE EXCEPTION 'dynamic checkpoint model is not running' USING ERRCODE='55000';
+    END IF;
+    PERFORM agent.verify_workspace_analysis_v2_model_run(model.id);
+    IF completed_at_value IS NULL OR completed_at_value<model.updated_at
+       OR EXISTS (SELECT 1 FROM agent.model_call WHERE model_run_id=model.id AND (status<>'SUCCEEDED' OR completed_at>completed_at_value)) THEN
+        RAISE EXCEPTION 'dynamic checkpoint cannot close an incomplete call' USING ERRCODE='55000';
+    END IF;
+    UPDATE agent.model_run SET status='SUCCEEDED',final_result_type='workspace_analysis_decision',error_code=NULL,
+        version=version+1,updated_at=completed_at_value,completed_at=completed_at_value WHERE id=model.id AND status='RUNNING';
+END;
+$$;
+
+
+--
+-- Name: close_workspace_analysis_v2_decision_runs(uuid, timestamp with time zone); Type: FUNCTION; Schema: agent; Owner: -
+--
+
+CREATE FUNCTION agent.close_workspace_analysis_v2_decision_runs(target_run_id uuid, completed_at_value timestamp with time zone) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+DECLARE checkpoint_model_id uuid;
+BEGIN
+    PERFORM 1 FROM agent.workspace_analysis_run WHERE id=target_run_id AND definition_version=2 FOR UPDATE;
+    IF NOT FOUND THEN RETURN; END IF;
+    FOR checkpoint_model_id IN SELECT model.id FROM agent.model_run model JOIN agent.workspace_analysis_run analysis
+        ON analysis.workflow_run_id=model.workflow_run_id AND analysis.workspace_id=model.workspace_id
+        WHERE analysis.id=target_run_id AND model.output_schema_id='agent.workspace-analysis-decision' AND model.status='RUNNING'
+        ORDER BY model.started_at,model.id FOR UPDATE OF model
+    LOOP PERFORM agent.close_workspace_analysis_v2_decision_model(checkpoint_model_id,completed_at_value); END LOOP;
+END;
+$$;
+
+
+--
+-- Name: close_workspace_analysis_v2_prior_decision_runs(uuid, uuid, timestamp with time zone); Type: FUNCTION; Schema: agent; Owner: -
+--
+
+CREATE FUNCTION agent.close_workspace_analysis_v2_prior_decision_runs(target_run_id uuid, current_attempt_id uuid, completed_at_value timestamp with time zone) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+DECLARE checkpoint_model_id uuid;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM agent.workspace_analysis_run analysis JOIN workflow.node_run node ON node.run_id=analysis.workflow_run_id
+        JOIN workflow.node_attempt attempt ON attempt.node_run_id=node.id
+        WHERE analysis.id=target_run_id AND analysis.definition_version=2 AND analysis.status IN ('queued','running')
+          AND node.node_key='decide_next' AND node.status='running' AND attempt.id=current_attempt_id AND attempt.status='running'
+          AND attempt.attempt_no=node.attempt AND attempt.lease_owner=node.lease_owner AND attempt.lease_until=node.lease_until
+          AND attempt.lease_until>clock_timestamp()) THEN
+        RAISE EXCEPTION 'dynamic replacement checkpoint has no current execution fence' USING ERRCODE='55000';
+    END IF;
+    FOR checkpoint_model_id IN SELECT model.id FROM agent.model_run model JOIN agent.workspace_analysis_run analysis
+        ON analysis.workflow_run_id=model.workflow_run_id AND analysis.workspace_id=model.workspace_id
+        WHERE analysis.id=target_run_id AND model.output_schema_id='agent.workspace-analysis-decision'
+          AND model.node_attempt_id<>current_attempt_id AND model.status='RUNNING' ORDER BY model.started_at,model.id FOR UPDATE OF model
+    LOOP
+        IF NOT EXISTS (SELECT 1 FROM agent.model_run model JOIN workflow.node_attempt attempt ON attempt.id=model.node_attempt_id
+            JOIN workflow.node_attempt current_attempt ON current_attempt.node_run_id=attempt.node_run_id AND current_attempt.id=current_attempt_id
+            WHERE model.id=checkpoint_model_id AND attempt.status IN ('lease_lost','retry_scheduled','failed','cancelled','manual_recovery') AND attempt.attempt_no<current_attempt.attempt_no) THEN
+            RAISE EXCEPTION 'dynamic prior attempt is still live' USING ERRCODE='55000';
+        END IF;
+        PERFORM agent.close_workspace_analysis_v2_decision_model(checkpoint_model_id,completed_at_value);
+    END LOOP;
+END;
+$$;
+
+
+--
 -- Name: enforce_answer_draft_session_transition(); Type: FUNCTION; Schema: agent; Owner: -
 --
 
@@ -280,6 +379,7 @@ DECLARE
     model_result_type text;
     model_workflow_run_id uuid;
     analysis_run_id_value uuid;
+    analysis_definition_version bigint;
     analysis_status text;
     analysis_reason text;
     refusal_reason text;
@@ -382,11 +482,23 @@ BEGIN
         RETURN NEW;
     END IF;
 
+    SELECT id,status,termination_reason,definition_version
+      INTO analysis_run_id_value,analysis_status,analysis_reason,analysis_definition_version
+      FROM agent.workspace_analysis_run
+     WHERE workspace_id=NEW.workspace_id
+       AND answer_id=NEW.id
+       AND question_id=NEW.question_id
+       AND workflow_run_id=NEW.workflow_run_id
+     FOR SHARE;
+    IF analysis_run_id_value IS NULL THEN
+        RAISE EXCEPTION 'workspace analysis answer has no analysis run' USING ERRCODE='55000';
+    END IF;
+
     IF question_mode<>'workspace_analysis'
        OR NEW.retrieval_summary IS NOT NULL
        OR NOT (NEW.result ? 'model_run_ref')
        OR NEW.result->>'result_type' IS DISTINCT FROM NEW.result_type
-       OR NEW.result->>'schema_version' IS DISTINCT FROM 'v1'
+       OR NEW.result->>'schema_version' IS DISTINCT FROM (CASE WHEN NEW.publication_status='completed' AND analysis_definition_version=2 THEN 'v2' ELSE 'v1' END)
        OR (
             NEW.model_run_id IS NULL
             AND NEW.result->'model_run_ref' IS DISTINCT FROM 'null'::jsonb
@@ -410,18 +522,6 @@ BEGIN
            OR model_status='RUNNING' THEN
             RAISE EXCEPTION 'workspace analysis answer model binding is invalid' USING ERRCODE='55000';
         END IF;
-    END IF;
-
-    SELECT id,status,termination_reason
-      INTO analysis_run_id_value,analysis_status,analysis_reason
-      FROM agent.workspace_analysis_run
-     WHERE workspace_id=NEW.workspace_id
-       AND answer_id=NEW.id
-       AND question_id=NEW.question_id
-       AND workflow_run_id=NEW.workflow_run_id
-     FOR SHARE;
-    IF analysis_run_id_value IS NULL THEN
-        RAISE EXCEPTION 'workspace analysis answer has no analysis run' USING ERRCODE='55000';
     END IF;
 
     IF NEW.publication_status<>'completed' THEN
@@ -715,7 +815,8 @@ BEGIN
         END IF;
         IF NEW.retrieval_index_version_id IS NULL
            AND NEW.output_schema_id NOT IN (
-               'agent.rag-answer','organizing.outline-generation','organizing.document-generation'
+               'agent.rag-answer','organizing.outline-generation','organizing.document-generation',
+               'agent.synthesis-delta','agent.synthesis-semantic-review','agent.synthesis-note-interview-plan','agent.workspace-analysis-decision'
            ) THEN
             RAISE EXCEPTION 'only rag or organizing model run may defer retrieval binding' USING ERRCODE = '23514';
         END IF;
@@ -738,6 +839,48 @@ BEGIN
            ) THEN
             RAISE EXCEPTION 'organizing model run requires an exact running generation binding'
                 USING ERRCODE = '55000';
+        END IF;
+        IF NEW.output_schema_id IN ('agent.synthesis-delta','agent.synthesis-semantic-review')
+           AND (NEW.output_schema_version<>'v1' OR NEW.retrieval_index_version_id IS NOT NULL
+                OR NOT EXISTS (
+                    SELECT 1 FROM organizing.synthesis_model_step step
+                    WHERE step.workspace_id=NEW.workspace_id AND step.workflow_run_id=NEW.workflow_run_id
+                      AND step.node_run_id=NEW.node_run_id AND step.node_attempt_id=NEW.node_attempt_id
+                      AND step.status='RUNNING'
+                      AND ((NEW.output_schema_id='agent.synthesis-delta' AND step.stage='GENERATE')
+                        OR (NEW.output_schema_id='agent.synthesis-semantic-review' AND step.stage='VALIDATE'))
+                )) THEN
+            RAISE EXCEPTION 'synthesis model run requires an exact running step' USING ERRCODE='23514';
+        END IF;
+        IF NEW.output_schema_id='agent.synthesis-note-interview-plan' AND (
+           NEW.output_schema_version<>'1' OR NEW.reduced_schema_id<>NEW.output_schema_id OR NEW.reduced_schema_version<>NEW.output_schema_version
+           OR NEW.retrieval_index_version_id IS NOT NULL OR NEW.memory_snapshot_id IS NOT NULL
+           OR NEW.prompt_template_id<>'interview.synthesis-note-plan' OR NEW.prompt_template_version<>'1'
+           OR NOT EXISTS (SELECT 1 FROM learning.note_interview_preparation p WHERE p.workspace_id=NEW.workspace_id AND p.workflow_run_id=NEW.workflow_run_id
+              AND p.node_run_id=NEW.node_run_id AND p.node_attempt_id=NEW.node_attempt_id AND p.status='GENERATING'
+              AND p.model_settings_revision IS NOT DISTINCT FROM NEW.model_settings_revision)) THEN
+           RAISE EXCEPTION 'note interview model requires an exact generating preparation' USING ERRCODE='23514';
+        END IF;
+        IF EXISTS (SELECT 1 FROM agent.workspace_analysis_run analysis JOIN workflow.node_run node ON node.run_id=analysis.workflow_run_id
+            WHERE analysis.workspace_id=NEW.workspace_id AND analysis.workflow_run_id=NEW.workflow_run_id AND analysis.definition_version=2 AND node.id=NEW.node_run_id
+              AND NOT ((node.node_key='decide_next' AND NEW.output_schema_id='agent.workspace-analysis-decision' AND NEW.output_schema_version='1')
+                OR (node.node_key='synthesize_answer' AND NEW.output_schema_id='agent.workspace-analysis-candidate' AND NEW.output_schema_version='2')
+                OR (node.node_key='review_publish' AND NEW.output_schema_id='agent.faithfulness-review' AND NEW.output_schema_version='v1'))) THEN
+            RAISE EXCEPTION 'dynamic model schema differs from its frozen node contract' USING ERRCODE='23514';
+        END IF;
+        IF NEW.output_schema_id='agent.workspace-analysis-decision' AND (
+            NEW.output_schema_version<>'1' OR NEW.reduced_schema_id<>NEW.output_schema_id OR NEW.reduced_schema_version<>NEW.output_schema_version
+            OR NEW.retrieval_index_version_id IS NOT NULL OR NEW.memory_snapshot_id IS NOT NULL
+            OR NOT EXISTS (SELECT 1 FROM agent.workspace_analysis_run analysis
+                JOIN workflow.node_run node ON node.run_id=analysis.workflow_run_id AND node.id=NEW.node_run_id AND node.node_key='decide_next'
+                JOIN workflow.node_attempt attempt ON attempt.node_run_id=node.id AND attempt.id=NEW.node_attempt_id
+                JOIN agent.workspace_analysis_operation operation ON operation.analysis_run_id=analysis.id AND operation.node_run_id=node.id
+                    AND operation.node_key='decide_next' AND operation.operation_kind='DECISION' AND operation.status='PENDING'
+                WHERE analysis.workspace_id=NEW.workspace_id AND analysis.workflow_run_id=NEW.workflow_run_id AND analysis.definition_version=2
+                    AND analysis.status IN ('queued','running') AND node.status='running' AND attempt.status='running'
+                    AND attempt.attempt_no=node.attempt AND attempt.lease_owner=node.lease_owner AND attempt.lease_until=node.lease_until
+                    AND attempt.lease_until>clock_timestamp())) THEN
+            RAISE EXCEPTION 'decision model run requires an exact dynamic pending operation and active attempt' USING ERRCODE='23514';
         END IF;
         IF NEW.memory_snapshot_id IS NULL AND EXISTS (
             SELECT 1
@@ -943,7 +1086,13 @@ DECLARE
     candidate_json jsonb;
     candidate_payload jsonb;
     proposal_json jsonb;
+    definition_version_value bigint;
 BEGIN
+    SELECT definition_version INTO definition_version_value FROM agent.workspace_analysis_run
+      WHERE id=NEW.analysis_run_id AND workspace_id=NEW.workspace_id AND answer_id=NEW.answer_id FOR SHARE;
+    IF definition_version_value IS NULL OR NEW.schema_version<>definition_version_value THEN
+        RAISE EXCEPTION 'candidate schema differs from the frozen analysis definition' USING ERRCODE='23514';
+    END IF;
     SELECT * INTO operation_row
      FROM agent.workspace_analysis_operation
      WHERE id=NEW.synthesis_operation_id
@@ -998,12 +1147,12 @@ BEGIN
        OR octet_length(convert_to(candidate_payload->>'answer_markdown','UTF8')) NOT BETWEEN 1 AND 65536
        OR candidate_payload->>'answer_markdown' IS DISTINCT FROM btrim(candidate_payload->>'answer_markdown')
        OR jsonb_typeof(candidate_payload->'citation_refs') IS DISTINCT FROM 'array'
-       OR jsonb_array_length(candidate_payload->'citation_refs') NOT BETWEEN 1 AND 3
+       OR jsonb_array_length(candidate_payload->'citation_refs') NOT BETWEEN 1 AND (CASE NEW.schema_version WHEN 2 THEN 8 ELSE 3 END)
        OR EXISTS (
             SELECT 1
               FROM jsonb_array_elements(candidate_payload->'citation_refs') AS item(value)
              WHERE jsonb_typeof(value) IS DISTINCT FROM 'string'
-                OR value#>>'{}' !~ '^E[1-3]$'
+                OR value#>>'{}' !~ (CASE NEW.schema_version WHEN 2 THEN '^E([1-9]|[12][0-9]|3[0-2])$' ELSE '^E[1-3]$' END)
        )
        OR (
             SELECT count(DISTINCT value#>>'{}')
@@ -1020,12 +1169,12 @@ BEGIN
             OR octet_length(convert_to(proposal_json->>'summary','UTF8')) NOT BETWEEN 1 AND 4096
             OR proposal_json->>'summary' IS DISTINCT FROM btrim(proposal_json->>'summary')
             OR jsonb_typeof(proposal_json->'citation_refs') IS DISTINCT FROM 'array'
-            OR jsonb_array_length(proposal_json->'citation_refs') NOT BETWEEN 1 AND 3
+            OR jsonb_array_length(proposal_json->'citation_refs') NOT BETWEEN 1 AND (CASE NEW.schema_version WHEN 2 THEN 8 ELSE 3 END)
             OR EXISTS (
                 SELECT 1
                   FROM jsonb_array_elements(proposal_json->'citation_refs') AS item(value)
                  WHERE jsonb_typeof(value) IS DISTINCT FROM 'string'
-                    OR value#>>'{}' !~ '^E[1-3]$'
+                    OR value#>>'{}' !~ (CASE NEW.schema_version WHEN 2 THEN '^E([1-9]|[12][0-9]|3[0-2])$' ELSE '^E[1-3]$' END)
                     OR NOT (candidate_payload->'citation_refs' @> jsonb_build_array(value))
             )
             OR (
@@ -1035,9 +1184,160 @@ BEGIN
        ) THEN
         RAISE EXCEPTION 'workspace analysis candidate proposal is invalid' USING ERRCODE='23514';
     END IF;
+    IF NEW.schema_version=2 AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(candidate_payload->'citation_refs') ref
+        WHERE NOT agent.workspace_analysis_v2_ref_read(NEW.analysis_run_id,ref)) THEN
+        RAISE EXCEPTION 'dynamic candidate references require exact completed source reads' USING ERRCODE='23514';
+    END IF;
     RETURN NEW;
 END;
 $_$;
+
+
+--
+-- Name: guard_workspace_analysis_decision_insert(); Type: FUNCTION; Schema: agent; Owner: -
+--
+
+CREATE FUNCTION agent.guard_workspace_analysis_decision_insert() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    op agent.workspace_analysis_operation%ROWTYPE;
+    model agent.model_run%ROWTYPE;
+    call_row agent.model_call%ROWTYPE;
+    document_json jsonb;
+    action_value text;
+    canonical text;
+    refs_canonical text;
+BEGIN
+    SELECT * INTO op FROM agent.workspace_analysis_operation WHERE id=NEW.operation_id AND analysis_run_id=NEW.analysis_run_id FOR SHARE;
+    SELECT * INTO model FROM agent.model_run WHERE id=NEW.model_run_id AND workspace_id=NEW.workspace_id FOR SHARE;
+    SELECT * INTO call_row FROM agent.model_call WHERE id=NEW.model_call_id AND model_run_id=NEW.model_run_id FOR SHARE;
+    IF op.id IS NULL OR model.id IS NULL OR call_row.id IS NULL
+       OR op.workspace_id<>NEW.workspace_id OR op.node_key<>'decide_next' OR op.operation_kind<>'DECISION' OR op.call_kind<>'MODEL'
+       OR op.ordinal<>NEW.ordinal OR op.status<>'STARTED' OR op.model_call_id IS DISTINCT FROM NEW.model_call_id
+       OR op.first_node_attempt_id IS DISTINCT FROM NEW.node_attempt_id OR op.latest_node_attempt_id IS DISTINCT FROM NEW.node_attempt_id
+       OR model.workflow_run_id<>op.workflow_run_id OR model.node_run_id<>op.node_run_id OR model.node_attempt_id<>NEW.node_attempt_id
+       OR model.output_schema_id<>'agent.workspace-analysis-decision' OR model.output_schema_version<>'1' OR model.status<>'RUNNING'
+       OR call_row.status<>'SUCCEEDED' OR call_row.phase<>'AGENT' OR call_row.request_hash<>op.request_hash
+       OR call_row.response_hash IS DISTINCT FROM NEW.document_hash OR call_row.response_bytes<>NEW.document_bytes
+       OR NEW.created_at IS DISTINCT FROM call_row.completed_at OR NEW.created_at<model.started_at
+       OR NOT EXISTS (SELECT 1 FROM agent.workspace_analysis_run WHERE id=NEW.analysis_run_id AND workspace_id=NEW.workspace_id AND definition_version=2)
+       OR NOT agent.workspace_analysis_v2_operation_predecessor(op.id) THEN
+        RAISE EXCEPTION 'dynamic decision receipt has no exact successful call' USING ERRCODE='55000';
+    END IF;
+    document_json:=convert_from(NEW.document,'UTF8')::jsonb;
+    IF NOT workflow.workspace_analysis_receipt_exact_object_keys(document_json,ARRAY['action','query','evidence_ref','evidence_refs'])
+       OR jsonb_typeof(document_json->'action') IS DISTINCT FROM 'string' THEN
+        RAISE EXCEPTION 'dynamic decision document keys are invalid' USING ERRCODE='23514';
+    END IF;
+    action_value:=document_json->>'action';
+    IF action_value IN ('git_status','finish') THEN
+        IF document_json->'query'<>'null'::jsonb OR document_json->'evidence_ref'<>'null'::jsonb OR document_json->'evidence_refs'<>'null'::jsonb THEN
+            RAISE EXCEPTION 'dynamic parameterless decision has arguments' USING ERRCODE='23514';
+        END IF;
+    ELSIF action_value='knowledge_search' THEN
+        IF jsonb_typeof(document_json->'query') IS DISTINCT FROM 'string'
+           OR NOT workflow.workspace_analysis_receipt_text(document_json->>'query',1024)
+           OR document_json->'evidence_ref'<>'null'::jsonb OR document_json->'evidence_refs'<>'null'::jsonb THEN
+            RAISE EXCEPTION 'dynamic search decision is invalid' USING ERRCODE='23514';
+        END IF;
+    ELSIF action_value='source_read' THEN
+        IF document_json->'query'<>'null'::jsonb OR document_json->'evidence_refs'<>'null'::jsonb
+           OR jsonb_typeof(document_json->'evidence_ref') IS DISTINCT FROM 'string'
+           OR NOT EXISTS (SELECT 1 FROM agent.workspace_analysis_evidence evidence WHERE evidence.analysis_run_id=NEW.analysis_run_id
+                AND 'E'||evidence.reference_no::text=document_json->>'evidence_ref') THEN
+            RAISE EXCEPTION 'dynamic source decision has no run-owned search reference' USING ERRCODE='23514';
+        END IF;
+    ELSIF action_value='citation_validation' THEN
+        IF document_json->'query'<>'null'::jsonb OR document_json->'evidence_ref'<>'null'::jsonb
+           OR NOT agent.workspace_analysis_v2_refs_valid(document_json->'evidence_refs',8) THEN
+            RAISE EXCEPTION 'dynamic citation decision is invalid' USING ERRCODE='23514';
+        END IF;
+        IF EXISTS (SELECT 1 FROM jsonb_array_elements_text(document_json->'evidence_refs') ref
+                   WHERE NOT agent.workspace_analysis_v2_ref_read(NEW.analysis_run_id,ref)) THEN
+            RAISE EXCEPTION 'dynamic citation decision must use completed reads' USING ERRCODE='23514';
+        END IF;
+    ELSE
+        RAISE EXCEPTION 'dynamic decision action is outside the frozen catalog' USING ERRCODE='23514';
+    END IF;
+    IF jsonb_typeof(document_json->'evidence_refs')='array' THEN
+        SELECT '['||string_agg(workflow.workspace_analysis_receipt_json_string(item#>>'{}'),',' ORDER BY ordinal)||']'
+          INTO refs_canonical FROM jsonb_array_elements(document_json->'evidence_refs') WITH ORDINALITY refs(item,ordinal);
+    ELSE refs_canonical:='null'; END IF;
+    canonical:='{"action":'||workflow.workspace_analysis_receipt_json_string(action_value)
+        ||',"query":'||COALESCE(workflow.workspace_analysis_receipt_json_string(document_json->>'query'),'null')
+        ||',"evidence_ref":'||COALESCE(workflow.workspace_analysis_receipt_json_string(document_json->>'evidence_ref'),'null')
+        ||',"evidence_refs":'||refs_canonical||'}';
+    IF NEW.document IS DISTINCT FROM convert_to(canonical,'UTF8') THEN
+        RAISE EXCEPTION 'dynamic decision document must be canonical without duplicate keys' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: guard_workspace_analysis_evidence_receipt(); Type: FUNCTION; Schema: agent; Owner: -
+--
+
+CREATE FUNCTION agent.guard_workspace_analysis_evidence_receipt() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    search workflow.tool_result_receipt%ROWTYPE;
+    operation agent.workspace_analysis_operation%ROWTYPE;
+    identity jsonb;
+BEGIN
+    SELECT * INTO search FROM workflow.tool_result_receipt
+      WHERE id=NEW.search_receipt_id AND workspace_id=NEW.workspace_id;
+    SELECT * INTO operation FROM agent.workspace_analysis_operation
+      WHERE id=NEW.search_operation_id AND workspace_id=NEW.workspace_id AND analysis_run_id=NEW.analysis_run_id;
+    identity:=jsonb_build_object('evidence_ref',NEW.local_evidence_ref,'citation_id',NEW.citation_id,
+      'index_version_id',NEW.index_version_id::text,'chunk_id',NEW.chunk_id::text,
+      'source_version_id',NEW.source_version_id::text,'source_span_id',NEW.source_span_id::text,'content_hash',NEW.content_hash);
+    IF search.id IS NULL OR search.tool_name<>'SearchKnowledge' OR search.tool_version<>3
+       OR search.output_hash<>NEW.search_receipt_hash OR operation.id IS NULL
+       OR operation.node_key<>'decide_next' OR operation.operation_kind<>'KNOWLEDGE_SEARCH'
+       OR operation.status<>'SUCCEEDED' OR operation.result_id IS DISTINCT FROM search.id
+       OR operation.result_hash IS DISTINCT FROM search.output_hash OR operation.tool_call_id IS DISTINCT FROM search.tool_call_id
+       OR operation.workflow_run_id<>search.workflow_run_id
+       OR NOT workflow.workspace_analysis_receipt_identity_valid(identity,5)
+       OR NOT workflow.workspace_analysis_dynamic_source_bound(NEW.workspace_id,identity)
+       OR NOT EXISTS (SELECT 1 FROM jsonb_array_elements(convert_from(search.server_binding_document,'UTF8')::jsonb->'items') item WHERE item=identity) THEN
+        RAISE EXCEPTION 'dynamic evidence alias does not match exact Search receipt' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: guard_workspace_analysis_journal_insert(); Type: FUNCTION; Schema: agent; Owner: -
+--
+
+CREATE FUNCTION agent.guard_workspace_analysis_journal_insert() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    op agent.workspace_analysis_operation%ROWTYPE;
+    expected_sequence bigint;
+    selected_decision_id uuid;
+BEGIN
+    PERFORM 1 FROM agent.workspace_analysis_run WHERE id=NEW.analysis_run_id AND workspace_id=NEW.workspace_id AND definition_version=2 FOR UPDATE;
+    IF NOT FOUND THEN RAISE EXCEPTION 'dynamic journal requires a version two run' USING ERRCODE='23514'; END IF;
+    SELECT * INTO op FROM agent.workspace_analysis_operation WHERE id=NEW.operation_id AND analysis_run_id=NEW.analysis_run_id;
+    SELECT COALESCE(max(sequence),0)+1 INTO expected_sequence FROM agent.workspace_analysis_journal WHERE analysis_run_id=NEW.analysis_run_id;
+    IF op.node_key='decide_next' AND op.call_kind='TOOL' THEN
+        SELECT id INTO selected_decision_id FROM agent.workspace_analysis_decision WHERE analysis_run_id=NEW.analysis_run_id AND ordinal=op.ordinal;
+    END IF;
+    IF op.id IS NULL OR op.workspace_id<>NEW.workspace_id OR op.status<>'PENDING' OR NEW.sequence<>expected_sequence
+       OR NEW.created_at IS DISTINCT FROM op.created_at OR NEW.decision_id IS DISTINCT FROM selected_decision_id
+       OR NOT agent.workspace_analysis_v2_operation_predecessor(op.id) THEN
+        RAISE EXCEPTION 'dynamic journal is not the next exact operation' USING ERRCODE='55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
 
 
 --
@@ -1248,6 +1548,14 @@ BEGIN
     IF TG_OP='DELETE' THEN
         RAISE EXCEPTION 'workspace analysis operation is append-only' USING ERRCODE='55000';
     END IF;
+    SELECT * INTO run_row FROM agent.workspace_analysis_run
+      WHERE id=NEW.analysis_run_id AND workspace_id=NEW.workspace_id AND workflow_run_id=NEW.workflow_run_id FOR SHARE;
+    IF run_row.id IS NULL
+       OR (run_row.definition_version=1 AND NEW.node_key='decide_next')
+       OR (run_row.definition_version=2 AND NEW.node_key IN ('inspect_workspace','retrieve_evidence','read_evidence'))
+       OR (run_row.definition_version=2 AND NEW.operation_kind='DECISION' AND NEW.status<>'PENDING' AND NEW.ordinal>12) THEN
+        RAISE EXCEPTION 'workspace analysis operation does not belong to its definition version' USING ERRCODE='23514';
+    END IF;
     IF TG_OP='INSERT' THEN
         IF NEW.status<>'PENDING' OR NEW.version<>1 THEN
             RAISE EXCEPTION 'workspace analysis operation must start pending at version one' USING ERRCODE='23514';
@@ -1395,6 +1703,7 @@ BEGIN
             NEW.call_kind='MODEL'
             AND NOT (
                 (NEW.operation_kind='RETRIEVAL_PLAN' AND model_phase_value='PLAN')
+                OR (run_row.definition_version=2 AND NEW.operation_kind='DECISION' AND model_phase_value='AGENT')
                 OR (NEW.operation_kind='ANSWER_SYNTHESIS' AND model_phase_value='ANSWER')
                 OR (NEW.operation_kind='FAITHFULNESS_REVIEW' AND model_phase_value='REVIEW')
             )
@@ -1402,10 +1711,10 @@ BEGIN
        OR (
             NEW.call_kind='TOOL'
             AND NOT (
-                (NEW.operation_kind='GIT_STATUS' AND tool_name_value='ReadGitStatus' AND tool_version_value=2)
-                OR (NEW.operation_kind='KNOWLEDGE_SEARCH' AND tool_name_value='SearchKnowledge' AND tool_version_value=2)
-                OR (NEW.operation_kind='SOURCE_READ' AND tool_name_value='ReadSource' AND tool_version_value=3)
-                OR (NEW.operation_kind='CITATION_VALIDATION' AND tool_name_value='ValidateCitation' AND tool_version_value=3)
+                (NEW.operation_kind='GIT_STATUS' AND tool_name_value='ReadGitStatus' AND tool_version_value=CASE run_row.definition_version WHEN 2 THEN 3 ELSE 2 END)
+                OR (NEW.operation_kind='KNOWLEDGE_SEARCH' AND tool_name_value='SearchKnowledge' AND tool_version_value=CASE run_row.definition_version WHEN 2 THEN 3 ELSE 2 END)
+                OR (NEW.operation_kind='SOURCE_READ' AND tool_name_value='ReadSource' AND tool_version_value=CASE run_row.definition_version WHEN 2 THEN 4 ELSE 3 END)
+                OR (NEW.operation_kind='CITATION_VALIDATION' AND tool_name_value='ValidateCitation' AND tool_version_value=CASE run_row.definition_version WHEN 2 THEN 4 ELSE 3 END)
             )
        ) THEN
         RAISE EXCEPTION 'workspace analysis operation call binding is invalid' USING ERRCODE='55000';
@@ -1445,7 +1754,17 @@ BEGIN
         IF call_status<>'SUCCEEDED' THEN
             RAISE EXCEPTION 'workspace analysis successful operation has no successful call' USING ERRCODE='55000';
         END IF;
-        IF NEW.result_kind='MODEL_RESULT_RECEIPT' THEN
+        IF run_row.definition_version=2 AND NOT terminal_replay AND workflow_cancel_requested_at IS NOT NULL THEN
+            RAISE EXCEPTION 'cancelled dynamic operation cannot publish a successful result' USING ERRCODE='55000';
+        END IF;
+        IF NEW.result_kind='DECISION_RECEIPT' THEN
+            SELECT document_hash INTO model_result_hash FROM agent.workspace_analysis_decision
+              WHERE id=NEW.result_id AND operation_id=NEW.id AND model_call_id=NEW.model_call_id FOR SHARE;
+            IF model_result_hash IS DISTINCT FROM NEW.result_hash OR model_result_hash IS DISTINCT FROM call_response_hash
+               OR run_row.definition_version<>2 OR model_run_status NOT IN ('RUNNING','SUCCEEDED','FAILED','UNKNOWN') THEN
+                RAISE EXCEPTION 'dynamic decision result binding is invalid' USING ERRCODE='55000';
+            END IF;
+        ELSIF NEW.result_kind='MODEL_RESULT_RECEIPT' THEN
             SELECT document_hash INTO model_result_hash
               FROM agent.workspace_analysis_model_result
              WHERE id=NEW.result_id
@@ -1626,8 +1945,8 @@ BEGIN
     END IF;
     IF run_row.status='queued'
        AND (
-            derived_node_key<>'inspect_workspace'
-            OR derived_operation_kind<>'GIT_STATUS'
+            derived_node_key<>(CASE WHEN run_row.definition_version=2 THEN 'decide_next' ELSE 'inspect_workspace' END)
+            OR derived_operation_kind<>(CASE WHEN run_row.definition_version=2 THEN 'DECISION' ELSE 'GIT_STATUS' END)
             OR derived_ordinal<>1
             OR EXISTS (
                 SELECT 1
@@ -1647,6 +1966,7 @@ BEGIN
     call_timeout_ms := CASE derived_operation_kind
         WHEN 'GIT_STATUS' THEN run_row.git_tool_timeout_ms
         WHEN 'RETRIEVAL_PLAN' THEN run_row.plan_model_timeout_ms
+        WHEN 'DECISION' THEN run_row.plan_model_timeout_ms
         WHEN 'KNOWLEDGE_SEARCH' THEN run_row.search_tool_timeout_ms
         WHEN 'SOURCE_READ' THEN run_row.source_read_tool_timeout_ms
         WHEN 'ANSWER_SYNTHESIS' THEN run_row.synthesis_model_timeout_ms
@@ -1658,6 +1978,11 @@ BEGIN
             <=run_row.deadline_at THEN
         RAISE EXCEPTION 'workspace analysis pre-operation deadline still has execution time'
             USING ERRCODE='55000';
+    END IF;
+
+    IF run_row.definition_version=2 AND EXISTS (SELECT 1 FROM agent.model_run
+        WHERE workspace_id=run_row.workspace_id AND workflow_run_id=run_row.workflow_run_id AND status='RUNNING') THEN
+        RAISE EXCEPTION 'dynamic runtime terminal model prefix is not closed' USING ERRCODE='55000';
     END IF;
 
     published_json := convert_from(NEW.published_document,'UTF8')::jsonb;
@@ -1841,6 +2166,11 @@ BEGIN
      WHERE id=NEW.review_model_result_id
        AND analysis_run_id=NEW.analysis_run_id
      FOR SHARE;
+
+    IF run_row.definition_version=2 THEN
+        PERFORM agent.validate_workspace_analysis_v2_publication_proof(NEW);
+        RETURN NEW;
+    END IF;
 
     IF run_row.id IS NULL
        OR run_row.status<>'running'
@@ -2144,6 +2474,7 @@ BEGIN
         call_timeout_ms := CASE operation_row.operation_kind
             WHEN 'GIT_STATUS' THEN run_row.git_tool_timeout_ms
             WHEN 'RETRIEVAL_PLAN' THEN run_row.plan_model_timeout_ms
+            WHEN 'DECISION' THEN run_row.plan_model_timeout_ms
             WHEN 'KNOWLEDGE_SEARCH' THEN run_row.search_tool_timeout_ms
             WHEN 'SOURCE_READ' THEN run_row.source_read_tool_timeout_ms
             WHEN 'ANSWER_SYNTHESIS' THEN run_row.synthesis_model_timeout_ms
@@ -2163,7 +2494,16 @@ BEGIN
            OR NEW.reserved_cost_microunits IS NOT NULL
            OR (NEW.call_kind='MODEL' AND NEW.reserved_input_tokens<>65536)
            OR (operation_row.operation_kind='RETRIEVAL_PLAN' AND NEW.reserved_output_tokens<>256)
-           OR (operation_row.operation_kind='ANSWER_SYNTHESIS' AND NEW.reserved_output_tokens<>run_row.max_output_tokens-1280)
+           OR (operation_row.operation_kind='ANSWER_SYNTHESIS' AND NEW.reserved_output_tokens<>
+               run_row.max_output_tokens-CASE run_row.definition_version WHEN 2 THEN 7168 ELSE 1280 END)
+           OR (operation_row.operation_kind='DECISION' AND (run_row.definition_version<>2 OR NEW.reserved_output_tokens<>512 OR operation_row.ordinal>12
+               OR run_row.reserved_model_calls+run_row.settled_model_calls+2>run_row.max_model_calls
+               OR run_row.reserved_input_tokens+run_row.settled_input_tokens+131072>run_row.max_input_tokens
+               OR run_row.reserved_output_tokens+run_row.settled_output_tokens+run_row.max_output_tokens-6144>run_row.max_output_tokens))
+           OR (run_row.definition_version=2 AND operation_row.node_key='decide_next' AND NEW.call_kind='TOOL'
+               AND run_row.reserved_tool_calls+run_row.settled_tool_calls+1>run_row.max_tool_calls)
+           OR (run_row.definition_version=2 AND operation_row.operation_kind='KNOWLEDGE_SEARCH'
+               AND (SELECT count(*) FROM agent.workspace_analysis_evidence WHERE analysis_run_id=run_row.id)>=32)
            OR (operation_row.operation_kind='FAITHFULNESS_REVIEW' AND NEW.reserved_output_tokens<>1024)
            OR (NEW.reserved_source_reads=1)<>(operation_row.operation_kind='SOURCE_READ') THEN
             RAISE EXCEPTION 'workspace analysis reservation binding is invalid' USING ERRCODE='55000';
@@ -2389,11 +2729,10 @@ BEGIN
                         SELECT 1
                           FROM agent.workspace_analysis_termination_proof AS proof
                          WHERE proof.analysis_run_id=NEW.id
-                           AND proof.operation_id=operation.id
-                           AND proof.reason IN (
-                                'WORKSPACE_ANALYSIS_BUDGET_EXHAUSTED',
-                                'WORKSPACE_ANALYSIS_DEADLINE_EXCEEDED'
-                           )
+                           AND ((proof.operation_id=operation.id AND proof.reason IN (
+                                'WORKSPACE_ANALYSIS_BUDGET_EXHAUSTED','WORKSPACE_ANALYSIS_DEADLINE_EXCEEDED'))
+                              OR (NEW.definition_version=2 AND proof.reason IN ('WORKSPACE_ANALYSIS_CANCELLED','WORKSPACE_ANALYSIS_RUNTIME_FAILED')
+                                  AND agent.workspace_analysis_v2_uncalled_pending(operation.id)))
                     )
                 )
            );
@@ -2405,7 +2744,14 @@ BEGIN
         END IF;
     END IF;
 
-    IF NEW.status='succeeded' THEN
+    IF NEW.definition_version=2 AND NEW.status IN ('succeeded','refused','failed','cancelled','clarification_required') THEN
+        IF EXISTS (SELECT 1 FROM agent.model_run WHERE workspace_id=NEW.workspace_id AND workflow_run_id=NEW.workflow_run_id AND status='RUNNING') THEN
+            RAISE EXCEPTION 'dynamic analysis terminal model runs are not closed' USING ERRCODE='55000';
+        END IF;
+    END IF;
+    IF NEW.status='succeeded' AND NEW.definition_version=2 THEN
+        PERFORM agent.verify_workspace_analysis_v2_success_facts(NEW,NEW.validation_receipt_id,NEW.review_model_run_id);
+    ELSIF NEW.status='succeeded' THEN
         SELECT
             count(*) FILTER (WHERE operation_kind='GIT_STATUS'),
             count(*) FILTER (WHERE operation_kind='RETRIEVAL_PLAN'),
@@ -2629,10 +2975,10 @@ BEGIN
        OR workflow_cancel_requested_at IS NULL
        OR workflow_cancel_requested_at>NEW.runtime_terminal_at
        OR workflow_completed_at IS DISTINCT FROM NEW.runtime_terminal_at
-       OR node_key_value NOT IN (
-            'inspect_workspace','retrieve_evidence','read_evidence',
-            'synthesize_answer','validate_citations','review_publish'
-       )
+       OR (run_row.definition_version=1 AND node_key_value NOT IN (
+            'inspect_workspace','retrieve_evidence','read_evidence','synthesize_answer','validate_citations','review_publish'))
+       OR (run_row.definition_version=2 AND (node_key_value NOT IN ('decide_next','synthesize_answer','validate_citations','review_publish')
+            OR NOT EXISTS (SELECT 1 FROM workflow.node_run WHERE id=NEW.terminal_node_run_id AND node_type='agent.workspace-analysis.v2.'||node_key)))
        OR node_status_value<>'cancelled'
        OR node_lease_owner IS NOT NULL
        OR node_lease_until IS NOT NULL
@@ -2673,6 +3019,7 @@ BEGIN
           FROM agent.workspace_analysis_operation
          WHERE analysis_run_id=NEW.analysis_run_id
            AND status<>'SUCCEEDED'
+           AND NOT (run_row.definition_version=2 AND agent.workspace_analysis_v2_uncalled_pending(id))
     ) OR EXISTS (
         SELECT 1
           FROM agent.workspace_analysis_budget_reservation
@@ -2681,6 +3028,11 @@ BEGIN
     ) THEN
         RAISE EXCEPTION 'workspace analysis cancellation cannot mask unfinished or failed work'
             USING ERRCODE='55000';
+    END IF;
+
+    IF run_row.definition_version=2 AND EXISTS (SELECT 1 FROM agent.model_run
+        WHERE workspace_id=run_row.workspace_id AND workflow_run_id=run_row.workflow_run_id AND status='RUNNING') THEN
+        RAISE EXCEPTION 'dynamic runtime terminal model prefix is not closed' USING ERRCODE='55000';
     END IF;
 
     published_json := convert_from(NEW.published_document,'UTF8')::jsonb;
@@ -2828,7 +3180,6 @@ BEGIN
     IF NEW.reason<>'WORKSPACE_ANALYSIS_RUNTIME_FAILED'
        OR NEW.runtime_terminal_at IS NULL
        OR NEW.runtime_terminal_at IS DISTINCT FROM NEW.checked_at
-       OR NEW.terminal_node_attempt_id IS NULL
        OR NEW.operation_id IS NOT NULL
        OR NEW.artifact_kind IS NOT NULL
        OR NEW.artifact_id IS NOT NULL
@@ -2898,10 +3249,10 @@ BEGIN
        OR workflow_status_value<>'failed'
        OR workflow_cancel_requested_at IS NOT NULL
        OR workflow_completed_at IS DISTINCT FROM NEW.runtime_terminal_at
-       OR node_key_value NOT IN (
-            'inspect_workspace','retrieve_evidence','read_evidence',
-            'synthesize_answer','validate_citations','review_publish'
-       )
+       OR (run_row.definition_version=1 AND node_key_value NOT IN (
+            'inspect_workspace','retrieve_evidence','read_evidence','synthesize_answer','validate_citations','review_publish'))
+       OR (run_row.definition_version=2 AND (node_key_value NOT IN ('decide_next','synthesize_answer','validate_citations','review_publish')
+            OR NOT EXISTS (SELECT 1 FROM workflow.node_run WHERE id=NEW.terminal_node_run_id AND node_type='agent.workspace-analysis.v2.'||node_key)))
        OR node_status_value<>'failed'
        OR node_lease_owner IS NOT NULL
        OR node_lease_until IS NOT NULL
@@ -2910,6 +3261,10 @@ BEGIN
        OR node_failure_class='cancelled'
        OR node_error_code IS NULL OR btrim(node_error_code)=''
        OR node_error_summary IS NULL OR btrim(node_error_summary)=''
+       OR (NEW.terminal_node_attempt_id IS NULL AND (run_row.definition_version<>2 OR node_attempt_no<>0
+            OR EXISTS (SELECT 1 FROM workflow.node_attempt WHERE node_run_id=NEW.terminal_node_run_id)))
+       OR (NEW.terminal_node_attempt_id IS NOT NULL AND (
+            attempt_status_value IS NULL
        OR attempt_status_value NOT IN ('failed','manual_recovery','lease_lost')
        OR attempt_number IS DISTINCT FROM node_attempt_no
        OR attempt_lease_owner IS NOT NULL
@@ -2919,6 +3274,7 @@ BEGIN
        OR attempt_failure_class='cancelled'
        OR attempt_error_code IS NULL OR btrim(attempt_error_code)=''
        OR attempt_error_summary IS NULL OR btrim(attempt_error_summary)=''
+       ))
        OR NEW.runtime_terminal_at>database_now
        OR NEW.created_at>database_now
        OR NEW.created_at<NEW.runtime_terminal_at
@@ -2932,6 +3288,7 @@ BEGIN
           FROM agent.workspace_analysis_operation
          WHERE analysis_run_id=NEW.analysis_run_id
            AND status<>'SUCCEEDED'
+           AND NOT (run_row.definition_version=2 AND agent.workspace_analysis_v2_uncalled_pending(id))
     ) OR EXISTS (
         SELECT 1
           FROM agent.workspace_analysis_budget_reservation
@@ -2943,6 +3300,11 @@ BEGIN
     END IF;
 
     expected_summary := 'The workspace analysis stopped because its runtime could not complete safely.';
+    IF run_row.definition_version=2 AND EXISTS (SELECT 1 FROM agent.model_run
+        WHERE workspace_id=run_row.workspace_id AND workflow_run_id=run_row.workflow_run_id AND status='RUNNING') THEN
+        RAISE EXCEPTION 'dynamic runtime terminal model prefix is not closed' USING ERRCODE='55000';
+    END IF;
+
     published_json := convert_from(NEW.published_document,'UTF8')::jsonb;
     published_payload := published_json->'payload';
     IF jsonb_typeof(published_json) IS DISTINCT FROM 'object'
@@ -2965,6 +3327,55 @@ $$;
 
 
 --
+-- Name: guard_workspace_analysis_search_evidence_closure(); Type: FUNCTION; Schema: agent; Owner: -
+--
+
+CREATE FUNCTION agent.guard_workspace_analysis_search_evidence_closure() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    search workflow.tool_result_receipt%ROWTYPE;
+    analysis_id_value uuid;
+    items jsonb;
+    alias_count bigint;
+    lower_ref integer;
+    upper_ref integer;
+BEGIN
+    IF TG_TABLE_SCHEMA='workflow' THEN
+        SELECT * INTO search FROM workflow.tool_result_receipt WHERE id=NEW.id;
+        IF search.tool_name<>'SearchKnowledge' OR search.tool_version<>3 THEN RETURN NULL; END IF;
+    ELSE
+        SELECT * INTO search FROM workflow.tool_result_receipt WHERE id=NEW.search_receipt_id;
+    END IF;
+    SELECT analysis_run_id INTO analysis_id_value FROM agent.workspace_analysis_operation
+      WHERE tool_call_id=search.tool_call_id AND workspace_id=search.workspace_id AND status='SUCCEEDED'
+        AND result_id=search.id AND result_hash=search.output_hash;
+    IF analysis_id_value IS NULL THEN
+        RAISE EXCEPTION 'dynamic Search operation is not complete' USING ERRCODE='23514';
+    END IF;
+    items:=convert_from(search.server_binding_document,'UTF8')::jsonb->'items';
+    SELECT count(*),min(reference_no),max(reference_no) INTO alias_count,lower_ref,upper_ref
+      FROM agent.workspace_analysis_evidence WHERE analysis_run_id=analysis_id_value AND search_receipt_id=search.id;
+    IF alias_count<>jsonb_array_length(items)
+       OR (alias_count>0 AND upper_ref-lower_ref+1<>alias_count)
+       OR EXISTS (
+         SELECT 1 FROM jsonb_array_elements(items) WITH ORDINALITY item(identity,ordinal)
+         WHERE NOT EXISTS (
+           SELECT 1 FROM agent.workspace_analysis_evidence evidence
+           WHERE evidence.analysis_run_id=analysis_id_value AND evidence.search_receipt_id=search.id
+             AND evidence.reference_no=lower_ref+item.ordinal-1
+             AND evidence.local_evidence_ref=item.identity->>'evidence_ref'
+             AND evidence.search_receipt_hash=search.output_hash
+         )
+       ) THEN
+        RAISE EXCEPTION 'dynamic Search evidence mapping is incomplete' USING ERRCODE='23514';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+
+--
 -- Name: guard_workspace_analysis_termination_proof_insert(); Type: FUNCTION; Schema: agent; Owner: -
 --
 
@@ -2973,6 +3384,7 @@ CREATE FUNCTION agent.guard_workspace_analysis_termination_proof_insert() RETURN
     AS $$
 DECLARE
     run_row agent.workspace_analysis_run%ROWTYPE;
+    decision_row agent.workspace_analysis_decision%ROWTYPE;
     operation_row agent.workspace_analysis_operation%ROWTYPE;
     reservation_row agent.workspace_analysis_budget_reservation%ROWTYPE;
     model_call_row agent.model_call%ROWTYPE;
@@ -3086,11 +3498,18 @@ BEGIN
            AND workflow_run_id=NEW.workflow_run_id
            AND (
                 (
-                    NEW.reason='WORKSPACE_ANALYSIS_EVIDENCE_INSUFFICIENT'
+                    run_row.definition_version=1
+                    AND NEW.reason='WORKSPACE_ANALYSIS_EVIDENCE_INSUFFICIENT'
                     AND terminal_node_key_value='read_evidence'
                     AND node_key='retrieve_evidence'
                     AND operation_kind='KNOWLEDGE_SEARCH'
                     AND ordinal=1
+                )
+                OR (
+                    run_row.definition_version=2
+                    AND NEW.reason='WORKSPACE_ANALYSIS_EVIDENCE_INSUFFICIENT'
+                    AND terminal_node_key_value='synthesize_answer'
+                    AND node_key='decide_next' AND operation_kind='DECISION'
                 )
                 OR (
                     NEW.reason='WORKSPACE_ANALYSIS_CITATION_INVALID'
@@ -3196,7 +3615,40 @@ BEGIN
         artifact_json := convert_from(model_result_row.document,'UTF8')::jsonb;
     END IF;
 
+    IF NEW.artifact_kind='DECISION_RECEIPT' THEN
+        SELECT * INTO decision_row FROM agent.workspace_analysis_decision
+          WHERE id=NEW.artifact_id AND workspace_id=NEW.workspace_id AND analysis_run_id=NEW.analysis_run_id
+            AND operation_id=operation_row.id AND model_call_id=operation_row.model_call_id FOR SHARE;
+        IF run_row.definition_version<>2 OR NEW.reason<>'WORKSPACE_ANALYSIS_EVIDENCE_INSUFFICIENT'
+           OR decision_row.id IS NULL OR decision_row.document_hash IS DISTINCT FROM NEW.artifact_hash
+           OR operation_row.result_id IS DISTINCT FROM decision_row.id OR operation_row.result_hash IS DISTINCT FROM decision_row.document_hash
+           OR decision_row.model_run_id IS DISTINCT FROM model_run_row.id OR NEW.checked_at<decision_row.created_at THEN
+            RAISE EXCEPTION 'dynamic finish decision artifact binding is invalid' USING ERRCODE='55000';
+        END IF;
+        artifact_json:=convert_from(decision_row.document,'UTF8')::jsonb;
+    END IF;
+    IF run_row.definition_version=2 THEN
+        IF NOT EXISTS (SELECT 1 FROM workflow.node_run WHERE id=NEW.terminal_node_run_id
+            AND node_type='agent.workspace-analysis.v2.'||node_key)
+           OR EXISTS (SELECT 1 FROM agent.model_run WHERE workspace_id=run_row.workspace_id
+                AND workflow_run_id=run_row.workflow_run_id AND status='RUNNING')
+           OR (operation_row.status='PENDING' AND (reservation_row.id IS NOT NULL OR operation_row.model_call_id IS NOT NULL OR operation_row.tool_call_id IS NOT NULL))
+           OR (operation_row.status IN ('SUCCEEDED','FAILED') AND reservation_row.status IS DISTINCT FROM 'SETTLED') THEN
+            RAISE EXCEPTION 'dynamic terminal model or reservation closure is invalid' USING ERRCODE='55000';
+        END IF;
+    END IF;
+
     IF NEW.reason='WORKSPACE_ANALYSIS_EVIDENCE_INSUFFICIENT' THEN
+        IF run_row.definition_version=2 THEN
+            IF operation_row.node_key<>'decide_next' OR operation_row.operation_kind<>'DECISION' OR operation_row.status<>'SUCCEEDED'
+               OR operation_row.call_kind<>'MODEL' OR operation_row.result_kind<>'DECISION_RECEIPT'
+               OR NEW.artifact_kind IS DISTINCT FROM 'DECISION_RECEIPT' OR artifact_json->>'action' IS DISTINCT FROM 'finish'
+               OR model_call_row.status IS DISTINCT FROM 'SUCCEEDED' OR model_run_row.status IS DISTINCT FROM 'SUCCEEDED'
+               OR NOT agent.workspace_analysis_v2_decisions_complete(run_row.id)
+               OR agent.workspace_analysis_v2_has_readable_evidence(run_row.id) THEN
+                RAISE EXCEPTION 'dynamic finish does not prove insufficient evidence' USING ERRCODE='55000';
+            END IF;
+        ELSE
         IF operation_row.node_key<>'retrieve_evidence'
            OR operation_row.operation_kind<>'KNOWLEDGE_SEARCH'
            OR operation_row.ordinal<>1
@@ -3210,7 +3662,19 @@ BEGIN
            OR jsonb_array_length(artifact_json->'items')<>0 THEN
             RAISE EXCEPTION 'workspace analysis evidence insufficiency proof is invalid' USING ERRCODE='55000';
         END IF;
+        END IF;
     ELSIF NEW.reason='WORKSPACE_ANALYSIS_CITATION_INVALID' THEN
+        IF run_row.definition_version=2 THEN
+            IF operation_row.node_key<>'validate_citations' OR operation_row.operation_kind<>'CITATION_VALIDATION'
+               OR operation_row.ordinal<>1 OR operation_row.call_kind<>'TOOL' OR operation_row.status<>'SUCCEEDED'
+               OR operation_row.result_kind<>'TOOL_RESULT_RECEIPT' OR NEW.artifact_kind IS DISTINCT FROM 'TOOL_RECEIPT'
+               OR tool_receipt_row.tool_name<>'ValidateCitation' OR tool_receipt_row.tool_version<>4
+               OR tool_call_row.status IS DISTINCT FROM 'SUCCEEDED'
+               OR NOT agent.workspace_analysis_v2_final_validation_bound(run_row.id)
+               OR NOT EXISTS (SELECT 1 FROM jsonb_array_elements(artifact_json->'results') item WHERE item->'valid'='false'::jsonb) THEN
+                RAISE EXCEPTION 'dynamic final citation rejection proof is invalid' USING ERRCODE='55000';
+            END IF;
+        ELSE
         IF operation_row.node_key<>'validate_citations'
            OR operation_row.operation_kind<>'CITATION_VALIDATION'
            OR operation_row.ordinal<>1
@@ -3342,6 +3806,7 @@ BEGIN
            ) THEN
             RAISE EXCEPTION 'workspace analysis citation rejection binding is invalid' USING ERRCODE='55000';
         END IF;
+        END IF;
     ELSIF NEW.reason='WORKSPACE_ANALYSIS_FAITHFULNESS_REJECTED' THEN
         IF operation_row.operation_kind<>'FAITHFULNESS_REVIEW'
            OR operation_row.status<>'SUCCEEDED'
@@ -3370,6 +3835,9 @@ BEGIN
         END IF;
     ELSIF NEW.reason='WORKSPACE_ANALYSIS_BUDGET_EXHAUSTED' THEN
         CASE operation_row.operation_kind
+            WHEN 'DECISION' THEN
+                expected_model_calls:=1; expected_tool_calls:=0; expected_source_reads:=0;
+                expected_input_tokens:=65536; expected_output_tokens:=512;
             WHEN 'RETRIEVAL_PLAN' THEN
                 expected_model_calls := 1;
                 expected_tool_calls := 0;
@@ -3381,7 +3849,7 @@ BEGIN
                 expected_tool_calls := 0;
                 expected_source_reads := 0;
                 expected_input_tokens := 65536;
-                expected_output_tokens := run_row.max_output_tokens-1280;
+                expected_output_tokens := run_row.max_output_tokens-CASE WHEN run_row.definition_version=2 THEN 7168 ELSE 1280 END;
             WHEN 'FAITHFULNESS_REVIEW' THEN
                 expected_model_calls := 1;
                 expected_tool_calls := 0;
@@ -3416,13 +3884,15 @@ BEGIN
                    AND prior.id<>NEW.operation_id
                    AND prior.status IN ('FAILED','UNKNOWN')
            )
-           OR (
+           OR (run_row.definition_version=2 AND NOT agent.workspace_analysis_v2_budget_denied(
+                run_row,operation_row,NEW.requested_model_calls,NEW.requested_tool_calls,NEW.requested_source_reads,NEW.requested_input_tokens,NEW.requested_output_tokens))
+           OR (run_row.definition_version=1 AND (
                 NEW.requested_model_calls<=run_row.max_model_calls-run_row.reserved_model_calls-run_row.settled_model_calls
                 AND NEW.requested_tool_calls<=run_row.max_tool_calls-run_row.reserved_tool_calls-run_row.settled_tool_calls
                 AND NEW.requested_source_reads<=run_row.max_source_reads-run_row.reserved_source_reads-run_row.settled_source_reads
                 AND NEW.requested_input_tokens<=run_row.max_input_tokens-run_row.reserved_input_tokens-run_row.settled_input_tokens
                 AND NEW.requested_output_tokens<=run_row.max_output_tokens-run_row.reserved_output_tokens-run_row.settled_output_tokens
-           ) THEN
+           )) THEN
             RAISE EXCEPTION 'workspace analysis budget request proof is invalid' USING ERRCODE='55000';
         END IF;
     ELSIF NEW.reason='WORKSPACE_ANALYSIS_RECEIPT_INVALID' THEN
@@ -3460,6 +3930,7 @@ BEGIN
         call_timeout_ms := CASE operation_row.operation_kind
             WHEN 'GIT_STATUS' THEN run_row.git_tool_timeout_ms
             WHEN 'RETRIEVAL_PLAN' THEN run_row.plan_model_timeout_ms
+            WHEN 'DECISION' THEN run_row.plan_model_timeout_ms
             WHEN 'KNOWLEDGE_SEARCH' THEN run_row.search_tool_timeout_ms
             WHEN 'SOURCE_READ' THEN run_row.source_read_tool_timeout_ms
             WHEN 'ANSWER_SYNTHESIS' THEN run_row.synthesis_model_timeout_ms
@@ -3519,6 +3990,11 @@ BEGIN
     ELSE
         RAISE EXCEPTION 'workspace analysis termination reason is unsupported' USING ERRCODE='55000';
     END IF;
+
+    IF run_row.definition_version=2 AND NEW.reason='WORKSPACE_ANALYSIS_CANCELLED' AND EXISTS (
+        SELECT 1 FROM agent.workspace_analysis_operation WHERE analysis_run_id=run_row.id AND status<>'SUCCEEDED'
+            AND NOT agent.workspace_analysis_v2_uncalled_pending(id)
+    ) THEN RAISE EXCEPTION 'dynamic cancellation cannot mask external work' USING ERRCODE='55000'; END IF;
 
     published_json := convert_from(NEW.published_document,'UTF8')::jsonb;
     published_payload := published_json->'payload';
@@ -3651,6 +4127,21 @@ $$;
 
 
 --
+-- Name: guard_workspace_analysis_v2_model_run_closure(); Type: FUNCTION; Schema: agent; Owner: -
+--
+
+CREATE FUNCTION agent.guard_workspace_analysis_v2_model_run_closure() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF TG_TABLE_NAME='model_run' THEN PERFORM agent.verify_workspace_analysis_v2_model_run(NEW.id);
+    ELSE PERFORM agent.verify_workspace_analysis_v2_model_run(NEW.model_run_id); END IF;
+    RETURN NULL;
+END;
+$$;
+
+
+--
 -- Name: guard_workspace_analysis_worker_capability(); Type: FUNCTION; Schema: agent; Owner: -
 --
 
@@ -3742,6 +4233,9 @@ BEGIN
         RETURN false;
     END IF;
 
+    IF EXISTS (SELECT 1 FROM agent.workspace_analysis_run WHERE id=operation_row.analysis_run_id AND definition_version=2) THEN
+        RETURN agent.workspace_analysis_v2_operation_predecessor(target_operation_id);
+    END IF;
     CASE operation_row.operation_kind
         WHEN 'GIT_STATUS' THEN
             RETURN NOT EXISTS (
@@ -3852,6 +4346,144 @@ CREATE FUNCTION agent.reject_workspace_analysis_worker_capability_delete() RETUR
 BEGIN
     RAISE EXCEPTION 'workspace analysis worker capability history cannot be deleted'
         USING ERRCODE='55000';
+END;
+$$;
+
+
+SET default_tablespace = '';
+
+SET default_table_access_method = heap;
+
+--
+-- Name: workspace_analysis_publication_proof; Type: TABLE; Schema: agent; Owner: -
+--
+
+CREATE TABLE agent.workspace_analysis_publication_proof (
+    id uuid NOT NULL,
+    workspace_id uuid NOT NULL,
+    analysis_run_id uuid NOT NULL,
+    answer_id uuid NOT NULL,
+    workflow_run_id uuid NOT NULL,
+    finalization_node_run_id uuid NOT NULL,
+    finalization_node_attempt_id uuid NOT NULL,
+    candidate_id uuid NOT NULL,
+    candidate_hash text NOT NULL,
+    git_receipt_id uuid,
+    git_receipt_hash text,
+    validation_receipt_id uuid NOT NULL,
+    validation_receipt_hash text NOT NULL,
+    review_model_result_id uuid NOT NULL,
+    review_document_hash text NOT NULL,
+    published_document bytea NOT NULL,
+    published_result_hash text NOT NULL,
+    published_bytes bigint NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    CONSTRAINT workspace_analysis_publication_git_pair CHECK (((git_receipt_id IS NULL) = (git_receipt_hash IS NULL))),
+    CONSTRAINT workspace_analysis_publication_pr_validation_receipt_hash_check CHECK ((validation_receipt_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT workspace_analysis_publication_proo_published_result_hash_check CHECK ((published_result_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT workspace_analysis_publication_proof_candidate_hash_check CHECK ((candidate_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT workspace_analysis_publication_proof_git_receipt_hash_check CHECK ((git_receipt_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT workspace_analysis_publication_proof_integrity CHECK (((published_bytes = octet_length(published_document)) AND ((published_bytes >= 1) AND (published_bytes <= 262144)) AND (published_result_hash = encode(sha256(published_document), 'hex'::text)))),
+    CONSTRAINT workspace_analysis_publication_proof_review_document_hash_check CHECK ((review_document_hash ~ '^[0-9a-f]{64}$'::text))
+);
+
+
+--
+-- Name: validate_workspace_analysis_v2_publication_proof(agent.workspace_analysis_publication_proof); Type: FUNCTION; Schema: agent; Owner: -
+--
+
+CREATE FUNCTION agent.validate_workspace_analysis_v2_publication_proof(proof agent.workspace_analysis_publication_proof) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    analysis agent.workspace_analysis_run%ROWTYPE;
+    runtime workflow.run%ROWTYPE; node workflow.node_run%ROWTYPE; attempt workflow.node_attempt%ROWTYPE;
+    candidate agent.workspace_analysis_candidate%ROWTYPE;
+    git_receipt workflow.tool_result_receipt%ROWTYPE; citation_receipt workflow.tool_result_receipt%ROWTYPE;
+    review agent.workspace_analysis_model_result%ROWTYPE;
+    latest_git_id uuid; latest_git_hash text;
+    candidate_json jsonb; binding_json jsonb; published_json jsonb; expected_git jsonb:='null'::jsonb;
+    expected_citations jsonb; expected_proposal jsonb; expected_document jsonb; git_json jsonb;
+BEGIN
+    SELECT * INTO runtime FROM workflow.run WHERE id=proof.workflow_run_id AND workspace_id=proof.workspace_id FOR UPDATE;
+    SELECT * INTO node FROM workflow.node_run WHERE id=proof.finalization_node_run_id AND run_id=proof.workflow_run_id FOR UPDATE;
+    SELECT * INTO attempt FROM workflow.node_attempt WHERE id=proof.finalization_node_attempt_id AND node_run_id=node.id FOR UPDATE;
+    SELECT * INTO analysis FROM agent.workspace_analysis_run WHERE id=proof.analysis_run_id AND workspace_id=proof.workspace_id AND answer_id=proof.answer_id AND workflow_run_id=proof.workflow_run_id FOR UPDATE;
+    SELECT * INTO candidate FROM agent.workspace_analysis_candidate WHERE id=proof.candidate_id AND analysis_run_id=analysis.id FOR SHARE;
+    SELECT * INTO citation_receipt FROM workflow.tool_result_receipt WHERE id=proof.validation_receipt_id AND workspace_id=proof.workspace_id FOR SHARE;
+    SELECT * INTO review FROM agent.workspace_analysis_model_result WHERE id=proof.review_model_result_id AND analysis_run_id=analysis.id FOR SHARE;
+    SELECT result_id,result_hash INTO latest_git_id,latest_git_hash FROM agent.workspace_analysis_operation
+        WHERE analysis_run_id=analysis.id AND node_key='decide_next' AND operation_kind='GIT_STATUS' AND status='SUCCEEDED' ORDER BY ordinal DESC LIMIT 1;
+    IF proof.git_receipt_id IS NOT NULL THEN SELECT * INTO git_receipt FROM workflow.tool_result_receipt WHERE id=proof.git_receipt_id AND workspace_id=proof.workspace_id FOR SHARE; END IF;
+    IF analysis.id IS NULL OR analysis.definition_version<>2 OR analysis.status<>'running' OR analysis.termination_reason IS NOT NULL
+       OR runtime.id IS NULL OR runtime.status<>'running' OR runtime.cancel_requested_at IS NOT NULL
+       OR node.id IS NULL OR node.node_key<>'review_publish' OR node.node_type<>'agent.workspace-analysis.v2.review_publish' OR node.status<>'running'
+       OR attempt.id IS NULL OR attempt.status<>'running' OR node.attempt IS DISTINCT FROM attempt.attempt_no
+       OR node.lease_owner IS NULL OR node.lease_owner='' OR node.lease_owner IS DISTINCT FROM btrim(node.lease_owner)
+       OR node.lease_owner IS DISTINCT FROM attempt.lease_owner OR node.lease_until IS NULL OR node.lease_until IS DISTINCT FROM attempt.lease_until
+       OR attempt.lease_until<=clock_timestamp() OR proof.created_at>clock_timestamp() OR proof.created_at<analysis.updated_at
+       OR analysis.deadline_at<proof.created_at OR analysis.deadline_at<=clock_timestamp()
+       OR candidate.id IS NULL OR candidate.answer_id<>proof.answer_id OR candidate.document_hash<>proof.candidate_hash OR candidate.schema_version<>2
+       OR citation_receipt.id IS NULL OR citation_receipt.workflow_run_id<>proof.workflow_run_id OR citation_receipt.output_hash<>proof.validation_receipt_hash
+       OR citation_receipt.tool_name<>'ValidateCitation' OR citation_receipt.tool_version<>4
+       OR review.id IS NULL OR review.operation_kind<>'FAITHFULNESS_REVIEW' OR review.document_hash<>proof.review_document_hash
+       OR review.subject_candidate_id IS DISTINCT FROM candidate.id OR review.subject_candidate_hash IS DISTINCT FROM candidate.document_hash
+       OR NOT EXISTS (SELECT 1 FROM agent.workspace_analysis_operation WHERE id=review.operation_id AND analysis_run_id=analysis.id
+            AND node_run_id=node.id AND result_id=review.id AND result_hash=review.document_hash AND status='SUCCEEDED')
+       OR proof.git_receipt_id IS DISTINCT FROM latest_git_id OR proof.git_receipt_hash IS DISTINCT FROM latest_git_hash
+       OR (proof.git_receipt_id IS NOT NULL AND (git_receipt.id IS NULL OR git_receipt.output_hash<>proof.git_receipt_hash
+            OR git_receipt.tool_name<>'ReadGitStatus' OR git_receipt.tool_version<>3 OR git_receipt.workflow_run_id<>proof.workflow_run_id))
+       OR proof.created_at<candidate.created_at OR proof.created_at<citation_receipt.created_at OR proof.created_at<review.created_at
+       OR (git_receipt.id IS NOT NULL AND proof.created_at<git_receipt.created_at)
+       OR EXISTS (SELECT 1 FROM agent.workspace_analysis_operation WHERE analysis_run_id=analysis.id AND updated_at>proof.created_at) THEN
+        RAISE EXCEPTION 'dynamic workspace analysis publication fence or authority binding is invalid' USING ERRCODE='55000';
+    END IF;
+    PERFORM agent.verify_workspace_analysis_v2_success_facts(analysis,citation_receipt.id,review.model_run_id);
+    candidate_json:=convert_from(candidate.document,'UTF8')::jsonb;
+    binding_json:=convert_from(citation_receipt.server_binding_document,'UTF8')::jsonb;
+    -- Alias references may describe the same immutable source. They retain their
+    -- private Search/Read authority and map to one public Citation in first-use order.
+    IF EXISTS (SELECT 1 FROM jsonb_array_elements(binding_json->'results') item GROUP BY item->>'citation_id'
+            HAVING count(DISTINCT jsonb_build_array(item->'index_version_id',item->'chunk_id',item->'source_version_id',item->'source_span_id'))<>1)
+       OR EXISTS (SELECT 1 FROM jsonb_array_elements(binding_json->'results') item
+            GROUP BY item->'index_version_id',item->'chunk_id',item->'source_version_id',item->'source_span_id'
+            HAVING count(DISTINCT item->>'citation_id')<>1) THEN
+        RAISE EXCEPTION 'dynamic citation aliases disagree on public identity' USING ERRCODE='55000';
+    END IF;
+    SELECT jsonb_agg(citation ORDER BY first_ordinal) INTO expected_citations FROM (
+        SELECT jsonb_build_object('id',item->>'citation_id','workspace_id',proof.workspace_id::text,
+            'index_version_id',item->>'index_version_id','chunk_id',item->>'chunk_id',
+            'source_version_id',item->>'source_version_id','source_span_id',item->>'source_span_id') citation, min(ordinal) first_ordinal
+        FROM jsonb_array_elements(binding_json->'results') WITH ORDINALITY entry(item,ordinal)
+        GROUP BY 1
+    ) projected;
+    IF candidate_json#>'{payload,proposal_suggestion}'='null'::jsonb THEN expected_proposal:='null'::jsonb;
+    ELSE
+        SELECT jsonb_build_object('summary',candidate_json#>>'{payload,proposal_suggestion,summary}',
+            'citation_ids',jsonb_agg(citation_id ORDER BY first_ordinal),'href','/proposals')
+        INTO expected_proposal FROM (
+            SELECT item->'citation_id' citation_id,min(proposal.ordinal) first_ordinal
+            FROM jsonb_array_elements(candidate_json#>'{payload,proposal_suggestion,citation_refs}') WITH ORDINALITY proposal(ref,ordinal)
+            JOIN jsonb_array_elements(binding_json->'results') item ON item->'evidence_ref'=proposal.ref
+            GROUP BY 1
+        ) projected;
+    END IF;
+    IF git_receipt.id IS NOT NULL THEN
+        git_json:=convert_from(git_receipt.output_document,'UTF8')::jsonb;
+        expected_git:=jsonb_build_object('branch',git_json->>'branch','head',git_json->>'head','clean',git_json->'clean',
+            'staged_count',git_json->'staged_count','unstaged_count',git_json->'unstaged_count',
+            'untracked_count',git_json->'untracked_count','conflict_count',git_json->'conflict_count');
+    END IF;
+    expected_document:=jsonb_build_object('result_type','workspace_analysis','schema_id','conversation.workspace_analysis_answer',
+        'schema_version','v2','model_run_ref',candidate.synthesis_model_run_id::text,
+        'payload',jsonb_build_object('answer_markdown',candidate_json#>>'{payload,answer_markdown}',
+            'citations',expected_citations,'git_status',expected_git,'proposal_suggestion',expected_proposal,'termination_reason','COMPLETED',
+            'budget',jsonb_build_object('model_calls',analysis.settled_model_calls,'tool_calls',analysis.settled_tool_calls,
+                'input_tokens',analysis.settled_input_tokens,'output_tokens',analysis.settled_output_tokens,'estimated_cost_microunits',analysis.settled_cost_microunits)));
+    published_json:=convert_from(proof.published_document,'UTF8')::jsonb;
+    IF published_json IS DISTINCT FROM expected_document THEN
+        RAISE EXCEPTION 'dynamic workspace analysis publication is not the authoritative projection' USING ERRCODE='55000';
+    END IF;
 END;
 $$;
 
@@ -4051,6 +4683,17 @@ BEGIN
       FROM agent.workspace_analysis_budget_reservation
      WHERE operation_id=target_operation_id;
 
+    IF EXISTS (SELECT 1 FROM agent.workspace_analysis_run WHERE id=operation_row.analysis_run_id AND definition_version=2) THEN
+        IF NOT EXISTS (SELECT 1 FROM agent.workspace_analysis_journal WHERE operation_id=operation_row.id
+            AND analysis_run_id=operation_row.analysis_run_id AND workspace_id=operation_row.workspace_id)
+           OR NOT agent.workspace_analysis_v2_operation_predecessor(operation_row.id) THEN
+            RAISE EXCEPTION 'dynamic operation requires its exact journal predecessor' USING ERRCODE='55000';
+        END IF;
+        IF operation_row.operation_kind='DECISION' AND operation_row.status<>'PENDING'
+           AND NOT agent.workspace_analysis_v2_decision_call_bound(operation_row.model_call_id) THEN
+            RAISE EXCEPTION 'dynamic decision operation has an incomplete call closure' USING ERRCODE='55000';
+        END IF;
+    END IF;
     IF operation_row.status='PENDING' THEN
         IF reservation_row.id IS NOT NULL THEN
             RAISE EXCEPTION 'pending workspace analysis operation has a reservation' USING ERRCODE='55000';
@@ -4248,6 +4891,198 @@ $$;
 
 
 --
+-- Name: verify_workspace_analysis_v2_model_run(uuid); Type: FUNCTION; Schema: agent; Owner: -
+--
+
+CREATE FUNCTION agent.verify_workspace_analysis_v2_model_run(target_model_run_id uuid) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    model agent.model_run%ROWTYPE;
+    last_call agent.model_call%ROWTYPE;
+    call_count integer;
+    maximum_call integer;
+    last_action text;
+BEGIN
+    SELECT * INTO model FROM agent.model_run WHERE id=target_model_run_id;
+    IF model.id IS NULL OR model.output_schema_id<>'agent.workspace-analysis-decision' THEN RETURN; END IF;
+    SELECT count(*),max(call_no) INTO call_count,maximum_call FROM agent.model_call WHERE model_run_id=model.id;
+    IF call_count NOT BETWEEN 1 AND 12 OR call_count IS DISTINCT FROM maximum_call
+       OR EXISTS (SELECT 1 FROM agent.model_call WHERE model_run_id=model.id AND NOT agent.workspace_analysis_v2_decision_call_bound(id)) THEN
+        RAISE EXCEPTION 'dynamic model run requires a complete nonempty decision call prefix' USING ERRCODE='55000';
+    END IF;
+    SELECT * INTO last_call FROM agent.model_call WHERE model_run_id=model.id AND call_no=maximum_call;
+    SELECT convert_from(document,'UTF8')::jsonb->>'action' INTO last_action FROM agent.workspace_analysis_decision WHERE model_call_id=last_call.id;
+    IF EXISTS (SELECT 1 FROM agent.model_call WHERE model_run_id=model.id AND call_no<maximum_call AND status<>'SUCCEEDED')
+       OR (model.status='RUNNING' AND (last_call.status NOT IN ('STARTED','SUCCEEDED') OR last_action='finish'))
+       OR (model.status='SUCCEEDED' AND (last_call.status<>'SUCCEEDED' OR model.final_result_type IS DISTINCT FROM 'workspace_analysis_decision'))
+       OR (model.status='FAILED' AND (last_call.status<>'FAILED' OR model.error_code IS DISTINCT FROM last_call.error_code))
+       OR (model.status='UNKNOWN' AND (last_call.status<>'UNKNOWN' OR model.error_code IS DISTINCT FROM last_call.error_code))
+       OR model.status NOT IN ('RUNNING','SUCCEEDED','FAILED','UNKNOWN')
+       OR (model.status<>'RUNNING' AND (model.completed_at IS NULL OR model.completed_at<last_call.completed_at)) THEN
+        RAISE EXCEPTION 'dynamic model run terminal result disagrees with its calls' USING ERRCODE='55000';
+    END IF;
+    IF model.status='SUCCEEDED' AND last_action IS DISTINCT FROM 'finish'
+       AND NOT EXISTS (SELECT 1 FROM workflow.node_attempt WHERE id=model.node_attempt_id AND status IN ('lease_lost','retry_scheduled','failed','cancelled','manual_recovery'))
+       AND NOT EXISTS (SELECT 1 FROM agent.workspace_analysis_run analysis
+           JOIN agent.workspace_analysis_termination_proof proof ON proof.analysis_run_id=analysis.id
+           WHERE analysis.workflow_run_id=model.workflow_run_id AND analysis.workspace_id=model.workspace_id) THEN
+        RAISE EXCEPTION 'dynamic model checkpoint requires replacement or a proven analysis termination' USING ERRCODE='55000';
+    END IF;
+END;
+$$;
+
+
+--
+-- Name: workspace_analysis_run; Type: TABLE; Schema: agent; Owner: -
+--
+
+CREATE TABLE agent.workspace_analysis_run (
+    id uuid NOT NULL,
+    workspace_id uuid NOT NULL,
+    conversation_id uuid NOT NULL,
+    question_id uuid NOT NULL,
+    answer_id uuid NOT NULL,
+    workflow_run_id uuid NOT NULL,
+    definition_key text NOT NULL,
+    definition_version bigint NOT NULL,
+    definition_hash text NOT NULL,
+    tool_catalog_hash text NOT NULL,
+    policy_version integer NOT NULL,
+    config_revision bigint NOT NULL,
+    deadline_at timestamp with time zone NOT NULL,
+    plan_model_timeout_ms bigint NOT NULL,
+    synthesis_model_timeout_ms bigint NOT NULL,
+    review_model_timeout_ms bigint NOT NULL,
+    git_tool_timeout_ms bigint NOT NULL,
+    search_tool_timeout_ms bigint NOT NULL,
+    source_read_tool_timeout_ms bigint NOT NULL,
+    validate_citation_tool_timeout_ms bigint NOT NULL,
+    durable_completion_margin_ms bigint NOT NULL,
+    max_nodes integer NOT NULL,
+    max_model_calls integer NOT NULL,
+    max_tool_calls integer NOT NULL,
+    max_source_reads integer NOT NULL,
+    max_tool_concurrency integer NOT NULL,
+    max_input_tokens bigint NOT NULL,
+    max_output_tokens bigint NOT NULL,
+    max_cost_microunits bigint,
+    reserved_model_calls integer DEFAULT 0 NOT NULL,
+    reserved_tool_calls integer DEFAULT 0 NOT NULL,
+    reserved_source_reads integer DEFAULT 0 NOT NULL,
+    reserved_input_tokens bigint DEFAULT 0 NOT NULL,
+    reserved_output_tokens bigint DEFAULT 0 NOT NULL,
+    reserved_cost_microunits bigint,
+    settled_model_calls integer DEFAULT 0 NOT NULL,
+    settled_tool_calls integer DEFAULT 0 NOT NULL,
+    settled_source_reads integer DEFAULT 0 NOT NULL,
+    settled_input_tokens bigint DEFAULT 0 NOT NULL,
+    settled_output_tokens bigint DEFAULT 0 NOT NULL,
+    settled_cost_microunits bigint,
+    status text NOT NULL,
+    termination_reason text,
+    validation_receipt_id uuid,
+    review_model_run_id uuid,
+    version bigint DEFAULT 1 NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    updated_at timestamp with time zone NOT NULL,
+    completed_at timestamp with time zone,
+    CONSTRAINT workspace_analysis_run_budget_bounds CHECK ((((reserved_model_calls + settled_model_calls) <= max_model_calls) AND ((reserved_tool_calls + settled_tool_calls) <= max_tool_calls) AND ((reserved_source_reads + settled_source_reads) <= max_source_reads) AND ((reserved_input_tokens + settled_input_tokens) <= max_input_tokens) AND ((reserved_output_tokens + settled_output_tokens) <= max_output_tokens) AND (reserved_cost_microunits IS NULL) AND (settled_cost_microunits IS NULL))),
+    CONSTRAINT workspace_analysis_run_config_revision_check CHECK ((config_revision >= 0)),
+    CONSTRAINT workspace_analysis_run_contract CHECK (((definition_key = 'workspace-analysis'::text) AND (max_tool_concurrency = 1) AND (max_cost_microunits IS NULL) AND (((definition_version = 1) AND (policy_version = 1) AND (max_nodes = 6) AND (max_model_calls = 3) AND (max_tool_calls = 6) AND (max_source_reads = 3) AND (max_input_tokens = 196608) AND ((max_output_tokens >= 1281) AND (max_output_tokens <= 5376))) OR ((definition_version = 2) AND (policy_version = 2) AND (max_nodes = 4) AND (max_model_calls = 14) AND (max_tool_calls = 13) AND (max_source_reads = 8) AND (max_input_tokens = 917504) AND ((max_output_tokens >= 7169) AND (max_output_tokens <= 11264)))))),
+    CONSTRAINT workspace_analysis_run_definition_hash_check CHECK ((definition_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT workspace_analysis_run_durable_completion_margin_ms_check CHECK ((durable_completion_margin_ms = 5000)),
+    CONSTRAINT workspace_analysis_run_git_tool_timeout_ms_check CHECK (((git_tool_timeout_ms >= 1) AND (git_tool_timeout_ms <= 3600000))),
+    CONSTRAINT workspace_analysis_run_lifecycle CHECK (((updated_at >= created_at) AND (deadline_at > created_at) AND (deadline_at <= (created_at + '01:00:00'::interval)) AND (deadline_at = (created_at + ((
+CASE definition_version
+    WHEN 1 THEN ((((((((((((git_tool_timeout_ms + 5000) + plan_model_timeout_ms) + search_tool_timeout_ms) + 15000) + (3 * source_read_tool_timeout_ms)) + 10000) + synthesis_model_timeout_ms) + 15000) + validate_citation_tool_timeout_ms) + 10000) + review_model_timeout_ms) + 15000)
+    WHEN 2 THEN ((((((((12 * ((plan_model_timeout_ms + GREATEST(git_tool_timeout_ms, search_tool_timeout_ms, source_read_tool_timeout_ms, validate_citation_tool_timeout_ms)) + 5000)) + 15000) + synthesis_model_timeout_ms) + 15000) + validate_citation_tool_timeout_ms) + 10000) + review_model_timeout_ms) + 15000)
+    ELSE NULL::bigint
+END)::double precision * '00:00:00.001'::interval))) AND (((status = ANY (ARRAY['queued'::text, 'running'::text])) AND (termination_reason IS NULL) AND (completed_at IS NULL)) OR ((status = 'succeeded'::text) AND (termination_reason = 'COMPLETED'::text) AND (validation_receipt_id IS NOT NULL) AND (review_model_run_id IS NOT NULL) AND (completed_at IS NOT NULL) AND (completed_at = updated_at) AND (completed_at <= deadline_at)) OR ((status = ANY (ARRAY['refused'::text, 'clarification_required'::text, 'failed'::text, 'cancelled'::text])) AND (termination_reason IS NOT NULL) AND (completed_at IS NOT NULL) AND (completed_at = updated_at))))),
+    CONSTRAINT workspace_analysis_run_plan_model_timeout_ms_check CHECK (((plan_model_timeout_ms >= 1) AND (plan_model_timeout_ms <= 3600000))),
+    CONSTRAINT workspace_analysis_run_reason_check CHECK ((((status = ANY (ARRAY['queued'::text, 'running'::text])) AND (termination_reason IS NULL)) OR ((status = 'succeeded'::text) AND (termination_reason = 'COMPLETED'::text)) OR ((status = 'refused'::text) AND (termination_reason = ANY (ARRAY['WORKSPACE_ANALYSIS_EVIDENCE_INSUFFICIENT'::text, 'WORKSPACE_ANALYSIS_CITATION_INVALID'::text, 'WORKSPACE_ANALYSIS_FAITHFULNESS_REJECTED'::text, 'WORKSPACE_ANALYSIS_MODEL_REFUSED'::text]))) OR ((status = 'clarification_required'::text) AND (termination_reason = 'WORKSPACE_ANALYSIS_CLARIFICATION_REQUIRED'::text)) OR ((status = 'failed'::text) AND (termination_reason = ANY (ARRAY['WORKSPACE_ANALYSIS_BUDGET_EXHAUSTED'::text, 'WORKSPACE_ANALYSIS_RECEIPT_INVALID'::text, 'WORKSPACE_ANALYSIS_RESULT_UNKNOWN'::text, 'WORKSPACE_ANALYSIS_DEADLINE_EXCEEDED'::text, 'WORKSPACE_ANALYSIS_MODEL_FAILED'::text, 'WORKSPACE_ANALYSIS_TOOL_FAILED'::text, 'WORKSPACE_ANALYSIS_RUNTIME_FAILED'::text]))) OR ((status = 'cancelled'::text) AND (termination_reason = 'WORKSPACE_ANALYSIS_CANCELLED'::text)))),
+    CONSTRAINT workspace_analysis_run_reserved_input_tokens_check CHECK ((reserved_input_tokens >= 0)),
+    CONSTRAINT workspace_analysis_run_reserved_model_calls_check CHECK ((reserved_model_calls >= 0)),
+    CONSTRAINT workspace_analysis_run_reserved_output_tokens_check CHECK ((reserved_output_tokens >= 0)),
+    CONSTRAINT workspace_analysis_run_reserved_source_reads_check CHECK ((reserved_source_reads >= 0)),
+    CONSTRAINT workspace_analysis_run_reserved_tool_calls_check CHECK ((reserved_tool_calls >= 0)),
+    CONSTRAINT workspace_analysis_run_review_model_timeout_ms_check CHECK (((review_model_timeout_ms >= 1) AND (review_model_timeout_ms <= 3600000))),
+    CONSTRAINT workspace_analysis_run_search_tool_timeout_ms_check CHECK (((search_tool_timeout_ms >= 1) AND (search_tool_timeout_ms <= 3600000))),
+    CONSTRAINT workspace_analysis_run_settled_input_tokens_check CHECK ((settled_input_tokens >= 0)),
+    CONSTRAINT workspace_analysis_run_settled_model_calls_check CHECK ((settled_model_calls >= 0)),
+    CONSTRAINT workspace_analysis_run_settled_output_tokens_check CHECK ((settled_output_tokens >= 0)),
+    CONSTRAINT workspace_analysis_run_settled_source_reads_check CHECK ((settled_source_reads >= 0)),
+    CONSTRAINT workspace_analysis_run_settled_tool_calls_check CHECK ((settled_tool_calls >= 0)),
+    CONSTRAINT workspace_analysis_run_source_read_tool_timeout_ms_check CHECK (((source_read_tool_timeout_ms >= 1) AND (source_read_tool_timeout_ms <= 3600000))),
+    CONSTRAINT workspace_analysis_run_status_check CHECK ((status = ANY (ARRAY['queued'::text, 'running'::text, 'succeeded'::text, 'refused'::text, 'clarification_required'::text, 'failed'::text, 'cancelled'::text]))),
+    CONSTRAINT workspace_analysis_run_synthesis_model_timeout_ms_check CHECK (((synthesis_model_timeout_ms >= 1) AND (synthesis_model_timeout_ms <= 3600000))),
+    CONSTRAINT workspace_analysis_run_tool_catalog_hash_check CHECK ((tool_catalog_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT workspace_analysis_run_validate_citation_tool_timeout_ms_check CHECK (((validate_citation_tool_timeout_ms >= 1) AND (validate_citation_tool_timeout_ms <= 3600000))),
+    CONSTRAINT workspace_analysis_run_version_check CHECK ((version > 0))
+);
+
+
+--
+-- Name: verify_workspace_analysis_v2_success_facts(agent.workspace_analysis_run, uuid, uuid); Type: FUNCTION; Schema: agent; Owner: -
+--
+
+CREATE FUNCTION agent.verify_workspace_analysis_v2_success_facts(analysis agent.workspace_analysis_run, validation_id uuid, review_id uuid) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    candidate agent.workspace_analysis_candidate%ROWTYPE;
+    review agent.workspace_analysis_model_result%ROWTYPE;
+    decision_count bigint; model_count bigint; tool_count bigint; read_count bigint;
+BEGIN
+    SELECT * INTO candidate FROM agent.workspace_analysis_candidate WHERE analysis_run_id=analysis.id AND answer_id=analysis.answer_id AND schema_version=2;
+    SELECT result.* INTO review FROM agent.workspace_analysis_operation operation
+      JOIN agent.workspace_analysis_model_result result ON result.id=operation.result_id AND result.operation_id=operation.id
+        AND result.document_hash=operation.result_hash AND result.model_call_id=operation.model_call_id
+      WHERE operation.analysis_run_id=analysis.id AND operation.node_key='review_publish' AND operation.operation_kind='FAITHFULNESS_REVIEW'
+        AND operation.ordinal=1 AND operation.status='SUCCEEDED' AND result.model_run_id=review_id;
+    SELECT count(*) FILTER (WHERE operation_kind='DECISION'),count(*) FILTER (WHERE call_kind='MODEL'),
+        count(*) FILTER (WHERE call_kind='TOOL'),count(*) FILTER (WHERE operation_kind='SOURCE_READ')
+      INTO decision_count,model_count,tool_count,read_count FROM agent.workspace_analysis_operation WHERE analysis_run_id=analysis.id;
+    IF analysis.definition_version<>2 OR analysis.policy_version<>2 OR candidate.id IS NULL OR review.id IS NULL
+       OR candidate.workspace_id<>analysis.workspace_id OR review.workspace_id<>analysis.workspace_id
+       OR candidate.schema_version<>2 OR convert_from(candidate.document,'UTF8')::jsonb->>'schema_version' IS DISTINCT FROM '2'
+       OR review.subject_candidate_id IS DISTINCT FROM candidate.id OR review.subject_candidate_hash IS DISTINCT FROM candidate.document_hash
+       OR review.model_run_id=candidate.synthesis_model_run_id OR convert_from(review.document,'UTF8')::jsonb#>'{payload,passed}' IS DISTINCT FROM 'true'::jsonb
+       OR NOT agent.workspace_analysis_v2_decisions_complete(analysis.id)
+       OR NOT agent.workspace_analysis_v2_final_validation_bound(analysis.id)
+       OR NOT agent.workspace_analysis_v2_validation_all_valid(analysis.id)
+       OR NOT EXISTS (SELECT 1 FROM agent.workspace_analysis_operation WHERE analysis_run_id=analysis.id
+            AND node_key='validate_citations' AND operation_kind='CITATION_VALIDATION' AND ordinal=1 AND status='SUCCEEDED' AND result_id=validation_id)
+       OR NOT EXISTS (SELECT 1 FROM agent.workspace_analysis_operation WHERE id=candidate.synthesis_operation_id AND analysis_run_id=analysis.id
+            AND node_key='synthesize_answer' AND operation_kind='ANSWER_SYNTHESIS' AND ordinal=1 AND status='SUCCEEDED'
+            AND result_id=candidate.id AND result_hash=candidate.document_hash)
+       OR NOT EXISTS (SELECT 1 FROM agent.model_run WHERE id=candidate.synthesis_model_run_id AND workspace_id=analysis.workspace_id
+            AND workflow_run_id=analysis.workflow_run_id AND status='SUCCEEDED' AND final_result_type='workspace_analysis_answer')
+       OR NOT EXISTS (SELECT 1 FROM agent.model_run WHERE id=review_id AND workspace_id=analysis.workspace_id
+            AND workflow_run_id=analysis.workflow_run_id AND status='SUCCEEDED' AND final_result_type='faithfulness_review')
+       OR EXISTS (SELECT 1 FROM agent.workspace_analysis_operation WHERE analysis_run_id=analysis.id AND (status<>'SUCCEEDED' OR NOT agent.workspace_analysis_v2_operation_predecessor(id)))
+       OR EXISTS (SELECT 1 FROM agent.workspace_analysis_budget_reservation WHERE analysis_run_id=analysis.id AND status<>'SETTLED')
+       OR EXISTS (SELECT 1 FROM agent.model_run WHERE workspace_id=analysis.workspace_id AND workflow_run_id=analysis.workflow_run_id AND status<>'SUCCEEDED')
+       OR EXISTS (SELECT 1 FROM agent.model_call call JOIN agent.model_run model ON model.id=call.model_run_id
+            WHERE model.workspace_id=analysis.workspace_id AND model.workflow_run_id=analysis.workflow_run_id AND call.status<>'SUCCEEDED')
+       OR EXISTS (SELECT 1 FROM workflow.tool_call WHERE workspace_id=analysis.workspace_id AND workflow_run_id=analysis.workflow_run_id AND status<>'SUCCEEDED')
+       OR model_count<>decision_count+2 OR model_count<>tool_count+2 OR decision_count NOT BETWEEN 3 AND 12
+       OR read_count NOT BETWEEN 1 AND 8 OR tool_count NOT BETWEEN 3 AND 13
+       OR (SELECT count(*) FROM agent.workspace_analysis_operation WHERE analysis_run_id=analysis.id AND node_key='synthesize_answer')<>1
+       OR (SELECT count(*) FROM agent.workspace_analysis_operation WHERE analysis_run_id=analysis.id AND node_key='validate_citations')<>1
+       OR (SELECT count(*) FROM agent.workspace_analysis_operation WHERE analysis_run_id=analysis.id AND node_key='review_publish')<>1
+       OR model_count<>(SELECT count(*) FROM agent.model_call call JOIN agent.model_run model ON model.id=call.model_run_id WHERE model.workspace_id=analysis.workspace_id AND model.workflow_run_id=analysis.workflow_run_id)
+       OR tool_count<>(SELECT count(*) FROM workflow.tool_call WHERE workspace_id=analysis.workspace_id AND workflow_run_id=analysis.workflow_run_id)
+       OR analysis.settled_model_calls<>model_count OR analysis.settled_tool_calls<>tool_count OR analysis.settled_source_reads<>read_count
+       OR analysis.reserved_model_calls<>0 OR analysis.reserved_tool_calls<>0 OR analysis.reserved_source_reads<>0
+       OR analysis.reserved_input_tokens<>0 OR analysis.reserved_output_tokens<>0 OR COALESCE(analysis.reserved_cost_microunits,0)<>0 THEN
+        RAISE EXCEPTION 'dynamic workspace analysis success facts are incomplete' USING ERRCODE='55000';
+    END IF;
+END;
+$$;
+
+
+--
 -- Name: workspace_analysis_deadline_next_slot(uuid); Type: FUNCTION; Schema: agent; Owner: -
 --
 
@@ -4267,6 +5102,8 @@ DECLARE
     plan_json jsonb;
     selected_refs jsonb;
     selected_count integer;
+    last_operation agent.workspace_analysis_operation%ROWTYPE;
+    last_decision jsonb;
 BEGIN
     IF EXISTS (
         SELECT 1
@@ -4274,6 +5111,31 @@ BEGIN
          WHERE analysis_run_id=target_run_id
            AND status<>'SUCCEEDED'
     ) THEN
+        RETURN;
+    END IF;
+
+    IF EXISTS (SELECT 1 FROM agent.workspace_analysis_run WHERE id=target_run_id AND definition_version=2) THEN
+        IF EXISTS (SELECT 1 FROM agent.workspace_analysis_operation operation WHERE operation.analysis_run_id=target_run_id
+            AND NOT agent.workspace_analysis_v2_operation_predecessor(operation.id)) THEN RETURN; END IF;
+        SELECT operation.* INTO last_operation FROM agent.workspace_analysis_journal journal
+          JOIN agent.workspace_analysis_operation operation ON operation.id=journal.operation_id
+          WHERE journal.analysis_run_id=target_run_id ORDER BY journal.sequence DESC LIMIT 1;
+        IF last_operation.id IS NULL THEN RETURN QUERY SELECT 'decide_next'::text,'DECISION'::text,1; RETURN; END IF;
+        IF last_operation.node_key='decide_next' AND last_operation.operation_kind='DECISION' THEN
+            SELECT convert_from(document,'UTF8')::jsonb INTO last_decision FROM agent.workspace_analysis_decision WHERE operation_id=last_operation.id;
+            IF last_decision->>'action'='finish' THEN
+                IF agent.workspace_analysis_v2_has_readable_evidence(target_run_id) THEN RETURN QUERY SELECT 'synthesize_answer'::text,'ANSWER_SYNTHESIS'::text,1; END IF;
+            ELSIF agent.workspace_analysis_v2_decision_action_kind(last_decision->>'action') IS NOT NULL THEN
+                RETURN QUERY SELECT 'decide_next'::text,agent.workspace_analysis_v2_decision_action_kind(last_decision->>'action'),last_operation.ordinal;
+            END IF;
+        ELSIF last_operation.node_key='decide_next' AND last_operation.call_kind='TOOL' THEN
+            RETURN QUERY SELECT 'decide_next'::text,'DECISION'::text,last_operation.ordinal+1;
+        ELSIF last_operation.node_key='synthesize_answer' AND last_operation.operation_kind='ANSWER_SYNTHESIS' THEN
+            RETURN QUERY SELECT 'validate_citations'::text,'CITATION_VALIDATION'::text,1;
+        ELSIF last_operation.node_key='validate_citations' AND last_operation.operation_kind='CITATION_VALIDATION'
+            AND agent.workspace_analysis_v2_validation_all_valid(target_run_id) THEN
+            RETURN QUERY SELECT 'review_publish'::text,'FAITHFULNESS_REVIEW'::text,1;
+        END IF;
         RETURN;
     END IF;
 
@@ -4546,6 +5408,379 @@ $$;
 
 
 --
+-- Name: workspace_analysis_operation; Type: TABLE; Schema: agent; Owner: -
+--
+
+CREATE TABLE agent.workspace_analysis_operation (
+    id uuid NOT NULL,
+    workspace_id uuid NOT NULL,
+    analysis_run_id uuid NOT NULL,
+    workflow_run_id uuid NOT NULL,
+    node_run_id uuid NOT NULL,
+    node_key text NOT NULL,
+    operation_kind text NOT NULL,
+    ordinal integer NOT NULL,
+    call_kind text NOT NULL,
+    request_hash text NOT NULL,
+    status text NOT NULL,
+    first_node_attempt_id uuid,
+    latest_node_attempt_id uuid,
+    model_call_id uuid,
+    tool_call_id uuid,
+    result_kind text,
+    result_id uuid,
+    result_hash text,
+    error_code text,
+    version bigint DEFAULT 1 NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    updated_at timestamp with time zone NOT NULL,
+    started_at timestamp with time zone,
+    completed_at timestamp with time zone,
+    CONSTRAINT workspace_analysis_operation_call_kind_check CHECK ((call_kind = ANY (ARRAY['MODEL'::text, 'TOOL'::text]))),
+    CONSTRAINT workspace_analysis_operation_call_pair CHECK ((((call_kind = 'MODEL'::text) AND (tool_call_id IS NULL)) OR ((call_kind = 'TOOL'::text) AND (model_call_id IS NULL)))),
+    CONSTRAINT workspace_analysis_operation_error_code_check CHECK (((error_code IS NULL) OR (error_code ~ '^[A-Z][A-Z0-9_]{0,127}$'::text))),
+    CONSTRAINT workspace_analysis_operation_lifecycle CHECK (((updated_at >= created_at) AND ((started_at IS NULL) OR ((started_at >= created_at) AND (started_at <= updated_at))) AND ((completed_at IS NULL) OR ((started_at IS NOT NULL) AND (completed_at >= started_at) AND (completed_at <= updated_at))) AND (((status = 'PENDING'::text) AND (first_node_attempt_id IS NULL) AND (latest_node_attempt_id IS NULL) AND (model_call_id IS NULL) AND (tool_call_id IS NULL) AND (started_at IS NULL) AND (completed_at IS NULL) AND (result_kind IS NULL) AND (result_id IS NULL) AND (result_hash IS NULL) AND (error_code IS NULL)) OR ((status = 'STARTED'::text) AND (first_node_attempt_id IS NOT NULL) AND (latest_node_attempt_id IS NOT NULL) AND (((call_kind = 'MODEL'::text) AND (model_call_id IS NOT NULL)) OR ((call_kind = 'TOOL'::text) AND (tool_call_id IS NOT NULL))) AND (started_at IS NOT NULL) AND (completed_at IS NULL) AND (result_kind IS NULL) AND (result_id IS NULL) AND (result_hash IS NULL) AND (error_code IS NULL)) OR ((status = 'SUCCEEDED'::text) AND (first_node_attempt_id IS NOT NULL) AND (latest_node_attempt_id IS NOT NULL) AND (((call_kind = 'MODEL'::text) AND (model_call_id IS NOT NULL)) OR ((call_kind = 'TOOL'::text) AND (tool_call_id IS NOT NULL))) AND (started_at IS NOT NULL) AND (completed_at IS NOT NULL) AND (result_kind IS NOT NULL) AND (result_id IS NOT NULL) AND (result_hash IS NOT NULL) AND (error_code IS NULL)) OR ((status = ANY (ARRAY['FAILED'::text, 'UNKNOWN'::text])) AND (first_node_attempt_id IS NOT NULL) AND (latest_node_attempt_id IS NOT NULL) AND (((call_kind = 'MODEL'::text) AND (model_call_id IS NOT NULL)) OR ((call_kind = 'TOOL'::text) AND (tool_call_id IS NOT NULL))) AND (started_at IS NOT NULL) AND (completed_at IS NOT NULL) AND (result_kind IS NULL) AND (result_id IS NULL) AND (result_hash IS NULL) AND (error_code IS NOT NULL))))),
+    CONSTRAINT workspace_analysis_operation_ordinal_check CHECK (((ordinal >= 1) AND (ordinal <= 13))),
+    CONSTRAINT workspace_analysis_operation_request_hash_check CHECK ((request_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT workspace_analysis_operation_result_hash_check CHECK (((result_hash IS NULL) OR (result_hash ~ '^[0-9a-f]{64}$'::text))),
+    CONSTRAINT workspace_analysis_operation_result_kind CHECK (((result_kind IS NULL) OR ((call_kind = 'TOOL'::text) AND (result_kind = 'TOOL_RESULT_RECEIPT'::text)) OR ((operation_kind = ANY (ARRAY['RETRIEVAL_PLAN'::text, 'FAITHFULNESS_REVIEW'::text])) AND (result_kind = 'MODEL_RESULT_RECEIPT'::text)) OR ((operation_kind = 'ANSWER_SYNTHESIS'::text) AND (result_kind = 'SYNTHESIS_CANDIDATE'::text)) OR ((operation_kind = 'DECISION'::text) AND (result_kind = 'DECISION_RECEIPT'::text)))),
+    CONSTRAINT workspace_analysis_operation_result_kind_check CHECK (((result_kind IS NULL) OR (result_kind = ANY (ARRAY['MODEL_RESULT_RECEIPT'::text, 'TOOL_RESULT_RECEIPT'::text, 'SYNTHESIS_CANDIDATE'::text, 'DECISION_RECEIPT'::text])))),
+    CONSTRAINT workspace_analysis_operation_slot CHECK ((((node_key = 'inspect_workspace'::text) AND (operation_kind = 'GIT_STATUS'::text) AND (ordinal = 1) AND (call_kind = 'TOOL'::text)) OR ((node_key = 'retrieve_evidence'::text) AND (operation_kind = 'RETRIEVAL_PLAN'::text) AND (ordinal = 1) AND (call_kind = 'MODEL'::text)) OR ((node_key = 'retrieve_evidence'::text) AND (operation_kind = 'KNOWLEDGE_SEARCH'::text) AND (ordinal = 1) AND (call_kind = 'TOOL'::text)) OR ((node_key = 'read_evidence'::text) AND (operation_kind = 'SOURCE_READ'::text) AND ((ordinal >= 1) AND (ordinal <= 3)) AND (call_kind = 'TOOL'::text)) OR ((node_key = 'synthesize_answer'::text) AND (operation_kind = 'ANSWER_SYNTHESIS'::text) AND (ordinal = 1) AND (call_kind = 'MODEL'::text)) OR ((node_key = 'validate_citations'::text) AND (operation_kind = 'CITATION_VALIDATION'::text) AND (ordinal = 1) AND (call_kind = 'TOOL'::text)) OR ((node_key = 'review_publish'::text) AND (operation_kind = 'FAITHFULNESS_REVIEW'::text) AND (ordinal = 1) AND (call_kind = 'MODEL'::text)) OR ((node_key = 'decide_next'::text) AND (operation_kind = 'DECISION'::text) AND ((ordinal >= 1) AND (ordinal <= 13)) AND (call_kind = 'MODEL'::text)) OR ((node_key = 'decide_next'::text) AND (operation_kind = ANY (ARRAY['GIT_STATUS'::text, 'KNOWLEDGE_SEARCH'::text, 'SOURCE_READ'::text, 'CITATION_VALIDATION'::text])) AND ((ordinal >= 1) AND (ordinal <= 12)) AND (call_kind = 'TOOL'::text)))),
+    CONSTRAINT workspace_analysis_operation_status_check CHECK ((status = ANY (ARRAY['PENDING'::text, 'STARTED'::text, 'SUCCEEDED'::text, 'FAILED'::text, 'UNKNOWN'::text]))),
+    CONSTRAINT workspace_analysis_operation_version_check CHECK ((version > 0))
+);
+
+
+--
+-- Name: workspace_analysis_v2_budget_denied(agent.workspace_analysis_run, agent.workspace_analysis_operation, integer, integer, integer, bigint, bigint); Type: FUNCTION; Schema: agent; Owner: -
+--
+
+CREATE FUNCTION agent.workspace_analysis_v2_budget_denied(analysis agent.workspace_analysis_run, operation agent.workspace_analysis_operation, requested_models integer, requested_tools integer, requested_reads integer, requested_input bigint, requested_output bigint) RETURNS boolean
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    expected_models integer:=0; expected_tools integer:=0; expected_reads integer:=0;
+    expected_input bigint:=0; expected_output bigint:=0;
+    retained_models integer:=0; retained_tools integer:=0; retained_input bigint:=0; retained_output bigint:=0;
+BEGIN
+    IF analysis.definition_version<>2 OR operation.status<>'PENDING' OR operation.analysis_run_id<>analysis.id THEN RETURN false; END IF;
+    CASE operation.operation_kind
+        WHEN 'DECISION' THEN
+            expected_models:=1; expected_input:=65536; expected_output:=512;
+            retained_models:=2; retained_input:=131072; retained_output:=analysis.max_output_tokens-6144;
+        WHEN 'ANSWER_SYNTHESIS' THEN expected_models:=1; expected_input:=65536; expected_output:=analysis.max_output_tokens-7168;
+        WHEN 'FAITHFULNESS_REVIEW' THEN expected_models:=1; expected_input:=65536; expected_output:=1024;
+        WHEN 'SOURCE_READ' THEN expected_tools:=1; expected_reads:=1;
+        WHEN 'GIT_STATUS','KNOWLEDGE_SEARCH','CITATION_VALIDATION' THEN expected_tools:=1;
+        ELSE RETURN false;
+    END CASE;
+    IF requested_models IS DISTINCT FROM expected_models OR requested_tools IS DISTINCT FROM expected_tools
+       OR requested_reads IS DISTINCT FROM expected_reads OR requested_input IS DISTINCT FROM expected_input
+       OR requested_output IS DISTINCT FROM expected_output THEN RETURN false; END IF;
+    IF operation.node_key='decide_next' AND operation.call_kind='TOOL' THEN retained_tools:=1; END IF;
+    RETURN (operation.operation_kind='DECISION' AND operation.ordinal>12)
+        OR (operation.operation_kind='KNOWLEDGE_SEARCH' AND (SELECT count(*) FROM agent.workspace_analysis_evidence WHERE analysis_run_id=analysis.id)>=32)
+        OR requested_models+retained_models>analysis.max_model_calls-analysis.reserved_model_calls-analysis.settled_model_calls
+        OR requested_tools+retained_tools>analysis.max_tool_calls-analysis.reserved_tool_calls-analysis.settled_tool_calls
+        OR requested_reads>analysis.max_source_reads-analysis.reserved_source_reads-analysis.settled_source_reads
+        OR requested_input+retained_input>analysis.max_input_tokens-analysis.reserved_input_tokens-analysis.settled_input_tokens
+        OR requested_output+retained_output>analysis.max_output_tokens-analysis.reserved_output_tokens-analysis.settled_output_tokens;
+END;
+$$;
+
+
+--
+-- Name: workspace_analysis_v2_decision_action_kind(text); Type: FUNCTION; Schema: agent; Owner: -
+--
+
+CREATE FUNCTION agent.workspace_analysis_v2_decision_action_kind(action_value text) RETURNS text
+    LANGUAGE sql IMMUTABLE STRICT
+    AS $$
+    SELECT CASE action_value WHEN 'git_status' THEN 'GIT_STATUS' WHEN 'knowledge_search' THEN 'KNOWLEDGE_SEARCH'
+        WHEN 'source_read' THEN 'SOURCE_READ' WHEN 'citation_validation' THEN 'CITATION_VALIDATION' END
+$$;
+
+
+--
+-- Name: workspace_analysis_v2_decision_call_bound(uuid); Type: FUNCTION; Schema: agent; Owner: -
+--
+
+CREATE FUNCTION agent.workspace_analysis_v2_decision_call_bound(target_call_id uuid) RETURNS boolean
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT COALESCE((SELECT
+        operation.node_key='decide_next' AND operation.operation_kind='DECISION' AND operation.ordinal BETWEEN 1 AND 12
+        AND operation.call_kind='MODEL' AND operation.request_hash=call_row.request_hash AND operation.first_node_attempt_id=model.node_attempt_id
+        AND operation.workspace_id=model.workspace_id AND operation.workflow_run_id=model.workflow_run_id AND operation.node_run_id=model.node_run_id
+        AND call_row.phase='AGENT' AND call_row.output_schema_id='agent.workspace-analysis-decision' AND call_row.output_schema_version='1'
+        AND call_row.max_output_tokens=512 AND reservation.model_call_id=call_row.id
+        AND reservation.reserved_model_calls=1 AND reservation.reserved_input_tokens=65536 AND reservation.reserved_output_tokens=512
+        AND ((call_row.status='STARTED' AND model.status='RUNNING' AND operation.status='STARTED' AND reservation.status='RESERVED' AND decision.id IS NULL)
+          OR (call_row.status='SUCCEEDED' AND operation.status='SUCCEEDED' AND reservation.status='SETTLED'
+              AND reservation.settled_input_tokens=call_row.input_tokens AND reservation.settled_output_tokens=call_row.output_tokens
+              AND decision.id=operation.result_id AND operation.result_kind='DECISION_RECEIPT' AND operation.result_hash=decision.document_hash
+              AND decision.model_run_id=model.id AND decision.model_call_id=call_row.id AND decision.node_attempt_id=model.node_attempt_id
+              AND decision.workspace_id=model.workspace_id AND decision.analysis_run_id=operation.analysis_run_id AND decision.ordinal=operation.ordinal
+              AND decision.document_hash=call_row.response_hash AND decision.document_bytes=call_row.response_bytes AND decision.created_at=call_row.completed_at)
+          OR (call_row.status='FAILED' AND operation.status='FAILED' AND reservation.status='SETTLED' AND decision.id IS NULL
+              AND operation.error_code=call_row.error_code AND reservation.settled_input_tokens=call_row.input_tokens AND reservation.settled_output_tokens=call_row.output_tokens)
+          OR (call_row.status='UNKNOWN' AND operation.status='UNKNOWN' AND reservation.status='UNKNOWN_CHARGED' AND decision.id IS NULL
+              AND operation.error_code=call_row.error_code AND reservation.settled_input_tokens=reservation.reserved_input_tokens
+              AND reservation.settled_output_tokens=reservation.reserved_output_tokens))
+      FROM agent.model_call call_row
+      JOIN agent.model_run model ON model.id=call_row.model_run_id
+      JOIN agent.workspace_analysis_operation operation ON operation.model_call_id=call_row.id
+      JOIN agent.workspace_analysis_run analysis ON analysis.id=operation.analysis_run_id AND analysis.definition_version=2
+      JOIN agent.workspace_analysis_journal journal ON journal.operation_id=operation.id AND journal.analysis_run_id=analysis.id
+      JOIN agent.workspace_analysis_budget_reservation reservation ON reservation.operation_id=operation.id AND reservation.analysis_run_id=analysis.id
+      LEFT JOIN agent.workspace_analysis_decision decision ON decision.operation_id=operation.id
+      WHERE call_row.id=target_call_id),false)
+$$;
+
+
+--
+-- Name: workspace_analysis_v2_decisions_complete(uuid); Type: FUNCTION; Schema: agent; Owner: -
+--
+
+CREATE FUNCTION agent.workspace_analysis_v2_decisions_complete(target_run_id uuid) RETURNS boolean
+    LANGUAGE plpgsql
+    AS $$
+DECLARE total_decisions integer; total_tools integer;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM agent.workspace_analysis_run WHERE id=target_run_id AND definition_version=2) THEN RETURN false; END IF;
+    SELECT count(*) FILTER (WHERE operation_kind='DECISION'),count(*) FILTER (WHERE call_kind='TOOL') INTO total_decisions,total_tools
+      FROM agent.workspace_analysis_operation WHERE analysis_run_id=target_run_id AND node_key='decide_next';
+    IF total_decisions NOT BETWEEN 1 AND 12 OR total_decisions<>total_tools+1
+       OR (SELECT count(*) FROM agent.workspace_analysis_decision WHERE analysis_run_id=target_run_id AND convert_from(document,'UTF8')::jsonb->>'action'='finish')<>1
+       OR EXISTS (SELECT 1 FROM agent.workspace_analysis_operation WHERE analysis_run_id=target_run_id AND node_key='decide_next'
+           AND (status<>'SUCCEEDED' OR NOT agent.workspace_analysis_v2_operation_predecessor(id)))
+       OR EXISTS (SELECT 1 FROM agent.model_run model JOIN agent.workspace_analysis_run analysis
+            ON analysis.workflow_run_id=model.workflow_run_id AND analysis.workspace_id=model.workspace_id
+            WHERE analysis.id=target_run_id AND model.output_schema_id='agent.workspace-analysis-decision'
+                AND (model.status<>'SUCCEEDED' OR model.final_result_type IS DISTINCT FROM 'workspace_analysis_decision')) THEN RETURN false; END IF;
+    RETURN NOT EXISTS (SELECT 1 FROM agent.workspace_analysis_operation operation WHERE analysis_run_id=target_run_id AND operation_kind='DECISION'
+        AND NOT agent.workspace_analysis_v2_decision_call_bound(operation.model_call_id));
+END;
+$$;
+
+
+--
+-- Name: workspace_analysis_v2_final_validation_bound(uuid); Type: FUNCTION; Schema: agent; Owner: -
+--
+
+CREATE FUNCTION agent.workspace_analysis_v2_final_validation_bound(target_run_id uuid) RETURNS boolean
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    candidate agent.workspace_analysis_candidate%ROWTYPE;
+    receipt workflow.tool_result_receipt%ROWTYPE;
+    refs jsonb; output_json jsonb; binding_json jsonb;
+BEGIN
+    SELECT * INTO candidate FROM agent.workspace_analysis_candidate WHERE analysis_run_id=target_run_id AND schema_version=2;
+    SELECT result.* INTO receipt FROM agent.workspace_analysis_operation operation
+      JOIN workflow.tool_result_receipt result ON result.id=operation.result_id AND result.tool_call_id=operation.tool_call_id AND result.output_hash=operation.result_hash
+      WHERE operation.analysis_run_id=target_run_id AND operation.node_key='validate_citations' AND operation.operation_kind='CITATION_VALIDATION'
+        AND operation.ordinal=1 AND operation.status='SUCCEEDED' AND result.workspace_id=operation.workspace_id AND result.workflow_run_id=operation.workflow_run_id
+        AND result.tool_name='ValidateCitation' AND result.tool_version=4;
+    IF candidate.id IS NULL OR receipt.id IS NULL OR NOT EXISTS (SELECT 1 FROM agent.workspace_analysis_operation
+        WHERE id=candidate.synthesis_operation_id AND status='SUCCEEDED' AND result_id=candidate.id AND result_hash=candidate.document_hash) THEN RETURN false; END IF;
+    refs:=convert_from(candidate.document,'UTF8')::jsonb#>'{payload,citation_refs}';
+    output_json:=convert_from(receipt.output_document,'UTF8')::jsonb;
+    binding_json:=convert_from(receipt.server_binding_document,'UTF8')::jsonb;
+    IF NOT agent.workspace_analysis_v2_refs_valid(refs,8)
+       OR jsonb_typeof(output_json->'results') IS DISTINCT FROM 'array' OR jsonb_typeof(binding_json->'results') IS DISTINCT FROM 'array'
+       OR binding_json->>'candidate_id' IS DISTINCT FROM candidate.id::text OR binding_json->>'candidate_hash' IS DISTINCT FROM candidate.document_hash THEN RETURN false; END IF;
+    IF jsonb_array_length(output_json->'results')<>jsonb_array_length(refs) OR jsonb_array_length(binding_json->'results')<>jsonb_array_length(refs)
+       OR refs IS DISTINCT FROM (SELECT jsonb_agg(item->'evidence_ref' ORDER BY ordinal) FROM jsonb_array_elements(output_json->'results') WITH ORDINALITY rows(item,ordinal))
+       OR refs IS DISTINCT FROM (SELECT jsonb_agg(item->'evidence_ref' ORDER BY ordinal) FROM jsonb_array_elements(binding_json->'results') WITH ORDINALITY rows(item,ordinal))
+       OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(refs) ref WHERE NOT agent.workspace_analysis_v2_ref_read(target_run_id,ref))
+       OR EXISTS (SELECT 1 FROM jsonb_array_elements(binding_json->'results') item WHERE NOT EXISTS (
+            SELECT 1 FROM agent.workspace_analysis_operation operation JOIN workflow.tool_result_receipt source ON source.id=operation.result_id AND source.tool_call_id=operation.tool_call_id
+            WHERE operation.analysis_run_id=target_run_id AND operation.node_key='decide_next' AND operation.operation_kind='SOURCE_READ' AND operation.status='SUCCEEDED'
+              AND source.id::text=item->>'read_receipt_id' AND source.output_hash=item->>'read_receipt_hash' AND source.output_hash=operation.result_hash
+              AND source.workspace_id=receipt.workspace_id AND source.workflow_run_id=receipt.workflow_run_id AND source.tool_name='ReadSource' AND source.tool_version=4
+              AND convert_from(source.server_binding_document,'UTF8')::jsonb=item-ARRAY['read_receipt_id','read_receipt_hash']
+              AND convert_from(source.output_document,'UTF8')::jsonb->'truncated'='false'::jsonb
+       )) THEN RETURN false; END IF;
+    RETURN true;
+END;
+$$;
+
+
+--
+-- Name: workspace_analysis_v2_has_readable_evidence(uuid); Type: FUNCTION; Schema: agent; Owner: -
+--
+
+CREATE FUNCTION agent.workspace_analysis_v2_has_readable_evidence(target_run_id uuid) RETURNS boolean
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT EXISTS (
+        SELECT 1 FROM agent.workspace_analysis_operation operation
+        JOIN workflow.tool_result_receipt receipt ON receipt.id=operation.result_id AND receipt.tool_call_id=operation.tool_call_id
+          AND receipt.output_hash=operation.result_hash AND receipt.workspace_id=operation.workspace_id AND receipt.workflow_run_id=operation.workflow_run_id
+        WHERE operation.analysis_run_id=target_run_id AND operation.node_key='decide_next'
+          AND operation.operation_kind='SOURCE_READ' AND operation.status='SUCCEEDED'
+          AND receipt.tool_name='ReadSource' AND receipt.tool_version=4
+          AND convert_from(receipt.output_document,'UTF8')::jsonb->'truncated'='false'::jsonb
+          AND agent.workspace_analysis_v2_ref_read(target_run_id,convert_from(receipt.output_document,'UTF8')::jsonb->>'evidence_ref')
+    )
+$$;
+
+
+--
+-- Name: workspace_analysis_v2_operation_predecessor(uuid); Type: FUNCTION; Schema: agent; Owner: -
+--
+
+CREATE FUNCTION agent.workspace_analysis_v2_operation_predecessor(target_operation_id uuid) RETURNS boolean
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    op agent.workspace_analysis_operation%ROWTYPE;
+    previous agent.workspace_analysis_operation%ROWTYPE;
+    decision agent.workspace_analysis_decision%ROWTYPE;
+    seq bigint;
+    action_value text;
+BEGIN
+    SELECT * INTO op FROM agent.workspace_analysis_operation WHERE id=target_operation_id;
+    IF op.id IS NULL OR NOT EXISTS (SELECT 1 FROM agent.workspace_analysis_run WHERE id=op.analysis_run_id AND definition_version=2) THEN RETURN false; END IF;
+    SELECT sequence INTO seq FROM agent.workspace_analysis_journal WHERE operation_id=op.id;
+    IF seq IS NULL THEN SELECT COALESCE(max(sequence),0)+1 INTO seq FROM agent.workspace_analysis_journal WHERE analysis_run_id=op.analysis_run_id; END IF;
+    IF seq=1 THEN RETURN op.node_key='decide_next' AND op.operation_kind='DECISION' AND op.ordinal=1; END IF;
+    SELECT operation.* INTO previous FROM agent.workspace_analysis_journal journal
+        JOIN agent.workspace_analysis_operation operation ON operation.id=journal.operation_id
+        WHERE journal.analysis_run_id=op.analysis_run_id AND journal.sequence=seq-1;
+    IF previous.id IS NULL OR previous.status<>'SUCCEEDED' THEN RETURN false; END IF;
+    IF op.node_key='decide_next' AND op.operation_kind='DECISION' THEN
+        RETURN previous.node_key='decide_next' AND previous.call_kind='TOOL' AND op.ordinal=previous.ordinal+1;
+    ELSIF op.node_key='decide_next' AND op.call_kind='TOOL' THEN
+        SELECT * INTO decision FROM agent.workspace_analysis_decision WHERE operation_id=previous.id;
+        action_value:=convert_from(decision.document,'UTF8')::jsonb->>'action';
+        RETURN previous.node_key='decide_next' AND previous.operation_kind='DECISION' AND previous.ordinal=op.ordinal
+            AND decision.id IS NOT NULL AND agent.workspace_analysis_v2_decision_action_kind(action_value)=op.operation_kind;
+    ELSIF op.node_key='synthesize_answer' AND op.operation_kind='ANSWER_SYNTHESIS' THEN
+        SELECT * INTO decision FROM agent.workspace_analysis_decision WHERE operation_id=previous.id;
+        RETURN previous.node_key='decide_next' AND previous.operation_kind='DECISION' AND decision.id IS NOT NULL
+            AND convert_from(decision.document,'UTF8')::jsonb->>'action'='finish'
+            AND EXISTS (SELECT 1 FROM agent.workspace_analysis_operation WHERE analysis_run_id=op.analysis_run_id
+                AND node_key='decide_next' AND operation_kind='SOURCE_READ' AND status='SUCCEEDED');
+    ELSIF op.node_key='validate_citations' AND op.operation_kind='CITATION_VALIDATION' THEN
+        RETURN previous.node_key='synthesize_answer' AND previous.operation_kind='ANSWER_SYNTHESIS'
+            AND EXISTS (SELECT 1 FROM agent.workspace_analysis_candidate WHERE synthesis_operation_id=previous.id AND schema_version=2);
+    ELSIF op.node_key='review_publish' AND op.operation_kind='FAITHFULNESS_REVIEW' THEN
+        RETURN previous.node_key='validate_citations' AND previous.operation_kind='CITATION_VALIDATION'
+            AND agent.workspace_analysis_validation_all_valid(op.analysis_run_id);
+    END IF;
+    RETURN false;
+END;
+$$;
+
+
+--
+-- Name: workspace_analysis_v2_ref_read(uuid, text); Type: FUNCTION; Schema: agent; Owner: -
+--
+
+CREATE FUNCTION agent.workspace_analysis_v2_ref_read(target_run_id uuid, reference_value text) RETURNS boolean
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT EXISTS (
+        SELECT 1 FROM agent.workspace_analysis_evidence evidence
+        JOIN agent.workspace_analysis_run analysis ON analysis.id=evidence.analysis_run_id AND analysis.definition_version=2
+        JOIN agent.workspace_analysis_operation operation ON operation.analysis_run_id=analysis.id AND operation.workspace_id=analysis.workspace_id
+            AND operation.node_key='decide_next' AND operation.operation_kind='SOURCE_READ' AND operation.status='SUCCEEDED'
+        JOIN workflow.tool_result_receipt receipt ON receipt.id=operation.result_id AND receipt.tool_call_id=operation.tool_call_id
+            AND receipt.workspace_id=analysis.workspace_id AND receipt.workflow_run_id=analysis.workflow_run_id
+            AND receipt.tool_name='ReadSource' AND receipt.tool_version=4 AND receipt.output_hash=operation.result_hash
+        WHERE evidence.analysis_run_id=target_run_id AND 'E'||evidence.reference_no::text=reference_value
+          AND convert_from(receipt.server_binding_document,'UTF8')::jsonb=jsonb_build_object(
+            'search_receipt_id',evidence.search_receipt_id::text,'search_receipt_hash',evidence.search_receipt_hash,
+            'search_evidence_ref',evidence.local_evidence_ref,'evidence_ref',reference_value,'citation_id',evidence.citation_id,
+            'index_version_id',evidence.index_version_id::text,'chunk_id',evidence.chunk_id::text,
+            'source_version_id',evidence.source_version_id::text,'source_span_id',evidence.source_span_id::text,'content_hash',evidence.content_hash)
+          AND convert_from(receipt.output_document,'UTF8')::jsonb->>'evidence_ref'=reference_value
+    )
+$$;
+
+
+--
+-- Name: workspace_analysis_v2_refs_valid(jsonb, integer); Type: FUNCTION; Schema: agent; Owner: -
+--
+
+CREATE FUNCTION agent.workspace_analysis_v2_refs_valid(refs jsonb, maximum_count integer) RETURNS boolean
+    LANGUAGE sql IMMUTABLE
+    AS $_$
+    SELECT COALESCE(jsonb_typeof(refs)='array' AND jsonb_array_length(refs) BETWEEN 1 AND maximum_count
+        AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(refs) item
+                        WHERE jsonb_typeof(item)<>'string' OR item#>>'{}' !~ '^E([1-9]|[12][0-9]|3[0-2])$')
+        AND (SELECT count(DISTINCT item#>>'{}') FROM jsonb_array_elements(refs) item)=jsonb_array_length(refs),false)
+$_$;
+
+
+--
+-- Name: workspace_analysis_v2_uncalled_pending(uuid); Type: FUNCTION; Schema: agent; Owner: -
+--
+
+CREATE FUNCTION agent.workspace_analysis_v2_uncalled_pending(target_operation_id uuid) RETURNS boolean
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT EXISTS (
+        SELECT 1 FROM agent.workspace_analysis_operation operation
+        JOIN agent.workspace_analysis_run analysis ON analysis.id=operation.analysis_run_id AND analysis.definition_version=2
+        JOIN agent.workspace_analysis_journal journal ON journal.operation_id=operation.id
+        WHERE operation.id=target_operation_id AND operation.status='PENDING'
+          AND operation.model_call_id IS NULL AND operation.tool_call_id IS NULL
+          AND operation.first_node_attempt_id IS NULL AND operation.latest_node_attempt_id IS NULL
+          AND NOT EXISTS (SELECT 1 FROM agent.workspace_analysis_budget_reservation WHERE operation_id=operation.id)
+          AND journal.sequence=(SELECT max(last.sequence) FROM agent.workspace_analysis_journal last WHERE last.analysis_run_id=operation.analysis_run_id)
+          AND NOT EXISTS (SELECT 1 FROM agent.workspace_analysis_operation prior
+              WHERE prior.analysis_run_id=operation.analysis_run_id AND prior.id<>operation.id AND prior.status<>'SUCCEEDED')
+    )
+$$;
+
+
+--
+-- Name: workspace_analysis_v2_validation_all_valid(uuid); Type: FUNCTION; Schema: agent; Owner: -
+--
+
+CREATE FUNCTION agent.workspace_analysis_v2_validation_all_valid(target_run_id uuid) RETURNS boolean
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    candidate agent.workspace_analysis_candidate%ROWTYPE;
+    receipt workflow.tool_result_receipt%ROWTYPE;
+    refs jsonb; output_json jsonb; binding_json jsonb;
+BEGIN
+    SELECT * INTO candidate FROM agent.workspace_analysis_candidate WHERE analysis_run_id=target_run_id AND schema_version=2;
+    SELECT result.* INTO receipt FROM agent.workspace_analysis_operation operation
+      JOIN workflow.tool_result_receipt result ON result.id=operation.result_id AND result.tool_call_id=operation.tool_call_id AND result.output_hash=operation.result_hash
+      WHERE operation.analysis_run_id=target_run_id AND operation.node_key='validate_citations' AND operation.operation_kind='CITATION_VALIDATION'
+        AND operation.ordinal=1 AND operation.status='SUCCEEDED' AND result.workspace_id=operation.workspace_id AND result.workflow_run_id=operation.workflow_run_id
+        AND result.tool_name='ValidateCitation' AND result.tool_version=4;
+    IF candidate.id IS NULL OR receipt.id IS NULL OR NOT EXISTS (SELECT 1 FROM agent.workspace_analysis_operation
+        WHERE id=candidate.synthesis_operation_id AND status='SUCCEEDED' AND result_id=candidate.id AND result_hash=candidate.document_hash) THEN RETURN false; END IF;
+    refs:=convert_from(candidate.document,'UTF8')::jsonb#>'{payload,citation_refs}';
+    output_json:=convert_from(receipt.output_document,'UTF8')::jsonb;
+    binding_json:=convert_from(receipt.server_binding_document,'UTF8')::jsonb;
+    IF NOT agent.workspace_analysis_v2_refs_valid(refs,8)
+       OR jsonb_typeof(output_json->'results') IS DISTINCT FROM 'array' OR jsonb_typeof(binding_json->'results') IS DISTINCT FROM 'array'
+       OR binding_json->>'candidate_id' IS DISTINCT FROM candidate.id::text OR binding_json->>'candidate_hash' IS DISTINCT FROM candidate.document_hash THEN RETURN false; END IF;
+    IF jsonb_array_length(output_json->'results')<>jsonb_array_length(refs) OR jsonb_array_length(binding_json->'results')<>jsonb_array_length(refs)
+       OR refs IS DISTINCT FROM (SELECT jsonb_agg(item->'evidence_ref' ORDER BY ordinal) FROM jsonb_array_elements(output_json->'results') WITH ORDINALITY rows(item,ordinal))
+       OR refs IS DISTINCT FROM (SELECT jsonb_agg(item->'evidence_ref' ORDER BY ordinal) FROM jsonb_array_elements(binding_json->'results') WITH ORDINALITY rows(item,ordinal))
+       OR EXISTS (SELECT 1 FROM jsonb_array_elements(output_json->'results') item WHERE item->'valid' IS DISTINCT FROM 'true'::jsonb OR item->>'reason_code' IS DISTINCT FROM 'OK')
+       OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(refs) ref WHERE NOT agent.workspace_analysis_v2_ref_read(target_run_id,ref))
+       OR EXISTS (SELECT 1 FROM jsonb_array_elements(binding_json->'results') item WHERE NOT EXISTS (
+            SELECT 1 FROM agent.workspace_analysis_operation operation JOIN workflow.tool_result_receipt source ON source.id=operation.result_id AND source.tool_call_id=operation.tool_call_id
+            WHERE operation.analysis_run_id=target_run_id AND operation.node_key='decide_next' AND operation.operation_kind='SOURCE_READ' AND operation.status='SUCCEEDED'
+              AND source.id::text=item->>'read_receipt_id' AND source.output_hash=item->>'read_receipt_hash' AND source.output_hash=operation.result_hash
+              AND source.workspace_id=receipt.workspace_id AND source.workflow_run_id=receipt.workflow_run_id AND source.tool_name='ReadSource' AND source.tool_version=4
+              AND convert_from(source.server_binding_document,'UTF8')::jsonb=item-ARRAY['read_receipt_id','read_receipt_hash']
+       )) THEN RETURN false; END IF;
+    RETURN true;
+END;
+$$;
+
+
+--
 -- Name: workspace_analysis_validation_all_valid(uuid); Type: FUNCTION; Schema: agent; Owner: -
 --
 
@@ -4563,6 +5798,9 @@ DECLARE
     candidate_refs jsonb;
     selected_refs jsonb;
 BEGIN
+    IF EXISTS (SELECT 1 FROM agent.workspace_analysis_run WHERE id=target_run_id AND definition_version=2) THEN
+        RETURN agent.workspace_analysis_v2_validation_all_valid(target_run_id);
+    END IF;
     SELECT * INTO candidate_row
       FROM agent.workspace_analysis_candidate
      WHERE analysis_run_id=target_run_id;
@@ -5038,6 +6276,130 @@ $$;
 
 
 --
+-- Name: validate_generated_document_insert(); Type: FUNCTION; Schema: authoring; Owner: -
+--
+
+CREATE FUNCTION authoring.validate_generated_document_insert() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    PERFORM 1 FROM core.document
+     WHERE id=NEW.document_id AND workspace_id=NEW.workspace_id
+       AND lifecycle_status='DRAFT' AND current_published_revision_id IS NULL
+       AND version=1 AND created_at=NEW.created_at AND updated_at=NEW.created_at
+     FOR UPDATE;
+    IF NOT FOUND OR EXISTS (
+        SELECT 1 FROM core.article_revision WHERE document_id=NEW.document_id
+    ) OR EXISTS (
+        SELECT 1 FROM authoring.working_draft WHERE document_id=NEW.document_id
+    ) THEN
+        RAISE EXCEPTION 'generated origin requires a new unbound document' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: validate_generated_retirement_insert(); Type: FUNCTION; Schema: authoring; Owner: -
+--
+
+CREATE FUNCTION authoring.validate_generated_retirement_insert() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    binding_record authoring.document_publication_binding%ROWTYPE;
+    proposal_record change_control.proposal%ROWTYPE;
+    document_version bigint;
+    latest_revision uuid;
+BEGIN
+    SELECT * INTO binding_record FROM authoring.document_publication_binding
+     WHERE id=NEW.publication_id AND workspace_id=NEW.workspace_id FOR SHARE;
+    SELECT * INTO proposal_record FROM change_control.proposal
+     WHERE id=binding_record.proposal_id AND workspace_id=NEW.workspace_id FOR SHARE;
+    SELECT version INTO document_version FROM core.document
+     WHERE id=NEW.document_id AND workspace_id=NEW.workspace_id FOR SHARE;
+    SELECT id INTO latest_revision FROM core.article_revision
+     WHERE document_id=NEW.document_id AND workspace_id=NEW.workspace_id
+     ORDER BY revision_no DESC LIMIT 1;
+    IF binding_record.id IS NULL OR proposal_record.id IS NULL
+       OR binding_record.document_id<>NEW.document_id OR binding_record.article_revision_id<>NEW.article_revision_id
+       OR latest_revision IS DISTINCT FROM NEW.article_revision_id
+       OR document_version IS DISTINCT FROM NEW.expected_document_version
+       OR binding_record.status<>'CLOSED' OR binding_record.error_code<>'AUTHORING_PUBLICATION_PROPOSAL_NEEDS_REVISION'
+       OR binding_record.git_commit IS NOT NULL OR binding_record.published_at IS NOT NULL
+       OR proposal_record.proposal_type<>'file_patch' OR proposal_record.status<>'needs_revision'
+       OR proposal_record.current_revision_id IS DISTINCT FROM binding_record.proposal_revision_id
+       OR proposal_record.version<>NEW.expected_proposal_version+1 OR proposal_record.workflow_run_id IS NOT NULL
+       OR NEW.created_at<binding_record.updated_at OR NEW.created_at<proposal_record.updated_at
+       OR EXISTS (SELECT 1 FROM change_control.approval WHERE proposal_id=proposal_record.id)
+       OR EXISTS (SELECT 1 FROM change_control.proposal_revision_dispatch WHERE proposal_id=proposal_record.id)
+       OR EXISTS (SELECT 1 FROM change_control.tool_authorization WHERE proposal_id=proposal_record.id)
+       OR EXISTS (SELECT 1 FROM change_control.writeback_execution WHERE proposal_id=proposal_record.id)
+       OR EXISTS (SELECT 1 FROM change_control.proposal_commit WHERE proposal_id=proposal_record.id) THEN
+        RAISE EXCEPTION 'generated publication retirement lacks an exact unapproved terminal binding' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: validate_generated_revision_insert(); Type: FUNCTION; Schema: authoring; Owner: -
+--
+
+CREATE FUNCTION authoring.validate_generated_revision_insert() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    document_record core.document%ROWTYPE;
+    revision_record core.article_revision%ROWTYPE;
+    parent_no integer;
+BEGIN
+    SELECT * INTO document_record FROM core.document
+     WHERE id=NEW.document_id AND workspace_id=NEW.workspace_id FOR UPDATE;
+    SELECT * INTO revision_record FROM core.article_revision
+     WHERE id=NEW.article_revision_id AND workspace_id=NEW.workspace_id AND document_id=NEW.document_id FOR SHARE;
+    IF document_record.id IS NULL OR revision_record.id IS NULL
+       OR document_record.version<>NEW.document_version
+       OR document_record.title<>NEW.title OR document_record.canonical_path<>NEW.target_path
+       OR document_record.created_at<>NEW.document_created_at OR document_record.updated_at<>NEW.created_at
+       OR document_record.lifecycle_status<>NEW.document_lifecycle
+       OR document_record.current_published_revision_id IS DISTINCT FROM NEW.published_revision_id
+       OR revision_record.created_by_type<>'AGENT' OR revision_record.source_version_id IS NOT NULL
+       OR revision_record.status<>'DRAFT' OR revision_record.git_commit IS NOT NULL
+       OR revision_record.optimization_mode<>'NONE'
+       OR revision_record.content_hash<>NEW.content_hash
+       OR encode(sha256(convert_to(revision_record.content,'UTF8')),'hex')<>NEW.content_hash
+       OR octet_length(revision_record.content)>10485760 OR position(chr(13) in revision_record.content)>0
+       OR revision_record.parent_revision_id IS DISTINCT FROM NEW.parent_revision_id
+       OR revision_record.revision_no<>NEW.revision_no OR revision_record.created_at<>NEW.created_at
+       OR EXISTS (
+           SELECT 1 FROM core.article_revision
+            WHERE document_id=NEW.document_id AND revision_no>NEW.revision_no
+       ) OR EXISTS (
+           SELECT 1 FROM authoring.document_publication_reservation
+            WHERE workspace_id=NEW.workspace_id AND document_id=NEW.document_id AND status='PENDING'
+       ) OR EXISTS (
+           SELECT 1 FROM authoring.document_publication_binding
+            WHERE workspace_id=NEW.workspace_id AND document_id=NEW.document_id AND status IN ('PENDING','RECOVERY_REQUIRED')
+       ) THEN
+        RAISE EXCEPTION 'generated revision does not match its document and agent provenance' USING ERRCODE='23514';
+    END IF;
+    IF NEW.parent_revision_id IS NOT NULL THEN
+        SELECT revision_no INTO parent_no FROM authoring.generated_article_revision
+         WHERE article_revision_id=NEW.parent_revision_id AND workspace_id=NEW.workspace_id
+           AND document_id=NEW.document_id AND origin_kind=NEW.origin_kind AND origin_id=NEW.origin_id;
+        IF parent_no IS NULL OR parent_no<>NEW.revision_no-1 THEN
+            RAISE EXCEPTION 'generated revision parent does not match its origin' USING ERRCODE='23514';
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+
+--
 -- Name: validate_publication_binding_write(); Type: FUNCTION; Schema: authoring; Owner: -
 --
 
@@ -5322,6 +6684,39 @@ BEGIN
         RAISE EXCEPTION 'working draft identity or version violation' USING ERRCODE='23514';
     END IF;
     RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: verify_generated_revision_closure(); Type: FUNCTION; Schema: authoring; Owner: -
+--
+
+CREATE FUNCTION authoring.verify_generated_revision_closure() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF TG_TABLE_NAME='generated_document' THEN
+        IF NOT EXISTS (
+            SELECT 1 FROM authoring.generated_article_revision
+             WHERE document_id=NEW.document_id AND workspace_id=NEW.workspace_id
+               AND origin_kind=NEW.origin_kind AND origin_id=NEW.origin_id AND revision_no=1
+        ) THEN
+            RAISE EXCEPTION 'generated document requires its initial revision' USING ERRCODE='23514';
+        END IF;
+    ELSIF NEW.created_by_type='AGENT' AND EXISTS (
+        SELECT 1 FROM authoring.generated_document
+         WHERE document_id=NEW.document_id AND workspace_id=NEW.workspace_id
+    ) AND NOT EXISTS (
+        SELECT 1 FROM authoring.generated_article_revision
+         WHERE article_revision_id=NEW.id AND workspace_id=NEW.workspace_id
+           AND document_id=NEW.document_id AND content_hash=NEW.content_hash
+           AND parent_revision_id IS NOT DISTINCT FROM NEW.parent_revision_id
+           AND revision_no=NEW.revision_no AND created_at=NEW.created_at
+    ) THEN
+        RAISE EXCEPTION 'generated agent revision requires its origin receipt' USING ERRCODE='23514';
+    END IF;
+    RETURN NULL;
 END;
 $$;
 
@@ -8208,45 +9603,44 @@ CREATE FUNCTION learning.assert_interview_artifact_binding() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 DECLARE
-    expected_type text;
-    actual_type text;
-    artifact_schema_version text;
-    revision_schema_version text;
-    current_revision_id uuid;
-    current_artifact_version bigint;
+ expected_type text; actual_type text; artifact_schema_version text; revision_schema_version text;
+ current_revision_id uuid; current_artifact_version bigint; interview_id uuid; sections jsonb;
+ preparation learning.note_interview_preparation;
 BEGIN
-    expected_type := CASE TG_TABLE_NAME
-        WHEN 'interview_report' THEN 'INTERVIEW_DOC'
-        WHEN 'learning_path' THEN 'LEARNING_PATH'
-        ELSE NULL
-    END;
-    SELECT artifact.artifact_type,
-           artifact.domain_schema_version,
-           artifact.current_revision_id,
-           artifact.version,
-           revision.domain_schema_version
-      INTO actual_type,
-           artifact_schema_version,
-           current_revision_id,
-           current_artifact_version,
-           revision_schema_version
-      FROM learning.artifact AS artifact
-      JOIN learning.artifact_revision AS revision
-        ON revision.id = NEW.artifact_revision_id
-       AND revision.workspace_id = NEW.workspace_id
-       AND revision.artifact_id = NEW.artifact_id
-     WHERE artifact.id = NEW.artifact_id
-       AND artifact.workspace_id = NEW.workspace_id;
-    IF actual_type IS DISTINCT FROM expected_type
-       OR artifact_schema_version IS DISTINCT FROM 'artifact/v1'
-       OR revision_schema_version IS DISTINCT FROM 'artifact-revision/v1'
-       OR current_revision_id IS DISTINCT FROM NEW.artifact_revision_id
-       OR current_artifact_version IS DISTINCT FROM NEW.artifact_version THEN
-        RAISE EXCEPTION 'learning path artifact binding is invalid' USING ERRCODE = '23514';
-    END IF;
-    RETURN NEW;
-END;
-$$;
+ expected_type:=CASE TG_TABLE_NAME WHEN 'interview_report' THEN 'INTERVIEW_DOC' WHEN 'learning_path' THEN 'LEARNING_PATH' ELSE NULL END;
+ SELECT artifact.artifact_type,artifact.domain_schema_version,artifact.current_revision_id,artifact.version,revision.domain_schema_version,revision.sections
+  INTO actual_type,artifact_schema_version,current_revision_id,current_artifact_version,revision_schema_version,sections
+  FROM learning.artifact artifact JOIN learning.artifact_revision revision
+   ON revision.id=NEW.artifact_revision_id AND revision.workspace_id=NEW.workspace_id AND revision.artifact_id=NEW.artifact_id
+  WHERE artifact.id=NEW.artifact_id AND artifact.workspace_id=NEW.workspace_id;
+ IF actual_type IS DISTINCT FROM expected_type OR artifact_schema_version IS DISTINCT FROM 'artifact/v1'
+  OR current_revision_id IS DISTINCT FROM NEW.artifact_revision_id OR current_artifact_version IS DISTINCT FROM NEW.artifact_version THEN
+  RAISE EXCEPTION 'learning path artifact binding is invalid' USING ERRCODE='23514';
+ END IF;
+ IF TG_TABLE_NAME='interview_report' THEN
+  interview_id:=NEW.session_id;
+ ELSIF TG_TABLE_NAME='learning_path' AND NEW.origin_type='INTERVIEW' THEN
+  interview_id:=NEW.interview_session_id;
+ END IF;
+ SELECT * INTO preparation FROM learning.note_interview_preparation
+  WHERE workspace_id=NEW.workspace_id AND session_id=interview_id AND status='READY';
+ IF preparation.id IS NULL THEN
+  IF revision_schema_version IS DISTINCT FROM 'artifact-revision/v1' THEN
+   RAISE EXCEPTION 'Claim and Review artifacts require their original revision schema' USING ERRCODE='23514';
+  END IF;
+ ELSE
+  IF revision_schema_version IS DISTINCT FROM 'artifact-revision/v2'
+   OR (SELECT count(*) FROM learning.artifact_revision_document_source source WHERE source.workspace_id=NEW.workspace_id AND source.revision_id=NEW.artifact_revision_id AND source.artifact_id=NEW.artifact_id)<>1
+   OR NOT EXISTS (SELECT 1 FROM learning.artifact_revision_document_source source
+    WHERE source.workspace_id=NEW.workspace_id AND source.revision_id=NEW.artifact_revision_id AND source.artifact_id=NEW.artifact_id
+     AND source.document_id=preparation.document_id AND source.article_revision_id=preparation.article_revision_id
+     AND source.revision_no=(preparation.snapshot->>'article_revision_no')::bigint AND source.content_hash=preparation.snapshot->>'content_hash')
+   OR EXISTS (SELECT 1 FROM jsonb_array_elements(sections) section WHERE COALESCE(section->'Citations','null'::jsonb) NOT IN ('[]'::jsonb,'null'::jsonb)) THEN
+   RAISE EXCEPTION 'note interview artifact differs from its frozen document source' USING ERRCODE='23514';
+  END IF;
+ END IF;
+ RETURN NEW;
+END $$;
 
 
 --
@@ -9224,6 +10618,172 @@ $_$;
 
 
 --
+-- Name: guard_note_interview_preparation(); Type: FUNCTION; Schema: learning; Owner: -
+--
+
+CREATE FUNCTION learning.guard_note_interview_preparation() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE expected jsonb; run_status text;
+BEGIN
+ IF TG_OP='DELETE' THEN RAISE EXCEPTION 'note interview preparation is retained history' USING ERRCODE='55000'; END IF;
+ IF TG_OP='INSERT' THEN
+  IF NEW.status<>'QUEUED' OR NEW.version<>1 THEN RAISE EXCEPTION 'note interview preparation must start queued' USING ERRCODE='23514'; END IF;
+  SELECT jsonb_build_object('workspace_id',r.workspace_id,'note_id',r.note_id,'revision_id',r.id,'revision_no',r.revision_no,
+   'document_id',r.document_id,'article_revision_id',r.article_revision_id,'article_revision_no',r.article_revision_no,
+   'content_hash',r.content_hash,'projection_hash',r.projection_hash,'title',r.title,'renderer_version',r.renderer_version,'items',r.items)
+   INTO expected FROM organizing.synthesis_revision r WHERE r.id=NEW.revision_id AND r.workspace_id=NEW.workspace_id;
+  IF expected IS NULL OR NEW.snapshot IS DISTINCT FROM expected THEN RAISE EXCEPTION 'note interview snapshot differs from immutable revision' USING ERRCODE='23514'; END IF;
+  IF NEW.retry_of IS NULL THEN
+   IF NOT EXISTS (
+    SELECT 1 FROM core.document d JOIN core.article_revision ar ON ar.id=d.current_published_revision_id AND ar.workspace_id=d.workspace_id AND ar.document_id=d.id
+    JOIN authoring.generated_article_revision gr ON gr.article_revision_id=ar.id AND gr.workspace_id=ar.workspace_id AND gr.document_id=ar.document_id AND gr.content_hash=ar.content_hash
+    JOIN authoring.document_publication_binding b ON b.article_revision_id=ar.id AND b.workspace_id=ar.workspace_id AND b.document_id=d.id AND b.status='PUBLISHED'
+    JOIN change_control.proposal_commit pc ON pc.proposal_id=b.proposal_id AND pc.revision_id=b.proposal_revision_id AND pc.workspace_id=b.workspace_id
+      AND pc.target_path=b.target_path AND pc.target_mode=b.target_mode AND pc.result_hash=b.content_hash AND pc.git_commit=b.git_commit
+    WHERE d.id=NEW.document_id AND d.workspace_id=NEW.workspace_id AND ar.id=NEW.article_revision_id AND ar.status='PUBLISHED' AND ar.created_by_type='AGENT'
+     AND ar.content_hash=NEW.snapshot->>'content_hash' AND ar.content_hash=b.content_hash AND ar.git_commit=b.git_commit AND d.canonical_path=b.target_path AND d.lifecycle_status='PUBLISHED'
+   ) THEN RAISE EXCEPTION 'note interview requires an actually published generated revision' USING ERRCODE='23514'; END IF;
+  ELSIF NOT EXISTS (SELECT 1 FROM learning.note_interview_preparation p WHERE p.id=NEW.retry_of AND p.workspace_id=NEW.workspace_id
+   AND p.status IN ('FAILED','CAPABILITY_UNAVAILABLE') AND p.failure_retryable AND p.snapshot=NEW.snapshot AND p.options=NEW.options) THEN
+   RAISE EXCEPTION 'note interview retry changed original material or is not allowed' USING ERRCODE='23514';
+  END IF;
+  IF NOT (NEW.options ?& ARRAY['role','difficulty','duration_minutes','question_count','max_follow_ups']) OR (SELECT count(*) FROM jsonb_object_keys(NEW.options))<>5
+   OR jsonb_typeof(NEW.options->'role')<>'string' OR btrim(NEW.options->>'role')='' OR octet_length(NEW.options->>'role')>256
+   OR NEW.options->>'difficulty' NOT IN ('FOUNDATION','INTERMEDIATE','ADVANCED')
+   OR (NEW.options->>'duration_minutes')::integer NOT BETWEEN 1 AND 240 OR (NEW.options->>'question_count')::integer NOT BETWEEN 1 AND 20
+   OR (NEW.options->>'max_follow_ups')::integer NOT BETWEEN 0 AND 20 THEN RAISE EXCEPTION 'note interview options are invalid' USING ERRCODE='23514'; END IF;
+ ELSE
+  IF OLD.status NOT IN ('QUEUED','GENERATING') OR NEW.version<>OLD.version+1 OR NEW.updated_at<OLD.updated_at
+   OR ROW(NEW.id,NEW.workspace_id,NEW.note_id,NEW.revision_id,NEW.document_id,NEW.article_revision_id,NEW.projection_hash,NEW.snapshot,NEW.options,NEW.workflow_run_id,NEW.node_run_id,NEW.idempotency_key,NEW.request_hash,NEW.retry_of,NEW.created_at)
+    IS DISTINCT FROM ROW(OLD.id,OLD.workspace_id,OLD.note_id,OLD.revision_id,OLD.document_id,OLD.article_revision_id,OLD.projection_hash,OLD.snapshot,OLD.options,OLD.workflow_run_id,OLD.node_run_id,OLD.idempotency_key,OLD.request_hash,OLD.retry_of,OLD.created_at)
+   OR (OLD.node_attempt_id IS NOT NULL AND ROW(NEW.node_attempt_id,NEW.model_settings_revision) IS DISTINCT FROM ROW(OLD.node_attempt_id,OLD.model_settings_revision))
+   OR (OLD.model_run_id IS NOT NULL AND NEW.model_run_id IS DISTINCT FROM OLD.model_run_id)
+   OR (OLD.status='GENERATING' AND NEW.status='QUEUED') OR (OLD.status='QUEUED' AND NEW.status NOT IN ('GENERATING','FAILED','CAPABILITY_UNAVAILABLE','RECOVERY_REQUIRED')) THEN
+   RAISE EXCEPTION 'note interview preparation transition or frozen binding is invalid' USING ERRCODE='55000';
+  END IF;
+ END IF;
+ IF NEW.model_run_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM agent.model_run m WHERE m.id=NEW.model_run_id AND m.workspace_id=NEW.workspace_id
+  AND m.workflow_run_id=NEW.workflow_run_id AND m.node_run_id=NEW.node_run_id AND m.node_attempt_id=NEW.node_attempt_id
+  AND m.model_settings_revision IS NOT DISTINCT FROM NEW.model_settings_revision AND m.output_schema_id='agent.synthesis-note-interview-plan'
+  AND m.output_schema_version='1' AND m.prompt_template_id='interview.synthesis-note-plan' AND m.prompt_template_version='1'
+  AND m.reduced_schema_id=m.output_schema_id AND m.reduced_schema_version=m.output_schema_version AND m.retrieval_index_version_id IS NULL) THEN
+  RAISE EXCEPTION 'note interview model binding is invalid' USING ERRCODE='23514';
+ END IF;
+ IF NEW.status='READY' AND NOT EXISTS (SELECT 1 FROM agent.model_run m JOIN LATERAL (SELECT response_hash,response_bytes,status FROM agent.model_call c WHERE c.model_run_id=m.id ORDER BY call_no DESC LIMIT 1) last_call ON true
+  WHERE m.id=NEW.model_run_id AND m.status='SUCCEEDED' AND m.final_result_type='synthesis_note_interview_plan' AND last_call.status='SUCCEEDED'
+  AND last_call.response_hash=encode(sha256(NEW.model_output),'hex') AND last_call.response_bytes=octet_length(NEW.model_output)) THEN
+  RAISE EXCEPTION 'ready note interview has no accepted model response proof' USING ERRCODE='23514';
+ END IF;
+ RETURN NEW;
+END $$;
+
+
+--
+-- Name: guard_note_interview_question(); Type: FUNCTION; Schema: learning; Owner: -
+--
+
+CREATE FUNCTION learning.guard_note_interview_question() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE p learning.note_interview_preparation; item jsonb; item_no integer; plan jsonb; points jsonb; expected_plan jsonb; ref jsonb; parent learning.interview_question;
+BEGIN
+ IF TG_OP='UPDATE' AND ROW(NEW.source_kind,NEW.note_source,NEW.follow_up_plan) IS DISTINCT FROM ROW(OLD.source_kind,OLD.note_source,OLD.follow_up_plan) THEN
+  RAISE EXCEPTION 'interview question source and model plan are immutable' USING ERRCODE='55000';
+ END IF;
+ IF NEW.source_kind<>'NOTE_REVISION' THEN
+  IF EXISTS (SELECT 1 FROM learning.review_session s WHERE s.id=NEW.session_id AND s.workspace_id=NEW.workspace_id AND s.config->'scope' ? 'note_revision') THEN RAISE EXCEPTION 'note interview cannot contain Claim questions' USING ERRCODE='23514'; END IF;
+  RETURN NEW;
+ END IF;
+ SELECT * INTO p FROM learning.note_interview_preparation WHERE session_id=NEW.session_id AND workspace_id=NEW.workspace_id AND status='READY';
+ IF p.id IS NULL THEN RAISE EXCEPTION 'note question has no ready preparation' USING ERRCODE='23514'; END IF;
+ ref:=p.snapshot-'items'-'renderer_version';
+ IF NOT EXISTS(SELECT 1 FROM learning.review_session s WHERE s.id=NEW.session_id AND s.workspace_id=NEW.workspace_id AND s.config->'scope'=jsonb_build_object('note_revision',ref)
+  AND s.config-'scope'-'schema_version'=p.options) THEN RAISE EXCEPTION 'note question scope differs from preparation' USING ERRCODE='23514'; END IF;
+ SELECT value,ordinality::integer INTO item,item_no FROM jsonb_array_elements(p.snapshot->'items') WITH ORDINALITY WHERE value->>'id'=NEW.note_source->>'item_id';
+ IF item IS NULL OR NEW.note_source IS DISTINCT FROM jsonb_build_object('revision',ref,'item_id',item->'id','item_kind',item->'kind','sources',learning.note_interview_item_sources(item)) THEN
+  RAISE EXCEPTION 'note question source differs from frozen material' USING ERRCODE='23514'; END IF;
+ points:=learning.note_interview_item_points(item);
+ plan:=convert_from(p.model_output,'UTF8')::jsonb->'questions'->(NEW.question_no-1);
+ SELECT COALESCE(jsonb_agg(jsonb_build_object('condition',f->'condition','prompt',f->'prompt','answer_points',points) ORDER BY n),'[]'::jsonb) INTO expected_plan
+  FROM jsonb_array_elements(plan->'follow_ups') WITH ORDINALITY q(f,n);
+ IF plan IS NULL OR plan->>'item_label' IS DISTINCT FROM 'I'||lpad(item_no::text,3,'0') OR NEW.answer_points IS DISTINCT FROM points OR NEW.follow_up_plan IS DISTINCT FROM expected_plan THEN
+  RAISE EXCEPTION 'note question differs from accepted model plan' USING ERRCODE='23514'; END IF;
+ IF NEW.follow_up_no=0 THEN
+  IF NEW.prompt IS DISTINCT FROM plan->>'prompt' THEN RAISE EXCEPTION 'note question prompt differs from model response' USING ERRCODE='23514'; END IF;
+ ELSE
+  SELECT * INTO parent FROM learning.interview_question WHERE id=NEW.parent_question_id AND workspace_id=NEW.workspace_id AND session_id=NEW.session_id;
+  IF parent.id IS NULL OR parent.source_kind<>'NOTE_REVISION' OR parent.note_source IS DISTINCT FROM NEW.note_source OR parent.question_no<>NEW.question_no OR parent.follow_up_no+1<>NEW.follow_up_no
+   OR NEW.prompt IS DISTINCT FROM (plan->'follow_ups'->(NEW.follow_up_no-1)->>'prompt') THEN RAISE EXCEPTION 'note follow-up does not extend its frozen question chain' USING ERRCODE='23514'; END IF;
+ END IF;
+ RETURN NEW;
+END $$;
+
+
+--
+-- Name: guard_note_interview_report(); Type: FUNCTION; Schema: learning; Owner: -
+--
+
+CREATE FUNCTION learning.guard_note_interview_report() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE expected jsonb; finding jsonb; group_key text;
+BEGIN
+ SELECT jsonb_agg(note_source ORDER BY first_question) INTO expected FROM (
+  SELECT note_source,min(question_no) first_question FROM learning.interview_question
+  WHERE workspace_id=NEW.workspace_id AND session_id=NEW.session_id AND source_kind='NOTE_REVISION' AND follow_up_no=0 GROUP BY note_source
+ ) source_items;
+ IF expected IS NULL THEN
+  IF NEW.report ? 'note_sources' THEN RAISE EXCEPTION 'Claim report cannot carry note sources' USING ERRCODE='23514'; END IF;
+  RETURN NEW;
+ END IF;
+ IF NEW.report->'note_sources' IS DISTINCT FROM expected OR NEW.report->'evidence' IS DISTINCT FROM '[]'::jsonb THEN
+  RAISE EXCEPTION 'note report sources differ from its frozen questions' USING ERRCODE='23514'; END IF;
+ FOREACH group_key IN ARRAY ARRAY['strengths','gaps','expression'] LOOP
+  FOR finding IN SELECT value FROM jsonb_array_elements(CASE WHEN jsonb_typeof(NEW.report->group_key)='array' THEN NEW.report->group_key ELSE '[]'::jsonb END) LOOP
+   IF finding->>'source_kind' IS DISTINCT FROM 'NOTE_REVISION' OR finding->>'claim_id' IS DISTINCT FROM '' OR finding->'evidence' IS DISTINCT FROM '[]'::jsonb
+    OR NOT EXISTS(SELECT 1 FROM jsonb_array_elements(expected) source WHERE source=finding->'note_source') THEN
+    RAISE EXCEPTION 'note report finding changed its original source' USING ERRCODE='23514'; END IF;
+  END LOOP;
+ END LOOP;
+ RETURN NEW;
+END $$;
+
+
+--
+-- Name: guard_note_interview_step(); Type: FUNCTION; Schema: learning; Owner: -
+--
+
+CREATE FUNCTION learning.guard_note_interview_step() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+ IF TG_OP='UPDATE' AND ROW(NEW.source_kind,NEW.note_source) IS DISTINCT FROM ROW(OLD.source_kind,OLD.note_source) THEN RAISE EXCEPTION 'learning step source is immutable' USING ERRCODE='55000'; END IF;
+ IF NEW.source_kind='NOTE_REVISION' AND NOT EXISTS (SELECT 1 FROM learning.learning_path p JOIN learning.interview_question q ON q.workspace_id=p.workspace_id AND q.session_id=p.interview_session_id
+  WHERE p.id=NEW.path_id AND p.workspace_id=NEW.workspace_id AND p.origin_type='INTERVIEW' AND q.source_kind='NOTE_REVISION' AND q.note_source=NEW.note_source) THEN
+  RAISE EXCEPTION 'note learning step has no exact interview source' USING ERRCODE='23514'; END IF;
+ RETURN NEW;
+END $$;
+
+
+--
+-- Name: guard_note_interview_turn(); Type: FUNCTION; Schema: learning; Owner: -
+--
+
+CREATE FUNCTION learning.guard_note_interview_turn() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE q learning.interview_question;
+BEGIN
+ SELECT * INTO q FROM learning.interview_question WHERE id=NEW.question_id AND session_id=NEW.session_id AND workspace_id=NEW.workspace_id;
+ IF q.source_kind='NOTE_REVISION' THEN
+  IF NEW.score->'note_source' IS DISTINCT FROM q.note_source OR NEW.score->'evidence' IS DISTINCT FROM '[]'::jsonb THEN RAISE EXCEPTION 'note turn source differs from question' USING ERRCODE='23514'; END IF;
+ ELSIF NEW.score ? 'note_source' THEN RAISE EXCEPTION 'Claim turn cannot carry a note source' USING ERRCODE='23514'; END IF;
+ RETURN NEW;
+END $$;
+
+
+--
 -- Name: guard_review_answer_session_binding(); Type: FUNCTION; Schema: learning; Owner: -
 --
 
@@ -9608,6 +11168,42 @@ BEGIN
        AND capture.profile_status='READY';
     RETURN NEW;
 END;
+$$;
+
+
+--
+-- Name: note_interview_item_points(jsonb); Type: FUNCTION; Schema: learning; Owner: -
+--
+
+CREATE FUNCTION learning.note_interview_item_points(item jsonb) RETURNS jsonb
+    LANGUAGE sql IMMUTABLE
+    AS $$
+ WITH statements AS (
+  SELECT 1::bigint n,item->'fact' statement WHERE item->>'kind'='FACT'
+  UNION ALL SELECT n,statement FROM jsonb_array_elements(CASE WHEN item->>'kind'='CONFLICT' THEN item->'conflict'->'alternatives' ELSE '[]'::jsonb END) WITH ORDINALITY a(statement,n)
+  UNION ALL SELECT 1,item->'gap'->'resolution' WHERE item->>'kind'='GAP' AND item->'gap'->'resolution'<>'null'::jsonb
+ ), points AS (
+  SELECT n*2 n,statement->>'text' value FROM statements
+  UNION ALL SELECT n*2+1,statement->>'applicability' FROM statements WHERE statement->>'applicability'<>''
+  UNION ALL SELECT 1,'Insufficient evidence; 不足以判断，需要补充资料。' WHERE item->>'kind'='GAP' AND item->'gap'->'resolution'='null'::jsonb
+ ), unique_points AS (SELECT value,min(n) n FROM points GROUP BY value)
+ SELECT jsonb_agg(value ORDER BY n) FROM unique_points
+$$;
+
+
+--
+-- Name: note_interview_item_sources(jsonb); Type: FUNCTION; Schema: learning; Owner: -
+--
+
+CREATE FUNCTION learning.note_interview_item_sources(item jsonb) RETURNS jsonb
+    LANGUAGE sql IMMUTABLE
+    AS $$
+ SELECT CASE item->>'kind'
+  WHEN 'FACT' THEN item->'fact'->'sources'
+  WHEN 'CONFLICT' THEN COALESCE((SELECT jsonb_agg(source ORDER BY alternative_no,source_no) FROM jsonb_array_elements(item->'conflict'->'alternatives') WITH ORDINALITY a(alternative,alternative_no)
+    CROSS JOIN LATERAL jsonb_array_elements(alternative->'sources') WITH ORDINALITY s(source,source_no)),'[]'::jsonb)
+  WHEN 'GAP' THEN COALESCE(item->'gap'->'sources','[]'::jsonb)||COALESCE(item->'gap'->'resolution'->'sources','[]'::jsonb)
+ END
 $$;
 
 
@@ -11596,10 +13192,6 @@ BEGIN
 END;
 $$;
 
-
-SET default_tablespace = '';
-
-SET default_table_access_method = heap;
 
 --
 -- Name: knowledge_command_receipt; Type: TABLE; Schema: core; Owner: -
@@ -13935,6 +15527,149 @@ $$;
 
 
 --
+-- Name: guard_synthesis_execution(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.guard_synthesis_execution() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF TG_OP='INSERT' THEN
+        IF NEW.version<>1 OR NEW.input_document IS NOT NULL OR NEW.apply_node_run_id IS NOT NULL THEN
+            RAISE EXCEPTION 'synthesis execution must start without results' USING ERRCODE='23514';
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM workflow.run r JOIN workflow.definition d ON d.id=r.definition_id AND d.workspace_id=r.workspace_id
+            WHERE r.id=NEW.workflow_run_id AND r.workspace_id=NEW.workspace_id AND d.key='organizing.synthesis-note' AND d.version=1
+              AND r.input->>'processing_id'=NEW.processing_id::text AND (r.input->>'execution_no')::integer=NEW.execution_no
+              AND (r.input->>'apply_recovery')::boolean=NEW.apply_recovery) THEN
+            RAISE EXCEPTION 'synthesis execution workflow binding is invalid' USING ERRCODE='23514';
+        END IF;
+        RETURN NEW;
+    END IF;
+    IF TG_OP='DELETE' OR NEW.workflow_run_id<>OLD.workflow_run_id OR NEW.workspace_id<>OLD.workspace_id OR NEW.processing_id<>OLD.processing_id
+       OR NEW.execution_no<>OLD.execution_no OR NEW.apply_recovery<>OLD.apply_recovery OR NEW.created_at<>OLD.created_at
+       OR NEW.version<>OLD.version+1 OR NEW.updated_at<OLD.updated_at
+       OR (OLD.input_document IS NOT NULL AND (NEW.input_document IS DISTINCT FROM OLD.input_document OR NEW.input_hash IS DISTINCT FROM OLD.input_hash))
+       OR OLD.applied_result IS NOT NULL THEN
+        RAISE EXCEPTION 'synthesis execution immutable result changed' USING ERRCODE='55000';
+    END IF;
+    IF NEW.applied_result IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM organizing.synthesis_apply_receipt receipt
+        WHERE receipt.workspace_id=NEW.workspace_id AND receipt.processing_id=NEW.processing_id
+          AND (NEW.apply_recovery OR receipt.workflow_run_id=NEW.workflow_run_id)
+          AND receipt.result=NEW.applied_result
+    ) THEN
+        RAISE EXCEPTION 'synthesis execution result requires its immutable application receipt' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: guard_synthesis_model_step(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.guard_synthesis_model_step() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF TG_OP='INSERT' THEN
+        IF NEW.status<>'RUNNING' OR NEW.version<>1 OR NEW.model_run_id IS NOT NULL THEN
+            RAISE EXCEPTION 'synthesis model step must start unbound' USING ERRCODE='23514';
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM organizing.synthesis_execution e JOIN workflow.node_run n ON n.run_id=e.workflow_run_id
+            WHERE e.workflow_run_id=NEW.workflow_run_id AND e.workspace_id=NEW.workspace_id AND e.processing_id=NEW.processing_id
+              AND NOT e.apply_recovery AND e.input_hash=NEW.input_request_hash AND n.id=NEW.node_run_id
+              AND ((NEW.stage='GENERATE' AND n.node_type='organizing.synthesis.generate') OR (NEW.stage='VALIDATE' AND n.node_type='organizing.synthesis.validate'))) THEN
+            RAISE EXCEPTION 'synthesis model step input binding is invalid' USING ERRCODE='23514';
+        END IF;
+        RETURN NEW;
+    END IF;
+    IF TG_OP='DELETE' OR OLD.status<>'RUNNING' OR NEW.id<>OLD.id OR NEW.workspace_id<>OLD.workspace_id OR NEW.processing_id<>OLD.processing_id
+       OR NEW.workflow_run_id<>OLD.workflow_run_id OR NEW.node_run_id<>OLD.node_run_id OR NEW.node_attempt_id<>OLD.node_attempt_id
+       OR NEW.stage<>OLD.stage OR NEW.request_hash<>OLD.request_hash OR NEW.input_request_hash<>OLD.input_request_hash
+       OR NEW.generation_output_hash IS DISTINCT FROM OLD.generation_output_hash OR NEW.model_settings_revision IS DISTINCT FROM OLD.model_settings_revision
+       OR NEW.created_at<>OLD.created_at OR NEW.version<>OLD.version+1 OR NEW.updated_at<OLD.updated_at
+       OR (OLD.model_run_id IS NOT NULL AND NEW.model_run_id IS DISTINCT FROM OLD.model_run_id)
+       OR (NEW.status='RUNNING' AND (OLD.model_run_id IS NOT NULL OR NEW.model_run_id IS NULL)) THEN
+        RAISE EXCEPTION 'synthesis model step transition is invalid' USING ERRCODE='55000';
+    END IF;
+    IF NEW.model_run_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM agent.model_run r WHERE r.id=NEW.model_run_id AND r.workspace_id=NEW.workspace_id
+          AND r.workflow_run_id=NEW.workflow_run_id AND r.node_run_id=NEW.node_run_id AND r.node_attempt_id=NEW.node_attempt_id
+          AND r.model_settings_revision IS NOT DISTINCT FROM NEW.model_settings_revision
+          AND ((NEW.stage='GENERATE' AND r.output_schema_id='agent.synthesis-delta') OR (NEW.stage='VALIDATE' AND r.output_schema_id='agent.synthesis-semantic-review'))
+          AND r.output_schema_version='v1'
+          AND ((NEW.status='RUNNING' AND r.status='RUNNING')
+            OR (NEW.status='FAILED' AND r.status='FAILED')
+            OR (NEW.status='RECOVERY_REQUIRED' AND r.status='UNKNOWN')
+            OR (NEW.status='READY' AND r.status='SUCCEEDED' AND ((NEW.stage='GENERATE' AND r.final_result_type='synthesis_delta') OR (NEW.stage='VALIDATE' AND r.final_result_type='synthesis_semantic_review'))))
+    ) THEN
+        RAISE EXCEPTION 'synthesis model step requires its exact ModelRun proof' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: guard_synthesis_processing(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.guard_synthesis_processing() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF TG_OP='INSERT' THEN
+        IF NEW.version<>1 OR NEW.status NOT IN ('PENDING','SKIPPED') OR NEW.model_run_id IS NOT NULL THEN
+            RAISE EXCEPTION 'synthesis processing must begin pending or skipped' USING ERRCODE='23514';
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM workflow.outbox_event e
+            JOIN core.source_version v ON v.id=NEW.source_version_id AND v.source_id=NEW.source_id
+            JOIN ingestion.parse_projection p ON p.id=NEW.parse_projection_id AND p.workspace_id=NEW.workspace_id
+            WHERE e.id=NEW.source_event_id AND e.workspace_id=NEW.workspace_id AND e.event_type='ingestion.source.ready'
+              AND e.payload->>'source_id'=NEW.source_id::text AND e.payload->>'source_version_id'=NEW.source_version_id::text
+              AND e.payload->>'content_artifact_id'=NEW.content_artifact_id::text AND e.payload->>'parse_projection_id'=NEW.parse_projection_id::text
+              AND e.payload->>'content_hash'=NEW.source_content_hash
+              AND e.payload->>'ingestion_attempt_id'=NEW.ingestion_attempt_id::text AND e.occurred_at=NEW.source_occurred_at
+              AND v.content_hash=NEW.source_content_hash AND v.content_artifact_id=NEW.content_artifact_id
+              AND p.content_artifact_id=NEW.content_artifact_id) THEN
+            RAISE EXCEPTION 'synthesis processing source event binding is invalid' USING ERRCODE='23514';
+        END IF;
+        RETURN NEW;
+    END IF;
+    IF TG_OP='DELETE' OR NEW.id<>OLD.id OR NEW.workspace_id<>OLD.workspace_id
+       OR NEW.source_event_id<>OLD.source_event_id OR NEW.source_id<>OLD.source_id OR NEW.source_version_id<>OLD.source_version_id
+       OR NEW.content_artifact_id<>OLD.content_artifact_id OR NEW.parse_projection_id<>OLD.parse_projection_id
+       OR NEW.source_content_hash<>OLD.source_content_hash OR NEW.ingestion_attempt_id<>OLD.ingestion_attempt_id
+       OR NEW.processor_version<>OLD.processor_version OR NEW.source_occurred_at<>OLD.source_occurred_at
+       OR NEW.processing_key<>OLD.processing_key OR NEW.request_hash<>OLD.request_hash OR NEW.created_at<>OLD.created_at
+       OR NEW.version<>OLD.version+1 OR NEW.updated_at<OLD.updated_at OR OLD.status IN ('SUCCEEDED','NO_CHANGE','SKIPPED','RECOVERY_REQUIRED') THEN
+        RAISE EXCEPTION 'synthesis processing transition is invalid' USING ERRCODE='55000';
+    END IF;
+    IF OLD.status='FAILED' THEN
+        IF NOT OLD.retryable OR NEW.status<>'PENDING' OR NEW.workflow_run_id=OLD.workflow_run_id OR NEW.model_run_id IS NOT NULL THEN
+            RAISE EXCEPTION 'synthesis processing retry is invalid' USING ERRCODE='55000';
+        END IF;
+    ELSIF NEW.workflow_run_id IS DISTINCT FROM OLD.workflow_run_id THEN
+        RAISE EXCEPTION 'synthesis processing active run is immutable' USING ERRCODE='55000';
+    END IF;
+    IF NEW.status IN ('SUCCEEDED','NO_CHANGE') AND NOT EXISTS (
+        SELECT 1 FROM organizing.synthesis_execution e JOIN workflow.run r ON r.id=e.workflow_run_id AND r.workspace_id=e.workspace_id
+        WHERE e.processing_id=NEW.id AND e.workspace_id=NEW.workspace_id AND e.workflow_run_id=NEW.workflow_run_id
+          AND r.status='succeeded' AND e.applied_result IS NOT NULL
+          AND e.applied_result->'revision_ids'=NEW.revision_ids
+          AND (e.applied_result->>'changed')::boolean=(NEW.status='SUCCEEDED')
+    ) THEN
+        RAISE EXCEPTION 'synthesis processing success requires Workflow application proof' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+
+--
 -- Name: reject_immutable_mutation(); Type: FUNCTION; Schema: organizing; Owner: -
 --
 
@@ -13944,6 +15679,28 @@ CREATE FUNCTION organizing.reject_immutable_mutation() RETURNS trigger
 BEGIN
     RAISE EXCEPTION 'organizing immutable fact cannot be mutated' USING ERRCODE='55000';
 END;
+$$;
+
+
+--
+-- Name: synthesis_item_sources(jsonb); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.synthesis_item_sources(items jsonb) RETURNS SETOF jsonb
+    LANGUAGE sql IMMUTABLE STRICT
+    AS $$
+    SELECT DISTINCT refs.source
+    FROM jsonb_array_elements(items) item
+    CROSS JOIN LATERAL (
+        SELECT value AS source FROM jsonb_array_elements(COALESCE(item->'fact'->'sources','[]'::jsonb))
+        UNION ALL
+        SELECT source.value FROM jsonb_array_elements(COALESCE(item->'conflict'->'alternatives','[]'::jsonb)) alternative
+            CROSS JOIN LATERAL jsonb_array_elements(COALESCE(alternative->'sources','[]'::jsonb)) source
+        UNION ALL
+        SELECT value FROM jsonb_array_elements(COALESCE(item->'gap'->'sources','[]'::jsonb))
+        UNION ALL
+        SELECT value FROM jsonb_array_elements(COALESCE(item->'gap'->'resolution'->'sources','[]'::jsonb))
+    ) refs;
 $$;
 
 
@@ -14487,6 +16244,108 @@ $$;
 
 
 --
+-- Name: validate_synthesis_membership(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.validate_synthesis_membership() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF TG_TABLE_NAME='synthesis_topic_key' THEN
+        PERFORM 1 FROM organizing.synthesis_note
+         WHERE id=NEW.note_id AND workspace_id=NEW.workspace_id
+           AND (topic_key=NEW.topic_key OR NEW.topic_key=ANY(aliases));
+    ELSE
+        PERFORM 1 FROM organizing.synthesis_revision r
+        CROSS JOIN LATERAL organizing.synthesis_item_sources(r.items) reference
+         WHERE r.id=NEW.revision_id AND r.workspace_id=NEW.workspace_id AND r.note_id=NEW.note_id
+           AND reference=jsonb_build_object('source',jsonb_build_object(
+                'workspace_id',NEW.workspace_id,'source_id',NEW.source_id,'source_version_id',NEW.source_version_id,
+                'content_artifact_id',NEW.content_artifact_id,'parse_projection_id',NEW.parse_projection_id,'content_hash',NEW.content_hash),
+                'source_span_id',NEW.source_span_id,'excerpt_hash',NEW.excerpt_hash,'title',NEW.title);
+    END IF;
+    IF NOT FOUND THEN RAISE EXCEPTION 'synthesis child is outside its immutable projection' USING ERRCODE='23514'; END IF;
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: validate_synthesis_note_transition(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.validate_synthesis_note_transition() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF TG_OP='DELETE' THEN RAISE EXCEPTION 'synthesis history cannot be deleted' USING ERRCODE='55000'; END IF;
+    IF (NEW.id,NEW.workspace_id,NEW.document_id,NEW.topic_key,NEW.title,NEW.aliases,NEW.created_at)
+       IS DISTINCT FROM (OLD.id,OLD.workspace_id,OLD.document_id,OLD.topic_key,OLD.title,OLD.aliases,OLD.created_at)
+       OR NEW.version<>OLD.version+1 OR NEW.updated_at<OLD.updated_at THEN
+        RAISE EXCEPTION 'synthesis identity or version changed' USING ERRCODE='23514';
+    END IF;
+    IF NEW.current_revision_id<>OLD.current_revision_id AND NOT EXISTS (
+        SELECT 1 FROM organizing.synthesis_revision WHERE id=NEW.current_revision_id AND workspace_id=NEW.workspace_id
+        AND note_id=NEW.id AND parent_revision_id=OLD.current_revision_id
+    ) THEN RAISE EXCEPTION 'synthesis candidate does not extend current revision' USING ERRCODE='23514'; END IF;
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: validate_synthesis_revision(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.validate_synthesis_revision() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE parent_record organizing.synthesis_revision%ROWTYPE;
+BEGIN
+    PERFORM 1 FROM organizing.synthesis_note
+     WHERE id=NEW.note_id AND workspace_id=NEW.workspace_id AND document_id=NEW.document_id AND title=NEW.title FOR UPDATE;
+    IF NOT FOUND THEN RAISE EXCEPTION 'synthesis note binding changed' USING ERRCODE='23514'; END IF;
+    IF NEW.parent_revision_id IS NOT NULL THEN
+        SELECT * INTO parent_record FROM organizing.synthesis_revision WHERE id=NEW.parent_revision_id;
+        IF parent_record.revision_no<>NEW.revision_no-1 OR parent_record.article_revision_no<>NEW.article_revision_no-1
+           OR parent_record.created_at>NEW.created_at THEN
+            RAISE EXCEPTION 'synthesis revision parent changed' USING ERRCODE='23514';
+        END IF;
+    END IF;
+    IF NEW.item_count<>jsonb_array_length(NEW.items)
+       OR NEW.conflict_count<>(SELECT count(*) FROM jsonb_array_elements(NEW.items) item WHERE item->>'kind'='CONFLICT')
+       OR NEW.gap_count<>(SELECT count(*) FROM jsonb_array_elements(NEW.items) item WHERE item->>'kind'='GAP')
+       OR NEW.open_gap_count<>(SELECT count(*) FROM jsonb_array_elements(NEW.items) item WHERE item->>'kind'='GAP' AND item->'gap'->'resolution'='null'::jsonb) THEN
+        RAISE EXCEPTION 'synthesis revision summary does not match its items' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: validate_synthesis_source(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.validate_synthesis_source() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM core.source_version v
+        JOIN core.content_artifact a ON a.id=v.content_artifact_id AND a.workspace_id=NEW.workspace_id AND a.content_hash=v.content_hash
+        JOIN ingestion.parse_projection pp ON pp.id=NEW.parse_projection_id AND pp.workspace_id=NEW.workspace_id AND pp.content_artifact_id=a.id
+        JOIN ingestion.source_span sp ON sp.id=NEW.source_span_id AND sp.workspace_id=NEW.workspace_id AND sp.content_artifact_id=a.id
+         AND sp.parse_projection_id=pp.id AND sp.parser_version=pp.parser_version AND sp.schema_version=pp.schema_version
+        WHERE v.id=NEW.source_version_id AND v.source_id=NEW.source_id AND v.workspace_id=NEW.workspace_id
+          AND a.id=NEW.content_artifact_id AND v.content_hash=NEW.content_hash AND sp.excerpt_hash=NEW.excerpt_hash
+    ) THEN RAISE EXCEPTION 'synthesis source tuple changed' USING ERRCODE='23514'; END IF;
+    RETURN NEW;
+END;
+$$;
+
+
+--
 -- Name: validate_template_current_revision(); Type: FUNCTION; Schema: organizing; Owner: -
 --
 
@@ -14551,6 +16410,77 @@ BEGIN
         RAISE EXCEPTION 'organizing template transition is invalid' USING ERRCODE='55000';
     END IF;
     RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: verify_synthesis_closure(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.verify_synthesis_closure() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE expected_sources jsonb; actual_sources jsonb;
+BEGIN
+    IF TG_TABLE_NAME='synthesis_note' THEN
+        IF (SELECT count(*) FROM organizing.synthesis_topic_key WHERE workspace_id=NEW.workspace_id AND note_id=NEW.id)
+           <> cardinality(NEW.aliases)+1 OR EXISTS (
+            SELECT 1 FROM organizing.synthesis_topic_key WHERE workspace_id=NEW.workspace_id AND note_id=NEW.id
+             AND topic_key<>NEW.topic_key AND NOT topic_key=ANY(NEW.aliases)
+        ) THEN RAISE EXCEPTION 'synthesis topic namespace is incomplete' USING ERRCODE='23514'; END IF;
+    ELSE
+        SELECT COALESCE(jsonb_agg(source ORDER BY source::text),'[]'::jsonb) INTO expected_sources
+          FROM organizing.synthesis_item_sources(NEW.items) source;
+        SELECT COALESCE(jsonb_agg(reference ORDER BY reference::text),'[]'::jsonb) INTO actual_sources FROM (
+            SELECT jsonb_build_object('source',jsonb_build_object(
+                'workspace_id',s.workspace_id,'source_id',s.source_id,'source_version_id',s.source_version_id,
+                'content_artifact_id',s.content_artifact_id,'parse_projection_id',s.parse_projection_id,'content_hash',s.content_hash),
+                'source_span_id',s.source_span_id,'excerpt_hash',s.excerpt_hash,'title',s.title) AS reference
+            FROM organizing.synthesis_revision_source s WHERE s.revision_id=NEW.id AND s.workspace_id=NEW.workspace_id AND s.note_id=NEW.note_id
+        ) source;
+        IF actual_sources<>expected_sources OR jsonb_array_length(actual_sources)>256 OR NOT EXISTS (
+            SELECT 1 FROM organizing.synthesis_apply_receipt receipt
+             WHERE receipt.workspace_id=NEW.workspace_id AND receipt.workflow_run_id=NEW.workflow_run_id
+               AND receipt.model_run_id=NEW.model_run_id AND receipt.source_event_id=NEW.source_event_id
+               AND receipt.result->'revision_ids' @> jsonb_build_array(NEW.id::text)
+        ) THEN RAISE EXCEPTION 'synthesis projection lacks its exact sources and receipt' USING ERRCODE='23514'; END IF;
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+
+--
+-- Name: verify_synthesis_receipt_publications(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.verify_synthesis_receipt_publications() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE command jsonb; matched integer;
+BEGIN
+    IF (SELECT count(DISTINCT value) FROM jsonb_array_elements(NEW.result->'revision_ids'))
+          <>jsonb_array_length(NEW.result->'revision_ids')
+       OR (SELECT count(DISTINCT value->>'revision_id') FROM jsonb_array_elements(NEW.result->'publications'))
+          <>jsonb_array_length(NEW.result->'publications') THEN
+        RAISE EXCEPTION 'synthesis receipt repeats a revision publication' USING ERRCODE='23514';
+    END IF;
+    FOR command IN SELECT value FROM jsonb_array_elements(NEW.result->'publications') LOOP
+        SELECT count(*) INTO matched FROM organizing.synthesis_revision r
+        JOIN authoring.document_publication_reservation reservation
+          ON reservation.workspace_id=r.workspace_id AND reservation.document_id=r.document_id
+         AND reservation.article_revision_id=r.article_revision_id AND reservation.content_hash=r.content_hash
+         AND reservation.idempotency_key=command->>'idempotency_key'
+        WHERE r.workspace_id=NEW.workspace_id AND r.workflow_run_id=NEW.workflow_run_id
+          AND r.model_run_id=NEW.model_run_id AND r.source_event_id=NEW.source_event_id
+          AND r.id::text=command->>'revision_id' AND r.note_id::text=command->>'note_id'
+          AND r.document_id::text=command->>'document_id' AND r.article_revision_id::text=command->>'article_revision_id'
+          AND r.content_hash=command->>'content_hash'
+          AND NEW.result->'revision_ids' @> jsonb_build_array(r.id::text);
+        IF matched<>1 THEN RAISE EXCEPTION 'synthesis receipt publication binding changed' USING ERRCODE='23514'; END IF;
+    END LOOP;
+    RETURN NULL;
 END;
 $$;
 
@@ -16144,6 +18074,357 @@ $_$;
 
 
 --
+-- Name: guard_tool_result_receipt_insert_v2(); Type: FUNCTION; Schema: workflow; Owner: -
+--
+
+CREATE FUNCTION workflow.guard_tool_result_receipt_insert_v2() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $_$
+DECLARE
+    call_row workflow.tool_call%ROWTYPE;
+    operation_row agent.workspace_analysis_operation%ROWTYPE;
+    analysis_status_value text;
+    output_document json;
+    binding_document json;
+    output_text text;
+    binding_text text;
+    output_json jsonb;
+    binding_json jsonb;
+    ordered_values text[];
+    sorted_values text[];
+    value_count bigint;
+    distinct_value_count bigint;
+BEGIN
+    SELECT analysis.status
+      INTO analysis_status_value
+      FROM agent.workspace_analysis_operation AS operation
+      JOIN agent.workspace_analysis_run AS analysis
+        ON analysis.id=operation.analysis_run_id
+       AND analysis.workspace_id=operation.workspace_id
+       AND analysis.workflow_run_id=operation.workflow_run_id
+       AND analysis.definition_version=2
+     WHERE operation.tool_call_id=NEW.tool_call_id
+       AND operation.workspace_id=NEW.workspace_id
+       AND operation.workflow_run_id=NEW.workflow_run_id
+       AND operation.node_run_id=NEW.node_run_id
+       AND operation.first_node_attempt_id=NEW.node_attempt_id
+     FOR UPDATE OF analysis;
+    SELECT operation.*
+      INTO operation_row
+      FROM agent.workspace_analysis_operation AS operation
+     WHERE operation.tool_call_id=NEW.tool_call_id
+       AND operation.workspace_id=NEW.workspace_id
+       AND operation.workflow_run_id=NEW.workflow_run_id
+       AND operation.node_run_id=NEW.node_run_id
+       AND operation.first_node_attempt_id=NEW.node_attempt_id
+     FOR UPDATE;
+    SELECT * INTO call_row
+      FROM workflow.tool_call
+     WHERE id=NEW.tool_call_id
+       AND workspace_id=NEW.workspace_id
+       AND workflow_run_id=NEW.workflow_run_id
+       AND node_run_id=NEW.node_run_id
+       AND node_attempt_id=NEW.node_attempt_id
+     FOR UPDATE;
+
+    IF operation_row.id IS NULL
+       OR operation_row.call_kind<>'TOOL'
+       OR operation_row.status<>'STARTED'
+       OR analysis_status_value IS DISTINCT FROM 'running'
+       OR EXISTS (
+            SELECT 1 FROM workflow.tool_result_receipt_failure
+             WHERE tool_call_id=NEW.tool_call_id
+       )
+       OR call_row.id IS NULL
+       OR call_row.status<>'SUCCEEDED'
+       OR call_row.requested_tool_name IS DISTINCT FROM NEW.tool_name
+       OR call_row.tool_version IS DISTINCT FROM NEW.tool_version
+       OR call_row.output_schema_id IS DISTINCT FROM NEW.output_schema_id
+       OR call_row.output_schema_version IS DISTINCT FROM NEW.output_schema_version
+       OR call_row.definition_hash IS DISTINCT FROM NEW.definition_hash
+       OR call_row.capability IS DISTINCT FROM 'READ_LOCAL'
+       OR call_row.side_effect_level IS DISTINCT FROM 'NONE'
+       OR call_row.invocation_policy IS DISTINCT FROM 'TRUSTED_WORKFLOW_ONLY'
+       OR call_row.response_hash IS DISTINCT FROM NEW.output_hash
+       OR call_row.response_bytes IS DISTINCT FROM NEW.output_bytes
+       OR call_row.result_ref IS NOT NULL
+       OR call_row.side_effect_type IS NOT NULL
+       OR call_row.side_effect_id IS NOT NULL
+       OR call_row.completed_at IS NULL
+       OR NEW.created_at<call_row.completed_at THEN
+        RAISE EXCEPTION 'tool result receipt call binding is invalid' USING ERRCODE='55000';
+    END IF;
+
+    IF (NEW.tool_name='ReadGitStatus' AND (
+            call_row.input_schema_id IS DISTINCT FROM 'tool.read_git_status.input'
+            OR call_row.input_schema_version IS DISTINCT FROM 1
+       )) OR (NEW.tool_name='SearchKnowledge' AND (
+            call_row.input_schema_id IS DISTINCT FROM 'tool.search_knowledge.input'
+            OR call_row.input_schema_version IS DISTINCT FROM 2
+       )) OR (NEW.tool_name='ReadSource' AND (
+            call_row.input_schema_id IS DISTINCT FROM 'tool.read_source.input'
+            OR call_row.input_schema_version IS DISTINCT FROM 3
+       )) OR (NEW.tool_name='ValidateCitation' AND (
+            call_row.input_schema_id IS DISTINCT FROM 'tool.validate_citation.input'
+            OR call_row.input_schema_version IS DISTINCT FROM 3
+       )) THEN
+        RAISE EXCEPTION 'tool result receipt input contract is invalid' USING ERRCODE='55000';
+    END IF;
+
+    output_text := convert_from(NEW.output_document,'UTF8');
+    BEGIN
+        output_document := output_text::json;
+    EXCEPTION WHEN OTHERS THEN
+        RAISE EXCEPTION 'tool result receipt output is not valid JSON' USING ERRCODE='23514';
+    END;
+    IF workflow.workspace_analysis_receipt_canonical_json(output_document)<>output_text THEN
+        RAISE EXCEPTION 'tool result receipt output is not canonical JSON' USING ERRCODE='23514';
+    END IF;
+    output_json := output_document::jsonb;
+    IF jsonb_typeof(output_json)<>'object' THEN
+        RAISE EXCEPTION 'tool result receipt output is not an object' USING ERRCODE='23514';
+    END IF;
+    IF NEW.server_binding_document IS NOT NULL THEN
+        binding_text := convert_from(NEW.server_binding_document,'UTF8');
+        BEGIN
+            binding_document := binding_text::json;
+        EXCEPTION WHEN OTHERS THEN
+            RAISE EXCEPTION 'tool result receipt binding is not valid JSON' USING ERRCODE='23514';
+        END;
+        IF workflow.workspace_analysis_receipt_canonical_json(binding_document)<>binding_text THEN
+            RAISE EXCEPTION 'tool result receipt binding is not canonical JSON' USING ERRCODE='23514';
+        END IF;
+        binding_json := binding_document::jsonb;
+        IF jsonb_typeof(binding_json)<>'object' THEN
+            RAISE EXCEPTION 'tool result receipt binding is not an object' USING ERRCODE='23514';
+        END IF;
+    END IF;
+
+    IF NEW.tool_name='ReadGitStatus' THEN
+        IF NOT workflow.workspace_analysis_receipt_exact_object_keys(output_json, ARRAY[
+            'branch','head','object_format','clean','staged_count','unstaged_count','untracked_count','conflict_count'
+        ])
+           OR jsonb_typeof(output_json->'branch')<>'string'
+           OR jsonb_typeof(output_json->'head')<>'string'
+           OR jsonb_typeof(output_json->'object_format')<>'string'
+           OR jsonb_typeof(output_json->'clean')<>'boolean'
+           OR jsonb_typeof(output_json->'staged_count')<>'number'
+           OR jsonb_typeof(output_json->'unstaged_count')<>'number'
+           OR jsonb_typeof(output_json->'untracked_count')<>'number'
+           OR jsonb_typeof(output_json->'conflict_count')<>'number'
+           OR NOT workflow.workspace_analysis_receipt_reference(output_json->>'branch', 255)
+           OR (output_json->>'object_format') NOT IN ('sha1','sha256')
+           OR ((output_json->>'object_format')='sha1' AND (output_json->>'head') !~ '^[0-9a-f]{40}$')
+           OR ((output_json->>'object_format')='sha256' AND (output_json->>'head') !~ '^[0-9a-f]{64}$')
+           OR (output_json->>'staged_count') !~ '^(0|[1-9][0-9]*)$'
+           OR (output_json->>'unstaged_count') !~ '^(0|[1-9][0-9]*)$'
+           OR (output_json->>'untracked_count') !~ '^(0|[1-9][0-9]*)$'
+           OR (output_json->>'conflict_count') !~ '^(0|[1-9][0-9]*)$'
+           OR (output_json->>'staged_count')::bigint>100000
+           OR (output_json->>'unstaged_count')::bigint>100000
+           OR (output_json->>'untracked_count')::bigint>100000
+           OR (output_json->>'conflict_count')::bigint>100000
+           OR (output_json->>'clean')::boolean<>(
+                (output_json->>'staged_count')::bigint
+                +(output_json->>'unstaged_count')::bigint
+                +(output_json->>'untracked_count')::bigint
+                +(output_json->>'conflict_count')::bigint=0
+           ) THEN
+            RAISE EXCEPTION 'ReadGitStatus receipt document is invalid' USING ERRCODE='23514';
+        END IF;
+        IF binding_json IS NOT NULL AND (
+            NOT workflow.workspace_analysis_receipt_exact_object_keys(binding_json, ARRAY['workspace_root_hash','repository_identity_hash'])
+            OR jsonb_typeof(binding_json->'workspace_root_hash')<>'string'
+            OR jsonb_typeof(binding_json->'repository_identity_hash')<>'string'
+            OR NOT workflow.workspace_analysis_receipt_hash(binding_json->>'workspace_root_hash')
+            OR NOT workflow.workspace_analysis_receipt_hash(binding_json->>'repository_identity_hash')
+        ) THEN
+            RAISE EXCEPTION 'ReadGitStatus receipt binding is invalid' USING ERRCODE='23514';
+        END IF;
+    ELSIF NEW.tool_name='SearchKnowledge' THEN
+        IF NOT workflow.workspace_analysis_receipt_exact_object_keys(output_json, ARRAY['effective_mode','items','degradations'])
+           OR jsonb_typeof(output_json->'effective_mode')<>'string'
+           OR jsonb_typeof(output_json->'items')<>'array'
+           OR jsonb_typeof(output_json->'degradations')<>'array'
+           OR (output_json->>'effective_mode') NOT IN ('keyword','semantic','hybrid')
+           OR jsonb_array_length(output_json->'items')>5
+           OR jsonb_array_length(output_json->'degradations')>16
+           OR EXISTS (
+                SELECT 1
+                  FROM jsonb_array_elements(output_json->'items') WITH ORDINALITY AS item(document, ordinal)
+                 WHERE NOT workflow.workspace_analysis_receipt_exact_object_keys(item.document, ARRAY['evidence_ref','rank','snippet'])
+                    OR jsonb_typeof(item.document->'evidence_ref')<>'string'
+                    OR jsonb_typeof(item.document->'rank')<>'number'
+                    OR jsonb_typeof(item.document->'snippet')<>'string'
+                    OR item.document->>'evidence_ref'<>'E'||item.ordinal::text
+                    OR item.document->>'rank'<>item.ordinal::text
+                    OR NOT workflow.workspace_analysis_receipt_text(item.document->>'snippet', 4096)
+           )
+           OR EXISTS (
+                SELECT 1
+                  FROM jsonb_array_elements(output_json->'degradations') AS degradation(value)
+                 WHERE jsonb_typeof(degradation.value)<>'string'
+                    OR degradation.value #>> '{}' !~ '^[A-Z][A-Z0-9_]{0,127}$'
+           ) THEN
+            RAISE EXCEPTION 'SearchKnowledge receipt output is invalid' USING ERRCODE='23514';
+        END IF;
+        SELECT array_agg(value #>> '{}' ORDER BY ordinal), array_agg(value #>> '{}' ORDER BY value #>> '{}'), count(*), count(DISTINCT value #>> '{}')
+          INTO ordered_values, sorted_values, value_count, distinct_value_count
+          FROM jsonb_array_elements(output_json->'degradations') WITH ORDINALITY AS degradation(value, ordinal);
+        IF ordered_values IS DISTINCT FROM sorted_values OR value_count<>distinct_value_count THEN
+            RAISE EXCEPTION 'SearchKnowledge receipt degradations are invalid' USING ERRCODE='23514';
+        END IF;
+        IF binding_json IS NULL OR NOT workflow.workspace_analysis_receipt_exact_object_keys(binding_json, ARRAY['items','selected_refs'])
+           OR jsonb_typeof(binding_json->'items')<>'array'
+           OR jsonb_typeof(binding_json->'selected_refs')<>'array'
+           OR jsonb_array_length(binding_json->'items')<>jsonb_array_length(output_json->'items')
+           OR jsonb_array_length(binding_json->'items')>5
+           OR jsonb_array_length(binding_json->'selected_refs')<>jsonb_array_length(binding_json->'items')
+           OR EXISTS (
+                SELECT 1 FROM jsonb_array_elements(binding_json->'items') WITH ORDINALITY AS item(document, ordinal)
+                 WHERE NOT workflow.workspace_analysis_receipt_identity_valid(item.document, 5)
+                    OR NOT workflow.workspace_analysis_dynamic_source_bound(NEW.workspace_id,item.document)
+                    OR item.document->>'evidence_ref'<>'E'||item.ordinal::text
+           )
+           OR EXISTS (
+                SELECT 1 FROM jsonb_array_elements(binding_json->'selected_refs') WITH ORDINALITY AS selection(value, ordinal)
+                 WHERE jsonb_typeof(selection.value)<>'string'
+                    OR selection.value #>> '{}' <>'E'||selection.ordinal::text
+           )
+           OR EXISTS (
+                SELECT 1
+                  FROM jsonb_array_elements(output_json->'items') WITH ORDINALITY AS output_item(document, ordinal)
+                  JOIN jsonb_array_elements(binding_json->'items') WITH ORDINALITY AS binding_item(document, ordinal)
+                    USING (ordinal)
+                 WHERE output_item.document->>'evidence_ref'<>binding_item.document->>'evidence_ref'
+           ) THEN
+            RAISE EXCEPTION 'SearchKnowledge receipt binding is invalid' USING ERRCODE='23514';
+        END IF;
+        SELECT count(*), count(DISTINCT document->>'citation_id')
+          INTO value_count, distinct_value_count
+          FROM jsonb_array_elements(binding_json->'items') AS item(document);
+        IF value_count<>distinct_value_count THEN
+            RAISE EXCEPTION 'SearchKnowledge receipt citation identities are duplicated' USING ERRCODE='23514';
+        END IF;
+
+        IF (SELECT count(DISTINCT item->>'index_version_id')
+              FROM jsonb_array_elements(binding_json->'items') item)>1 THEN
+            RAISE EXCEPTION 'dynamic Search receipt spans indexes' USING ERRCODE='23514';
+        END IF;
+    ELSIF NEW.tool_name='ReadSource' THEN
+        IF NOT workflow.workspace_analysis_receipt_exact_object_keys(output_json,ARRAY['evidence_ref','content_hash','truncated','excerpt'])
+           OR jsonb_typeof(output_json->'evidence_ref')<>'string'
+           OR jsonb_typeof(output_json->'content_hash')<>'string'
+           OR jsonb_typeof(output_json->'truncated')<>'boolean'
+           OR jsonb_typeof(output_json->'excerpt')<>'string'
+           OR output_json->>'evidence_ref' !~ '^E([1-9]|[12][0-9]|3[0-2])$'
+           OR NOT workflow.workspace_analysis_receipt_hash(output_json->>'content_hash')
+           OR NOT workflow.workspace_analysis_receipt_text(output_json->>'excerpt',4096) THEN
+            RAISE EXCEPTION 'dynamic Read output is invalid' USING ERRCODE='23514';
+        END IF;
+        IF binding_json IS NULL OR NOT workflow.workspace_analysis_receipt_exact_object_keys(binding_json,ARRAY[
+             'search_receipt_id','search_receipt_hash','search_evidence_ref','evidence_ref','citation_id','index_version_id','chunk_id','source_version_id','source_span_id','content_hash'])
+           OR jsonb_typeof(binding_json->'search_receipt_id')<>'string'
+           OR jsonb_typeof(binding_json->'search_receipt_hash')<>'string'
+           OR jsonb_typeof(binding_json->'search_evidence_ref')<>'string'
+           OR NOT workflow.workspace_analysis_receipt_canonical_uuid(binding_json->>'search_receipt_id')
+           OR NOT workflow.workspace_analysis_receipt_hash(binding_json->>'search_receipt_hash')
+           OR binding_json->>'search_evidence_ref' !~ '^E[1-5]$'
+           OR NOT workflow.workspace_analysis_dynamic_identity_valid(binding_json-ARRAY['search_receipt_id','search_receipt_hash','search_evidence_ref'])
+           OR output_json->>'evidence_ref'<>binding_json->>'evidence_ref'
+           OR output_json->>'content_hash'<>binding_json->>'content_hash'
+           OR NOT workflow.workspace_analysis_dynamic_read_bound(NEW.workspace_id,NEW.workflow_run_id,operation_row.analysis_run_id,binding_json) THEN
+            RAISE EXCEPTION 'dynamic Read Search binding is invalid' USING ERRCODE='23514';
+        END IF;
+    ELSIF NEW.tool_name='ValidateCitation' THEN
+        IF NOT workflow.workspace_analysis_receipt_exact_object_keys(output_json,ARRAY['results'])
+           OR jsonb_typeof(output_json->'results')<>'array'
+           OR jsonb_array_length(output_json->'results') NOT BETWEEN 1 AND 8
+           OR EXISTS (
+             SELECT 1 FROM jsonb_array_elements(output_json->'results') result
+             WHERE NOT workflow.workspace_analysis_receipt_exact_object_keys(result,ARRAY['evidence_ref','valid','reason_code'])
+                OR jsonb_typeof(result->'evidence_ref')<>'string'
+                OR jsonb_typeof(result->'valid')<>'boolean'
+                OR jsonb_typeof(result->'reason_code')<>'string'
+                OR result->>'evidence_ref' !~ '^E([1-9]|[12][0-9]|3[0-2])$'
+                OR result->>'reason_code' NOT IN ('OK','CITATION_UNRESOLVABLE','EVIDENCE_INELIGIBLE','BINDING_MISMATCH')
+                OR (result->>'valid')::boolean<>(result->>'reason_code'='OK')
+           ) THEN
+            RAISE EXCEPTION 'dynamic Citation output is invalid' USING ERRCODE='23514';
+        END IF;
+        IF binding_json IS NULL OR NOT workflow.workspace_analysis_receipt_exact_object_keys(binding_json,ARRAY['candidate_id','candidate_hash','results'])
+           OR jsonb_typeof(binding_json->'results')<>'array'
+           OR jsonb_array_length(binding_json->'results')<>jsonb_array_length(output_json->'results') THEN
+            RAISE EXCEPTION 'dynamic Citation private binding is invalid' USING ERRCODE='23514';
+        END IF;
+        IF operation_row.node_key='decide_next' THEN
+            IF binding_json->'candidate_id'<>'null'::jsonb OR binding_json->'candidate_hash'<>'null'::jsonb THEN
+                RAISE EXCEPTION 'loop Citation cannot bind a candidate' USING ERRCODE='23514';
+            END IF;
+        ELSIF operation_row.node_key='validate_citations' AND operation_row.ordinal=1 THEN
+            IF jsonb_typeof(binding_json->'candidate_id')<>'string'
+               OR jsonb_typeof(binding_json->'candidate_hash')<>'string'
+               OR NOT workflow.workspace_analysis_receipt_canonical_uuid(binding_json->>'candidate_id')
+               OR NOT workflow.workspace_analysis_receipt_hash(binding_json->>'candidate_hash')
+               OR NOT EXISTS (
+                 SELECT 1 FROM agent.workspace_analysis_candidate candidate
+                 WHERE candidate.id=(binding_json->>'candidate_id')::uuid
+                   AND candidate.workspace_id=NEW.workspace_id AND candidate.analysis_run_id=operation_row.analysis_run_id
+                   AND candidate.schema_version=2 AND candidate.document_hash=binding_json->>'candidate_hash'
+                   AND convert_from(candidate.document,'UTF8')::jsonb->'payload'->'citation_refs'=(
+                     SELECT jsonb_agg(result->'evidence_ref' ORDER BY ordinal)
+                     FROM jsonb_array_elements(output_json->'results') WITH ORDINALITY AS item(result,ordinal))
+               ) THEN
+                RAISE EXCEPTION 'final Citation candidate binding is invalid' USING ERRCODE='23514';
+            END IF;
+        ELSE
+            RAISE EXCEPTION 'dynamic Citation operation purpose is invalid' USING ERRCODE='23514';
+        END IF;
+        IF EXISTS (
+            SELECT 1 FROM jsonb_array_elements(binding_json->'results') WITH ORDINALITY binding(item,ordinal)
+            JOIN jsonb_array_elements(output_json->'results') WITH ORDINALITY output(item,ordinal) USING (ordinal)
+            WHERE NOT workflow.workspace_analysis_receipt_exact_object_keys(binding.item,ARRAY[
+               'search_receipt_id','search_receipt_hash','search_evidence_ref','read_receipt_id','read_receipt_hash','evidence_ref','citation_id','index_version_id','chunk_id','source_version_id','source_span_id','content_hash'])
+              OR jsonb_typeof(binding.item->'search_receipt_id')<>'string'
+              OR jsonb_typeof(binding.item->'search_receipt_hash')<>'string'
+              OR jsonb_typeof(binding.item->'search_evidence_ref')<>'string'
+              OR jsonb_typeof(binding.item->'read_receipt_id')<>'string'
+              OR jsonb_typeof(binding.item->'read_receipt_hash')<>'string'
+              OR NOT workflow.workspace_analysis_receipt_canonical_uuid(binding.item->>'search_receipt_id')
+              OR NOT workflow.workspace_analysis_receipt_canonical_uuid(binding.item->>'read_receipt_id')
+              OR binding.item->>'read_receipt_id'=binding.item->>'search_receipt_id'
+              OR NOT workflow.workspace_analysis_receipt_hash(binding.item->>'search_receipt_hash')
+              OR NOT workflow.workspace_analysis_receipt_hash(binding.item->>'read_receipt_hash')
+              OR binding.item->>'search_evidence_ref' !~ '^E[1-5]$'
+              OR NOT workflow.workspace_analysis_dynamic_identity_valid(binding.item-ARRAY['search_receipt_id','search_receipt_hash','search_evidence_ref','read_receipt_id','read_receipt_hash'])
+              OR binding.item->>'evidence_ref'<>output.item->>'evidence_ref'
+              OR NOT workflow.workspace_analysis_dynamic_read_bound(NEW.workspace_id,NEW.workflow_run_id,operation_row.analysis_run_id,binding.item)
+              OR NOT EXISTS (
+                SELECT 1 FROM workflow.tool_result_receipt source_read
+                JOIN agent.workspace_analysis_operation read_operation ON read_operation.tool_call_id=source_read.tool_call_id
+                  AND read_operation.workspace_id=source_read.workspace_id AND read_operation.workflow_run_id=source_read.workflow_run_id
+                  AND read_operation.analysis_run_id=operation_row.analysis_run_id
+                  AND read_operation.node_key='decide_next' AND read_operation.operation_kind='SOURCE_READ'
+                  AND read_operation.status='SUCCEEDED' AND read_operation.result_id=source_read.id
+                  AND read_operation.result_hash=source_read.output_hash AND read_operation.result_kind='TOOL_RESULT_RECEIPT'
+                WHERE source_read.id=(binding.item->>'read_receipt_id')::uuid
+                  AND source_read.workspace_id=NEW.workspace_id AND source_read.workflow_run_id=NEW.workflow_run_id
+                  AND source_read.tool_name='ReadSource' AND source_read.tool_version=4
+                  AND source_read.output_hash=binding.item->>'read_receipt_hash'
+                  AND convert_from(source_read.server_binding_document,'UTF8')::jsonb=binding.item-ARRAY['read_receipt_id','read_receipt_hash']
+              )
+        ) OR (SELECT count(DISTINCT item->>'evidence_ref') FROM jsonb_array_elements(output_json->'results') item)<>jsonb_array_length(output_json->'results') THEN
+            RAISE EXCEPTION 'dynamic Citation exact Read/Search chain is invalid' USING ERRCODE='23514';
+        END IF;
+    ELSE
+        RAISE EXCEPTION 'unsupported dynamic Tool receipt' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END;
+$_$;
+
+
+--
 -- Name: guard_workspace_analysis_tool_receipt_closure(); Type: FUNCTION; Schema: workflow; Owner: -
 --
 
@@ -16241,6 +18522,113 @@ CREATE FUNCTION workflow.river_job_state_in_bitmask(bitmask bit, state workflow.
         WHEN 'scheduled' THEN get_bit(bitmask, 0)
         ELSE 0
     END = 1;
+$$;
+
+
+--
+-- Name: workspace_analysis_dynamic_citation_id(uuid, jsonb); Type: FUNCTION; Schema: workflow; Owner: -
+--
+
+CREATE FUNCTION workflow.workspace_analysis_dynamic_citation_id(workspace uuid, document jsonb) RETURNS text
+    LANGUAGE sql IMMUTABLE STRICT
+    AS $$
+ SELECT 'cite-' || encode(sha256(
+   convert_to(workspace::text,'UTF8') || decode('00','hex') ||
+   convert_to(document->>'index_version_id','UTF8') || decode('00','hex') ||
+   convert_to(document->>'chunk_id','UTF8') || decode('00','hex') ||
+   convert_to(document->>'source_version_id','UTF8') || decode('00','hex') ||
+   convert_to(document->>'source_span_id','UTF8')),'hex')
+$$;
+
+
+--
+-- Name: workspace_analysis_dynamic_identity_valid(jsonb); Type: FUNCTION; Schema: workflow; Owner: -
+--
+
+CREATE FUNCTION workflow.workspace_analysis_dynamic_identity_valid(document jsonb) RETURNS boolean
+    LANGUAGE sql IMMUTABLE STRICT
+    AS $_$
+ SELECT COALESCE(
+   jsonb_typeof(document->'evidence_ref')='string'
+   AND document->>'evidence_ref' ~ '^E([1-9]|[12][0-9]|3[0-2])$'
+   AND workflow.workspace_analysis_receipt_identity_valid(document || '{"evidence_ref":"E1"}'::jsonb,1),false)
+$_$;
+
+
+--
+-- Name: workspace_analysis_dynamic_read_bound(uuid, uuid, uuid, jsonb); Type: FUNCTION; Schema: workflow; Owner: -
+--
+
+CREATE FUNCTION workflow.workspace_analysis_dynamic_read_bound(workspace uuid, run_id uuid, analysis_id uuid, document jsonb) RETURNS boolean
+    LANGUAGE sql STABLE STRICT
+    AS $$
+ SELECT EXISTS (
+   SELECT 1 FROM agent.workspace_analysis_evidence evidence
+   JOIN workflow.tool_result_receipt search ON search.id=evidence.search_receipt_id
+     AND search.workspace_id=evidence.workspace_id AND search.workflow_run_id=run_id
+     AND search.tool_name='SearchKnowledge' AND search.tool_version=3
+     AND search.output_hash=evidence.search_receipt_hash
+   JOIN agent.workspace_analysis_operation operation ON operation.id=evidence.search_operation_id
+     AND operation.workspace_id=evidence.workspace_id AND operation.analysis_run_id=evidence.analysis_run_id
+     AND operation.workflow_run_id=run_id AND operation.node_key='decide_next'
+     AND operation.operation_kind='KNOWLEDGE_SEARCH' AND operation.status='SUCCEEDED'
+     AND operation.tool_call_id=search.tool_call_id AND operation.result_id=search.id
+     AND operation.result_hash=search.output_hash AND operation.result_kind='TOOL_RESULT_RECEIPT'
+   WHERE evidence.workspace_id=workspace AND evidence.analysis_run_id=analysis_id
+     AND 'E'||evidence.reference_no::text=document->>'evidence_ref'
+     AND evidence.search_receipt_id=(document->>'search_receipt_id')::uuid
+     AND evidence.search_receipt_hash=document->>'search_receipt_hash'
+     AND evidence.local_evidence_ref=document->>'search_evidence_ref'
+     AND evidence.citation_id=document->>'citation_id'
+     AND evidence.index_version_id=(document->>'index_version_id')::uuid
+     AND evidence.chunk_id=(document->>'chunk_id')::uuid
+     AND evidence.source_version_id=(document->>'source_version_id')::uuid
+     AND evidence.source_span_id=(document->>'source_span_id')::uuid
+     AND evidence.content_hash=document->>'content_hash'
+     AND EXISTS (
+       SELECT 1 FROM jsonb_array_elements(convert_from(search.server_binding_document,'UTF8')::jsonb->'items') item
+       WHERE item=(document-ARRAY['search_receipt_id','search_receipt_hash','search_evidence_ref','read_receipt_id','read_receipt_hash'])
+         || jsonb_build_object('evidence_ref',document->>'search_evidence_ref')
+     )
+ )
+$$;
+
+
+--
+-- Name: workspace_analysis_dynamic_source_bound(uuid, jsonb); Type: FUNCTION; Schema: workflow; Owner: -
+--
+
+CREATE FUNCTION workflow.workspace_analysis_dynamic_source_bound(workspace uuid, document jsonb) RETURNS boolean
+    LANGUAGE sql STABLE STRICT
+    AS $$
+ SELECT document->>'citation_id'=workflow.workspace_analysis_dynamic_citation_id(workspace,document)
+ AND EXISTS (
+   SELECT 1 FROM retrieval.index_manifest_chunk manifest
+   JOIN ingestion.canonical_chunk chunk ON chunk.id=manifest.chunk_id
+     AND chunk.workspace_id=manifest.workspace_id AND chunk.content_hash=manifest.content_hash
+   JOIN retrieval.index_manifest_source source_manifest
+     ON source_manifest.index_version_id=manifest.index_version_id
+     AND source_manifest.workspace_id=manifest.workspace_id
+     AND source_manifest.parse_projection_id=chunk.parse_projection_id
+     AND source_manifest.source_version_id=(document->>'source_version_id')::uuid
+     AND source_manifest.selection_status='included'
+   JOIN core.source_version source_version ON source_version.id=source_manifest.source_version_id
+     AND source_version.source_id=source_manifest.source_id
+   JOIN core.source source ON source.id=source_version.source_id AND source.workspace_id=manifest.workspace_id
+   JOIN core.content_artifact artifact ON artifact.id=source_version.content_artifact_id
+     AND artifact.workspace_id=manifest.workspace_id AND artifact.content_hash=source_version.content_hash
+     AND artifact.byte_size=source_version.byte_size
+   JOIN ingestion.parse_projection projection ON projection.id=source_manifest.parse_projection_id
+     AND projection.workspace_id=manifest.workspace_id AND projection.content_artifact_id=artifact.id
+   JOIN ingestion.source_span span ON span.id=chunk.source_span_id
+     AND span.workspace_id=manifest.workspace_id AND span.parse_projection_id=projection.id
+     AND span.content_artifact_id=artifact.id
+   WHERE manifest.workspace_id=workspace
+     AND manifest.index_version_id=(document->>'index_version_id')::uuid
+     AND manifest.chunk_id=(document->>'chunk_id')::uuid
+     AND span.id=(document->>'source_span_id')::uuid
+     AND span.excerpt_hash=document->>'content_hash'
+ )
 $$;
 
 
@@ -16652,11 +19040,11 @@ CREATE TABLE agent.model_run (
     memory_context_item_count integer,
     memory_context_bytes bigint,
     model_settings_revision bigint,
-    CONSTRAINT agent_model_run_final_result_type_check CHECK (((final_result_type IS NULL) OR (final_result_type = ANY (ARRAY['relation_assessment'::text, 'rag_answer'::text, 'refusal'::text, 'faithfulness_review'::text, 'tool_request'::text, 'clarification'::text, 'artifact_section'::text, 'document_knowledge_profile'::text, 'organizing_outline'::text, 'organizing_document'::text, 'workspace_analysis_plan'::text, 'workspace_analysis_answer'::text])))),
+    CONSTRAINT agent_model_run_final_result_type_check CHECK (((final_result_type IS NULL) OR (final_result_type = ANY (ARRAY['relation_assessment'::text, 'rag_answer'::text, 'refusal'::text, 'faithfulness_review'::text, 'tool_request'::text, 'clarification'::text, 'artifact_section'::text, 'document_knowledge_profile'::text, 'organizing_outline'::text, 'organizing_document'::text, 'workspace_analysis_plan'::text, 'workspace_analysis_answer'::text, 'synthesis_delta'::text, 'synthesis_semantic_review'::text, 'synthesis_note_interview_plan'::text, 'workspace_analysis_decision'::text])))),
     CONSTRAINT agent_model_run_lifecycle CHECK (((updated_at >= started_at) AND ((completed_at IS NULL) OR ((completed_at >= started_at) AND (completed_at = updated_at))) AND (((status = 'RUNNING'::text) AND (completed_at IS NULL) AND (final_result_type IS NULL) AND (error_code IS NULL)) OR ((status = 'SUCCEEDED'::text) AND (completed_at IS NOT NULL) AND (final_result_type IS NOT NULL) AND (error_code IS NULL)) OR ((status = 'REFUSED'::text) AND (completed_at IS NOT NULL) AND (final_result_type = 'refusal'::text) AND (error_code IS NOT NULL)) OR ((status = ANY (ARRAY['FAILED'::text, 'UNKNOWN'::text])) AND (completed_at IS NOT NULL) AND (final_result_type IS NULL) AND (error_code IS NOT NULL))))),
     CONSTRAINT agent_model_run_memory_context_binding CHECK ((((memory_snapshot_id IS NULL) AND (memory_context_schema_version IS NULL) AND (memory_context_digest IS NULL) AND (memory_context_item_count IS NULL) AND (memory_context_bytes IS NULL)) OR ((memory_snapshot_id IS NOT NULL) AND (memory_context_schema_version IS NOT NULL) AND (memory_context_digest IS NOT NULL) AND (memory_context_item_count IS NOT NULL) AND (memory_context_bytes IS NOT NULL) AND (memory_context_schema_version = 'agent-rag-memory-context/v1'::text) AND (memory_context_digest ~ '^[0-9a-f]{64}$'::text) AND ((memory_context_item_count >= 0) AND (memory_context_item_count <= 32)) AND ((memory_context_bytes >= 1) AND (memory_context_bytes <= 65536))))),
     CONSTRAINT agent_model_run_model_settings_revision CHECK (((model_settings_revision IS NULL) OR (model_settings_revision >= 0))),
-    CONSTRAINT agent_model_run_retrieval_binding CHECK (((retrieval_index_version_id IS NOT NULL) OR ((embedding_version_id IS NULL) AND (rerank_model_version IS NULL) AND (((output_schema_id = 'agent.rag-answer'::text) AND (NOT ((status = 'SUCCEEDED'::text) AND (final_result_type = 'rag_answer'::text)))) OR (output_schema_id = ANY (ARRAY['organizing.outline-generation'::text, 'organizing.document-generation'::text])))))),
+    CONSTRAINT agent_model_run_retrieval_binding CHECK (((retrieval_index_version_id IS NOT NULL) OR ((embedding_version_id IS NULL) AND (rerank_model_version IS NULL) AND (((output_schema_id = 'agent.rag-answer'::text) AND (NOT ((status = 'SUCCEEDED'::text) AND (final_result_type = 'rag_answer'::text)))) OR (output_schema_id = ANY (ARRAY['organizing.outline-generation'::text, 'organizing.document-generation'::text, 'agent.synthesis-delta'::text, 'agent.synthesis-semantic-review'::text, 'agent.synthesis-note-interview-plan'::text, 'agent.workspace-analysis-decision'::text])))))),
     CONSTRAINT model_run_adapter_name_check CHECK (((btrim(adapter_name) <> ''::text) AND (octet_length(adapter_name) <= 128))),
     CONSTRAINT model_run_adapter_version_check CHECK (((btrim(adapter_version) <> ''::text) AND (octet_length(adapter_version) <= 64))),
     CONSTRAINT model_run_error_code_check CHECK (((error_code IS NULL) OR ((btrim(error_code) <> ''::text) AND (error_code ~ '^[A-Z0-9_]+$'::text) AND (octet_length(error_code) <= 128)))),
@@ -16809,7 +19197,71 @@ CREATE TABLE agent.workspace_analysis_candidate (
     CONSTRAINT workspace_analysis_candidate_document_hash_check CHECK ((document_hash ~ '^[0-9a-f]{64}$'::text)),
     CONSTRAINT workspace_analysis_candidate_integrity CHECK (((document_bytes = octet_length(document)) AND ((document_bytes >= 1) AND (document_bytes <= 262144)) AND (document_hash = encode(sha256(document), 'hex'::text)))),
     CONSTRAINT workspace_analysis_candidate_schema_id_check CHECK ((schema_id = 'agent.workspace-analysis-candidate'::text)),
-    CONSTRAINT workspace_analysis_candidate_schema_version_check CHECK ((schema_version = 1))
+    CONSTRAINT workspace_analysis_candidate_schema_version_check CHECK ((schema_version = ANY (ARRAY[(1)::bigint, (2)::bigint])))
+);
+
+
+--
+-- Name: workspace_analysis_decision; Type: TABLE; Schema: agent; Owner: -
+--
+
+CREATE TABLE agent.workspace_analysis_decision (
+    id uuid NOT NULL,
+    workspace_id uuid NOT NULL,
+    analysis_run_id uuid NOT NULL,
+    operation_id uuid NOT NULL,
+    node_attempt_id uuid NOT NULL,
+    model_run_id uuid NOT NULL,
+    model_call_id uuid NOT NULL,
+    ordinal integer NOT NULL,
+    document bytea NOT NULL,
+    document_hash text NOT NULL,
+    document_bytes bigint NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    CONSTRAINT workspace_analysis_decision_integrity CHECK (((document_bytes = octet_length(document)) AND ((document_bytes >= 1) AND (document_bytes <= 4096)) AND (document_hash = encode(sha256(document), 'hex'::text)))),
+    CONSTRAINT workspace_analysis_decision_ordinal_check CHECK (((ordinal >= 1) AND (ordinal <= 12)))
+);
+
+
+--
+-- Name: workspace_analysis_evidence; Type: TABLE; Schema: agent; Owner: -
+--
+
+CREATE TABLE agent.workspace_analysis_evidence (
+    workspace_id uuid NOT NULL,
+    analysis_run_id uuid NOT NULL,
+    reference_no integer NOT NULL,
+    search_operation_id uuid NOT NULL,
+    search_receipt_id uuid NOT NULL,
+    search_receipt_hash text NOT NULL,
+    local_evidence_ref text NOT NULL,
+    citation_id text NOT NULL,
+    index_version_id uuid NOT NULL,
+    chunk_id uuid NOT NULL,
+    source_version_id uuid NOT NULL,
+    source_span_id uuid NOT NULL,
+    content_hash text NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    CONSTRAINT workspace_analysis_evidence_citation_id_check CHECK (((length(citation_id) >= 1) AND (length(citation_id) <= 256))),
+    CONSTRAINT workspace_analysis_evidence_content_hash_check CHECK ((content_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT workspace_analysis_evidence_local_evidence_ref_check CHECK ((local_evidence_ref ~ '^E[1-5]$'::text)),
+    CONSTRAINT workspace_analysis_evidence_reference_no_check CHECK (((reference_no >= 1) AND (reference_no <= 32))),
+    CONSTRAINT workspace_analysis_evidence_search_receipt_hash_check CHECK ((search_receipt_hash ~ '^[0-9a-f]{64}$'::text))
+);
+
+
+--
+-- Name: workspace_analysis_journal; Type: TABLE; Schema: agent; Owner: -
+--
+
+CREATE TABLE agent.workspace_analysis_journal (
+    workspace_id uuid NOT NULL,
+    analysis_run_id uuid NOT NULL,
+    sequence bigint NOT NULL,
+    operation_id uuid NOT NULL,
+    decision_id uuid,
+    created_at timestamp with time zone NOT NULL,
+    CONSTRAINT workspace_analysis_journal_sequence_check CHECK (((sequence >= 1) AND (sequence <= 27)))
 );
 
 
@@ -16839,167 +19291,6 @@ CREATE TABLE agent.workspace_analysis_model_result (
     CONSTRAINT workspace_analysis_model_result_integrity CHECK (((document_bytes = octet_length(document)) AND ((document_bytes >= 1) AND (document_bytes <= 65536)) AND (document_hash = encode(sha256(document), 'hex'::text)))),
     CONSTRAINT workspace_analysis_model_result_operation_kind_check CHECK ((operation_kind = ANY (ARRAY['RETRIEVAL_PLAN'::text, 'FAITHFULNESS_REVIEW'::text]))),
     CONSTRAINT workspace_analysis_model_result_subject_candidate_hash_check CHECK (((subject_candidate_hash IS NULL) OR (subject_candidate_hash ~ '^[0-9a-f]{64}$'::text)))
-);
-
-
---
--- Name: workspace_analysis_operation; Type: TABLE; Schema: agent; Owner: -
---
-
-CREATE TABLE agent.workspace_analysis_operation (
-    id uuid NOT NULL,
-    workspace_id uuid NOT NULL,
-    analysis_run_id uuid NOT NULL,
-    workflow_run_id uuid NOT NULL,
-    node_run_id uuid NOT NULL,
-    node_key text NOT NULL,
-    operation_kind text NOT NULL,
-    ordinal integer NOT NULL,
-    call_kind text NOT NULL,
-    request_hash text NOT NULL,
-    status text NOT NULL,
-    first_node_attempt_id uuid,
-    latest_node_attempt_id uuid,
-    model_call_id uuid,
-    tool_call_id uuid,
-    result_kind text,
-    result_id uuid,
-    result_hash text,
-    error_code text,
-    version bigint DEFAULT 1 NOT NULL,
-    created_at timestamp with time zone NOT NULL,
-    updated_at timestamp with time zone NOT NULL,
-    started_at timestamp with time zone,
-    completed_at timestamp with time zone,
-    CONSTRAINT workspace_analysis_operation_call_kind_check CHECK ((call_kind = ANY (ARRAY['MODEL'::text, 'TOOL'::text]))),
-    CONSTRAINT workspace_analysis_operation_call_pair CHECK ((((call_kind = 'MODEL'::text) AND (tool_call_id IS NULL)) OR ((call_kind = 'TOOL'::text) AND (model_call_id IS NULL)))),
-    CONSTRAINT workspace_analysis_operation_error_code_check CHECK (((error_code IS NULL) OR (error_code ~ '^[A-Z][A-Z0-9_]{0,127}$'::text))),
-    CONSTRAINT workspace_analysis_operation_lifecycle CHECK (((updated_at >= created_at) AND ((started_at IS NULL) OR ((started_at >= created_at) AND (started_at <= updated_at))) AND ((completed_at IS NULL) OR ((started_at IS NOT NULL) AND (completed_at >= started_at) AND (completed_at <= updated_at))) AND (((status = 'PENDING'::text) AND (first_node_attempt_id IS NULL) AND (latest_node_attempt_id IS NULL) AND (model_call_id IS NULL) AND (tool_call_id IS NULL) AND (started_at IS NULL) AND (completed_at IS NULL) AND (result_kind IS NULL) AND (result_id IS NULL) AND (result_hash IS NULL) AND (error_code IS NULL)) OR ((status = 'STARTED'::text) AND (first_node_attempt_id IS NOT NULL) AND (latest_node_attempt_id IS NOT NULL) AND (((call_kind = 'MODEL'::text) AND (model_call_id IS NOT NULL)) OR ((call_kind = 'TOOL'::text) AND (tool_call_id IS NOT NULL))) AND (started_at IS NOT NULL) AND (completed_at IS NULL) AND (result_kind IS NULL) AND (result_id IS NULL) AND (result_hash IS NULL) AND (error_code IS NULL)) OR ((status = 'SUCCEEDED'::text) AND (first_node_attempt_id IS NOT NULL) AND (latest_node_attempt_id IS NOT NULL) AND (((call_kind = 'MODEL'::text) AND (model_call_id IS NOT NULL)) OR ((call_kind = 'TOOL'::text) AND (tool_call_id IS NOT NULL))) AND (started_at IS NOT NULL) AND (completed_at IS NOT NULL) AND (result_kind IS NOT NULL) AND (result_id IS NOT NULL) AND (result_hash IS NOT NULL) AND (error_code IS NULL)) OR ((status = ANY (ARRAY['FAILED'::text, 'UNKNOWN'::text])) AND (first_node_attempt_id IS NOT NULL) AND (latest_node_attempt_id IS NOT NULL) AND (((call_kind = 'MODEL'::text) AND (model_call_id IS NOT NULL)) OR ((call_kind = 'TOOL'::text) AND (tool_call_id IS NOT NULL))) AND (started_at IS NOT NULL) AND (completed_at IS NOT NULL) AND (result_kind IS NULL) AND (result_id IS NULL) AND (result_hash IS NULL) AND (error_code IS NOT NULL))))),
-    CONSTRAINT workspace_analysis_operation_ordinal_check CHECK (((ordinal >= 1) AND (ordinal <= 3))),
-    CONSTRAINT workspace_analysis_operation_request_hash_check CHECK ((request_hash ~ '^[0-9a-f]{64}$'::text)),
-    CONSTRAINT workspace_analysis_operation_result_hash_check CHECK (((result_hash IS NULL) OR (result_hash ~ '^[0-9a-f]{64}$'::text))),
-    CONSTRAINT workspace_analysis_operation_result_kind CHECK (((result_kind IS NULL) OR ((call_kind = 'TOOL'::text) AND (result_kind = 'TOOL_RESULT_RECEIPT'::text)) OR ((operation_kind = ANY (ARRAY['RETRIEVAL_PLAN'::text, 'FAITHFULNESS_REVIEW'::text])) AND (result_kind = 'MODEL_RESULT_RECEIPT'::text)) OR ((operation_kind = 'ANSWER_SYNTHESIS'::text) AND (result_kind = 'SYNTHESIS_CANDIDATE'::text)))),
-    CONSTRAINT workspace_analysis_operation_result_kind_check CHECK (((result_kind IS NULL) OR (result_kind = ANY (ARRAY['MODEL_RESULT_RECEIPT'::text, 'TOOL_RESULT_RECEIPT'::text, 'SYNTHESIS_CANDIDATE'::text])))),
-    CONSTRAINT workspace_analysis_operation_slot CHECK ((((node_key = 'inspect_workspace'::text) AND (operation_kind = 'GIT_STATUS'::text) AND (ordinal = 1) AND (call_kind = 'TOOL'::text)) OR ((node_key = 'retrieve_evidence'::text) AND (operation_kind = 'RETRIEVAL_PLAN'::text) AND (ordinal = 1) AND (call_kind = 'MODEL'::text)) OR ((node_key = 'retrieve_evidence'::text) AND (operation_kind = 'KNOWLEDGE_SEARCH'::text) AND (ordinal = 1) AND (call_kind = 'TOOL'::text)) OR ((node_key = 'read_evidence'::text) AND (operation_kind = 'SOURCE_READ'::text) AND ((ordinal >= 1) AND (ordinal <= 3)) AND (call_kind = 'TOOL'::text)) OR ((node_key = 'synthesize_answer'::text) AND (operation_kind = 'ANSWER_SYNTHESIS'::text) AND (ordinal = 1) AND (call_kind = 'MODEL'::text)) OR ((node_key = 'validate_citations'::text) AND (operation_kind = 'CITATION_VALIDATION'::text) AND (ordinal = 1) AND (call_kind = 'TOOL'::text)) OR ((node_key = 'review_publish'::text) AND (operation_kind = 'FAITHFULNESS_REVIEW'::text) AND (ordinal = 1) AND (call_kind = 'MODEL'::text)))),
-    CONSTRAINT workspace_analysis_operation_status_check CHECK ((status = ANY (ARRAY['PENDING'::text, 'STARTED'::text, 'SUCCEEDED'::text, 'FAILED'::text, 'UNKNOWN'::text]))),
-    CONSTRAINT workspace_analysis_operation_version_check CHECK ((version > 0))
-);
-
-
---
--- Name: workspace_analysis_publication_proof; Type: TABLE; Schema: agent; Owner: -
---
-
-CREATE TABLE agent.workspace_analysis_publication_proof (
-    id uuid NOT NULL,
-    workspace_id uuid NOT NULL,
-    analysis_run_id uuid NOT NULL,
-    answer_id uuid NOT NULL,
-    workflow_run_id uuid NOT NULL,
-    finalization_node_run_id uuid NOT NULL,
-    finalization_node_attempt_id uuid NOT NULL,
-    candidate_id uuid NOT NULL,
-    candidate_hash text NOT NULL,
-    git_receipt_id uuid NOT NULL,
-    git_receipt_hash text NOT NULL,
-    validation_receipt_id uuid NOT NULL,
-    validation_receipt_hash text NOT NULL,
-    review_model_result_id uuid NOT NULL,
-    review_document_hash text NOT NULL,
-    published_document bytea NOT NULL,
-    published_result_hash text NOT NULL,
-    published_bytes bigint NOT NULL,
-    created_at timestamp with time zone NOT NULL,
-    CONSTRAINT workspace_analysis_publication_pr_validation_receipt_hash_check CHECK ((validation_receipt_hash ~ '^[0-9a-f]{64}$'::text)),
-    CONSTRAINT workspace_analysis_publication_proo_published_result_hash_check CHECK ((published_result_hash ~ '^[0-9a-f]{64}$'::text)),
-    CONSTRAINT workspace_analysis_publication_proof_candidate_hash_check CHECK ((candidate_hash ~ '^[0-9a-f]{64}$'::text)),
-    CONSTRAINT workspace_analysis_publication_proof_git_receipt_hash_check CHECK ((git_receipt_hash ~ '^[0-9a-f]{64}$'::text)),
-    CONSTRAINT workspace_analysis_publication_proof_integrity CHECK (((published_bytes = octet_length(published_document)) AND ((published_bytes >= 1) AND (published_bytes <= 262144)) AND (published_result_hash = encode(sha256(published_document), 'hex'::text)))),
-    CONSTRAINT workspace_analysis_publication_proof_review_document_hash_check CHECK ((review_document_hash ~ '^[0-9a-f]{64}$'::text))
-);
-
-
---
--- Name: workspace_analysis_run; Type: TABLE; Schema: agent; Owner: -
---
-
-CREATE TABLE agent.workspace_analysis_run (
-    id uuid NOT NULL,
-    workspace_id uuid NOT NULL,
-    conversation_id uuid NOT NULL,
-    question_id uuid NOT NULL,
-    answer_id uuid NOT NULL,
-    workflow_run_id uuid NOT NULL,
-    definition_key text NOT NULL,
-    definition_version bigint NOT NULL,
-    definition_hash text NOT NULL,
-    tool_catalog_hash text NOT NULL,
-    policy_version integer NOT NULL,
-    config_revision bigint NOT NULL,
-    deadline_at timestamp with time zone NOT NULL,
-    plan_model_timeout_ms bigint NOT NULL,
-    synthesis_model_timeout_ms bigint NOT NULL,
-    review_model_timeout_ms bigint NOT NULL,
-    git_tool_timeout_ms bigint NOT NULL,
-    search_tool_timeout_ms bigint NOT NULL,
-    source_read_tool_timeout_ms bigint NOT NULL,
-    validate_citation_tool_timeout_ms bigint NOT NULL,
-    durable_completion_margin_ms bigint NOT NULL,
-    max_nodes integer NOT NULL,
-    max_model_calls integer NOT NULL,
-    max_tool_calls integer NOT NULL,
-    max_source_reads integer NOT NULL,
-    max_tool_concurrency integer NOT NULL,
-    max_input_tokens bigint NOT NULL,
-    max_output_tokens bigint NOT NULL,
-    max_cost_microunits bigint,
-    reserved_model_calls integer DEFAULT 0 NOT NULL,
-    reserved_tool_calls integer DEFAULT 0 NOT NULL,
-    reserved_source_reads integer DEFAULT 0 NOT NULL,
-    reserved_input_tokens bigint DEFAULT 0 NOT NULL,
-    reserved_output_tokens bigint DEFAULT 0 NOT NULL,
-    reserved_cost_microunits bigint,
-    settled_model_calls integer DEFAULT 0 NOT NULL,
-    settled_tool_calls integer DEFAULT 0 NOT NULL,
-    settled_source_reads integer DEFAULT 0 NOT NULL,
-    settled_input_tokens bigint DEFAULT 0 NOT NULL,
-    settled_output_tokens bigint DEFAULT 0 NOT NULL,
-    settled_cost_microunits bigint,
-    status text NOT NULL,
-    termination_reason text,
-    validation_receipt_id uuid,
-    review_model_run_id uuid,
-    version bigint DEFAULT 1 NOT NULL,
-    created_at timestamp with time zone NOT NULL,
-    updated_at timestamp with time zone NOT NULL,
-    completed_at timestamp with time zone,
-    CONSTRAINT workspace_analysis_run_budget_bounds CHECK ((((reserved_model_calls + settled_model_calls) <= max_model_calls) AND ((reserved_tool_calls + settled_tool_calls) <= max_tool_calls) AND ((reserved_source_reads + settled_source_reads) <= max_source_reads) AND ((reserved_input_tokens + settled_input_tokens) <= max_input_tokens) AND ((reserved_output_tokens + settled_output_tokens) <= max_output_tokens) AND (reserved_cost_microunits IS NULL) AND (settled_cost_microunits IS NULL))),
-    CONSTRAINT workspace_analysis_run_config_revision_check CHECK ((config_revision >= 0)),
-    CONSTRAINT workspace_analysis_run_contract CHECK (((definition_key = 'workspace-analysis'::text) AND (definition_version = 1) AND (policy_version = 1) AND (max_nodes = 6) AND (max_model_calls = 3) AND (max_tool_calls = 6) AND (max_source_reads = 3) AND (max_tool_concurrency = 1) AND (max_input_tokens = 196608) AND ((max_output_tokens >= 1281) AND (max_output_tokens <= 5376)) AND (max_cost_microunits IS NULL))),
-    CONSTRAINT workspace_analysis_run_definition_hash_check CHECK ((definition_hash ~ '^[0-9a-f]{64}$'::text)),
-    CONSTRAINT workspace_analysis_run_durable_completion_margin_ms_check CHECK ((durable_completion_margin_ms = 5000)),
-    CONSTRAINT workspace_analysis_run_git_tool_timeout_ms_check CHECK (((git_tool_timeout_ms >= 1) AND (git_tool_timeout_ms <= 3600000))),
-    CONSTRAINT workspace_analysis_run_lifecycle CHECK (((updated_at >= created_at) AND (deadline_at > created_at) AND (deadline_at = (created_at + ((((((((((((((git_tool_timeout_ms + 5000) + plan_model_timeout_ms) + search_tool_timeout_ms) + 15000) + (3 * source_read_tool_timeout_ms)) + 10000) + synthesis_model_timeout_ms) + 15000) + validate_citation_tool_timeout_ms) + 10000) + review_model_timeout_ms) + 15000))::double precision * '00:00:00.001'::interval))) AND (deadline_at <= (created_at + '01:00:00'::interval)) AND (((status = ANY (ARRAY['queued'::text, 'running'::text])) AND (termination_reason IS NULL) AND (completed_at IS NULL)) OR ((status = 'succeeded'::text) AND (termination_reason = 'COMPLETED'::text) AND (validation_receipt_id IS NOT NULL) AND (review_model_run_id IS NOT NULL) AND (completed_at IS NOT NULL) AND (completed_at = updated_at) AND (completed_at <= deadline_at)) OR ((status = ANY (ARRAY['refused'::text, 'clarification_required'::text, 'failed'::text, 'cancelled'::text])) AND (termination_reason IS NOT NULL) AND (completed_at IS NOT NULL) AND (completed_at = updated_at))))),
-    CONSTRAINT workspace_analysis_run_plan_model_timeout_ms_check CHECK (((plan_model_timeout_ms >= 1) AND (plan_model_timeout_ms <= 3600000))),
-    CONSTRAINT workspace_analysis_run_reason_check CHECK ((((status = ANY (ARRAY['queued'::text, 'running'::text])) AND (termination_reason IS NULL)) OR ((status = 'succeeded'::text) AND (termination_reason = 'COMPLETED'::text)) OR ((status = 'refused'::text) AND (termination_reason = ANY (ARRAY['WORKSPACE_ANALYSIS_EVIDENCE_INSUFFICIENT'::text, 'WORKSPACE_ANALYSIS_CITATION_INVALID'::text, 'WORKSPACE_ANALYSIS_FAITHFULNESS_REJECTED'::text, 'WORKSPACE_ANALYSIS_MODEL_REFUSED'::text]))) OR ((status = 'clarification_required'::text) AND (termination_reason = 'WORKSPACE_ANALYSIS_CLARIFICATION_REQUIRED'::text)) OR ((status = 'failed'::text) AND (termination_reason = ANY (ARRAY['WORKSPACE_ANALYSIS_BUDGET_EXHAUSTED'::text, 'WORKSPACE_ANALYSIS_RECEIPT_INVALID'::text, 'WORKSPACE_ANALYSIS_RESULT_UNKNOWN'::text, 'WORKSPACE_ANALYSIS_DEADLINE_EXCEEDED'::text, 'WORKSPACE_ANALYSIS_MODEL_FAILED'::text, 'WORKSPACE_ANALYSIS_TOOL_FAILED'::text, 'WORKSPACE_ANALYSIS_RUNTIME_FAILED'::text]))) OR ((status = 'cancelled'::text) AND (termination_reason = 'WORKSPACE_ANALYSIS_CANCELLED'::text)))),
-    CONSTRAINT workspace_analysis_run_reserved_input_tokens_check CHECK ((reserved_input_tokens >= 0)),
-    CONSTRAINT workspace_analysis_run_reserved_model_calls_check CHECK ((reserved_model_calls >= 0)),
-    CONSTRAINT workspace_analysis_run_reserved_output_tokens_check CHECK ((reserved_output_tokens >= 0)),
-    CONSTRAINT workspace_analysis_run_reserved_source_reads_check CHECK ((reserved_source_reads >= 0)),
-    CONSTRAINT workspace_analysis_run_reserved_tool_calls_check CHECK ((reserved_tool_calls >= 0)),
-    CONSTRAINT workspace_analysis_run_review_model_timeout_ms_check CHECK (((review_model_timeout_ms >= 1) AND (review_model_timeout_ms <= 3600000))),
-    CONSTRAINT workspace_analysis_run_search_tool_timeout_ms_check CHECK (((search_tool_timeout_ms >= 1) AND (search_tool_timeout_ms <= 3600000))),
-    CONSTRAINT workspace_analysis_run_settled_input_tokens_check CHECK ((settled_input_tokens >= 0)),
-    CONSTRAINT workspace_analysis_run_settled_model_calls_check CHECK ((settled_model_calls >= 0)),
-    CONSTRAINT workspace_analysis_run_settled_output_tokens_check CHECK ((settled_output_tokens >= 0)),
-    CONSTRAINT workspace_analysis_run_settled_source_reads_check CHECK ((settled_source_reads >= 0)),
-    CONSTRAINT workspace_analysis_run_settled_tool_calls_check CHECK ((settled_tool_calls >= 0)),
-    CONSTRAINT workspace_analysis_run_source_read_tool_timeout_ms_check CHECK (((source_read_tool_timeout_ms >= 1) AND (source_read_tool_timeout_ms <= 3600000))),
-    CONSTRAINT workspace_analysis_run_status_check CHECK ((status = ANY (ARRAY['queued'::text, 'running'::text, 'succeeded'::text, 'refused'::text, 'clarification_required'::text, 'failed'::text, 'cancelled'::text]))),
-    CONSTRAINT workspace_analysis_run_synthesis_model_timeout_ms_check CHECK (((synthesis_model_timeout_ms >= 1) AND (synthesis_model_timeout_ms <= 3600000))),
-    CONSTRAINT workspace_analysis_run_tool_catalog_hash_check CHECK ((tool_catalog_hash ~ '^[0-9a-f]{64}$'::text)),
-    CONSTRAINT workspace_analysis_run_validate_citation_tool_timeout_ms_check CHECK (((validate_citation_tool_timeout_ms >= 1) AND (validate_citation_tool_timeout_ms <= 3600000))),
-    CONSTRAINT workspace_analysis_run_version_check CHECK ((version > 0))
 );
 
 
@@ -17047,17 +19338,17 @@ CREATE TABLE agent.workspace_analysis_termination_proof (
     CONSTRAINT workspace_analysis_termination_proo_requested_model_calls_check CHECK (((requested_model_calls IS NULL) OR (requested_model_calls >= 0))),
     CONSTRAINT workspace_analysis_termination_proof_actual_hash_check CHECK (((actual_hash IS NULL) OR (actual_hash ~ '^[0-9a-f]{64}$'::text))),
     CONSTRAINT workspace_analysis_termination_proof_artifact_hash_check CHECK (((artifact_hash IS NULL) OR (artifact_hash ~ '^[0-9a-f]{64}$'::text))),
-    CONSTRAINT workspace_analysis_termination_proof_artifact_kind_check CHECK (((artifact_kind IS NULL) OR (artifact_kind = ANY (ARRAY['TOOL_RECEIPT'::text, 'MODEL_RESULT'::text])))),
+    CONSTRAINT workspace_analysis_termination_proof_artifact_kind_check CHECK (((artifact_kind IS NULL) OR (artifact_kind = ANY (ARRAY['TOOL_RECEIPT'::text, 'MODEL_RESULT'::text, 'DECISION_RECEIPT'::text])))),
     CONSTRAINT workspace_analysis_termination_proof_artifact_pair CHECK ((((artifact_kind IS NULL) AND (artifact_id IS NULL) AND (artifact_hash IS NULL)) OR ((artifact_kind IS NOT NULL) AND (artifact_id IS NOT NULL) AND (artifact_hash IS NOT NULL)))),
     CONSTRAINT workspace_analysis_termination_proof_check CHECK ((created_at >= checked_at)),
-    CONSTRAINT workspace_analysis_termination_proof_deadline_slot CHECK (((((reason = 'WORKSPACE_ANALYSIS_DEADLINE_EXCEEDED'::text) AND (operation_id IS NULL)) = ((deadline_operation_kind IS NOT NULL) AND (deadline_operation_ordinal IS NOT NULL))) AND ((deadline_operation_kind IS NULL) OR ((deadline_operation_kind = 'SOURCE_READ'::text) AND ((deadline_operation_ordinal >= 1) AND (deadline_operation_ordinal <= 3))) OR ((deadline_operation_kind = ANY (ARRAY['GIT_STATUS'::text, 'RETRIEVAL_PLAN'::text, 'KNOWLEDGE_SEARCH'::text, 'ANSWER_SYNTHESIS'::text, 'CITATION_VALIDATION'::text, 'FAITHFULNESS_REVIEW'::text])) AND (deadline_operation_ordinal = 1))))),
+    CONSTRAINT workspace_analysis_termination_proof_deadline_slot CHECK (((((reason = 'WORKSPACE_ANALYSIS_DEADLINE_EXCEEDED'::text) AND (operation_id IS NULL)) = ((deadline_operation_kind IS NOT NULL) AND (deadline_operation_ordinal IS NOT NULL))) AND ((deadline_operation_kind IS NULL) OR ((deadline_operation_kind = ANY (ARRAY['GIT_STATUS'::text, 'KNOWLEDGE_SEARCH'::text, 'SOURCE_READ'::text, 'CITATION_VALIDATION'::text])) AND ((deadline_operation_ordinal >= 1) AND (deadline_operation_ordinal <= 12))) OR ((deadline_operation_kind = 'DECISION'::text) AND ((deadline_operation_ordinal >= 1) AND (deadline_operation_ordinal <= 13))) OR ((deadline_operation_kind = ANY (ARRAY['RETRIEVAL_PLAN'::text, 'ANSWER_SYNTHESIS'::text, 'FAITHFULNESS_REVIEW'::text])) AND (deadline_operation_ordinal = 1))))),
     CONSTRAINT workspace_analysis_termination_proof_expected_hash_check CHECK (((expected_hash IS NULL) OR (expected_hash ~ '^[0-9a-f]{64}$'::text))),
     CONSTRAINT workspace_analysis_termination_proof_publication_integrity CHECK (((published_bytes = octet_length(published_document)) AND ((published_bytes >= 1) AND (published_bytes <= 262144)) AND (published_result_hash = encode(sha256(published_document), 'hex'::text)))),
     CONSTRAINT workspace_analysis_termination_proof_reason_check CHECK ((reason = ANY (ARRAY['WORKSPACE_ANALYSIS_EVIDENCE_INSUFFICIENT'::text, 'WORKSPACE_ANALYSIS_CITATION_INVALID'::text, 'WORKSPACE_ANALYSIS_FAITHFULNESS_REJECTED'::text, 'WORKSPACE_ANALYSIS_MODEL_REFUSED'::text, 'WORKSPACE_ANALYSIS_CLARIFICATION_REQUIRED'::text, 'WORKSPACE_ANALYSIS_BUDGET_EXHAUSTED'::text, 'WORKSPACE_ANALYSIS_RECEIPT_INVALID'::text, 'WORKSPACE_ANALYSIS_RESULT_UNKNOWN'::text, 'WORKSPACE_ANALYSIS_DEADLINE_EXCEEDED'::text, 'WORKSPACE_ANALYSIS_MODEL_FAILED'::text, 'WORKSPACE_ANALYSIS_TOOL_FAILED'::text, 'WORKSPACE_ANALYSIS_RUNTIME_FAILED'::text, 'WORKSPACE_ANALYSIS_CANCELLED'::text]))),
     CONSTRAINT workspace_analysis_termination_proof_receipt_failure_code_check CHECK (((receipt_failure_code IS NULL) OR (receipt_failure_code = ANY (ARRAY['MISSING'::text, 'HASH_MISMATCH'::text, 'CONTRACT_INVALID'::text, 'BINDING_INVALID'::text])))),
     CONSTRAINT workspace_analysis_termination_proof_receipt_failure_shape CHECK (((reason = 'WORKSPACE_ANALYSIS_RECEIPT_INVALID'::text) = ((receipt_failure_code IS NOT NULL) AND (receipt_failure_id IS NOT NULL)))),
     CONSTRAINT workspace_analysis_termination_proof_requested_tool_calls_check CHECK (((requested_tool_calls IS NULL) OR (requested_tool_calls >= 0))),
-    CONSTRAINT workspace_analysis_termination_proof_runtime_terminal CHECK ((((runtime_terminal_at IS NULL) AND (terminal_node_attempt_id IS NOT NULL)) OR ((runtime_terminal_at IS NOT NULL) AND ((reason = 'WORKSPACE_ANALYSIS_CANCELLED'::text) OR ((reason = 'WORKSPACE_ANALYSIS_RUNTIME_FAILED'::text) AND (terminal_node_attempt_id IS NOT NULL))))))
+    CONSTRAINT workspace_analysis_termination_proof_runtime_terminal CHECK ((((runtime_terminal_at IS NULL) AND (terminal_node_attempt_id IS NOT NULL)) OR ((runtime_terminal_at IS NOT NULL) AND (reason = ANY (ARRAY['WORKSPACE_ANALYSIS_CANCELLED'::text, 'WORKSPACE_ANALYSIS_RUNTIME_FAILED'::text])))))
 );
 
 
@@ -17100,7 +19391,7 @@ CREATE TABLE agent.workspace_analysis_worker_capability (
     version bigint DEFAULT 1 NOT NULL,
     created_at timestamp with time zone NOT NULL,
     updated_at timestamp with time zone NOT NULL,
-    CONSTRAINT workspace_analysis_worker_capability_contract CHECK (((definition_key = 'workspace-analysis'::text) AND (definition_version = 1) AND (policy_version = 1) AND (definition_hash ~ '^[0-9a-f]{64}$'::text) AND (tool_catalog_hash ~ '^[0-9a-f]{64}$'::text) AND (config_revision >= 0))),
+    CONSTRAINT workspace_analysis_worker_capability_contract CHECK (((definition_key = 'workspace-analysis'::text) AND (((definition_version = 1) AND (policy_version = 1)) OR ((definition_version = 2) AND (policy_version = 2))) AND (definition_hash ~ '^[0-9a-f]{64}$'::text) AND (tool_catalog_hash ~ '^[0-9a-f]{64}$'::text) AND (config_revision >= 0))),
     CONSTRAINT workspace_analysis_worker_capability_lease CHECK (((heartbeat_at <= lease_until) AND (((lease_until - heartbeat_at) >= '00:00:10'::interval) AND ((lease_until - heartbeat_at) <= '00:01:00'::interval)))),
     CONSTRAINT workspace_analysis_worker_capability_release CHECK (((released_at IS NULL) OR (released_at >= heartbeat_at))),
     CONSTRAINT workspace_analysis_worker_capability_times CHECK (((created_at <= heartbeat_at) AND (updated_at >= created_at))),
@@ -17272,6 +19563,87 @@ CREATE TABLE authoring.document_restore_publication (
     CONSTRAINT document_restore_publication_expected_document_version_check CHECK ((expected_document_version > 0)),
     CONSTRAINT document_restore_publication_git_commit_check CHECK ((git_commit ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'::text)),
     CONSTRAINT document_restore_publication_target_path_check CHECK (((btrim(target_path) <> ''::text) AND ("left"(target_path, 1) <> '/'::text) AND (target_path !~ '(^|/)\.\.(/|$)'::text) AND (POSITION(('\'::text) IN (target_path)) = 0)))
+);
+
+
+--
+-- Name: generated_article_revision; Type: TABLE; Schema: authoring; Owner: -
+--
+
+CREATE TABLE authoring.generated_article_revision (
+    article_revision_id uuid NOT NULL,
+    workspace_id uuid NOT NULL,
+    document_id uuid NOT NULL,
+    origin_kind text NOT NULL,
+    origin_id uuid NOT NULL,
+    origin_revision_id uuid NOT NULL,
+    projection_hash text NOT NULL,
+    idempotency_key text NOT NULL,
+    request_hash text NOT NULL,
+    expected_document_version bigint NOT NULL,
+    document_version bigint NOT NULL,
+    revision_no integer NOT NULL,
+    parent_revision_id uuid,
+    content_hash text NOT NULL,
+    title text NOT NULL,
+    target_path text NOT NULL,
+    document_created_at timestamp with time zone NOT NULL,
+    document_lifecycle text NOT NULL,
+    published_revision_id uuid,
+    created_at timestamp with time zone NOT NULL,
+    CONSTRAINT authoring_generated_revision_document_shape CHECK (((((document_lifecycle = 'DRAFT'::text) AND (published_revision_id IS NULL)) OR ((document_lifecycle = 'PUBLISHED'::text) AND (published_revision_id IS NOT NULL))) AND (created_at >= document_created_at))),
+    CONSTRAINT authoring_generated_revision_version_shape CHECK (((document_version = (expected_document_version + 1)) AND (((revision_no = 1) AND (parent_revision_id IS NULL) AND (expected_document_version = 0)) OR ((revision_no > 1) AND (parent_revision_id IS NOT NULL) AND (expected_document_version > 0))) AND (parent_revision_id IS DISTINCT FROM article_revision_id))),
+    CONSTRAINT generated_article_revision_content_hash_check CHECK ((content_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT generated_article_revision_document_lifecycle_check CHECK ((document_lifecycle = ANY (ARRAY['DRAFT'::text, 'PUBLISHED'::text]))),
+    CONSTRAINT generated_article_revision_document_version_check CHECK ((document_version > 0)),
+    CONSTRAINT generated_article_revision_expected_document_version_check CHECK ((expected_document_version >= 0)),
+    CONSTRAINT generated_article_revision_idempotency_key_check CHECK (((idempotency_key = btrim(idempotency_key)) AND (idempotency_key <> ''::text) AND (octet_length(idempotency_key) <= 128) AND (idempotency_key !~ '[\r\n]'::text))),
+    CONSTRAINT generated_article_revision_origin_kind_check CHECK ((origin_kind = 'SYNTHESIS_NOTE'::text)),
+    CONSTRAINT generated_article_revision_projection_hash_check CHECK ((projection_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT generated_article_revision_request_hash_check CHECK ((request_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT generated_article_revision_revision_no_check CHECK ((revision_no > 0)),
+    CONSTRAINT generated_article_revision_title_check CHECK (((title = btrim(title)) AND (title <> ''::text) AND (octet_length(title) <= 512)))
+);
+
+
+--
+-- Name: generated_document; Type: TABLE; Schema: authoring; Owner: -
+--
+
+CREATE TABLE authoring.generated_document (
+    document_id uuid NOT NULL,
+    workspace_id uuid NOT NULL,
+    origin_kind text NOT NULL,
+    origin_id uuid NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    CONSTRAINT generated_document_origin_kind_check CHECK ((origin_kind = 'SYNTHESIS_NOTE'::text))
+);
+
+
+--
+-- Name: generated_publication_retirement; Type: TABLE; Schema: authoring; Owner: -
+--
+
+CREATE TABLE authoring.generated_publication_retirement (
+    workspace_id uuid NOT NULL,
+    idempotency_key text NOT NULL,
+    request_hash text NOT NULL,
+    publication_id uuid NOT NULL,
+    document_id uuid NOT NULL,
+    article_revision_id uuid NOT NULL,
+    origin_kind text NOT NULL,
+    origin_id uuid NOT NULL,
+    origin_revision_id uuid NOT NULL,
+    projection_hash text NOT NULL,
+    expected_document_version bigint NOT NULL,
+    expected_proposal_version bigint NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    CONSTRAINT generated_publication_retiremen_expected_document_version_check CHECK ((expected_document_version > 0)),
+    CONSTRAINT generated_publication_retiremen_expected_proposal_version_check CHECK ((expected_proposal_version > 0)),
+    CONSTRAINT generated_publication_retirement_idempotency_key_check CHECK (((idempotency_key = btrim(idempotency_key)) AND (idempotency_key <> ''::text) AND (octet_length(idempotency_key) <= 128) AND (idempotency_key !~ '[\r\n]'::text))),
+    CONSTRAINT generated_publication_retirement_origin_kind_check CHECK ((origin_kind = 'SYNTHESIS_NOTE'::text)),
+    CONSTRAINT generated_publication_retirement_projection_hash_check CHECK ((projection_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT generated_publication_retirement_request_hash_check CHECK ((request_hash ~ '^[0-9a-f]{64}$'::text))
 );
 
 
@@ -19043,23 +21415,26 @@ CREATE TABLE learning.learning_path_step (
     workspace_id uuid NOT NULL,
     path_id uuid NOT NULL,
     step_no integer NOT NULL,
-    claim_id uuid NOT NULL,
+    claim_id uuid,
     topic_id uuid,
-    source_version_id uuid NOT NULL,
-    source_span_id uuid NOT NULL,
-    evidence_hash text NOT NULL,
+    source_version_id uuid,
+    source_span_id uuid,
+    evidence_hash text,
     title text NOT NULL,
     rationale text NOT NULL,
     status text NOT NULL,
     version bigint NOT NULL,
     created_at timestamp with time zone NOT NULL,
     updated_at timestamp with time zone NOT NULL,
+    source_kind text DEFAULT 'CLAIM'::text NOT NULL,
+    note_source jsonb,
     CONSTRAINT interview_learning_path_step_evidence_hash_check CHECK ((evidence_hash ~ '^[0-9a-f]{64}$'::text)),
     CONSTRAINT interview_learning_path_step_rationale_check CHECK (((btrim(rationale) <> ''::text) AND (octet_length(rationale) <= 4096))),
     CONSTRAINT interview_learning_path_step_status_check CHECK ((status = ANY (ARRAY['PENDING'::text, 'IN_PROGRESS'::text, 'COMPLETED'::text, 'SKIPPED'::text]))),
     CONSTRAINT interview_learning_path_step_step_no_check CHECK ((step_no > 0)),
     CONSTRAINT interview_learning_path_step_title_check CHECK (((btrim(title) <> ''::text) AND (octet_length(title) <= 512))),
-    CONSTRAINT interview_learning_path_step_version_check CHECK ((version > 0))
+    CONSTRAINT interview_learning_path_step_version_check CHECK ((version > 0)),
+    CONSTRAINT learning_path_step_source_union CHECK ((((source_kind = 'CLAIM'::text) AND (claim_id IS NOT NULL) AND (source_version_id IS NOT NULL) AND (source_span_id IS NOT NULL) AND (evidence_hash IS NOT NULL) AND (note_source IS NULL)) OR ((source_kind = 'NOTE_REVISION'::text) AND (claim_id IS NULL) AND (topic_id IS NULL) AND (source_version_id IS NULL) AND (source_span_id IS NULL) AND (evidence_hash IS NULL) AND (note_source IS NOT NULL) AND (jsonb_typeof(note_source) = 'object'::text))))
 );
 
 
@@ -19082,7 +21457,9 @@ CREATE VIEW learning.interview_learning_path_step AS
     status,
     version,
     created_at,
-    updated_at
+    updated_at,
+    source_kind,
+    note_source
    FROM learning.learning_path_step step
   WHERE (EXISTS ( SELECT 1
            FROM learning.learning_path path
@@ -19101,7 +21478,7 @@ CREATE TABLE learning.interview_question (
     question_no integer NOT NULL,
     follow_up_no integer DEFAULT 0 NOT NULL,
     parent_question_id uuid,
-    claim_id uuid NOT NULL,
+    claim_id uuid,
     topic_id uuid,
     prompt text NOT NULL,
     answer_points jsonb NOT NULL,
@@ -19110,12 +21487,15 @@ CREATE TABLE learning.interview_question (
     fingerprint text NOT NULL,
     created_at timestamp with time zone NOT NULL,
     answered_at timestamp with time zone,
+    source_kind text DEFAULT 'CLAIM'::text NOT NULL,
+    note_source jsonb,
+    follow_up_plan jsonb,
     CONSTRAINT interview_question_answer_points_check CHECK (((jsonb_typeof(answer_points) = 'array'::text) AND (jsonb_array_length(answer_points) > 0))),
-    CONSTRAINT interview_question_evidence_check CHECK (((jsonb_typeof(evidence) = 'array'::text) AND (jsonb_array_length(evidence) > 0))),
     CONSTRAINT interview_question_fingerprint_check CHECK ((fingerprint ~ '^[0-9a-f]{64}$'::text)),
     CONSTRAINT interview_question_follow_up_no_check CHECK ((follow_up_no >= 0)),
     CONSTRAINT interview_question_prompt_check CHECK (((btrim(prompt) <> ''::text) AND (octet_length(prompt) <= 8192))),
     CONSTRAINT interview_question_question_no_check CHECK ((question_no > 0)),
+    CONSTRAINT interview_question_source_union CHECK ((((source_kind = 'CLAIM'::text) AND (claim_id IS NOT NULL) AND (note_source IS NULL) AND (follow_up_plan IS NULL) AND (jsonb_typeof(evidence) = 'array'::text) AND (jsonb_array_length(evidence) > 0)) OR ((source_kind = 'NOTE_REVISION'::text) AND (claim_id IS NULL) AND (topic_id IS NULL) AND (jsonb_typeof(note_source) = 'object'::text) AND (note_source IS NOT NULL) AND (evidence = '[]'::jsonb) AND (follow_up_plan IS NOT NULL) AND (jsonb_typeof(follow_up_plan) = 'array'::text) AND (jsonb_array_length(follow_up_plan) <= 3)))),
     CONSTRAINT interview_question_status_check CHECK ((status = ANY (ARRAY['PENDING'::text, 'ANSWERED'::text, 'SKIPPED'::text]))),
     CONSTRAINT learning_interview_question_answer_time_check CHECK ((((status = 'ANSWERED'::text) AND (answered_at IS NOT NULL)) OR ((status <> 'ANSWERED'::text) AND (answered_at IS NULL)))),
     CONSTRAINT learning_interview_question_parent_check CHECK ((((follow_up_no = 0) AND (parent_question_id IS NULL)) OR ((follow_up_no > 0) AND (parent_question_id IS NOT NULL))))
@@ -19355,6 +21735,51 @@ CREATE TABLE learning.memory_command (
     CONSTRAINT memory_command_owner_principal_kind_check CHECK ((owner_principal_kind = 'USER'::text)),
     CONSTRAINT memory_command_request_hash_check CHECK ((request_hash ~ '^[0-9a-f]{64}$'::text)),
     CONSTRAINT memory_command_response_check CHECK ((jsonb_typeof(response) = 'object'::text))
+);
+
+
+--
+-- Name: note_interview_preparation; Type: TABLE; Schema: learning; Owner: -
+--
+
+CREATE TABLE learning.note_interview_preparation (
+    id uuid NOT NULL,
+    workspace_id uuid NOT NULL,
+    note_id uuid NOT NULL,
+    revision_id uuid NOT NULL,
+    document_id uuid NOT NULL,
+    article_revision_id uuid NOT NULL,
+    projection_hash text NOT NULL,
+    snapshot jsonb NOT NULL,
+    options jsonb NOT NULL,
+    status text NOT NULL,
+    workflow_run_id uuid NOT NULL,
+    node_run_id uuid NOT NULL,
+    node_attempt_id uuid,
+    model_run_id uuid,
+    model_settings_revision bigint,
+    model_output bytea,
+    session_id uuid,
+    failure_code text,
+    failure_retryable boolean DEFAULT false NOT NULL,
+    version bigint NOT NULL,
+    idempotency_key text NOT NULL,
+    request_hash text NOT NULL,
+    retry_of uuid,
+    created_at timestamp with time zone NOT NULL,
+    updated_at timestamp with time zone NOT NULL,
+    CONSTRAINT note_interview_preparation_check CHECK ((updated_at >= created_at)),
+    CONSTRAINT note_interview_preparation_failure_code_check CHECK (((failure_code IS NULL) OR (failure_code ~ '^[A-Z][A-Z0-9_]{0,127}$'::text))),
+    CONSTRAINT note_interview_preparation_idempotency_key_check CHECK (((btrim(idempotency_key) <> ''::text) AND (octet_length(idempotency_key) <= 128))),
+    CONSTRAINT note_interview_preparation_lifecycle CHECK ((((status = 'QUEUED'::text) AND (node_attempt_id IS NULL) AND (model_run_id IS NULL) AND (model_settings_revision IS NULL) AND (model_output IS NULL) AND (session_id IS NULL) AND (failure_code IS NULL) AND (NOT failure_retryable)) OR ((status = 'GENERATING'::text) AND (node_attempt_id IS NOT NULL) AND (model_output IS NULL) AND (session_id IS NULL) AND (failure_code IS NULL) AND (NOT failure_retryable)) OR ((status = 'READY'::text) AND (node_attempt_id IS NOT NULL) AND (model_run_id IS NOT NULL) AND (model_output IS NOT NULL) AND (session_id IS NOT NULL) AND (failure_code IS NULL) AND (NOT failure_retryable)) OR ((status = ANY (ARRAY['FAILED'::text, 'CAPABILITY_UNAVAILABLE'::text, 'RECOVERY_REQUIRED'::text])) AND (model_output IS NULL) AND (session_id IS NULL) AND (failure_code IS NOT NULL) AND ((status <> 'RECOVERY_REQUIRED'::text) OR (NOT failure_retryable))))),
+    CONSTRAINT note_interview_preparation_model_output_check CHECK (((model_output IS NULL) OR ((octet_length(model_output) >= 1) AND (octet_length(model_output) <= 262144)))),
+    CONSTRAINT note_interview_preparation_model_settings_revision_check CHECK (((model_settings_revision IS NULL) OR (model_settings_revision >= 0))),
+    CONSTRAINT note_interview_preparation_options_check CHECK ((jsonb_typeof(options) = 'object'::text)),
+    CONSTRAINT note_interview_preparation_projection_hash_check CHECK ((projection_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT note_interview_preparation_request_hash_check CHECK ((request_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT note_interview_preparation_snapshot_check CHECK (((jsonb_typeof(snapshot) = 'object'::text) AND (octet_length((snapshot)::text) <= 2097152))),
+    CONSTRAINT note_interview_preparation_status_check CHECK ((status = ANY (ARRAY['QUEUED'::text, 'GENERATING'::text, 'READY'::text, 'FAILED'::text, 'CAPABILITY_UNAVAILABLE'::text, 'RECOVERY_REQUIRED'::text]))),
+    CONSTRAINT note_interview_preparation_version_check CHECK ((version > 0))
 );
 
 
@@ -21076,6 +23501,265 @@ END) STORED,
 
 
 --
+-- Name: synthesis_apply_receipt; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.synthesis_apply_receipt (
+    workspace_id uuid NOT NULL,
+    processing_id uuid NOT NULL,
+    processing_key text NOT NULL,
+    source_event_id uuid NOT NULL,
+    workflow_run_id uuid NOT NULL,
+    model_run_id uuid NOT NULL,
+    request_hash text NOT NULL,
+    output_hash text NOT NULL,
+    binding_hash text NOT NULL,
+    changed boolean NOT NULL,
+    result jsonb NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    CONSTRAINT synthesis_apply_receipt_binding_hash_check CHECK ((binding_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT synthesis_apply_receipt_check CHECK ((((jsonb_typeof(result) = 'object'::text) AND (jsonb_typeof((result -> 'revision_ids'::text)) = 'array'::text) AND (jsonb_typeof((result -> 'publications'::text)) = 'array'::text) AND (jsonb_array_length((result -> 'revision_ids'::text)) = jsonb_array_length((result -> 'publications'::text))) AND (jsonb_array_length((result -> 'revision_ids'::text)) <= 8) AND (((result ->> 'changed'::text))::boolean = changed) AND (((result ->> 'replayed'::text))::boolean = false) AND ((result ->> 'processing_id'::text) = (processing_id)::text) AND (changed = (jsonb_array_length((result -> 'revision_ids'::text)) > 0))) IS TRUE)),
+    CONSTRAINT synthesis_apply_receipt_output_hash_check CHECK ((output_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT synthesis_apply_receipt_processing_key_check CHECK (((processing_key <> ''::text) AND (octet_length(processing_key) <= 256))),
+    CONSTRAINT synthesis_apply_receipt_request_hash_check CHECK ((request_hash ~ '^[0-9a-f]{64}$'::text))
+);
+
+
+--
+-- Name: synthesis_execution; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.synthesis_execution (
+    workflow_run_id uuid NOT NULL,
+    workspace_id uuid NOT NULL,
+    processing_id uuid NOT NULL,
+    execution_no integer NOT NULL,
+    apply_recovery boolean DEFAULT false NOT NULL,
+    input_document jsonb,
+    input_hash text,
+    apply_node_run_id uuid,
+    apply_node_attempt_id uuid,
+    applied_result jsonb,
+    version bigint NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    updated_at timestamp with time zone NOT NULL,
+    CONSTRAINT synthesis_execution_apply_shape CHECK (((((apply_node_run_id IS NULL) AND (apply_node_attempt_id IS NULL) AND (applied_result IS NULL)) OR ((apply_node_run_id IS NOT NULL) AND (apply_node_attempt_id IS NOT NULL) AND ((applied_result IS NULL) OR ((jsonb_typeof(applied_result) = 'object'::text) AND (applied_result ?& ARRAY['processing_id'::text, 'revision_ids'::text, 'changed'::text, 'publications'::text, 'replayed'::text]) AND ((applied_result ->> 'processing_id'::text) = (processing_id)::text) AND (jsonb_typeof((applied_result -> 'revision_ids'::text)) = 'array'::text) AND (jsonb_typeof((applied_result -> 'publications'::text)) = 'array'::text) AND (jsonb_typeof((applied_result -> 'changed'::text)) = 'boolean'::text) AND ((applied_result -> 'replayed'::text) = 'false'::jsonb))))) IS TRUE)),
+    CONSTRAINT synthesis_execution_check CHECK ((updated_at >= created_at)),
+    CONSTRAINT synthesis_execution_execution_no_check CHECK (((execution_no >= 1) AND (execution_no <= 10))),
+    CONSTRAINT synthesis_execution_input_hash_check CHECK (((input_hash IS NULL) OR (input_hash ~ '^[0-9a-f]{64}$'::text))),
+    CONSTRAINT synthesis_execution_input_shape CHECK (((((input_document IS NULL) AND (input_hash IS NULL)) OR ((NOT apply_recovery) AND (input_document IS NOT NULL) AND (jsonb_typeof(input_document) = 'object'::text) AND (input_hash IS NOT NULL) AND (input_document ?& ARRAY['processing_id'::text, 'workflow_run_id'::text, 'source_event'::text, 'notes'::text, 'sources'::text, 'request_hash'::text]) AND ((input_document ->> 'processing_id'::text) = (processing_id)::text) AND ((input_document ->> 'workflow_run_id'::text) = (workflow_run_id)::text) AND ((input_document ->> 'request_hash'::text) = input_hash) AND (jsonb_typeof((input_document -> 'notes'::text)) = 'array'::text) AND (jsonb_array_length((input_document -> 'notes'::text)) <= 24) AND (jsonb_typeof((input_document -> 'sources'::text)) = 'array'::text) AND ((jsonb_array_length((input_document -> 'sources'::text)) >= 1) AND (jsonb_array_length((input_document -> 'sources'::text)) <= 256)) AND (octet_length((input_document)::text) <= 1048576))) IS TRUE)),
+    CONSTRAINT synthesis_execution_version_check CHECK ((version > 0))
+);
+
+
+--
+-- Name: synthesis_model_step; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.synthesis_model_step (
+    id uuid NOT NULL,
+    workspace_id uuid NOT NULL,
+    processing_id uuid NOT NULL,
+    workflow_run_id uuid NOT NULL,
+    node_run_id uuid NOT NULL,
+    node_attempt_id uuid NOT NULL,
+    stage text NOT NULL,
+    request_hash text NOT NULL,
+    input_request_hash text NOT NULL,
+    generation_output_hash text,
+    model_settings_revision bigint,
+    model_run_id uuid,
+    status text NOT NULL,
+    output_document bytea,
+    output_hash text,
+    generation_result jsonb,
+    semantic_receipt jsonb,
+    error_code text,
+    retryable boolean DEFAULT false NOT NULL,
+    version bigint NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    updated_at timestamp with time zone NOT NULL,
+    completed_at timestamp with time zone,
+    CONSTRAINT synthesis_model_step_error_code_check CHECK (((error_code IS NULL) OR (error_code ~ '^[A-Z][A-Z0-9_]{0,127}$'::text))),
+    CONSTRAINT synthesis_model_step_generation_output_hash_check CHECK (((generation_output_hash IS NULL) OR (generation_output_hash ~ '^[0-9a-f]{64}$'::text))),
+    CONSTRAINT synthesis_model_step_input_request_hash_check CHECK ((input_request_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT synthesis_model_step_lifecycle CHECK ((((updated_at >= created_at) AND ((completed_at IS NULL) OR (completed_at = updated_at)) AND (((status = 'RUNNING'::text) AND (completed_at IS NULL) AND (output_document IS NULL) AND (output_hash IS NULL) AND (generation_result IS NULL) AND (semantic_receipt IS NULL) AND (error_code IS NULL) AND (NOT retryable)) OR ((status = 'READY'::text) AND (model_run_id IS NOT NULL) AND (completed_at IS NOT NULL) AND (output_document IS NOT NULL) AND (output_hash IS NOT NULL) AND ((octet_length(output_document) >= 1) AND (octet_length(output_document) <= 262144)) AND (encode(sha256(output_document), 'hex'::text) = output_hash) AND (error_code IS NULL) AND (NOT retryable) AND (((stage = 'GENERATE'::text) AND (generation_result IS NOT NULL) AND (jsonb_typeof(generation_result) = 'object'::text) AND (semantic_receipt IS NULL) AND (generation_result ?& ARRAY['ModelRunID'::text, 'RequestHash'::text, 'OutputHash'::text, 'Notes'::text]) AND ((generation_result ->> 'ModelRunID'::text) = (model_run_id)::text) AND ((generation_result ->> 'RequestHash'::text) = input_request_hash) AND ((generation_result ->> 'OutputHash'::text) = output_hash)) OR ((stage = 'VALIDATE'::text) AND (generation_result IS NULL) AND (semantic_receipt IS NOT NULL) AND (jsonb_typeof(semantic_receipt) = 'object'::text) AND (semantic_receipt ?& ARRAY['model_run_id'::text, 'request_hash'::text, 'generation_model_run_id'::text, 'generation_output_hash'::text, 'output_hash'::text, 'accepted'::text, 'check_count'::text]) AND ((semantic_receipt ->> 'model_run_id'::text) = (model_run_id)::text) AND ((semantic_receipt ->> 'request_hash'::text) = input_request_hash) AND ((semantic_receipt ->> 'generation_output_hash'::text) = generation_output_hash) AND ((semantic_receipt ->> 'output_hash'::text) = output_hash) AND (jsonb_typeof((semantic_receipt -> 'accepted'::text)) = 'boolean'::text) AND ((((semantic_receipt ->> 'check_count'::text))::integer >= 1) AND (((semantic_receipt ->> 'check_count'::text))::integer <= 512))))) OR ((status = ANY (ARRAY['FAILED'::text, 'RECOVERY_REQUIRED'::text])) AND (completed_at IS NOT NULL) AND (output_document IS NULL) AND (output_hash IS NULL) AND (generation_result IS NULL) AND (semantic_receipt IS NULL) AND (error_code IS NOT NULL) AND ((status <> 'RECOVERY_REQUIRED'::text) OR (NOT retryable))))) IS TRUE)),
+    CONSTRAINT synthesis_model_step_model_settings_revision_check CHECK (((model_settings_revision IS NULL) OR (model_settings_revision >= 0))),
+    CONSTRAINT synthesis_model_step_output_hash_check CHECK (((output_hash IS NULL) OR (output_hash ~ '^[0-9a-f]{64}$'::text))),
+    CONSTRAINT synthesis_model_step_request_hash_check CHECK ((request_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT synthesis_model_step_stage CHECK ((((stage = 'GENERATE'::text) AND (generation_output_hash IS NULL)) OR ((stage = 'VALIDATE'::text) AND (generation_output_hash IS NOT NULL)))),
+    CONSTRAINT synthesis_model_step_stage_check CHECK ((stage = ANY (ARRAY['GENERATE'::text, 'VALIDATE'::text]))),
+    CONSTRAINT synthesis_model_step_status_check CHECK ((status = ANY (ARRAY['RUNNING'::text, 'READY'::text, 'FAILED'::text, 'RECOVERY_REQUIRED'::text]))),
+    CONSTRAINT synthesis_model_step_version_check CHECK ((version > 0))
+);
+
+
+--
+-- Name: synthesis_note; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.synthesis_note (
+    id uuid NOT NULL,
+    workspace_id uuid NOT NULL,
+    document_id uuid NOT NULL,
+    topic_key text NOT NULL,
+    title text NOT NULL,
+    aliases text[] DEFAULT '{}'::text[] NOT NULL,
+    current_revision_id uuid NOT NULL,
+    version bigint NOT NULL,
+    status text NOT NULL,
+    workflow_run_id uuid,
+    failure jsonb,
+    created_at timestamp with time zone NOT NULL,
+    updated_at timestamp with time zone NOT NULL,
+    CONSTRAINT synthesis_note_aliases_check CHECK ((cardinality(aliases) <= 16)),
+    CONSTRAINT synthesis_note_check CHECK ((updated_at >= created_at)),
+    CONSTRAINT synthesis_note_failure_shape CHECK (((((status = ANY (ARRAY['FAILED'::text, 'CONFLICT'::text, 'CAPABILITY_UNAVAILABLE'::text, 'RECOVERY_REQUIRED'::text])) AND (failure IS NOT NULL) AND (jsonb_typeof(failure) = 'object'::text) AND (jsonb_typeof((failure -> 'code'::text)) = 'string'::text) AND ((length((failure ->> 'code'::text)) >= 1) AND (length((failure ->> 'code'::text)) <= 128)) AND (jsonb_typeof((failure -> 'retryable'::text)) = 'boolean'::text) AND (((failure - 'code'::text) - 'retryable'::text) = '{}'::jsonb) AND ((status <> 'RECOVERY_REQUIRED'::text) OR ((failure ->> 'retryable'::text) = 'false'::text))) OR ((status <> ALL (ARRAY['FAILED'::text, 'CONFLICT'::text, 'CAPABILITY_UNAVAILABLE'::text, 'RECOVERY_REQUIRED'::text])) AND (failure IS NULL))) IS TRUE)),
+    CONSTRAINT synthesis_note_generating_binding CHECK (((status <> 'GENERATING'::text) OR (workflow_run_id IS NOT NULL))),
+    CONSTRAINT synthesis_note_status_check CHECK ((status = ANY (ARRAY['QUEUED'::text, 'GENERATING'::text, 'PENDING_APPROVAL'::text, 'READY'::text, 'FAILED'::text, 'CONFLICT'::text, 'CAPABILITY_UNAVAILABLE'::text, 'RECOVERY_REQUIRED'::text]))),
+    CONSTRAINT synthesis_note_title_check CHECK (((title = btrim(title)) AND (title <> ''::text) AND (octet_length(title) <= 512))),
+    CONSTRAINT synthesis_note_topic_key_check CHECK (((topic_key = btrim(topic_key)) AND (topic_key <> ''::text) AND (octet_length(topic_key) <= 256))),
+    CONSTRAINT synthesis_note_version_check CHECK ((version > 0))
+);
+
+
+--
+-- Name: synthesis_processing; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.synthesis_processing (
+    id uuid NOT NULL,
+    workspace_id uuid NOT NULL,
+    source_event_id uuid NOT NULL,
+    source_id uuid NOT NULL,
+    source_version_id uuid NOT NULL,
+    content_artifact_id uuid NOT NULL,
+    parse_projection_id uuid NOT NULL,
+    source_content_hash text NOT NULL,
+    ingestion_attempt_id uuid NOT NULL,
+    processor_version text NOT NULL,
+    source_occurred_at timestamp with time zone NOT NULL,
+    processing_key text NOT NULL,
+    workflow_run_id uuid,
+    model_run_id uuid,
+    request_hash text NOT NULL,
+    status text NOT NULL,
+    revision_ids jsonb DEFAULT '[]'::jsonb NOT NULL,
+    error_code text,
+    retryable boolean DEFAULT false NOT NULL,
+    version bigint NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    updated_at timestamp with time zone NOT NULL,
+    completed_at timestamp with time zone,
+    CONSTRAINT synthesis_processing_error_code_check CHECK (((error_code IS NULL) OR (error_code ~ '^[A-Z][A-Z0-9_]{0,127}$'::text))),
+    CONSTRAINT synthesis_processing_lifecycle CHECK (((updated_at >= created_at) AND ((completed_at IS NULL) OR (completed_at = updated_at)) AND (((status = ANY (ARRAY['PENDING'::text, 'RUNNING'::text])) AND (workflow_run_id IS NOT NULL) AND (completed_at IS NULL) AND (error_code IS NULL) AND (NOT retryable) AND (revision_ids = '[]'::jsonb)) OR ((status = 'SKIPPED'::text) AND (workflow_run_id IS NULL) AND (model_run_id IS NULL) AND (completed_at IS NOT NULL) AND (error_code IS NULL) AND (NOT retryable) AND (revision_ids = '[]'::jsonb)) OR ((status = 'SUCCEEDED'::text) AND (workflow_run_id IS NOT NULL) AND (completed_at IS NOT NULL) AND (error_code IS NULL) AND (NOT retryable) AND (jsonb_array_length(revision_ids) > 0)) OR ((status = 'NO_CHANGE'::text) AND (workflow_run_id IS NOT NULL) AND (completed_at IS NOT NULL) AND (error_code IS NULL) AND (NOT retryable) AND (revision_ids = '[]'::jsonb)) OR ((status = ANY (ARRAY['FAILED'::text, 'RECOVERY_REQUIRED'::text])) AND (workflow_run_id IS NOT NULL) AND (completed_at IS NOT NULL) AND (error_code IS NOT NULL) AND (revision_ids = '[]'::jsonb) AND ((status <> 'RECOVERY_REQUIRED'::text) OR (NOT retryable)))))),
+    CONSTRAINT synthesis_processing_processing_key_check CHECK ((processing_key ~ '^synthesis:[0-9a-f]{64}$'::text)),
+    CONSTRAINT synthesis_processing_processor_version_check CHECK ((processor_version = 'synthesis/v1'::text)),
+    CONSTRAINT synthesis_processing_request_hash_check CHECK ((request_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT synthesis_processing_revision_ids_check CHECK (((jsonb_typeof(revision_ids) = 'array'::text) AND (jsonb_array_length(revision_ids) <= 8))),
+    CONSTRAINT synthesis_processing_source_content_hash_check CHECK ((source_content_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT synthesis_processing_status_check CHECK ((status = ANY (ARRAY['PENDING'::text, 'RUNNING'::text, 'SUCCEEDED'::text, 'NO_CHANGE'::text, 'SKIPPED'::text, 'FAILED'::text, 'RECOVERY_REQUIRED'::text]))),
+    CONSTRAINT synthesis_processing_version_check CHECK ((version > 0))
+);
+
+
+--
+-- Name: synthesis_retry_receipt; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.synthesis_retry_receipt (
+    workspace_id uuid NOT NULL,
+    idempotency_key text NOT NULL,
+    request_hash text NOT NULL,
+    processing_id uuid NOT NULL,
+    workflow_run_id uuid NOT NULL,
+    response jsonb NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    CONSTRAINT synthesis_retry_receipt_idempotency_key_check CHECK ((((octet_length(idempotency_key) >= 1) AND (octet_length(idempotency_key) <= 128)) AND (idempotency_key = btrim(idempotency_key)))),
+    CONSTRAINT synthesis_retry_receipt_request_hash_check CHECK ((request_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT synthesis_retry_receipt_response_check CHECK ((jsonb_typeof(response) = 'object'::text))
+);
+
+
+--
+-- Name: synthesis_revision; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.synthesis_revision (
+    id uuid NOT NULL,
+    workspace_id uuid NOT NULL,
+    note_id uuid NOT NULL,
+    document_id uuid NOT NULL,
+    article_revision_id uuid NOT NULL,
+    revision_no integer NOT NULL,
+    article_revision_no integer NOT NULL,
+    parent_revision_id uuid,
+    title text NOT NULL,
+    renderer_version text NOT NULL,
+    content_hash text NOT NULL,
+    projection_hash text NOT NULL,
+    items jsonb NOT NULL,
+    delta jsonb NOT NULL,
+    item_count integer NOT NULL,
+    conflict_count integer NOT NULL,
+    gap_count integer NOT NULL,
+    open_gap_count integer NOT NULL,
+    source_event_id uuid NOT NULL,
+    workflow_run_id uuid NOT NULL,
+    model_run_id uuid NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    CONSTRAINT synthesis_revision_article_revision_no_check CHECK ((article_revision_no > 0)),
+    CONSTRAINT synthesis_revision_check CHECK (((open_gap_count >= 0) AND (open_gap_count <= gap_count))),
+    CONSTRAINT synthesis_revision_conflict_count_check CHECK (((conflict_count >= 0) AND (conflict_count <= 128))),
+    CONSTRAINT synthesis_revision_content_hash_check CHECK ((content_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT synthesis_revision_counts CHECK (((item_count = jsonb_array_length(items)) AND ((conflict_count + gap_count) <= item_count))),
+    CONSTRAINT synthesis_revision_delta_check CHECK ((((jsonb_typeof(delta) = 'object'::text) AND (jsonb_typeof((delta -> 'operations'::text)) = 'array'::text) AND ((jsonb_array_length((delta -> 'operations'::text)) >= 1) AND (jsonb_array_length((delta -> 'operations'::text)) <= 64)) AND ((delta - 'operations'::text) = '{}'::jsonb)) IS TRUE)),
+    CONSTRAINT synthesis_revision_gap_count_check CHECK (((gap_count >= 0) AND (gap_count <= 128))),
+    CONSTRAINT synthesis_revision_item_count_check CHECK (((item_count >= 1) AND (item_count <= 128))),
+    CONSTRAINT synthesis_revision_items_check CHECK (((jsonb_typeof(items) = 'array'::text) AND ((jsonb_array_length(items) >= 1) AND (jsonb_array_length(items) <= 128)))),
+    CONSTRAINT synthesis_revision_parent_shape CHECK ((((revision_no = 1) AND (parent_revision_id IS NULL)) OR ((revision_no > 1) AND (parent_revision_id IS NOT NULL) AND (parent_revision_id <> id)))),
+    CONSTRAINT synthesis_revision_projection_hash_check CHECK ((projection_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT synthesis_revision_renderer_version_check CHECK ((renderer_version = 'synthesis-markdown/v1'::text)),
+    CONSTRAINT synthesis_revision_revision_no_check CHECK ((revision_no > 0)),
+    CONSTRAINT synthesis_revision_title_check CHECK (((title = btrim(title)) AND (title <> ''::text) AND (octet_length(title) <= 512)))
+);
+
+
+--
+-- Name: synthesis_revision_source; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.synthesis_revision_source (
+    workspace_id uuid NOT NULL,
+    revision_id uuid NOT NULL,
+    note_id uuid NOT NULL,
+    source_id uuid NOT NULL,
+    source_version_id uuid NOT NULL,
+    content_artifact_id uuid NOT NULL,
+    parse_projection_id uuid NOT NULL,
+    source_span_id uuid NOT NULL,
+    content_hash text NOT NULL,
+    excerpt_hash text NOT NULL,
+    title text NOT NULL,
+    CONSTRAINT synthesis_revision_source_content_hash_check CHECK ((content_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT synthesis_revision_source_excerpt_hash_check CHECK ((excerpt_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT synthesis_revision_source_title_check CHECK (((title <> ''::text) AND (octet_length(title) <= 512)))
+);
+
+
+--
+-- Name: synthesis_topic_key; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.synthesis_topic_key (
+    workspace_id uuid NOT NULL,
+    topic_key text NOT NULL,
+    note_id uuid NOT NULL,
+    CONSTRAINT synthesis_topic_key_topic_key_check CHECK (((topic_key = btrim(topic_key)) AND (topic_key <> ''::text) AND (octet_length(topic_key) <= 256)))
+);
+
+
+--
 -- Name: template; Type: TABLE; Schema: organizing; Owner: -
 --
 
@@ -21930,7 +24614,7 @@ CREATE TABLE workflow.tool_result_receipt (
     created_at timestamp with time zone NOT NULL,
     CONSTRAINT tool_result_receipt_binding_integrity CHECK ((((server_binding_schema_id IS NULL) AND (server_binding_schema_version IS NULL) AND (server_binding_document IS NULL) AND (server_binding_hash IS NULL) AND (server_binding_bytes IS NULL)) OR ((server_binding_schema_id IS NOT NULL) AND (server_binding_schema_version IS NOT NULL) AND (server_binding_document IS NOT NULL) AND (server_binding_hash IS NOT NULL) AND (server_binding_bytes IS NOT NULL) AND (server_binding_bytes = octet_length(server_binding_document)) AND ((server_binding_bytes >= 1) AND (server_binding_bytes <= max_private_binding_bytes)) AND (server_binding_hash = encode(sha256(server_binding_document), 'hex'::text))))),
     CONSTRAINT tool_result_receipt_definition_hash_check CHECK ((definition_hash ~ '^[0-9a-f]{64}$'::text)),
-    CONSTRAINT tool_result_receipt_exact_contract CHECK ((((tool_name = 'ReadGitStatus'::text) AND (tool_version = 2) AND (definition_hash = 'b5dd1fcca72d5bb41fd9ad3f74006d3706e4184ad39e2a3409b565d1ff896bbd'::text) AND (output_schema_id = 'tool.read_git_status.output'::text) AND (output_schema_version = 1) AND (max_output_bytes = 4096) AND (max_private_binding_bytes = 1024) AND ((server_binding_schema_id IS NULL) OR ((server_binding_schema_id = 'tool.read_git_status.private_binding'::text) AND (server_binding_schema_version = 1)))) OR ((tool_name = 'SearchKnowledge'::text) AND (tool_version = 2) AND (definition_hash = 'db7180086adb06a18a4be8d1eb80a208fa6385c70f1a71d6d67c4f263fbd1807'::text) AND (output_schema_id = 'tool.search_knowledge.output'::text) AND (output_schema_version = 2) AND (max_output_bytes = 32768) AND (max_private_binding_bytes = 16384) AND (server_binding_schema_id = 'tool.search_knowledge.private_binding'::text) AND (server_binding_schema_version = 1)) OR ((tool_name = 'ReadSource'::text) AND (tool_version = 3) AND (definition_hash = 'd41dabac535261b885e453b64e11fe5bb779838e31a255aea4798e27ead54d32'::text) AND (output_schema_id = 'tool.read_source.output'::text) AND (output_schema_version = 2) AND (max_output_bytes = 8192) AND (max_private_binding_bytes = 4096) AND (server_binding_schema_id = 'tool.read_source.private_binding'::text) AND (server_binding_schema_version = 1)) OR ((tool_name = 'ValidateCitation'::text) AND (tool_version = 3) AND (definition_hash = 'bf5e643c47d57478b46d258eca250dc30e810ee7a0693569f44edaab19037d54'::text) AND (output_schema_id = 'tool.validate_citation.output'::text) AND (output_schema_version = 2) AND (max_output_bytes = 16384) AND (max_private_binding_bytes = 16384) AND (server_binding_schema_id = 'tool.validate_citation.private_binding'::text) AND (server_binding_schema_version = 1)))),
+    CONSTRAINT tool_result_receipt_exact_contract CHECK ((((tool_name = 'ReadGitStatus'::text) AND (tool_version = 2) AND (definition_hash = 'b5dd1fcca72d5bb41fd9ad3f74006d3706e4184ad39e2a3409b565d1ff896bbd'::text) AND (output_schema_id = 'tool.read_git_status.output'::text) AND (output_schema_version = 1) AND (max_output_bytes = 4096) AND (max_private_binding_bytes = 1024) AND ((server_binding_schema_id IS NULL) OR ((server_binding_schema_id = 'tool.read_git_status.private_binding'::text) AND (server_binding_schema_version = 1)))) OR ((tool_name = 'SearchKnowledge'::text) AND (tool_version = 2) AND (definition_hash = 'db7180086adb06a18a4be8d1eb80a208fa6385c70f1a71d6d67c4f263fbd1807'::text) AND (output_schema_id = 'tool.search_knowledge.output'::text) AND (output_schema_version = 2) AND (max_output_bytes = 32768) AND (max_private_binding_bytes = 16384) AND (server_binding_schema_id = 'tool.search_knowledge.private_binding'::text) AND (server_binding_schema_version = 1)) OR ((tool_name = 'ReadSource'::text) AND (tool_version = 3) AND (definition_hash = 'd41dabac535261b885e453b64e11fe5bb779838e31a255aea4798e27ead54d32'::text) AND (output_schema_id = 'tool.read_source.output'::text) AND (output_schema_version = 2) AND (max_output_bytes = 8192) AND (max_private_binding_bytes = 4096) AND (server_binding_schema_id = 'tool.read_source.private_binding'::text) AND (server_binding_schema_version = 1)) OR ((tool_name = 'ValidateCitation'::text) AND (tool_version = 3) AND (definition_hash = 'bf5e643c47d57478b46d258eca250dc30e810ee7a0693569f44edaab19037d54'::text) AND (output_schema_id = 'tool.validate_citation.output'::text) AND (output_schema_version = 2) AND (max_output_bytes = 16384) AND (max_private_binding_bytes = 16384) AND (server_binding_schema_id = 'tool.validate_citation.private_binding'::text) AND (server_binding_schema_version = 1)) OR ((tool_name = 'ReadGitStatus'::text) AND (tool_version = 3) AND (definition_hash = '2aa8ae138367486c4f59e1459a47c9a86f3adca78a0d5c3305849fe7f68a6e19'::text) AND (output_schema_id = 'tool.read_git_status.output'::text) AND (output_schema_version = 1) AND (max_output_bytes = 4096) AND (max_private_binding_bytes = 1024) AND ((server_binding_schema_id IS NULL) OR ((server_binding_schema_id = 'tool.read_git_status.private_binding'::text) AND (server_binding_schema_version = 1)))) OR ((tool_name = 'SearchKnowledge'::text) AND (tool_version = 3) AND (definition_hash = 'cb3f96130645ebafc8500d6a54685a073f6b75d622f1348f194c8e88f871d832'::text) AND (output_schema_id = 'tool.search_knowledge.output'::text) AND (output_schema_version = 3) AND (max_output_bytes = 32768) AND (max_private_binding_bytes = 16384) AND ((server_binding_schema_id = 'tool.search_knowledge.private_binding'::text) AND (server_binding_schema_version = 2))) OR ((tool_name = 'ReadSource'::text) AND (tool_version = 4) AND (definition_hash = 'c6d5ffdc62d1837c3ca728a862bfc1968fc553cfe0493827e51d942abab8182c'::text) AND (output_schema_id = 'tool.read_source.output'::text) AND (output_schema_version = 3) AND (max_output_bytes = 8192) AND (max_private_binding_bytes = 4096) AND ((server_binding_schema_id = 'tool.read_source.private_binding'::text) AND (server_binding_schema_version = 2))) OR ((tool_name = 'ValidateCitation'::text) AND (tool_version = 4) AND (definition_hash = '037f389043481ef4b5f8344d4ff35b4a032b1646adc03e7afff98418ac6f3333'::text) AND (output_schema_id = 'tool.validate_citation.output'::text) AND (output_schema_version = 3) AND (max_output_bytes = 16384) AND (max_private_binding_bytes = 16384) AND ((server_binding_schema_id = 'tool.validate_citation.private_binding'::text) AND (server_binding_schema_version = 2))))),
     CONSTRAINT tool_result_receipt_output_hash_check CHECK ((output_hash ~ '^[0-9a-f]{64}$'::text)),
     CONSTRAINT tool_result_receipt_output_integrity CHECK (((output_bytes = octet_length(output_document)) AND ((output_bytes >= 1) AND (output_bytes <= max_output_bytes)) AND (output_hash = encode(sha256(output_document), 'hex'::text)))),
     CONSTRAINT tool_result_receipt_persistence_policy_check CHECK ((persistence_policy = 'PERSIST_CANONICAL'::text)),
@@ -22233,11 +24917,43 @@ ALTER TABLE ONLY agent.answer_draft_session
 
 
 --
+-- Name: model_run uq_synthesis_model_workflow; Type: CONSTRAINT; Schema: agent; Owner: -
+--
+
+ALTER TABLE ONLY agent.model_run
+    ADD CONSTRAINT uq_synthesis_model_workflow UNIQUE (id, workspace_id, workflow_run_id);
+
+
+--
 -- Name: workspace_analysis_candidate uq_workspace_analysis_candidate_scope; Type: CONSTRAINT; Schema: agent; Owner: -
 --
 
 ALTER TABLE ONLY agent.workspace_analysis_candidate
     ADD CONSTRAINT uq_workspace_analysis_candidate_scope UNIQUE (id, analysis_run_id);
+
+
+--
+-- Name: workspace_analysis_decision uq_workspace_analysis_decision_ordinal; Type: CONSTRAINT; Schema: agent; Owner: -
+--
+
+ALTER TABLE ONLY agent.workspace_analysis_decision
+    ADD CONSTRAINT uq_workspace_analysis_decision_ordinal UNIQUE (analysis_run_id, ordinal);
+
+
+--
+-- Name: workspace_analysis_decision uq_workspace_analysis_decision_scope; Type: CONSTRAINT; Schema: agent; Owner: -
+--
+
+ALTER TABLE ONLY agent.workspace_analysis_decision
+    ADD CONSTRAINT uq_workspace_analysis_decision_scope UNIQUE (id, analysis_run_id);
+
+
+--
+-- Name: workspace_analysis_evidence uq_workspace_analysis_evidence_local; Type: CONSTRAINT; Schema: agent; Owner: -
+--
+
+ALTER TABLE ONLY agent.workspace_analysis_evidence
+    ADD CONSTRAINT uq_workspace_analysis_evidence_local UNIQUE (analysis_run_id, search_receipt_id, local_evidence_ref);
 
 
 --
@@ -22422,6 +25138,54 @@ ALTER TABLE ONLY agent.workspace_analysis_candidate
 
 ALTER TABLE ONLY agent.workspace_analysis_candidate
     ADD CONSTRAINT workspace_analysis_candidate_synthesis_operation_id_key UNIQUE (synthesis_operation_id);
+
+
+--
+-- Name: workspace_analysis_decision workspace_analysis_decision_model_call_id_key; Type: CONSTRAINT; Schema: agent; Owner: -
+--
+
+ALTER TABLE ONLY agent.workspace_analysis_decision
+    ADD CONSTRAINT workspace_analysis_decision_model_call_id_key UNIQUE (model_call_id);
+
+
+--
+-- Name: workspace_analysis_decision workspace_analysis_decision_operation_id_key; Type: CONSTRAINT; Schema: agent; Owner: -
+--
+
+ALTER TABLE ONLY agent.workspace_analysis_decision
+    ADD CONSTRAINT workspace_analysis_decision_operation_id_key UNIQUE (operation_id);
+
+
+--
+-- Name: workspace_analysis_decision workspace_analysis_decision_pkey; Type: CONSTRAINT; Schema: agent; Owner: -
+--
+
+ALTER TABLE ONLY agent.workspace_analysis_decision
+    ADD CONSTRAINT workspace_analysis_decision_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: workspace_analysis_evidence workspace_analysis_evidence_pkey; Type: CONSTRAINT; Schema: agent; Owner: -
+--
+
+ALTER TABLE ONLY agent.workspace_analysis_evidence
+    ADD CONSTRAINT workspace_analysis_evidence_pkey PRIMARY KEY (analysis_run_id, reference_no);
+
+
+--
+-- Name: workspace_analysis_journal workspace_analysis_journal_operation_id_key; Type: CONSTRAINT; Schema: agent; Owner: -
+--
+
+ALTER TABLE ONLY agent.workspace_analysis_journal
+    ADD CONSTRAINT workspace_analysis_journal_operation_id_key UNIQUE (operation_id);
+
+
+--
+-- Name: workspace_analysis_journal workspace_analysis_journal_pkey; Type: CONSTRAINT; Schema: agent; Owner: -
+--
+
+ALTER TABLE ONLY agent.workspace_analysis_journal
+    ADD CONSTRAINT workspace_analysis_journal_pkey PRIMARY KEY (analysis_run_id, sequence);
 
 
 --
@@ -22662,6 +25426,86 @@ ALTER TABLE ONLY authoring.document_restore_publication
 
 ALTER TABLE ONLY authoring.document_restore_publication
     ADD CONSTRAINT document_restore_publication_proposal_commit_id_key UNIQUE (proposal_commit_id);
+
+
+--
+-- Name: generated_article_revision generated_article_revision_pkey; Type: CONSTRAINT; Schema: authoring; Owner: -
+--
+
+ALTER TABLE ONLY authoring.generated_article_revision
+    ADD CONSTRAINT generated_article_revision_pkey PRIMARY KEY (article_revision_id);
+
+
+--
+-- Name: generated_document generated_document_pkey; Type: CONSTRAINT; Schema: authoring; Owner: -
+--
+
+ALTER TABLE ONLY authoring.generated_document
+    ADD CONSTRAINT generated_document_pkey PRIMARY KEY (document_id);
+
+
+--
+-- Name: generated_publication_retirement generated_publication_retirement_pkey; Type: CONSTRAINT; Schema: authoring; Owner: -
+--
+
+ALTER TABLE ONLY authoring.generated_publication_retirement
+    ADD CONSTRAINT generated_publication_retirement_pkey PRIMARY KEY (workspace_id, idempotency_key);
+
+
+--
+-- Name: generated_publication_retirement generated_publication_retirement_publication_id_key; Type: CONSTRAINT; Schema: authoring; Owner: -
+--
+
+ALTER TABLE ONLY authoring.generated_publication_retirement
+    ADD CONSTRAINT generated_publication_retirement_publication_id_key UNIQUE (publication_id);
+
+
+--
+-- Name: generated_document uq_authoring_generated_document_binding; Type: CONSTRAINT; Schema: authoring; Owner: -
+--
+
+ALTER TABLE ONLY authoring.generated_document
+    ADD CONSTRAINT uq_authoring_generated_document_binding UNIQUE (document_id, workspace_id, origin_kind, origin_id);
+
+
+--
+-- Name: generated_document uq_authoring_generated_document_origin; Type: CONSTRAINT; Schema: authoring; Owner: -
+--
+
+ALTER TABLE ONLY authoring.generated_document
+    ADD CONSTRAINT uq_authoring_generated_document_origin UNIQUE (workspace_id, origin_kind, origin_id);
+
+
+--
+-- Name: generated_article_revision uq_authoring_generated_revision_key; Type: CONSTRAINT; Schema: authoring; Owner: -
+--
+
+ALTER TABLE ONLY authoring.generated_article_revision
+    ADD CONSTRAINT uq_authoring_generated_revision_key UNIQUE (workspace_id, idempotency_key);
+
+
+--
+-- Name: generated_article_revision uq_authoring_generated_revision_origin; Type: CONSTRAINT; Schema: authoring; Owner: -
+--
+
+ALTER TABLE ONLY authoring.generated_article_revision
+    ADD CONSTRAINT uq_authoring_generated_revision_origin UNIQUE (workspace_id, origin_kind, origin_id, origin_revision_id);
+
+
+--
+-- Name: generated_article_revision uq_authoring_generated_revision_parent_binding; Type: CONSTRAINT; Schema: authoring; Owner: -
+--
+
+ALTER TABLE ONLY authoring.generated_article_revision
+    ADD CONSTRAINT uq_authoring_generated_revision_parent_binding UNIQUE (article_revision_id, workspace_id, document_id, origin_kind, origin_id);
+
+
+--
+-- Name: generated_article_revision uq_authoring_generated_revision_projection; Type: CONSTRAINT; Schema: authoring; Owner: -
+--
+
+ALTER TABLE ONLY authoring.generated_article_revision
+    ADD CONSTRAINT uq_authoring_generated_revision_projection UNIQUE (article_revision_id, workspace_id, document_id, origin_id, origin_revision_id, projection_hash);
 
 
 --
@@ -23897,6 +26741,14 @@ ALTER TABLE ONLY learning.memory
 
 
 --
+-- Name: note_interview_preparation note_interview_preparation_pkey; Type: CONSTRAINT; Schema: learning; Owner: -
+--
+
+ALTER TABLE ONLY learning.note_interview_preparation
+    ADD CONSTRAINT note_interview_preparation_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: artifact_revision_citation_selector pk_learning_artifact_revision_citation_selector; Type: CONSTRAINT; Schema: learning; Owner: -
 --
 
@@ -24374,6 +27226,46 @@ ALTER TABLE ONLY learning.review_session
 
 ALTER TABLE ONLY learning.smart_collection
     ADD CONSTRAINT uq_learning_smart_collection_id_workspace UNIQUE (id, workspace_id);
+
+
+--
+-- Name: note_interview_preparation uq_note_interview_preparation_key; Type: CONSTRAINT; Schema: learning; Owner: -
+--
+
+ALTER TABLE ONLY learning.note_interview_preparation
+    ADD CONSTRAINT uq_note_interview_preparation_key UNIQUE (workspace_id, idempotency_key);
+
+
+--
+-- Name: note_interview_preparation uq_note_interview_preparation_retry; Type: CONSTRAINT; Schema: learning; Owner: -
+--
+
+ALTER TABLE ONLY learning.note_interview_preparation
+    ADD CONSTRAINT uq_note_interview_preparation_retry UNIQUE (retry_of);
+
+
+--
+-- Name: note_interview_preparation uq_note_interview_preparation_run; Type: CONSTRAINT; Schema: learning; Owner: -
+--
+
+ALTER TABLE ONLY learning.note_interview_preparation
+    ADD CONSTRAINT uq_note_interview_preparation_run UNIQUE (workflow_run_id);
+
+
+--
+-- Name: note_interview_preparation uq_note_interview_preparation_session; Type: CONSTRAINT; Schema: learning; Owner: -
+--
+
+ALTER TABLE ONLY learning.note_interview_preparation
+    ADD CONSTRAINT uq_note_interview_preparation_session UNIQUE (session_id);
+
+
+--
+-- Name: note_interview_preparation uq_note_interview_preparation_workspace; Type: CONSTRAINT; Schema: learning; Owner: -
+--
+
+ALTER TABLE ONLY learning.note_interview_preparation
+    ADD CONSTRAINT uq_note_interview_preparation_workspace UNIQUE (id, workspace_id);
 
 
 --
@@ -25049,6 +27941,94 @@ ALTER TABLE ONLY organizing.run_result
 
 
 --
+-- Name: synthesis_apply_receipt synthesis_apply_receipt_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_apply_receipt
+    ADD CONSTRAINT synthesis_apply_receipt_pkey PRIMARY KEY (workspace_id, processing_id);
+
+
+--
+-- Name: synthesis_execution synthesis_execution_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_execution
+    ADD CONSTRAINT synthesis_execution_pkey PRIMARY KEY (workflow_run_id);
+
+
+--
+-- Name: synthesis_model_step synthesis_model_step_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_model_step
+    ADD CONSTRAINT synthesis_model_step_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: synthesis_note synthesis_note_document_id_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_note
+    ADD CONSTRAINT synthesis_note_document_id_key UNIQUE (document_id);
+
+
+--
+-- Name: synthesis_note synthesis_note_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_note
+    ADD CONSTRAINT synthesis_note_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: synthesis_processing synthesis_processing_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_processing
+    ADD CONSTRAINT synthesis_processing_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: synthesis_retry_receipt synthesis_retry_receipt_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_retry_receipt
+    ADD CONSTRAINT synthesis_retry_receipt_pkey PRIMARY KEY (workspace_id, idempotency_key);
+
+
+--
+-- Name: synthesis_revision synthesis_revision_article_revision_id_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_revision
+    ADD CONSTRAINT synthesis_revision_article_revision_id_key UNIQUE (article_revision_id);
+
+
+--
+-- Name: synthesis_revision synthesis_revision_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_revision
+    ADD CONSTRAINT synthesis_revision_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: synthesis_revision_source synthesis_revision_source_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_revision_source
+    ADD CONSTRAINT synthesis_revision_source_pkey PRIMARY KEY (revision_id, source_version_id, parse_projection_id, source_span_id);
+
+
+--
+-- Name: synthesis_topic_key synthesis_topic_key_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_topic_key
+    ADD CONSTRAINT synthesis_topic_key_pkey PRIMARY KEY (workspace_id, topic_key);
+
+
+--
 -- Name: template template_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
 --
 
@@ -25230,6 +28210,142 @@ ALTER TABLE ONLY organizing.template_revision
 
 ALTER TABLE ONLY organizing.template_revision
     ADD CONSTRAINT uq_organizing_template_revision_template_no UNIQUE (template_id, revision_no);
+
+
+--
+-- Name: synthesis_apply_receipt uq_synthesis_apply_source; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_apply_receipt
+    ADD CONSTRAINT uq_synthesis_apply_source UNIQUE (workspace_id, processing_key);
+
+
+--
+-- Name: synthesis_execution uq_synthesis_execution_binding; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_execution
+    ADD CONSTRAINT uq_synthesis_execution_binding UNIQUE (workflow_run_id, workspace_id, processing_id);
+
+
+--
+-- Name: synthesis_execution uq_synthesis_execution_processing; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_execution
+    ADD CONSTRAINT uq_synthesis_execution_processing UNIQUE (processing_id, execution_no);
+
+
+--
+-- Name: synthesis_execution uq_synthesis_execution_workspace; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_execution
+    ADD CONSTRAINT uq_synthesis_execution_workspace UNIQUE (workflow_run_id, workspace_id);
+
+
+--
+-- Name: synthesis_model_step uq_synthesis_model_step_attempt; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_model_step
+    ADD CONSTRAINT uq_synthesis_model_step_attempt UNIQUE (node_attempt_id);
+
+
+--
+-- Name: synthesis_model_step uq_synthesis_model_step_model; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_model_step
+    ADD CONSTRAINT uq_synthesis_model_step_model UNIQUE (model_run_id);
+
+
+--
+-- Name: synthesis_model_step uq_synthesis_model_step_workspace; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_model_step
+    ADD CONSTRAINT uq_synthesis_model_step_workspace UNIQUE (id, workspace_id);
+
+
+--
+-- Name: synthesis_note uq_synthesis_note_scope; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_note
+    ADD CONSTRAINT uq_synthesis_note_scope UNIQUE (id, workspace_id, document_id);
+
+
+--
+-- Name: synthesis_note uq_synthesis_note_topic; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_note
+    ADD CONSTRAINT uq_synthesis_note_topic UNIQUE (workspace_id, topic_key);
+
+
+--
+-- Name: synthesis_note uq_synthesis_note_workspace; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_note
+    ADD CONSTRAINT uq_synthesis_note_workspace UNIQUE (id, workspace_id);
+
+
+--
+-- Name: synthesis_processing uq_synthesis_processing_event; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_processing
+    ADD CONSTRAINT uq_synthesis_processing_event UNIQUE (source_event_id, processor_version);
+
+
+--
+-- Name: synthesis_processing uq_synthesis_processing_source; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_processing
+    ADD CONSTRAINT uq_synthesis_processing_source UNIQUE (workspace_id, processing_key);
+
+
+--
+-- Name: synthesis_processing uq_synthesis_processing_workspace; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_processing
+    ADD CONSTRAINT uq_synthesis_processing_workspace UNIQUE (id, workspace_id);
+
+
+--
+-- Name: synthesis_revision uq_synthesis_revision_no; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_revision
+    ADD CONSTRAINT uq_synthesis_revision_no UNIQUE (note_id, revision_no);
+
+
+--
+-- Name: synthesis_revision uq_synthesis_revision_note; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_revision
+    ADD CONSTRAINT uq_synthesis_revision_note UNIQUE (id, workspace_id, note_id);
+
+
+--
+-- Name: synthesis_revision uq_synthesis_revision_projection; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_revision
+    ADD CONSTRAINT uq_synthesis_revision_projection UNIQUE (id, workspace_id, note_id, document_id, article_revision_id, projection_hash);
+
+
+--
+-- Name: synthesis_revision uq_synthesis_revision_scope; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_revision
+    ADD CONSTRAINT uq_synthesis_revision_scope UNIQUE (id, workspace_id, note_id, document_id);
 
 
 --
@@ -26646,6 +29762,13 @@ CREATE INDEX idx_learning_smart_collection_workspace_status_updated ON learning.
 
 
 --
+-- Name: idx_note_interview_preparation_note; Type: INDEX; Schema: learning; Owner: -
+--
+
+CREATE INDEX idx_note_interview_preparation_note ON learning.note_interview_preparation USING btree (workspace_id, note_id, created_at DESC, id DESC);
+
+
+--
 -- Name: uq_document_profile_attempt_active; Type: INDEX; Schema: learning; Owner: -
 --
 
@@ -27094,6 +30217,27 @@ CREATE INDEX idx_organizing_template_visible ON organizing.template USING btree 
 
 
 --
+-- Name: idx_synthesis_note_workspace_updated; Type: INDEX; Schema: organizing; Owner: -
+--
+
+CREATE INDEX idx_synthesis_note_workspace_updated ON organizing.synthesis_note USING btree (workspace_id, updated_at DESC, id DESC);
+
+
+--
+-- Name: idx_synthesis_processing_list; Type: INDEX; Schema: organizing; Owner: -
+--
+
+CREATE INDEX idx_synthesis_processing_list ON organizing.synthesis_processing USING btree (workspace_id, updated_at DESC, id DESC);
+
+
+--
+-- Name: idx_synthesis_revision_source_version; Type: INDEX; Schema: organizing; Owner: -
+--
+
+CREATE INDEX idx_synthesis_revision_source_version ON organizing.synthesis_revision_source USING btree (workspace_id, source_version_id, note_id);
+
+
+--
 -- Name: uq_organizing_generation_open_node; Type: INDEX; Schema: organizing; Owner: -
 --
 
@@ -27105,6 +30249,20 @@ CREATE UNIQUE INDEX uq_organizing_generation_open_node ON organizing.generation 
 --
 
 CREATE UNIQUE INDEX uq_organizing_generation_ready_node ON organizing.generation USING btree (workspace_id, node_run_id) WHERE (status = 'READY'::text);
+
+
+--
+-- Name: uq_synthesis_model_step_active; Type: INDEX; Schema: organizing; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_synthesis_model_step_active ON organizing.synthesis_model_step USING btree (workflow_run_id, stage) WHERE (status = ANY (ARRAY['RUNNING'::text, 'READY'::text, 'RECOVERY_REQUIRED'::text]));
+
+
+--
+-- Name: uq_synthesis_processing_active_workspace; Type: INDEX; Schema: organizing; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_synthesis_processing_active_workspace ON organizing.synthesis_processing USING btree (workspace_id) WHERE (status = ANY (ARRAY['PENDING'::text, 'RUNNING'::text]));
 
 
 --
@@ -27577,6 +30735,76 @@ CREATE TRIGGER workspace_analysis_candidate_reject_truncate BEFORE TRUNCATE ON a
 
 
 --
+-- Name: workspace_analysis_decision workspace_analysis_decision_append_only; Type: TRIGGER; Schema: agent; Owner: -
+--
+
+CREATE TRIGGER workspace_analysis_decision_append_only BEFORE DELETE OR UPDATE ON agent.workspace_analysis_decision FOR EACH ROW EXECUTE FUNCTION agent.reject_workspace_analysis_fact_mutation();
+
+
+--
+-- Name: workspace_analysis_decision workspace_analysis_decision_guard_insert; Type: TRIGGER; Schema: agent; Owner: -
+--
+
+CREATE TRIGGER workspace_analysis_decision_guard_insert BEFORE INSERT ON agent.workspace_analysis_decision FOR EACH ROW EXECUTE FUNCTION agent.guard_workspace_analysis_decision_insert();
+
+
+--
+-- Name: workspace_analysis_decision workspace_analysis_decision_reject_truncate; Type: TRIGGER; Schema: agent; Owner: -
+--
+
+CREATE TRIGGER workspace_analysis_decision_reject_truncate BEFORE TRUNCATE ON agent.workspace_analysis_decision FOR EACH STATEMENT EXECUTE FUNCTION agent.reject_workspace_analysis_fact_mutation();
+
+
+--
+-- Name: workspace_analysis_evidence workspace_analysis_evidence_append_only; Type: TRIGGER; Schema: agent; Owner: -
+--
+
+CREATE TRIGGER workspace_analysis_evidence_append_only BEFORE DELETE OR UPDATE ON agent.workspace_analysis_evidence FOR EACH ROW EXECUTE FUNCTION agent.reject_workspace_analysis_fact_mutation();
+
+
+--
+-- Name: workspace_analysis_evidence workspace_analysis_evidence_receipt_guard; Type: TRIGGER; Schema: agent; Owner: -
+--
+
+CREATE TRIGGER workspace_analysis_evidence_receipt_guard BEFORE INSERT ON agent.workspace_analysis_evidence FOR EACH ROW EXECUTE FUNCTION agent.guard_workspace_analysis_evidence_receipt();
+
+
+--
+-- Name: workspace_analysis_evidence workspace_analysis_evidence_reject_truncate; Type: TRIGGER; Schema: agent; Owner: -
+--
+
+CREATE TRIGGER workspace_analysis_evidence_reject_truncate BEFORE TRUNCATE ON agent.workspace_analysis_evidence FOR EACH STATEMENT EXECUTE FUNCTION agent.reject_workspace_analysis_fact_mutation();
+
+
+--
+-- Name: workspace_analysis_evidence workspace_analysis_evidence_search_closure; Type: TRIGGER; Schema: agent; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER workspace_analysis_evidence_search_closure AFTER INSERT ON agent.workspace_analysis_evidence DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION agent.guard_workspace_analysis_search_evidence_closure();
+
+
+--
+-- Name: workspace_analysis_journal workspace_analysis_journal_append_only; Type: TRIGGER; Schema: agent; Owner: -
+--
+
+CREATE TRIGGER workspace_analysis_journal_append_only BEFORE DELETE OR UPDATE ON agent.workspace_analysis_journal FOR EACH ROW EXECUTE FUNCTION agent.reject_workspace_analysis_fact_mutation();
+
+
+--
+-- Name: workspace_analysis_journal workspace_analysis_journal_guard_insert; Type: TRIGGER; Schema: agent; Owner: -
+--
+
+CREATE TRIGGER workspace_analysis_journal_guard_insert BEFORE INSERT ON agent.workspace_analysis_journal FOR EACH ROW EXECUTE FUNCTION agent.guard_workspace_analysis_journal_insert();
+
+
+--
+-- Name: workspace_analysis_journal workspace_analysis_journal_reject_truncate; Type: TRIGGER; Schema: agent; Owner: -
+--
+
+CREATE TRIGGER workspace_analysis_journal_reject_truncate BEFORE TRUNCATE ON agent.workspace_analysis_journal FOR EACH STATEMENT EXECUTE FUNCTION agent.reject_workspace_analysis_fact_mutation();
+
+
+--
 -- Name: model_call workspace_analysis_model_call_operation_closure; Type: TRIGGER; Schema: agent; Owner: -
 --
 
@@ -27609,6 +30837,13 @@ CREATE CONSTRAINT TRIGGER workspace_analysis_model_result_operation_closure AFTE
 --
 
 CREATE TRIGGER workspace_analysis_model_result_reject_truncate BEFORE TRUNCATE ON agent.workspace_analysis_model_result FOR EACH STATEMENT EXECUTE FUNCTION agent.reject_workspace_analysis_fact_mutation();
+
+
+--
+-- Name: workspace_analysis_operation workspace_analysis_operation_append_journal; Type: TRIGGER; Schema: agent; Owner: -
+--
+
+CREATE TRIGGER workspace_analysis_operation_append_journal AFTER INSERT ON agent.workspace_analysis_operation FOR EACH ROW EXECUTE FUNCTION agent.append_workspace_analysis_operation_journal();
 
 
 --
@@ -27794,6 +31029,27 @@ CREATE TRIGGER workspace_analysis_tool_refusal_reject_truncate BEFORE TRUNCATE O
 
 
 --
+-- Name: workspace_analysis_decision workspace_analysis_v2_decision_closure; Type: TRIGGER; Schema: agent; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER workspace_analysis_v2_decision_closure AFTER INSERT ON agent.workspace_analysis_decision DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION agent.guard_workspace_analysis_v2_model_run_closure();
+
+
+--
+-- Name: model_call workspace_analysis_v2_model_call_closure; Type: TRIGGER; Schema: agent; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER workspace_analysis_v2_model_call_closure AFTER INSERT OR UPDATE ON agent.model_call DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION agent.guard_workspace_analysis_v2_model_run_closure();
+
+
+--
+-- Name: model_run workspace_analysis_v2_model_run_closure; Type: TRIGGER; Schema: agent; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER workspace_analysis_v2_model_run_closure AFTER INSERT OR UPDATE ON agent.model_run DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION agent.guard_workspace_analysis_v2_model_run_closure();
+
+
+--
 -- Name: workspace_analysis_worker_capability workspace_analysis_worker_capability_guard; Type: TRIGGER; Schema: agent; Owner: -
 --
 
@@ -27826,6 +31082,76 @@ CREATE TRIGGER authoring_command_append_only BEFORE DELETE OR UPDATE ON authorin
 --
 
 CREATE TRIGGER authoring_command_reject_truncate BEFORE TRUNCATE ON authoring.working_draft_command FOR EACH STATEMENT EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: generated_document authoring_generated_document_append_only; Type: TRIGGER; Schema: authoring; Owner: -
+--
+
+CREATE TRIGGER authoring_generated_document_append_only BEFORE DELETE OR UPDATE ON authoring.generated_document FOR EACH ROW EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: generated_document authoring_generated_document_reject_truncate; Type: TRIGGER; Schema: authoring; Owner: -
+--
+
+CREATE TRIGGER authoring_generated_document_reject_truncate BEFORE TRUNCATE ON authoring.generated_document FOR EACH STATEMENT EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: generated_document authoring_generated_document_validate_insert; Type: TRIGGER; Schema: authoring; Owner: -
+--
+
+CREATE TRIGGER authoring_generated_document_validate_insert BEFORE INSERT ON authoring.generated_document FOR EACH ROW EXECUTE FUNCTION authoring.validate_generated_document_insert();
+
+
+--
+-- Name: generated_document authoring_generated_document_verify_closure; Type: TRIGGER; Schema: authoring; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER authoring_generated_document_verify_closure AFTER INSERT ON authoring.generated_document DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION authoring.verify_generated_revision_closure();
+
+
+--
+-- Name: generated_publication_retirement authoring_generated_retirement_append_only; Type: TRIGGER; Schema: authoring; Owner: -
+--
+
+CREATE TRIGGER authoring_generated_retirement_append_only BEFORE DELETE OR UPDATE ON authoring.generated_publication_retirement FOR EACH ROW EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: generated_publication_retirement authoring_generated_retirement_reject_truncate; Type: TRIGGER; Schema: authoring; Owner: -
+--
+
+CREATE TRIGGER authoring_generated_retirement_reject_truncate BEFORE TRUNCATE ON authoring.generated_publication_retirement FOR EACH STATEMENT EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: generated_publication_retirement authoring_generated_retirement_validate_insert; Type: TRIGGER; Schema: authoring; Owner: -
+--
+
+CREATE TRIGGER authoring_generated_retirement_validate_insert BEFORE INSERT ON authoring.generated_publication_retirement FOR EACH ROW EXECUTE FUNCTION authoring.validate_generated_retirement_insert();
+
+
+--
+-- Name: generated_article_revision authoring_generated_revision_append_only; Type: TRIGGER; Schema: authoring; Owner: -
+--
+
+CREATE TRIGGER authoring_generated_revision_append_only BEFORE DELETE OR UPDATE ON authoring.generated_article_revision FOR EACH ROW EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: generated_article_revision authoring_generated_revision_reject_truncate; Type: TRIGGER; Schema: authoring; Owner: -
+--
+
+CREATE TRIGGER authoring_generated_revision_reject_truncate BEFORE TRUNCATE ON authoring.generated_article_revision FOR EACH STATEMENT EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: generated_article_revision authoring_generated_revision_validate_insert; Type: TRIGGER; Schema: authoring; Owner: -
+--
+
+CREATE TRIGGER authoring_generated_revision_validate_insert BEFORE INSERT ON authoring.generated_article_revision FOR EACH ROW EXECUTE FUNCTION authoring.validate_generated_revision_insert();
 
 
 --
@@ -28190,6 +31516,13 @@ CREATE TRIGGER authoring_document_guard_publication_path BEFORE UPDATE ON core.d
 --
 
 CREATE CONSTRAINT TRIGGER authoring_document_verify_terminal_state AFTER UPDATE ON core.document DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION authoring.verify_publication_terminal_state();
+
+
+--
+-- Name: article_revision authoring_generated_article_verify_closure; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER authoring_generated_article_verify_closure AFTER INSERT ON core.article_revision DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION authoring.verify_generated_revision_closure();
 
 
 --
@@ -29008,14 +32341,14 @@ CREATE TRIGGER trg_learning_interview_learning_path_artifact_type BEFORE INSERT 
 -- Name: learning_path_step trg_learning_interview_path_step_evidence; Type: TRIGGER; Schema: learning; Owner: -
 --
 
-CREATE TRIGGER trg_learning_interview_path_step_evidence BEFORE INSERT OR UPDATE OF workspace_id, claim_id, source_version_id, source_span_id, evidence_hash ON learning.learning_path_step FOR EACH ROW EXECUTE FUNCTION learning.assert_interview_path_step_evidence();
+CREATE TRIGGER trg_learning_interview_path_step_evidence BEFORE INSERT OR UPDATE OF workspace_id, claim_id, source_version_id, source_span_id, evidence_hash, source_kind ON learning.learning_path_step FOR EACH ROW WHEN ((new.source_kind = 'CLAIM'::text)) EXECUTE FUNCTION learning.assert_interview_path_step_evidence();
 
 
 --
 -- Name: interview_question trg_learning_interview_question_evidence; Type: TRIGGER; Schema: learning; Owner: -
 --
 
-CREATE TRIGGER trg_learning_interview_question_evidence BEFORE INSERT OR UPDATE OF workspace_id, session_id, parent_question_id, follow_up_no, claim_id, evidence ON learning.interview_question FOR EACH ROW EXECUTE FUNCTION learning.assert_interview_question_evidence();
+CREATE TRIGGER trg_learning_interview_question_evidence BEFORE INSERT OR UPDATE OF workspace_id, session_id, parent_question_id, follow_up_no, claim_id, evidence, source_kind ON learning.interview_question FOR EACH ROW WHEN ((new.source_kind = 'CLAIM'::text)) EXECUTE FUNCTION learning.assert_interview_question_evidence();
 
 
 --
@@ -29135,6 +32468,41 @@ CREATE TRIGGER trg_learning_review_answer_session_binding BEFORE INSERT ON learn
 --
 
 CREATE TRIGGER trg_learning_review_session_learning_binding BEFORE UPDATE OF session_type, deck_id, config, started_at ON learning.review_session FOR EACH ROW EXECUTE FUNCTION learning.guard_review_session_learning_binding();
+
+
+--
+-- Name: note_interview_preparation trg_note_interview_preparation; Type: TRIGGER; Schema: learning; Owner: -
+--
+
+CREATE TRIGGER trg_note_interview_preparation BEFORE INSERT OR DELETE OR UPDATE ON learning.note_interview_preparation FOR EACH ROW EXECUTE FUNCTION learning.guard_note_interview_preparation();
+
+
+--
+-- Name: interview_question trg_note_interview_question; Type: TRIGGER; Schema: learning; Owner: -
+--
+
+CREATE TRIGGER trg_note_interview_question BEFORE INSERT OR UPDATE ON learning.interview_question FOR EACH ROW EXECUTE FUNCTION learning.guard_note_interview_question();
+
+
+--
+-- Name: interview_report trg_note_interview_report; Type: TRIGGER; Schema: learning; Owner: -
+--
+
+CREATE TRIGGER trg_note_interview_report BEFORE INSERT ON learning.interview_report FOR EACH ROW EXECUTE FUNCTION learning.guard_note_interview_report();
+
+
+--
+-- Name: learning_path_step trg_note_interview_step; Type: TRIGGER; Schema: learning; Owner: -
+--
+
+CREATE TRIGGER trg_note_interview_step BEFORE INSERT OR UPDATE ON learning.learning_path_step FOR EACH ROW EXECUTE FUNCTION learning.guard_note_interview_step();
+
+
+--
+-- Name: interview_turn trg_note_interview_turn; Type: TRIGGER; Schema: learning; Owner: -
+--
+
+CREATE TRIGGER trg_note_interview_turn BEFORE INSERT ON learning.interview_turn FOR EACH ROW EXECUTE FUNCTION learning.guard_note_interview_turn();
 
 
 --
@@ -29754,6 +33122,181 @@ CREATE TRIGGER organizing_template_validate_write BEFORE INSERT OR DELETE OR UPD
 
 
 --
+-- Name: synthesis_apply_receipt synthesis_apply_append_only; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_apply_append_only BEFORE DELETE OR UPDATE ON organizing.synthesis_apply_receipt FOR EACH ROW EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_apply_receipt synthesis_apply_reject_truncate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_apply_reject_truncate BEFORE TRUNCATE ON organizing.synthesis_apply_receipt FOR EACH STATEMENT EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_execution synthesis_execution_guard; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_execution_guard BEFORE INSERT OR DELETE OR UPDATE ON organizing.synthesis_execution FOR EACH ROW EXECUTE FUNCTION organizing.guard_synthesis_execution();
+
+
+--
+-- Name: synthesis_execution synthesis_execution_no_truncate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_execution_no_truncate BEFORE TRUNCATE ON organizing.synthesis_execution FOR EACH STATEMENT EXECUTE FUNCTION organizing.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_model_step synthesis_model_step_guard; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_model_step_guard BEFORE INSERT OR DELETE OR UPDATE ON organizing.synthesis_model_step FOR EACH ROW EXECUTE FUNCTION organizing.guard_synthesis_model_step();
+
+
+--
+-- Name: synthesis_model_step synthesis_model_step_no_truncate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_model_step_no_truncate BEFORE TRUNCATE ON organizing.synthesis_model_step FOR EACH STATEMENT EXECUTE FUNCTION organizing.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_note synthesis_note_reject_truncate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_note_reject_truncate BEFORE TRUNCATE ON organizing.synthesis_note FOR EACH STATEMENT EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_note synthesis_note_transition; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_note_transition BEFORE DELETE OR UPDATE ON organizing.synthesis_note FOR EACH ROW EXECUTE FUNCTION organizing.validate_synthesis_note_transition();
+
+
+--
+-- Name: synthesis_note synthesis_note_verify_closure; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER synthesis_note_verify_closure AFTER INSERT ON organizing.synthesis_note DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION organizing.verify_synthesis_closure();
+
+
+--
+-- Name: synthesis_processing synthesis_processing_guard; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_processing_guard BEFORE INSERT OR DELETE OR UPDATE ON organizing.synthesis_processing FOR EACH ROW EXECUTE FUNCTION organizing.guard_synthesis_processing();
+
+
+--
+-- Name: synthesis_processing synthesis_processing_no_truncate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_processing_no_truncate BEFORE TRUNCATE ON organizing.synthesis_processing FOR EACH STATEMENT EXECUTE FUNCTION organizing.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_apply_receipt synthesis_receipt_verify_publications; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER synthesis_receipt_verify_publications AFTER INSERT ON organizing.synthesis_apply_receipt DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION organizing.verify_synthesis_receipt_publications();
+
+
+--
+-- Name: synthesis_retry_receipt synthesis_retry_receipt_immutable; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_retry_receipt_immutable BEFORE DELETE OR UPDATE ON organizing.synthesis_retry_receipt FOR EACH ROW EXECUTE FUNCTION organizing.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_retry_receipt synthesis_retry_receipt_no_truncate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_retry_receipt_no_truncate BEFORE TRUNCATE ON organizing.synthesis_retry_receipt FOR EACH STATEMENT EXECUTE FUNCTION organizing.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_revision synthesis_revision_append_only; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_revision_append_only BEFORE DELETE OR UPDATE ON organizing.synthesis_revision FOR EACH ROW EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_revision synthesis_revision_reject_truncate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_revision_reject_truncate BEFORE TRUNCATE ON organizing.synthesis_revision FOR EACH STATEMENT EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_revision synthesis_revision_validate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_revision_validate BEFORE INSERT ON organizing.synthesis_revision FOR EACH ROW EXECUTE FUNCTION organizing.validate_synthesis_revision();
+
+
+--
+-- Name: synthesis_revision synthesis_revision_verify_closure; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER synthesis_revision_verify_closure AFTER INSERT ON organizing.synthesis_revision DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION organizing.verify_synthesis_closure();
+
+
+--
+-- Name: synthesis_revision_source synthesis_source_append_only; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_source_append_only BEFORE DELETE OR UPDATE ON organizing.synthesis_revision_source FOR EACH ROW EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_revision_source synthesis_source_membership; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_source_membership BEFORE INSERT ON organizing.synthesis_revision_source FOR EACH ROW EXECUTE FUNCTION organizing.validate_synthesis_membership();
+
+
+--
+-- Name: synthesis_revision_source synthesis_source_reject_truncate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_source_reject_truncate BEFORE TRUNCATE ON organizing.synthesis_revision_source FOR EACH STATEMENT EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_revision_source synthesis_source_validate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_source_validate BEFORE INSERT ON organizing.synthesis_revision_source FOR EACH ROW EXECUTE FUNCTION organizing.validate_synthesis_source();
+
+
+--
+-- Name: synthesis_topic_key synthesis_topic_append_only; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_topic_append_only BEFORE DELETE OR UPDATE ON organizing.synthesis_topic_key FOR EACH ROW EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_topic_key synthesis_topic_membership; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_topic_membership BEFORE INSERT ON organizing.synthesis_topic_key FOR EACH ROW EXECUTE FUNCTION organizing.validate_synthesis_membership();
+
+
+--
+-- Name: synthesis_topic_key synthesis_topic_reject_truncate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_topic_reject_truncate BEFORE TRUNCATE ON organizing.synthesis_topic_key FOR EACH STATEMENT EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
 -- Name: index_activation document_profile_index_activation_stale; Type: TRIGGER; Schema: retrieval; Owner: -
 --
 
@@ -29953,7 +33496,7 @@ CREATE TRIGGER tool_result_receipt_failure_reject_truncate BEFORE TRUNCATE ON wo
 -- Name: tool_result_receipt tool_result_receipt_guard_insert; Type: TRIGGER; Schema: workflow; Owner: -
 --
 
-CREATE TRIGGER tool_result_receipt_guard_insert BEFORE INSERT ON workflow.tool_result_receipt FOR EACH ROW EXECUTE FUNCTION workflow.guard_tool_result_receipt_insert();
+CREATE TRIGGER tool_result_receipt_guard_insert BEFORE INSERT ON workflow.tool_result_receipt FOR EACH ROW WHEN ((((((new.tool_name = 'ReadGitStatus'::text) AND (new.tool_version = 2)) OR ((new.tool_name = 'SearchKnowledge'::text) AND (new.tool_version = 2))) OR ((new.tool_name = 'ReadSource'::text) AND (new.tool_version = 3))) OR ((new.tool_name = 'ValidateCitation'::text) AND (new.tool_version = 3)))) EXECUTE FUNCTION workflow.guard_tool_result_receipt_insert();
 
 
 --
@@ -29961,6 +33504,20 @@ CREATE TRIGGER tool_result_receipt_guard_insert BEFORE INSERT ON workflow.tool_r
 --
 
 CREATE TRIGGER tool_result_receipt_reject_truncate BEFORE TRUNCATE ON workflow.tool_result_receipt FOR EACH STATEMENT EXECUTE FUNCTION agent.reject_workspace_analysis_fact_mutation();
+
+
+--
+-- Name: tool_result_receipt tool_result_receipt_v2_guard_insert; Type: TRIGGER; Schema: workflow; Owner: -
+--
+
+CREATE TRIGGER tool_result_receipt_v2_guard_insert BEFORE INSERT ON workflow.tool_result_receipt FOR EACH ROW WHEN ((((((new.tool_name = 'ReadGitStatus'::text) AND (new.tool_version = 3)) OR ((new.tool_name = 'SearchKnowledge'::text) AND (new.tool_version = 3))) OR ((new.tool_name = 'ReadSource'::text) AND (new.tool_version = 4))) OR ((new.tool_name = 'ValidateCitation'::text) AND (new.tool_version = 4)))) EXECUTE FUNCTION workflow.guard_tool_result_receipt_insert_v2();
+
+
+--
+-- Name: tool_result_receipt tool_search_evidence_closure; Type: TRIGGER; Schema: workflow; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER tool_search_evidence_closure AFTER INSERT ON workflow.tool_result_receipt DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION agent.guard_workspace_analysis_search_evidence_closure();
 
 
 --
@@ -30310,6 +33867,78 @@ ALTER TABLE ONLY agent.workspace_analysis_candidate
 
 
 --
+-- Name: workspace_analysis_decision fk_workspace_analysis_decision_model_run; Type: FK CONSTRAINT; Schema: agent; Owner: -
+--
+
+ALTER TABLE ONLY agent.workspace_analysis_decision
+    ADD CONSTRAINT fk_workspace_analysis_decision_model_run FOREIGN KEY (model_run_id, workspace_id) REFERENCES agent.model_run(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: workspace_analysis_decision fk_workspace_analysis_decision_operation; Type: FK CONSTRAINT; Schema: agent; Owner: -
+--
+
+ALTER TABLE ONLY agent.workspace_analysis_decision
+    ADD CONSTRAINT fk_workspace_analysis_decision_operation FOREIGN KEY (operation_id, analysis_run_id) REFERENCES agent.workspace_analysis_operation(id, analysis_run_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: workspace_analysis_decision fk_workspace_analysis_decision_run; Type: FK CONSTRAINT; Schema: agent; Owner: -
+--
+
+ALTER TABLE ONLY agent.workspace_analysis_decision
+    ADD CONSTRAINT fk_workspace_analysis_decision_run FOREIGN KEY (analysis_run_id, workspace_id) REFERENCES agent.workspace_analysis_run(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: workspace_analysis_evidence fk_workspace_analysis_evidence_operation; Type: FK CONSTRAINT; Schema: agent; Owner: -
+--
+
+ALTER TABLE ONLY agent.workspace_analysis_evidence
+    ADD CONSTRAINT fk_workspace_analysis_evidence_operation FOREIGN KEY (search_operation_id, analysis_run_id) REFERENCES agent.workspace_analysis_operation(id, analysis_run_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: workspace_analysis_evidence fk_workspace_analysis_evidence_receipt; Type: FK CONSTRAINT; Schema: agent; Owner: -
+--
+
+ALTER TABLE ONLY agent.workspace_analysis_evidence
+    ADD CONSTRAINT fk_workspace_analysis_evidence_receipt FOREIGN KEY (search_receipt_id, workspace_id) REFERENCES workflow.tool_result_receipt(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: workspace_analysis_evidence fk_workspace_analysis_evidence_run; Type: FK CONSTRAINT; Schema: agent; Owner: -
+--
+
+ALTER TABLE ONLY agent.workspace_analysis_evidence
+    ADD CONSTRAINT fk_workspace_analysis_evidence_run FOREIGN KEY (analysis_run_id, workspace_id) REFERENCES agent.workspace_analysis_run(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: workspace_analysis_journal fk_workspace_analysis_journal_decision; Type: FK CONSTRAINT; Schema: agent; Owner: -
+--
+
+ALTER TABLE ONLY agent.workspace_analysis_journal
+    ADD CONSTRAINT fk_workspace_analysis_journal_decision FOREIGN KEY (decision_id, analysis_run_id) REFERENCES agent.workspace_analysis_decision(id, analysis_run_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: workspace_analysis_journal fk_workspace_analysis_journal_operation; Type: FK CONSTRAINT; Schema: agent; Owner: -
+--
+
+ALTER TABLE ONLY agent.workspace_analysis_journal
+    ADD CONSTRAINT fk_workspace_analysis_journal_operation FOREIGN KEY (operation_id, analysis_run_id) REFERENCES agent.workspace_analysis_operation(id, analysis_run_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: workspace_analysis_journal fk_workspace_analysis_journal_run; Type: FK CONSTRAINT; Schema: agent; Owner: -
+--
+
+ALTER TABLE ONLY agent.workspace_analysis_journal
+    ADD CONSTRAINT fk_workspace_analysis_journal_run FOREIGN KEY (analysis_run_id, workspace_id) REFERENCES agent.workspace_analysis_run(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
 -- Name: workspace_analysis_model_result fk_workspace_analysis_model_result_attempt; Type: FK CONSTRAINT; Schema: agent; Owner: -
 --
 
@@ -30638,6 +34267,22 @@ ALTER TABLE ONLY agent.workspace_analysis_budget_reservation
 
 
 --
+-- Name: workspace_analysis_decision workspace_analysis_decision_model_call_id_fkey; Type: FK CONSTRAINT; Schema: agent; Owner: -
+--
+
+ALTER TABLE ONLY agent.workspace_analysis_decision
+    ADD CONSTRAINT workspace_analysis_decision_model_call_id_fkey FOREIGN KEY (model_call_id) REFERENCES agent.model_call(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: workspace_analysis_decision workspace_analysis_decision_node_attempt_id_fkey; Type: FK CONSTRAINT; Schema: agent; Owner: -
+--
+
+ALTER TABLE ONLY agent.workspace_analysis_decision
+    ADD CONSTRAINT workspace_analysis_decision_node_attempt_id_fkey FOREIGN KEY (node_attempt_id) REFERENCES workflow.node_attempt(id) ON DELETE RESTRICT;
+
+
+--
 -- Name: workspace_analysis_operation workspace_analysis_operation_model_call_id_fkey; Type: FK CONSTRAINT; Schema: agent; Owner: -
 --
 
@@ -30798,6 +34443,54 @@ ALTER TABLE ONLY authoring.working_draft_command
 
 
 --
+-- Name: generated_document fk_authoring_generated_document_workspace; Type: FK CONSTRAINT; Schema: authoring; Owner: -
+--
+
+ALTER TABLE ONLY authoring.generated_document
+    ADD CONSTRAINT fk_authoring_generated_document_workspace FOREIGN KEY (document_id, workspace_id) REFERENCES core.document(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: generated_publication_retirement fk_authoring_generated_retirement_projection; Type: FK CONSTRAINT; Schema: authoring; Owner: -
+--
+
+ALTER TABLE ONLY authoring.generated_publication_retirement
+    ADD CONSTRAINT fk_authoring_generated_retirement_projection FOREIGN KEY (article_revision_id, workspace_id, document_id, origin_id, origin_revision_id, projection_hash) REFERENCES authoring.generated_article_revision(article_revision_id, workspace_id, document_id, origin_id, origin_revision_id, projection_hash) ON DELETE RESTRICT;
+
+
+--
+-- Name: generated_article_revision fk_authoring_generated_revision_article; Type: FK CONSTRAINT; Schema: authoring; Owner: -
+--
+
+ALTER TABLE ONLY authoring.generated_article_revision
+    ADD CONSTRAINT fk_authoring_generated_revision_article FOREIGN KEY (article_revision_id, workspace_id, document_id) REFERENCES core.article_revision(id, workspace_id, document_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: generated_article_revision fk_authoring_generated_revision_document; Type: FK CONSTRAINT; Schema: authoring; Owner: -
+--
+
+ALTER TABLE ONLY authoring.generated_article_revision
+    ADD CONSTRAINT fk_authoring_generated_revision_document FOREIGN KEY (document_id, workspace_id, origin_kind, origin_id) REFERENCES authoring.generated_document(document_id, workspace_id, origin_kind, origin_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: generated_article_revision fk_authoring_generated_revision_parent; Type: FK CONSTRAINT; Schema: authoring; Owner: -
+--
+
+ALTER TABLE ONLY authoring.generated_article_revision
+    ADD CONSTRAINT fk_authoring_generated_revision_parent FOREIGN KEY (parent_revision_id, workspace_id, document_id, origin_kind, origin_id) REFERENCES authoring.generated_article_revision(article_revision_id, workspace_id, document_id, origin_kind, origin_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: generated_article_revision fk_authoring_generated_revision_published; Type: FK CONSTRAINT; Schema: authoring; Owner: -
+--
+
+ALTER TABLE ONLY authoring.generated_article_revision
+    ADD CONSTRAINT fk_authoring_generated_revision_published FOREIGN KEY (published_revision_id, workspace_id, document_id) REFERENCES core.article_revision(id, workspace_id, document_id) ON DELETE RESTRICT;
+
+
+--
 -- Name: document_publication_binding fk_authoring_publication_document_workspace; Type: FK CONSTRAINT; Schema: authoring; Owner: -
 --
 
@@ -30851,6 +34544,54 @@ ALTER TABLE ONLY authoring.document_restore_publication
 
 ALTER TABLE ONLY authoring.document_restore_publication
     ADD CONSTRAINT fk_document_restore_publication_document FOREIGN KEY (document_id, workspace_id) REFERENCES core.document(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: generated_document fk_generated_synthesis_note; Type: FK CONSTRAINT; Schema: authoring; Owner: -
+--
+
+ALTER TABLE ONLY authoring.generated_document
+    ADD CONSTRAINT fk_generated_synthesis_note FOREIGN KEY (origin_id, workspace_id, document_id) REFERENCES organizing.synthesis_note(id, workspace_id, document_id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: generated_article_revision fk_generated_synthesis_projection; Type: FK CONSTRAINT; Schema: authoring; Owner: -
+--
+
+ALTER TABLE ONLY authoring.generated_article_revision
+    ADD CONSTRAINT fk_generated_synthesis_projection FOREIGN KEY (origin_revision_id, workspace_id, origin_id, document_id, article_revision_id, projection_hash) REFERENCES organizing.synthesis_revision(id, workspace_id, note_id, document_id, article_revision_id, projection_hash) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: generated_article_revision generated_article_revision_workspace_id_fkey; Type: FK CONSTRAINT; Schema: authoring; Owner: -
+--
+
+ALTER TABLE ONLY authoring.generated_article_revision
+    ADD CONSTRAINT generated_article_revision_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES core.workspace(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: generated_document generated_document_workspace_id_fkey; Type: FK CONSTRAINT; Schema: authoring; Owner: -
+--
+
+ALTER TABLE ONLY authoring.generated_document
+    ADD CONSTRAINT generated_document_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES core.workspace(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: generated_publication_retirement generated_publication_retirement_publication_id_fkey; Type: FK CONSTRAINT; Schema: authoring; Owner: -
+--
+
+ALTER TABLE ONLY authoring.generated_publication_retirement
+    ADD CONSTRAINT generated_publication_retirement_publication_id_fkey FOREIGN KEY (publication_id) REFERENCES authoring.document_publication_binding(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: generated_publication_retirement generated_publication_retirement_workspace_id_fkey; Type: FK CONSTRAINT; Schema: authoring; Owner: -
+--
+
+ALTER TABLE ONLY authoring.generated_publication_retirement
+    ADD CONSTRAINT generated_publication_retirement_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES core.workspace(id) ON DELETE RESTRICT;
 
 
 --
@@ -32502,6 +36243,62 @@ ALTER TABLE ONLY learning.smart_collection_command
 
 
 --
+-- Name: note_interview_preparation fk_note_interview_preparation_attempt; Type: FK CONSTRAINT; Schema: learning; Owner: -
+--
+
+ALTER TABLE ONLY learning.note_interview_preparation
+    ADD CONSTRAINT fk_note_interview_preparation_attempt FOREIGN KEY (node_attempt_id, node_run_id) REFERENCES workflow.node_attempt(id, node_run_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: note_interview_preparation fk_note_interview_preparation_model; Type: FK CONSTRAINT; Schema: learning; Owner: -
+--
+
+ALTER TABLE ONLY learning.note_interview_preparation
+    ADD CONSTRAINT fk_note_interview_preparation_model FOREIGN KEY (model_run_id, workspace_id) REFERENCES agent.model_run(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: note_interview_preparation fk_note_interview_preparation_node; Type: FK CONSTRAINT; Schema: learning; Owner: -
+--
+
+ALTER TABLE ONLY learning.note_interview_preparation
+    ADD CONSTRAINT fk_note_interview_preparation_node FOREIGN KEY (node_run_id, workflow_run_id) REFERENCES workflow.node_run(id, run_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: note_interview_preparation fk_note_interview_preparation_retry; Type: FK CONSTRAINT; Schema: learning; Owner: -
+--
+
+ALTER TABLE ONLY learning.note_interview_preparation
+    ADD CONSTRAINT fk_note_interview_preparation_retry FOREIGN KEY (retry_of, workspace_id) REFERENCES learning.note_interview_preparation(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: note_interview_preparation fk_note_interview_preparation_revision; Type: FK CONSTRAINT; Schema: learning; Owner: -
+--
+
+ALTER TABLE ONLY learning.note_interview_preparation
+    ADD CONSTRAINT fk_note_interview_preparation_revision FOREIGN KEY (revision_id, workspace_id, note_id, document_id, article_revision_id, projection_hash) REFERENCES organizing.synthesis_revision(id, workspace_id, note_id, document_id, article_revision_id, projection_hash) ON DELETE RESTRICT;
+
+
+--
+-- Name: note_interview_preparation fk_note_interview_preparation_run; Type: FK CONSTRAINT; Schema: learning; Owner: -
+--
+
+ALTER TABLE ONLY learning.note_interview_preparation
+    ADD CONSTRAINT fk_note_interview_preparation_run FOREIGN KEY (workflow_run_id, workspace_id) REFERENCES workflow.run(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: note_interview_preparation fk_note_interview_preparation_session; Type: FK CONSTRAINT; Schema: learning; Owner: -
+--
+
+ALTER TABLE ONLY learning.note_interview_preparation
+    ADD CONSTRAINT fk_note_interview_preparation_session FOREIGN KEY (session_id, workspace_id) REFERENCES learning.interview_session(session_id, workspace_id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
+
+
+--
 -- Name: interview_command interview_command_workspace_id_fkey; Type: FK CONSTRAINT; Schema: learning; Owner: -
 --
 
@@ -32603,6 +36400,14 @@ ALTER TABLE ONLY learning.memory_command
 
 ALTER TABLE ONLY learning.memory
     ADD CONSTRAINT memory_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES core.workspace(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: note_interview_preparation note_interview_preparation_workspace_id_fkey; Type: FK CONSTRAINT; Schema: learning; Owner: -
+--
+
+ALTER TABLE ONLY learning.note_interview_preparation
+    ADD CONSTRAINT note_interview_preparation_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES core.workspace(id) ON DELETE RESTRICT;
 
 
 --
@@ -33502,6 +37307,270 @@ ALTER TABLE ONLY organizing.template_revision
 
 
 --
+-- Name: synthesis_apply_receipt fk_synthesis_apply_event; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_apply_receipt
+    ADD CONSTRAINT fk_synthesis_apply_event FOREIGN KEY (source_event_id, workspace_id) REFERENCES workflow.outbox_event(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_apply_receipt fk_synthesis_apply_model; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_apply_receipt
+    ADD CONSTRAINT fk_synthesis_apply_model FOREIGN KEY (model_run_id, workspace_id) REFERENCES agent.model_run(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_apply_receipt fk_synthesis_apply_model_workflow; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_apply_receipt
+    ADD CONSTRAINT fk_synthesis_apply_model_workflow FOREIGN KEY (model_run_id, workspace_id, workflow_run_id) REFERENCES agent.model_run(id, workspace_id, workflow_run_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_apply_receipt fk_synthesis_apply_workflow; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_apply_receipt
+    ADD CONSTRAINT fk_synthesis_apply_workflow FOREIGN KEY (workflow_run_id, workspace_id) REFERENCES workflow.run(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_execution fk_synthesis_execution_apply_attempt; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_execution
+    ADD CONSTRAINT fk_synthesis_execution_apply_attempt FOREIGN KEY (apply_node_attempt_id, apply_node_run_id) REFERENCES workflow.node_attempt(id, node_run_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_execution fk_synthesis_execution_apply_node; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_execution
+    ADD CONSTRAINT fk_synthesis_execution_apply_node FOREIGN KEY (apply_node_run_id, workflow_run_id) REFERENCES workflow.node_run(id, run_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_execution fk_synthesis_execution_processing; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_execution
+    ADD CONSTRAINT fk_synthesis_execution_processing FOREIGN KEY (processing_id, workspace_id) REFERENCES organizing.synthesis_processing(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_execution fk_synthesis_execution_workflow; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_execution
+    ADD CONSTRAINT fk_synthesis_execution_workflow FOREIGN KEY (workflow_run_id, workspace_id) REFERENCES workflow.run(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_model_step fk_synthesis_model_step_attempt; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_model_step
+    ADD CONSTRAINT fk_synthesis_model_step_attempt FOREIGN KEY (node_attempt_id, node_run_id) REFERENCES workflow.node_attempt(id, node_run_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_model_step fk_synthesis_model_step_execution; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_model_step
+    ADD CONSTRAINT fk_synthesis_model_step_execution FOREIGN KEY (workflow_run_id, workspace_id, processing_id) REFERENCES organizing.synthesis_execution(workflow_run_id, workspace_id, processing_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_model_step fk_synthesis_model_step_model; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_model_step
+    ADD CONSTRAINT fk_synthesis_model_step_model FOREIGN KEY (model_run_id, workspace_id) REFERENCES agent.model_run(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_model_step fk_synthesis_model_step_node; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_model_step
+    ADD CONSTRAINT fk_synthesis_model_step_node FOREIGN KEY (node_run_id, workflow_run_id) REFERENCES workflow.node_run(id, run_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_note fk_synthesis_note_current; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_note
+    ADD CONSTRAINT fk_synthesis_note_current FOREIGN KEY (current_revision_id, workspace_id, id, document_id) REFERENCES organizing.synthesis_revision(id, workspace_id, note_id, document_id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: synthesis_note fk_synthesis_note_document; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_note
+    ADD CONSTRAINT fk_synthesis_note_document FOREIGN KEY (document_id, workspace_id) REFERENCES core.document(id, workspace_id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: synthesis_note fk_synthesis_note_workflow; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_note
+    ADD CONSTRAINT fk_synthesis_note_workflow FOREIGN KEY (workflow_run_id, workspace_id) REFERENCES workflow.run(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_processing fk_synthesis_processing_artifact; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_processing
+    ADD CONSTRAINT fk_synthesis_processing_artifact FOREIGN KEY (workspace_id, content_artifact_id) REFERENCES core.content_artifact(workspace_id, id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_processing fk_synthesis_processing_model; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_processing
+    ADD CONSTRAINT fk_synthesis_processing_model FOREIGN KEY (model_run_id, workspace_id) REFERENCES agent.model_run(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_processing fk_synthesis_processing_projection; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_processing
+    ADD CONSTRAINT fk_synthesis_processing_projection FOREIGN KEY (source_version_id, parse_projection_id, workspace_id) REFERENCES ingestion.source_version_projection(source_version_id, parse_projection_id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_processing fk_synthesis_processing_source; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_processing
+    ADD CONSTRAINT fk_synthesis_processing_source FOREIGN KEY (source_id, workspace_id) REFERENCES core.source(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_processing fk_synthesis_processing_version; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_processing
+    ADD CONSTRAINT fk_synthesis_processing_version FOREIGN KEY (source_version_id, source_id) REFERENCES core.source_version(id, source_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_processing fk_synthesis_processing_workflow; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_processing
+    ADD CONSTRAINT fk_synthesis_processing_workflow FOREIGN KEY (workflow_run_id, workspace_id) REFERENCES workflow.run(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_revision fk_synthesis_revision_event; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_revision
+    ADD CONSTRAINT fk_synthesis_revision_event FOREIGN KEY (source_event_id, workspace_id) REFERENCES workflow.outbox_event(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_revision fk_synthesis_revision_generated; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_revision
+    ADD CONSTRAINT fk_synthesis_revision_generated FOREIGN KEY (article_revision_id, workspace_id, document_id, note_id, id, projection_hash) REFERENCES authoring.generated_article_revision(article_revision_id, workspace_id, document_id, origin_id, origin_revision_id, projection_hash) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: synthesis_revision fk_synthesis_revision_model; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_revision
+    ADD CONSTRAINT fk_synthesis_revision_model FOREIGN KEY (model_run_id, workspace_id) REFERENCES agent.model_run(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_revision fk_synthesis_revision_model_workflow; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_revision
+    ADD CONSTRAINT fk_synthesis_revision_model_workflow FOREIGN KEY (model_run_id, workspace_id, workflow_run_id) REFERENCES agent.model_run(id, workspace_id, workflow_run_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_revision fk_synthesis_revision_note; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_revision
+    ADD CONSTRAINT fk_synthesis_revision_note FOREIGN KEY (note_id, workspace_id, document_id) REFERENCES organizing.synthesis_note(id, workspace_id, document_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_revision fk_synthesis_revision_parent; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_revision
+    ADD CONSTRAINT fk_synthesis_revision_parent FOREIGN KEY (parent_revision_id, workspace_id, note_id) REFERENCES organizing.synthesis_revision(id, workspace_id, note_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_revision fk_synthesis_revision_workflow; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_revision
+    ADD CONSTRAINT fk_synthesis_revision_workflow FOREIGN KEY (workflow_run_id, workspace_id) REFERENCES workflow.run(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_revision_source fk_synthesis_source_projection; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_revision_source
+    ADD CONSTRAINT fk_synthesis_source_projection FOREIGN KEY (source_version_id, parse_projection_id, workspace_id) REFERENCES ingestion.source_version_projection(source_version_id, parse_projection_id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_revision_source fk_synthesis_source_revision; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_revision_source
+    ADD CONSTRAINT fk_synthesis_source_revision FOREIGN KEY (revision_id, workspace_id, note_id) REFERENCES organizing.synthesis_revision(id, workspace_id, note_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_revision_source fk_synthesis_source_source; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_revision_source
+    ADD CONSTRAINT fk_synthesis_source_source FOREIGN KEY (source_id, workspace_id) REFERENCES core.source(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_revision_source fk_synthesis_source_version; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_revision_source
+    ADD CONSTRAINT fk_synthesis_source_version FOREIGN KEY (source_version_id, source_id) REFERENCES core.source_version(id, source_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_topic_key fk_synthesis_topic_note; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_topic_key
+    ADD CONSTRAINT fk_synthesis_topic_note FOREIGN KEY (note_id, workspace_id) REFERENCES organizing.synthesis_note(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
 -- Name: generation generation_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
 --
 
@@ -33531,6 +37600,78 @@ ALTER TABLE ONLY organizing.run_result
 
 ALTER TABLE ONLY organizing.run_result
     ADD CONSTRAINT run_result_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES core.workspace(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_apply_receipt synthesis_apply_receipt_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_apply_receipt
+    ADD CONSTRAINT synthesis_apply_receipt_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES core.workspace(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_note synthesis_note_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_note
+    ADD CONSTRAINT synthesis_note_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES core.workspace(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_processing synthesis_processing_ingestion_attempt_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_processing
+    ADD CONSTRAINT synthesis_processing_ingestion_attempt_id_fkey FOREIGN KEY (ingestion_attempt_id) REFERENCES ingestion.attempt(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_processing synthesis_processing_source_event_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_processing
+    ADD CONSTRAINT synthesis_processing_source_event_id_fkey FOREIGN KEY (source_event_id) REFERENCES workflow.outbox_event(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_processing synthesis_processing_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_processing
+    ADD CONSTRAINT synthesis_processing_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES core.workspace(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_retry_receipt synthesis_retry_receipt_processing_id_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_retry_receipt
+    ADD CONSTRAINT synthesis_retry_receipt_processing_id_workspace_id_fkey FOREIGN KEY (processing_id, workspace_id) REFERENCES organizing.synthesis_processing(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_retry_receipt synthesis_retry_receipt_workflow_run_id_workspace_id_proce_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_retry_receipt
+    ADD CONSTRAINT synthesis_retry_receipt_workflow_run_id_workspace_id_proce_fkey FOREIGN KEY (workflow_run_id, workspace_id, processing_id) REFERENCES organizing.synthesis_execution(workflow_run_id, workspace_id, processing_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_revision_source synthesis_revision_source_source_span_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_revision_source
+    ADD CONSTRAINT synthesis_revision_source_source_span_id_fkey FOREIGN KEY (source_span_id) REFERENCES ingestion.source_span(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_revision synthesis_revision_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_revision
+    ADD CONSTRAINT synthesis_revision_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES core.workspace(id) ON DELETE RESTRICT;
 
 
 --

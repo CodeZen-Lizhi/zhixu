@@ -108,6 +108,13 @@ func TestFixtureBarrierRequiresExplicitRelease(t *testing.T) {
 }
 
 func TestFixtureBarrierAcknowledgesExactWorkspaceAnalysisCandidateStream(t *testing.T) {
+	for _, version := range []string{"1", "2"} {
+		t.Run(version, func(t *testing.T) { assertFixtureWorkspaceAnalysisCandidateStreamBarrier(t, version) })
+	}
+}
+
+func assertFixtureWorkspaceAnalysisCandidateStreamBarrier(t *testing.T, version string) {
+	t.Helper()
 	barrierDir := t.TempDir()
 	releasePath := barrierDir + "/release"
 	enteredPath := barrierDir + "/entered"
@@ -117,10 +124,16 @@ func TestFixtureBarrierAcknowledgesExactWorkspaceAnalysisCandidateStream(t *test
 	writeFixtureBarrierToken(t, armedPath, token)
 	fixtureServer, _ := newProductionFixtureServer(t)
 	_, catalog := newProductionStructuredRuntime(t, fixtureServer)
+	prompt := agentworkflow.WorkspaceAnalysisSynthesisPromptRef()
+	input := fixtureWorkspaceAnalysisSynthesisInput()
+	if version == "2" {
+		prompt = agentworkflow.WorkspaceAnalysisSynthesisPromptRefV2()
+		input = fixtureWorkspaceAnalysisV2CandidateInput()
+	}
 	snapshot, err := catalog.Snapshot(
-		agentworkflow.WorkspaceAnalysisSynthesisPromptRef(),
-		agentdomain.SchemaRef{ID: agentdomain.WorkspaceAnalysisCandidateSchemaID, Version: "1"},
-		agentdomain.SchemaRef{ID: agentdomain.WorkspaceAnalysisCandidateSchemaID, Version: "1"},
+		prompt,
+		agentdomain.SchemaRef{ID: agentdomain.WorkspaceAnalysisCandidateSchemaID, Version: version},
+		agentdomain.SchemaRef{ID: agentdomain.WorkspaceAnalysisCandidateSchemaID, Version: version},
 		agentworkflow.DefaultProfileRef(),
 	)
 	if err != nil {
@@ -130,7 +143,10 @@ func TestFixtureBarrierAcknowledgesExactWorkspaceAnalysisCandidateStream(t *test
 		stage: "workspace_analysis_candidate_stream", releasePath: releasePath, enteredPath: enteredPath, settledPath: settledPath, armedPath: armedPath, lockPath: barrierDir + "/claim",
 		maxWait: 2 * time.Second, poll: 5 * time.Millisecond,
 	})
-	body := fixtureWorkspaceAnalysisCandidateStreamRequest(t, snapshot.Schema.JSONSchema, fixtureWorkspaceAnalysisSynthesisInput())
+	body := fixtureWorkspaceAnalysisCandidateStreamRequest(t, snapshot.Schema.JSONSchema, input)
+	if version == "2" {
+		body = bytes.Replace(body, []byte(workspaceAnalysisCandidateResponseSchemaName), []byte(workspaceAnalysisCandidateResponseSchemaNameV2), 1)
+	}
 	type barrierResponse struct {
 		status int
 		body   string

@@ -60,6 +60,10 @@
       "description": "Material organizing drafts, templates, snapshots, and runs."
     },
     {
+      "name": "Synthesis",
+      "description": "Continuously evolving synthesis notes, exact sources, and durable processing."
+    },
+    {
       "name": "GitSync",
       "description": "Git remote configuration and synchronization operations."
     },
@@ -3452,7 +3456,8 @@
             "$ref": "#/components/responses/MethodNotAllowed"
           },
           "409": {
-            "$ref": "#/components/responses/Conflict"
+            "$ref": "#/components/responses/Conflict",
+            "description": "Conflict. CONVERSATION_API_VERSION_UNSUPPORTED: this record requires the matching /api/v2 endpoint; no new command side effects are performed."
           },
           "415": {
             "$ref": "#/components/responses/UnsupportedMediaType"
@@ -3463,7 +3468,11 @@
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
-        }
+        },
+        "description": "Preserves the v1 response contract. Historical v1 analysis and RAG idempotent requests remain replayable. With dynamic-analysis admission enabled, new workspace_analysis requests require /api/v2 and are rejected here before creating a workflow.",
+        "x-error-codes": [
+          "CONVERSATION_API_VERSION_UNSUPPORTED"
+        ]
       }
     },
     "/api/v1/conversations/{conversation_id}/turns": {
@@ -3528,7 +3537,8 @@
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
-        }
+        },
+        "description": "Preserves the v1 response contract. Lists only RAG and historical v1 analysis records, filtering before pagination. Use the matching v2 endpoint to include dynamic-analysis records. Turn cursors are bound to the HTTP API version; restart from the first page when switching versions."
       }
     },
     "/api/v1/answers/{answer_id}": {
@@ -3576,13 +3586,21 @@
           "405": {
             "$ref": "#/components/responses/MethodNotAllowed"
           },
+          "409": {
+            "$ref": "#/components/responses/Conflict",
+            "description": "Conflict. CONVERSATION_API_VERSION_UNSUPPORTED: this record requires the matching /api/v2 endpoint; no new command side effects are performed."
+          },
           "500": {
             "$ref": "#/components/responses/InternalError"
           },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
-        }
+        },
+        "description": "Preserves the v1 response contract.",
+        "x-error-codes": [
+          "CONVERSATION_API_VERSION_UNSUPPORTED"
+        ]
       }
     },
     "/api/v1/answers/{answer_id}/analysis-timeline": {
@@ -3625,13 +3643,21 @@
           "405": {
             "$ref": "#/components/responses/MethodNotAllowed"
           },
+          "409": {
+            "$ref": "#/components/responses/Conflict",
+            "description": "Conflict. CONVERSATION_API_VERSION_UNSUPPORTED: this record requires the matching /api/v2 endpoint; no new command side effects are performed."
+          },
           "500": {
             "$ref": "#/components/responses/InternalError"
           },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
-        }
+        },
+        "description": "Preserves the v1 response contract.",
+        "x-error-codes": [
+          "CONVERSATION_API_VERSION_UNSUPPORTED"
+        ]
       }
     },
     "/api/v1/answers/{answer_id}/feedback": {
@@ -10584,7 +10610,7 @@
           "Interview"
         ],
         "x-required-capability": "READ_LOCAL",
-        "description": "Lists recoverable Interview Session summaries in one Workspace without questions, answers, evidence, or command receipts.",
+        "description": "Lists recoverable Claim Interview Session summaries in one Workspace without questions, answers, evidence, or command receipts. Preserves the v1 response contract and filters by source before pagination. Use the matching v2 endpoint to include note interviews. Cursors are bound to the HTTP API version; restart from the first page when switching versions.",
         "parameters": [
           {
             "$ref": "#/components/parameters/WorkspaceIDQuery"
@@ -10648,7 +10674,7 @@
           "Interview"
         ],
         "x-required-capability": "WRITE_PROPOSAL",
-        "description": "Starts an evidence-bound Interview with a frozen configuration and persisted initial questions. The user cannot supply questions, scores, or evidence.",
+        "description": "Starts an evidence-bound Interview with a frozen configuration and persisted initial questions. The user cannot supply questions, scores, or evidence. Preserves the v1 response contract.",
         "parameters": [
           {
             "$ref": "#/components/parameters/IdempotencyKey"
@@ -10702,7 +10728,8 @@
             "$ref": "#/components/responses/MethodNotAllowed"
           },
           "409": {
-            "$ref": "#/components/responses/Conflict"
+            "$ref": "#/components/responses/Conflict",
+            "description": "Conflict. INTERVIEW_API_VERSION_UNSUPPORTED: this record requires the matching /api/v2 endpoint; no new command side effects are performed."
           },
           "415": {
             "$ref": "#/components/responses/UnsupportedMediaType"
@@ -10713,7 +10740,10 @@
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
-        }
+        },
+        "x-error-codes": [
+          "INTERVIEW_API_VERSION_UNSUPPORTED"
+        ]
       }
     },
     "/api/v1/review/interviews/{session_id}": {
@@ -10763,13 +10793,21 @@
           "405": {
             "$ref": "#/components/responses/MethodNotAllowed"
           },
+          "409": {
+            "$ref": "#/components/responses/Conflict",
+            "description": "Conflict. INTERVIEW_API_VERSION_UNSUPPORTED: this record requires the matching /api/v2 endpoint; no new command side effects are performed."
+          },
           "500": {
             "$ref": "#/components/responses/InternalError"
           },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
-        }
+        },
+        "description": "Preserves the v1 response contract.",
+        "x-error-codes": [
+          "INTERVIEW_API_VERSION_UNSUPPORTED"
+        ]
       }
     },
     "/api/v1/review/interviews/{session_id}/turns": {
@@ -10779,7 +10817,7 @@
           "Interview"
         ],
         "x-required-capability": "WRITE_PROPOSAL",
-        "description": "Submits only a user answer. The server produces the score, follow-up decision, and next question from persisted evidence.",
+        "description": "Submits only a user answer. The server produces the score, follow-up decision, and next question from persisted evidence. Preserves the v1 response contract.",
         "parameters": [
           {
             "name": "session_id",
@@ -10832,7 +10870,8 @@
             "$ref": "#/components/responses/MethodNotAllowed"
           },
           "409": {
-            "$ref": "#/components/responses/Conflict"
+            "$ref": "#/components/responses/Conflict",
+            "description": "Conflict. INTERVIEW_API_VERSION_UNSUPPORTED: this record requires the matching /api/v2 endpoint; no new command side effects are performed."
           },
           "415": {
             "$ref": "#/components/responses/UnsupportedMediaType"
@@ -10843,7 +10882,10 @@
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
-        }
+        },
+        "x-error-codes": [
+          "INTERVIEW_API_VERSION_UNSUPPORTED"
+        ]
       }
     },
     "/api/v1/review/interviews/{session_id}/complete": {
@@ -10853,7 +10895,7 @@
           "Interview"
         ],
         "x-required-capability": "WRITE_PROPOSAL",
-        "description": "Completes a persisted Interview exactly once and creates the evidence-bound report and Learning Path Artifact bindings.",
+        "description": "Completes a persisted Interview exactly once and creates the evidence-bound report and Learning Path Artifact bindings. Preserves the v1 response contract.",
         "parameters": [
           {
             "name": "session_id",
@@ -10906,7 +10948,8 @@
             "$ref": "#/components/responses/MethodNotAllowed"
           },
           "409": {
-            "$ref": "#/components/responses/Conflict"
+            "$ref": "#/components/responses/Conflict",
+            "description": "Conflict. INTERVIEW_API_VERSION_UNSUPPORTED: this record requires the matching /api/v2 endpoint; no new command side effects are performed."
           },
           "415": {
             "$ref": "#/components/responses/UnsupportedMediaType"
@@ -10917,7 +10960,10 @@
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
-        }
+        },
+        "x-error-codes": [
+          "INTERVIEW_API_VERSION_UNSUPPORTED"
+        ]
       }
     },
     "/api/v1/review/interviews/{session_id}/learning-paths/{path_id}/steps/{step_id}/memory-candidate": {
@@ -11163,7 +11209,8 @@
             "$ref": "#/components/responses/MethodNotAllowed"
           },
           "409": {
-            "$ref": "#/components/responses/Conflict"
+            "$ref": "#/components/responses/Conflict",
+            "description": "Conflict. INTERVIEW_API_VERSION_UNSUPPORTED: this record requires the matching /api/v2 endpoint; no new command side effects are performed."
           },
           "415": {
             "$ref": "#/components/responses/UnsupportedMediaType"
@@ -11174,7 +11221,11 @@
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
-        }
+        },
+        "description": "Preserves the v1 response contract.",
+        "x-error-codes": [
+          "INTERVIEW_API_VERSION_UNSUPPORTED"
+        ]
       }
     },
     "/api/v1/artifacts": {
@@ -12965,6 +13016,1470 @@
           "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" }, "405": { "$ref": "#/components/responses/MethodNotAllowed" }, "409": { "$ref": "#/components/responses/Conflict" }, "415": { "$ref": "#/components/responses/UnsupportedMediaType" }, "500": { "$ref": "#/components/responses/InternalError" }, "503": { "$ref": "#/components/responses/Unavailable" }
         }
       }
+    },
+    "/api/v1/workspaces/{workspace_id}/synthesis/notes": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SynthesisWorkspaceID"
+        }
+      ],
+      "get": {
+        "operationId": "listSynthesisNotes",
+        "tags": [
+          "Synthesis"
+        ],
+        "description": "Lists bounded synthesis note summaries and exact publication projections.",
+        "x-required-capability": "READ_LOCAL",
+        "responses": {
+          "200": {
+            "description": "Authoritative Workspace-scoped projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SynthesisNotePage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of results.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque signed cursor bound to Workspace, list, and limit; invalid after server restart.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SynthesisWorkspaceID"
+        },
+        {
+          "$ref": "#/components/parameters/SynthesisNoteID"
+        }
+      ],
+      "get": {
+        "operationId": "getSynthesisNote",
+        "tags": [
+          "Synthesis"
+        ],
+        "description": "Reads current and published immutable synthesis revisions without treating a candidate as approved.",
+        "x-required-capability": "READ_LOCAL",
+        "responses": {
+          "200": {
+            "description": "Authoritative Workspace-scoped projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SynthesisNoteDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/revisions": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SynthesisWorkspaceID"
+        },
+        {
+          "$ref": "#/components/parameters/SynthesisNoteID"
+        }
+      ],
+      "get": {
+        "operationId": "listSynthesisRevisions",
+        "tags": [
+          "Synthesis"
+        ],
+        "description": "Lists immutable revision summaries in descending revision order.",
+        "x-required-capability": "READ_LOCAL",
+        "responses": {
+          "200": {
+            "description": "Authoritative Workspace-scoped projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SynthesisRevisionPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of results.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque signed cursor bound to Workspace, list, and limit; invalid after server restart.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/revisions/{revision_id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SynthesisWorkspaceID"
+        },
+        {
+          "$ref": "#/components/parameters/SynthesisNoteID"
+        },
+        {
+          "$ref": "#/components/parameters/SynthesisRevisionID"
+        }
+      ],
+      "get": {
+        "operationId": "getSynthesisRevision",
+        "tags": [
+          "Synthesis"
+        ],
+        "description": "Reads the requested immutable note revision, including its original evidence references.",
+        "x-required-capability": "READ_LOCAL",
+        "responses": {
+          "200": {
+            "description": "Authoritative Workspace-scoped projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SynthesisRevisionResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/revisions/{revision_id}/sources/{source_span_id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SynthesisWorkspaceID"
+        },
+        {
+          "$ref": "#/components/parameters/SynthesisNoteID"
+        },
+        {
+          "$ref": "#/components/parameters/SynthesisRevisionID"
+        },
+        {
+          "$ref": "#/components/parameters/SynthesisSourceSpanID"
+        }
+      ],
+      "get": {
+        "operationId": "openSynthesisSource",
+        "tags": [
+          "Synthesis"
+        ],
+        "description": "Opens a source only if the exact span is already bound to this note revision. Unavailable historical evidence is never redirected.",
+        "x-required-capability": "READ_LOCAL",
+        "responses": {
+          "200": {
+            "description": "Authoritative Workspace-scoped projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SynthesisSourceView"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/synthesis/processing": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SynthesisWorkspaceID"
+        }
+      ],
+      "get": {
+        "operationId": "listSynthesisProcessing",
+        "tags": [
+          "Synthesis"
+        ],
+        "description": "Lists durable source processing, including initial failures that produced no note.",
+        "x-required-capability": "READ_LOCAL",
+        "responses": {
+          "200": {
+            "description": "Authoritative Workspace-scoped projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SynthesisProcessingPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of results.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque signed cursor bound to Workspace, list, and limit; invalid after server restart.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/synthesis/processing/{processing_id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SynthesisWorkspaceID"
+        },
+        {
+          "$ref": "#/components/parameters/SynthesisProcessingID"
+        }
+      ],
+      "get": {
+        "operationId": "getSynthesisProcessing",
+        "tags": [
+          "Synthesis"
+        ],
+        "description": "Reads one exact source processing record for refresh recovery.",
+        "x-required-capability": "READ_LOCAL",
+        "responses": {
+          "200": {
+            "description": "Authoritative Workspace-scoped projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SynthesisProcessingResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/synthesis/processing/{processing_id}/retry": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SynthesisWorkspaceID"
+        },
+        {
+          "$ref": "#/components/parameters/SynthesisProcessingID"
+        }
+      ],
+      "post": {
+        "operationId": "retrySynthesisProcessing",
+        "tags": [
+          "Synthesis"
+        ],
+        "description": "Explicitly retries a known retryable failure with expected version and idempotency. Unknown results require recovery.",
+        "x-required-capability": "WRITE_PROPOSAL",
+        "responses": {
+          "202": {
+            "description": "Authoritative Workspace-scoped projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SynthesisRetryResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "x-max-body-bytes": 16384,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SynthesisRetryRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/interviews": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SynthesisWorkspaceID"
+        },
+        {
+          "$ref": "#/components/parameters/SynthesisNoteID"
+        }
+      ],
+      "post": {
+        "operationId": "prepareSynthesisNoteInterview",
+        "tags": [
+          "Interview"
+        ],
+        "description": "Freezes an actually published note revision and starts durable model question preparation.",
+        "x-required-capability": "WRITE_PROPOSAL",
+        "responses": {
+          "202": {
+            "description": "Authoritative Workspace-scoped projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InterviewNotePreparationResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "x-max-body-bytes": 131072,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InterviewNotePreparationOptions"
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "listSynthesisNoteInterviewPreparations",
+        "tags": [
+          "Interview"
+        ],
+        "description": "Returns the 20 most recently created preparations for this note, including operations whose initial response was lost.",
+        "x-required-capability": "READ_LOCAL",
+        "responses": {
+          "200": {
+            "description": "Authoritative Workspace-scoped projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InterviewNotePreparationPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/interviews/{preparation_id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SynthesisWorkspaceID"
+        },
+        {
+          "$ref": "#/components/parameters/SynthesisNoteID"
+        },
+        {
+          "$ref": "#/components/parameters/InterviewNotePreparationID"
+        }
+      ],
+      "get": {
+        "operationId": "getSynthesisNoteInterviewPreparation",
+        "tags": [
+          "Interview"
+        ],
+        "description": "Reads durable preparation without exposing answer points or follow-up plans.",
+        "x-required-capability": "READ_LOCAL",
+        "responses": {
+          "200": {
+            "description": "Authoritative Workspace-scoped projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InterviewNotePreparationResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/interviews/{preparation_id}/retry": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SynthesisWorkspaceID"
+        },
+        {
+          "$ref": "#/components/parameters/SynthesisNoteID"
+        },
+        {
+          "$ref": "#/components/parameters/InterviewNotePreparationID"
+        }
+      ],
+      "post": {
+        "operationId": "retrySynthesisNoteInterviewPreparation",
+        "tags": [
+          "Interview"
+        ],
+        "description": "Retries only a known failure, retaining the original note snapshot and options.",
+        "x-required-capability": "WRITE_PROPOSAL",
+        "responses": {
+          "202": {
+            "description": "Authoritative Workspace-scoped projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InterviewNotePreparationResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "x-max-body-bytes": 131072,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InterviewNotePreparationOptions"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/conversations/{conversation_id}/questions": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ConversationID"
+        },
+        {
+          "$ref": "#/components/parameters/IdempotencyKey"
+        }
+      ],
+      "post": {
+        "operationId": "submitQuestionV2",
+        "tags": [
+          "Conversation"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubmitQuestionRequest"
+              },
+              "examples": {
+                "rag": {
+                  "summary": "默认证据问答",
+                  "value": {
+                    "workspace_id": "11111111-1111-4111-8111-111111111111",
+                    "question": "如何验证当前结论？"
+                  }
+                },
+                "workspace_analysis": {
+                  "summary": "受限工作区分析",
+                  "value": {
+                    "workspace_id": "11111111-1111-4111-8111-111111111111",
+                    "mode": "workspace_analysis",
+                    "question": "分析当前工作区并给出有证据的改进建议"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Exact idempotent replay.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuestionAcceptanceV2"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Question accepted; poll status_url or subscribe to events.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuestionAcceptanceV2"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "description": "Uses the v2 HTTP representation and also accepts compatible historical records. Starts dynamic Workspace Analysis for new analysis questions; an existing idempotency key retains its original workflow and analysis version."
+      }
+    },
+    "/api/v2/conversations/{conversation_id}/turns": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ConversationID"
+        },
+        {
+          "$ref": "#/components/parameters/WorkspaceIDQuery"
+        },
+        {
+          "$ref": "#/components/parameters/Cursor"
+        },
+        {
+          "$ref": "#/components/parameters/Limit"
+        },
+        {
+          "name": "latest",
+          "in": "query",
+          "required": false,
+          "description": "When true, return only the latest Turn as a bounded refresh-recovery projection; cursor must be omitted.",
+          "schema": {
+            "type": "boolean",
+            "const": true
+          }
+        }
+      ],
+      "get": {
+        "operationId": "listConversationTurnsV2",
+        "tags": [
+          "Conversation"
+        ],
+        "responses": {
+          "200": {
+            "description": "Stable ordinal-ordered Turn page, or one latest Turn when latest=true.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TurnPageV2"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "description": "Uses the v2 HTTP representation and also accepts compatible historical records. Turn cursors are bound to the HTTP API version; restart from the first page when switching versions."
+      }
+    },
+    "/api/v2/answers/{answer_id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/AnswerID"
+        },
+        {
+          "$ref": "#/components/parameters/WorkspaceIDQuery"
+        }
+      ],
+      "get": {
+        "operationId": "getAnswerV2",
+        "tags": [
+          "Conversation"
+        ],
+        "responses": {
+          "200": {
+            "description": "Authoritative Answer and Workflow projection.",
+            "headers": {
+              "ETag": {
+                "$ref": "#/components/headers/ETag"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnswerV2"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "description": "Uses the v2 HTTP representation and also accepts compatible historical records."
+      }
+    },
+    "/api/v2/answers/{answer_id}/analysis-timeline": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/AnswerID"
+        },
+        {
+          "$ref": "#/components/parameters/WorkspaceIDQuery"
+        }
+      ],
+      "get": {
+        "operationId": "getWorkspaceAnalysisTimelineV2",
+        "tags": [
+          "Timeline"
+        ],
+        "responses": {
+          "200": {
+            "description": "Authoritative, bounded Workspace Analysis timeline snapshot.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceAnalysisTimelineResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "description": "Uses the v2 HTTP representation and also accepts compatible historical records."
+      }
+    },
+    "/api/v2/review/interviews": {
+      "get": {
+        "operationId": "listInterviewsV2",
+        "tags": [
+          "Interview"
+        ],
+        "x-required-capability": "READ_LOCAL",
+        "description": "Lists recoverable Claim and note Interview Session summaries in one Workspace without questions, answers, evidence, or command receipts. Uses the v2 HTTP representation and also accepts compatible historical records. Cursors are bound to the HTTP API version; restart from the first page when switching versions.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/WorkspaceIDQuery"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque, Workspace-bound continuation cursor returned by this endpoint.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "x-max-utf8-bytes": 4096
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Workspace-scoped, stable descending Interview Session page.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InterviewSessionPageV2"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      },
+      "post": {
+        "operationId": "startInterviewV2",
+        "tags": [
+          "Interview"
+        ],
+        "x-required-capability": "WRITE_PROPOSAL",
+        "description": "Starts an evidence-bound Interview with a frozen configuration and persisted initial questions. The user cannot supply questions, scores, or evidence. Uses the v2 HTTP representation and also accepts compatible historical records. This operation still starts Claim interviews only; note interviews are created by the published-note preparation endpoint.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "x-max-body-bytes": 131072,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartInterviewRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Exact Idempotency-Key replay.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InterviewStartResultV2"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Interview Session and its frozen initial questions.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InterviewStartResultV2"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/v2/review/interviews/{session_id}": {
+      "get": {
+        "operationId": "getInterviewV2",
+        "tags": [
+          "Interview"
+        ],
+        "x-required-capability": "READ_LOCAL",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/WorkspaceIDQuery"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Recoverable Interview Session projection. It excludes canonical answer points and raw participant answers.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InterviewSnapshotV2"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "description": "Uses the v2 HTTP representation and also accepts compatible historical records."
+      }
+    },
+    "/api/v2/review/interviews/{session_id}/turns": {
+      "post": {
+        "operationId": "submitInterviewTurnV2",
+        "tags": [
+          "Interview"
+        ],
+        "x-required-capability": "WRITE_PROPOSAL",
+        "description": "Submits only a user answer. The server produces the score, follow-up decision, and next question from persisted evidence. Uses the v2 HTTP representation and also accepts compatible historical records.",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "x-max-body-bytes": 131072,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubmitInterviewTurnRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Scored Interview Turn or exact durable replay.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InterviewTurnResultV2"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/v2/review/interviews/{session_id}/complete": {
+      "post": {
+        "operationId": "completeInterviewV2",
+        "tags": [
+          "Interview"
+        ],
+        "x-required-capability": "WRITE_PROPOSAL",
+        "description": "Completes a persisted Interview exactly once and creates the evidence-bound report and Learning Path Artifact bindings. Uses the v2 HTTP representation and also accepts compatible historical records.",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "x-max-body-bytes": 131072,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompleteInterviewRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Completed report, Learning Path and exact durable replay.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InterviewCompletionResultV2"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/v2/review/learning-paths/{path_id}/steps/{step_id}": {
+      "put": {
+        "operationId": "updateLearningPathStepV2",
+        "tags": [
+          "Review"
+        ],
+        "x-required-capability": "WRITE_PROPOSAL",
+        "parameters": [
+          {
+            "name": "path_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "step_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "x-max-body-bytes": 131072,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateLearningPathStepRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "CAS-updated Learning Path step or exact durable replay.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LearningPathStepResultV2"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "description": "Uses the v2 HTTP representation and also accepts compatible historical records."
+      }
     }
   },
   "components": {
@@ -13150,6 +14665,66 @@
           "minimum": 1,
           "maximum": 100,
           "default": 25
+        }
+      },
+      "SynthesisWorkspaceID": {
+        "name": "workspace_id",
+        "in": "path",
+        "required": true,
+        "description": "Exact Workspace-scoped resource identity.",
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "SynthesisNoteID": {
+        "name": "note_id",
+        "in": "path",
+        "required": true,
+        "description": "Exact Workspace-scoped resource identity.",
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "SynthesisRevisionID": {
+        "name": "revision_id",
+        "in": "path",
+        "required": true,
+        "description": "Exact Workspace-scoped resource identity.",
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "SynthesisSourceSpanID": {
+        "name": "source_span_id",
+        "in": "path",
+        "required": true,
+        "description": "Exact Workspace-scoped resource identity.",
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "SynthesisProcessingID": {
+        "name": "processing_id",
+        "in": "path",
+        "required": true,
+        "description": "Exact Workspace-scoped resource identity.",
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "InterviewNotePreparationID": {
+        "name": "preparation_id",
+        "in": "path",
+        "required": true,
+        "description": "Exact Workspace-scoped resource identity.",
+        "schema": {
+          "type": "string",
+          "format": "uuid"
         }
       }
     },
@@ -30962,7 +32537,7 @@
             "format": "uuid"
           },
           "config": {
-            "$ref": "#/components/schemas/InterviewConfig"
+            "$ref": "#/components/schemas/InterviewClaimConfig"
           }
         },
         "additionalProperties": false
@@ -33334,6 +34909,3624 @@
         "type": "object",
         "required": ["items"],
         "properties": { "items": { "type": "array", "maxItems": 100, "items": { "$ref": "#/components/schemas/GitSyncRun" } }, "next_cursor": { "type": "string", "minLength": 1, "maxLength": 2048 } },
+        "additionalProperties": false
+      },
+      "SynthesisFailure": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "retryable"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "pattern": "^[A-Z][A-Z0-9_]{0,127}$"
+          },
+          "retryable": {
+            "type": "boolean"
+          }
+        }
+      },
+      "SynthesisNoteStatus": {
+        "type": "string",
+        "enum": [
+          "QUEUED",
+          "GENERATING",
+          "PENDING_APPROVAL",
+          "READY",
+          "FAILED",
+          "CONFLICT",
+          "CAPABILITY_UNAVAILABLE",
+          "RECOVERY_REQUIRED"
+        ]
+      },
+      "SynthesisProcessingStatus": {
+        "type": "string",
+        "enum": [
+          "PENDING",
+          "RUNNING",
+          "SUCCEEDED",
+          "NO_CHANGE",
+          "SKIPPED",
+          "FAILED",
+          "RECOVERY_REQUIRED"
+        ]
+      },
+      "SynthesisNote": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "workspace_id",
+          "document_id",
+          "topic_key",
+          "title",
+          "aliases",
+          "current_revision_id",
+          "version",
+          "status",
+          "workflow_run_id",
+          "failure",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "document_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "topic_key": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "aliases": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "minItems": 0,
+            "maxItems": 16
+          },
+          "current_revision_id": {
+            "oneOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647
+          },
+          "status": {
+            "$ref": "#/components/schemas/SynthesisNoteStatus"
+          },
+          "workflow_run_id": {
+            "oneOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "failure": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SynthesisFailure"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "SynthesisRevisionSummary": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "revision_no",
+          "article_revision_id",
+          "article_revision_no",
+          "content_hash",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "revision_no": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647
+          },
+          "article_revision_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "article_revision_no": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647
+          },
+          "content_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "SynthesisSourceVersion": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "workspace_id",
+          "source_id",
+          "source_version_id",
+          "content_artifact_id",
+          "parse_projection_id",
+          "content_hash"
+        ],
+        "properties": {
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "source_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "source_version_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "content_artifact_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "parse_projection_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "content_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      },
+      "SynthesisSourceRef": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source",
+          "source_span_id",
+          "excerpt_hash",
+          "title"
+        ],
+        "properties": {
+          "source": {
+            "$ref": "#/components/schemas/SynthesisSourceVersion"
+          },
+          "source_span_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "excerpt_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        }
+      },
+      "SynthesisStatement": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "text",
+          "applicability",
+          "sources"
+        ],
+        "properties": {
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "applicability": {
+            "type": "string",
+            "minLength": 0,
+            "maxLength": 2048
+          },
+          "sources": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SynthesisSourceRef"
+            },
+            "minItems": 1,
+            "maxItems": 32
+          }
+        }
+      },
+      "SynthesisConflictContent": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "subject",
+          "alternatives"
+        ],
+        "properties": {
+          "subject": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "alternatives": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SynthesisStatement"
+            },
+            "minItems": 2,
+            "maxItems": 4
+          }
+        }
+      },
+      "SynthesisGapContent": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "question",
+          "context",
+          "sources",
+          "resolution"
+        ],
+        "properties": {
+          "question": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "context": {
+            "type": "string",
+            "minLength": 0,
+            "maxLength": 2048
+          },
+          "sources": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SynthesisSourceRef"
+            },
+            "minItems": 0,
+            "maxItems": 32
+          },
+          "resolution": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SynthesisStatement"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "SynthesisFactItem": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "kind",
+          "fact",
+          "conflict",
+          "gap"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string",
+            "const": "FACT"
+          },
+          "fact": {
+            "$ref": "#/components/schemas/SynthesisStatement"
+          },
+          "conflict": {
+            "type": "null"
+          },
+          "gap": {
+            "type": "null"
+          }
+        }
+      },
+      "SynthesisConflictItem": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "kind",
+          "fact",
+          "conflict",
+          "gap"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string",
+            "const": "CONFLICT"
+          },
+          "fact": {
+            "type": "null"
+          },
+          "conflict": {
+            "$ref": "#/components/schemas/SynthesisConflictContent"
+          },
+          "gap": {
+            "type": "null"
+          }
+        }
+      },
+      "SynthesisGapItem": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "kind",
+          "fact",
+          "conflict",
+          "gap"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string",
+            "const": "GAP"
+          },
+          "fact": {
+            "type": "null"
+          },
+          "conflict": {
+            "type": "null"
+          },
+          "gap": {
+            "$ref": "#/components/schemas/SynthesisGapContent"
+          }
+        }
+      },
+      "SynthesisItem": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/SynthesisFactItem"
+          },
+          {
+            "$ref": "#/components/schemas/SynthesisConflictItem"
+          },
+          {
+            "$ref": "#/components/schemas/SynthesisGapItem"
+          }
+        ]
+      },
+      "SynthesisRevision": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "workspace_id",
+          "note_id",
+          "document_id",
+          "article_revision_id",
+          "revision_no",
+          "article_revision_no",
+          "parent_revision_id",
+          "title",
+          "content_hash",
+          "projection_hash",
+          "items",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "note_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "document_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "article_revision_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "revision_no": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647
+          },
+          "article_revision_no": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647
+          },
+          "parent_revision_id": {
+            "oneOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "content_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "projection_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SynthesisItem"
+            },
+            "minItems": 1,
+            "maxItems": 128
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "SynthesisPublication": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "revision_id",
+          "article_revision_id",
+          "proposal_id",
+          "proposal_revision_id",
+          "content_hash"
+        ],
+        "properties": {
+          "revision_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "article_revision_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "proposal_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "proposal_revision_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "content_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      },
+      "SynthesisNoteSummary": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "note",
+          "current_revision",
+          "published_revision",
+          "publication",
+          "item_count",
+          "conflict_count",
+          "gap_count",
+          "open_gap_count"
+        ],
+        "properties": {
+          "note": {
+            "$ref": "#/components/schemas/SynthesisNote"
+          },
+          "current_revision": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SynthesisRevisionSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "published_revision": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SynthesisRevisionSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "publication": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SynthesisPublication"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "item_count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 128
+          },
+          "conflict_count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 128
+          },
+          "gap_count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 128
+          },
+          "open_gap_count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 128
+          }
+        }
+      },
+      "SynthesisProcessing": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "workspace_id",
+          "source_version_id",
+          "workflow_run_id",
+          "status",
+          "revision_ids",
+          "failure",
+          "version",
+          "created_at",
+          "updated_at",
+          "completed_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "source_version_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "workflow_run_id": {
+            "oneOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/SynthesisProcessingStatus"
+          },
+          "revision_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "minItems": 0,
+            "maxItems": 8
+          },
+          "failure": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SynthesisFailure"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "completed_at": {
+            "oneOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "enum": [
+                    "PENDING",
+                    "RUNNING"
+                  ]
+                }
+              },
+              "required": [
+                "status"
+              ]
+            },
+            "then": {
+              "properties": {
+                "completed_at": {
+                  "type": "null"
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "completed_at": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "enum": [
+                    "FAILED",
+                    "RECOVERY_REQUIRED"
+                  ]
+                }
+              },
+              "required": [
+                "status"
+              ]
+            },
+            "then": {
+              "properties": {
+                "failure": {
+                  "$ref": "#/components/schemas/SynthesisFailure"
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "failure": {
+                  "type": "null"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "enum": [
+                    "RECOVERY_REQUIRED"
+                  ]
+                }
+              },
+              "required": [
+                "status"
+              ]
+            },
+            "then": {
+              "properties": {
+                "failure": {
+                  "properties": {
+                    "retryable": {
+                      "const": false
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "enum": [
+                    "RUNNING"
+                  ]
+                }
+              },
+              "required": [
+                "status"
+              ]
+            },
+            "then": {
+              "properties": {
+                "workflow_run_id": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "enum": [
+                    "SUCCEEDED"
+                  ]
+                }
+              },
+              "required": [
+                "status"
+              ]
+            },
+            "then": {
+              "properties": {
+                "revision_ids": {
+                  "minItems": 1
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "enum": [
+                    "NO_CHANGE",
+                    "SKIPPED"
+                  ]
+                }
+              },
+              "required": [
+                "status"
+              ]
+            },
+            "then": {
+              "properties": {
+                "revision_ids": {
+                  "maxItems": 0
+                }
+              }
+            }
+          }
+        ]
+      },
+      "SynthesisNoteDetail": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "workspace_id",
+          "note",
+          "current_revision",
+          "published_revision",
+          "publication",
+          "latest_processing"
+        ],
+        "properties": {
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "note": {
+            "$ref": "#/components/schemas/SynthesisNote"
+          },
+          "current_revision": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SynthesisRevision"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "published_revision": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SynthesisRevision"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "publication": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SynthesisPublication"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "latest_processing": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SynthesisProcessing"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "SynthesisNotePage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "workspace_id",
+          "items",
+          "next_cursor"
+        ],
+        "properties": {
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SynthesisNoteSummary"
+            },
+            "minItems": 0,
+            "maxItems": 100
+          },
+          "next_cursor": {
+            "oneOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "SynthesisProcessingPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "workspace_id",
+          "items",
+          "next_cursor"
+        ],
+        "properties": {
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SynthesisProcessing"
+            },
+            "minItems": 0,
+            "maxItems": 100
+          },
+          "next_cursor": {
+            "oneOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "SynthesisRevisionPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "workspace_id",
+          "items",
+          "next_cursor",
+          "note_id"
+        ],
+        "properties": {
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SynthesisRevisionSummary"
+            },
+            "minItems": 0,
+            "maxItems": 100
+          },
+          "next_cursor": {
+            "oneOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "note_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "SynthesisRevisionResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "workspace_id",
+          "note_id",
+          "revision"
+        ],
+        "properties": {
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "note_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "revision": {
+            "$ref": "#/components/schemas/SynthesisRevision"
+          }
+        }
+      },
+      "SynthesisSourceView": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "workspace_id",
+          "note_id",
+          "revision_id",
+          "reference",
+          "availability",
+          "text"
+        ],
+        "properties": {
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "note_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "revision_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "reference": {
+            "$ref": "#/components/schemas/SynthesisSourceRef"
+          },
+          "availability": {
+            "type": "string",
+            "enum": [
+              "AVAILABLE",
+              "STALE",
+              "UNAVAILABLE"
+            ]
+          },
+          "text": {
+            "oneOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 16384
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "availability": {
+                  "const": "AVAILABLE"
+                }
+              },
+              "required": [
+                "availability"
+              ]
+            },
+            "then": {
+              "properties": {
+                "text": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "text": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "SynthesisProcessingResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "workspace_id",
+          "processing"
+        ],
+        "properties": {
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "processing": {
+            "$ref": "#/components/schemas/SynthesisProcessing"
+          }
+        }
+      },
+      "SynthesisRetryRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "expected_version"
+        ],
+        "properties": {
+          "expected_version": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647
+          }
+        }
+      },
+      "SynthesisRetryResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "workspace_id",
+          "processing",
+          "replayed"
+        ],
+        "properties": {
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "processing": {
+            "$ref": "#/components/schemas/SynthesisProcessing"
+          },
+          "replayed": {
+            "type": "boolean"
+          }
+        }
+      },
+      "InterviewNoteRevisionRef": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "workspace_id",
+          "note_id",
+          "revision_id",
+          "document_id",
+          "article_revision_id",
+          "revision_no",
+          "article_revision_no",
+          "content_hash",
+          "projection_hash",
+          "title"
+        ],
+        "properties": {
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "note_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "revision_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "document_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "article_revision_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "revision_no": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647
+          },
+          "article_revision_no": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647
+          },
+          "content_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "projection_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        }
+      },
+      "InterviewNoteItem": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "revision",
+          "item_id",
+          "item_kind"
+        ],
+        "properties": {
+          "revision": {
+            "$ref": "#/components/schemas/InterviewNoteRevisionRef"
+          },
+          "item_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "item_kind": {
+            "type": "string",
+            "enum": [
+              "FACT",
+              "CONFLICT",
+              "GAP"
+            ]
+          }
+        }
+      },
+      "InterviewNoteQuestionSource": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "revision",
+          "item_id",
+          "item_kind",
+          "sources"
+        ],
+        "properties": {
+          "revision": {
+            "$ref": "#/components/schemas/InterviewNoteRevisionRef"
+          },
+          "item_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "item_kind": {
+            "type": "string",
+            "enum": [
+              "FACT",
+              "CONFLICT",
+              "GAP"
+            ]
+          },
+          "sources": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SynthesisSourceRef"
+            },
+            "minItems": 0,
+            "maxItems": 256
+          }
+        }
+      },
+      "InterviewNotePreparationOptions": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "role",
+          "difficulty",
+          "duration_minutes",
+          "question_count",
+          "max_follow_ups"
+        ],
+        "properties": {
+          "role": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "difficulty": {
+            "type": "string",
+            "enum": [
+              "FOUNDATION",
+              "INTERMEDIATE",
+              "ADVANCED"
+            ]
+          },
+          "duration_minutes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 240
+          },
+          "question_count": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20
+          },
+          "max_follow_ups": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 20
+          }
+        }
+      },
+      "InterviewNotePreparation": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "workspace_id",
+          "note_revision",
+          "options",
+          "status",
+          "workflow_run_id",
+          "session_id",
+          "failure",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "note_revision": {
+            "$ref": "#/components/schemas/InterviewNoteRevisionRef"
+          },
+          "options": {
+            "$ref": "#/components/schemas/InterviewNotePreparationOptions"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "QUEUED",
+              "GENERATING",
+              "READY",
+              "FAILED",
+              "CAPABILITY_UNAVAILABLE",
+              "RECOVERY_REQUIRED"
+            ]
+          },
+          "workflow_run_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "session_id": {
+            "oneOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "failure": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SynthesisFailure"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "enum": [
+                    "READY"
+                  ]
+                }
+              },
+              "required": [
+                "status"
+              ]
+            },
+            "then": {
+              "properties": {
+                "session_id": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "session_id": {
+                  "type": "null"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "enum": [
+                    "FAILED",
+                    "CAPABILITY_UNAVAILABLE",
+                    "RECOVERY_REQUIRED"
+                  ]
+                }
+              },
+              "required": [
+                "status"
+              ]
+            },
+            "then": {
+              "properties": {
+                "failure": {
+                  "$ref": "#/components/schemas/SynthesisFailure"
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "failure": {
+                  "type": "null"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "enum": [
+                    "RECOVERY_REQUIRED"
+                  ]
+                }
+              },
+              "required": [
+                "status"
+              ]
+            },
+            "then": {
+              "properties": {
+                "failure": {
+                  "properties": {
+                    "retryable": {
+                      "const": false
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "InterviewNotePreparationResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "preparation",
+          "replayed"
+        ],
+        "properties": {
+          "preparation": {
+            "$ref": "#/components/schemas/InterviewNotePreparation"
+          },
+          "replayed": {
+            "type": "boolean"
+          }
+        }
+      },
+      "InterviewNotePreparationPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InterviewNotePreparation"
+            },
+            "minItems": 0,
+            "maxItems": 20
+          }
+        }
+      },
+      "InterviewClaimQuestion": {
+        "type": "object",
+        "description": "Participant question projection. Canonical answer_points are deliberately not present.",
+        "required": [
+          "id",
+          "workspace_id",
+          "session_id",
+          "question_no",
+          "follow_up_no",
+          "claim_id",
+          "prompt",
+          "status",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "session_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "question_no": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "follow_up_no": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "parent_question_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "claim_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "topic_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "prompt": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8192,
+            "x-max-utf8-bytes": 8192
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "PENDING",
+              "ANSWERED",
+              "SKIPPED"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "answered_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "source_kind": {
+            "type": "string",
+            "const": "CLAIM"
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "follow_up_no": {
+                  "const": 0
+                }
+              },
+              "required": [
+                "follow_up_no"
+              ]
+            },
+            "then": {
+              "not": {
+                "required": [
+                  "parent_question_id"
+                ]
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "follow_up_no": {
+                  "minimum": 1
+                }
+              },
+              "required": [
+                "follow_up_no"
+              ]
+            },
+            "then": {
+              "required": [
+                "parent_question_id"
+              ]
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "const": "ANSWERED"
+                }
+              },
+              "required": [
+                "status"
+              ]
+            },
+            "then": {
+              "required": [
+                "answered_at"
+              ]
+            }
+          }
+        ],
+        "additionalProperties": false
+      },
+      "InterviewNoteQuestion": {
+        "type": "object",
+        "description": "Participant question projection. Canonical answer_points are deliberately not present.",
+        "required": [
+          "id",
+          "workspace_id",
+          "session_id",
+          "question_no",
+          "follow_up_no",
+          "claim_id",
+          "prompt",
+          "status",
+          "created_at",
+          "source_kind",
+          "note_item"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "session_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "question_no": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "follow_up_no": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "parent_question_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "claim_id": {
+            "type": "null"
+          },
+          "prompt": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8192,
+            "x-max-utf8-bytes": 8192
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "PENDING",
+              "ANSWERED",
+              "SKIPPED"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "answered_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "source_kind": {
+            "type": "string",
+            "const": "NOTE_REVISION"
+          },
+          "note_item": {
+            "$ref": "#/components/schemas/InterviewNoteItem"
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "follow_up_no": {
+                  "const": 0
+                }
+              },
+              "required": [
+                "follow_up_no"
+              ]
+            },
+            "then": {
+              "not": {
+                "required": [
+                  "parent_question_id"
+                ]
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "follow_up_no": {
+                  "minimum": 1
+                }
+              },
+              "required": [
+                "follow_up_no"
+              ]
+            },
+            "then": {
+              "required": [
+                "parent_question_id"
+              ]
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "const": "ANSWERED"
+                }
+              },
+              "required": [
+                "status"
+              ]
+            },
+            "then": {
+              "required": [
+                "answered_at"
+              ]
+            }
+          }
+        ],
+        "additionalProperties": false
+      },
+      "InterviewClaimFinding": {
+        "type": "object",
+        "required": [
+          "claim_id",
+          "detail",
+          "evidence"
+        ],
+        "properties": {
+          "claim_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "topic_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "detail": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "x-max-utf8-bytes": 4096
+          },
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 64,
+            "items": {
+              "$ref": "#/components/schemas/InterviewEvidence"
+            }
+          },
+          "source_kind": {
+            "type": "string",
+            "const": "CLAIM"
+          }
+        },
+        "additionalProperties": false
+      },
+      "InterviewNoteFinding": {
+        "type": "object",
+        "required": [
+          "claim_id",
+          "detail",
+          "evidence",
+          "source_kind",
+          "note_source"
+        ],
+        "properties": {
+          "claim_id": {
+            "type": "null"
+          },
+          "detail": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "x-max-utf8-bytes": 4096
+          },
+          "evidence": {
+            "type": "array",
+            "minItems": 0,
+            "maxItems": 0,
+            "items": {
+              "$ref": "#/components/schemas/InterviewEvidence"
+            }
+          },
+          "source_kind": {
+            "type": "string",
+            "const": "NOTE_REVISION"
+          },
+          "note_source": {
+            "$ref": "#/components/schemas/InterviewNoteQuestionSource"
+          }
+        },
+        "additionalProperties": false
+      },
+      "LearningPathClaimStep": {
+        "type": "object",
+        "required": [
+          "id",
+          "workspace_id",
+          "path_id",
+          "step_no",
+          "claim_id",
+          "source_version_id",
+          "source_span_id",
+          "evidence_hash",
+          "title",
+          "rationale",
+          "status",
+          "version",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "path_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "step_no": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "claim_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "topic_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "source_version_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "source_span_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "evidence_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "x-max-utf8-bytes": 512
+          },
+          "rationale": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "x-max-utf8-bytes": 4096
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "PENDING",
+              "IN_PROGRESS",
+              "COMPLETED",
+              "SKIPPED"
+            ]
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "source_kind": {
+            "type": "string",
+            "const": "CLAIM"
+          }
+        },
+        "additionalProperties": false
+      },
+      "LearningPathNoteStep": {
+        "type": "object",
+        "required": [
+          "id",
+          "workspace_id",
+          "path_id",
+          "step_no",
+          "claim_id",
+          "source_version_id",
+          "source_span_id",
+          "evidence_hash",
+          "title",
+          "rationale",
+          "status",
+          "version",
+          "created_at",
+          "updated_at",
+          "source_kind",
+          "note_source"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "path_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "step_no": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "claim_id": {
+            "type": "null"
+          },
+          "source_version_id": {
+            "type": "null"
+          },
+          "source_span_id": {
+            "type": "null"
+          },
+          "evidence_hash": {
+            "type": "null"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "x-max-utf8-bytes": 512
+          },
+          "rationale": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "x-max-utf8-bytes": 4096
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "PENDING",
+              "IN_PROGRESS",
+              "COMPLETED",
+              "SKIPPED"
+            ]
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "source_kind": {
+            "type": "string",
+            "const": "NOTE_REVISION"
+          },
+          "note_source": {
+            "$ref": "#/components/schemas/InterviewNoteQuestionSource"
+          }
+        },
+        "additionalProperties": false
+      },
+      "InterviewClaimScore": {
+        "type": "object",
+        "required": [
+          "schema_version",
+          "correctness",
+          "coverage",
+          "boundaries",
+          "clarity",
+          "evidence"
+        ],
+        "properties": {
+          "schema_version": {
+            "const": "interview-score/v1"
+          },
+          "correctness": {
+            "$ref": "#/components/schemas/InterviewScoreDimension"
+          },
+          "coverage": {
+            "$ref": "#/components/schemas/InterviewScoreDimension"
+          },
+          "boundaries": {
+            "$ref": "#/components/schemas/InterviewScoreDimension"
+          },
+          "clarity": {
+            "$ref": "#/components/schemas/InterviewScoreDimension"
+          },
+          "errors": {
+            "type": "array",
+            "maxItems": 32,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048,
+              "x-max-utf8-bytes": 2048
+            }
+          },
+          "omissions": {
+            "type": "array",
+            "maxItems": 32,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048,
+              "x-max-utf8-bytes": 2048
+            }
+          },
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 64,
+            "items": {
+              "$ref": "#/components/schemas/InterviewEvidence"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "InterviewNoteScore": {
+        "type": "object",
+        "required": [
+          "schema_version",
+          "correctness",
+          "coverage",
+          "boundaries",
+          "clarity",
+          "evidence",
+          "note_source"
+        ],
+        "properties": {
+          "schema_version": {
+            "const": "interview-score/v1"
+          },
+          "correctness": {
+            "$ref": "#/components/schemas/InterviewScoreDimension"
+          },
+          "coverage": {
+            "$ref": "#/components/schemas/InterviewScoreDimension"
+          },
+          "boundaries": {
+            "$ref": "#/components/schemas/InterviewScoreDimension"
+          },
+          "clarity": {
+            "$ref": "#/components/schemas/InterviewScoreDimension"
+          },
+          "errors": {
+            "type": "array",
+            "maxItems": 32,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048,
+              "x-max-utf8-bytes": 2048
+            }
+          },
+          "omissions": {
+            "type": "array",
+            "maxItems": 32,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048,
+              "x-max-utf8-bytes": 2048
+            }
+          },
+          "evidence": {
+            "type": "array",
+            "minItems": 0,
+            "maxItems": 0,
+            "items": {
+              "$ref": "#/components/schemas/InterviewEvidence"
+            }
+          },
+          "note_source": {
+            "$ref": "#/components/schemas/InterviewNoteQuestionSource"
+          }
+        },
+        "additionalProperties": false
+      },
+      "InterviewClaimScope": {
+        "type": "object",
+        "properties": {
+          "claim_ids": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "topic_ids": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        },
+        "anyOf": [
+          {
+            "required": [
+              "claim_ids"
+            ]
+          },
+          {
+            "required": [
+              "topic_ids"
+            ]
+          }
+        ],
+        "additionalProperties": false
+      },
+      "InterviewNoteScope": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "note_revision"
+        ],
+        "properties": {
+          "note_revision": {
+            "$ref": "#/components/schemas/InterviewNoteRevisionRef"
+          }
+        }
+      },
+      "InterviewClaimConfig": {
+        "type": "object",
+        "required": [
+          "schema_version",
+          "role",
+          "scope",
+          "difficulty",
+          "duration_minutes",
+          "question_count",
+          "max_follow_ups"
+        ],
+        "properties": {
+          "schema_version": {
+            "const": "interview/v1"
+          },
+          "role": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "x-max-utf8-bytes": 256
+          },
+          "scope": {
+            "$ref": "#/components/schemas/InterviewClaimScope"
+          },
+          "difficulty": {
+            "type": "string",
+            "enum": [
+              "FOUNDATION",
+              "INTERMEDIATE",
+              "ADVANCED"
+            ]
+          },
+          "duration_minutes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 240
+          },
+          "question_count": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20
+          },
+          "max_follow_ups": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 20
+          }
+        },
+        "additionalProperties": false
+      },
+      "WorkspaceAnalysisBudgetSummaryV2": {
+        "type": "object",
+        "required": [
+          "model_calls",
+          "tool_calls",
+          "input_tokens",
+          "output_tokens",
+          "estimated_cost_microunits"
+        ],
+        "properties": {
+          "model_calls": {
+            "type": "integer",
+            "minimum": 5,
+            "maximum": 14
+          },
+          "tool_calls": {
+            "type": "integer",
+            "minimum": 3,
+            "maximum": 13
+          },
+          "input_tokens": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 917504
+          },
+          "output_tokens": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 11264
+          },
+          "estimated_cost_microunits": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false,
+        "description": "Settled dynamic-loop usage. model_calls = tool_calls + 2; input tokens cannot exceed model_calls × 65536 and output tokens cannot exceed (model_calls − 2) × 512 + 4096 + 1024."
+      },
+      "WorkspaceAnalysisAnswerResultV2": {
+        "type": "object",
+        "required": [
+          "result_type",
+          "schema_id",
+          "schema_version",
+          "model_run_ref",
+          "payload"
+        ],
+        "properties": {
+          "result_type": {
+            "const": "workspace_analysis"
+          },
+          "schema_id": {
+            "const": "conversation.workspace_analysis_answer"
+          },
+          "schema_version": {
+            "const": "v2"
+          },
+          "model_run_ref": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "payload": {
+            "type": "object",
+            "required": [
+              "answer_markdown",
+              "citations",
+              "git_status",
+              "budget",
+              "proposal_suggestion",
+              "termination_reason"
+            ],
+            "properties": {
+              "answer_markdown": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 65536,
+                "x-max-utf8-bytes": 65536
+              },
+              "citations": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 32,
+                "items": {
+                  "$ref": "#/components/schemas/RAGResultCitation"
+                }
+              },
+              "git_status": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/WorkspaceAnalysisGitStatus"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Present only if ReadGitStatus was actually executed; otherwise explicitly null."
+              },
+              "budget": {
+                "$ref": "#/components/schemas/WorkspaceAnalysisBudgetSummaryV2"
+              },
+              "proposal_suggestion": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/WorkspaceAnalysisProposalSuggestion"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "termination_reason": {
+                "const": "COMPLETED"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false,
+        "description": "Published dynamic workspace analysis with same-workspace/index unique Citation tuples, independent review, and settled usage. Model Run identity must not reuse an evidence identity."
+      },
+      "WorkspaceAnalysisPublishedAnswerResult": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/WorkspaceAnalysisAnswerResult"
+          },
+          {
+            "$ref": "#/components/schemas/WorkspaceAnalysisAnswerResultV2"
+          }
+        ]
+      },
+      "WorkspaceAnalysisTimelineSourceSummaryV2": {
+        "type": "object",
+        "required": [
+          "kind",
+          "source"
+        ],
+        "properties": {
+          "kind": {
+            "const": "source"
+          },
+          "source": {
+            "type": "object",
+            "required": [
+              "evidence_ref",
+              "content_hash",
+              "truncated"
+            ],
+            "properties": {
+              "evidence_ref": {
+                "type": "string",
+                "pattern": "^E(?:[1-9]|[12][0-9]|3[0-2])$"
+              },
+              "content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      },
+      "WorkspaceAnalysisTimelineCitationSummaryV2": {
+        "type": "object",
+        "required": [
+          "kind",
+          "citation_validation"
+        ],
+        "properties": {
+          "kind": {
+            "const": "citation_validation"
+          },
+          "citation_validation": {
+            "type": "object",
+            "required": [
+              "valid_count",
+              "invalid_count",
+              "reason_codes"
+            ],
+            "properties": {
+              "valid_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 32
+              },
+              "invalid_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 32
+              },
+              "reason_codes": {
+                "type": "array",
+                "maxItems": 4,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                }
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false,
+        "description": "Run-global Citation result: total count 1..32. OK is present exactly when valid_count > 0; invalid_count > 0 requires a failure code."
+      },
+      "WorkspaceAnalysisTimelineModelSummaryV2": {
+        "type": "object",
+        "required": [
+          "kind",
+          "model_usage"
+        ],
+        "properties": {
+          "kind": {
+            "const": "model_usage"
+          },
+          "model_usage": {
+            "type": "object",
+            "required": [
+              "input_tokens",
+              "output_tokens"
+            ],
+            "properties": {
+              "input_tokens": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 65536
+              },
+              "output_tokens": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4096
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false,
+        "description": "Settled model usage; output limits are 512 for decide_next, 4096 for synthesize_answer, and 1024 for review_publish."
+      },
+      "WorkspaceAnalysisTimelineToolRefV2": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "name",
+              "version"
+            ],
+            "properties": {
+              "name": {
+                "const": "ReadGitStatus"
+              },
+              "version": {
+                "const": 3
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": [
+              "name",
+              "version"
+            ],
+            "properties": {
+              "name": {
+                "const": "SearchKnowledge"
+              },
+              "version": {
+                "const": 3
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": [
+              "name",
+              "version"
+            ],
+            "properties": {
+              "name": {
+                "const": "ReadSource"
+              },
+              "version": {
+                "const": 4
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": [
+              "name",
+              "version"
+            ],
+            "properties": {
+              "name": {
+                "const": "ValidateCitation"
+              },
+              "version": {
+                "const": 4
+              }
+            },
+            "additionalProperties": false
+          }
+        ]
+      },
+      "WorkspaceAnalysisTimelineItemV2": {
+        "type": "object",
+        "required": [
+          "sequence",
+          "kind",
+          "phase",
+          "status",
+          "tool_ref",
+          "duration_ms",
+          "error_code",
+          "summary"
+        ],
+        "properties": {
+          "sequence": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 27
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "node",
+              "model",
+              "tool"
+            ]
+          },
+          "phase": {
+            "type": "string",
+            "enum": [
+              "decide_next",
+              "inspect_workspace",
+              "retrieve_evidence",
+              "read_evidence",
+              "synthesize_answer",
+              "validate_citations",
+              "review_publish"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "waiting",
+              "started",
+              "succeeded",
+              "failed",
+              "refused",
+              "unknown",
+              "cancelled"
+            ]
+          },
+          "tool_ref": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/WorkspaceAnalysisTimelineToolRefV2"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 3600000
+          },
+          "error_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "WORKSPACE_ANALYSIS_EVIDENCE_INSUFFICIENT",
+              "WORKSPACE_ANALYSIS_CITATION_INVALID",
+              "WORKSPACE_ANALYSIS_FAITHFULNESS_REJECTED",
+              "WORKSPACE_ANALYSIS_MODEL_REFUSED",
+              "WORKSPACE_ANALYSIS_BUDGET_EXHAUSTED",
+              "WORKSPACE_ANALYSIS_RECEIPT_INVALID",
+              "WORKSPACE_ANALYSIS_RESULT_UNKNOWN",
+              "WORKSPACE_ANALYSIS_DEADLINE_EXCEEDED",
+              "WORKSPACE_ANALYSIS_MODEL_FAILED",
+              "WORKSPACE_ANALYSIS_TOOL_FAILED",
+              "WORKSPACE_ANALYSIS_RUNTIME_FAILED",
+              "WORKSPACE_ANALYSIS_CANCELLED",
+              null
+            ]
+          },
+          "summary": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/WorkspaceAnalysisTimelineGitSummary"
+              },
+              {
+                "$ref": "#/components/schemas/WorkspaceAnalysisTimelineSearchSummary"
+              },
+              {
+                "$ref": "#/components/schemas/WorkspaceAnalysisTimelineSourceSummaryV2"
+              },
+              {
+                "$ref": "#/components/schemas/WorkspaceAnalysisTimelineCitationSummaryV2"
+              },
+              {
+                "$ref": "#/components/schemas/WorkspaceAnalysisTimelineModelSummaryV2"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "description": "One persisted operation in journal order. No reasoning text, model request, source excerpt or permissions are exposed. Pending is an unauthorised slot and does not consume a call."
+      },
+      "WorkspaceAnalysisTimelineBudgetV2": {
+        "type": "object",
+        "required": [
+          "model_calls",
+          "tool_calls",
+          "source_reads",
+          "input_tokens",
+          "output_tokens",
+          "estimated_cost_microunits"
+        ],
+        "properties": {
+          "model_calls": {
+            "type": "object",
+            "required": [
+              "used",
+              "max"
+            ],
+            "properties": {
+              "used": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 14
+              },
+              "max": {
+                "type": "integer",
+                "const": 14
+              }
+            },
+            "additionalProperties": false
+          },
+          "tool_calls": {
+            "type": "object",
+            "required": [
+              "used",
+              "max"
+            ],
+            "properties": {
+              "used": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 13
+              },
+              "max": {
+                "type": "integer",
+                "const": 13
+              }
+            },
+            "additionalProperties": false
+          },
+          "source_reads": {
+            "type": "object",
+            "required": [
+              "used",
+              "max"
+            ],
+            "properties": {
+              "used": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 8
+              },
+              "max": {
+                "type": "integer",
+                "const": 8
+              }
+            },
+            "additionalProperties": false
+          },
+          "input_tokens": {
+            "type": "object",
+            "required": [
+              "used",
+              "max"
+            ],
+            "properties": {
+              "used": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 917504
+              },
+              "max": {
+                "type": "integer",
+                "const": 917504
+              }
+            },
+            "additionalProperties": false
+          },
+          "output_tokens": {
+            "type": "object",
+            "required": [
+              "used",
+              "max"
+            ],
+            "properties": {
+              "used": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 11264
+              },
+              "max": {
+                "type": "integer",
+                "minimum": 7169,
+                "maximum": 11264
+              }
+            },
+            "additionalProperties": false
+          },
+          "estimated_cost_microunits": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/WorkspaceAnalysisTimelineCounter"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "description": "Authoritative usage ledger; successful operation facts cannot exceed used counters. Pending slots do not count. Only success requires exact settled equality. Output maximum includes the configured synthesis allowance."
+      },
+      "WorkspaceAnalysisTimelineV2": {
+        "type": "object",
+        "required": [
+          "schema_id",
+          "schema_version",
+          "workspace_id",
+          "answer_id",
+          "analysis_run_id",
+          "run_status",
+          "termination_reason",
+          "items",
+          "budget",
+          "latest_server_event_sequence"
+        ],
+        "properties": {
+          "schema_id": {
+            "const": "conversation.workspace_analysis_timeline"
+          },
+          "schema_version": {
+            "const": "v2"
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "answer_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "analysis_run_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "run_status": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "running",
+              "succeeded",
+              "refused",
+              "clarification_required",
+              "failed",
+              "cancelled"
+            ]
+          },
+          "termination_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "COMPLETED",
+              "WORKSPACE_ANALYSIS_EVIDENCE_INSUFFICIENT",
+              "WORKSPACE_ANALYSIS_CITATION_INVALID",
+              "WORKSPACE_ANALYSIS_FAITHFULNESS_REJECTED",
+              "WORKSPACE_ANALYSIS_CLARIFICATION_REQUIRED",
+              "WORKSPACE_ANALYSIS_MODEL_REFUSED",
+              "WORKSPACE_ANALYSIS_BUDGET_EXHAUSTED",
+              "WORKSPACE_ANALYSIS_RECEIPT_INVALID",
+              "WORKSPACE_ANALYSIS_RESULT_UNKNOWN",
+              "WORKSPACE_ANALYSIS_DEADLINE_EXCEEDED",
+              "WORKSPACE_ANALYSIS_MODEL_FAILED",
+              "WORKSPACE_ANALYSIS_TOOL_FAILED",
+              "WORKSPACE_ANALYSIS_RUNTIME_FAILED",
+              "WORKSPACE_ANALYSIS_CANCELLED",
+              null
+            ]
+          },
+          "items": {
+            "type": "array",
+            "minItems": 0,
+            "maxItems": 27,
+            "items": {
+              "$ref": "#/components/schemas/WorkspaceAnalysisTimelineItemV2"
+            }
+          },
+          "budget": {
+            "$ref": "#/components/schemas/WorkspaceAnalysisTimelineBudgetV2"
+          },
+          "latest_server_event_sequence": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false,
+        "description": "Dynamic decision/tool prefixes in persisted journal order, followed by synthesis, final Citation validation and review. Loop Citation checks can occur before synthesis and do not constitute the final publishing gate."
+      },
+      "WorkspaceAnalysisTimelineResponse": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/WorkspaceAnalysisTimeline"
+          },
+          {
+            "$ref": "#/components/schemas/WorkspaceAnalysisTimelineV2"
+          }
+        ]
+      },
+      "AnswerV2": {
+        "type": "object",
+        "required": [
+          "id",
+          "workspace_id",
+          "conversation_id",
+          "question_id",
+          "publication_status",
+          "citations",
+          "retrieval_summary",
+          "current_stage",
+          "workflow",
+          "version",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "conversation_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "question_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "publication_status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "completed",
+              "refused",
+              "clarification_required",
+              "failed",
+              "cancelled"
+            ]
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowProjection"
+          },
+          "result_type": {
+            "type": "string",
+            "enum": [
+              "rag_answer",
+              "refusal",
+              "clarification",
+              "workspace_analysis",
+              "workspace_analysis_refusal",
+              "workspace_analysis_termination"
+            ]
+          },
+          "assistant_text": {
+            "type": "string"
+          },
+          "citations": {
+            "type": "array",
+            "maxItems": 500,
+            "items": {
+              "$ref": "#/components/schemas/AnswerCitation"
+            }
+          },
+          "result": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RAGAnswerResult"
+              },
+              {
+                "$ref": "#/components/schemas/RefusalResult"
+              },
+              {
+                "$ref": "#/components/schemas/ClarificationResult"
+              },
+              {
+                "$ref": "#/components/schemas/WorkspaceAnalysisPublishedAnswerResult"
+              },
+              {
+                "$ref": "#/components/schemas/WorkspaceAnalysisRefusalResult"
+              },
+              {
+                "$ref": "#/components/schemas/WorkspaceAnalysisTerminationResult"
+              }
+            ]
+          },
+          "retrieval_summary": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RetrievalSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "current_stage": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "plan.started",
+              "plan.completed",
+              "retrieval.started",
+              "retrieval.completed",
+              "validation.started",
+              "validation.completed",
+              null
+            ]
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false
+      },
+      "InterviewCompletionResultV2": {
+        "type": "object",
+        "required": [
+          "session",
+          "report",
+          "path",
+          "steps",
+          "replayed"
+        ],
+        "properties": {
+          "session": {
+            "$ref": "#/components/schemas/InterviewSessionV2"
+          },
+          "report": {
+            "$ref": "#/components/schemas/InterviewReportV2"
+          },
+          "path": {
+            "$ref": "#/components/schemas/LearningPath"
+          },
+          "steps": {
+            "type": "array",
+            "maxItems": 40,
+            "items": {
+              "$ref": "#/components/schemas/LearningPathStepV2"
+            }
+          },
+          "replayed": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "InterviewConfigV2": {
+        "type": "object",
+        "required": [
+          "schema_version",
+          "role",
+          "scope",
+          "difficulty",
+          "duration_minutes",
+          "question_count",
+          "max_follow_ups"
+        ],
+        "properties": {
+          "schema_version": {
+            "const": "interview/v1"
+          },
+          "role": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "x-max-utf8-bytes": 256
+          },
+          "scope": {
+            "$ref": "#/components/schemas/InterviewScopeV2"
+          },
+          "difficulty": {
+            "type": "string",
+            "enum": [
+              "FOUNDATION",
+              "INTERMEDIATE",
+              "ADVANCED"
+            ]
+          },
+          "duration_minutes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 240
+          },
+          "question_count": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20
+          },
+          "max_follow_ups": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 20
+          }
+        },
+        "additionalProperties": false
+      },
+      "InterviewFindingV2": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/InterviewClaimFinding"
+          },
+          {
+            "$ref": "#/components/schemas/InterviewNoteFinding"
+          }
+        ]
+      },
+      "InterviewQuestionV2": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/InterviewClaimQuestion"
+          },
+          {
+            "$ref": "#/components/schemas/InterviewNoteQuestion"
+          }
+        ]
+      },
+      "InterviewReportV2": {
+        "type": "object",
+        "required": [
+          "id",
+          "workspace_id",
+          "session_id",
+          "schema_version",
+          "summary",
+          "strengths",
+          "gaps",
+          "expression",
+          "evidence",
+          "artifact",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "session_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "schema_version": {
+            "const": "interview-report/v1"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/InterviewReportSummary"
+          },
+          "strengths": {
+            "type": "array",
+            "maxItems": 40,
+            "items": {
+              "$ref": "#/components/schemas/InterviewFindingV2"
+            }
+          },
+          "gaps": {
+            "type": "array",
+            "maxItems": 40,
+            "items": {
+              "$ref": "#/components/schemas/InterviewFindingV2"
+            }
+          },
+          "expression": {
+            "type": "array",
+            "maxItems": 40,
+            "items": {
+              "$ref": "#/components/schemas/InterviewFindingV2"
+            }
+          },
+          "evidence": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "$ref": "#/components/schemas/InterviewEvidence"
+            }
+          },
+          "artifact": {
+            "$ref": "#/components/schemas/InterviewReportArtifactBinding"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "note_sources": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 20,
+            "items": {
+              "$ref": "#/components/schemas/InterviewNoteQuestionSource"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "InterviewScopeV2": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/InterviewClaimScope"
+          },
+          {
+            "$ref": "#/components/schemas/InterviewNoteScope"
+          }
+        ]
+      },
+      "InterviewScoreV2": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/InterviewClaimScore"
+          },
+          {
+            "$ref": "#/components/schemas/InterviewNoteScore"
+          }
+        ]
+      },
+      "InterviewSessionV2": {
+        "type": "object",
+        "required": [
+          "id",
+          "workspace_id",
+          "config",
+          "status",
+          "version",
+          "follow_up_count",
+          "started_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "config": {
+            "$ref": "#/components/schemas/InterviewConfigV2"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ACTIVE",
+              "COMPLETED",
+              "CANCELLED"
+            ]
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "follow_up_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "ended_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "const": "ACTIVE"
+                }
+              },
+              "required": [
+                "status"
+              ]
+            },
+            "then": {
+              "not": {
+                "required": [
+                  "ended_at"
+                ]
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "enum": [
+                    "COMPLETED",
+                    "CANCELLED"
+                  ]
+                }
+              },
+              "required": [
+                "status"
+              ]
+            },
+            "then": {
+              "required": [
+                "ended_at"
+              ]
+            }
+          }
+        ],
+        "additionalProperties": false
+      },
+      "InterviewSessionPageV2": {
+        "type": "object",
+        "required": [
+          "workspace_id",
+          "items"
+        ],
+        "properties": {
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "items": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/InterviewSessionV2"
+            }
+          },
+          "next_cursor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "x-max-utf8-bytes": 4096
+          }
+        },
+        "additionalProperties": false
+      },
+      "InterviewSnapshotV2": {
+        "type": "object",
+        "required": [
+          "session",
+          "questions",
+          "turns",
+          "steps"
+        ],
+        "properties": {
+          "session": {
+            "$ref": "#/components/schemas/InterviewSessionV2"
+          },
+          "questions": {
+            "type": "array",
+            "maxItems": 40,
+            "items": {
+              "$ref": "#/components/schemas/InterviewQuestionV2"
+            }
+          },
+          "turns": {
+            "type": "array",
+            "maxItems": 40,
+            "items": {
+              "$ref": "#/components/schemas/InterviewTurnV2"
+            }
+          },
+          "report": {
+            "$ref": "#/components/schemas/InterviewReportV2"
+          },
+          "path": {
+            "$ref": "#/components/schemas/LearningPath"
+          },
+          "steps": {
+            "type": "array",
+            "maxItems": 40,
+            "items": {
+              "$ref": "#/components/schemas/LearningPathStepV2"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "InterviewStartResultV2": {
+        "type": "object",
+        "required": [
+          "session",
+          "questions",
+          "replayed"
+        ],
+        "properties": {
+          "session": {
+            "$ref": "#/components/schemas/InterviewSessionV2"
+          },
+          "questions": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 20,
+            "items": {
+              "$ref": "#/components/schemas/InterviewQuestionV2"
+            }
+          },
+          "replayed": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "InterviewTurnV2": {
+        "type": "object",
+        "description": "Raw user_answer and request receipt identity are deliberately excluded from recovery projections.",
+        "required": [
+          "id",
+          "workspace_id",
+          "session_id",
+          "question_id",
+          "score",
+          "decision",
+          "scorer_version",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "session_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "question_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "score": {
+            "$ref": "#/components/schemas/InterviewScoreV2"
+          },
+          "decision": {
+            "$ref": "#/components/schemas/InterviewTurnDecision"
+          },
+          "scorer_version": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "x-max-utf8-bytes": 128
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false
+      },
+      "InterviewTurnResultV2": {
+        "type": "object",
+        "required": [
+          "turn",
+          "replayed"
+        ],
+        "properties": {
+          "turn": {
+            "$ref": "#/components/schemas/InterviewTurnV2"
+          },
+          "follow_up": {
+            "$ref": "#/components/schemas/InterviewQuestionV2"
+          },
+          "next_question": {
+            "$ref": "#/components/schemas/InterviewQuestionV2"
+          },
+          "replayed": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "LearningPathStepV2": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/LearningPathClaimStep"
+          },
+          {
+            "$ref": "#/components/schemas/LearningPathNoteStep"
+          }
+        ]
+      },
+      "LearningPathStepResultV2": {
+        "type": "object",
+        "required": [
+          "path",
+          "step",
+          "replayed"
+        ],
+        "properties": {
+          "path": {
+            "$ref": "#/components/schemas/LearningPath"
+          },
+          "step": {
+            "$ref": "#/components/schemas/LearningPathStepV2"
+          },
+          "replayed": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "QuestionAcceptanceV2": {
+        "type": "object",
+        "required": [
+          "question",
+          "answer",
+          "status_url"
+        ],
+        "properties": {
+          "question": {
+            "$ref": "#/components/schemas/Question"
+          },
+          "answer": {
+            "$ref": "#/components/schemas/AnswerV2"
+          },
+          "status_url": {
+            "type": "string",
+            "format": "uri-reference",
+            "pattern": "^/api/v2/answers/"
+          }
+        },
+        "additionalProperties": false
+      },
+      "TurnV2": {
+        "type": "object",
+        "required": [
+          "question",
+          "answer"
+        ],
+        "properties": {
+          "question": {
+            "$ref": "#/components/schemas/Question"
+          },
+          "answer": {
+            "$ref": "#/components/schemas/AnswerV2"
+          }
+        },
+        "additionalProperties": false
+      },
+      "TurnPageV2": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/TurnV2"
+            }
+          },
+          "next_cursor": {
+            "$ref": "#/components/schemas/PageCursor"
+          }
+        },
         "additionalProperties": false
       }
     }

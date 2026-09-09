@@ -241,7 +241,7 @@ func (finalizer *GORMWorkspaceAnalysisFinalizer) finalizeSuccessScoped(ctx conte
 	if err := gormForceWorkspaceAnalysisPublicationConstraints(ctx, tx); err != nil {
 		return conversationworkflow.WorkspaceAnalysisPublicationOutput{}, false, err
 	}
-	output, err := workspaceAnalysisPublicationOutput(answer, proofID)
+	output, err := workspaceAnalysisPublicationOutputForVersion(answer, proofID, fence.DefinitionVersion)
 	if err != nil {
 		return conversationworkflow.WorkspaceAnalysisPublicationOutput{}, false, err
 	}
@@ -298,6 +298,9 @@ func (finalizer *GORMWorkspaceAnalysisFinalizer) finalizeTerminationScoped(ctx c
 	if err := validateActiveTerminationFence(fence, command); err != nil {
 		return conversationworkflow.WorkspaceAnalysisPublicationOutput{}, false, err
 	}
+	if err := gormCloseWorkspaceAnalysisDecisionRuns(ctx, tx, fence.RunID, fence.DefinitionVersion, fence.DatabaseNow); err != nil {
+		return conversationworkflow.WorkspaceAnalysisPublicationOutput{}, false, err
+	}
 	authority, err := gormLockWorkspaceAnalysisTerminationAuthority(ctx, tx, command, fence)
 	if err != nil {
 		return conversationworkflow.WorkspaceAnalysisPublicationOutput{}, false, err
@@ -348,7 +351,7 @@ func (finalizer *GORMWorkspaceAnalysisFinalizer) finalizeTerminationScoped(ctx c
 	if err := gormForceWorkspaceAnalysisPublicationConstraints(ctx, tx); err != nil {
 		return conversationworkflow.WorkspaceAnalysisPublicationOutput{}, false, err
 	}
-	output, err := workspaceAnalysisPublicationOutput(answer, proofID)
+	output, err := workspaceAnalysisPublicationOutputForVersion(answer, proofID, fence.DefinitionVersion)
 	if err != nil {
 		return conversationworkflow.WorkspaceAnalysisPublicationOutput{}, false, err
 	}
@@ -374,8 +377,9 @@ func gormLockWorkspaceAnalysisFinalizationFence(
 		return workspaceAnalysisFinalizationFence{}, workspaceAnalysisFinalizerQueryError(err, "workflow node attempt")
 	}
 	var runReason *string
+	var definitionKey, definitionHash string
 	if err := gormScanRow(tx.WithContext(ctx).Raw(`SELECT
-		status,termination_reason,version,deadline_at,
+		status,termination_reason,version,deadline_at,definition_key,definition_version,definition_hash,policy_version,
 		max_model_calls,max_tool_calls,max_source_reads,max_input_tokens,max_output_tokens,
 		reserved_model_calls,reserved_tool_calls,reserved_source_reads,reserved_input_tokens,reserved_output_tokens,
 		settled_model_calls,settled_tool_calls,settled_source_reads,settled_input_tokens,settled_output_tokens,
@@ -383,7 +387,7 @@ func gormLockWorkspaceAnalysisFinalizationFence(
 		FROM agent.workspace_analysis_run
 		WHERE id=? AND workspace_id=? AND conversation_id=? AND question_id=? AND answer_id=? AND workflow_run_id=?
 		FOR UPDATE`, string(lookup.AnalysisRunID), string(lookup.WorkspaceID), string(lookup.ConversationID), string(lookup.QuestionID), string(lookup.AnswerID), string(lookup.WorkflowRunID))).Scan(
-		&fence.RunStatus, &runReason, &fence.RunVersion, &fence.DeadlineAt,
+		&fence.RunStatus, &runReason, &fence.RunVersion, &fence.DeadlineAt, &definitionKey, &fence.DefinitionVersion, &definitionHash, &fence.PolicyVersion,
 		&fence.MaxModelCalls, &fence.MaxToolCalls, &fence.MaxSourceReads, &fence.MaxInputTokens, &fence.MaxOutputTokens,
 		&fence.ReservedModelCalls, &fence.ReservedToolCalls, &fence.ReservedSourceReads, &fence.ReservedInputTokens, &fence.ReservedOutputTokens,
 		&fence.SettledModelCalls, &fence.SettledToolCalls, &fence.SettledSourceReads, &fence.SettledInputTokens, &fence.SettledOutputTokens,
@@ -395,6 +399,17 @@ func gormLockWorkspaceAnalysisFinalizationFence(
 		reason := agentdomain.WorkspaceAnalysisRunTerminationReason(*runReason)
 		fence.RunReason = &reason
 	}
+	if definitionKey != conversationworkflow.WorkspaceAnalysisDefinitionKey || fence.DefinitionVersion != workspaceAnalysisPublicationVersion(lookup.DefinitionVersion) {
+		return workspaceAnalysisFinalizationFence{}, workspaceAnalysisTerminationAuthorityError("workspace analysis publication version differs from its persisted run")
+	}
+	if err := gormValidateWorkspaceAnalysisPersistedDefinition(ctx, tx, lookup.WorkspaceID, lookup.WorkflowRunID, fence.DefinitionVersion, fence.PolicyVersion, definitionHash); err != nil {
+		return workspaceAnalysisFinalizationFence{}, err
+	}
+	if fence.DefinitionVersion == 2 {
+		if err := gormScanRow(tx.WithContext(ctx).Raw(`SELECT count(*) FROM agent.workspace_analysis_evidence WHERE analysis_run_id=?`, string(lookup.AnalysisRunID))).Scan(&fence.EvidenceCount); err != nil {
+			return workspaceAnalysisFinalizationFence{}, classify(err, ErrorCodeWorkspaceAnalysisFinalizeUnavailable)
+		}
+	}
 	return fence, nil
 }
 
@@ -404,7 +419,7 @@ func gormLockWorkspaceAnalysisSuccessAuthority(
 	command conversationapplication.FinalizeWorkspaceAnalysisSuccessCommand,
 ) (workspaceAnalysisOperationRecord, workspaceAnalysisCallAuthority, error) {
 	operation, err := scanWorkspaceAnalysisOperation(gormScanRow(tx.WithContext(ctx).Raw(`SELECT
-		id::text,node_run_id::text,operation_kind,call_kind,status,model_call_id::text,tool_call_id::text,
+		id::text,node_run_id::text,node_key,ordinal,operation_kind,call_kind,status,model_call_id::text,tool_call_id::text,
 		result_kind,result_id::text,result_hash,error_code,created_at,updated_at,completed_at
 		FROM agent.workspace_analysis_operation
 		WHERE analysis_run_id=? AND node_run_id=? AND operation_kind='FAITHFULNESS_REVIEW'
@@ -438,21 +453,16 @@ func gormLockWorkspaceAnalysisTerminationAuthority(
 		return workspaceAnalysisTerminationAuthority{}, nil
 	}
 	operation, err := scanWorkspaceAnalysisOperation(gormScanRow(tx.WithContext(ctx).Raw(`SELECT
-		id::text,node_run_id::text,operation_kind,call_kind,status,model_call_id::text,tool_call_id::text,
+		id::text,node_run_id::text,node_key,ordinal,operation_kind,call_kind,status,model_call_id::text,tool_call_id::text,
 		result_kind,result_id::text,result_hash,error_code,created_at,updated_at,completed_at
 		FROM agent.workspace_analysis_operation
 		WHERE id=? AND analysis_run_id=? AND workspace_id=? AND workflow_run_id=?
-		  AND (
-			(?='WORKSPACE_ANALYSIS_EVIDENCE_INSUFFICIENT' AND ?='read_evidence'
-			 AND node_key='retrieve_evidence' AND operation_kind='KNOWLEDGE_SEARCH' AND ordinal=1)
-			OR (?='WORKSPACE_ANALYSIS_CITATION_INVALID' AND ?='review_publish'
-			 AND node_key='validate_citations' AND operation_kind='CITATION_VALIDATION' AND ordinal=1)
-			OR (? NOT IN ('WORKSPACE_ANALYSIS_EVIDENCE_INSUFFICIENT','WORKSPACE_ANALYSIS_CITATION_INVALID')
-			 AND node_run_id=?)
-		  )
-		FOR UPDATE`, string(*command.OperationID), string(command.AnalysisRunID), string(command.WorkspaceID), string(command.WorkflowRunID), string(command.Reason), fence.NodeKey, string(command.Reason), fence.NodeKey, string(command.Reason), string(command.NodeRunID))))
+		FOR UPDATE`, string(*command.OperationID), string(command.AnalysisRunID), string(command.WorkspaceID), string(command.WorkflowRunID))))
 	if err != nil {
 		return workspaceAnalysisTerminationAuthority{}, workspaceAnalysisFinalizerQueryError(err, "workspace analysis termination operation")
+	}
+	if !workspaceAnalysisTerminationOperationBinding(command, fence, operation) {
+		return workspaceAnalysisTerminationAuthority{}, workspaceAnalysisTerminationAuthorityError("workspace analysis termination node binding drifted")
 	}
 	authority, err := gormLockWorkspaceAnalysisOperationAuthority(ctx, tx, operation)
 	if err != nil {
@@ -539,9 +549,20 @@ func gormLoadWorkspaceAnalysisSuccessFacts(
 	if err != nil {
 		return workspaceAnalysisSuccessFacts{}, err
 	}
-	gitReceipt, err := gormLoadWorkspaceAnalysisResultReceipt(ctx, tx, command.WorkspaceID, command.GitReceiptID, command.GitReceiptHash)
-	if err != nil {
-		return workspaceAnalysisSuccessFacts{}, err
+	var gitReceipt toolsdomain.ResultReceipt
+	if command.GitReceiptID != "" {
+		gitReceipt, err = gormLoadWorkspaceAnalysisResultReceipt(ctx, tx, command.WorkspaceID, command.GitReceiptID, command.GitReceiptHash)
+		if err != nil {
+			return workspaceAnalysisSuccessFacts{}, err
+		}
+	}
+	if candidate.SchemaVersion != fence.DefinitionVersion || candidate.WorkspaceID != command.WorkspaceID {
+		return workspaceAnalysisSuccessFacts{}, workspaceAnalysisTerminationAuthorityError("workspace analysis candidate version or workspace differs")
+	}
+	if fence.DefinitionVersion == 2 {
+		if err := gormValidateWorkspaceAnalysisV2SuccessFacts(ctx, tx, command); err != nil {
+			return workspaceAnalysisSuccessFacts{}, err
+		}
 	}
 	validationReceipt, err := gormLoadWorkspaceAnalysisResultReceipt(ctx, tx, command.WorkspaceID, command.ValidationReceiptID, command.ValidationReceiptHash)
 	if err != nil {
@@ -563,7 +584,7 @@ func gormLoadWorkspaceAnalysisSuccessFacts(
 	if err != nil || !review.Payload.Passed || review.ModelRunRef != reviewResult.ModelRunID {
 		return workspaceAnalysisSuccessFacts{}, consistency(ErrorCodeWorkspaceAnalysisFinalizeCorrupt, errors.New("workspace analysis review did not produce a publishable decision"))
 	}
-	if gitReceipt.WorkflowRunID != command.WorkflowRunID || validationReceipt.WorkflowRunID != command.WorkflowRunID {
+	if (gitReceipt.ID != "" && gitReceipt.WorkflowRunID != command.WorkflowRunID) || validationReceipt.WorkflowRunID != command.WorkflowRunID {
 		return workspaceAnalysisSuccessFacts{}, consistency(ErrorCodeWorkspaceAnalysisFinalizeCorrupt, errors.New("workspace analysis receipt workflow binding drifted"))
 	}
 	latest := laterWorkspaceAnalysisTime(fence.RunUpdatedAt, candidate.CreatedAt)
@@ -722,6 +743,14 @@ func gormBuildWorkspaceAnalysisTerminationPublication(
 	var modelRunID *foundation.ID
 	switch command.Reason {
 	case agentdomain.WorkspaceAnalysisRunEvidenceInsufficient:
+		if fence.DefinitionVersion == 2 {
+			createdAt, err := gormValidateWorkspaceAnalysisV2EvidenceInsufficient(ctx, tx, command, authority)
+			if err != nil {
+				return workspaceAnalysisPublication{}, time.Time{}, err
+			}
+			latestFactAt = laterWorkspaceAnalysisTime(latestFactAt, createdAt)
+			break
+		}
 		receipt, err := gormLoadWorkspaceAnalysisResultReceipt(ctx, tx, command.WorkspaceID, command.Artifact.ID, command.Artifact.Hash)
 		if err != nil {
 			return workspaceAnalysisPublication{}, time.Time{}, err
@@ -740,8 +769,16 @@ func gormBuildWorkspaceAnalysisTerminationPublication(
 		if err != nil {
 			return workspaceAnalysisPublication{}, time.Time{}, err
 		}
-		results, err := toolsdomain.ValidateCitationV3ReceiptResults(receipt, candidate.ID, candidate.DocumentHash, decoded.Payload.CitationRefs)
-		if err != nil || receipt.Tool != (toolsdomain.ToolRef{Name: "ValidateCitation", Version: 3}) {
+		if candidate.SchemaVersion != fence.DefinitionVersion {
+			return workspaceAnalysisPublication{}, time.Time{}, workspaceAnalysisTerminationAuthorityError("citation-invalid candidate version differs")
+		}
+		var results []toolsdomain.ValidateCitationV3ReceiptResult
+		if fence.DefinitionVersion == 2 {
+			results, err = toolsdomain.ValidateCitationV4ReceiptResults(receipt, candidate.ID, candidate.DocumentHash, decoded.Payload.CitationRefs)
+		} else {
+			results, err = toolsdomain.ValidateCitationV3ReceiptResults(receipt, candidate.ID, candidate.DocumentHash, decoded.Payload.CitationRefs)
+		}
+		if err != nil {
 			return workspaceAnalysisPublication{}, time.Time{}, workspaceAnalysisTerminationAuthorityError("citation-invalid receipt binding is incomplete")
 		}
 		invalidResult := false
@@ -927,11 +964,14 @@ func gormInsertWorkspaceAnalysisSuccessProof(ctx context.Context, tx *gorm.DB, p
 		AnswerID: string(command.AnswerID), WorkflowRunID: string(command.WorkflowRunID),
 		FinalizationNodeRunID: string(command.NodeRunID), FinalizationNodeAttemptID: string(command.NodeAttemptID),
 		CandidateID: string(command.CandidateID), CandidateHash: command.CandidateHash,
-		GitReceiptID: string(command.GitReceiptID), GitReceiptHash: command.GitReceiptHash,
 		ValidationReceiptID: string(command.ValidationReceiptID), ValidationReceiptHash: command.ValidationReceiptHash,
 		ReviewModelResultID: string(command.ReviewModelResultID), ReviewDocumentHash: command.ReviewModelResultHash,
 		PublishedDocument: []byte(publication.Document), PublishedResultHash: publication.ResultHash,
 		PublishedBytes: int64(len(publication.Document)), CreatedAt: now,
+	}
+	if command.GitReceiptID != "" {
+		id, hash := string(command.GitReceiptID), command.GitReceiptHash
+		model.GitReceiptID, model.GitReceiptHash = &id, &hash
 	}
 	if err := tx.WithContext(ctx).Create(&model).Error; err != nil {
 		return classify(err, ErrorCodeWorkspaceAnalysisFinalizeUnavailable)
@@ -1152,7 +1192,8 @@ func gormLoadWorkspaceAnalysisSuccessProof(
 	lookup conversationapplication.WorkspaceAnalysisPublicationLookup,
 ) (workspaceAnalysisSuccessProofRecord, bool, error) {
 	var record workspaceAnalysisSuccessProofRecord
-	var id, nodeRunID, nodeAttemptID, candidateID, gitReceiptID, validationReceiptID, reviewResultID string
+	var id, nodeRunID, nodeAttemptID, candidateID, validationReceiptID, reviewResultID string
+	var gitReceiptID, gitReceiptHash *string
 	err := gormScanRow(tx.WithContext(ctx).Raw(`SELECT
 		id::text,finalization_node_run_id::text,finalization_node_attempt_id::text,
 		candidate_id::text,candidate_hash,git_receipt_id::text,git_receipt_hash,
@@ -1160,7 +1201,7 @@ func gormLoadWorkspaceAnalysisSuccessProof(
 		published_document,published_result_hash
 		FROM agent.workspace_analysis_publication_proof
 		WHERE analysis_run_id=? AND workspace_id=? AND answer_id=? AND workflow_run_id=?`, string(lookup.AnalysisRunID), string(lookup.WorkspaceID), string(lookup.AnswerID), string(lookup.WorkflowRunID))).Scan(
-		&id, &nodeRunID, &nodeAttemptID, &candidateID, &record.CandidateHash, &gitReceiptID, &record.GitReceiptHash,
+		&id, &nodeRunID, &nodeAttemptID, &candidateID, &record.CandidateHash, &gitReceiptID, &gitReceiptHash,
 		&validationReceiptID, &record.ValidationReceiptHash, &reviewResultID, &record.ReviewResultHash,
 		&record.PublishedDocument, &record.PublishedResultHash,
 	)
@@ -1170,12 +1211,22 @@ func gormLoadWorkspaceAnalysisSuccessProof(
 	if err != nil {
 		return workspaceAnalysisSuccessProofRecord{}, false, classify(err, ErrorCodeWorkspaceAnalysisFinalizeUnavailable)
 	}
-	ids, err := parseWorkspaceAnalysisIDs(id, nodeRunID, nodeAttemptID, candidateID, gitReceiptID, validationReceiptID, reviewResultID)
+	ids, err := parseWorkspaceAnalysisIDs(id, nodeRunID, nodeAttemptID, candidateID, validationReceiptID, reviewResultID)
 	if err != nil {
 		return workspaceAnalysisSuccessProofRecord{}, false, consistency(ErrorCodeWorkspaceAnalysisFinalizeCorrupt, err)
 	}
 	record.ID, record.NodeRunID, record.NodeAttemptID, record.CandidateID = ids[0], ids[1], ids[2], ids[3]
-	record.GitReceiptID, record.ValidationReceiptID, record.ReviewResultID = ids[4], ids[5], ids[6]
+	record.ValidationReceiptID, record.ReviewResultID = ids[4], ids[5]
+	if (gitReceiptID == nil) != (gitReceiptHash == nil) || (gitReceiptID == nil && lookup.DefinitionVersion != 2) {
+		return workspaceAnalysisSuccessProofRecord{}, false, workspaceAnalysisTerminationAuthorityError("workspace analysis Git proof nullable pair differs")
+	}
+	if gitReceiptID != nil {
+		parsed, err := parseCanonicalID(*gitReceiptID)
+		if err != nil || len(*gitReceiptHash) != 64 {
+			return workspaceAnalysisSuccessProofRecord{}, false, workspaceAnalysisTerminationAuthorityError("workspace analysis Git proof is invalid")
+		}
+		record.GitReceiptID, record.GitReceiptHash = parsed, *gitReceiptHash
+	}
 	return record, true, nil
 }
 

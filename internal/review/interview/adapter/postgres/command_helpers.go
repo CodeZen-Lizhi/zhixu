@@ -264,6 +264,8 @@ func cloneQuestion(question *domain.Question) *domain.Question {
 	copy := *question
 	copy.AnswerPoints = append([]string(nil), question.AnswerPoints...)
 	copy.Evidence = append([]domain.EvidenceRef(nil), question.Evidence...)
+	copy.NoteSource = domain.CloneNoteSource(question.NoteSource)
+	copy.FollowUpPlan = domain.CloneNoteFollowUps(question.FollowUpPlan)
 	return &copy
 }
 

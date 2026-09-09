@@ -26,9 +26,10 @@ import (
 // Models instance that constructed it. A Host lease therefore protects both
 // from retirement until the Workflow Attempt has settled.
 type workerRuntimeGeneration struct {
-	models    *modelsettingsruntime.Models
-	executors *workflowapplication.ExecutorRegistry
-	sources   sourceProcessingComponents
+	models            *modelsettingsruntime.Models
+	executors         *workflowapplication.ExecutorRegistry
+	sources           sourceProcessingComponents
+	workspaceAnalysis workerWorkspaceAnalysisGeneration
 }
 
 type workerUnavailableExecutor struct {

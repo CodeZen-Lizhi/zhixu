@@ -2,7 +2,8 @@
 import { canonicalUuidPattern as uuidPattern, hasOnlyKeys, isAbortError, isRecord } from "../shared/codec";
 import { InterviewApi as GeneratedInterviewApi } from "./generated/apis/InterviewApi";
 import { ReviewApi as GeneratedReviewApi } from "./generated/apis/ReviewApi";
-import type { InterviewConfig as GeneratedInterviewConfig } from "./generated/models";
+import type { InterviewClaimConfig as GeneratedInterviewConfig } from "./generated/models";
+import { decodeNoteItemRef as decodeSynthesisNoteItem, decodeNoteQuestionSource as decodeSynthesisNoteSource, decodeNoteRevisionRef as decodeSynthesisNoteRevision, type NoteItemRef, type NoteQuestionSource, type NoteRevisionRef } from "./synthesis";
 import {
   generatedConfiguration,
   generatedRawResponse,
@@ -35,7 +36,7 @@ export interface InterviewEvidence {
 export interface InterviewConfig {
   schemaVersion: "interview/v1";
   role: string;
-  scope: { claimIds: string[]; topicIds: string[] };
+  scope: { claimIds: string[]; topicIds: string[]; noteRevision?: NoteRevisionRef };
   difficulty: InterviewDifficulty;
   durationMinutes: number;
   questionCount: number;
@@ -74,7 +75,9 @@ export interface InterviewQuestion {
   questionNo: number;
   followUpNo: number;
   parentQuestionId?: string;
-  claimId: string;
+  claimId: string | null;
+  sourceKind?: "CLAIM" | "NOTE_REVISION";
+  noteItem?: NoteItemRef;
   topicId?: string;
   prompt: string;
   status: InterviewQuestionStatus;
@@ -96,6 +99,7 @@ export interface InterviewScore {
   errors: string[];
   omissions: string[];
   evidence: InterviewEvidence[];
+  noteSource?: NoteQuestionSource;
 }
 
 export interface InterviewTurn {
@@ -121,7 +125,9 @@ export interface InterviewArtifactBinding {
 }
 
 export interface InterviewFinding {
-  claimId: string;
+  claimId: string | null;
+  sourceKind?: "CLAIM" | "NOTE_REVISION";
+  noteSource?: NoteQuestionSource;
   topicId?: string;
   detail: string;
   evidence: InterviewEvidence[];
@@ -145,6 +151,7 @@ export interface InterviewReport {
   gaps: InterviewFinding[];
   expression: InterviewFinding[];
   evidence: InterviewEvidence[];
+  noteSources?: NoteQuestionSource[];
   artifact: InterviewArtifactBinding & { kind: "INTERVIEW_DOC" };
   createdAt: string;
 }
@@ -166,11 +173,13 @@ export interface LearningPathStep {
   workspaceId: string;
   pathId: string;
   stepNo: number;
-  claimId: string;
+  claimId: string | null;
+  sourceKind?: "CLAIM" | "NOTE_REVISION";
+  noteSource?: NoteQuestionSource;
   topicId?: string;
-  sourceVersionId: string;
-  sourceSpanId: string;
-  evidenceHash: string;
+  sourceVersionId: string | null;
+  sourceSpanId: string | null;
+  evidenceHash: string | null;
   title: string;
   rationale: string;
   status: LearningPathStepStatus;
@@ -301,6 +310,15 @@ const invalidResponse = (field: string, status: number | null = null): Interview
   new InterviewApiError("INVALID_RESPONSE", "INVALID_RESPONSE", `Interview 响应字段无效：${field}`, false, status);
 const invalidRequest = (field: string): InterviewApiError =>
   new InterviewApiError("INVALID_REQUEST", "INVALID_REQUEST", `Interview 请求字段无效：${field}`, false);
+
+const noteValue = <T>(decode: () => T, field: string): T => {
+  try { return decode(); } catch { throw invalidResponse(field); }
+};
+const decodeNoteRevisionRef = (value: unknown, workspaceId: string): NoteRevisionRef => noteValue(() => decodeSynthesisNoteRevision(value, workspaceId), "note_revision");
+const decodeNoteItemRef = (value: unknown, workspaceId: string): NoteItemRef => noteValue(() => decodeSynthesisNoteItem(value, workspaceId), "note_item");
+const decodeNoteQuestionSource = (value: unknown, workspaceId: string): NoteQuestionSource => noteValue(() => decodeSynthesisNoteSource(value, workspaceId), "note_source");
+const sameNoteItem = (left: NoteItemRef | undefined, right: NoteItemRef | undefined): boolean =>
+  left === undefined || right === undefined ? left === right : left.itemId === right.itemId && left.itemKind === right.itemKind && JSON.stringify(left.revision) === JSON.stringify(right.revision);
 
 const exact = (value: Record<string, unknown>, keys: readonly string[], field: string): void => {
   if (!hasOnlyKeys(value, keys)) throw invalidResponse(field);
@@ -503,18 +521,19 @@ const decodeUuidList = (value: unknown, field: string): string[] => {
   return result;
 };
 
-const decodeConfig = (value: unknown, field = "config"): InterviewConfig => {
+const decodeConfig = (value: unknown, workspaceId: string, field = "config"): InterviewConfig => {
   if (!isRecord(value)) throw invalidResponse(field);
   exact(value, ["schema_version", "role", "scope", "difficulty", "duration_minutes", "question_count", "max_follow_ups"], field);
   if (!isRecord(value.scope)) throw invalidResponse(`${field}.scope`);
-  exact(value.scope, ["claim_ids", "topic_ids"], `${field}.scope`);
+  exact(value.scope, ["claim_ids", "topic_ids", "note_revision"], `${field}.scope`);
   const claimIds = decodeUuidList(value.scope.claim_ids, `${field}.scope.claim_ids`);
   const topicIds = decodeUuidList(value.scope.topic_ids, `${field}.scope.topic_ids`);
-  if (value.schema_version !== "interview/v1" || (claimIds.length === 0 && topicIds.length === 0)) throw invalidResponse(field);
+  const noteRevision = value.scope.note_revision === undefined ? undefined : decodeNoteRevisionRef(value.scope.note_revision, workspaceId);
+  if (value.schema_version !== "interview/v1" || (noteRevision === undefined ? claimIds.length === 0 && topicIds.length === 0 : value.scope.claim_ids !== undefined || value.scope.topic_ids !== undefined)) throw invalidResponse(field);
   return {
     schemaVersion: "interview/v1",
     role: requiredText(value.role, `${field}.role`, 256),
-    scope: { claimIds, topicIds },
+    scope: { claimIds, topicIds, ...(noteRevision === undefined ? {} : { noteRevision }) },
     difficulty: enumValue(value.difficulty, difficultyValues, `${field}.difficulty`),
     durationMinutes: integer(value.duration_minutes, `${field}.duration_minutes`, 1, 240),
     questionCount: integer(value.question_count, `${field}.question_count`, 1, 20),
@@ -531,12 +550,13 @@ const sameConfig = (left: InterviewConfig, right: InterviewConfig): boolean =>
   && left.scope.claimIds.length === right.scope.claimIds.length
   && left.scope.claimIds.every((item, index) => item === right.scope.claimIds[index])
   && left.scope.topicIds.length === right.scope.topicIds.length
-  && left.scope.topicIds.every((item, index) => item === right.scope.topicIds[index]);
+  && left.scope.topicIds.every((item, index) => item === right.scope.topicIds[index])
+  && JSON.stringify(left.scope.noteRevision) === JSON.stringify(right.scope.noteRevision);
 
 const decodeSession = (value: unknown, field = "session"): InterviewSession => {
   if (!isRecord(value)) throw invalidResponse(field);
   exact(value, ["id", "workspace_id", "config", "status", "version", "follow_up_count", "started_at", "ended_at"], field);
-  const config = decodeConfig(value.config, `${field}.config`);
+  const config = decodeConfig(value.config, uuid(value.workspace_id, `${field}.workspace_id`), `${field}.config`);
   const status = enumValue(value.status, sessionStatusValues, `${field}.status`);
   const startedAt = timestamp(value.started_at, `${field}.started_at`);
   const endedAt = optionalTimestamp(value.ended_at, `${field}.ended_at`);
@@ -583,7 +603,10 @@ export const decodeInterviewSessionPage = (value: unknown): InterviewSessionPage
 
 const decodeQuestion = (value: unknown, workspaceId: string, sessionId: string, field = "question"): InterviewQuestion => {
   if (!isRecord(value)) throw invalidResponse(field);
-  exact(value, ["id", "workspace_id", "session_id", "question_no", "follow_up_no", "parent_question_id", "claim_id", "topic_id", "prompt", "status", "created_at", "answered_at"], field);
+  exact(value, ["id", "workspace_id", "session_id", "question_no", "follow_up_no", "parent_question_id", "claim_id", "topic_id", "prompt", "status", "created_at", "answered_at", "source_kind", "note_item"], field);
+  const sourceKind = value.source_kind === undefined ? "CLAIM" : enumValue(value.source_kind, ["CLAIM", "NOTE_REVISION"], `${field}.source_kind`);
+  const noteItem = sourceKind === "NOTE_REVISION" ? decodeNoteItemRef(value.note_item, workspaceId) : undefined;
+  if (sourceKind === "NOTE_REVISION" ? value.claim_id !== null || value.topic_id !== undefined : value.note_item !== undefined) throw invalidResponse(`${field}.source`);
   const followUpNo = integer(value.follow_up_no, `${field}.follow_up_no`, 0, 20);
   const parentQuestionId = optionalUuid(value.parent_question_id, `${field}.parent_question_id`);
   const status = enumValue(value.status, questionStatusValues, `${field}.status`);
@@ -596,7 +619,9 @@ const decodeQuestion = (value: unknown, workspaceId: string, sessionId: string, 
     questionNo: integer(value.question_no, `${field}.question_no`, 1, 20),
     followUpNo,
     ...(parentQuestionId === undefined ? {} : { parentQuestionId }),
-    claimId: uuid(value.claim_id, `${field}.claim_id`),
+    claimId: sourceKind === "NOTE_REVISION" ? null : uuid(value.claim_id, `${field}.claim_id`),
+    sourceKind,
+    ...(noteItem === undefined ? {} : { noteItem }),
     ...(value.topic_id === undefined ? {} : { topicId: uuid(value.topic_id, `${field}.topic_id`) }),
     prompt: requiredText(value.prompt, `${field}.prompt`, 8192),
     status,
@@ -671,8 +696,11 @@ const decodeFeedbackList = (value: unknown, field: string): string[] => {
 
 const decodeScore = (value: unknown, workspaceId: string, field: string): InterviewScore => {
   if (!isRecord(value)) throw invalidResponse(field);
-  exact(value, ["schema_version", "correctness", "coverage", "boundaries", "clarity", "errors", "omissions", "evidence"], field);
+  exact(value, ["schema_version", "correctness", "coverage", "boundaries", "clarity", "errors", "omissions", "evidence", "note_source"], field);
   if (value.schema_version !== "interview-score/v1") throw invalidResponse(`${field}.schema_version`);
+  const noteSource = value.note_source === undefined ? undefined : decodeNoteQuestionSource(value.note_source, workspaceId);
+  const evidence = decodeEvidenceList(value.evidence, workspaceId, `${field}.evidence`, { required: noteSource === undefined });
+  if (noteSource !== undefined && evidence.length !== 0) throw invalidResponse(`${field}.evidence`);
   return {
     schemaVersion: "interview-score/v1",
     correctness: decodeScoreDimension(value.correctness, `${field}.correctness`),
@@ -681,7 +709,8 @@ const decodeScore = (value: unknown, workspaceId: string, field: string): Interv
     clarity: decodeScoreDimension(value.clarity, `${field}.clarity`),
     errors: decodeFeedbackList(value.errors, `${field}.errors`),
     omissions: decodeFeedbackList(value.omissions, `${field}.omissions`),
-    evidence: decodeEvidenceList(value.evidence, workspaceId, `${field}.evidence`, { required: true }),
+    evidence,
+    ...(noteSource === undefined ? {} : { noteSource }),
   };
 };
 
@@ -727,13 +756,20 @@ const decodeArtifactBinding = <T extends InterviewArtifactBinding["kind"]>(value
 
 const decodeFinding = (value: unknown, workspaceId: string, field: string): InterviewFinding => {
   if (!isRecord(value)) throw invalidResponse(field);
-  exact(value, ["claim_id", "topic_id", "detail", "evidence"], field);
-  const claimId = uuid(value.claim_id, `${field}.claim_id`);
+  exact(value, ["claim_id", "topic_id", "detail", "evidence", "source_kind", "note_source"], field);
+  const sourceKind = value.source_kind === undefined ? "CLAIM" : enumValue(value.source_kind, ["CLAIM", "NOTE_REVISION"], `${field}.source_kind`);
+  const noteSource = sourceKind === "NOTE_REVISION" ? decodeNoteQuestionSource(value.note_source, workspaceId) : undefined;
+  if (sourceKind === "NOTE_REVISION" ? value.claim_id !== null || value.topic_id !== undefined : value.note_source !== undefined) throw invalidResponse(`${field}.source`);
+  const claimId = sourceKind === "NOTE_REVISION" ? null : uuid(value.claim_id, `${field}.claim_id`);
+  const evidence = decodeEvidenceList(value.evidence, workspaceId, `${field}.evidence`, { required: noteSource === undefined, ...(claimId === null ? {} : { expectedClaimId: claimId }) });
+  if (noteSource !== undefined && evidence.length !== 0) throw invalidResponse(`${field}.evidence`);
   return {
     claimId,
+    sourceKind,
+    ...(noteSource === undefined ? {} : { noteSource }),
     ...(value.topic_id === undefined ? {} : { topicId: uuid(value.topic_id, `${field}.topic_id`) }),
     detail: requiredText(value.detail, `${field}.detail`, 4096),
-    evidence: decodeEvidenceList(value.evidence, workspaceId, `${field}.evidence`, { required: true, expectedClaimId: claimId }),
+    evidence,
   };
 };
 
@@ -744,13 +780,14 @@ const decodeFindingList = (value: unknown, workspaceId: string, field: string): 
 
 const decodeReport = (value: unknown, workspaceId: string, sessionId: string, field = "report"): InterviewReport => {
   if (!isRecord(value)) throw invalidResponse(field);
-  exact(value, ["id", "workspace_id", "session_id", "schema_version", "summary", "strengths", "gaps", "expression", "evidence", "artifact", "created_at"], field);
+  exact(value, ["id", "workspace_id", "session_id", "schema_version", "summary", "strengths", "gaps", "expression", "evidence", "artifact", "created_at", "note_sources"], field);
   if (!isRecord(value.summary)) throw invalidResponse(`${field}.summary`);
   exact(value.summary, ["questions_total", "answered_total", "skipped_total", "correctness", "coverage", "boundaries", "clarity"], `${field}.summary`);
   if (value.schema_version !== "interview-report/v1") throw invalidResponse(`${field}.schema_version`);
   const questionsTotal = integer(value.summary.questions_total, `${field}.summary.questions_total`, 1, 40);
   const answeredTotal = integer(value.summary.answered_total, `${field}.summary.answered_total`, 0, questionsTotal);
   const skippedTotal = integer(value.summary.skipped_total, `${field}.summary.skipped_total`, 0, questionsTotal);
+  const noteSources = value.note_sources === undefined ? undefined : decodeNoteSourceList(value.note_sources, workspaceId, `${field}.note_sources`);
   const result: InterviewReport = {
     id: uuid(value.id, `${field}.id`),
     workspaceId: uuid(value.workspace_id, `${field}.workspace_id`),
@@ -769,13 +806,25 @@ const decodeReport = (value: unknown, workspaceId: string, sessionId: string, fi
     gaps: decodeFindingList(value.gaps, workspaceId, `${field}.gaps`),
     expression: decodeFindingList(value.expression, workspaceId, `${field}.expression`),
     evidence: decodeEvidenceList(value.evidence, workspaceId, `${field}.evidence`),
+    ...(noteSources === undefined ? {} : { noteSources }),
     artifact: decodeArtifactBinding(value.artifact, "INTERVIEW_DOC", `${field}.artifact`),
     createdAt: timestamp(value.created_at, `${field}.created_at`),
   };
   if (result.workspaceId !== workspaceId || result.sessionId !== sessionId || answeredTotal + skippedTotal !== questionsTotal) {
     throw invalidResponse(`${field}.binding`);
   }
+  if (noteSources !== undefined) {
+    const knownSources = new Set(noteSources.map((source) => JSON.stringify(source)));
+    if (result.evidence.length !== 0 || [...result.strengths, ...result.gaps, ...result.expression].some((finding) => finding.noteSource === undefined || !knownSources.has(JSON.stringify(finding.noteSource)))) throw invalidResponse(`${field}.note_sources`);
+  } else if ([...result.strengths, ...result.gaps, ...result.expression].some((finding) => finding.noteSource !== undefined)) throw invalidResponse(`${field}.note_sources`);
   return result;
+};
+
+const decodeNoteSourceList = (value: unknown, workspaceId: string, field: string): NoteQuestionSource[] => {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 20) throw invalidResponse(field);
+  const sources = value.map((source) => decodeNoteQuestionSource(source, workspaceId));
+  if (new Set(sources.map((source) => `${source.revision.revisionId}:${source.itemId}`)).size !== sources.length) throw invalidResponse(field);
+  return sources;
 };
 
 const decodeLearningPath = (value: unknown, workspaceId: string, sessionId?: string, field = "path"): LearningPath => {
@@ -802,19 +851,24 @@ const decodeLearningPath = (value: unknown, workspaceId: string, sessionId?: str
 
 const decodeLearningPathStep = (value: unknown, workspaceId: string, pathId: string, field = "step"): LearningPathStep => {
   if (!isRecord(value)) throw invalidResponse(field);
-  exact(value, ["id", "workspace_id", "path_id", "step_no", "claim_id", "topic_id", "source_version_id", "source_span_id", "evidence_hash", "title", "rationale", "status", "version", "created_at", "updated_at"], field);
+  exact(value, ["id", "workspace_id", "path_id", "step_no", "claim_id", "topic_id", "source_version_id", "source_span_id", "evidence_hash", "title", "rationale", "status", "version", "created_at", "updated_at", "source_kind", "note_source"], field);
+  const sourceKind = value.source_kind === undefined ? "CLAIM" : enumValue(value.source_kind, ["CLAIM", "NOTE_REVISION"], `${field}.source_kind`);
+  const noteSource = sourceKind === "NOTE_REVISION" ? decodeNoteQuestionSource(value.note_source, workspaceId) : undefined;
+  if (sourceKind === "NOTE_REVISION" ? value.claim_id !== null || value.topic_id !== undefined || value.source_version_id !== null || value.source_span_id !== null || value.evidence_hash !== null : value.note_source !== undefined) throw invalidResponse(`${field}.source`);
   const createdAt = timestamp(value.created_at, `${field}.created_at`);
   const updatedAt = timestamp(value.updated_at, `${field}.updated_at`);
-  const evidenceHash = stringValue(value.evidence_hash, `${field}.evidence_hash`);
+  const evidenceHash = sourceKind === "NOTE_REVISION" ? null : stringValue(value.evidence_hash, `${field}.evidence_hash`);
   const result: LearningPathStep = {
     id: uuid(value.id, `${field}.id`),
     workspaceId: uuid(value.workspace_id, `${field}.workspace_id`),
     pathId: uuid(value.path_id, `${field}.path_id`),
     stepNo: integer(value.step_no, `${field}.step_no`, 1, 40),
-    claimId: uuid(value.claim_id, `${field}.claim_id`),
+    claimId: sourceKind === "NOTE_REVISION" ? null : uuid(value.claim_id, `${field}.claim_id`),
+    sourceKind,
+    ...(noteSource === undefined ? {} : { noteSource }),
     ...(value.topic_id === undefined ? {} : { topicId: uuid(value.topic_id, `${field}.topic_id`) }),
-    sourceVersionId: uuid(value.source_version_id, `${field}.source_version_id`),
-    sourceSpanId: uuid(value.source_span_id, `${field}.source_span_id`),
+    sourceVersionId: sourceKind === "NOTE_REVISION" ? null : uuid(value.source_version_id, `${field}.source_version_id`),
+    sourceSpanId: sourceKind === "NOTE_REVISION" ? null : uuid(value.source_span_id, `${field}.source_span_id`),
     evidenceHash,
     title: requiredText(value.title, `${field}.title`, 512),
     rationale: requiredText(value.rationale, `${field}.rationale`, 4096),
@@ -823,7 +877,7 @@ const decodeLearningPathStep = (value: unknown, workspaceId: string, pathId: str
     createdAt,
     updatedAt,
   };
-  if (result.workspaceId !== workspaceId || result.pathId !== pathId || !hashPattern.test(evidenceHash) || Date.parse(updatedAt) < Date.parse(createdAt)) {
+  if (result.workspaceId !== workspaceId || result.pathId !== pathId || evidenceHash !== null && !hashPattern.test(evidenceHash) || Date.parse(updatedAt) < Date.parse(createdAt)) {
     throw invalidResponse(`${field}.binding`);
   }
   return result;
@@ -838,15 +892,27 @@ const decodeLearningPathSteps = (value: unknown, workspaceId: string, pathId: st
   return result;
 };
 
+const validateCompletionSources = (session: InterviewSession, report: InterviewReport, steps: LearningPathStep[]): void => {
+  const revision = session.config.scope.noteRevision;
+  if (revision === undefined) {
+    if (report.noteSources !== undefined || steps.some((step) => step.noteSource !== undefined)) throw invalidResponse("completion.source");
+    return;
+  }
+  if (report.noteSources === undefined || report.noteSources.some((source) => JSON.stringify(source.revision) !== JSON.stringify(revision))) throw invalidResponse("completion.note_revision");
+  const sources = new Set(report.noteSources.map((source) => JSON.stringify(source)));
+  if (steps.some((step) => step.noteSource === undefined || !sources.has(JSON.stringify(step.noteSource)))) throw invalidResponse("completion.steps.note_source");
+};
+
 const validateQuestions = (questions: InterviewQuestion[], session: InterviewSession, field: string): void => {
   if (new Set(questions.map((item) => item.id)).size !== questions.length) throw invalidResponse(field);
   if (new Set(questions.map((item) => `${String(item.questionNo)}:${String(item.followUpNo)}`)).size !== questions.length) throw invalidResponse(field);
   if (questions.some((item) => item.questionNo > session.config.questionCount)) throw invalidResponse(field);
   const byId = new Map(questions.map((item) => [item.id, item]));
   for (const question of questions) {
+    if (session.config.scope.noteRevision === undefined ? question.noteItem !== undefined : question.noteItem === undefined || JSON.stringify(question.noteItem.revision) !== JSON.stringify(session.config.scope.noteRevision)) throw invalidResponse(`${field}.note_revision`);
     if (question.followUpNo === 0) continue;
     const parent = question.parentQuestionId === undefined ? undefined : byId.get(question.parentQuestionId);
-    if (parent?.questionNo !== question.questionNo || parent.claimId !== question.claimId || parent.followUpNo >= question.followUpNo) {
+    if (parent?.questionNo !== question.questionNo || parent.claimId !== question.claimId || parent.followUpNo >= question.followUpNo || JSON.stringify(parent.noteItem) !== JSON.stringify(question.noteItem)) {
       throw invalidResponse(field);
     }
   }
@@ -870,7 +936,8 @@ export const decodeInterviewSnapshot = (value: unknown): InterviewSnapshot => {
   const turnsByQuestion = new Map(turns.map((item) => [item.questionId, item]));
   for (const turn of turns) {
     const question = questionsById.get(turn.questionId);
-    if (question?.status !== "ANSWERED" || turn.score.evidence.some((item) => item.claimId !== question.claimId)) throw invalidResponse("snapshot.turns");
+    if (question?.status !== "ANSWERED" || turn.score.evidence.some((item) => item.claimId !== question.claimId) ||
+      !sameNoteItem(question.noteItem, turn.score.noteSource)) throw invalidResponse("snapshot.turns");
     const followUp = turn.decision.followUpQuestionId === undefined ? undefined : questionsById.get(turn.decision.followUpQuestionId);
     const next = turn.decision.nextQuestionId === undefined ? undefined : questionsById.get(turn.decision.nextQuestionId);
     if (turn.decision.followUpQuestionId !== undefined && followUp?.parentQuestionId !== question.id) {
@@ -891,10 +958,18 @@ export const decodeInterviewSnapshot = (value: unknown): InterviewSnapshot => {
   }
   if (report === undefined || session.status !== "COMPLETED" || path.reportId !== report.id) throw invalidResponse("snapshot.completion");
   const steps = decodeLearningPathSteps(value.steps, session.workspaceId, path.id, "snapshot.steps");
-  const answeredTotal = questions.filter((item) => item.status === "ANSWERED").length;
-  const skippedTotal = questions.filter((item) => item.status === "SKIPPED").length;
+  validateCompletionSources(session, report, steps);
+  if (report.noteSources !== undefined && (questions.some((question) => !report.noteSources?.some((source) => sameNoteItem(question.noteItem, source))) || report.noteSources.some((source) => !questions.some((question) => sameNoteItem(question.noteItem, source))))) throw invalidResponse("snapshot.report.note_sources");
+  const lastQuestions = new Map<number, InterviewQuestion>();
+  for (const question of questions) {
+    const previous = lastQuestions.get(question.questionNo);
+    if (previous === undefined || previous.followUpNo < question.followUpNo) lastQuestions.set(question.questionNo, question);
+  }
+  const terminalQuestions = [...lastQuestions.values()];
+  const answeredTotal = terminalQuestions.filter((item) => item.status === "ANSWERED").length;
+  const skippedTotal = terminalQuestions.filter((item) => item.status === "SKIPPED").length;
   if (
-    report.summary.questionsTotal !== questions.length
+    report.summary.questionsTotal !== terminalQuestions.length
     || report.summary.answeredTotal !== answeredTotal
     || report.summary.skippedTotal !== skippedTotal
     || questions.some((item) => item.status === "PENDING")
@@ -1022,7 +1097,7 @@ const configToWire = (config: InterviewConfig): GeneratedInterviewConfig => ({
 export const startInterview = async (input: StartInterviewInput): Promise<StartInterviewResult> => {
   const workspaceId = requireUuid(input.workspaceId, "workspaceId");
   const config = normalizeConfigInput(input.config);
-  const payload = await request(generatedRawResponse(interviewApi.startInterviewRaw({
+  const payload = await request(generatedRawResponse(interviewApi.startInterviewV2Raw({
     idempotencyKey: requireIdempotencyKey(input.idempotencyKey),
     startInterviewRequest: { workspace_id: workspaceId, config: configToWire(config) },
   }, generatedRequestInit())), [200, 201]);
@@ -1050,7 +1125,7 @@ export const listInterviewSessions = async (input: ListInterviewSessionsInput, s
     throw invalidRequest("cursor");
   }
   const page = decodeInterviewSessionPage(await request(
-    generatedRawResponse(interviewApi.listInterviewsRaw({
+    generatedRawResponse(interviewApi.listInterviewsV2Raw({
       workspaceId,
       limit,
       ...(cursor === undefined ? {} : { cursor }),
@@ -1064,7 +1139,7 @@ export const getInterview = async (workspaceId: string, sessionId: string, signa
   const expectedWorkspaceId = requireUuid(workspaceId, "workspaceId");
   const expectedSessionId = requireUuid(sessionId, "sessionId");
   const result = decodeInterviewSnapshot(await request(
-    generatedRawResponse(interviewApi.getInterviewRaw({
+    generatedRawResponse(interviewApi.getInterviewV2Raw({
       sessionId: expectedSessionId,
       workspaceId: expectedWorkspaceId,
     }, generatedRequestInit(signal))),
@@ -1077,7 +1152,7 @@ export const submitInterviewTurn = async (input: SubmitInterviewTurnInput): Prom
   const workspaceId = requireUuid(input.workspaceId, "workspaceId");
   const sessionId = requireUuid(input.sessionId, "sessionId");
   const questionId = requireUuid(input.questionId, "questionId");
-  const payload = await request(generatedRawResponse(interviewApi.submitInterviewTurnRaw({
+  const payload = await request(generatedRawResponse(interviewApi.submitInterviewTurnV2Raw({
     sessionId,
     idempotencyKey: requireIdempotencyKey(input.idempotencyKey),
     submitInterviewTurnRequest: {
@@ -1098,6 +1173,8 @@ export const submitInterviewTurn = async (input: SubmitInterviewTurnInput): Prom
     || (nextQuestion === undefined) !== (turn.decision.nextQuestionId === undefined)
     || (nextQuestion !== undefined && (nextQuestion.id !== turn.decision.nextQuestionId || nextQuestion.status !== "PENDING"))
   ) throw invalidResponse("turn_result.binding");
+  if (followUp !== undefined && !sameNoteItem(followUp.noteItem, turn.score.noteSource) ||
+      nextQuestion !== undefined && (turn.score.noteSource === undefined ? nextQuestion.noteItem !== undefined : JSON.stringify(nextQuestion.noteItem?.revision) !== JSON.stringify(turn.score.noteSource.revision))) throw invalidResponse("turn_result.note_source");
   return {
     turn,
     ...(followUp === undefined ? {} : { followUp }),
@@ -1110,7 +1187,7 @@ export const completeInterview = async (input: CompleteInterviewInput): Promise<
   const workspaceId = requireUuid(input.workspaceId, "workspaceId");
   const sessionId = requireUuid(input.sessionId, "sessionId");
   if (typeof input.manualEnd !== "boolean") throw invalidRequest("manualEnd");
-  const payload = await request(generatedRawResponse(interviewApi.completeInterviewRaw({
+  const payload = await request(generatedRawResponse(interviewApi.completeInterviewV2Raw({
     sessionId,
     idempotencyKey: requireIdempotencyKey(input.idempotencyKey),
     completeInterviewRequest: { workspace_id: workspaceId, manual_end: input.manualEnd },
@@ -1124,6 +1201,7 @@ export const completeInterview = async (input: CompleteInterviewInput): Promise<
   if (session.workspaceId !== workspaceId || session.id !== sessionId || session.status !== "COMPLETED" || path.reportId !== report.id) {
     throw invalidResponse("complete.binding");
   }
+  validateCompletionSources(session, report, steps);
   return { session, report, path, steps, replayed: booleanValue(payload.replayed, "complete.replayed") };
 };
 
@@ -1173,7 +1251,7 @@ export const updateLearningPathStep = async (input: UpdateLearningPathStepInput)
   const stepId = requireUuid(input.stepId, "stepId");
   const expectedVersion = requireVersion(input.expectedVersion);
   const status = requireStepStatus(input.status);
-  const payload = await request(generatedRawResponse(reviewApi.updateLearningPathStepRaw({
+  const payload = await request(generatedRawResponse(reviewApi.updateLearningPathStepV2Raw({
     pathId,
     stepId,
     idempotencyKey: requireIdempotencyKey(input.idempotencyKey),

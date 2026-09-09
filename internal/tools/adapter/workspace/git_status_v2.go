@@ -41,10 +41,14 @@ func NewReadGitStatusV2Executor(inspector gitStatusAggregateInspector) (*ReadGit
 
 // Execute 只从可信执行身份读取 Workspace，并返回不含文件名和 porcelain 正文的聚合。
 func (executor *ReadGitStatusV2Executor) Execute(ctx context.Context, request toolsapplication.ExecutorRequest) (toolsapplication.ExecutorResult, error) {
+	return executor.execute(ctx, request, readGitStatusV2Ref)
+}
+
+func (executor *ReadGitStatusV2Executor) execute(ctx context.Context, request toolsapplication.ExecutorRequest, ref toolsdomain.ToolRef) (toolsapplication.ExecutorResult, error) {
 	if executor == nil || nilDependency(executor.inspector) {
 		return toolsapplication.ExecutorResult{}, gitDependencyError(errors.New("git status aggregate inspector is unavailable"))
 	}
-	if ctx == nil || request.Tool != readGitStatusV2Ref {
+	if ctx == nil || request.Tool != ref {
 		return toolsapplication.ExecutorResult{}, gitInputError(errors.New("git status executor request is invalid"))
 	}
 	if err := request.Identity.Validate(); err != nil {

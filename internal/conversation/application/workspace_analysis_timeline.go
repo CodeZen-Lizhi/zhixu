@@ -15,6 +15,7 @@ const errorCodeWorkspaceAnalysisTimelineUnavailable = "CONVERSATION_WORKSPACE_AN
 type WorkspaceAnalysisTimelineQuery struct {
 	WorkspaceID foundation.ID
 	AnswerID    foundation.ID
+	APIVersion  APIVersion
 }
 
 // WorkspaceAnalysisTimelineReader 是加载脱敏、权威 Workspace Analysis 时间线的窄端口。
@@ -31,12 +32,18 @@ func (service *Service) GetWorkspaceAnalysisTimeline(ctx context.Context, query 
 	if err := validateScopedIDs(query.WorkspaceID, query.AnswerID); err != nil {
 		return conversationdomain.WorkspaceAnalysisTimeline{}, err
 	}
+	if err := query.APIVersion.Validate(); err != nil {
+		return conversationdomain.WorkspaceAnalysisTimeline{}, err
+	}
 	timeline, err := service.timelines.GetWorkspaceAnalysisTimeline(ctx, query)
 	if err != nil {
 		return conversationdomain.WorkspaceAnalysisTimeline{}, err
 	}
 	if err := timeline.Validate(); err != nil || timeline.WorkspaceID != query.WorkspaceID || timeline.AnswerID != query.AnswerID {
 		return conversationdomain.WorkspaceAnalysisTimeline{}, resultInconsistent(err)
+	}
+	if err := query.APIVersion.CheckTimeline(timeline); err != nil {
+		return conversationdomain.WorkspaceAnalysisTimeline{}, err
 	}
 	return timeline, nil
 }

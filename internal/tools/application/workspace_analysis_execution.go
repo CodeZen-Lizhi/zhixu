@@ -18,8 +18,8 @@ const (
 	errorCodeWorkspaceAnalysisAuthorizationUnavailable = "TOOL_WORKSPACE_ANALYSIS_AUTHORIZATION_UNAVAILABLE"
 )
 
-// ExecuteWorkspaceAnalysisToolCommand 为一个静态 Workspace Analysis Operation 请求唯一 exact Tool。
-// Tool 名称和参数由节点 Executor 在服务端构造，不得来自模型选择。
+// ExecuteWorkspaceAnalysisToolCommand 为一个服务端授权的 Analysis Operation 请求唯一 exact Tool。
+// v1 使用固定阶段；v2 从已持久化决策重建白名单请求，作用域和权限始终由服务端提供。
 type ExecuteWorkspaceAnalysisToolCommand struct {
 	OperationKey agentdomain.WorkspaceAnalysisOperationKey
 	Tool         ExecuteToolCommand
@@ -87,10 +87,15 @@ func (service *ExecutionService) ExecuteWorkspaceAnalysisTool(
 			foundation.ErrorDependencyUnavailable, errorCodeWorkspaceAnalysisAuthorizationUnavailable, true, err,
 		)
 	}
+	canonicalRequest, err := canonicalRequestDocument(command.Tool.Request, prepared.contract.Definition.Ref, prepared.contract.Definition.InputSchema, prepared.arguments)
+	if err != nil {
+		return ToolExecutionResult{}, err
+	}
 	authorized, err := repository.AuthorizeWorkspaceAnalysisToolCall(ctx, AuthorizeWorkspaceAnalysisToolCallCommand{
 		Identity: command.Tool.Identity, OperationKey: command.OperationKey,
 		OperationID: operationID, ReservationID: reservationID,
 		Call: started, Definition: prepared.contract.Definition,
+		CanonicalRequest: canonicalRequest,
 	})
 	if err != nil {
 		return ToolExecutionResult{}, err
@@ -130,14 +135,15 @@ func validateWorkspaceAnalysisToolSlot(command ExecuteWorkspaceAnalysisToolComma
 	if err != nil {
 		return err
 	}
-	expectedRef, expectedCallNo, found := workspaceAnalysisToolSlot(command.OperationKey)
+	version := command.Tool.Identity.DefinitionVersion
+	expectedRef, expectedCallNo, found := workspaceAnalysisToolSlotVersion(command.OperationKey, version)
 	if !found || contract.CallKind != agentdomain.WorkspaceAnalysisOperationCallTool || definition.Ref != expectedRef ||
 		command.Tool.CallNo != expectedCallNo || definition.RequiredCapability != capability.ReadLocal ||
 		definition.SideEffectLevel != domain.SideEffectNone || definition.InvocationPolicy != domain.InvocationTrustedWorkflowOnly ||
 		definition.ResultPersistencePolicy != domain.ResultPersistenceCanonical || definition.IdempotencyMode != domain.IdempotencyNone ||
 		!workspaceAnalysisToolTimeoutRepresentable(definition.Timeout) ||
 		len(definition.AllowedWorkflows) != 1 ||
-		definition.AllowedWorkflows[0] != (domain.WorkflowBinding{Key: "workspace-analysis", Version: 1}) {
+		definition.AllowedWorkflows[0] != (domain.WorkflowBinding{Key: "workspace-analysis", Version: version}) {
 		return executionError(
 			foundation.ErrorConsistencyViolation,
 			errorCodeWorkspaceAnalysisToolContractDenied,
@@ -209,6 +215,33 @@ func workspaceAnalysisDeterministicRefusal(cause error) bool {
 }
 
 func workspaceAnalysisToolSlot(key agentdomain.WorkspaceAnalysisOperationKey) (domain.ToolRef, int, bool) {
+	return workspaceAnalysisToolSlotVersion(key, 1)
+}
+
+func workspaceAnalysisToolSlotVersion(key agentdomain.WorkspaceAnalysisOperationKey, version int64) (domain.ToolRef, int, bool) {
+	if version == 2 {
+		if key.Validate() != nil {
+			return domain.ToolRef{}, 0, false
+		}
+		callNo := key.Ordinal
+		if key.NodeKey != agentdomain.WorkspaceAnalysisOperationNodeDecideNext && (key.NodeKey != agentdomain.WorkspaceAnalysisOperationNodeValidateCitations || key.Kind != agentdomain.WorkspaceAnalysisOperationCitationValidation || key.Ordinal != 1) {
+			return domain.ToolRef{}, 0, false
+		}
+		switch key.Kind {
+		case agentdomain.WorkspaceAnalysisOperationGitStatus:
+			return domain.ToolRef{Name: "ReadGitStatus", Version: 3}, callNo, true
+		case agentdomain.WorkspaceAnalysisOperationKnowledgeSearch:
+			return domain.ToolRef{Name: "SearchKnowledge", Version: 3}, callNo, true
+		case agentdomain.WorkspaceAnalysisOperationSourceRead:
+			return domain.ToolRef{Name: "ReadSource", Version: 4}, callNo, true
+		case agentdomain.WorkspaceAnalysisOperationCitationValidation:
+			return domain.ToolRef{Name: "ValidateCitation", Version: 4}, callNo, true
+		}
+		return domain.ToolRef{}, 0, false
+	}
+	if version != 1 || key.NodeKey == agentdomain.WorkspaceAnalysisOperationNodeDecideNext {
+		return domain.ToolRef{}, 0, false
+	}
 	switch key.Kind {
 	case agentdomain.WorkspaceAnalysisOperationGitStatus:
 		return domain.ToolRef{Name: "ReadGitStatus", Version: 2}, 1, key.Ordinal == 1

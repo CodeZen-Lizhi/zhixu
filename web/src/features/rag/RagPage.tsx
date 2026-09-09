@@ -194,12 +194,12 @@ export const AnswerPublication = ({ answer, draft, onCitation, onPrompt = () => 
   </article>;
   if (answer.resultType === "workspace_analysis") return <article className="rag-answer">
     <p className="eyebrow">已校验分析</p><div className="rag-answer__copy">{answer.assistantText}</div>
-    <dl className="rag-analysis-git">
+    {answer.result.payload.gitStatus === null ? <p className="rag-muted">本次分析未查询 Git 状态。</p> : <dl className="rag-analysis-git">
       <div><dt>分支</dt><dd>{answer.result.payload.gitStatus.branch === "" ? "detached" : answer.result.payload.gitStatus.branch}</dd></div>
       <div><dt>提交</dt><dd>{answer.result.payload.gitStatus.head.slice(0, 10)}</dd></div>
       <div><dt>工作树</dt><dd>{answer.result.payload.gitStatus.clean ? "干净" : "有变更"}</dd></div>
       <div><dt>冲突</dt><dd>{answer.result.payload.gitStatus.conflictCount}</dd></div>
-    </dl>
+    </dl>}
     <CitationList citations={answer.citations} onSelect={onCitation} />
     {answer.result.payload.proposalSuggestion === null ? null : <div className="rag-proposal-suggestion">
       <strong>{answer.result.payload.proposalSuggestion.summary}</strong>

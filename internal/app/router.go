@@ -53,40 +53,42 @@ func (e *readinessError) Unwrap() error { return e.err }
 
 // Dependencies is the composition boundary for the HTTP application.
 type Dependencies struct {
-	Version           string
-	Database          postgres.Pinger
-	DatabaseConfigErr error
-	DatabaseInitErr   error
-	PingTimeout       time.Duration
-	Static            http.Handler
-	Workspace         *workspacehttp.Handler
-	Workflow          *workflowhttp.Handler
-	ChangeControl     *changecontrolhttp.Handler
-	Collection        *collectionhttp.Handler
-	Health            *healthhttp.Handler
-	Ingestion         *ingestionhttp.Handler
-	Retrieval         *retrievalhttp.Handler
-	Graph             *graphhttp.Handler
-	Candidate         *graphhttp.CandidateHandler
-	Conversation      *conversationhttp.Handler
-	DraftStream       *conversationhttp.DraftStreamHandler
-	Events            *eventshttp.Handler
-	Export            *exporthttp.Handler
-	Review            *reviewhttp.Handler
-	LearningPath      *learningpathhttp.Handler
-	Memory            *memoryhttp.Handler
-	Interview         *interviewhttp.Handler
-	Knowledge         *knowledgehttp.Handler
-	Artifact          *artifacthttp.Handler
-	Authoring         *authoringhttp.Handler
-	Capture           *capturehttp.Handler
-	Organizing        *organizinghttp.Handler
-	DocumentHistory   *documenthistoryhttp.Handler
-	GitSync           *gitsynchttp.Handler
-	ModelSettings     *modelsettingshttp.Handler
-	Auth              *authhttp.Handler
-	AuthRequired      bool
-	AuthInitErr       error
+	Version            string
+	Database           postgres.Pinger
+	DatabaseConfigErr  error
+	DatabaseInitErr    error
+	PingTimeout        time.Duration
+	Static             http.Handler
+	Workspace          *workspacehttp.Handler
+	Workflow           *workflowhttp.Handler
+	ChangeControl      *changecontrolhttp.Handler
+	Collection         *collectionhttp.Handler
+	Health             *healthhttp.Handler
+	Ingestion          *ingestionhttp.Handler
+	Retrieval          *retrievalhttp.Handler
+	Graph              *graphhttp.Handler
+	Candidate          *graphhttp.CandidateHandler
+	Conversation       *conversationhttp.Handler
+	DraftStream        *conversationhttp.DraftStreamHandler
+	Events             *eventshttp.Handler
+	Export             *exporthttp.Handler
+	Review             *reviewhttp.Handler
+	LearningPath       *learningpathhttp.Handler
+	Memory             *memoryhttp.Handler
+	Interview          *interviewhttp.Handler
+	Knowledge          *knowledgehttp.Handler
+	Artifact           *artifacthttp.Handler
+	Authoring          *authoringhttp.Handler
+	Capture            *capturehttp.Handler
+	Organizing         *organizinghttp.Handler
+	Synthesis          *organizinghttp.SynthesisHandler
+	SynthesisInterview *interviewhttp.NotePreparationHandler
+	DocumentHistory    *documenthistoryhttp.Handler
+	GitSync            *gitsynchttp.Handler
+	ModelSettings      *modelsettingshttp.Handler
+	Auth               *authhttp.Handler
+	AuthRequired       bool
+	AuthInitErr        error
 	// AuthCheck confirms that both authentication credential tables remain readable.
 	AuthCheck  func(context.Context) error
 	RAGEnabled bool
@@ -191,6 +193,13 @@ func NewRouter(deps Dependencies) *gin.Engine {
 	} else {
 		registerDomainRoutes(api, deps)
 	}
+	apiV2 := router.Group("/api/v2")
+	if deps.Auth != nil {
+		apiV2.Use(deps.Auth.Middleware)
+	} else if deps.AuthRequired {
+		apiV2.Use(authUnavailableMiddleware)
+	}
+	registerV2DomainRoutes(apiV2, deps)
 	router.NoMethod(func(context *gin.Context) {
 		context.Header("Allow", "")
 		context.Writer.Header().Del("Allow")
@@ -227,6 +236,17 @@ func modelSettingsNoStoreMiddleware(context *gin.Context) {
 		context.Header("Cache-Control", "no-store")
 	}
 	context.Next()
+}
+
+// registerV2DomainRoutes exposes only the versioned contracts whose response
+// shapes differ. Unchanged operations retain their existing v1 routes.
+func registerV2DomainRoutes(api gin.IRouter, deps Dependencies) {
+	if deps.Conversation != nil {
+		deps.Conversation.RoutesV2(api)
+	}
+	if deps.Interview != nil {
+		deps.Interview.RoutesV2(api)
+	}
 }
 
 func registerDomainRoutes(api gin.IRouter, deps Dependencies) {
@@ -291,6 +311,12 @@ func registerDomainRoutes(api gin.IRouter, deps Dependencies) {
 	}
 	if deps.Organizing != nil {
 		deps.Organizing.Routes(api)
+	}
+	if deps.Synthesis != nil {
+		deps.Synthesis.Routes(api)
+	}
+	if deps.SynthesisInterview != nil {
+		deps.SynthesisInterview.Routes(api)
 	}
 	if deps.DocumentHistory != nil {
 		deps.DocumentHistory.Routes(api)

@@ -9,6 +9,7 @@ import (
 	agentdomain "github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
 	conversationapplication "github.com/CodeZen-Lizhi/zhixu/internal/conversation/application"
 	conversationdomain "github.com/CodeZen-Lizhi/zhixu/internal/conversation/domain"
+	conversationworkflow "github.com/CodeZen-Lizhi/zhixu/internal/conversation/workflow"
 	eventsapplication "github.com/CodeZen-Lizhi/zhixu/internal/events/application"
 	eventsdomain "github.com/CodeZen-Lizhi/zhixu/internal/events/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
@@ -20,14 +21,15 @@ import (
 
 // GORMQuestionDispatcher 在同一 scope 原子创建 Question、Workflow、River Job 和通知。
 type GORMQuestionDispatcher struct {
-	db       *gorm.DB
-	uow      foundation.UnitOfWork
-	runtime  workflowapplication.ScopedRuntimeStarter
-	events   eventsapplication.ScopedAppender
-	ids      foundation.IDGenerator
-	clock    foundation.Clock
-	analysis agentapplication.ScopedWorkspaceAnalysisRunStarter
-	audit    ScopedWorkspaceAnalysisAuditRecorder
+	db                        *gorm.DB
+	uow                       foundation.UnitOfWork
+	runtime                   workflowapplication.ScopedRuntimeStarter
+	events                    eventsapplication.ScopedAppender
+	ids                       foundation.IDGenerator
+	clock                     foundation.Clock
+	analysis                  agentapplication.ScopedWorkspaceAnalysisRunStarter
+	audit                     ScopedWorkspaceAnalysisAuditRecorder
+	analysisDefinitionVersion int64
 }
 
 // NewGORMQuestionDispatcher 构造固定 RAG v2 的同池派发器。
@@ -51,6 +53,17 @@ func NewGORMQuestionDispatcherWithWorkspaceAnalysisAndAudit(pool *platformpostgr
 	return newGORMQuestionDispatcher(pool, runtime, events, ids, clock, analysis, audit)
 }
 
+// NewGORMQuestionDispatcherWithWorkspaceAnalysisV2AndAudit selects the dynamic
+// definition for new analysis questions; existing keys retain their own version.
+func NewGORMQuestionDispatcherWithWorkspaceAnalysisV2AndAudit(pool *platformpostgres.Pool, runtime workflowapplication.ScopedRuntimeStarter, events eventsapplication.ScopedAppender, ids foundation.IDGenerator, clock foundation.Clock, analysis agentapplication.ScopedWorkspaceAnalysisRunStarter, audit ScopedWorkspaceAnalysisAuditRecorder) (*GORMQuestionDispatcher, error) {
+	dispatcher, err := NewGORMQuestionDispatcherWithWorkspaceAnalysisAndAudit(pool, runtime, events, ids, clock, analysis, audit)
+	if err != nil {
+		return nil, err
+	}
+	dispatcher.analysisDefinitionVersion = 2
+	return dispatcher, nil
+}
+
 func newGORMQuestionDispatcher(pool *platformpostgres.Pool, runtime workflowapplication.ScopedRuntimeStarter, events eventsapplication.ScopedAppender, ids foundation.IDGenerator, clock foundation.Clock, analysis agentapplication.ScopedWorkspaceAnalysisRunStarter, audit ScopedWorkspaceAnalysisAuditRecorder) (*GORMQuestionDispatcher, error) {
 	if isNilInterface(runtime) || isNilInterface(events) || isNilInterface(ids) || isNilInterface(clock) {
 		return nil, dependency(ErrorCodeQuestionDispatchUnavailable, errors.New("question dispatch dependency is nil"))
@@ -59,7 +72,7 @@ func newGORMQuestionDispatcher(pool *platformpostgres.Pool, runtime workflowappl
 	if err != nil {
 		return nil, err
 	}
-	return &GORMQuestionDispatcher{db: db, uow: uow, runtime: runtime, events: events, ids: ids, clock: clock, analysis: analysis, audit: audit}, nil
+	return &GORMQuestionDispatcher{db: db, uow: uow, runtime: runtime, events: events, ids: ids, clock: clock, analysis: analysis, audit: audit, analysisDefinitionVersion: 1}, nil
 }
 
 // SubmitQuestion 提交或精确重放所有派发事实；任何协作者失败均回滚整个事务。
@@ -108,6 +121,13 @@ func (dispatcher *GORMQuestionDispatcher) submitQuestion(ctx context.Context, tx
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return conversationapplication.SubmitQuestionResult{}, err
+	}
+	// The client contract never changes the trusted dispatch version or request
+	// hash. Check after the locked idempotency read but before creating any fact.
+	if request.Mode == conversationdomain.QuestionModeWorkspaceAnalysis {
+		if err := record.APIVersion.CheckWorkflow(conversationworkflow.WorkspaceAnalysisDefinitionKey, dispatcher.analysisDefinitionVersion); err != nil {
+			return conversationapplication.SubmitQuestionResult{}, err
+		}
 	}
 	if conversationRecord.Conversation.Status != conversationdomain.ConversationStatusOpen {
 		return conversationapplication.SubmitQuestionResult{}, conflict(ErrorCodeQuestionConversationArchived, errors.New("archived conversation does not accept questions"))
@@ -199,6 +219,7 @@ func (dispatcher *GORMQuestionDispatcher) submitQuestion(ctx context.Context, tx
 	answerView, err := scanAnswerView(gormScanRow(tx.WithContext(ctx).Raw(`SELECT `+answerViewColumns+`
 		FROM agent.answer a
 		JOIN workflow.run w ON w.id=a.workflow_run_id AND w.workspace_id=a.workspace_id
+		JOIN workflow.definition d ON d.id=w.definition_id AND d.workspace_id=w.workspace_id
 		WHERE a.workspace_id=? AND a.id=?`, string(answer.WorkspaceID), string(answer.ID))))
 	if err != nil {
 		return conversationapplication.SubmitQuestionResult{}, err
@@ -231,26 +252,41 @@ func (dispatcher *GORMQuestionDispatcher) replayQuestion(ctx context.Context, tx
 	if question.RequestHash != record.RequestHash {
 		return conversationapplication.SubmitQuestionResult{}, conflict(ErrorCodeQuestionIdempotencyConflict, errors.New("question idempotency key is bound to a different request"))
 	}
-	var answerIDValue string
-	err := gormScanRow(tx.WithContext(ctx).Raw(`SELECT id::text FROM agent.answer
-		WHERE workspace_id=? AND conversation_id=? AND question_id=?`, string(question.Request.WorkspaceID), string(question.Request.ConversationID), string(question.ID))).Scan(&answerIDValue)
+	var answerIDValue, definitionKey string
+	var definitionVersion int64
+	var definitionGraph []byte
+	err := gormScanRow(tx.WithContext(ctx).Raw(`SELECT a.id::text,d.key,d.version,d.graph
+		FROM agent.answer a
+		JOIN workflow.run w ON w.id=a.workflow_run_id AND w.workspace_id=a.workspace_id
+		JOIN workflow.definition d ON d.id=w.definition_id AND d.workspace_id=w.workspace_id
+		WHERE a.workspace_id=? AND a.conversation_id=? AND a.question_id=?`, string(question.Request.WorkspaceID), string(question.Request.ConversationID), string(question.ID))).Scan(&answerIDValue, &definitionKey, &definitionVersion, &definitionGraph)
 	if errors.Is(err, sql.ErrNoRows) {
 		return conversationapplication.SubmitQuestionResult{}, consistency(ErrorCodeQuestionDispatchCorrupt, errors.New("replayed question has no answer workflow binding"))
 	}
 	if err != nil {
 		return conversationapplication.SubmitQuestionResult{}, classify(err, ErrorCodeQuestionDispatchUnavailable)
 	}
+	// An existing key retains its original definition, even when current
+	// composition starts another version. Reject before runtime replay effects.
+	if err := record.APIVersion.CheckWorkflow(definitionKey, definitionVersion); err != nil {
+		return conversationapplication.SubmitQuestionResult{}, err
+	}
 	answerID, err := foundation.ParseID(answerIDValue)
 	if err != nil {
 		return conversationapplication.SubmitQuestionResult{}, consistency(ErrorCodeQuestionDispatchCorrupt, errors.New("replayed question answer identity is invalid"))
 	}
-	runtimeResult, err := dispatcher.startQuestionWorkflow(ctx, tx, transaction, question, answerID)
+	plan, err := buildReplayedQuestionWorkflowDispatchPlan(question, answerID, definitionKey, definitionVersion, definitionGraph)
+	if err != nil {
+		return conversationapplication.SubmitQuestionResult{}, err
+	}
+	runtimeResult, err := dispatcher.startQuestionWorkflowWithPlan(ctx, transaction, question, plan)
 	if err != nil {
 		return conversationapplication.SubmitQuestionResult{}, err
 	}
 	answerView, err := scanAnswerView(gormScanRow(tx.WithContext(ctx).Raw(`SELECT `+answerViewColumns+`
 		FROM agent.answer a
 		JOIN workflow.run w ON w.id=a.workflow_run_id AND w.workspace_id=a.workspace_id
+		JOIN workflow.definition d ON d.id=w.definition_id AND d.workspace_id=w.workspace_id
 		WHERE a.workspace_id=? AND a.conversation_id=? AND a.question_id=?`, string(question.Request.WorkspaceID), string(question.Request.ConversationID), string(question.ID))))
 	if errors.Is(err, sql.ErrNoRows) {
 		return conversationapplication.SubmitQuestionResult{}, consistency(ErrorCodeQuestionDispatchCorrupt, errors.New("replayed question has no answer workflow binding"))
@@ -272,10 +308,14 @@ func (dispatcher *GORMQuestionDispatcher) replayQuestion(ctx context.Context, tx
 }
 
 func (dispatcher *GORMQuestionDispatcher) startQuestionWorkflow(ctx context.Context, tx *gorm.DB, transaction foundation.TransactionScope, question conversationdomain.Question, answerID foundation.ID) (workflowapplication.RuntimeStartResult, error) {
-	plan, err := buildQuestionWorkflowDispatchPlan(question, answerID)
+	plan, err := buildQuestionWorkflowDispatchPlanForVersion(question, answerID, dispatcher.analysisDefinitionVersion)
 	if err != nil {
 		return workflowapplication.RuntimeStartResult{}, err
 	}
+	return dispatcher.startQuestionWorkflowWithPlan(ctx, transaction, question, plan)
+}
+
+func (dispatcher *GORMQuestionDispatcher) startQuestionWorkflowWithPlan(ctx context.Context, transaction foundation.TransactionScope, question conversationdomain.Question, plan questionWorkflowDispatchPlan) (workflowapplication.RuntimeStartResult, error) {
 	request, err := workflowapplication.BuildRuntimeStartRequest(
 		dispatcher.ids, dispatcher.clock, question.Request.WorkspaceID, plan.idempotencyKey, plan.input, plan.definition,
 	)

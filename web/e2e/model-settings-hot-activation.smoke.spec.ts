@@ -136,7 +136,7 @@ const fixtureControl = async (path: "/control/block-next" | "/control/state" | "
 
 const submitQuestion = async (page: Page, conversationID: string, idempotencyKey: string): Promise<string> => {
   const result = await page.evaluate(async ({ conversation, csrf, idempotency, workspace }) => {
-    const response = await fetch(`/api/v1/conversations/${conversation}/questions`, {
+    const response = await fetch(`/api/v2/conversations/${conversation}/questions`, {
       method: "POST",
       credentials: "same-origin",
       headers: {
@@ -165,7 +165,7 @@ const submitQuestion = async (page: Page, conversationID: string, idempotencyKey
 
 const waitForAnswer = async (page: Page, answerID: string): Promise<void> => {
   await expect.poll(async () => page.evaluate(async ({ answer, workspace }) => {
-    const response = await fetch(`/api/v1/answers/${answer}?workspace_id=${workspace}`, { headers: { Accept: "application/json" } });
+    const response = await fetch(`/api/v2/answers/${answer}?workspace_id=${workspace}`, { headers: { Accept: "application/json" } });
     const body = await response.json() as { publication_status?: unknown; workflow?: { status?: unknown }; error_code?: unknown };
 		if (!response.ok) {
 			const errorCode = typeof body.error_code === "string" ? body.error_code : "unknown";

@@ -1,9 +1,10 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { lazy, type ComponentType } from "react";
-import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
+import { lazy, useState, type ComponentType, type ReactNode } from "react";
+import { Link, MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const useActiveWorkspaceId = vi.hoisted(() => vi.fn());
+const signOut = vi.hoisted(() => vi.fn());
 const captureMutation = vi.hoisted(() => ({
   mutate: vi.fn(),
   reset: vi.fn(),
@@ -21,17 +22,19 @@ vi.mock("../features/capture/queries", () => ({ useCreateCapture: () => captureM
 vi.mock("./auth-context", () => ({
   useAuth: () => ({
     state: { status: "authenticated", mode: "required", session: { userLabel: "owner" } },
-    signOut: vi.fn(),
+    signOut,
   }),
 }));
 
 import { AppShell } from "./AppShell";
+import { reportCaughtRouteError } from "../routes/RouteContentBoundary";
 
 describe("AppShell", () => {
   beforeEach(() => {
     useActiveWorkspaceId.mockReturnValue("10000000-0000-4000-8000-000000000002");
     captureMutation.mutate.mockReset();
     captureMutation.reset.mockReset();
+    signOut.mockReset().mockResolvedValue(undefined);
   });
 
   it("在懒加载期间保留一级入口，并以内联三级结构展示知识导航", async () => {
@@ -262,5 +265,80 @@ describe("AppShell", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "关闭" }));
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "快速记录" })).not.toBeInTheDocument());
     await waitFor(() => expect(contextInput).toHaveFocus());
+  });
+
+  it("页面崩溃后仍可退出登录和导航，切换路由清除错误", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const BrokenPage = (): ReactNode => { throw new Error("render failed"); };
+    render(
+      <MemoryRouter initialEntries={["/search"]}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route path="/search" element={<BrokenPage />} />
+            <Route path="/settings" element={<p>工作区设置已打开</p>} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+      { onCaughtError: reportCaughtRouteError },
+    );
+
+    expect(screen.getByRole("alert", { name: "页面暂时无法显示" })).toBeInTheDocument();
+    const navigation = screen.getByRole("navigation", { name: "主导航" });
+    expect(screen.getByText("已认证 · owner")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("实时同步");
+    expect(screen.getByRole("button", { name: "快速记录" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "退出登录" }));
+    await waitFor(() => expect(signOut).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(within(navigation).getByRole("link", { name: "设置" }));
+
+    expect(await screen.findByText("工作区设置已打开")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(navigation).toBeInTheDocument();
+  });
+
+  it("同一路由切换 Workspace 后不保留旧工作区的错误", () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const nextWorkspace = "10000000-0000-4000-8000-000000000003";
+    const WorkspacePage = () => {
+      const workspaceId: unknown = useActiveWorkspaceId();
+      if (workspaceId !== nextWorkspace) throw new Error("previous workspace failed");
+      return <p>新工作区页面</p>;
+    };
+    const app = <MemoryRouter initialEntries={["/search"]}>
+      <Routes><Route element={<AppShell />}><Route path="/search" element={<WorkspacePage />} /></Route></Routes>
+    </MemoryRouter>;
+    const { rerender } = render(app, { onCaughtError: reportCaughtRouteError });
+    expect(screen.getByRole("alert", { name: "页面暂时无法显示" })).toBeInTheDocument();
+
+    useActiveWorkspaceId.mockReturnValue(nextWorkspace);
+    rerender(<MemoryRouter initialEntries={["/search"]}>
+      <Routes><Route element={<AppShell />}><Route path="/search" element={<WorkspacePage />} /></Route></Routes>
+    </MemoryRouter>);
+
+    expect(screen.getByText("新工作区页面")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByText("已认证 · owner")).toBeInTheDocument();
+  });
+
+  it("正常页面改变 URL 筛选时保留尚未提交的本地输入", async () => {
+    const DraftPage = () => {
+      const [draft, setDraft] = useState("");
+      const location = useLocation();
+      return <>
+        <input aria-label="未提交的输入" value={draft} onChange={(event) => setDraft(event.target.value)} />
+        <Link to="/search?mode=hybrid">切换检索模式</Link>
+        <output>{location.search}</output>
+      </>;
+    };
+    render(<MemoryRouter initialEntries={["/search"]}>
+      <Routes><Route element={<AppShell />}><Route path="/search" element={<DraftPage />} /></Route></Routes>
+    </MemoryRouter>);
+
+    fireEvent.change(screen.getByRole("textbox", { name: "未提交的输入" }), { target: { value: "保留草稿" } });
+    fireEvent.click(screen.getByRole("link", { name: "切换检索模式" }));
+
+    expect(await screen.findByText("?mode=hybrid")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "未提交的输入" })).toHaveValue("保留草稿");
   });
 });

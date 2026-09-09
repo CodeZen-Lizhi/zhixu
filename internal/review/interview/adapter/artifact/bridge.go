@@ -88,12 +88,16 @@ func (bridge *Bridge) CreateDraft(ctx context.Context, request interviewapplicat
 			SourceVersionID: evidence.SourceVersionID, SourceSpanID: evidence.SourceSpanID,
 		}
 	}
+	documents := make([]artifactapplication.DocumentSourceInput, len(request.Section.DocumentSources))
+	for index, source := range request.Section.DocumentSources {
+		documents[index] = artifactapplication.DocumentSourceInput{DocumentID: source.DocumentID, ArticleRevisionID: source.ArticleRevisionID, RevisionNo: source.ArticleRevisionNo, ContentHash: source.ContentHash}
+	}
 	recorded, err := bridge.commands.RecordSection(ctx, artifactapplication.RecordSectionPersistentCommand{
 		RevisionPersistentCommand: artifactapplication.RevisionPersistentCommand{
 			WorkspaceID: request.WorkspaceID, ArtifactID: artifactID, ExpectedVersion: 3, IdempotencyKey: keys.section,
 		},
 		Section: artifactapplication.SectionInput{
-			Key: request.Section.Key, Title: request.Section.Title, Content: request.Section.Markdown, Citations: citations,
+			Key: request.Section.Key, Title: request.Section.Title, Content: request.Section.Markdown, Citations: citations, DocumentSources: documents,
 			Coverage: artifactdomain.Coverage{SectionKey: request.Section.Key, Status: artifactdomain.CoverageCovered, Gaps: []artifactdomain.Gap{}},
 		},
 		Creator:  artifactdomain.CreatorAgent,
@@ -139,9 +143,15 @@ func validateRequest(request interviewapplication.ArtifactDraftRequest) error {
 	if !validID(request.WorkspaceID) || !validKind(request.Kind) || strings.TrimSpace(request.Title) == "" ||
 		len(request.Scope) == 0 || !json.Valid(request.Scope) || strings.TrimSpace(request.Section.Key) == "" ||
 		strings.TrimSpace(request.Section.Title) == "" || request.Section.Markdown == "" ||
-		request.Section.Markdown != strings.TrimSpace(request.Section.Markdown) || len(request.Section.Evidence) == 0 ||
+		request.Section.Markdown != strings.TrimSpace(request.Section.Markdown) || (len(request.Section.Evidence) == 0 && len(request.Section.DocumentSources) == 0) ||
+		(len(request.Section.Evidence) != 0 && len(request.Section.DocumentSources) != 0) || len(request.Section.DocumentSources) > 1 ||
 		!validVisibilityHold(request.Kind, request.IdempotencyBaseKey, request.VisibilityHold) {
 		return interviewdomain.InvalidError(interviewdomain.ErrorCodeReportInvalid, "interview artifact draft request is invalid")
+	}
+	for _, source := range request.Section.DocumentSources {
+		if source.Validate() != nil || source.WorkspaceID != request.WorkspaceID {
+			return interviewdomain.InvalidError(interviewdomain.ErrorCodeReportInvalid, "interview artifact note revision is invalid")
+		}
 	}
 	seen := make(map[string]struct{}, len(request.Section.Evidence))
 	seenCitation := make(map[string]struct{}, len(request.Section.Evidence))
@@ -195,8 +205,14 @@ func validateFinalDraft(request interviewapplication.ArtifactDraftRequest, state
 	if outline.Key != request.Section.Key || outline.Title != request.Section.Title || section.Key != request.Section.Key ||
 		section.Title != request.Section.Title || section.Content != request.Section.Markdown || section.Coverage.SectionKey != request.Section.Key ||
 		section.Coverage.Status != artifactdomain.CoverageCovered || len(section.Coverage.Gaps) != 0 ||
-		len(section.Citations) != len(request.Section.Evidence) {
+		len(section.Citations) != len(request.Section.Evidence) || len(section.DocumentSources) != len(request.Section.DocumentSources) {
 		return interviewdomain.InvalidError(interviewdomain.ErrorCodePersistenceInvalid, "interview artifact draft content is inconsistent")
+	}
+	for index, source := range section.DocumentSources {
+		expected := request.Section.DocumentSources[index]
+		if !source.Verified || source.DocumentID != expected.DocumentID || source.ArticleRevisionID != expected.ArticleRevisionID || source.RevisionNo != expected.ArticleRevisionNo || source.VerifiedContentHash != expected.ContentHash {
+			return interviewdomain.InvalidError(interviewdomain.ErrorCodePersistenceInvalid, "interview artifact document source drifted")
+		}
 	}
 	wantCitations := make(map[string]struct{}, len(request.Section.Evidence))
 	for _, evidence := range request.Section.Evidence {

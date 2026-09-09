@@ -64,15 +64,33 @@ func gormInterviewInsertQuestion(ctx context.Context, transaction *gorm.DB, ques
 	if err != nil {
 		return err
 	}
+	if question.NoteSource != nil {
+		evidence = []byte("[]")
+	}
+	noteSource, err := encodeNoteSource(question.NoteSource)
+	if err != nil {
+		return err
+	}
+	plan, err := encodeJSON(domain.CloneNoteFollowUps(question.FollowUpPlan))
+	if err != nil {
+		return err
+	}
+	if len(question.FollowUpPlan) == 0 {
+		plan = []byte("[]")
+	}
+	var planBinding any
+	if question.SourceKind == domain.QuestionSourceNoteRevision {
+		planBinding = interviewJSONB(plan)
+	}
 	_, err = gormInterviewExec(ctx, transaction, `
 		INSERT INTO learning.interview_question(
 			id,workspace_id,session_id,question_no,follow_up_no,parent_question_id,claim_id,topic_id,prompt,
-			answer_points,evidence,status,fingerprint,created_at,answered_at
-		) VALUES(?::uuid,?::uuid,?::uuid,?,?,?::uuid,?::uuid,?::uuid,?,?::jsonb,?::jsonb,?,?,?::timestamptz,?::timestamptz)`,
+			answer_points,evidence,status,fingerprint,created_at,answered_at,source_kind,note_source,follow_up_plan
+		) VALUES(?::uuid,?::uuid,?::uuid,?,?,?::uuid,?::uuid,?::uuid,?,?::jsonb,?::jsonb,?,?,?::timestamptz,?::timestamptz,?,?::jsonb,?::jsonb)`,
 		string(question.ID), string(question.WorkspaceID), string(question.SessionID), question.QuestionNo, question.FollowUpNo,
-		nullableID(question.ParentQuestionID), string(question.ClaimID), nullableID(question.TopicID), question.Prompt,
+		nullableID(question.ParentQuestionID), nullableNoteString(string(question.ClaimID)), nullableID(question.TopicID), question.Prompt,
 		interviewJSONB(answerPoints), interviewJSONB(evidence), string(question.Status), question.Fingerprint,
-		question.CreatedAt.UTC(), nullableTime(question.AnsweredAt))
+		question.CreatedAt.UTC(), nullableTime(question.AnsweredAt), persistedSourceKind(question.SourceKind), noteSource, planBinding)
 	return gormInterviewClassify(ctx, err, domain.ErrorCodePersistenceInvalid)
 }
 
@@ -80,14 +98,18 @@ func gormInterviewInsertPathStep(ctx context.Context, transaction *gorm.DB, step
 	if err := domain.ValidatePathStep(step); err != nil {
 		return err
 	}
-	_, err := gormInterviewExec(ctx, transaction, `
+	noteSource, err := encodeNoteSource(step.NoteSource)
+	if err != nil {
+		return err
+	}
+	_, err = gormInterviewExec(ctx, transaction, `
 		INSERT INTO learning.interview_learning_path_step(
 			id,workspace_id,path_id,step_no,claim_id,topic_id,source_version_id,source_span_id,evidence_hash,
-			title,rationale,status,version,created_at,updated_at
-		) VALUES(?::uuid,?::uuid,?::uuid,?,?::uuid,?::uuid,?::uuid,?::uuid,?,?,?,?,?,?::timestamptz,?::timestamptz)`,
-		string(step.ID), string(step.WorkspaceID), string(step.PathID), step.StepNo, string(step.ClaimID), nullableID(step.TopicID),
-		string(step.SourceVersionID), string(step.SourceSpanID), step.EvidenceHash, step.Title, step.Rationale, string(step.Status),
-		step.Version, step.CreatedAt.UTC(), step.UpdatedAt.UTC())
+			title,rationale,status,version,created_at,updated_at,source_kind,note_source
+		) VALUES(?::uuid,?::uuid,?::uuid,?,?::uuid,?::uuid,?::uuid,?::uuid,?,?,?,?,?,?::timestamptz,?::timestamptz,?,?::jsonb)`,
+		string(step.ID), string(step.WorkspaceID), string(step.PathID), step.StepNo, nullableNoteString(string(step.ClaimID)), nullableID(step.TopicID),
+		nullableNoteString(string(step.SourceVersionID)), nullableNoteString(string(step.SourceSpanID)), nullableNoteString(step.EvidenceHash), step.Title, step.Rationale, string(step.Status),
+		step.Version, step.CreatedAt.UTC(), step.UpdatedAt.UTC(), persistedSourceKind(step.SourceKind), noteSource)
 	return gormInterviewClassify(ctx, err, domain.ErrorCodePersistenceInvalid)
 }
 

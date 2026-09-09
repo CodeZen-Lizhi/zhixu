@@ -33,6 +33,9 @@ Quick Capture 已由 AppShell 单例提供文字、链接、文件和图片入�
 `/captures/:captureId` 分层恢复原始来源、处理状态与候选画像；严格 wire、焦点恢复和降级语义见 `capture-workbench.md`。
 Authoring 已交付 `/authoring` 与 `/authoring/new`、服务端 Working Draft autosave、每次 Freeze 新 Revision、
 安全 Markdown preview 和 Proposal publication 恢复；严格 wire 与 stale Revision 防护见 `authoring-workbench.md`。
+合成笔记的 `/authoring/notes`、current/published/history 区分、冻结来源深链、显式 Processing retry 和 NOTE
+面试准备契约也记录在 `authoring-workbench.md`；准备任务响应 envelope、丢响应恢复与旧 Claim wire 有定向回归。
+真实浏览器脚本入口与实际运行证据分开记录，不能因脚本可加载宣称 TODO4 全部完成。
 Organizing 已交付 `/organizing` 的服务端 Draft 恢复、可解释材料增删/选择、四模板与受约束自定义模板、
 Snapshot/Run/Artifact/Proposal 状态，以及 Topic/Merge Human Task Evidence/GAP/Diff 审阅；严格 wire 与盲批防护见
 `organizing-workbench.md`。
@@ -86,7 +89,7 @@ M8-03 已交付 `/interviews`、Interview-origin Learning Path 和 `/memories`�
 | [模型设置前端契约](./model-settings.md) | strict wire、desired/active/applied、双进程热应用、Session-only 与 Secret 生命周期 | 无重启 Save-and-Apply、恢复状态和桌面/移动真实容器门禁 |
 | [Artifact 工作台契约](./artifact-workbench.md) | Artifact wire、Query、generation 恢复、GAP/export/publish UI 边界 | M8-01 decoder、组件、桌面/移动真实浏览器闭环已验证 |
 | [快速记录工作台契约](./capture-workbench.md) | Capture/Profile strict wire、Dialog、Inbox、详情、焦点与恢复 | 真实 API/Worker 下 TEXT Capture、降级画像及桌面/移动交互已验证 |
-| [主动创作工作台契约](./authoring-workbench.md) | Authoring wire、autosave、Freeze、preview 与发布恢复 | Decoder、Query、组件、lint/typecheck/build 与真实桌面/移动浏览器门禁已验证 |
+| [主动创作与合成笔记工作台契约](./authoring-workbench.md) | Authoring autosave/Freeze/发布；Synthesis 版本、精确来源、retry 与 NOTE preparation | Authoring 原有浏览器基线；Synthesis/NOTE 定向 decoder/组件/HTTP 回归与独立真实 smoke 入口 |
 | [材料整理工作台契约](./organizing-workbench.md) | Material/Template/Snapshot/Run strict wire、服务端 Draft、Human Task Evidence/GAP/Diff 与结果恢复 | Decoder、Query、组件、lint/typecheck/test/build 及父任务桌面/移动真实浏览器门禁已验证 |
 | [文档文件历史工作台契约](./document-history-workbench.md) | History strict wire、Workspace/head/path/version/cursor Query、compare、restore preview/Proposal 与 SSE recovery | Decoder、Query/SSE、组件、Monaco、lint/typecheck/test/build 及父任务桌面/移动真实浏览器门禁已验证 |
 | [Git 同步设置前端契约](./git-sync-settings.md) | strict wire、Workspace binding、Secret 生命周期、配置/状态/重试、轮询恢复与响应式边界 | Decoder、Query/Mutation、组件、lint/typecheck/test/build及真实 API/Worker 桌面/390x844 分叉冲突、有界预览与重试门禁已验证 |

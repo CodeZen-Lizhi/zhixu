@@ -28,6 +28,9 @@ const (
 
 type workspaceAnalysisFinalizationFence struct {
 	RunID                     foundation.ID
+	DefinitionVersion         int64
+	PolicyVersion             int
+	EvidenceCount             int
 	WorkflowStatus            string
 	WorkflowCancelRequestedAt *time.Time
 	NodeStatus                string
@@ -134,6 +137,8 @@ func validateCurrentWorkspaceAnalysisLease(
 type workspaceAnalysisOperationRecord struct {
 	ID          foundation.ID
 	NodeRunID   foundation.ID
+	NodeKey     string
+	Ordinal     int
 	Kind        agentdomain.WorkspaceAnalysisOperationKind
 	CallKind    agentdomain.WorkspaceAnalysisOperationCallKind
 	Status      agentdomain.WorkspaceAnalysisOperationStatus
@@ -180,7 +185,7 @@ func scanWorkspaceAnalysisOperation(row scanner) (workspaceAnalysisOperationReco
 		resultKind, resultHash, errorCode *string
 	)
 	if err := row.Scan(
-		&id, &nodeRunID, &record.Kind, &record.CallKind, &record.Status, &modelCallID, &toolCallID,
+		&id, &nodeRunID, &record.NodeKey, &record.Ordinal, &record.Kind, &record.CallKind, &record.Status, &modelCallID, &toolCallID,
 		&resultKind, &resultID, &resultHash, &errorCode, &record.CreatedAt, &record.UpdatedAt, &record.CompletedAt,
 	); err != nil {
 		return workspaceAnalysisOperationRecord{}, err
@@ -239,6 +244,14 @@ func validateWorkspaceAnalysisTerminationAuthority(
 	settled := authority.Reservation.Found && authority.Reservation.Status == agentdomain.WorkspaceAnalysisBudgetSettled
 	switch command.Reason {
 	case agentdomain.WorkspaceAnalysisRunEvidenceInsufficient:
+		if fence.DefinitionVersion == 2 {
+			if operation.Kind != agentdomain.WorkspaceAnalysisOperationDecision || operation.NodeKey != conversationworkflow.WorkspaceAnalysisNodeDecideNext ||
+				operation.Status != agentdomain.WorkspaceAnalysisOperationSucceeded || operation.CallKind != agentdomain.WorkspaceAnalysisOperationCallModel ||
+				!artifactMatches(conversationapplication.WorkspaceAnalysisTerminationArtifactDecisionReceipt) || !modelSucceeded || !settled {
+				return workspaceAnalysisTerminationAuthorityError("dynamic evidence-insufficient decision authority is incomplete")
+			}
+			break
+		}
 		if operation.Kind != agentdomain.WorkspaceAnalysisOperationKnowledgeSearch || operation.Status != agentdomain.WorkspaceAnalysisOperationSucceeded ||
 			operation.CallKind != agentdomain.WorkspaceAnalysisOperationCallTool || !artifactMatches(conversationapplication.WorkspaceAnalysisTerminationArtifactToolReceipt) ||
 			!toolSucceeded || !settled {
@@ -276,6 +289,12 @@ func validateWorkspaceAnalysisTerminationAuthority(
 			return workspaceAnalysisTerminationAuthorityError("budget exhaustion authority is incomplete")
 		}
 		request := *command.BudgetRequest
+		if fence.DefinitionVersion == 2 {
+			if !workspaceAnalysisV2BudgetExhausted(request, operation, fence) {
+				return workspaceAnalysisTerminationAuthorityError("dynamic budget request still fits the authoritative remaining budget")
+			}
+			break
+		}
 		if request.ModelCalls <= fence.MaxModelCalls-fence.ReservedModelCalls-fence.SettledModelCalls &&
 			request.ToolCalls <= fence.MaxToolCalls-fence.ReservedToolCalls-fence.SettledToolCalls &&
 			request.SourceReads <= fence.MaxSourceReads-fence.ReservedSourceReads-fence.SettledSourceReads &&
@@ -325,6 +344,9 @@ func workspaceAnalysisBudgetRequestMatchesOperation(
 	kind agentdomain.WorkspaceAnalysisOperationKind,
 	fence workspaceAnalysisFinalizationFence,
 ) bool {
+	if fence.DefinitionVersion == 2 {
+		return workspaceAnalysisV2BudgetRequestMatchesOperation(request, kind, fence)
+	}
 	want := conversationapplication.WorkspaceAnalysisBudgetRequest{}
 	switch kind {
 	case agentdomain.WorkspaceAnalysisOperationRetrievalPlan:
@@ -394,8 +416,11 @@ func buildWorkspaceAnalysisSuccessPublication(
 	fence workspaceAnalysisFinalizationFence,
 	facts workspaceAnalysisSuccessFacts,
 ) (workspaceAnalysisPublication, error) {
+	if fence.DefinitionVersion == 2 {
+		return buildWorkspaceAnalysisSuccessPublicationV2(workspaceID, fence, facts)
+	}
 	candidate, err := agentdomain.DecodeWorkspaceAnalysisCandidate(facts.Candidate.Document, agentdomain.DefaultDecodeLimits())
-	if err != nil || candidate.ModelRunRef != facts.Candidate.SynthesisModelRunID {
+	if err != nil || candidate.SchemaVersion != "1" || facts.Candidate.SchemaVersion != 1 || candidate.ModelRunRef != facts.Candidate.SynthesisModelRunID {
 		return workspaceAnalysisPublication{}, consistency(ErrorCodeWorkspaceAnalysisFinalizeCorrupt, errors.New("workspace analysis candidate document is invalid"))
 	}
 	git, err := conversationworkflow.DecodeWorkspaceAnalysisGitStatusSummary(facts.GitReceipt.Output)
@@ -696,11 +721,19 @@ func workspaceAnalysisPublicationOutput(
 	answer conversationdomain.Answer,
 	proofID foundation.ID,
 ) (conversationworkflow.WorkspaceAnalysisPublicationOutput, error) {
+	return workspaceAnalysisPublicationOutputForVersion(answer, proofID, 1)
+}
+
+func workspaceAnalysisPublicationOutputForVersion(
+	answer conversationdomain.Answer,
+	proofID foundation.ID,
+	definitionVersion int64,
+) (conversationworkflow.WorkspaceAnalysisPublicationOutput, error) {
 	if err := conversationdomain.ValidateAnswer(answer); err != nil {
 		return conversationworkflow.WorkspaceAnalysisPublicationOutput{}, consistency(ErrorCodeWorkspaceAnalysisFinalizeCorrupt, err)
 	}
 	output := conversationworkflow.WorkspaceAnalysisPublicationOutput{
-		SchemaVersion: conversationworkflow.WorkspaceAnalysisOutputSchemaVersion,
+		SchemaVersion: int(workspaceAnalysisPublicationVersion(definitionVersion)),
 		AnswerID:      answer.ID, PublicationStatus: answer.PublicationStatus, ResultType: answer.ResultType,
 		ModelRunID: copyWorkspaceAnalysisFinalizerID(answer.ModelRunID), ResultHash: answer.ResultHash, ProofID: proofID,
 	}
@@ -780,6 +813,16 @@ func workspaceAnalysisOutputFromState(
 	var proofID foundation.ID
 	if state.Success != nil {
 		proof := state.Success
+		var envelope struct {
+			SchemaVersion string `json:"schema_version"`
+		}
+		wantSchema := conversationdomain.WorkspaceAnalysisResultSchemaVersionV1
+		if lookup.DefinitionVersion == 2 {
+			wantSchema = conversationdomain.WorkspaceAnalysisResultSchemaVersionV2
+		}
+		if err := json.Unmarshal(answer.Result, &envelope); err != nil || envelope.SchemaVersion != wantSchema {
+			return conversationworkflow.WorkspaceAnalysisPublicationOutput{}, false, consistency(ErrorCodeWorkspaceAnalysisFinalizeCorrupt, errors.New("workspace analysis success version differs from the persisted run"))
+		}
 		if proof.NodeRunID != lookup.NodeRunID || answer.PublicationStatus != conversationdomain.AnswerPublicationCompleted ||
 			answer.ResultType != conversationdomain.AnswerResultWorkspaceAnalysis || state.RunStatus != agentdomain.WorkspaceAnalysisRunSucceeded ||
 			state.RunReason == nil || *state.RunReason != agentdomain.WorkspaceAnalysisRunCompleted ||
@@ -808,7 +851,7 @@ func workspaceAnalysisOutputFromState(
 		return conversationworkflow.WorkspaceAnalysisPublicationOutput{}, false,
 			consistency(ErrorCodeWorkspaceAnalysisFinalizeCorrupt, errors.New("terminal workspace analysis answer has no publication proof"))
 	}
-	output, err := workspaceAnalysisPublicationOutput(answer, proofID)
+	output, err := workspaceAnalysisPublicationOutputForVersion(answer, proofID, lookup.DefinitionVersion)
 	return output, err == nil, err
 }
 
@@ -821,6 +864,19 @@ func workspaceAnalysisTerminalCitationCount(answer conversationdomain.Answer) (i
 	}
 	if published.Type != conversationdomain.AnswerResultWorkspaceAnalysis {
 		return 0, nil
+	}
+	var envelope struct {
+		SchemaVersion string `json:"schema_version"`
+	}
+	if err := json.Unmarshal(published.Document, &envelope); err != nil {
+		return 0, consistency(ErrorCodeWorkspaceAnalysisFinalizeCorrupt, err)
+	}
+	if envelope.SchemaVersion == conversationdomain.WorkspaceAnalysisResultSchemaVersionV2 {
+		var result conversationdomain.WorkspaceAnalysisAnswerResultV2
+		if err := json.Unmarshal(published.Document, &result); err != nil || result.Validate() != nil {
+			return 0, consistency(ErrorCodeWorkspaceAnalysisFinalizeCorrupt, errors.New("workspace analysis v2 replay citation projection is invalid"))
+		}
+		return int64(len(result.Payload.Citations)), nil
 	}
 	var result conversationdomain.WorkspaceAnalysisAnswerResult
 	if err := json.Unmarshal(published.Document, &result); err != nil || result.Validate() != nil {

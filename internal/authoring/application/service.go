@@ -262,6 +262,7 @@ func (service *Service) PublishArticleRevision(ctx context.Context, command Publ
 		BaseVersion:    preparation.Reservation.BaseVersion,
 		Content:        preparation.Revision.Content,
 		ContentHash:    preparation.Reservation.ContentHash,
+		CreatedByType:  preparation.Revision.CreatedByType,
 		IdempotencyKey: preparation.Reservation.ProposalIdempotencyKey,
 	})
 	if err != nil {

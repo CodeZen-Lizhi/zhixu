@@ -15,6 +15,7 @@ export const TAG_CATALOG = [
   ["DocumentHistory", "Document history, comparison, and restore operations."],
   ["SourceSpans", "Source versions, ingestion, knowledge profiles, and evidence spans."],
   ["Organizing", "Material organizing drafts, templates, snapshots, and runs."],
+  ["Synthesis", "Continuously evolving synthesis notes, exact sources, and durable processing."],
   ["GitSync", "Git remote configuration and synchronization operations."],
   ["Business", "Workflow, proposal, approval, and change-control operations."],
   ["BusinessRevisions", "Proposal current-content and revision-history operations."],
@@ -38,6 +39,28 @@ const CATALOG_NAMES = new Set(TAG_CATALOG.map(([name]) => name));
 // This is intentionally an operationId decision table rather than a path-prefix guess.
 // New operations must be assigned explicitly and will fail the verifier until reviewed.
 const EXACT_TAGS = new Map([
+  ["submitQuestionV2", "Conversation"],
+  ["listConversationTurnsV2", "Conversation"],
+  ["getAnswerV2", "Conversation"],
+  ["getWorkspaceAnalysisTimelineV2", "Timeline"],
+  ["listInterviewsV2", "Interview"],
+  ["startInterviewV2", "Interview"],
+  ["getInterviewV2", "Interview"],
+  ["submitInterviewTurnV2", "Interview"],
+  ["completeInterviewV2", "Interview"],
+  ["updateLearningPathStepV2", "Review"],
+  ["listSynthesisNotes", "Synthesis"],
+  ["getSynthesisNote", "Synthesis"],
+  ["listSynthesisRevisions", "Synthesis"],
+  ["getSynthesisRevision", "Synthesis"],
+  ["openSynthesisSource", "Synthesis"],
+  ["listSynthesisProcessing", "Synthesis"],
+  ["getSynthesisProcessing", "Synthesis"],
+  ["retrySynthesisProcessing", "Synthesis"],
+  ["prepareSynthesisNoteInterview", "Interview"],
+  ["listSynthesisNoteInterviewPreparations", "Interview"],
+  ["getSynthesisNoteInterviewPreparation", "Interview"],
+  ["retrySynthesisNoteInterviewPreparation", "Interview"],
   ["getLiveness", "Health"],
   ["getReadiness", "Health"],
   ["getSystemStatus", "System"],
@@ -243,7 +266,7 @@ export function verifyTagManifest(document, manifest, { checkOperationTags = tru
   const manifestIds = new Set(Object.keys(manifest.operations ?? {}));
   const missing = [...operationIds].filter((operationId) => !manifestIds.has(operationId));
   const extra = [...manifestIds].filter((operationId) => !operationIds.has(operationId));
-  if (missing.length || extra.length || operations.length !== 189) {
+  if (missing.length || extra.length || operations.length !== EXACT_TAGS.size || operationIds.size !== operations.length) {
     throw new Error(`operation tag manifest drift: count=${operations.length}, missing=${missing.join(",")}, extra=${extra.join(",")}`);
   }
   for (const [operationId, tag] of Object.entries(manifest.operations)) {

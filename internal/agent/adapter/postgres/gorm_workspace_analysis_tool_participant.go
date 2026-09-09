@@ -56,26 +56,32 @@ func (repository *GORMRepository) PrepareWorkspaceAnalysisToolOperationScoped(
 	if err := proveGORMWorkspaceAnalysisToolHasNoRefusal(ctx, database, command.OperationKey); err != nil {
 		return application.WorkspaceAnalysisToolOperationSnapshot{}, err
 	}
+	if err := validateGORMWorkspaceAnalysisToolDecision(ctx, database, command); err != nil {
+		return application.WorkspaceAnalysisToolOperationSnapshot{}, err
+	}
 
-	insert := database.Exec(`INSERT INTO agent.workspace_analysis_operation(
+	created := false
+	if !command.RequireExisting {
+		insert := database.Exec(`INSERT INTO agent.workspace_analysis_operation(
 		id,workspace_id,analysis_run_id,workflow_run_id,node_run_id,node_key,operation_kind,
 		ordinal,call_kind,request_hash,status,version,created_at,updated_at
 	) SELECT ?,?,?,?,?,?,?,?,'TOOL',?,'PENDING',1,pending.at,pending.at
 		FROM (SELECT clock_timestamp() AS at) AS pending
 		ON CONFLICT (analysis_run_id,node_key,operation_kind,ordinal) DO NOTHING`,
-		string(command.CandidateOperationID), string(command.Identity.WorkspaceID), string(command.OperationKey.AnalysisRunID),
-		string(command.Identity.WorkflowRunID), string(command.Identity.NodeRunID), string(command.OperationKey.NodeKey),
-		string(command.OperationKey.Kind), command.OperationKey.Ordinal, command.RequestHash,
-	)
-	if insert.Error != nil {
-		return application.WorkspaceAnalysisToolOperationSnapshot{}, classifyGORM(ctx, insert.Error)
-	}
-	if insert.RowsAffected < 0 || insert.RowsAffected > 1 {
-		return application.WorkspaceAnalysisToolOperationSnapshot{}, consistency(
-			errors.New("workspace analysis tool prepare affected an invalid number of operations"),
+			string(command.CandidateOperationID), string(command.Identity.WorkspaceID), string(command.OperationKey.AnalysisRunID),
+			string(command.Identity.WorkflowRunID), string(command.Identity.NodeRunID), string(command.OperationKey.NodeKey),
+			string(command.OperationKey.Kind), command.OperationKey.Ordinal, command.RequestHash,
 		)
+		if insert.Error != nil {
+			return application.WorkspaceAnalysisToolOperationSnapshot{}, classifyGORM(ctx, insert.Error)
+		}
+		if insert.RowsAffected < 0 || insert.RowsAffected > 1 {
+			return application.WorkspaceAnalysisToolOperationSnapshot{}, consistency(
+				errors.New("workspace analysis tool prepare affected an invalid number of operations"),
+			)
+		}
+		created = insert.RowsAffected == 1
 	}
-	created := insert.RowsAffected == 1
 
 	operation, found, err := loadGORMWorkspaceAnalysisToolOperationForUpdateByKey(ctx, database, command.OperationKey)
 	if err != nil {
@@ -114,8 +120,10 @@ func (repository *GORMRepository) PrepareWorkspaceAnalysisToolOperationScoped(
 		if err := validateGORMWorkspaceAnalysisToolPending(operation); err != nil {
 			return application.WorkspaceAnalysisToolOperationSnapshot{}, err
 		}
-		if err := validateGORMWorkspaceAnalysisToolAdmission(ctx, database, run, command.OperationKey.Kind, databaseNow); err != nil {
-			return application.WorkspaceAnalysisToolOperationSnapshot{}, err
+		if run.DefinitionVersion == 1 {
+			if err := validateGORMWorkspaceAnalysisToolAdmission(ctx, database, run, command.OperationKey.Kind, databaseNow); err != nil {
+				return application.WorkspaceAnalysisToolOperationSnapshot{}, err
+			}
 		}
 		return buildGORMWorkspaceAnalysisToolSnapshot(run, operation, nil, databaseNow)
 	}

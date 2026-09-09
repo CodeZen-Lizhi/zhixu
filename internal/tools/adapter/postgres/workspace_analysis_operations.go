@@ -46,12 +46,12 @@ func validateWorkspaceAnalysisToolAuthorization(command application.AuthorizeWor
 	}
 	definition, err := exactWorkspaceAnalysisToolDefinition(command.Definition, contract, *call.Tool)
 	expectedCallNo := 1
-	if contract.Kind == agentdomain.WorkspaceAnalysisOperationSourceRead {
+	if contract.Kind == agentdomain.WorkspaceAnalysisOperationSourceRead || contract.NodeKey == agentdomain.WorkspaceAnalysisOperationNodeDecideNext {
 		expectedCallNo = contract.Ordinal
 	}
 	if err != nil || call.DefinitionHash != definition.DefinitionHash || call.InputSchema == nil || *call.InputSchema != definition.InputSchema ||
 		call.OutputSchema == nil || *call.OutputSchema != definition.OutputSchema || call.Capability != definition.RequiredCapability ||
-		call.CallNo != expectedCallNo {
+		call.CallNo != expectedCallNo || domain.WorkspaceAnalysisToolWorkflowVersion(*call.Tool) != command.Identity.DefinitionVersion {
 		if err == nil {
 			err = errors.New("workspace analysis call definition binding differs")
 		}
@@ -75,7 +75,7 @@ func validateWorkspaceAnalysisToolFinalization(command application.FinalizeWorks
 }
 
 func exactWorkspaceAnalysisToolDefinition(input domain.Definition, contract agentdomain.WorkspaceAnalysisOperationContract, ref domain.ToolRef) (domain.Definition, error) {
-	expected, ok := workspaceAnalysisToolForOperation(contract)
+	expected, ok := workspaceAnalysisToolForOperationVersion(contract, domain.WorkspaceAnalysisToolWorkflowVersion(ref))
 	if !ok || expected != ref {
 		return domain.Definition{}, errors.New("workspace analysis operation tool is not exact")
 	}
@@ -91,6 +91,32 @@ func exactWorkspaceAnalysisToolDefinition(input domain.Definition, contract agen
 }
 
 func workspaceAnalysisToolForOperation(contract agentdomain.WorkspaceAnalysisOperationContract) (domain.ToolRef, bool) {
+	return workspaceAnalysisToolForOperationVersion(contract, 1)
+}
+
+func workspaceAnalysisToolForOperationVersion(contract agentdomain.WorkspaceAnalysisOperationContract, version int64) (domain.ToolRef, bool) {
+	if version == 2 {
+		if contract.NodeKey != agentdomain.WorkspaceAnalysisOperationNodeDecideNext && (contract.NodeKey != agentdomain.WorkspaceAnalysisOperationNodeValidateCitations || contract.Kind != agentdomain.WorkspaceAnalysisOperationCitationValidation || contract.Ordinal != 1) {
+			return domain.ToolRef{}, false
+		}
+		if contract.Ordinal < 1 || contract.Ordinal > agentdomain.WorkspaceAnalysisV2MaxDecisions {
+			return domain.ToolRef{}, false
+		}
+		switch contract.Kind {
+		case agentdomain.WorkspaceAnalysisOperationGitStatus:
+			return domain.ToolRef{Name: "ReadGitStatus", Version: 3}, true
+		case agentdomain.WorkspaceAnalysisOperationKnowledgeSearch:
+			return domain.ToolRef{Name: "SearchKnowledge", Version: 3}, true
+		case agentdomain.WorkspaceAnalysisOperationSourceRead:
+			return domain.ToolRef{Name: "ReadSource", Version: 4}, true
+		case agentdomain.WorkspaceAnalysisOperationCitationValidation:
+			return domain.ToolRef{Name: "ValidateCitation", Version: 4}, true
+		}
+		return domain.ToolRef{}, false
+	}
+	if version != 1 || contract.NodeKey == agentdomain.WorkspaceAnalysisOperationNodeDecideNext {
+		return domain.ToolRef{}, false
+	}
 	switch contract.Kind {
 	case agentdomain.WorkspaceAnalysisOperationGitStatus:
 		return workspaceAnalysisGitStatusRef, contract.Ordinal == 1
@@ -117,7 +143,14 @@ func sameWorkspaceAnalysisToolRequestBinding(existing, requested domain.ToolCall
 }
 
 func workspaceAnalysisCatalogHash() string {
+	return workspaceAnalysisCatalogHashForVersion(1)
+}
+
+func workspaceAnalysisCatalogHashForVersion(version int64) string {
 	snapshot, err := catalog.WorkspaceAnalysisToolCatalogSnapshot()
+	if version == 2 {
+		snapshot, err = catalog.WorkspaceAnalysisToolCatalogSnapshotV2()
+	}
 	if err != nil {
 		return ""
 	}

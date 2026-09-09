@@ -251,6 +251,7 @@ func gormLoadBoundAnswer(ctx context.Context, db *gorm.DB, lookup conversationap
 	}
 	view, err := scanAnswerView(gormScanRow(db.WithContext(ctx).Raw(`SELECT `+answerViewColumns+` FROM agent.answer a
 		JOIN workflow.run w ON w.id=a.workflow_run_id AND w.workspace_id=a.workspace_id
+		JOIN workflow.definition d ON d.id=w.definition_id AND d.workspace_id=w.workspace_id
 		WHERE a.workspace_id=? AND a.id=? AND a.conversation_id=? AND a.question_id=? AND a.workflow_run_id=?
 		AND EXISTS (SELECT 1 FROM workflow.node_run n JOIN workflow.node_attempt na ON na.node_run_id=n.id
 			WHERE n.id=? AND n.run_id=a.workflow_run_id AND na.id=?)`+locking, string(lookup.WorkspaceID), string(lookup.AnswerID), string(lookup.ConversationID), string(lookup.QuestionID), string(lookup.WorkflowRunID), string(lookup.NodeRunID), string(lookup.NodeAttemptID))))

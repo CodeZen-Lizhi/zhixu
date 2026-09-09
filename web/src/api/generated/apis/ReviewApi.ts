@@ -17,6 +17,7 @@ import type {
     CreateReviewLearningPathRequest,
     LearningPathStatusResult,
     LearningPathStepResult,
+    LearningPathStepResultV2,
     Problem,
     ReviewAnswerResult,
     ReviewCard,
@@ -160,6 +161,13 @@ export interface UpdateLearningPathStatusOperationRequest {
 }
 
 export interface UpdateLearningPathStepOperationRequest {
+    pathId: string;
+    stepId: string;
+    idempotencyKey: string;
+    updateLearningPathStepRequest: UpdateLearningPathStepRequest;
+}
+
+export interface UpdateLearningPathStepV2Request {
     pathId: string;
     stepId: string;
     idempotencyKey: string;
@@ -1644,6 +1652,7 @@ export class ReviewApi extends runtime.BaseAPI {
     }
 
     /**
+     * Preserves the v1 response contract.
      */
     async updateLearningPathStepRaw(requestParameters: UpdateLearningPathStepOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<LearningPathStepResult>> {
         const requestOptions = await this.updateLearningPathStepRequestOpts(requestParameters);
@@ -1653,9 +1662,92 @@ export class ReviewApi extends runtime.BaseAPI {
     }
 
     /**
+     * Preserves the v1 response contract.
      */
     async updateLearningPathStep(requestParameters: UpdateLearningPathStepOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<LearningPathStepResult> {
         const response = await this.updateLearningPathStepRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for updateLearningPathStepV2 without sending the request
+     */
+    async updateLearningPathStepV2RequestOpts(requestParameters: UpdateLearningPathStepV2Request): Promise<runtime.RequestOpts> {
+        if (requestParameters['pathId'] == null) {
+            throw new runtime.RequiredError(
+                'pathId',
+                'Required parameter "pathId" was null or undefined when calling updateLearningPathStepV2().'
+            );
+        }
+
+        if (requestParameters['stepId'] == null) {
+            throw new runtime.RequiredError(
+                'stepId',
+                'Required parameter "stepId" was null or undefined when calling updateLearningPathStepV2().'
+            );
+        }
+
+        if (requestParameters['idempotencyKey'] == null) {
+            throw new runtime.RequiredError(
+                'idempotencyKey',
+                'Required parameter "idempotencyKey" was null or undefined when calling updateLearningPathStepV2().'
+            );
+        }
+
+        if (requestParameters['updateLearningPathStepRequest'] == null) {
+            throw new runtime.RequiredError(
+                'updateLearningPathStepRequest',
+                'Required parameter "updateLearningPathStepRequest" was null or undefined when calling updateLearningPathStepV2().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+        if (requestParameters['idempotencyKey'] != null) {
+            headerParameters['Idempotency-Key'] = String(requestParameters['idempotencyKey']);
+        }
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v2/review/learning-paths/{path_id}/steps/{step_id}`;
+        urlPath = urlPath.replace('{path_id}', encodeURIComponent(String(requestParameters['pathId'])));
+        urlPath = urlPath.replace('{step_id}', encodeURIComponent(String(requestParameters['stepId'])));
+
+        return {
+            path: urlPath,
+            method: 'PUT',
+            headers: headerParameters,
+            query: queryParameters,
+            body: requestParameters['updateLearningPathStepRequest'],
+        };
+    }
+
+    /**
+     * Uses the v2 HTTP representation and also accepts compatible historical records.
+     */
+    async updateLearningPathStepV2Raw(requestParameters: UpdateLearningPathStepV2Request, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<LearningPathStepResultV2>> {
+        const requestOptions = await this.updateLearningPathStepV2RequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Uses the v2 HTTP representation and also accepts compatible historical records.
+     */
+    async updateLearningPathStepV2(requestParameters: UpdateLearningPathStepV2Request, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<LearningPathStepResultV2> {
+        const response = await this.updateLearningPathStepV2Raw(requestParameters, initOverrides);
         return await response.value();
     }
 

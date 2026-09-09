@@ -35,7 +35,15 @@ func (DeterministicScorer) Score(ctx context.Context, input ScoreInput) (domain.
 	}
 	boundaries := boundaryScore(input.UserAnswer)
 	clarity := clarityScore(input.UserAnswer)
+	if input.Question.NoteSource != nil && len(input.Question.AnswerPoints) == 1 && input.Question.AnswerPoints[0] == UnresolvedNoteGapPoint && acknowledgesMissingNoteEvidence(input.UserAnswer) {
+		correctness, coverage, boundaries = 1, 1, 1
+		missing = nil
+	}
 	feedback := scorerFeedbackFor(personalizationFrom(input.PersonalContext))
+	if input.Question.NoteSource != nil {
+		feedback.correctness = "Matched frozen note answer points using deterministic term rules; no model grading was performed."
+		feedback.emptyAnswer = "No answer was provided for the frozen note item."
+	}
 	errors := make([]string, 0, 1)
 	if strings.TrimSpace(input.UserAnswer) == "" {
 		errors = append(errors, feedback.emptyAnswer)
@@ -53,8 +61,12 @@ func (DeterministicScorer) Score(ctx context.Context, input ScoreInput) (domain.
 		Errors:        errors,
 		Omissions:     omissions,
 		Evidence:      append([]domain.EvidenceRef(nil), input.Question.Evidence...),
+		NoteSource:    domain.CloneNoteSource(input.Question.NoteSource),
 	}
-	if err := domain.ValidateScore(score, input.Question.Evidence); err != nil {
+	if input.Question.NoteSource != nil {
+		score.Evidence = []domain.EvidenceRef{}
+	}
+	if err := domain.ValidateScoreForQuestion(score, input.Question); err != nil {
 		return domain.Score{}, err
 	}
 	return score, nil
@@ -246,4 +258,15 @@ func min(left, right int) int {
 
 var scorerStopWords = map[string]struct{}{
 	"a": {}, "an": {}, "and": {}, "as": {}, "at": {}, "be": {}, "by": {}, "for": {}, "from": {}, "in": {}, "is": {}, "it": {}, "of": {}, "on": {}, "or": {}, "that": {}, "the": {}, "to": {}, "with": {},
+}
+
+// This is an explicit vocabulary rule, not semantic or model grading.
+func acknowledgesMissingNoteEvidence(answer string) bool {
+	lower := strings.ToLower(strings.TrimSpace(answer))
+	for _, marker := range []string{"不足以判断", "无法判断", "不能判断", "需补充资料", "需要补充资料", "证据不足", "insufficient evidence", "not enough evidence", "cannot determine", "need more information"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
 }

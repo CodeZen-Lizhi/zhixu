@@ -6,7 +6,7 @@ API、Worker、Workspace CLI/Probe、Model CLI 和 Local Model Runtime 的业务
 `cmd/migrate` 继续由 Atlas/River 管理 Schema，credential-init 保留经过独立安全审查的管理角色入口。
 最终代码 [cb935655](https://github.com/CodeZen-Lizhi/zhixu/commit/cb93565561498674cda1dc1230fed587fba66075) 已提交并推送到 `origin/dev`，TODO 10 父任务和 30 个子任务均已完成并归档。
 TODO 10 本身未修改 Atlas Schema、迁移 checksum 或业务协议。后续 M9 历史升级修复追加了 `00093` 兼容迁移，
-需要使用包含该文件及兼容 runner 的版本；永久 Schema 与 `00001`–`00092` 原文及校验和保持不变。目标环境尚未部署。
+需要使用包含该文件及兼容 runner 的版本；该兼容修复保持永久 Schema 与 `00001`–`00092` 原文及校验和不变。2026-09-09 已完成本机受控部署，原 Goose 81 数据库经正式入口升级至 Atlas 00099，原业务 ID、知识 Root 与密钥保留；实际镜像、HTTP/页面与模型配置限制见 [统一交付记录](../../../.trellis/tasks/07-16-product-delivery/research/final-integration-2026-09-09.md)。
 
 构造和错误契约见 [GORM 持久化规范](../../../.trellis/spec/backend/gorm-persistence.md)。
 完整 owner/入口/验收映射见 [TODO 10 收口记录](../../../.trellis/tasks/archive/2026-09/08-19-gorm-composition-pgx-convergence/research/final-acceptance.md)。
@@ -49,7 +49,7 @@ flowchart TD
 
 ## 发布顺序
 
-以下是取得发布授权后的操作要求，本轮未执行：
+以下为受控升级操作要求。2026-09-09 本机已执行备份、同版构建、前向迁移及最小部署核验；具体通过范围见上述交付记录，目标容量、故障矩阵和现场模型闭环未据此标为通过：
 
 1. 固定审查通过的代码版本和完整依赖闭包，同批构建 API、Worker、CLI；禁止只提交某个 scoped 接口而遗漏调用方。
 2. 核对目标 Atlas/River 版本、数据库备份与恢复能力。低于 82 的历史库使用包含 `00093` 和兼容 runner 的构建；

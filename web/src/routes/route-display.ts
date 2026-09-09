@@ -59,6 +59,7 @@ export const routeDisplayRegistry: readonly RouteDisplay[] = [
   { basePath: "/interviews", label: "访谈", section: "knowledge", navigation: { placement: "submenu", icon: "user-round-check", group: { label: "学习", icon: "graduation-cap", order: 3, itemOrder: 2 } } },
   { basePath: "/authoring", label: "创作", section: "authoring", navigation: { placement: "primary", label: "创作", order: 2, icon: "square-pen" } },
   { basePath: "/authoring/new", label: "新建文章", parentLabel: "创作", section: "authoring" },
+  { basePath: "/authoring/notes", label: "合成笔记", parentLabel: "创作", section: "authoring" },
   { basePath: "/authoring/documents", label: "文档历史", parentLabel: "创作", section: "authoring" },
   { basePath: "/authoring/organize", label: "整理成文", parentLabel: "创作", section: "authoring" },
   { basePath: "/proposals", label: "提案", section: "authoring" },

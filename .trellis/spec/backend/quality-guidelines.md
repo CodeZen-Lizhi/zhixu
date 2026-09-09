@@ -3,7 +3,15 @@
 ## 适用范围
 
 适用于后端所有领域模块、API、Worker、数据库/文件/Git/模型 Adapter、迁移、Workflow 和安全边界。
-仓库已进入 M6-D；本文件记录可执行质量门禁，但只有实际命令输出才能证明某项测试或 smoke 已通过。
+本文件记录各模块可执行验证方法，但只有实际命令输出才能证明某项测试或 smoke 已通过。
+
+## 开发交付口径
+
+按用户 2026-09-08 的精简要求，开发收尾只运行当前改动必要的行为、数据/权限安全、兼容与静态检查；
+复用有效的既有证据，不为归档新增形式化测试或重跑全仓矩阵。下文各模块的完整清单是按风险选取的参考，
+不是每次开发结束必须全部执行的累加门禁。长期观察、容量/跨平台/灾备矩阵、coverage 趋势与评分复评不再阻塞
+开发归档；未执行要明确记录，不能写 PASS。真实失败必须修复或明确保留，缺失业务功能不能以取消测试冒充完成。
+M11 最终 E2E、AI Eval 与发布包在整体开发完成后单独处理。事实源见 [`quality.md`](../../../docs/architecture/quality.md)。
 
 ## 已确认事实
 
@@ -52,6 +60,17 @@
 10. 修改公开 OpenAPI 时，通用 OAS lint 由锁定 Spectral、兼容性 diff 由固定 digest 的 oasdiff 拥有；项目 checker
     与 Gin route inventory 继续拥有 Auth/Capability/Workspace/SSE/Router 不变量。不得把任一单层绿色描述为完整
     契约绿色，细节见 [`ADR-0028`](../../../docs/architecture/adr/0028-openapi-contract-gates.md)。
+
+## 最小停写备份工具边界
+
+- `deploy/backup.py create` 只打包指定 canonical Root/Git 与整库 dump；`verify` 只读核验私有产物。数据库导出复用所选容器内的 `pg_dump`，Python 不建立第二数据库驱动或业务恢复写路径。
+- 停写由操作者确认；marker/HEAD 复查不能证明所有业务行未变化。已有输出不得覆盖，不自动停启服务、删除旧目录或原地还原。
+- Git 读取固定 cwd、清理继承 `GIT_*`，禁系统/全局配置、hooks、fsmonitor 和可选锁；在可能执行 filter 的 `status` 前检查 tracked attributes。仅检查 `.gitattributes` 文本或 `.promisor` pack 是否存在都不足以证明读取没有外部副作用。
+- Git 环境必须固定 `GIT_NO_LAZY_FETCH=1`、`GIT_ALLOW_PROTOCOL=""`，阻止缺失对象读取触发 lazy fetch/remote helper；不因备份去下载对象或执行仓库定义的命令。
+- Python 3.10 的 `Path.resolve` 在循环符号链接时可抛 `RuntimeError`；与 `OSError` 一样转换为固定 `BACKUP_PATH_INVALID`，不输出路径、底层错误或 traceback。
+- 保护回归使用本地 canary 证明 filter、remote helper 均未执行，并验证循环路径、输出/权限/归档篡改被拒绝；不通过联网或操作用户仓库来验证安全边界。
+- 参数/完整性测试和实际还原证据分别报告。合成 `PGDMP` 头或 Atlas marker 不代表有效数据库备份或真实迁移；基本 PG 还原也不代表完整应用一致性。仅改变失败输入处理时可复用未变数据路径的已有还原证据。
+- 正式恢复另需原安装配置、主密钥、selection/control identity 和角色/权限；临时新目录核验不能冒充原 Workspace 身份。具体操作与范围见 [运行手册](../../../docs/operations.md#7-最小停写备份与恢复)。
 
 ## 测试要求
 

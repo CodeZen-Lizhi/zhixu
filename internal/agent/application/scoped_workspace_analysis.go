@@ -123,7 +123,7 @@ func (service *ScopedWorkspaceAnalysisRunService) StartWorkspaceAnalysisRunScope
 		return domain.WorkspaceAnalysisRun{}, err
 	}
 	if domain.ValidateWorkspaceAnalysisRun(persisted) != nil ||
-		!sameWorkspaceAnalysisQueuedRun(persisted, run, service.config, service.budget, service.deadlines) {
+		!sameWorkspaceAnalysisQueuedRun(persisted, run) {
 		return domain.WorkspaceAnalysisRun{}, workspaceAnalysisRunStartError(
 			foundation.ErrorConsistencyViolation,
 			ErrorCodeWorkspaceAnalysisRunStartConflict,
@@ -134,7 +134,7 @@ func (service *ScopedWorkspaceAnalysisRunService) StartWorkspaceAnalysisRunScope
 	return persisted, nil
 }
 
-// ScopedWorkspaceAnalysisCapabilityCheckedRunStarter 固定在同一 scope 内执行 readiness 后再启动 Run。
+// ScopedWorkspaceAnalysisCapabilityCheckedRunStarter 在同一 scope 内校验新请求 readiness，重放沿用历史绑定。
 type ScopedWorkspaceAnalysisCapabilityCheckedRunStarter struct {
 	readiness ScopedWorkspaceAnalysisReadiness
 	delegate  ScopedWorkspaceAnalysisRunStarter
@@ -160,7 +160,7 @@ func NewScopedWorkspaceAnalysisCapabilityCheckedRunStarter(
 	}, nil
 }
 
-// StartWorkspaceAnalysisRunScoped 在同一 caller-owned scope 内先确认 Worker readiness，再创建或验证 Run。
+// StartWorkspaceAnalysisRunScoped 对新请求先确认 Worker readiness 再创建 Run，对重放读取已持久绑定。
 func (starter *ScopedWorkspaceAnalysisCapabilityCheckedRunStarter) StartWorkspaceAnalysisRunScoped(
 	ctx context.Context,
 	scope foundation.TransactionScope,
@@ -171,6 +171,11 @@ func (starter *ScopedWorkspaceAnalysisCapabilityCheckedRunStarter) StartWorkspac
 	}
 	if ctx == nil {
 		return domain.WorkspaceAnalysisRun{}, workspaceAnalysisCapabilityInvalid(errors.New("workspace analysis capability context is nil"))
+	}
+	if command.Replayed {
+		// The durable run owns the version on replay. A newer deployment's
+		// capability advertisement must not rewrite or gate historical requests.
+		return starter.delegate.StartWorkspaceAnalysisRunScoped(ctx, scope, command)
 	}
 	if err := starter.readiness.RequireWorkspaceAnalysisWorkerReadyScoped(ctx, scope, starter.contract); err != nil {
 		return domain.WorkspaceAnalysisRun{}, err

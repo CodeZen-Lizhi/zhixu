@@ -43,7 +43,7 @@ func ValidateWorkspaceAnalysisCandidateStreamRequest(request ChatRequest, sink W
 	if request.Phase != domain.ModelCallAnswer {
 		return applicationError(foundation.ErrorInvalidInput, ErrorCodeWorkspaceAnalysisCandidateStreamInvalid, false, errors.New("workspace analysis candidate stream must use the answer phase"))
 	}
-	if request.SchemaRef.ID != domain.WorkspaceAnalysisCandidateSchemaID || request.SchemaRef.Version != "1" {
+	if request.SchemaRef.ID != domain.WorkspaceAnalysisCandidateSchemaID || (request.SchemaRef.Version != "1" && request.SchemaRef.Version != "2") {
 		return applicationError(foundation.ErrorInvalidInput, ErrorCodeWorkspaceAnalysisCandidateStreamInvalid, false, errors.New("workspace analysis candidate stream schema is invalid"))
 	}
 	if isNilWorkspaceAnalysisCandidateStreamSink(sink) {

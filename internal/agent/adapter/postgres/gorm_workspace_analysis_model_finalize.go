@@ -68,6 +68,9 @@ func gormValidateWorkspaceAnalysisModelLockedBinding(
 }
 
 func gormValidateWorkspaceAnalysisModelStoredClosure(ctx context.Context, transaction *gorm.DB, locked workspaceAnalysisModelLocks) error {
+	if locked.operation.kind == domain.WorkspaceAnalysisOperationDecision {
+		return gormValidateWorkspaceAnalysisDecisionClosure(ctx, transaction, locked)
+	}
 	run, call, operation, reservation := locked.modelRun, locked.modelCall, locked.operation, locked.reservation
 	if run == nil || call == nil || reservation == nil {
 		return consistency(errors.New("workspace analysis model closure is incomplete"))
@@ -204,6 +207,9 @@ func gormAuthorizePendingWorkspaceAnalysisModelCall(
 	locked workspaceAnalysisModelLocks,
 	command application.AuthorizeWorkspaceAnalysisModelCallCommand,
 ) (application.WorkspaceAnalysisModelAuthorizationResult, error) {
+	if command.OperationKey.Kind == domain.WorkspaceAnalysisOperationDecision {
+		return gormAuthorizePendingWorkspaceAnalysisDecision(ctx, transaction, locked, command)
+	}
 	if err := validateWorkspaceAnalysisModelAdmission(locked, command); err != nil {
 		return application.WorkspaceAnalysisModelAuthorizationResult{}, err
 	}
@@ -225,7 +231,21 @@ func gormAuthorizePendingWorkspaceAnalysisModelCall(
 	if execResult.RowsAffected != 1 {
 		return application.WorkspaceAnalysisModelAuthorizationResult{}, workspaceAnalysisModelConflict(errors.New("workspace analysis model run already exists"))
 	}
-	execResult = transaction.WithContext(ctx).Exec(`INSERT INTO agent.model_call(
+	return gormStartWorkspaceAnalysisModelCall(ctx, transaction, locked, command, run, call)
+}
+
+// gormStartWorkspaceAnalysisModelCall shares the atomic Call, Operation and
+// budget write path between a one-call run and a retained decision-loop run.
+func gormStartWorkspaceAnalysisModelCall(
+	ctx context.Context,
+	transaction *gorm.DB,
+	locked workspaceAnalysisModelLocks,
+	command application.AuthorizeWorkspaceAnalysisModelCallCommand,
+	run domain.ModelRun,
+	call domain.ModelCall,
+) (application.WorkspaceAnalysisModelAuthorizationResult, error) {
+	at := locked.fence.databaseNow
+	execResult := transaction.WithContext(ctx).Exec(`INSERT INTO agent.model_call(
 		id,model_run_id,call_no,phase,
 		adapter_name,adapter_version,model_id,model_version,profile_id,profile_version,
 		prompt_template_id,prompt_template_version,output_schema_id,output_schema_version,max_output_tokens,

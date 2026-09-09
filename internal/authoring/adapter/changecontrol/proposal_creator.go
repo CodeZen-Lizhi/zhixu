@@ -58,9 +58,12 @@ func (creator *ProposalCreator) CreatePublicationProposal(ctx context.Context, r
 		request.ContentHash != authoringdomain.ComputeContentHash(request.Content) || strings.TrimSpace(request.IdempotencyKey) == "" {
 		return authoringapp.PublicationProposalResult{}, foundation.NewError(foundation.ErrorInvalidInput, authoringdomain.ErrorCodePublicationInvalid, false, errors.New("publication proposal request is invalid"))
 	}
-	evidence := publicationEvidence + " content_sha256=" + request.ContentHash
+	provenance, err := generatedPublicationEvidence(request.CreatedByType)
+	if err != nil {
+		return authoringapp.PublicationProposalResult{}, err
+	}
+	evidence := provenance + " content_sha256=" + request.ContentHash
 	var result changecontrolapp.CreateResult
-	var err error
 	if mode == changecontroldomain.TargetModeCreateOnly {
 		result, err = creator.proposals.CreateCreateOnlyFileProposal(ctx, changecontrolapp.CreateCreateOnlyFileProposalCommand{
 			WorkspaceID: request.WorkspaceID, TargetPath: request.TargetPath,

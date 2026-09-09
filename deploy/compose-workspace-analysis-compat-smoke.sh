@@ -3,7 +3,7 @@
 # Exercises both the rolling-upgrade pre-enable window and a post-fact rollback.
 # The current tree migrates the database once. Four legacy/current API/Worker
 # pairs reject the new mode before enablement; the final phase creates one real
-# Workspace Analysis result, retains the compatible API, and rolls back Worker.
+# dynamic Workspace Analysis v2 result, retains the compatible API, and rolls back Worker.
 set -Eeuo pipefail
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,6 +20,7 @@ readonly DEFAULT_LEGACY_REF=541033dd4548f8a53ef1064053ff6545faf2820e
 readonly LEGACY_REF="${ZHIXU_WORKSPACE_ANALYSIS_LEGACY_REF:-${DEFAULT_LEGACY_REF}}"
 
 source "${SCRIPT_DIR}/compose-smoke-cleanup.sh"
+source "${SCRIPT_DIR}/compose-workspace-analysis-v2-smoke-functions.sh"
 
 STATE_DIR=""
 PROJECT_NAME=""
@@ -307,7 +308,9 @@ run_rag() {
 }
 
 assert_workspace_analysis_rejected() {
-  local pair=$1 api_kind=$2 conversation_id payload before after status
+  local pair=$1 api_kind=$2 conversation_id payload before after status question_api_version=v1
+  # Each pre-enable probe uses the HTTP version exposed by its API artifact.
+  [[ "${api_kind}" != current ]] || question_api_version=v2
   request_json POST /api/v1/conversations 201 "$(jq -cn --arg workspace "${WORKSPACE_ID}" --arg title "compat ${pair} mode" '{workspace_id:$workspace,title:$title}')" "${pair} mode conversation" "${pair}-mode-conversation"
   conversation_id="$(jq -er '.id' "${LAST_RESPONSE_FILE}")"
   before="$(compose exec -T postgres psql -Atq --username "${ZHIXU_POSTGRES_USER}" --dbname "${ZHIXU_POSTGRES_DB}" -c "SELECT count(*) FROM agent.workspace_analysis_run")"
@@ -316,7 +319,7 @@ assert_workspace_analysis_rejected() {
   response_file="$(mktemp "${STATE_DIR}/mode.XXXXXX")"
   status="$(curl --silent --show-error --connect-timeout 5 --max-time 15 --output "${response_file}" --write-out '%{http_code}' --request POST \
     --cookie "${COOKIE_JAR}" --header "Origin: ${AUTH_ORIGIN}" --header "X-CSRF-Token: ${CSRF_TOKEN}" --header "X-Workspace-ID: ${WORKSPACE_ID}" --header "Idempotency-Key: ${pair}-mode" \
-    --header 'Content-Type: application/json' --data-binary "${payload}" "${API_BASE_URL}/api/v1/conversations/${conversation_id}/questions")" || fail "${pair} mode probe could not reach API"
+    --header 'Content-Type: application/json' --data-binary "${payload}" "${API_BASE_URL}/api/${question_api_version}/conversations/${conversation_id}/questions")" || fail "${pair} mode probe could not reach API"
   case "${api_kind}" in
     legacy)
       [[ "${status}" == 400 ]] || fail "${pair} legacy API accepted or misclassified workspace_analysis mode"
@@ -416,7 +419,7 @@ SQL
 }
 
 run_workspace_analysis_for_rollback() {
-  local pair=$1 payload started publication workflow timeline_path fact_counts
+  local pair=$1 payload started publication workflow fact_counts
   request_json POST /api/v1/conversations 201 \
     "$(jq -cn --arg workspace "${WORKSPACE_ID}" '{workspace_id:$workspace,title:"Workspace Analysis rollback compatibility"}')" \
     "${pair} conversation" "${pair}-workspace-analysis-conversation"
@@ -431,14 +434,14 @@ SQL
   [[ "${ROLLBACK_EVENT_WATERMARK}" =~ ^[1-9][0-9]*$ ]] || fail 'could not establish the rollback SSE watermark'
   payload="$(jq -cn --arg workspace "${WORKSPACE_ID}" --arg token "${EVIDENCE_TOKEN}" \
     '{workspace_id:$workspace,mode:"workspace_analysis",question:("Analyze the approved recovery evidence token "+$token+" and cite the bounded next step."),scope:{retrieval_mode:"keyword"},answer_depth:"standard",output_format:"markdown"}')"
-  request_json POST "/api/v1/conversations/${ROLLBACK_CONVERSATION_ID}/questions" 202 "${payload}" \
+  request_json POST "/api/v2/conversations/${ROLLBACK_CONVERSATION_ID}/questions" 202 "${payload}" \
     "${pair} Workspace Analysis submission" "${pair}-question"
   jq -e '.question.mode=="workspace_analysis" and .answer.publication_status=="pending"' "${LAST_RESPONSE_FILE}" >/dev/null \
     || fail 'rollback fixture submission omitted canonical Workspace Analysis mode'
   ROLLBACK_ANSWER_ID="$(jq -er '.answer.id' "${LAST_RESPONSE_FILE}")"
   started=${SECONDS}
   while (( SECONDS - started < TIMEOUT_SECONDS )); do
-    request_json GET "/api/v1/answers/${ROLLBACK_ANSWER_ID}?workspace_id=${WORKSPACE_ID}" 200 '' "${pair} Workspace Analysis status"
+    request_json GET "/api/v2/answers/${ROLLBACK_ANSWER_ID}?workspace_id=${WORKSPACE_ID}" 200 '' "${pair} Workspace Analysis status"
     publication="$(jq -r '.publication_status' "${LAST_RESPONSE_FILE}")"
     workflow="$(jq -r '.workflow.status' "${LAST_RESPONSE_FILE}")"
     [[ "${publication}:${workflow}" == completed:succeeded ]] && break
@@ -450,22 +453,8 @@ SQL
     sleep 1
   done
   [[ "${publication}:${workflow}" == completed:succeeded ]] || fail "${pair} Workspace Analysis timed out"
-  jq -e --arg workspace "${WORKSPACE_ID}" '
-    .publication_status=="completed" and .result_type=="workspace_analysis" and .workflow.status=="succeeded"
-    and .retrieval_summary==null and .current_stage==null
-    and (.citations|length)>0 and ([.citations[].workspace_id]|all(.==$workspace))
-    and .result.payload.termination_reason=="COMPLETED"
-  ' "${LAST_RESPONSE_FILE}" >/dev/null || fail 'rollback fixture Answer omitted its validated terminal projection'
-
-  timeline_path="/api/v1/answers/${ROLLBACK_ANSWER_ID}/analysis-timeline?workspace_id=${WORKSPACE_ID}"
-  request_json GET "${timeline_path}" 200 '' "${pair} Workspace Analysis timeline"
-  jq -e '
-    .schema_id=="conversation.workspace_analysis_timeline" and .schema_version=="v1"
-    and .run_status=="succeeded" and .termination_reason=="COMPLETED"
-    and .budget.model_calls.used==3 and .budget.tool_calls.used>=4
-    and (.budget.source_reads.used>=1 and .budget.source_reads.used<=3)
-    and ([.items[]|select(.kind=="node" and .status=="succeeded")]|length)==6
-  ' "${LAST_RESPONSE_FILE}" >/dev/null || fail 'rollback fixture timeline omitted completed facts'
+  cp "${LAST_RESPONSE_FILE}" "${STATE_DIR}/completed-answer.json"
+  assert_workspace_analysis_v2_completed "${ROLLBACK_ANSWER_ID}" default 5 5 1 true
 
   assert_workspace_analysis_fact_marker "${ROLLBACK_ANSWER_ID}"
   ROLLBACK_ANALYSIS_RUN_ID="$(compose exec -T postgres psql -Atq --set=ON_ERROR_STOP=1 \
@@ -488,27 +477,24 @@ SQL
 }
 
 assert_workspace_analysis_historical_reads() {
-  local pair=$1 timeline_path sse_file sse_data_file curl_status projection expected_resource_ref
-  request_json GET "/api/v1/answers/${ROLLBACK_ANSWER_ID}?workspace_id=${WORKSPACE_ID}" 200 '' "${pair} historical Answer"
+  local pair=$1 sse_file sse_data_file curl_status projection expected_resource_ref
+  request_json GET "/api/v2/answers/${ROLLBACK_ANSWER_ID}?workspace_id=${WORKSPACE_ID}" 200 '' "${pair} historical Answer"
   jq -e --arg answer "${ROLLBACK_ANSWER_ID}" '
     .id==$answer and .publication_status=="completed"
     and .result_type=="workspace_analysis" and .workflow.status=="succeeded"
-    and .result.payload.termination_reason=="COMPLETED"
+    and .result.schema_version=="v2" and .result.payload.termination_reason=="COMPLETED"
   ' "${LAST_RESPONSE_FILE}" >/dev/null || fail 'compatible API could not decode the historical Workspace Analysis Answer'
 
-  request_json GET "/api/v1/conversations/${ROLLBACK_CONVERSATION_ID}/turns?workspace_id=${WORKSPACE_ID}&latest=true" 200 '' "${pair} historical turn"
+  request_json GET "/api/v2/conversations/${ROLLBACK_CONVERSATION_ID}/turns?workspace_id=${WORKSPACE_ID}&latest=true" 200 '' "${pair} historical turn"
   jq -e --arg answer "${ROLLBACK_ANSWER_ID}" '
     (.items|length)==1 and .items[0].question.mode=="workspace_analysis"
     and .items[0].answer.id==$answer and .items[0].answer.publication_status=="completed"
-    and .items[0].answer.result_type=="workspace_analysis"
+    and .items[0].answer.result_type=="workspace_analysis" and .items[0].answer.result.schema_version=="v2"
   ' "${LAST_RESPONSE_FILE}" >/dev/null || fail 'compatible API could not decode the historical Workspace Analysis turn'
 
-  timeline_path="/api/v1/answers/${ROLLBACK_ANSWER_ID}/analysis-timeline?workspace_id=${WORKSPACE_ID}"
-  request_json GET "${timeline_path}" 200 '' "${pair} historical timeline"
-  jq -e --arg answer "${ROLLBACK_ANSWER_ID}" '
-    .answer_id==$answer and .run_status=="succeeded" and .termination_reason=="COMPLETED"
-    and ([.items[]|select(.kind=="node" and .status=="succeeded")]|length)==6
-  ' "${LAST_RESPONSE_FILE}" >/dev/null || fail 'compatible API could not decode the historical Workspace Analysis timeline'
+  assert_workspace_analysis_v2_timeline_replay "${ROLLBACK_ANSWER_ID}" default
+  jq -e --arg answer "${ROLLBACK_ANSWER_ID}" '.answer_id==$answer' "${LAST_RESPONSE_FILE}" >/dev/null \
+    || fail 'compatible API could not decode the historical Workspace Analysis timeline'
 
   sse_file="${STATE_DIR}/post-fact-rollback-events.sse"
   set +e
@@ -557,7 +543,7 @@ assert_workspace_analysis_post_fact_rejected() {
     --cookie "${COOKIE_JAR}" --header "Origin: ${AUTH_ORIGIN}" --header "X-CSRF-Token: ${CSRF_TOKEN}" \
     --header "X-Workspace-ID: ${WORKSPACE_ID}" --header "Idempotency-Key: ${pair}-admission" \
     --header 'Content-Type: application/json' --data-binary "${payload}" \
-    "${API_BASE_URL}/api/v1/conversations/${conversation_id}/questions")" || fail 'post-fact admission probe could not reach API'
+    "${API_BASE_URL}/api/v2/conversations/${conversation_id}/questions")" || fail 'post-fact admission probe could not reach API'
   [[ "${status}" == 503 ]] || fail "post-fact compatible API returned HTTP ${status} instead of failing closed"
   jq -e '.error_code=="WORKSPACE_ANALYSIS_CAPABILITY_UNAVAILABLE" and .retryable==false' "${response_file}" >/dev/null \
     || fail 'post-fact compatible API returned an unstable capability Problem'

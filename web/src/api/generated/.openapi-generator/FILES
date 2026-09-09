@@ -22,6 +22,7 @@ apis/ReviewApi.ts
 apis/SearchApi.ts
 apis/SemanticLinksApi.ts
 apis/SourceSpansApi.ts
+apis/SynthesisApi.ts
 apis/SystemApi.ts
 apis/TimelineApi.ts
 apis/WorkspacesApi.ts

@@ -132,15 +132,8 @@ func newWorkspaceAnalysisQueuedRun(
 func sameWorkspaceAnalysisQueuedRun(
 	persisted domain.WorkspaceAnalysisRun,
 	expected domain.WorkspaceAnalysisRun,
-	config WorkspaceAnalysisRunStartConfig,
-	budget WorkspaceAnalysisBudgetPolicy,
-	deadlines WorkspaceAnalysisV1Deadlines,
 ) bool {
-	return persisted.ID == expected.ID && sameWorkspaceAnalysisFrozenStartBinding(persisted, WorkspaceAnalysisRunStartCommand{
-		WorkspaceID: expected.WorkspaceID, ConversationID: expected.ConversationID,
-		QuestionID: expected.QuestionID, AnswerID: expected.AnswerID, WorkflowRunID: expected.WorkflowRunID,
-		CreatedAt: expected.CreatedAt,
-	}, config, budget, deadlines) &&
+	return persisted.ID == expected.ID && sameWorkspaceAnalysisFrozenStartBinding(persisted, expected) &&
 		persisted.Status == expected.Status && persisted.Version == expected.Version &&
 		persisted.TerminationReason == expected.TerminationReason && persisted.ValidationReceiptID == nil &&
 		persisted.ReviewModelRunID == nil && persisted.CompletedAt == nil &&
@@ -150,12 +143,8 @@ func sameWorkspaceAnalysisQueuedRun(
 
 func sameWorkspaceAnalysisFrozenStartBinding(
 	run domain.WorkspaceAnalysisRun,
-	command WorkspaceAnalysisRunStartCommand,
-	config WorkspaceAnalysisRunStartConfig,
-	budget WorkspaceAnalysisBudgetPolicy,
-	deadlines WorkspaceAnalysisV1Deadlines,
+	expected domain.WorkspaceAnalysisRun,
 ) bool {
-	expected := newWorkspaceAnalysisQueuedRun(run.ID, command, config, budget, deadlines)
 	return run.WorkspaceID == expected.WorkspaceID && run.ConversationID == expected.ConversationID &&
 		run.QuestionID == expected.QuestionID && run.AnswerID == expected.AnswerID && run.WorkflowRunID == expected.WorkflowRunID &&
 		run.DefinitionKey == expected.DefinitionKey && run.DefinitionVersion == expected.DefinitionVersion &&

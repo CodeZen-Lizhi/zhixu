@@ -16,12 +16,20 @@ import * as runtime from '../runtime';
 import type {
     CompleteInterviewRequest,
     InterviewCompletionResult,
+    InterviewCompletionResultV2,
     InterviewMemoryCandidateRequest,
     InterviewMemoryCandidateResult,
+    InterviewNotePreparationOptions,
+    InterviewNotePreparationPage,
+    InterviewNotePreparationResult,
     InterviewSessionPage,
+    InterviewSessionPageV2,
     InterviewSnapshot,
+    InterviewSnapshotV2,
     InterviewStartResult,
+    InterviewStartResultV2,
     InterviewTurnResult,
+    InterviewTurnResultV2,
     Problem,
     StartInterviewRequest,
     SubmitInterviewTurnRequest,
@@ -33,9 +41,26 @@ export interface CompleteInterviewOperationRequest {
     completeInterviewRequest: CompleteInterviewRequest;
 }
 
+export interface CompleteInterviewV2Request {
+    sessionId: string;
+    idempotencyKey: string;
+    completeInterviewRequest: CompleteInterviewRequest;
+}
+
 export interface GetInterviewRequest {
     sessionId: string;
     workspaceId: string;
+}
+
+export interface GetInterviewV2Request {
+    sessionId: string;
+    workspaceId: string;
+}
+
+export interface GetSynthesisNoteInterviewPreparationRequest {
+    workspaceId: string;
+    noteId: string;
+    preparationId: string;
 }
 
 export interface ListInterviewsRequest {
@@ -44,12 +69,49 @@ export interface ListInterviewsRequest {
     cursor?: string;
 }
 
+export interface ListInterviewsV2Request {
+    workspaceId: string;
+    limit?: number;
+    cursor?: string;
+}
+
+export interface ListSynthesisNoteInterviewPreparationsRequest {
+    workspaceId: string;
+    noteId: string;
+}
+
+export interface PrepareSynthesisNoteInterviewRequest {
+    idempotencyKey: string;
+    workspaceId: string;
+    noteId: string;
+    interviewNotePreparationOptions: InterviewNotePreparationOptions;
+}
+
+export interface RetrySynthesisNoteInterviewPreparationRequest {
+    idempotencyKey: string;
+    workspaceId: string;
+    noteId: string;
+    preparationId: string;
+    interviewNotePreparationOptions: InterviewNotePreparationOptions;
+}
+
 export interface StartInterviewOperationRequest {
     idempotencyKey: string;
     startInterviewRequest: StartInterviewRequest;
 }
 
+export interface StartInterviewV2Request {
+    idempotencyKey: string;
+    startInterviewRequest: StartInterviewRequest;
+}
+
 export interface SubmitInterviewTurnOperationRequest {
+    sessionId: string;
+    idempotencyKey: string;
+    submitInterviewTurnRequest: SubmitInterviewTurnRequest;
+}
+
+export interface SubmitInterviewTurnV2Request {
     sessionId: string;
     idempotencyKey: string;
     submitInterviewTurnRequest: SubmitInterviewTurnRequest;
@@ -125,7 +187,7 @@ export class InterviewApi extends runtime.BaseAPI {
     }
 
     /**
-     * Completes a persisted Interview exactly once and creates the evidence-bound report and Learning Path Artifact bindings.
+     * Completes a persisted Interview exactly once and creates the evidence-bound report and Learning Path Artifact bindings. Preserves the v1 response contract.
      */
     async completeInterviewRaw(requestParameters: CompleteInterviewOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<InterviewCompletionResult>> {
         const requestOptions = await this.completeInterviewRequestOpts(requestParameters);
@@ -135,10 +197,84 @@ export class InterviewApi extends runtime.BaseAPI {
     }
 
     /**
-     * Completes a persisted Interview exactly once and creates the evidence-bound report and Learning Path Artifact bindings.
+     * Completes a persisted Interview exactly once and creates the evidence-bound report and Learning Path Artifact bindings. Preserves the v1 response contract.
      */
     async completeInterview(requestParameters: CompleteInterviewOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<InterviewCompletionResult> {
         const response = await this.completeInterviewRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for completeInterviewV2 without sending the request
+     */
+    async completeInterviewV2RequestOpts(requestParameters: CompleteInterviewV2Request): Promise<runtime.RequestOpts> {
+        if (requestParameters['sessionId'] == null) {
+            throw new runtime.RequiredError(
+                'sessionId',
+                'Required parameter "sessionId" was null or undefined when calling completeInterviewV2().'
+            );
+        }
+
+        if (requestParameters['idempotencyKey'] == null) {
+            throw new runtime.RequiredError(
+                'idempotencyKey',
+                'Required parameter "idempotencyKey" was null or undefined when calling completeInterviewV2().'
+            );
+        }
+
+        if (requestParameters['completeInterviewRequest'] == null) {
+            throw new runtime.RequiredError(
+                'completeInterviewRequest',
+                'Required parameter "completeInterviewRequest" was null or undefined when calling completeInterviewV2().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+        if (requestParameters['idempotencyKey'] != null) {
+            headerParameters['Idempotency-Key'] = String(requestParameters['idempotencyKey']);
+        }
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v2/review/interviews/{session_id}/complete`;
+        urlPath = urlPath.replace('{session_id}', encodeURIComponent(String(requestParameters['sessionId'])));
+
+        return {
+            path: urlPath,
+            method: 'POST',
+            headers: headerParameters,
+            query: queryParameters,
+            body: requestParameters['completeInterviewRequest'],
+        };
+    }
+
+    /**
+     * Completes a persisted Interview exactly once and creates the evidence-bound report and Learning Path Artifact bindings. Uses the v2 HTTP representation and also accepts compatible historical records.
+     */
+    async completeInterviewV2Raw(requestParameters: CompleteInterviewV2Request, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<InterviewCompletionResultV2>> {
+        const requestOptions = await this.completeInterviewV2RequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Completes a persisted Interview exactly once and creates the evidence-bound report and Learning Path Artifact bindings. Uses the v2 HTTP representation and also accepts compatible historical records.
+     */
+    async completeInterviewV2(requestParameters: CompleteInterviewV2Request, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<InterviewCompletionResultV2> {
+        const response = await this.completeInterviewV2Raw(requestParameters, initOverrides);
         return await response.value();
     }
 
@@ -189,6 +325,7 @@ export class InterviewApi extends runtime.BaseAPI {
     }
 
     /**
+     * Preserves the v1 response contract.
      */
     async getInterviewRaw(requestParameters: GetInterviewRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<InterviewSnapshot>> {
         const requestOptions = await this.getInterviewRequestOpts(requestParameters);
@@ -198,9 +335,143 @@ export class InterviewApi extends runtime.BaseAPI {
     }
 
     /**
+     * Preserves the v1 response contract.
      */
     async getInterview(requestParameters: GetInterviewRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<InterviewSnapshot> {
         const response = await this.getInterviewRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for getInterviewV2 without sending the request
+     */
+    async getInterviewV2RequestOpts(requestParameters: GetInterviewV2Request): Promise<runtime.RequestOpts> {
+        if (requestParameters['sessionId'] == null) {
+            throw new runtime.RequiredError(
+                'sessionId',
+                'Required parameter "sessionId" was null or undefined when calling getInterviewV2().'
+            );
+        }
+
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling getInterviewV2().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        if (requestParameters['workspaceId'] != null) {
+            queryParameters['workspace_id'] = requestParameters['workspaceId'];
+        }
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v2/review/interviews/{session_id}`;
+        urlPath = urlPath.replace('{session_id}', encodeURIComponent(String(requestParameters['sessionId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * Uses the v2 HTTP representation and also accepts compatible historical records.
+     */
+    async getInterviewV2Raw(requestParameters: GetInterviewV2Request, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<InterviewSnapshotV2>> {
+        const requestOptions = await this.getInterviewV2RequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Uses the v2 HTTP representation and also accepts compatible historical records.
+     */
+    async getInterviewV2(requestParameters: GetInterviewV2Request, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<InterviewSnapshotV2> {
+        const response = await this.getInterviewV2Raw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for getSynthesisNoteInterviewPreparation without sending the request
+     */
+    async getSynthesisNoteInterviewPreparationRequestOpts(requestParameters: GetSynthesisNoteInterviewPreparationRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling getSynthesisNoteInterviewPreparation().'
+            );
+        }
+
+        if (requestParameters['noteId'] == null) {
+            throw new runtime.RequiredError(
+                'noteId',
+                'Required parameter "noteId" was null or undefined when calling getSynthesisNoteInterviewPreparation().'
+            );
+        }
+
+        if (requestParameters['preparationId'] == null) {
+            throw new runtime.RequiredError(
+                'preparationId',
+                'Required parameter "preparationId" was null or undefined when calling getSynthesisNoteInterviewPreparation().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/interviews/{preparation_id}`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+        urlPath = urlPath.replace('{note_id}', encodeURIComponent(String(requestParameters['noteId'])));
+        urlPath = urlPath.replace('{preparation_id}', encodeURIComponent(String(requestParameters['preparationId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * Reads durable preparation without exposing answer points or follow-up plans.
+     */
+    async getSynthesisNoteInterviewPreparationRaw(requestParameters: GetSynthesisNoteInterviewPreparationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<InterviewNotePreparationResult>> {
+        const requestOptions = await this.getSynthesisNoteInterviewPreparationRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Reads durable preparation without exposing answer points or follow-up plans.
+     */
+    async getSynthesisNoteInterviewPreparation(requestParameters: GetSynthesisNoteInterviewPreparationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<InterviewNotePreparationResult> {
+        const response = await this.getSynthesisNoteInterviewPreparationRaw(requestParameters, initOverrides);
         return await response.value();
     }
 
@@ -251,7 +522,7 @@ export class InterviewApi extends runtime.BaseAPI {
     }
 
     /**
-     * Lists recoverable Interview Session summaries in one Workspace without questions, answers, evidence, or command receipts.
+     * Lists recoverable Claim Interview Session summaries in one Workspace without questions, answers, evidence, or command receipts. Preserves the v1 response contract and filters by source before pagination. Use the matching v2 endpoint to include note interviews. Cursors are bound to the HTTP API version; restart from the first page when switching versions.
      */
     async listInterviewsRaw(requestParameters: ListInterviewsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<InterviewSessionPage>> {
         const requestOptions = await this.listInterviewsRequestOpts(requestParameters);
@@ -261,10 +532,307 @@ export class InterviewApi extends runtime.BaseAPI {
     }
 
     /**
-     * Lists recoverable Interview Session summaries in one Workspace without questions, answers, evidence, or command receipts.
+     * Lists recoverable Claim Interview Session summaries in one Workspace without questions, answers, evidence, or command receipts. Preserves the v1 response contract and filters by source before pagination. Use the matching v2 endpoint to include note interviews. Cursors are bound to the HTTP API version; restart from the first page when switching versions.
      */
     async listInterviews(requestParameters: ListInterviewsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<InterviewSessionPage> {
         const response = await this.listInterviewsRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for listInterviewsV2 without sending the request
+     */
+    async listInterviewsV2RequestOpts(requestParameters: ListInterviewsV2Request): Promise<runtime.RequestOpts> {
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling listInterviewsV2().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        if (requestParameters['workspaceId'] != null) {
+            queryParameters['workspace_id'] = requestParameters['workspaceId'];
+        }
+
+        if (requestParameters['limit'] != null) {
+            queryParameters['limit'] = requestParameters['limit'];
+        }
+
+        if (requestParameters['cursor'] != null) {
+            queryParameters['cursor'] = requestParameters['cursor'];
+        }
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v2/review/interviews`;
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * Lists recoverable Claim and note Interview Session summaries in one Workspace without questions, answers, evidence, or command receipts. Uses the v2 HTTP representation and also accepts compatible historical records. Cursors are bound to the HTTP API version; restart from the first page when switching versions.
+     */
+    async listInterviewsV2Raw(requestParameters: ListInterviewsV2Request, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<InterviewSessionPageV2>> {
+        const requestOptions = await this.listInterviewsV2RequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Lists recoverable Claim and note Interview Session summaries in one Workspace without questions, answers, evidence, or command receipts. Uses the v2 HTTP representation and also accepts compatible historical records. Cursors are bound to the HTTP API version; restart from the first page when switching versions.
+     */
+    async listInterviewsV2(requestParameters: ListInterviewsV2Request, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<InterviewSessionPageV2> {
+        const response = await this.listInterviewsV2Raw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for listSynthesisNoteInterviewPreparations without sending the request
+     */
+    async listSynthesisNoteInterviewPreparationsRequestOpts(requestParameters: ListSynthesisNoteInterviewPreparationsRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling listSynthesisNoteInterviewPreparations().'
+            );
+        }
+
+        if (requestParameters['noteId'] == null) {
+            throw new runtime.RequiredError(
+                'noteId',
+                'Required parameter "noteId" was null or undefined when calling listSynthesisNoteInterviewPreparations().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/interviews`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+        urlPath = urlPath.replace('{note_id}', encodeURIComponent(String(requestParameters['noteId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * Returns the 20 most recently created preparations for this note, including operations whose initial response was lost.
+     */
+    async listSynthesisNoteInterviewPreparationsRaw(requestParameters: ListSynthesisNoteInterviewPreparationsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<InterviewNotePreparationPage>> {
+        const requestOptions = await this.listSynthesisNoteInterviewPreparationsRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Returns the 20 most recently created preparations for this note, including operations whose initial response was lost.
+     */
+    async listSynthesisNoteInterviewPreparations(requestParameters: ListSynthesisNoteInterviewPreparationsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<InterviewNotePreparationPage> {
+        const response = await this.listSynthesisNoteInterviewPreparationsRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for prepareSynthesisNoteInterview without sending the request
+     */
+    async prepareSynthesisNoteInterviewRequestOpts(requestParameters: PrepareSynthesisNoteInterviewRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['idempotencyKey'] == null) {
+            throw new runtime.RequiredError(
+                'idempotencyKey',
+                'Required parameter "idempotencyKey" was null or undefined when calling prepareSynthesisNoteInterview().'
+            );
+        }
+
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling prepareSynthesisNoteInterview().'
+            );
+        }
+
+        if (requestParameters['noteId'] == null) {
+            throw new runtime.RequiredError(
+                'noteId',
+                'Required parameter "noteId" was null or undefined when calling prepareSynthesisNoteInterview().'
+            );
+        }
+
+        if (requestParameters['interviewNotePreparationOptions'] == null) {
+            throw new runtime.RequiredError(
+                'interviewNotePreparationOptions',
+                'Required parameter "interviewNotePreparationOptions" was null or undefined when calling prepareSynthesisNoteInterview().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+        if (requestParameters['idempotencyKey'] != null) {
+            headerParameters['Idempotency-Key'] = String(requestParameters['idempotencyKey']);
+        }
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/interviews`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+        urlPath = urlPath.replace('{note_id}', encodeURIComponent(String(requestParameters['noteId'])));
+
+        return {
+            path: urlPath,
+            method: 'POST',
+            headers: headerParameters,
+            query: queryParameters,
+            body: requestParameters['interviewNotePreparationOptions'],
+        };
+    }
+
+    /**
+     * Freezes an actually published note revision and starts durable model question preparation.
+     */
+    async prepareSynthesisNoteInterviewRaw(requestParameters: PrepareSynthesisNoteInterviewRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<InterviewNotePreparationResult>> {
+        const requestOptions = await this.prepareSynthesisNoteInterviewRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Freezes an actually published note revision and starts durable model question preparation.
+     */
+    async prepareSynthesisNoteInterview(requestParameters: PrepareSynthesisNoteInterviewRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<InterviewNotePreparationResult> {
+        const response = await this.prepareSynthesisNoteInterviewRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for retrySynthesisNoteInterviewPreparation without sending the request
+     */
+    async retrySynthesisNoteInterviewPreparationRequestOpts(requestParameters: RetrySynthesisNoteInterviewPreparationRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['idempotencyKey'] == null) {
+            throw new runtime.RequiredError(
+                'idempotencyKey',
+                'Required parameter "idempotencyKey" was null or undefined when calling retrySynthesisNoteInterviewPreparation().'
+            );
+        }
+
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling retrySynthesisNoteInterviewPreparation().'
+            );
+        }
+
+        if (requestParameters['noteId'] == null) {
+            throw new runtime.RequiredError(
+                'noteId',
+                'Required parameter "noteId" was null or undefined when calling retrySynthesisNoteInterviewPreparation().'
+            );
+        }
+
+        if (requestParameters['preparationId'] == null) {
+            throw new runtime.RequiredError(
+                'preparationId',
+                'Required parameter "preparationId" was null or undefined when calling retrySynthesisNoteInterviewPreparation().'
+            );
+        }
+
+        if (requestParameters['interviewNotePreparationOptions'] == null) {
+            throw new runtime.RequiredError(
+                'interviewNotePreparationOptions',
+                'Required parameter "interviewNotePreparationOptions" was null or undefined when calling retrySynthesisNoteInterviewPreparation().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+        if (requestParameters['idempotencyKey'] != null) {
+            headerParameters['Idempotency-Key'] = String(requestParameters['idempotencyKey']);
+        }
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/interviews/{preparation_id}/retry`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+        urlPath = urlPath.replace('{note_id}', encodeURIComponent(String(requestParameters['noteId'])));
+        urlPath = urlPath.replace('{preparation_id}', encodeURIComponent(String(requestParameters['preparationId'])));
+
+        return {
+            path: urlPath,
+            method: 'POST',
+            headers: headerParameters,
+            query: queryParameters,
+            body: requestParameters['interviewNotePreparationOptions'],
+        };
+    }
+
+    /**
+     * Retries only a known failure, retaining the original note snapshot and options.
+     */
+    async retrySynthesisNoteInterviewPreparationRaw(requestParameters: RetrySynthesisNoteInterviewPreparationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<InterviewNotePreparationResult>> {
+        const requestOptions = await this.retrySynthesisNoteInterviewPreparationRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Retries only a known failure, retaining the original note snapshot and options.
+     */
+    async retrySynthesisNoteInterviewPreparation(requestParameters: RetrySynthesisNoteInterviewPreparationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<InterviewNotePreparationResult> {
+        const response = await this.retrySynthesisNoteInterviewPreparationRaw(requestParameters, initOverrides);
         return await response.value();
     }
 
@@ -317,7 +885,7 @@ export class InterviewApi extends runtime.BaseAPI {
     }
 
     /**
-     * Starts an evidence-bound Interview with a frozen configuration and persisted initial questions. The user cannot supply questions, scores, or evidence.
+     * Starts an evidence-bound Interview with a frozen configuration and persisted initial questions. The user cannot supply questions, scores, or evidence. Preserves the v1 response contract.
      */
     async startInterviewRaw(requestParameters: StartInterviewOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<InterviewStartResult>> {
         const requestOptions = await this.startInterviewRequestOpts(requestParameters);
@@ -327,10 +895,76 @@ export class InterviewApi extends runtime.BaseAPI {
     }
 
     /**
-     * Starts an evidence-bound Interview with a frozen configuration and persisted initial questions. The user cannot supply questions, scores, or evidence.
+     * Starts an evidence-bound Interview with a frozen configuration and persisted initial questions. The user cannot supply questions, scores, or evidence. Preserves the v1 response contract.
      */
     async startInterview(requestParameters: StartInterviewOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<InterviewStartResult> {
         const response = await this.startInterviewRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for startInterviewV2 without sending the request
+     */
+    async startInterviewV2RequestOpts(requestParameters: StartInterviewV2Request): Promise<runtime.RequestOpts> {
+        if (requestParameters['idempotencyKey'] == null) {
+            throw new runtime.RequiredError(
+                'idempotencyKey',
+                'Required parameter "idempotencyKey" was null or undefined when calling startInterviewV2().'
+            );
+        }
+
+        if (requestParameters['startInterviewRequest'] == null) {
+            throw new runtime.RequiredError(
+                'startInterviewRequest',
+                'Required parameter "startInterviewRequest" was null or undefined when calling startInterviewV2().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+        if (requestParameters['idempotencyKey'] != null) {
+            headerParameters['Idempotency-Key'] = String(requestParameters['idempotencyKey']);
+        }
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v2/review/interviews`;
+
+        return {
+            path: urlPath,
+            method: 'POST',
+            headers: headerParameters,
+            query: queryParameters,
+            body: requestParameters['startInterviewRequest'],
+        };
+    }
+
+    /**
+     * Starts an evidence-bound Interview with a frozen configuration and persisted initial questions. The user cannot supply questions, scores, or evidence. Uses the v2 HTTP representation and also accepts compatible historical records. This operation still starts Claim interviews only; note interviews are created by the published-note preparation endpoint.
+     */
+    async startInterviewV2Raw(requestParameters: StartInterviewV2Request, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<InterviewStartResultV2>> {
+        const requestOptions = await this.startInterviewV2RequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Starts an evidence-bound Interview with a frozen configuration and persisted initial questions. The user cannot supply questions, scores, or evidence. Uses the v2 HTTP representation and also accepts compatible historical records. This operation still starts Claim interviews only; note interviews are created by the published-note preparation endpoint.
+     */
+    async startInterviewV2(requestParameters: StartInterviewV2Request, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<InterviewStartResultV2> {
+        const response = await this.startInterviewV2Raw(requestParameters, initOverrides);
         return await response.value();
     }
 
@@ -391,7 +1025,7 @@ export class InterviewApi extends runtime.BaseAPI {
     }
 
     /**
-     * Submits only a user answer. The server produces the score, follow-up decision, and next question from persisted evidence.
+     * Submits only a user answer. The server produces the score, follow-up decision, and next question from persisted evidence. Preserves the v1 response contract.
      */
     async submitInterviewTurnRaw(requestParameters: SubmitInterviewTurnOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<InterviewTurnResult>> {
         const requestOptions = await this.submitInterviewTurnRequestOpts(requestParameters);
@@ -401,10 +1035,84 @@ export class InterviewApi extends runtime.BaseAPI {
     }
 
     /**
-     * Submits only a user answer. The server produces the score, follow-up decision, and next question from persisted evidence.
+     * Submits only a user answer. The server produces the score, follow-up decision, and next question from persisted evidence. Preserves the v1 response contract.
      */
     async submitInterviewTurn(requestParameters: SubmitInterviewTurnOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<InterviewTurnResult> {
         const response = await this.submitInterviewTurnRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for submitInterviewTurnV2 without sending the request
+     */
+    async submitInterviewTurnV2RequestOpts(requestParameters: SubmitInterviewTurnV2Request): Promise<runtime.RequestOpts> {
+        if (requestParameters['sessionId'] == null) {
+            throw new runtime.RequiredError(
+                'sessionId',
+                'Required parameter "sessionId" was null or undefined when calling submitInterviewTurnV2().'
+            );
+        }
+
+        if (requestParameters['idempotencyKey'] == null) {
+            throw new runtime.RequiredError(
+                'idempotencyKey',
+                'Required parameter "idempotencyKey" was null or undefined when calling submitInterviewTurnV2().'
+            );
+        }
+
+        if (requestParameters['submitInterviewTurnRequest'] == null) {
+            throw new runtime.RequiredError(
+                'submitInterviewTurnRequest',
+                'Required parameter "submitInterviewTurnRequest" was null or undefined when calling submitInterviewTurnV2().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+        if (requestParameters['idempotencyKey'] != null) {
+            headerParameters['Idempotency-Key'] = String(requestParameters['idempotencyKey']);
+        }
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v2/review/interviews/{session_id}/turns`;
+        urlPath = urlPath.replace('{session_id}', encodeURIComponent(String(requestParameters['sessionId'])));
+
+        return {
+            path: urlPath,
+            method: 'POST',
+            headers: headerParameters,
+            query: queryParameters,
+            body: requestParameters['submitInterviewTurnRequest'],
+        };
+    }
+
+    /**
+     * Submits only a user answer. The server produces the score, follow-up decision, and next question from persisted evidence. Uses the v2 HTTP representation and also accepts compatible historical records.
+     */
+    async submitInterviewTurnV2Raw(requestParameters: SubmitInterviewTurnV2Request, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<InterviewTurnResultV2>> {
+        const requestOptions = await this.submitInterviewTurnV2RequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Submits only a user answer. The server produces the score, follow-up decision, and next question from persisted evidence. Uses the v2 HTTP representation and also accepts compatible historical records.
+     */
+    async submitInterviewTurnV2(requestParameters: SubmitInterviewTurnV2Request, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<InterviewTurnResultV2> {
+        const response = await this.submitInterviewTurnV2Raw(requestParameters, initOverrides);
         return await response.value();
     }
 

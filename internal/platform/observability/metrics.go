@@ -117,7 +117,7 @@ var metricDefinitions = map[MetricName]metricDefinition{
 		[]string{"mode", "definition", "outcome", "termination_reason"},
 		[]string{"mode", "definition", "outcome", "termination_reason"}, map[string][]string{
 			"mode":               {"workspace_analysis"},
-			"definition":         {"workspace-analysis-v1"},
+			"definition":         {"workspace-analysis-v1", "workspace-analysis-v2"},
 			"outcome":            {"completed", "refused", "clarification_required", "failure", "cancelled"},
 			"termination_reason": {"COMPLETED", "WORKSPACE_ANALYSIS_EVIDENCE_INSUFFICIENT", "WORKSPACE_ANALYSIS_CITATION_INVALID", "WORKSPACE_ANALYSIS_FAITHFULNESS_REJECTED", "WORKSPACE_ANALYSIS_MODEL_REFUSED", "WORKSPACE_ANALYSIS_CLARIFICATION_REQUIRED", "WORKSPACE_ANALYSIS_BUDGET_EXHAUSTED", "WORKSPACE_ANALYSIS_RECEIPT_INVALID", "WORKSPACE_ANALYSIS_RESULT_UNKNOWN", "WORKSPACE_ANALYSIS_DEADLINE_EXCEEDED", "WORKSPACE_ANALYSIS_MODEL_FAILED", "WORKSPACE_ANALYSIS_TOOL_FAILED", "WORKSPACE_ANALYSIS_RUNTIME_FAILED", "WORKSPACE_ANALYSIS_CANCELLED"},
 		}),
@@ -199,7 +199,7 @@ var boundedMetricLabelValues = map[string]map[string]struct{}{
 	"phase":         {"PLAN": {}, "AGENT": {}, "ANSWER": {}, "INITIAL": {}, "REPAIR": {}, "REDUCED": {}, "REVIEW": {}},
 	"outcome":       {"completed": {}, "refused": {}, "clarification_required": {}, "failure": {}, "cancelled": {}},
 	"mode":          {"rag": {}, "workspace_analysis": {}},
-	"definition":    {"agent-rag-answer-v1": {}, "agent-rag-answer-v2": {}, "workspace-analysis-v1": {}},
+	"definition":    {"agent-rag-answer-v1": {}, "agent-rag-answer-v2": {}, "workspace-analysis-v1": {}, "workspace-analysis-v2": {}},
 	"termination_reason": {
 		"COMPLETED": {}, "WORKSPACE_ANALYSIS_EVIDENCE_INSUFFICIENT": {}, "WORKSPACE_ANALYSIS_CITATION_INVALID": {},
 		"WORKSPACE_ANALYSIS_FAITHFULNESS_REJECTED": {}, "WORKSPACE_ANALYSIS_MODEL_REFUSED": {}, "WORKSPACE_ANALYSIS_CLARIFICATION_REQUIRED": {},
@@ -319,13 +319,27 @@ func RecordTelemetryRequired(ctx context.Context, metrics Metrics, required bool
 // The metric intentionally contains no workspace, run, answer, tool, or
 // receipt identity.
 func NewWorkspaceAnalysisOutcomeMeasurement(status, terminationReason string) (Measurement, error) {
+	return NewWorkspaceAnalysisOutcomeMeasurementForVersion(1, status, terminationReason)
+}
+
+// NewWorkspaceAnalysisOutcomeMeasurementForVersion preserves the persisted
+// workflow definition version without admitting arbitrary label values.
+func NewWorkspaceAnalysisOutcomeMeasurementForVersion(definitionVersion int64, status, terminationReason string) (Measurement, error) {
+	definition := "workspace-analysis-v1"
+	switch definitionVersion {
+	case 1:
+	case 2:
+		definition = "workspace-analysis-v2"
+	default:
+		return Measurement{}, ErrInvalidMetric
+	}
 	outcome, valid := workspaceAnalysisMetricOutcome(status)
 	if !valid || !workspaceAnalysisMetricReasonAllowed(status, terminationReason) {
 		return Measurement{}, ErrInvalidMetric
 	}
 	labels, err := NewLabels(map[string]string{
 		"mode":               "workspace_analysis",
-		"definition":         "workspace-analysis-v1",
+		"definition":         definition,
 		"outcome":            outcome,
 		"termination_reason": terminationReason,
 	})

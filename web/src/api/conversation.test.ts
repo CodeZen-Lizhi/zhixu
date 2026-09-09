@@ -99,6 +99,23 @@ const successfulWorkspaceAnalysisTimeline = {
   budget: { ...workspaceAnalysisTimeline.budget, model_calls: { used: 3, max: 3 }, tool_calls: { used: 4, max: 6 }, source_reads: { used: 1, max: 3 }, input_tokens: { used: 90, max: 196608 }, output_tokens: { used: 90, max: 5376 } },
 };
 
+const dynamicModel = (phase = "decide_next") => ({ kind: "model", phase, status: "succeeded", tool_ref: null, duration_ms: 1, error_code: null, summary: { kind: "model_usage", model_usage: { input_tokens: 10, output_tokens: 10 } } });
+const dynamicTool = (phase: string, name: string, version: number, summary: unknown) => ({ kind: "tool", phase, status: "succeeded", tool_ref: { name, version }, duration_ms: 1, error_code: null, summary });
+const dynamicSearch = () => dynamicTool("retrieve_evidence", "SearchKnowledge", 3, { kind: "search", search: { hit_count: 1, degradation_codes: [] } });
+const dynamicSource = (evidenceRef = "E32", hash = "b".repeat(64)) => dynamicTool("read_evidence", "ReadSource", 4, { kind: "source", source: { evidence_ref: evidenceRef, content_hash: hash, truncated: false } });
+const dynamicCitation = () => dynamicTool("validate_citations", "ValidateCitation", 4, { kind: "citation_validation", citation_validation: { valid_count: 1, invalid_count: 0, reason_codes: ["OK"] } });
+const dynamicOperations = () => [dynamicModel(), dynamicSearch(), dynamicModel(), dynamicSource(), dynamicModel(), dynamicModel("synthesize_answer"), dynamicCitation(), dynamicModel("review_publish")];
+const dynamicTimeline = (operations = dynamicOperations()) => {
+  const modelCalls = operations.filter((item) => item.kind === "model").length;
+  const toolCalls = operations.filter((item) => item.kind === "tool").length;
+  return { ...workspaceAnalysisTimeline, schema_version: "v2", run_status: "succeeded", termination_reason: "COMPLETED",
+    items: operations.map((item, index) => ({ sequence: index + 1, ...item })),
+    budget: { model_calls: { used: modelCalls, max: 14 }, tool_calls: { used: toolCalls, max: 13 }, source_reads: { used: operations.filter((item) => item.phase === "read_evidence").length, max: 8 },
+      input_tokens: { used: modelCalls * 10, max: 917504 }, output_tokens: { used: modelCalls * 10, max: 11264 }, estimated_cost_microunits: null } };
+};
+const dynamicAnalysisResult = () => ({ ...workspaceAnalysisResult, schema_version: "v2", payload: { ...workspaceAnalysisResult.payload, git_status: null,
+  budget: { model_calls: 5, tool_calls: 3, input_tokens: 100, output_tokens: 300, estimated_cost_microunits: null } } });
+
 afterEach(() => vi.unstubAllGlobals());
 
 describe("Conversation response decoders", () => {
@@ -109,6 +126,7 @@ describe("Conversation response decoders", () => {
       answer: { publicationStatus: "completed", result: { resultType: "rag_answer", payload: { relatedTopics: [{ topicId }], followUpQuestions: ["如何验证？"] } }, retrievalSummary: { effectiveMode: "keyword" } },
     });
     expect(decodeQuestionAcceptance({ question, answer: pendingAnswer, status_url: `/api/v1/answers/${answerId}?workspace_id=${workspaceId}` }).answer.publicationStatus).toBe("pending");
+    expect(decodeQuestionAcceptance({ question, answer: pendingAnswer, status_url: `/api/v2/answers/${answerId}?workspace_id=${workspaceId}` }).statusUrl).toBe(`/api/v2/answers/${answerId}?workspace_id=${workspaceId}`);
   });
 
   it("Conversation title 按实际 wire 接受最多 512 UTF-8 bytes", () => {
@@ -173,6 +191,67 @@ describe("Conversation response decoders", () => {
     expect(decodeWorkspaceAnalysisTimeline({ ...workspaceAnalysisTimeline, run_status: "failed", termination_reason: "WORKSPACE_ANALYSIS_RUNTIME_FAILED", items: [{ sequence: 1, kind: "node", phase: "inspect_workspace", status: "failed", tool_ref: null, duration_ms: 1, error_code: "WORKSPACE_ANALYSIS_RUNTIME_FAILED", summary: null }] })).toMatchObject({ runStatus: "failed", terminationReason: "WORKSPACE_ANALYSIS_RUNTIME_FAILED", items: [{ errorCode: "WORKSPACE_ANALYSIS_RUNTIME_FAILED" }] });
   });
 
+  it("v2 接受实际未调用 Git 的成功结果，并保持 v1 严格", () => {
+    const result = dynamicAnalysisResult();
+    expect(decodeAnswer({ ...workspaceAnalysisAnswer, result })).toMatchObject({ result: { schemaVersion: "v2", payload: { gitStatus: null, budget: { modelCalls: 5, toolCalls: 3 } } } });
+    expect(() => decodeAnswer({ ...workspaceAnalysisAnswer, result: { ...result, schema_version: "v1" } })).toThrow(ConversationApiError);
+    expect(() => decodeAnswer({ ...workspaceAnalysisAnswer, result: { ...result, payload: { ...result.payload, git_status: undefined } } })).toThrow(ConversationApiError);
+    expect(() => decodeAnswer({ ...workspaceAnalysisAnswer, result: { ...result, model_run_ref: chunkId } })).toThrow(ConversationApiError);
+    expect(() => decodeAnswer({ ...workspaceAnalysisAnswer, result: { ...result, payload: { ...result.payload, citations: [identity, { ...identity, id: "second-label" }] } } })).toThrow(ConversationApiError);
+    expect(() => decodeAnswer({ ...workspaceAnalysisAnswer, result: { ...result, payload: { ...result.payload, citations: [identity, { ...identity, id: "second-label", chunk_id: claimId1, index_version_id: claimId2 }] } } })).toThrow(ConversationApiError);
+  });
+
+  it.each([
+    { model_calls: 4, tool_calls: 2 },
+    { model_calls: 6, tool_calls: 3 },
+    { model_calls: 5, tool_calls: 3, input_tokens: 327681 },
+    { model_calls: 5, tool_calls: 3, output_tokens: 6657 },
+  ])("v2 成功结果拒绝与真实调用次数不符的预算 %j", (budget) => {
+    const result = dynamicAnalysisResult();
+    expect(() => decodeAnswer({ ...workspaceAnalysisAnswer, result: { ...result, payload: { ...result.payload, budget: { ...result.payload.budget, ...budget } } } })).toThrow(ConversationApiError);
+  });
+
+  it("v2 保留真实工具循环与 E32，允许循环内校验后继续检索", () => {
+    const operations = dynamicOperations();
+    operations.splice(4, 0, dynamicModel(), dynamicCitation(), dynamicModel(), dynamicSearch());
+    const timeline = dynamicTimeline(operations);
+    const decoded = decodeWorkspaceAnalysisTimeline(timeline);
+    expect(decoded).toMatchObject({ schemaVersion: "v2", runStatus: "succeeded", budget: { modelCalls: { used: 7 }, toolCalls: { used: 5 } } });
+    expect(decoded.items.map((item) => item.phase)).toEqual(operations.map((item) => item.phase));
+    expect(decoded.items[3]?.summary).toMatchObject({ source: { evidenceRef: "E32" } });
+    for (const maximum of [7169, 10000, 11264]) expect(() => decodeWorkspaceAnalysisTimeline({ ...timeline, budget: { ...timeline.budget, output_tokens: { used: 70, max: maximum } } })).not.toThrow();
+  });
+
+  it("v2 显示被预算拒绝的 pending 槽且不计入调用量", () => {
+    const timeline = dynamicTimeline([dynamicModel(), dynamicSearch()]);
+    const pending = { ...timeline.items[1], status: "pending", duration_ms: null, summary: null };
+    const budget = { ...timeline.budget, tool_calls: { used: 0, max: 13 } };
+    expect(decodeWorkspaceAnalysisTimeline({ ...timeline, run_status: "failed", termination_reason: "WORKSPACE_ANALYSIS_BUDGET_EXHAUSTED", items: [timeline.items[0], pending], budget })).toMatchObject({ items: [{ status: "succeeded" }, { status: "pending" }], budget: { toolCalls: { used: 0 } } });
+    expect(() => decodeWorkspaceAnalysisTimeline({ ...timeline, run_status: "failed", termination_reason: "WORKSPACE_ANALYSIS_RESULT_UNKNOWN", items: [], budget })).toThrow(ConversationApiError);
+  });
+
+  it("v2 拒绝错误工具版本、失序、证据重绑、模型原文和漏记账本", () => {
+    const timeline = dynamicTimeline();
+    const changedItem = (index: number, patch: Record<string, unknown>) => ({ ...timeline, items: timeline.items.map((item, position) => position === index ? { ...item, ...patch } : item) });
+    for (const value of [
+      { ...timeline, schema_version: "v1" },
+      changedItem(1, { tool_ref: { name: "SearchKnowledge", version: 2 } }),
+      changedItem(3, { summary: { kind: "source", source: { evidence_ref: "E33", content_hash: "b".repeat(64), truncated: false } } }),
+      changedItem(0, { reasoning: "private model deliberation" }),
+      changedItem(0, { summary: { kind: "model_usage", model_usage: { input_tokens: 1, output_tokens: 513 } } }),
+      changedItem(6, { summary: { kind: "citation_validation", citation_validation: { valid_count: 2, invalid_count: 0, reason_codes: ["OK"] } } }),
+      changedItem(6, { summary: { kind: "citation_validation", citation_validation: { valid_count: 1, invalid_count: 0, reason_codes: ["EVIDENCE_INELIGIBLE"] } } }),
+      { ...timeline, budget: { ...timeline.budget, input_tokens: { used: 49, max: 917504 } } },
+      { ...timeline, budget: { ...timeline.budget, output_tokens: { used: 51, max: 11264 } } },
+    ]) expect(() => decodeWorkspaceAnalysisTimeline(value)).toThrow(ConversationApiError);
+    const reordered = dynamicOperations();
+    reordered.splice(4, 0, dynamicSearch());
+    expect(() => decodeWorkspaceAnalysisTimeline(dynamicTimeline(reordered))).toThrow(ConversationApiError);
+    const rebound = dynamicOperations();
+    rebound.splice(4, 0, dynamicModel(), dynamicSource("E32", "c".repeat(64)));
+    expect(() => decodeWorkspaceAnalysisTimeline(dynamicTimeline(rebound))).toThrow(ConversationApiError);
+  });
+
   it.each([
     ["未知顶层字段", { ...completedAnswer, drift: true }],
     ["非法 UUID", { ...completedAnswer, id: "bad" }],
@@ -193,6 +272,7 @@ describe("Conversation response decoders", () => {
   });
 
   it.each([
+    ["未知 HTTP 版本", `/api/v3/answers/${answerId}?workspace_id=${workspaceId}`],
     ["缺少 workspace query", `/api/v1/answers/${answerId}`],
     ["workspace 不匹配", `/api/v1/answers/${answerId}?workspace_id=${conversationId}`],
     ["重复 workspace", `/api/v1/answers/${answerId}?workspace_id=${workspaceId}&workspace_id=${workspaceId}`],
@@ -221,9 +301,10 @@ describe("Conversation request clients", () => {
   });
 
   it("提交问题省略 mode 以保持后端 RAG 默认值并解码 202", async () => {
-    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ question, answer: pendingAnswer, status_url: `/api/v1/answers/${answerId}?workspace_id=${workspaceId}` }), { status: 202, headers: { "Content-Type": "application/json" } }));
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ question, answer: pendingAnswer, status_url: `/api/v2/answers/${answerId}?workspace_id=${workspaceId}` }), { status: 202, headers: { "Content-Type": "application/json" } }));
     vi.stubGlobal("fetch", fetchMock);
     await submitQuestion({ workspaceId, conversationId, idempotencyKey: "question-1", question: "如何恢复？" });
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(`/api/v2/conversations/${conversationId}/questions`);
     const init = fetchMock.mock.calls[0]?.[1]; if (typeof init?.body !== "string") throw new Error("missing body");
     expect(JSON.parse(init.body)).toEqual({ workspace_id: workspaceId, question: "如何恢复？", scope: { retrieval_mode: "hybrid", source_ids: [], source_version_ids: [], path_prefixes: [], captured_at_from: null, captured_at_before: null, allow_original_sources: false, allow_web: false }, answer_depth: "standard", output_format: "markdown" });
     expect(new Headers(init.headers).get("Idempotency-Key")).toBe("question-1");
@@ -231,14 +312,15 @@ describe("Conversation request clients", () => {
 
   it("提交工作区分析显式发送 mode，并按 Workspace/Answer 绑定读取时间线", async () => {
     const fetchMock = vi.fn<typeof fetch>()
-      .mockResolvedValueOnce(new Response(JSON.stringify({ question: { ...question, mode: "workspace_analysis" }, answer: pendingAnswer, status_url: `/api/v1/answers/${answerId}?workspace_id=${workspaceId}` }), { status: 202, headers: { "Content-Type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ question: { ...question, mode: "workspace_analysis" }, answer: pendingAnswer, status_url: `/api/v2/answers/${answerId}?workspace_id=${workspaceId}` }), { status: 202, headers: { "Content-Type": "application/json" } }))
       .mockResolvedValueOnce(new Response(JSON.stringify(workspaceAnalysisTimeline), { status: 200, headers: { "Content-Type": "application/json" } }));
     vi.stubGlobal("fetch", fetchMock);
     await submitQuestion({ workspaceId, conversationId, idempotencyKey: "workspace-analysis-1", question: "检查当前工作区", mode: "workspace_analysis" });
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(`/api/v2/conversations/${conversationId}/questions`);
     const init = fetchMock.mock.calls[0]?.[1]; if (typeof init?.body !== "string") throw new Error("missing body");
     expect(JSON.parse(init.body)).toMatchObject({ mode: "workspace_analysis" });
     await expect(getWorkspaceAnalysisTimeline({ workspaceId, answerId })).resolves.toMatchObject({ answerId, workspaceId });
-    expect(fetchMock.mock.calls[1]?.[0]).toBe(`/api/v1/answers/${answerId}/analysis-timeline?workspace_id=${workspaceId}`);
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(`/api/v2/answers/${answerId}/analysis-timeline?workspace_id=${workspaceId}`);
   });
 
   it("GET 编码 cursor/limit 并处理带 stage 的 Answer ETag 200/304", async () => {
@@ -250,6 +332,7 @@ describe("Conversation request clients", () => {
     await listConversations({ workspaceId, cursor: "opaque+cursor", limit: 20 });
     expect(fetchMock.mock.calls[0]?.[0]).toContain(`workspace_id=${workspaceId}&cursor=opaque%2Bcursor&limit=20`);
     await expect(getAnswer({ workspaceId, id: answerId })).resolves.toMatchObject({ resource: { publicationStatus: "completed" }, etag: 'W/"answer-2-workflow-3-stage-none"', notModified: false });
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(`/api/v2/answers/${answerId}?workspace_id=${workspaceId}`);
     await expect(getAnswer({ workspaceId, id: answerId, ifNoneMatch: 'W/"answer-2-workflow-3-stage-plan.started"' })).resolves.toEqual({ resource: null, etag: 'W/"answer-2-workflow-3-stage-plan.started"', notModified: true });
     expect(new Headers(fetchMock.mock.calls[2]?.[1]?.headers).get("If-None-Match")).toBe('W/"answer-2-workflow-3-stage-plan.started"');
   });
@@ -258,7 +341,7 @@ describe("Conversation request clients", () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ items: [{ question, answer: pendingAnswer }] }), { status: 200, headers: { "Content-Type": "application/json" } }));
     vi.stubGlobal("fetch", fetchMock);
     await expect(getLatestTurn({ workspaceId, conversationId })).resolves.toMatchObject({ question: { ordinal: 1 }, answer: { publicationStatus: "pending" } });
-    expect(fetchMock.mock.calls[0]?.[0]).toContain(`/conversations/${conversationId}/turns?workspace_id=${workspaceId}&latest=true`);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(`/api/v2/conversations/${conversationId}/turns?workspace_id=${workspaceId}&latest=true`);
   });
 
   it("拒绝 Answer ETag 的未知 stage", async () => {

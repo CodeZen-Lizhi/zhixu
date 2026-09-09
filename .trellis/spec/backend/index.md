@@ -14,20 +14,20 @@ Scheduler 固定使用 Eino。新 `/chat` 使用 RAG v2，由 Eino Graph、class
 `eino-runtime-adoption-gates.md`。
 
 M7-01 已补充 Graph canonical read projection、公共 HTTP/真实进程 smoke、容量 benchmark 与跨层质量门禁；
-首版只读 Topic/Claim，500,000 Relation/FPS 与正式认证仍归 M10。
+首版只读 Topic/Claim；500,000 Relation/FPS 为按实际需要选择的容量验证，正式认证已由 M10-02 交付。
 M7-02 已补充 Semantic Link Candidate、typed Relation Proposal、Approval 后 Knowledge apply、durable Topic scan、
 严格故障隔离与执行计划门禁；Candidate 仍不是正式 Relation。
 M7-03 已补充版本化 Smart Collection、统一 read model/cursor、持久 Health Scan/Issue/Schedule、SMART_COLLECTION
 Candidate scope、affected-change outbox、真实 PostgreSQL/River/API/浏览器门禁；Tag/Review/Directory owner、Artifact/
-Review 批量动作、认证和 M10 最终容量仍未实现。
+Review 批量动作的支持范围以当前需求和领域合同为准；认证已由 M10-02 交付，完整容量矩阵不作为开发关闭前置。
 M7-04 已交付 append-only Knowledge Timeline、durable Outbox/Worker 恢复、Workspace-bound HMAC cursor、Timeline UI、
 `impact-analysis/v2` Artifact/Review Card impact、一等 owner event、正式 `downstream_update` Proposal 意图与
 `IMPACT_ANALYZED` Audit 原子事务；下游 owner executor 与 Document/Eval impact 仍不在当前合同。OTel exporter 与
-API/Worker Prometheus 已交付；跨领域 Audit 生产者覆盖、查询/留存/恢复和 POISONED 运维入口仍未完成。
+API/Worker Prometheus 已交付；现有 Audit 生产者的最小只读查询由 `cmd/audit` 提供。全域审计/自动留存、通用 POISONED 运维入口和自动一致性修复不在当前精简交付范围，不冒充已实现。
 M9 已补充 Workspace Source Version/Proposal/Workflow 列表、资源绑定 cursor 与 Active Index 选择投影；
 Proposal 等级由不可变 `proposal.risk_level` 唯一拥有，Source Version 使用受复合约束的 Workspace 镜像键支撑
 有界 keyset 查询；Proposal detail 的 Approval 为必需 nullable，Summary 保持 optional non-null。三条真实
-PostgreSQL 列表、迁移契约与严格执行计划已在最终迁移工作树复验；M10 继续负责最终容量门禁。
+PostgreSQL 列表、迁移契约与严格执行计划已在最终迁移工作树复验；完整容量采样按实际性能问题选用，未执行不记 PASS。
 M9 Export 已交付两个显式 scope：Smart Collection `MARKDOWN|METADATA_JSON` 与 Workspace
 `ATTACHMENTS_ZIP`。PostgreSQL 保存 tagged binding、幂等、租约、prepared result、持久 capability gate、
 TTL/cleanup 与下载 Audit；附件 ZIP 从固定 `attachments/` 生成，使用 fd-relative 安全遍历、确定性 manifest 和
@@ -35,6 +35,9 @@ TTL/cleanup 与下载 Audit；附件 ZIP 从固定 `attachments/` 生成，使�
 AC-33 已由 Markdown、领域 Metadata JSON 和真实附件字节闭环关闭。
 M10-02 已交付单用户 Auth、Cookie Session、受限 API Token、CSRF/Origin、Capability Middleware 和 Compose
 启动预检；认证与 Write Authorization 保持两道独立边界，具体可执行契约见 `auth-security.md`。
+M10-04 的 `deploy/backup.py create/verify` 提供停写前提下单 Root/Git＋整库的最小备份与完整性检查；
+向新目标还原及原 canonical Root/密钥/身份材料边界见 [运行手册](../../../docs/operations.md#7-最小停写备份与恢复)。
+完整应用灾备和跨域自动一致性修复不由该工具承担。
 Docker Web/API 固定通过 IPv4 loopback 发布，宿主机不再运行常驻网页控制进程。Workspace Root/Docker mutation
 由启动器调用的一次性原生命令执行；精确 bind、quiescence、lease、失败回滚和 Workspace ID 隔离保持不变。
 M8-01 已交付 Workspace 隔离的 Artifact/Revision、证据复核章节生成、受控 Markdown 导出和
@@ -99,12 +102,13 @@ Go race/vet/tidy、OpenAPI 与 Web lint/typecheck/test/build 门禁通过。
 | [Eino Embedding Adapter 契约](./eino-embedding-adapter.md) | Eino OpenAI-Compatible/Ollama、wire 向量交叉校验、安全传输、错误矩阵与升级门禁 | 生产固定 Eino，真实 Provider/发布验收独立记录 |
 | [Eino Structured Scheduler 契约](./eino-structured-scheduler.md) | Application phase-scheduler Port、固定短 Graph、五消费者编排、错误/预算/审计门禁 | 生产固定 Eino；构建失败 fail closed |
 | [Eino 生产 AI Runtime 契约](./eino-runtime-adoption-gates.md) | RAG v2 Agent/短引用只读工具/final Stream、draft SSE、Finalizer 与稳定性门禁 | Eino 是唯一部署路径；Checkpoint 仍仅 PoC，真实 Provider 与稳定性证据独立记录 |
-| [Workspace Analysis 合同](./workspace-analysis-contract.md) | 显式模式、六阶段 Definition、精确只读 Tool、Operation/receipt/预算恢复、终态发布与时间线 | 本地实现、真实 PostgreSQL/River、旧/新四组合、post-fact Worker-only 回滚、进程 kill/reclaim、固定 RAG、Worker OTLP 演练与桌面/移动浏览器链路已验证；目标环境 Migration、Canary、OTLP 观察窗口与扩量仍需发布授权 |
+| [Workspace Analysis 合同](./workspace-analysis-contract.md) | v1 六阶段兼容、v2 四节点动态循环、Decision journal、版本化只读工具、预算/恢复与发布证明 | v1 历史 Compose、Worker 恢复、OTLP 与浏览器证据保留；v2 必要实库及真实 Compose/桌面与窄屏浏览器已通过；旧 Worker kill/OTLP 证据不自动适用于 v2 |
 | [Timeline 与 Impact 契约](./timeline-impact.md) | append-only Event/Report、Outbox 状态机、Impact/Audit 原子事务、API/Worker/Web 门禁 | M7-04 与遗留收口已验证；下游 owner executor、Document/Eval impact 与全局 Audit 保持 deferred |
 | [Artifact 产物闭环契约](./artifact-contract.md) | Revision、Citation、generation、receipt/reservation、导出与 Publish Proposal 边界 | M8-01 后端、迁移、API/Worker 和真实浏览器闭环已验证；Proposal 批准后的正式写回保持 Change Control owner |
 | [快速记录与画像契约](./capture-profile-contract.md) | Capture、Source/Version、Outbox、独立阶段、Profile Revision/Evidence 与降级恢复 | TEXT/URL/FILE/IMAGE、Profile v1、真实 PostgreSQL 与桌面/移动 Capture 链已验证 |
 | [主动创作与 Document Draft 契约](./authoring-contract.md) | Working Draft、Freeze、Revision、发布预留、CREATE_ONLY 与 Commit 最终化 | Domain/Application、真实 PostgreSQL、Change Control/Git、HTTP/OpenAPI、前端构建与桌面/移动浏览器门禁已验证 |
 | [材料确认与整理模板契约](./organizing-contract.md) | Suggested Material、Serializable Snapshot、Template Revision、四 Workflow、Human Task review 与结果治理 | Domain/Application、真实 PostgreSQL、Workflow/Artifact/Proposal、HTTP/OpenAPI、前端构建及父任务桌面/移动浏览器门禁已验证 |
+| [持续演进合成笔记契约](./synthesis-notes.md) | Source-ready、受限增量、两阶段模型证明、receipt 恢复、AGENT 候选审批与 NOTE_REVISION 面试 | Domain/Application、真实 PostgreSQL/River、Authoring 发布与恢复、生产 Capture 组合及笔记面试已验证；真实模型质量另行验收 |
 | [文档文件历史与受控恢复契约](./document-history-contract.md) | 当前 path Git 时间线、映射、cursor、compare、restore Proposal、Safe Writeback 与 Authoring closure | Domain/Application/Git/PostgreSQL/Change Control/Authoring、HTTP/OpenAPI、Web 构建、并发恢复及父任务桌面/移动浏览器门禁已验证 |
 | [Git 远端同步契约](./git-sync-contract.md) | HTTPS Remote、AEAD Token、SSRF/AskPass、Run/Attempt/Outbox、受控 Fetch/Fast-forward/Push、post-check、自动调度与索引分离 | Domain/Application/Git/PostgreSQL/API/Worker、安全与 migration 门禁已验证；真实浏览器已覆盖桌面/390x844 配置、持久运行恢复、分叉冲突、有界预览和重试 |
 | [可恢复异步 Export 契约](./export-contract.md) | Tagged Job、Collection scan、附件 ZIP、prepared result、流式下载、Audit 与清理 | Collection Markdown/Metadata JSON 和 Workspace Attachments ZIP 已交付并关闭 AC-33；Evaluation/Audit 内容导出保持 deferred |

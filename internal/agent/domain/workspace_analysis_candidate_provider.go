@@ -26,14 +26,14 @@ type workspaceAnalysisCandidateProviderDocument struct {
 // Validate 校验 Provider 只能返回有界正文、短引用和可选 Proposal 建议。
 func (result WorkspaceAnalysisCandidateProviderResult) Validate() error {
 	if result.ResultType != ResultTypeWorkspaceAnalysisCandidate || result.SchemaID != WorkspaceAnalysisCandidateSchemaID ||
-		result.SchemaVersion != workspaceAnalysisCandidateDocumentVersion ||
+		(result.SchemaVersion != workspaceAnalysisCandidateDocumentVersion && result.SchemaVersion != "2") ||
 		!boundedText(result.Payload.AnswerMarkdown, maxWorkspaceAnalysisCandidateAnswerBytes, true) ||
-		!validWorkspaceAnalysisCandidateReferences(result.Payload.CitationRefs, true) {
+		!validWorkspaceAnalysisCandidateReferencesForVersion(result.Payload.CitationRefs, true, result.SchemaVersion) {
 		return invalid(ErrorCodeWorkspaceAnalysisCandidateInvalid, "workspace analysis candidate provider document is invalid")
 	}
 	if proposal := result.Payload.ProposalSuggestion; proposal != nil {
 		if !boundedText(proposal.Summary, maxWorkspaceAnalysisCandidateSummaryBytes, true) ||
-			!validWorkspaceAnalysisCandidateReferences(proposal.CitationRefs, true) ||
+			!validWorkspaceAnalysisCandidateReferencesForVersion(proposal.CitationRefs, true, result.SchemaVersion) ||
 			!workspaceAnalysisCandidateReferenceSubset(proposal.CitationRefs, result.Payload.CitationRefs) {
 			return invalid(ErrorCodeWorkspaceAnalysisCandidateInvalid, "workspace analysis candidate provider proposal is invalid")
 		}

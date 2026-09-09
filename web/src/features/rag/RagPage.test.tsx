@@ -205,6 +205,20 @@ describe("AnswerPublication", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("v2 未调用 Git 时显示明确说明，空提案建议没有操作入口", () => {
+    const original = workspaceAnalysisAnswer();
+    if (original.publicationStatus !== "completed" || original.resultType !== "workspace_analysis") throw new Error("analysis fixture missing");
+    const answer: Answer = { ...original, result: { ...original.result, schemaVersion: "v2", payload: {
+      ...original.result.payload, gitStatus: null, proposalSuggestion: null,
+      budget: { modelCalls: 5, toolCalls: 3, inputTokens: 128, outputTokens: 64, estimatedCostMicrounits: null },
+    } } };
+    const view = renderWithAppProviders(<AnswerPublication answer={answer} onCitation={vi.fn()} />);
+    expect(screen.getByText("本次分析未查询 Git 状态。")).toBeInTheDocument();
+    expect(view.container.querySelector(".rag-analysis-git")).toBeNull();
+    expect(screen.queryByRole("link", { name: "查看提案" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /打开段落证据/ })).toBeInTheDocument();
+  });
+
   it("工作区分析拒答、澄清与终止都展示各自的稳定终态", () => {
     const refusal: Answer = {
       ...workspaceAnalysisAnswer(), publicationStatus: "refused", resultType: "workspace_analysis_refusal", assistantText: "证据不足，无法确认变更范围", citations: [],
@@ -335,6 +349,42 @@ describe("RagPage workspace analysis composer", () => {
 });
 
 describe("WorkspaceAnalysisTimeline", () => {
+  it("v2 按真实动态顺序显示决策、循环内引用检查和发布门禁，以及实际预算", () => {
+    const model = (phase: "decide_next" | "synthesize_answer" | "review_publish"): Omit<WorkspaceAnalysisTimelineValue["items"][number], "sequence"> => ({
+      kind: "model", phase, status: "succeeded", toolRef: null, durationMs: 1, errorCode: null,
+      summary: { kind: "model_usage", modelUsage: { inputTokens: 10, outputTokens: phase === "decide_next" ? 1 : 2 } },
+    });
+    const validation: Omit<WorkspaceAnalysisTimelineValue["items"][number], "sequence"> = {
+      kind: "tool", phase: "validate_citations", status: "succeeded", toolRef: { name: "ValidateCitation", version: 4 }, durationMs: 1, errorCode: null,
+      summary: { kind: "citation_validation", citationValidation: { validCount: 1, invalidCount: 0, reasonCodes: ["OK"] } },
+    };
+    const operations: Omit<WorkspaceAnalysisTimelineValue["items"][number], "sequence">[] = [
+      model("decide_next"),
+      { kind: "tool", phase: "retrieve_evidence", status: "succeeded", toolRef: { name: "SearchKnowledge", version: 3 }, durationMs: 1, errorCode: null,
+        summary: { kind: "search", search: { hitCount: 1, degradationCodes: [] } } },
+      model("decide_next"),
+      { kind: "tool", phase: "read_evidence", status: "succeeded", toolRef: { name: "ReadSource", version: 4 }, durationMs: 1, errorCode: null,
+        summary: { kind: "source", source: { evidenceRef: "E1", contentHash: "a".repeat(64), truncated: false } } },
+      model("decide_next"), validation, model("decide_next"), model("synthesize_answer"), validation, model("review_publish"),
+    ];
+    pageState.timelineData = {
+      schemaId: "conversation.workspace_analysis_timeline", schemaVersion: "v2", workspaceId, answerId, analysisRunId: runId,
+      runStatus: "succeeded", terminationReason: "COMPLETED", latestServerEventSequence: 25,
+      items: operations.map((item, index) => ({ ...item, sequence: index + 1 })),
+      budget: { modelCalls: { used: 6, max: 14 }, toolCalls: { used: 4, max: 13 }, sourceReads: { used: 1, max: 8 },
+        inputTokens: { used: 60, max: 917_504 }, outputTokens: { used: 8, max: 11_264 }, estimatedCostMicrounits: { used: 2, max: 100 } },
+    };
+    const view = render(<QueryClientProvider client={createQueryClient()}><WorkspaceAnalysisTimeline workspaceId={workspaceId} conversationId={conversationId} answer={workspaceAnalysisAnswer()} autoRefresh /></QueryClientProvider>);
+    expect([...view.container.querySelectorAll(".rag-analysis-item__heading > span")].map((element) => element.textContent)).toEqual([
+      "决定下一步", "检索证据", "决定下一步", "读取证据", "决定下一步", "检查已取得的引用", "决定下一步", "生成回答", "发布前校验引用", "审查发布",
+    ]);
+    expect(screen.getByText("6/14")).toBeInTheDocument();
+    expect(screen.getByText("4/13")).toBeInTheDocument();
+    expect(screen.getByText("估算成本（微单位）")).toBeInTheDocument();
+    expect(screen.getByText("2/100")).toBeInTheDocument();
+    expect(screen.queryByText("检查工作区")).not.toBeInTheDocument();
+  });
+
   it("看到终态快照后立即失效正式 Answer 与 Turns", async () => {
     const queryClient = createQueryClient();
     const invalidate = vi.spyOn(queryClient, "invalidateQueries");

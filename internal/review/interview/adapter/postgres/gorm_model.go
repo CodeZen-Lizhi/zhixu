@@ -52,21 +52,24 @@ type interviewSessionGORMRecord struct {
 func (interviewSessionGORMRecord) TableName() string { return "learning.interview_session" }
 
 type interviewQuestionGORMRecord struct {
-	ID               string         `gorm:"column:id;type:uuid;primaryKey"`
-	WorkspaceID      string         `gorm:"column:workspace_id;type:uuid;not null"`
-	SessionID        string         `gorm:"column:session_id;type:uuid;not null"`
-	QuestionNo       int            `gorm:"column:question_no;not null"`
-	FollowUpNo       int            `gorm:"column:follow_up_no;not null"`
-	ParentQuestionID *string        `gorm:"column:parent_question_id;type:uuid"`
-	ClaimID          string         `gorm:"column:claim_id;type:uuid;not null"`
-	TopicID          *string        `gorm:"column:topic_id;type:uuid"`
-	Prompt           string         `gorm:"column:prompt;not null"`
-	AnswerPoints     interviewJSONB `gorm:"column:answer_points;type:jsonb;not null"`
-	Evidence         interviewJSONB `gorm:"column:evidence;type:jsonb;not null"`
-	Status           string         `gorm:"column:status;not null"`
-	Fingerprint      string         `gorm:"column:fingerprint;not null"`
-	CreatedAt        time.Time      `gorm:"column:created_at;not null;autoCreateTime:false"`
-	AnsweredAt       *time.Time     `gorm:"column:answered_at"`
+	SourceKind       string          `gorm:"column:source_kind;not null"`
+	NoteSource       *interviewJSONB `gorm:"column:note_source;type:jsonb"`
+	ID               string          `gorm:"column:id;type:uuid;primaryKey"`
+	WorkspaceID      string          `gorm:"column:workspace_id;type:uuid;not null"`
+	SessionID        string          `gorm:"column:session_id;type:uuid;not null"`
+	QuestionNo       int             `gorm:"column:question_no;not null"`
+	FollowUpNo       int             `gorm:"column:follow_up_no;not null"`
+	ParentQuestionID *string         `gorm:"column:parent_question_id;type:uuid"`
+	ClaimID          *string         `gorm:"column:claim_id;type:uuid"`
+	TopicID          *string         `gorm:"column:topic_id;type:uuid"`
+	Prompt           string          `gorm:"column:prompt;not null"`
+	AnswerPoints     interviewJSONB  `gorm:"column:answer_points;type:jsonb;not null"`
+	Evidence         interviewJSONB  `gorm:"column:evidence;type:jsonb;not null"`
+	Status           string          `gorm:"column:status;not null"`
+	Fingerprint      string          `gorm:"column:fingerprint;not null"`
+	CreatedAt        time.Time       `gorm:"column:created_at;not null;autoCreateTime:false"`
+	AnsweredAt       *time.Time      `gorm:"column:answered_at"`
+	FollowUpPlan     *interviewJSONB `gorm:"column:follow_up_plan;type:jsonb"`
 }
 
 func (interviewQuestionGORMRecord) TableName() string { return "learning.interview_question" }
@@ -123,21 +126,23 @@ func (interviewLearningPathGORMRecord) TableName() string {
 }
 
 type interviewLearningPathStepGORMRecord struct {
-	ID              string    `gorm:"column:id;type:uuid;primaryKey"`
-	WorkspaceID     string    `gorm:"column:workspace_id;type:uuid;not null"`
-	PathID          string    `gorm:"column:path_id;type:uuid;not null"`
-	StepNo          int       `gorm:"column:step_no;not null"`
-	ClaimID         string    `gorm:"column:claim_id;type:uuid;not null"`
-	TopicID         *string   `gorm:"column:topic_id;type:uuid"`
-	SourceVersionID string    `gorm:"column:source_version_id;type:uuid;not null"`
-	SourceSpanID    string    `gorm:"column:source_span_id;type:uuid;not null"`
-	EvidenceHash    string    `gorm:"column:evidence_hash;not null"`
-	Title           string    `gorm:"column:title;not null"`
-	Rationale       string    `gorm:"column:rationale;not null"`
-	Status          string    `gorm:"column:status;not null"`
-	Version         int64     `gorm:"column:version;not null"`
-	CreatedAt       time.Time `gorm:"column:created_at;not null;autoCreateTime:false"`
-	UpdatedAt       time.Time `gorm:"column:updated_at;not null;autoUpdateTime:false"`
+	SourceKind      string          `gorm:"column:source_kind;not null"`
+	NoteSource      *interviewJSONB `gorm:"column:note_source;type:jsonb"`
+	ID              string          `gorm:"column:id;type:uuid;primaryKey"`
+	WorkspaceID     string          `gorm:"column:workspace_id;type:uuid;not null"`
+	PathID          string          `gorm:"column:path_id;type:uuid;not null"`
+	StepNo          int             `gorm:"column:step_no;not null"`
+	ClaimID         *string         `gorm:"column:claim_id;type:uuid"`
+	TopicID         *string         `gorm:"column:topic_id;type:uuid"`
+	SourceVersionID *string         `gorm:"column:source_version_id;type:uuid"`
+	SourceSpanID    *string         `gorm:"column:source_span_id;type:uuid"`
+	EvidenceHash    *string         `gorm:"column:evidence_hash"`
+	Title           string          `gorm:"column:title;not null"`
+	Rationale       string          `gorm:"column:rationale;not null"`
+	Status          string          `gorm:"column:status;not null"`
+	Version         int64           `gorm:"column:version;not null"`
+	CreatedAt       time.Time       `gorm:"column:created_at;not null;autoCreateTime:false"`
+	UpdatedAt       time.Time       `gorm:"column:updated_at;not null;autoUpdateTime:false"`
 }
 
 func (interviewLearningPathStepGORMRecord) TableName() string {

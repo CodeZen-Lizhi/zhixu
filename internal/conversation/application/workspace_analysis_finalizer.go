@@ -22,7 +22,9 @@ const (
 // WorkspaceAnalysisPublicationLookup 冻结工作区分析运行、当前 Workflow Attempt 与 Answer 发布槽身份。
 type WorkspaceAnalysisPublicationLookup struct {
 	AnswerPublicationLookup
-	AnalysisRunID      foundation.ID
+	AnalysisRunID foundation.ID
+	// DefinitionVersion is the persisted Workflow version. Zero retains the v1 caller contract.
+	DefinitionVersion  int64
 	ExpectedLeaseOwner string
 	ExpectedLeaseFence int64
 }
@@ -33,7 +35,7 @@ func (lookup WorkspaceAnalysisPublicationLookup) Validate() error {
 		lookup.WorkspaceID, lookup.WorkflowRunID, lookup.NodeRunID, lookup.NodeAttemptID,
 		lookup.ConversationID, lookup.QuestionID, lookup.AnswerID, lookup.AnalysisRunID,
 	}
-	if !validWorkspaceAnalysisFinalizerIDs(ids) ||
+	if !validWorkspaceAnalysisFinalizerIDs(ids) || lookup.DefinitionVersion < 0 || lookup.DefinitionVersion > 2 ||
 		lookup.ExpectedLeaseOwner == "" || strings.TrimSpace(lookup.ExpectedLeaseOwner) != lookup.ExpectedLeaseOwner ||
 		len(lookup.ExpectedLeaseOwner) > 256 || !utf8.ValidString(lookup.ExpectedLeaseOwner) ||
 		lookup.ExpectedLeaseFence < 1 || lookup.ExpectedLeaseFence > math.MaxInt32 {
@@ -61,11 +63,16 @@ func (command FinalizeWorkspaceAnalysisSuccessCommand) Validate() error {
 	if err := command.WorkspaceAnalysisPublicationLookup.Validate(); err != nil {
 		return err
 	}
-	ids := []foundation.ID{command.CandidateID, command.GitReceiptID, command.ValidationReceiptID, command.ReviewModelResultID}
+	ids := []foundation.ID{command.CandidateID, command.ValidationReceiptID, command.ReviewModelResultID}
+	gitPresent := command.GitReceiptID != ""
+	if gitPresent {
+		ids = append(ids, command.GitReceiptID)
+	}
 	if command.ExpectedAnswerVersion < 1 || !validWorkspaceAnalysisFinalizerIDs(ids) ||
 		!workspaceAnalysisFinalizerIDsDisjoint(command.WorkspaceAnalysisPublicationLookup, ids) ||
 		!validWorkspaceAnalysisFinalizerHash(command.CandidateHash) ||
-		!validWorkspaceAnalysisFinalizerHash(command.GitReceiptHash) ||
+		gitPresent != (command.GitReceiptHash != "") || (!gitPresent && command.DefinitionVersion != 2) ||
+		(gitPresent && !validWorkspaceAnalysisFinalizerHash(command.GitReceiptHash)) ||
 		!validWorkspaceAnalysisFinalizerHash(command.ValidationReceiptHash) ||
 		!validWorkspaceAnalysisFinalizerHash(command.ReviewModelResultHash) {
 		return invalidWorkspaceAnalysisFinalizerCommand(errors.New("workspace analysis success proof reference is invalid"))
@@ -81,6 +88,8 @@ const (
 	WorkspaceAnalysisTerminationArtifactToolReceipt WorkspaceAnalysisTerminationArtifactKind = "TOOL_RECEIPT"
 	// WorkspaceAnalysisTerminationArtifactModelResult 表示不可变 Planner 或 Review 模型结果。
 	WorkspaceAnalysisTerminationArtifactModelResult WorkspaceAnalysisTerminationArtifactKind = "MODEL_RESULT"
+	// WorkspaceAnalysisTerminationArtifactDecisionReceipt proves a persisted v2 finish decision.
+	WorkspaceAnalysisTerminationArtifactDecisionReceipt WorkspaceAnalysisTerminationArtifactKind = "DECISION_RECEIPT"
 )
 
 // WorkspaceAnalysisTerminationArtifact 引用迁移允许作为终止证据的不可变文档。
@@ -180,7 +189,13 @@ func validWorkspaceAnalysisTerminationShape(command FinalizeWorkspaceAnalysisTer
 	hasBudget := command.BudgetRequest != nil
 	hasFailure := command.ReceiptFailure != nil
 	switch command.Reason {
-	case agentdomain.WorkspaceAnalysisRunEvidenceInsufficient, agentdomain.WorkspaceAnalysisRunCitationInvalid:
+	case agentdomain.WorkspaceAnalysisRunEvidenceInsufficient:
+		kind := WorkspaceAnalysisTerminationArtifactToolReceipt
+		if command.DefinitionVersion == 2 {
+			kind = WorkspaceAnalysisTerminationArtifactDecisionReceipt
+		}
+		return hasOperation && hasArtifact && command.Artifact.Kind == kind && !hasBudget && !hasFailure
+	case agentdomain.WorkspaceAnalysisRunCitationInvalid:
 		return hasOperation && hasArtifact && command.Artifact.Kind == WorkspaceAnalysisTerminationArtifactToolReceipt && !hasBudget && !hasFailure
 	case agentdomain.WorkspaceAnalysisRunFaithfulnessRejected, agentdomain.WorkspaceAnalysisRunNeedsClarification:
 		return hasOperation && hasArtifact && command.Artifact.Kind == WorkspaceAnalysisTerminationArtifactModelResult && !hasBudget && !hasFailure

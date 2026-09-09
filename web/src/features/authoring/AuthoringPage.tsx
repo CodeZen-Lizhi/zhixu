@@ -34,6 +34,11 @@ export const AuthoringPage = () => {
     <PageHeader title="创作" description="从空白文章开始，或用已有材料整理成文。" />
 
     <section className="authoring-paths" aria-label="创作方式">
+      <Link className="authoring-path" to="/authoring/notes">
+        <span className="authoring-path__icon"><FileText size={21} /></span>
+        <span><strong>合成笔记</strong><small>持续整理知识点与原始依据</small></span>
+        <ArrowRight size={18} />
+      </Link>
       <Link className="authoring-path" to="/authoring/new">
         <span className="authoring-path__icon"><FilePlus2 size={21} /></span>
         <span><strong>新建文章</strong><small>空白 Markdown</small></span>

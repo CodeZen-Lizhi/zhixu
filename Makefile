@@ -6,6 +6,7 @@ POSTGRES_CLIENT_IMAGE ?= pgvector/pgvector@sha256:1d533553fefe4f12e5d80c7b80622b
 .PHONY: test migrate go-test go-vet testcontainers-integration atlas-schema-inspect atlas-schema-drift atlas-migrate-hash atlas-migrate-hash-check atlas-migrate-lint atlas-migrate-lint-pro atlas-migrate-validate web-install web-lint web-typecheck web-test web-build eino-test eino-vet eino-live-smoke eino-live-smoke-env eino-live-smoke-contract eino-live-chat-smoke eino-live-query-plan-smoke eino-live-rag-metadata-smoke eino-live-openai-embedding-smoke eino-live-ollama-embedding-smoke eino-stable-observation-test eino-stable-observation-preflight eino-stable-observation-start eino-stable-observation-day eino-stable-observation-attest eino-stable-observation-verify agent-eval semantic-link-eval openapi-check trellis-script-test task-context-check auth-integration tool-integration rag-integration workspace-analysis-integration workspace-analysis-terminal-matrix workspace-analysis-fault-smoke graph-integration graph-smoke graph-benchmark benchmark-capacity semantic-link-integration semantic-link-fault-smoke semantic-link-browser-smoke semantic-link-smoke collection-health-integration collection-health-fault-smoke collection-health-benchmark collection-health-browser-smoke collection-health-secret-scan collection-health-smoke artifact-browser-smoke m8-learning-browser-smoke export-browser-smoke timeline-impact-integration timeline-impact-fault-smoke timeline-impact-worker-smoke compose-auth-check compose-runtime-check compose-bootstrap-check compose-runtime-contract compose-netns-check compose-netns-contract compose-workspace-check compose-workspace-contract compose-static-models-check compose-smoke-cleanup-contract smoke-image-cleanup-contract compose-rag-real-provider-contract compose-workspace-analysis-compat-contract compose-workspace-analysis-worker-restart-contract compose-workspace-analysis-otlp-contract compose-auth-smoke compose-check launcher-contract model-secrets-init-contract architecture-quality-baseline docker-build compose-up compose-down compose-reset compose-search-smoke compose-tool-smoke compose-rag-smoke compose-rag-browser-smoke compose-workspace-analysis-smoke compose-workspace-analysis-otlp-smoke compose-workspace-analysis-compat-smoke compose-workspace-analysis-worker-restart-smoke compose-rag-real-provider-preflight compose-rag-real-provider-smoke compose-model-runtime-hot-activation-smoke
 .PHONY: openapi-install openapi-lint openapi-project-check openapi-route-check openapi-tags-check openapi-generated-typecheck openapi-generate openapi-generate-check openapi-breaking-check
 .PHONY: persistence-check
+.PHONY: compose-synthesis-smoke
 
 test: persistence-check trellis-script-test task-context-check go-test go-vet web-lint web-typecheck web-test web-build eino-test eino-vet eino-live-smoke-contract eino-stable-observation-test agent-eval openapi-check compose-check
 
@@ -488,6 +489,9 @@ compose-rag-browser-smoke:
 
 compose-workspace-analysis-smoke:
 	bash deploy/compose-workspace-analysis-smoke.sh
+
+compose-synthesis-smoke:
+	bash deploy/compose-synthesis-smoke.sh
 
 compose-workspace-analysis-otlp-smoke:
 	bash deploy/compose-workspace-analysis-otlp-smoke.sh

@@ -40,6 +40,7 @@ import { useActiveWorkspaceId } from "../../app/active-workspace";
 import { canonicalUuidPattern as uuidPattern } from "../../shared/codec";
 import { Badge, Button, Card, CardHeader, Dialog, EmptyState, ErrorState, UnavailableState } from "../../shared/ui";
 import { SourceSpanViewer } from "../source-spans";
+import { SynthesisEvidence } from "../synthesis";
 import {
   useCompleteInterview,
   useInterview,
@@ -140,6 +141,7 @@ const ScorePanel = ({ result, workspaceId }: { result: SubmitInterviewTurnResult
         {result.replayed ? <Badge tone="neutral">精确重放</Badge> : null}
       </div>
     </div>
+    {result.turn.scorerVersion === "interview-deterministic/v2" ? <p className="sidebar-note">本题使用确定性规则评分；AI 负责生成题目与追问计划。</p> : null}
     <dl className="interview-score-grid">
       {dimensions.map(([label, dimension]) => <div key={label}>
         <dt>{label}</dt>
@@ -149,16 +151,16 @@ const ScorePanel = ({ result, workspaceId }: { result: SubmitInterviewTurnResult
     </dl>
     {value.errors.length > 0 ? <div className="artifact-coverage artifact-coverage--gap"><strong>错误</strong><ul>{value.errors.map((item) => <li key={item}>{item}</li>)}</ul></div> : null}
     {value.omissions.length > 0 ? <div className="artifact-coverage artifact-coverage--partial"><strong>遗漏</strong><ul>{value.omissions.map((item) => <li key={item}>{item}</li>)}</ul></div> : null}
-    <EvidenceList values={value.evidence} workspaceId={workspaceId} />
+    {value.noteSource === undefined ? <EvidenceList values={value.evidence} workspaceId={workspaceId} /> : <SynthesisEvidence source={value.noteSource} />}
   </section>;
 };
 
 const FindingGroup = ({ title, findings, workspaceId }: { title: string; findings: InterviewFinding[]; workspaceId: string }) => <section className="artifact-section">
   <h3>{title}</h3>
   {findings.length === 0 ? <p className="artifact-note">没有此类发现。</p> : <ul className="interview-finding-list">
-    {findings.map((item) => <li key={`${item.claimId}:${item.detail}`}>
+    {findings.map((item, index) => <li key={`${item.claimId ?? item.noteSource?.itemId ?? "finding"}:${String(index)}`}>
       <p>{item.detail}</p>
-      <EvidenceList values={item.evidence} workspaceId={workspaceId} />
+      {item.noteSource === undefined ? <EvidenceList values={item.evidence} workspaceId={workspaceId} /> : <SynthesisEvidence source={item.noteSource} />}
     </li>)}
   </ul>}
 </section>;
@@ -203,7 +205,7 @@ const ReportAndLearningPath = ({ snapshot, pending, candidatePendingStepId, cand
       <FindingGroup title="强项" findings={report.strengths} workspaceId={report.workspaceId} />
       <FindingGroup title="学习缺口" findings={report.gaps} workspaceId={report.workspaceId} />
       <FindingGroup title="表达问题" findings={report.expression} workspaceId={report.workspaceId} />
-      <section className="artifact-section"><h3>报告来源</h3><EvidenceList values={report.evidence} workspaceId={report.workspaceId} /></section>
+      <section className="artifact-section"><h3>报告来源</h3>{report.noteSources === undefined ? <EvidenceList values={report.evidence} workspaceId={report.workspaceId} /> : report.noteSources.map((source) => <SynthesisEvidence key={`${source.revision.revisionId}:${source.itemId}`} source={source} />)}</section>
     </Card>
 
     <Card>
@@ -226,13 +228,13 @@ const ReportAndLearningPath = ({ snapshot, pending, candidatePendingStepId, cand
             <div className="learning-path-step__body">
               <div className="learning-path-step__header"><h3>{step.title}</h3><Badge tone={step.status === "COMPLETED" ? "success" : step.status === "SKIPPED" ? "neutral" : "info"}>{stepStatusLabel[step.status]}</Badge></div>
               <p>{step.rationale}</p>
-              <p className="learning-path-step__binding">知识点 {step.claimId} · 证据 {step.evidenceHash.slice(0, 16)}…</p>
+              {step.noteSource === undefined ? <p className="learning-path-step__binding">知识点 {step.claimId} · 证据 {step.evidenceHash?.slice(0, 16)}…</p> : <SynthesisEvidence source={step.noteSource} />}
               <div className="button-row">
-                <SourceSpanViewer
+                {step.sourceVersionId !== null && step.sourceSpanId !== null ? <SourceSpanViewer
                   className="ui-button ui-button--secondary ui-button--sm"
                   label="打开步骤证据"
                   reference={{ workspaceId: step.workspaceId, sourceVersionId: step.sourceVersionId, sourceSpanId: step.sourceSpanId }}
-                />
+                /> : null}
                 <Button size="sm" variant="secondary" onClick={() => onMemoryCandidate(step.id)} disabled={pending}>
                   <Brain size={14} />{candidatePendingStepId === step.id ? "正在创建…" : "创建记忆候选"}
                 </Button>
@@ -561,6 +563,7 @@ export const InterviewSessionPage = () => {
             <Badge tone={data.session.status === "COMPLETED" ? "success" : data.session.status === "CANCELLED" ? "danger" : "info"}>{interviewSessionStatusLabel[data.session.status]}</Badge>
           </div>}
         />
+        {data.session.config.scope.noteRevision ? <p className="sidebar-note">题目绑定「{data.session.config.scope.noteRevision.title}」版本 {data.session.config.scope.noteRevision.revisionNo}。AI 已生成题目与追问计划，评分使用确定性规则。</p> : null}
         <div className="interview-progress-row">
           <label htmlFor="interview-progress">答题进度</label>
           <progress id="interview-progress" max={data.questions.length} value={data.questions.filter((item) => item.status !== "PENDING").length} />

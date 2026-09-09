@@ -218,6 +218,9 @@ func NewRuntimeCatalog(options CatalogOptions) (*agentapplication.RuntimeCatalog
 	}); err != nil {
 		return nil, err
 	}
+	if err := registerWorkspaceAnalysisV2Catalog(catalog); err != nil {
+		return nil, err
+	}
 	if err := catalog.Freeze(); err != nil {
 		return nil, err
 	}
@@ -596,8 +599,12 @@ func queryPlanProviderV2Decoder(raw []byte) (json.RawMessage, error) {
 func workspaceAnalysisCandidateProviderDecoder(raw []byte) (json.RawMessage, error) {
 	limits := agentdomain.DefaultDecodeLimits()
 	limits.MaxDocumentBytes = int(agentdomain.MaxWorkspaceAnalysisCandidateBytes)
-	if _, err := agentdomain.DecodeWorkspaceAnalysisCandidateProvider(raw, limits); err != nil {
+	result, err := agentdomain.DecodeWorkspaceAnalysisCandidateProvider(raw, limits)
+	if err != nil {
 		return nil, err
+	}
+	if result.SchemaVersion != "1" {
+		return nil, workspaceAnalysisReceiptError(errors.New("workspace analysis v1 candidate schema drifted"))
 	}
 	return append(json.RawMessage(nil), raw...), nil
 }

@@ -10,12 +10,13 @@ import (
 const workspaceAnalysisCancelRequestedAuditAction = "workspace_analysis.cancel_requested"
 
 type workspaceAnalysisCancellationAuditRun struct {
-	ID             foundation.ID
-	WorkspaceID    foundation.ID
-	ConversationID foundation.ID
-	QuestionID     foundation.ID
-	AnswerID       foundation.ID
-	WorkflowRunID  foundation.ID
+	DefinitionVersion int64
+	ID                foundation.ID
+	WorkspaceID       foundation.ID
+	ConversationID    foundation.ID
+	QuestionID        foundation.ID
+	AnswerID          foundation.ID
+	WorkflowRunID     foundation.ID
 }
 
 func validateWorkspaceAnalysisCancellationControlEvent(event workflowapplication.WorkflowControlEvent) error {

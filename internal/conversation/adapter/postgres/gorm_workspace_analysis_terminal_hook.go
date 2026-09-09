@@ -10,6 +10,7 @@ import (
 	agentdomain "github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
 	conversationapplication "github.com/CodeZen-Lizhi/zhixu/internal/conversation/application"
 	conversationdomain "github.com/CodeZen-Lizhi/zhixu/internal/conversation/domain"
+	conversationworkflow "github.com/CodeZen-Lizhi/zhixu/internal/conversation/workflow"
 	eventsapplication "github.com/CodeZen-Lizhi/zhixu/internal/events/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
@@ -123,7 +124,12 @@ func (hook *GORMWorkspaceAnalysisCancellationTerminalHook) OnWorkflowNodeTermina
 	if err != nil {
 		return err
 	}
-	if err := gormLockWorkspaceAnalysisCancellationOperations(ctx, tx, run.ID, !run.Status.Terminal()); err != nil {
+	if !run.Status.Terminal() {
+		if err := gormCloseWorkspaceAnalysisDecisionRuns(ctx, tx, run.ID, run.DefinitionVersion, event.TerminalAt); err != nil {
+			return err
+		}
+	}
+	if err := gormLockWorkspaceAnalysisCancellationOperations(ctx, tx, run.ID, run.DefinitionVersion, !run.Status.Terminal()); err != nil {
 		return err
 	}
 	slot, err := gormLockWorkspaceAnalysisCancellationSlot(ctx, tx, run)
@@ -206,7 +212,12 @@ func (hook *GORMWorkspaceAnalysisCancellationTerminalHook) onWorkspaceAnalysisRu
 	if err != nil {
 		return err
 	}
-	if err := gormLockWorkspaceAnalysisCancellationOperations(ctx, tx, run.ID, !run.Status.Terminal()); err != nil {
+	if !run.Status.Terminal() {
+		if err := gormCloseWorkspaceAnalysisDecisionRuns(ctx, tx, run.ID, run.DefinitionVersion, event.TerminalAt); err != nil {
+			return err
+		}
+	}
+	if err := gormLockWorkspaceAnalysisCancellationOperations(ctx, tx, run.ID, run.DefinitionVersion, !run.Status.Terminal()); err != nil {
 		return err
 	}
 	slot, err := gormLockWorkspaceAnalysisCancellationSlot(ctx, tx, run)
@@ -297,7 +308,7 @@ func (hook *GORMWorkspaceAnalysisCancellationTerminalHook) validateWorkspaceAnal
 			WorkspaceID: run.WorkspaceID, WorkflowRunID: run.WorkflowRunID,
 			ConversationID: run.ConversationID, QuestionID: run.QuestionID, AnswerID: run.AnswerID,
 		},
-		AnalysisRunID: run.ID,
+		AnalysisRunID: run.ID, DefinitionVersion: run.DefinitionVersion,
 	}
 	proof, found, err := gormLoadWorkspaceAnalysisTerminationProof(ctx, tx, lookup)
 	if err != nil {
@@ -378,6 +389,12 @@ func gormLockWorkspaceAnalysisRuntimeFailure(
 			ErrorCodeWorkspaceAnalysisFinalizeCorrupt,
 			errors.New("workspace analysis runtime failure fence is invalid"),
 		)
+	}
+	if event.NodeAttemptID == "" {
+		if workspaceAnalysisCancellationNodeVersion(event.NodeKind) != 2 {
+			return workspaceAnalysisTerminationAuthorityError("legacy runtime failure requires an attempt")
+		}
+		return gormValidateWorkspaceAnalysisCancellationAttempt(ctx, tx, event, nodeAttemptNo)
 	}
 	var (
 		attemptStatus                 workflowdomain.AttemptStatus
@@ -497,14 +514,16 @@ func gormLockWorkspaceAnalysisCancellationRun(
 		id, workspaceID, conversationID, questionID string
 		answerID, workflowRunID                     string
 		reasonText                                  *string
+		definitionKey                               string
 	)
 	if err := gormScanRow(tx.WithContext(ctx).Raw(`SELECT
 		id::text,workspace_id::text,conversation_id::text,question_id::text,answer_id::text,workflow_run_id::text,
-		status,termination_reason,version,created_at,updated_at
+		status,termination_reason,version,created_at,updated_at,definition_key,definition_version,policy_version,definition_hash
 		FROM agent.workspace_analysis_run
 		WHERE workspace_id=? AND workflow_run_id=? FOR UPDATE`, string(event.WorkspaceID), string(event.WorkflowRunID))).Scan(
 		&id, &workspaceID, &conversationID, &questionID, &answerID, &workflowRunID,
 		&run.Status, &reasonText, &run.Version, &run.CreatedAt, &run.UpdatedAt,
+		&definitionKey, &run.DefinitionVersion, &run.PolicyVersion, &run.DefinitionHash,
 	); err != nil {
 		return workspaceAnalysisCancellationRun{}, workspaceAnalysisFinalizerQueryError(err, "workspace analysis cancellation run")
 	}
@@ -524,6 +543,12 @@ func gormLockWorkspaceAnalysisCancellationRun(
 			errors.New("workspace analysis cancellation run scope drifted"),
 		)
 	}
+	if definitionKey != conversationworkflow.WorkspaceAnalysisDefinitionKey || workspaceAnalysisCancellationNodeVersion(event.NodeKind) != run.DefinitionVersion {
+		return workspaceAnalysisCancellationRun{}, workspaceAnalysisTerminationAuthorityError("workspace analysis terminal node version differs from its run")
+	}
+	if err := gormValidateWorkspaceAnalysisPersistedDefinition(ctx, tx, run.WorkspaceID, run.WorkflowRunID, run.DefinitionVersion, run.PolicyVersion, run.DefinitionHash); err != nil {
+		return workspaceAnalysisCancellationRun{}, err
+	}
 	return run, nil
 }
 
@@ -531,20 +556,29 @@ func gormLockWorkspaceAnalysisCancellationOperations(
 	ctx context.Context,
 	tx *gorm.DB,
 	analysisRunID foundation.ID,
+	definitionVersion int64,
 	requireSucceeded bool,
 ) error {
-	rows, err := tx.WithContext(ctx).Raw(`SELECT status FROM agent.workspace_analysis_operation
-		WHERE analysis_run_id=? ORDER BY id FOR UPDATE`, string(analysisRunID)).Rows()
+	rows, err := tx.WithContext(ctx).Raw(`SELECT status,
+		(?=2 AND status='PENDING' AND model_call_id IS NULL AND tool_call_id IS NULL
+		 AND NOT EXISTS (SELECT 1 FROM agent.workspace_analysis_budget_reservation b WHERE b.operation_id=o.id)
+		 AND EXISTS (SELECT 1 FROM agent.workspace_analysis_journal j WHERE j.operation_id=o.id
+		   AND j.sequence=(SELECT max(last.sequence) FROM agent.workspace_analysis_journal last WHERE last.analysis_run_id=o.analysis_run_id))
+		 AND (? OR EXISTS (SELECT 1 FROM agent.workspace_analysis_termination_proof proof WHERE proof.analysis_run_id=o.analysis_run_id
+		   AND (proof.operation_id=o.id OR proof.reason IN ('WORKSPACE_ANALYSIS_CANCELLED','WORKSPACE_ANALYSIS_RUNTIME_FAILED')))))
+		FROM agent.workspace_analysis_operation o
+		WHERE analysis_run_id=? ORDER BY id FOR UPDATE OF o`, definitionVersion, requireSucceeded, string(analysisRunID)).Rows()
 	if err != nil {
 		return classify(err, ErrorCodeWorkspaceAnalysisFinalizeUnavailable)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var status agentdomain.WorkspaceAnalysisOperationStatus
-		if err := rows.Scan(&status); err != nil {
+		var uncalledPending bool
+		if err := rows.Scan(&status, &uncalledPending); err != nil {
 			return classify(err, ErrorCodeWorkspaceAnalysisFinalizeUnavailable)
 		}
-		if requireSucceeded && status != agentdomain.WorkspaceAnalysisOperationSucceeded {
+		if requireSucceeded && status != agentdomain.WorkspaceAnalysisOperationSucceeded && !uncalledPending {
 			return conflict(
 				ErrorCodeWorkspaceAnalysisFinalizeConflict,
 				errors.New("workspace analysis cancellation cannot mask unfinished or failed work"),
@@ -553,7 +587,7 @@ func gormLockWorkspaceAnalysisCancellationOperations(
 		terminal := status == agentdomain.WorkspaceAnalysisOperationSucceeded ||
 			status == agentdomain.WorkspaceAnalysisOperationFailed ||
 			status == agentdomain.WorkspaceAnalysisOperationUnknown
-		if !requireSucceeded && !terminal {
+		if !requireSucceeded && !terminal && !uncalledPending {
 			return consistency(
 				ErrorCodeWorkspaceAnalysisFinalizeCorrupt,
 				errors.New("workspace analysis cancellation replay retains active work"),
@@ -603,6 +637,7 @@ func gormLockWorkspaceAnalysisCancellationSlot(
 	}
 	view, err := scanAnswerView(gormScanRow(tx.WithContext(ctx).Raw(`SELECT `+answerViewColumns+` FROM agent.answer a
 		JOIN workflow.run w ON w.id=a.workflow_run_id AND w.workspace_id=a.workspace_id
+		JOIN workflow.definition d ON d.id=w.definition_id AND d.workspace_id=w.workspace_id
 		WHERE a.workspace_id=? AND a.id=? AND a.conversation_id=? AND a.question_id=? AND a.workflow_run_id=?
 		FOR UPDATE OF a`, string(run.WorkspaceID), string(run.AnswerID), string(run.ConversationID), string(run.QuestionID), string(run.WorkflowRunID))))
 	if err != nil {

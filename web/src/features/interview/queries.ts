@@ -11,7 +11,7 @@ import {
   updateLearningPathStep,
   type InterviewSnapshot,
 } from "../../api/interview";
-import { useActiveWorkspaceId } from "../../app/active-workspace";
+import { getActiveWorkspaceId, useActiveWorkspaceId } from "../../app/active-workspace";
 import { interviewQueryKeys } from "./query-keys";
 
 /** Workspace 切换或登出时清除 Interview 与 Learning Path 的全部缓存。 */
@@ -56,6 +56,7 @@ export const useStartInterview = () => {
   return useMutation({
     mutationFn: startInterview,
     onSuccess: (result) => {
+      if (getActiveWorkspaceId() !== result.session.workspaceId) return;
       queryClient.setQueryData<InterviewSnapshot>(interviewQueryKeys.session(result.session.workspaceId, result.session.id), {
         session: result.session,
         questions: result.questions,
@@ -72,6 +73,7 @@ export const useSubmitInterviewTurn = () => {
   return useMutation({
     mutationFn: submitInterviewTurn,
     onSuccess: (result) => {
+      if (getActiveWorkspaceId() !== result.turn.workspaceId) return;
       void queryClient.invalidateQueries({ queryKey: interviewQueryKeys.sessions(result.turn.workspaceId) });
       return refetchSession(queryClient, result.turn.workspaceId, result.turn.sessionId);
     },
@@ -83,6 +85,7 @@ export const useCompleteInterview = () => {
   return useMutation({
     mutationFn: completeInterview,
     onSuccess: (result) => {
+      if (getActiveWorkspaceId() !== result.session.workspaceId) return;
       const key = interviewQueryKeys.session(result.session.workspaceId, result.session.id);
       queryClient.setQueryData<InterviewSnapshot>(key, (current) => current === undefined ? current : {
         ...current,
@@ -105,6 +108,7 @@ export const useUpdateLearningPathStatus = () => {
     mutationFn: updateLearningPathStatus,
     onSuccess: (result) => {
       const { path } = result;
+      if (getActiveWorkspaceId() !== path.workspaceId) return;
       const key = interviewQueryKeys.session(path.workspaceId, path.sessionId);
       queryClient.setQueryData<InterviewSnapshot>(key, (current) => current === undefined ? current : { ...current, path });
       return refetchSession(queryClient, path.workspaceId, path.sessionId);
@@ -118,6 +122,7 @@ export const useUpdateLearningPathStep = () => {
     mutationFn: updateLearningPathStep,
     onSuccess: (result) => {
       const { path, step } = result;
+      if (getActiveWorkspaceId() !== path.workspaceId) return;
       const key = interviewQueryKeys.session(path.workspaceId, path.sessionId);
       queryClient.setQueryData<InterviewSnapshot>(key, (current) => current === undefined ? current : {
         ...current,

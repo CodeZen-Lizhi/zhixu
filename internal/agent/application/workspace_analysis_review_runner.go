@@ -17,10 +17,11 @@ import (
 )
 
 const (
-	workspaceAnalysisReviewFinalizationTimeout = 5 * time.Second
-	workspaceAnalysisReviewInputSchemaVersion  = "agent-workspace-analysis-review-input/v1"
-	workspaceAnalysisReviewConclusionTargetID  = "@answer/conclusion"
-	workspaceAnalysisReviewMaxEvidenceBytes    = 4 * 1024
+	workspaceAnalysisReviewFinalizationTimeout  = 5 * time.Second
+	workspaceAnalysisReviewInputSchemaVersion   = "agent-workspace-analysis-review-input/v1"
+	workspaceAnalysisReviewInputSchemaVersionV2 = "agent-workspace-analysis-review-input/v2"
+	workspaceAnalysisReviewConclusionTargetID   = "@answer/conclusion"
+	workspaceAnalysisReviewMaxEvidenceBytes     = 4 * 1024
 )
 
 // WorkspaceAnalysisReviewRunnerDependencies 是 Faithfulness Review 单次模型调用的全部项目边界。
@@ -318,13 +319,14 @@ func validateWorkspaceAnalysisReviewRequest(request WorkspaceAnalysisReviewReque
 	}
 	if request.Identity.NodeKey != domain.WorkspaceAnalysisOperationNodeReviewPublish || operationKey.Validate() != nil ||
 		domain.ValidateWorkspaceAnalysisCandidate(request.Candidate) != nil ||
+		request.Candidate.SchemaVersion != request.Identity.DefinitionVersion ||
 		request.Candidate.WorkspaceID != request.Identity.WorkspaceID || request.Candidate.AnalysisRunID != request.AnalysisRunID ||
 		request.ProfileRef.Validate() != nil || request.PromptRef.Validate() != nil || request.Retrieval.Validate() != nil ||
 		(request.ModelSettingsRevision != nil && *request.ModelSettingsRevision < 0) {
 		return workspaceAnalysisModelError(errors.New("workspace analysis review request is invalid"))
 	}
 	candidateResult, err := decodeWorkspaceAnalysisReviewCandidate(request.Candidate)
-	if err != nil || validateWorkspaceAnalysisReviewEvidence(candidateResult.Payload.CitationRefs, request.Evidence) != nil {
+	if err != nil || validateWorkspaceAnalysisReviewEvidenceForVersion(candidateResult.Payload.CitationRefs, request.Evidence, request.Identity.DefinitionVersion) != nil {
 		return workspaceAnalysisModelError(errors.New("workspace analysis review evidence is invalid"))
 	}
 	return nil
@@ -340,8 +342,12 @@ func canonicalWorkspaceAnalysisReviewInput(
 			errOrWorkspaceAnalysisPlan(err, "workspace analysis review candidate cannot be decoded"),
 		)
 	}
-	if err := validateWorkspaceAnalysisReviewEvidence(candidateResult.Payload.CitationRefs, evidence); err != nil {
+	if err := validateWorkspaceAnalysisReviewEvidenceForVersion(candidateResult.Payload.CitationRefs, evidence, candidate.SchemaVersion); err != nil {
 		return nil, err
+	}
+	inputSchemaVersion := workspaceAnalysisReviewInputSchemaVersion
+	if candidate.SchemaVersion == 2 {
+		inputSchemaVersion = workspaceAnalysisReviewInputSchemaVersionV2
 	}
 	input := struct {
 		SchemaVersion string                                `json:"schema_version"`
@@ -350,7 +356,7 @@ func canonicalWorkspaceAnalysisReviewInput(
 		ReviewTargets []faithfulnessReviewTarget            `json:"review_targets"`
 		Evidence      []WorkspaceAnalysisReviewEvidence     `json:"evidence"`
 	}{
-		SchemaVersion: workspaceAnalysisReviewInputSchemaVersion,
+		SchemaVersion: inputSchemaVersion,
 		ModelRunRef:   candidate.SynthesisModelRunID,
 		Candidate: workspaceAnalysisReviewCandidateInput{
 			AnswerMarkdown: candidateResult.Payload.AnswerMarkdown,
@@ -396,12 +402,21 @@ func validateWorkspaceAnalysisReviewEvidence(
 	expectedRefs []string,
 	evidence []WorkspaceAnalysisReviewEvidence,
 ) error {
-	if len(expectedRefs) < 1 || len(expectedRefs) > int(WorkspaceAnalysisV1MaxSourceReads) ||
+	return validateWorkspaceAnalysisReviewEvidenceForVersion(expectedRefs, evidence, 1)
+}
+
+func validateWorkspaceAnalysisReviewEvidenceForVersion(expectedRefs []string, evidence []WorkspaceAnalysisReviewEvidence, version int64) error {
+	maxReads := int(WorkspaceAnalysisV1MaxSourceReads)
+	if version == 2 {
+		maxReads = domain.WorkspaceAnalysisV2MaxSourceReads
+	}
+	if version != 1 && version != 2 || len(expectedRefs) < 1 || len(expectedRefs) > maxReads ||
 		len(evidence) != len(expectedRefs) {
 		return workspaceAnalysisModelError(errors.New("workspace analysis review evidence set is incomplete"))
 	}
 	for index, item := range evidence {
 		if item.EvidenceRef != expectedRefs[index] || strings.TrimSpace(item.Excerpt) == "" ||
+			(version == 2 && !domain.ValidWorkspaceAnalysisV2EvidenceRef(item.EvidenceRef)) ||
 			len(item.Excerpt) > workspaceAnalysisReviewMaxEvidenceBytes || !utf8.ValidString(item.Excerpt) ||
 			strings.ContainsRune(item.Excerpt, '\x00') {
 			return workspaceAnalysisModelError(errors.New("workspace analysis review evidence item is invalid"))

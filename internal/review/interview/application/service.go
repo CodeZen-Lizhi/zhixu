@@ -115,6 +115,9 @@ func (s *Service) Start(ctx context.Context, command StartCommand) (StartResult,
 	if err != nil {
 		return StartResult{}, err
 	}
+	if config.Scope.NoteRevision != nil {
+		return StartResult{}, domain.InvalidError(domain.ErrorCodeConfigInvalid, "note interviews require the background preparation command")
+	}
 	requestHash, err := requestHash(struct {
 		Command   string        `json:"command"`
 		Workspace foundation.ID `json:"workspace_id"`
@@ -212,6 +215,17 @@ func (s *Service) SubmitTurn(ctx context.Context, command SubmitTurnCommand) (Su
 	if err := domain.ValidateIdempotencyKey(command.IdempotencyKey); err != nil {
 		return SubmitTurnResult{}, err
 	}
+	var snapshot Snapshot
+	if command.ClaimOnly {
+		var err error
+		snapshot, err = s.Get(ctx, command.WorkspaceID, command.SessionID)
+		if err != nil {
+			return SubmitTurnResult{}, err
+		}
+		if err := RequireClaimSources(snapshot); err != nil {
+			return SubmitTurnResult{}, err
+		}
+	}
 	requestHash, err := requestHash(struct {
 		Command    string        `json:"command"`
 		Workspace  foundation.ID `json:"workspace_id"`
@@ -226,9 +240,11 @@ func (s *Service) SubmitTurn(ctx context.Context, command SubmitTurnCommand) (Su
 		return replay, err
 	}
 
-	snapshot, err := s.store.Get(ctx, command.WorkspaceID, command.SessionID)
-	if err != nil {
-		return SubmitTurnResult{}, err
+	if !command.ClaimOnly {
+		snapshot, err = s.store.Get(ctx, command.WorkspaceID, command.SessionID)
+		if err != nil {
+			return SubmitTurnResult{}, err
+		}
 	}
 	if snapshot.Session.Status != domain.SessionStatusActive {
 		return SubmitTurnResult{}, domain.ConflictError(domain.ErrorCodeSessionClosed, "interview session is closed")
@@ -260,7 +276,7 @@ func (s *Service) SubmitTurn(ctx context.Context, command SubmitTurnCommand) (Su
 	if err != nil {
 		return SubmitTurnResult{}, err
 	}
-	if err := domain.ValidateScore(score, current.Evidence); err != nil {
+	if err := domain.ValidateScoreForQuestion(score, *current); err != nil {
 		return SubmitTurnResult{}, err
 	}
 	now := s.clock.Now()
@@ -272,7 +288,7 @@ func (s *Service) SubmitTurn(ctx context.Context, command SubmitTurnCommand) (Su
 		return SubmitTurnResult{}, err
 	}
 	var followUp *domain.Question
-	if snapshot.Session.FollowUpCount < snapshot.Session.Config.MaxFollowUps && domain.NeedsFollowUp(score) {
+	if snapshot.Session.FollowUpCount < snapshot.Session.Config.MaxFollowUps && (current.SourceKind == domain.QuestionSourceNoteRevision || domain.NeedsFollowUp(score)) {
 		followUp, err = s.newFollowUp(snapshot.Session, *current, score, now)
 		if err != nil {
 			return SubmitTurnResult{}, err
@@ -304,6 +320,7 @@ func (s *Service) SubmitTurn(ctx context.Context, command SubmitTurnCommand) (Su
 		return SubmitTurnResult{}, err
 	}
 	return s.store.Submit(ctx, SubmitRecord{
+		ClaimOnly:   command.ClaimOnly,
 		WorkspaceID: command.WorkspaceID, SessionID: command.SessionID, ExpectedVersion: snapshot.Session.Version,
 		Question: *current, Turn: turn, FollowUp: followUp, IdempotencyKey: command.IdempotencyKey, RequestHash: requestHash,
 	})
@@ -316,6 +333,15 @@ func (s *Service) Complete(ctx context.Context, command CompleteCommand) (Comple
 	}
 	if err := domain.ValidateIdempotencyKey(command.IdempotencyKey); err != nil {
 		return CompleteResult{}, err
+	}
+	if command.ClaimOnly {
+		snapshot, err := s.Get(ctx, command.WorkspaceID, command.SessionID)
+		if err != nil {
+			return CompleteResult{}, err
+		}
+		if err := RequireClaimSources(snapshot); err != nil {
+			return CompleteResult{}, err
+		}
 	}
 	requestHash, err := requestHash(struct {
 		Command   string        `json:"command"`
@@ -331,6 +357,7 @@ func (s *Service) Complete(ctx context.Context, command CompleteCommand) (Comple
 	}
 
 	begin, err := s.store.BeginComplete(ctx, BeginCompleteRecord{
+		ClaimOnly:   command.ClaimOnly,
 		WorkspaceID: command.WorkspaceID, SessionID: command.SessionID, ManualEnd: command.ManualEnd,
 		IdempotencyKey: command.IdempotencyKey, RequestHash: requestHash,
 	})
@@ -362,6 +389,7 @@ func (s *Service) Complete(ctx context.Context, command CompleteCommand) (Comple
 		return CompleteResult{}, err
 	}
 	prepared, err := s.store.PrepareComplete(ctx, PrepareCompleteRecord{
+		ClaimOnly:   command.ClaimOnly,
 		WorkspaceID: command.WorkspaceID, SessionID: command.SessionID, IdempotencyKey: command.IdempotencyKey,
 		RequestHash: requestHash, ManualEnd: command.ManualEnd, SnapshotVersion: snapshot.Session.Version,
 		ArtifactDigest: digest,
@@ -385,6 +413,7 @@ func (s *Service) Complete(ctx context.Context, command CompleteCommand) (Comple
 		return CompleteResult{}, err
 	}
 	return s.store.Complete(ctx, CompleteRecord{
+		ClaimOnly:   command.ClaimOnly,
 		WorkspaceID: command.WorkspaceID, SessionID: command.SessionID, ExpectedVersion: snapshot.Session.Version, ManualEnd: command.ManualEnd,
 		ArtifactDigest: digest, Report: report, Path: path, Steps: steps,
 		IdempotencyKey: command.IdempotencyKey, RequestHash: requestHash, At: now,
@@ -398,6 +427,17 @@ func (s *Service) UpdatePathStep(ctx context.Context, command UpdatePathStepComm
 	}
 	if err := domain.ValidateIdempotencyKey(command.IdempotencyKey); err != nil {
 		return PathStepResult{}, err
+	}
+	var path PathSnapshot
+	if command.ClaimOnly {
+		var err error
+		path, err = s.store.GetPath(ctx, command.WorkspaceID, command.PathID)
+		if err != nil {
+			return PathStepResult{}, err
+		}
+		if err := RequireClaimPathSources(path); err != nil {
+			return PathStepResult{}, err
+		}
 	}
 	requestHash, err := requestHash(struct {
 		Command   string            `json:"command"`
@@ -413,9 +453,11 @@ func (s *Service) UpdatePathStep(ctx context.Context, command UpdatePathStepComm
 	if replay, found, err := s.store.FindPathStepReplay(ctx, command.WorkspaceID, command.IdempotencyKey, requestHash); err != nil || found {
 		return replay, err
 	}
-	path, err := s.store.GetPath(ctx, command.WorkspaceID, command.PathID)
-	if err != nil {
-		return PathStepResult{}, err
+	if !command.ClaimOnly {
+		path, err = s.store.GetPath(ctx, command.WorkspaceID, command.PathID)
+		if err != nil {
+			return PathStepResult{}, err
+		}
 	}
 	if path.Path.Version != command.ExpectedVersion {
 		return PathStepResult{}, domain.ConflictError(domain.ErrorCodePathInvalid, "learning path version changed")
@@ -432,6 +474,7 @@ func (s *Service) UpdatePathStep(ctx context.Context, command UpdatePathStepComm
 		return PathStepResult{}, domain.ConflictError(domain.ErrorCodePathInvalid, "learning path step transition is invalid")
 	}
 	return s.store.UpdatePathStep(ctx, UpdatePathStepRecord{
+		ClaimOnly:   command.ClaimOnly,
 		WorkspaceID: command.WorkspaceID, PathID: command.PathID, StepID: command.StepID, ExpectedVersion: command.ExpectedVersion,
 		Status: command.Status, IdempotencyKey: command.IdempotencyKey, RequestHash: requestHash, At: s.clock.Now(),
 	})
@@ -473,6 +516,9 @@ func (s *Service) UpdatePathStatus(ctx context.Context, command UpdatePathStatus
 }
 
 func (s *Service) newFollowUp(session domain.Session, parent domain.Question, score domain.Score, now time.Time) (*domain.Question, error) {
+	if parent.SourceKind == domain.QuestionSourceNoteRevision {
+		return s.newNoteFollowUp(session, parent, score, now)
+	}
 	id, err := s.newID()
 	if err != nil {
 		return nil, err
@@ -517,7 +563,12 @@ func (s *Service) buildCompletion(snapshot Snapshot, reportID, pathID foundation
 	var totals struct{ correctness, coverage, boundaries, clarity float64 }
 	steps := make([]domain.PathStep, 0, snapshot.Session.Config.QuestionCount)
 	seenEvidence := make(map[string]domain.EvidenceRef)
+	seenNoteItems := make(map[foundation.ID]bool)
 	for _, question := range questions {
+		if question.SourceKind == domain.QuestionSourceNoteRevision && question.FollowUpNo == 0 && !seenNoteItems[question.NoteSource.ItemID] {
+			seenNoteItems[question.NoteSource.ItemID] = true
+			report.NoteSources = append(report.NoteSources, *domain.CloneNoteSource(question.NoteSource))
+		}
 		for _, evidence := range question.Evidence {
 			seenEvidence[evidence.EvidenceHash] = evidence
 		}
@@ -532,11 +583,7 @@ func (s *Service) buildCompletion(snapshot Snapshot, reportID, pathID foundation
 		report.Summary.QuestionsTotal++
 		if !answered {
 			report.Summary.SkippedTotal++
-			gap := domain.Finding{
-				ClaimID: terminal.ClaimID, TopicID: cloneID(terminal.TopicID),
-				Detail:   "This question chain ended without an answer. Review the claim and its linked supporting evidence before the next interview.",
-				Evidence: append([]domain.EvidenceRef(nil), terminal.Evidence...),
-			}
+			gap := findingForQuestion(terminal, "This question chain ended without an answer. Review the claim and its linked supporting evidence before the next interview.")
 			report.Gaps = append(report.Gaps, gap)
 			step, err := completionPathStep(snapshot.Session, pathID, terminal, len(steps)+1, gap.Detail, now)
 			if err != nil {
@@ -551,9 +598,9 @@ func (s *Service) buildCompletion(snapshot Snapshot, reportID, pathID foundation
 			totals.clarity += turn.Score.Clarity.Value
 			average := (turn.Score.Correctness.Value + turn.Score.Coverage.Value + turn.Score.Boundaries.Value) / 3
 			if average >= 0.75 {
-				report.Strengths = append(report.Strengths, domain.Finding{ClaimID: terminal.ClaimID, TopicID: cloneID(terminal.TopicID), Detail: "The final answer covered the claim and its supporting evidence.", Evidence: append([]domain.EvidenceRef(nil), terminal.Evidence...)})
+				report.Strengths = append(report.Strengths, findingForQuestion(terminal, "The final answer covered the claim and its supporting evidence."))
 			} else {
-				gap := domain.Finding{ClaimID: terminal.ClaimID, TopicID: cloneID(terminal.TopicID), Detail: "Review this claim, its conditions, and the linked supporting evidence before the next interview.", Evidence: append([]domain.EvidenceRef(nil), terminal.Evidence...)}
+				gap := findingForQuestion(terminal, "Review this claim, its conditions, and the linked supporting evidence before the next interview.")
 				report.Gaps = append(report.Gaps, gap)
 				step, err := completionPathStep(snapshot.Session, pathID, terminal, len(steps)+1, gap.Detail, now)
 				if err != nil {
@@ -562,7 +609,7 @@ func (s *Service) buildCompletion(snapshot Snapshot, reportID, pathID foundation
 				steps = append(steps, step)
 			}
 			if turn.Score.Clarity.Value < 0.65 {
-				report.Expression = append(report.Expression, domain.Finding{ClaimID: terminal.ClaimID, TopicID: cloneID(terminal.TopicID), Detail: "State the claim first, then its conditions and evidence in a clear order.", Evidence: append([]domain.EvidenceRef(nil), terminal.Evidence...)})
+				report.Expression = append(report.Expression, findingForQuestion(terminal, "State the claim first, then its conditions and evidence in a clear order."))
 			}
 		}
 		start = end
@@ -592,6 +639,11 @@ func completionPathStep(session domain.Session, pathID foundation.ID, question d
 	if err != nil {
 		return domain.PathStep{}, err
 	}
+	if question.SourceKind == domain.QuestionSourceNoteRevision {
+		return domain.PathStep{ID: stepID, WorkspaceID: session.WorkspaceID, PathID: pathID, StepNo: stepNo,
+			SourceKind: domain.QuestionSourceNoteRevision, NoteSource: domain.CloneNoteSource(question.NoteSource),
+			Title: "Revisit the note and its original sources", Rationale: rationale, Status: domain.StepStatusPending, Version: 1, CreatedAt: now, UpdatedAt: now}, nil
+	}
 	evidence := question.Evidence[0]
 	return domain.PathStep{
 		ID: stepID, WorkspaceID: session.WorkspaceID, PathID: pathID, StepNo: stepNo,
@@ -613,7 +665,7 @@ func completionArtifactRequests(snapshotVersion int64, report domain.Report, pat
 	}
 	reportMarkdown := renderReportMarkdown(report)
 	pathMarkdown := renderLearningPathMarkdown(steps)
-	digest, err := completionArtifactDigest(report.SessionID, snapshotVersion, reportScope, pathScope, reportMarkdown, pathMarkdown, report.Evidence)
+	digest, err := completionArtifactDigest(report.SessionID, snapshotVersion, reportScope, pathScope, reportMarkdown, pathMarkdown, report.Evidence, report.NoteSources...)
 	if err != nil {
 		return "", ArtifactDraftRequest{}, ArtifactDraftRequest{}, err
 	}
@@ -632,7 +684,7 @@ func completionArtifactRequests(snapshotVersion int64, report domain.Report, pat
 		Scope:       reportScope,
 		Section: ArtifactDraftSection{
 			Key: "report", Title: "Interview report", Markdown: reportMarkdown,
-			Evidence: append([]domain.EvidenceRef(nil), report.Evidence...),
+			Evidence: append([]domain.EvidenceRef(nil), report.Evidence...), DocumentSources: noteDocuments(report.NoteSources),
 		},
 		IdempotencyBaseKey: reportBaseKey,
 		VisibilityHold: ArtifactVisibilityHold{
@@ -648,7 +700,7 @@ func completionArtifactRequests(snapshotVersion int64, report domain.Report, pat
 		Scope:       pathScope,
 		Section: ArtifactDraftSection{
 			Key: "learning-path", Title: "Learning path", Markdown: pathMarkdown,
-			Evidence: append([]domain.EvidenceRef(nil), report.Evidence...),
+			Evidence: append([]domain.EvidenceRef(nil), report.Evidence...), DocumentSources: noteDocuments(report.NoteSources),
 		},
 		IdempotencyBaseKey: pathBaseKey,
 		VisibilityHold: ArtifactVisibilityHold{
@@ -702,6 +754,11 @@ func renderReportMarkdown(report domain.Report) string {
 			continue
 		}
 		for _, finding := range section.findings {
+			if finding.NoteSource != nil {
+				fmt.Fprintf(&body, "- Note `%s`, item `%s` (%s): %s\n", finding.NoteSource.Revision.NoteID, finding.NoteSource.ItemID, finding.NoteSource.ItemKind, finding.Detail)
+				writeNoteSourceLinks(&body, *finding.NoteSource)
+				continue
+			}
 			fmt.Fprintf(&body, "- Claim `%s`: %s\n", finding.ClaimID, finding.Detail)
 		}
 	}
@@ -717,6 +774,11 @@ func renderLearningPathMarkdown(steps []domain.PathStep) string {
 		return strings.TrimSpace(body.String())
 	}
 	for _, step := range steps {
+		if step.NoteSource != nil {
+			fmt.Fprintf(&body, "### %d. %s\n\n%s\n\n", step.StepNo, step.Title, step.Rationale)
+			writeNoteSourceLinks(&body, *step.NoteSource)
+			continue
+		}
 		fmt.Fprintf(&body, "### %d. %s\n\n%s\n\n- Claim: `%s`\n- Source version: `%s`\n- Source span: `%s`\n\n",
 			step.StepNo, step.Title, step.Rationale, step.ClaimID, step.SourceVersionID, step.SourceSpanID)
 	}
@@ -730,8 +792,9 @@ func completionArtifactDigest(
 	reportScope, pathScope json.RawMessage,
 	reportMarkdown, pathMarkdown string,
 	evidence []domain.EvidenceRef,
+	noteSources ...domain.NoteQuestionSource,
 ) (string, error) {
-	if !validID(sessionID) || snapshotVersion < 1 || strings.TrimSpace(reportMarkdown) == "" || strings.TrimSpace(pathMarkdown) == "" || len(evidence) == 0 {
+	if !validID(sessionID) || snapshotVersion < 1 || strings.TrimSpace(reportMarkdown) == "" || strings.TrimSpace(pathMarkdown) == "" || (len(evidence) == 0 && len(noteSources) == 0) || (len(evidence) != 0 && len(noteSources) != 0) {
 		return "", domain.InvalidError(domain.ErrorCodeReportInvalid, "interview artifact content binding is invalid")
 	}
 	canonicalEvidence := append([]domain.EvidenceRef(nil), evidence...)
@@ -746,18 +809,24 @@ func completionArtifactDigest(
 			return "", err
 		}
 	}
+	for _, source := range noteSources {
+		if err := source.Validate(source.Revision.WorkspaceID); err != nil {
+			return "", err
+		}
+	}
 	encoded, err := json.Marshal(struct {
-		SchemaVersion   string               `json:"schema_version"`
-		SessionID       foundation.ID        `json:"session_id"`
-		SnapshotVersion int64                `json:"snapshot_version"`
-		ReportScope     json.RawMessage      `json:"report_scope"`
-		PathScope       json.RawMessage      `json:"path_scope"`
-		ReportMarkdown  string               `json:"report_markdown"`
-		PathMarkdown    string               `json:"path_markdown"`
-		Evidence        []domain.EvidenceRef `json:"evidence"`
+		SchemaVersion   string                      `json:"schema_version"`
+		SessionID       foundation.ID               `json:"session_id"`
+		SnapshotVersion int64                       `json:"snapshot_version"`
+		ReportScope     json.RawMessage             `json:"report_scope"`
+		PathScope       json.RawMessage             `json:"path_scope"`
+		ReportMarkdown  string                      `json:"report_markdown"`
+		PathMarkdown    string                      `json:"path_markdown"`
+		Evidence        []domain.EvidenceRef        `json:"evidence"`
+		NoteSources     []domain.NoteQuestionSource `json:"note_sources,omitempty"`
 	}{
 		SchemaVersion: "interview-completion-artifacts/v1", SessionID: sessionID, SnapshotVersion: snapshotVersion,
-		ReportScope: reportScope, PathScope: pathScope, ReportMarkdown: reportMarkdown, PathMarkdown: pathMarkdown, Evidence: canonicalEvidence,
+		ReportScope: reportScope, PathScope: pathScope, ReportMarkdown: reportMarkdown, PathMarkdown: pathMarkdown, Evidence: canonicalEvidence, NoteSources: noteSources,
 	})
 	if err != nil {
 		return "", domain.InvalidError(domain.ErrorCodeReportInvalid, "interview artifact content binding cannot be encoded")
@@ -938,6 +1007,9 @@ func validateSessionListPage(query SessionListQuery, page SessionListPage) error
 	for index, session := range page.Items {
 		if session.WorkspaceID != query.WorkspaceID || domain.ValidateSession(session) != nil {
 			return domain.InvalidError(domain.ErrorCodePersistenceInvalid, "interview session list escaped its requested workspace")
+		}
+		if query.ClaimOnly && RequireClaimSessionSource(session) != nil {
+			return domain.InvalidError(domain.ErrorCodePersistenceInvalid, "interview session list escaped its requested source set")
 		}
 		if index > 0 {
 			previous := page.Items[index-1]

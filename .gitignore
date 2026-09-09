@@ -7,6 +7,7 @@
 
 # Go
 /bin/
+/worker
 *.exe
 *.exe~
 *.dll
@@ -65,6 +66,7 @@ test-results/
 
 # Local AI tooling and generated design outputs
 /.serena/
+/.workbuddy/
 /outputs/
 /output/
 /.playwright-cli/

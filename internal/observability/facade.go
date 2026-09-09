@@ -179,6 +179,11 @@ func NewWorkspaceAnalysisOutcomeMeasurement(status, terminationReason string) (M
 	return platform.NewWorkspaceAnalysisOutcomeMeasurement(status, terminationReason)
 }
 
+// NewWorkspaceAnalysisOutcomeMeasurementForVersion 保留持久工作流版本，且只接受已注册版本。
+func NewWorkspaceAnalysisOutcomeMeasurementForVersion(definitionVersion int64, status, terminationReason string) (Measurement, error) {
+	return platform.NewWorkspaceAnalysisOutcomeMeasurementForVersion(definitionVersion, status, terminationReason)
+}
+
 // MetricNames 返回稳定指标注册表。
 func MetricNames() []MetricName { return platform.MetricNames() }
 

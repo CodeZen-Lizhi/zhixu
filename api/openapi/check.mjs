@@ -937,6 +937,53 @@ for (const [path, schema] of [
 }
 
 const schemas = document.components.schemas;
+const versionedResponseOperations = [
+  ["/conversations/{conversation_id}/questions", "post", "QuestionAcceptance", "QuestionAcceptanceV2"],
+  ["/conversations/{conversation_id}/turns", "get", "TurnPage", "TurnPageV2"],
+  ["/answers/{answer_id}", "get", "Answer", "AnswerV2"],
+  ["/answers/{answer_id}/analysis-timeline", "get", "WorkspaceAnalysisTimeline", "WorkspaceAnalysisTimelineResponse"],
+  ["/review/interviews", "get", "InterviewSessionPage", "InterviewSessionPageV2"],
+  ["/review/interviews", "post", "InterviewStartResult", "InterviewStartResultV2"],
+  ["/review/interviews/{session_id}", "get", "InterviewSnapshot", "InterviewSnapshotV2"],
+  ["/review/interviews/{session_id}/turns", "post", "InterviewTurnResult", "InterviewTurnResultV2"],
+  ["/review/interviews/{session_id}/complete", "post", "InterviewCompletionResult", "InterviewCompletionResultV2"],
+  ["/review/learning-paths/{path_id}/steps/{step_id}", "put", "LearningPathStepResult", "LearningPathStepResultV2"],
+];
+for (const [suffix, method, legacySchema, currentSchema] of versionedResponseOperations) {
+  const legacy = document.paths[`/api/v1${suffix}`]?.[method];
+  const current = document.paths[`/api/v2${suffix}`]?.[method];
+  if (!legacy || !current || current.operationId !== `${legacy.operationId}V2` ||
+      current.security !== undefined || JSON.stringify(current.requestBody) !== JSON.stringify(legacy.requestBody)) {
+    throw new Error(`${method.toUpperCase()} ${suffix} must retain its authenticated versioned operation and command contract`);
+  }
+  for (const [operation, schema] of [[legacy, legacySchema], [current, currentSchema]]) {
+    for (const [status, response] of Object.entries(operation.responses)) {
+      if (status.startsWith("2") && response.content?.["application/json"]?.schema?.$ref !== `#/components/schemas/${schema}`) {
+        throw new Error(`${operation.operationId} must return its own ${schema} response contract`);
+      }
+    }
+  }
+  if (method !== "get") {
+    const expectedCapability = suffix.startsWith("/review/") ? "WriteProposal" : "ReadLocal";
+    const methodName = method[0].toUpperCase() + method.slice(1);
+    if (!authHandlerSource.includes(`oneCapability(http.Method${methodName}, "/api/v2${suffix}", capability.${expectedCapability})`)) {
+      throw new Error(`${current.operationId} must retain its explicit authentication capability`);
+    }
+  }
+}
+for (const name of ["InterviewScope", "InterviewQuestion", "InterviewScore", "InterviewFinding", "LearningPathStep"]) {
+  if (schemas[name]?.type !== "object" || schemas[name].additionalProperties !== false || schemas[name].oneOf !== undefined) {
+    throw new Error(`${name} must retain its v1 object contract; new source unions belong to v2`);
+  }
+}
+if (schemas.Answer.properties.result.oneOf[3]?.$ref !== "#/components/schemas/WorkspaceAnalysisAnswerResult" ||
+    schemas.AnswerV2.properties.result.oneOf[3]?.$ref !== "#/components/schemas/WorkspaceAnalysisPublishedAnswerResult" ||
+    schemas.InterviewReport.properties.note_sources !== undefined ||
+    schemas.InterviewQuestion.properties.source_kind !== undefined ||
+    schemas.LearningPathStep.properties.claim_id?.format !== "uuid" ||
+    schemas.QuestionAcceptanceV2.properties.status_url?.pattern !== "^/api/v2/answers/") {
+  throw new Error("v1 response guarantees must stay isolated from dynamic analysis and frozen-note v2 responses");
+}
 const workspaceAnalysisTimelinePath = "/api/v1/answers/{answer_id}/analysis-timeline";
 const workspaceAnalysisTimelineOperation = document.paths?.[workspaceAnalysisTimelinePath]?.get;
 const workspaceAnalysisTimelineParameters = document.paths?.[workspaceAnalysisTimelinePath]?.parameters ?? [];
@@ -988,6 +1035,43 @@ const workspaceAnalysisTimelineErrorCodes = [
 if (JSON.stringify(schemas.WorkspaceAnalysisTimelineItem?.properties?.error_code?.enum) !==
     JSON.stringify(workspaceAnalysisTimelineErrorCodes)) {
   throw new Error("Workspace Analysis timeline item error_code must remain a closed public-code enum");
+}
+for (const [union, v1, v2] of [
+  ["WorkspaceAnalysisTimelineResponse", "WorkspaceAnalysisTimeline", "WorkspaceAnalysisTimelineV2"],
+  ["WorkspaceAnalysisPublishedAnswerResult", "WorkspaceAnalysisAnswerResult", "WorkspaceAnalysisAnswerResultV2"],
+]) {
+  if (schemas[union]?.oneOf?.map((branch) => branch.$ref).join(",") !== `#/components/schemas/${v1},#/components/schemas/${v2}` ||
+      schemas[v1]?.properties?.schema_version?.const !== "v1" || schemas[v2]?.properties?.schema_version?.const !== "v2" ||
+      schemas[v1]?.additionalProperties !== false || schemas[v2]?.additionalProperties !== false) {
+    throw new Error(`${union} must retain independent, closed v1 and v2 contracts`);
+  }
+}
+const workspaceAnalysisV2ToolRefs = schemas.WorkspaceAnalysisTimelineToolRefV2?.oneOf ?? [];
+if (workspaceAnalysisV2ToolRefs.map((schema) => `${schema.properties?.name?.const}@${schema.properties?.version?.const}`).join(",") !==
+    "ReadGitStatus@3,SearchKnowledge@3,ReadSource@4,ValidateCitation@4" ||
+    workspaceAnalysisV2ToolRefs.some((schema) => schema.additionalProperties !== false || schema.required?.join(",") !== "name,version") ||
+    schemas.WorkspaceAnalysisTimelineV2.properties.items?.maxItems !== 27 || schemas.WorkspaceAnalysisTimelineItemV2.properties.sequence?.maximum !== 27 ||
+    schemas.WorkspaceAnalysisTimelineItemV2.properties.phase?.enum?.join(",") !== "decide_next,inspect_workspace,retrieve_evidence,read_evidence,synthesize_answer,validate_citations,review_publish" ||
+    schemas.WorkspaceAnalysisTimelineItemV2.properties.kind?.enum?.join(",") !== "node,model,tool" ||
+    JSON.stringify(schemas.WorkspaceAnalysisTimelineItemV2.properties.error_code?.enum) !== JSON.stringify(workspaceAnalysisTimelineErrorCodes)) {
+  throw new Error("Workspace Analysis v2 must retain its exact tools, journal bound, phases and public errors");
+}
+const workspaceAnalysisV2Budget = schemas.WorkspaceAnalysisTimelineBudgetV2;
+if (workspaceAnalysisV2Budget.additionalProperties !== false || workspaceAnalysisV2Budget.required?.join(",") !== workspaceAnalysisTimelineBudgetFields.join(",") ||
+    [["model_calls", 14], ["tool_calls", 13], ["source_reads", 8], ["input_tokens", 917504]].some(([field, max]) => workspaceAnalysisV2Budget.properties[field]?.properties?.max?.const !== max) ||
+    workspaceAnalysisV2Budget.properties.output_tokens?.properties?.max?.minimum !== 7169 || workspaceAnalysisV2Budget.properties.output_tokens?.properties?.max?.maximum !== 11264 ||
+    schemas.WorkspaceAnalysisTimelineSourceSummaryV2.properties.source.properties.evidence_ref.pattern !== "^E(?:[1-9]|[12][0-9]|3[0-2])$" ||
+    schemas.WorkspaceAnalysisTimelineSourceSummary.properties.source.properties.evidence_ref.pattern !== "^E[1-3]$") {
+  throw new Error("Workspace Analysis v2 budgets/global evidence refs must not widen the frozen v1 contract");
+}
+const workspaceAnalysisV2Payload = schemas.WorkspaceAnalysisAnswerResultV2.properties.payload;
+if (!workspaceAnalysisV2Payload.required.includes("git_status") || workspaceAnalysisV2Payload.properties.git_status?.oneOf?.[0]?.$ref !== "#/components/schemas/WorkspaceAnalysisGitStatus" ||
+    workspaceAnalysisV2Payload.properties.git_status?.oneOf?.[1]?.type !== "null" || workspaceAnalysisV2Payload.properties.citations?.maxItems !== 32 ||
+    workspaceAnalysisV2Payload.properties.budget?.$ref !== "#/components/schemas/WorkspaceAnalysisBudgetSummaryV2" ||
+    schemas.WorkspaceAnalysisBudgetSummaryV2.properties.model_calls?.minimum !== 5 || schemas.WorkspaceAnalysisBudgetSummaryV2.properties.model_calls?.maximum !== 14 ||
+    schemas.WorkspaceAnalysisBudgetSummary.properties.model_calls?.const !== 3 ||
+    schemas.WorkspaceAnalysisAnswerResult.properties.payload.properties.git_status?.$ref !== "#/components/schemas/WorkspaceAnalysisGitStatus") {
+  throw new Error("Workspace Analysis v2 result requires nullable actual Git facts and settled bounded dynamic usage");
 }
 const revisionPreviewPath = "/api/v1/proposals/{proposal_id}/revision-merge-previews";
 const revisionCollectionPath = "/api/v1/proposals/{proposal_id}/revisions";
@@ -4038,15 +4122,55 @@ if (schemas.InterviewConfig.additionalProperties !== false || schemas.InterviewC
     schemas.InterviewEvidence.properties.evidence_hash.pattern !== "^[0-9a-f]{64}$") {
   throw new Error("Interview config or formal SUPPORTS Evidence contract drifted");
 }
-const interviewQuestionFields = ["id", "workspace_id", "session_id", "question_no", "follow_up_no", "parent_question_id", "claim_id", "topic_id", "prompt", "status", "created_at", "answered_at"];
+const interviewQuestionFields = ["id", "workspace_id", "session_id", "question_no", "follow_up_no", "parent_question_id", "claim_id", "topic_id", "prompt", "status", "created_at", "answered_at", "source_kind"];
 const interviewQuestionRequired = ["id", "workspace_id", "session_id", "question_no", "follow_up_no", "claim_id", "prompt", "status", "created_at"];
-if (schemas.InterviewQuestion.additionalProperties !== false || schemas.InterviewQuestion.properties.answer_points !== undefined || schemas.InterviewQuestion.properties.evidence !== undefined ||
-    Object.keys(schemas.InterviewQuestion.properties ?? {}).join(",") !== interviewQuestionFields.join(",") || schemas.InterviewQuestion.required?.join(",") !== interviewQuestionRequired.join(",") ||
+for (const [union, claim, note] of [
+  ["InterviewScopeV2", "InterviewClaimScope", "InterviewNoteScope"],
+  ["InterviewQuestionV2", "InterviewClaimQuestion", "InterviewNoteQuestion"],
+  ["InterviewScoreV2", "InterviewClaimScore", "InterviewNoteScore"],
+  ["InterviewFindingV2", "InterviewClaimFinding", "InterviewNoteFinding"],
+  ["LearningPathStepV2", "LearningPathClaimStep", "LearningPathNoteStep"],
+]) {
+  if (schemas[union]?.oneOf?.map((branch) => branch.$ref).join(",") !== `#/components/schemas/${claim},#/components/schemas/${note}` ||
+      schemas[claim]?.additionalProperties !== false || schemas[note]?.additionalProperties !== false) {
+    throw new Error(`${union} must remain a closed formal-Claim / frozen-Note union`);
+  }
+}
+const claimQuestion = schemas.InterviewClaimQuestion;
+const noteQuestion = schemas.InterviewNoteQuestion;
+const questionHiddenFields = ["answer_points", "evidence", "note_source", "sources", "follow_up_plan", "user_answer", "model_run_id"];
+if (Object.keys(claimQuestion.properties).join(",") !== interviewQuestionFields.join(",") || claimQuestion.required?.join(",") !== interviewQuestionRequired.join(",") ||
+    claimQuestion.properties.claim_id?.format !== "uuid" || claimQuestion.properties.source_kind?.const !== "CLAIM" || claimQuestion.required.includes("source_kind") ||
+    Object.keys(noteQuestion.properties).join(",") !== [...interviewQuestionFields.filter((field) => field !== "topic_id"), "note_item"].join(",") ||
+    noteQuestion.required?.join(",") !== [...interviewQuestionRequired, "source_kind", "note_item"].join(",") ||
+    noteQuestion.properties.source_kind?.const !== "NOTE_REVISION" || noteQuestion.properties.claim_id?.type !== "null" ||
+    noteQuestion.properties.note_item?.$ref !== "#/components/schemas/InterviewNoteItem" ||
+    [claimQuestion, noteQuestion].some((schema) => questionHiddenFields.some((field) => schema.properties[field] !== undefined)) ||
     schemas.InterviewTurn.additionalProperties !== false || schemas.InterviewTurn.properties.user_answer !== undefined || schemas.InterviewTurn.properties.idempotency_key !== undefined || schemas.InterviewTurn.properties.request_hash !== undefined ||
-    schemas.InterviewScore.properties.schema_version.const !== "interview-score/v1" || schemas.InterviewReport.properties.schema_version.const !== "interview-report/v1" ||
+    schemas.InterviewClaimScore.properties.schema_version.const !== "interview-score/v1" || schemas.InterviewNoteScore.properties.schema_version.const !== "interview-score/v1" || schemas.InterviewReport.properties.schema_version.const !== "interview-report/v1" ||
     schemas.InterviewReport.properties.artifact.$ref !== "#/components/schemas/InterviewReportArtifactBinding" || schemas.LearningPath.properties.artifact.$ref !== "#/components/schemas/LearningPathArtifactBinding" ||
     schemas.InterviewReportArtifactBinding.allOf?.[1]?.properties?.kind?.const !== "INTERVIEW_DOC" || schemas.LearningPathArtifactBinding.allOf?.[1]?.properties?.kind?.const !== "LEARNING_PATH") {
   throw new Error("Interview must hide scoring answers/raw submissions and retain immutable Artifact kind bindings");
+}
+if (schemas.StartInterviewRequest.properties.config?.$ref !== "#/components/schemas/InterviewClaimConfig" ||
+    schemas.InterviewClaimConfig.properties.scope?.$ref !== "#/components/schemas/InterviewClaimScope" ||
+    Object.keys(schemas.InterviewNoteScope.properties).join(",") !== "note_revision" || schemas.InterviewNoteScope.required?.join(",") !== "note_revision" ||
+    Object.keys(schemas.InterviewNoteItem.properties).join(",") !== "revision,item_id,item_kind" ||
+    schemas.InterviewNoteQuestionSource.properties.sources?.maxItems !== 256 || schemas.InterviewReportV2.properties.note_sources?.maxItems !== 20) {
+  throw new Error("Note interviews must freeze a published revision through preparation and hide sources before answering");
+}
+for (const name of ["InterviewNoteScore", "InterviewNoteFinding", "LearningPathNoteStep"]) {
+  const schema = schemas[name];
+  if (!schema.required?.includes("note_source") || schema.properties.note_source?.$ref !== "#/components/schemas/InterviewNoteQuestionSource" ||
+      name !== "LearningPathNoteStep" && schema.properties.evidence?.maxItems !== 0 ||
+      name !== "InterviewNoteScore" && (schema.properties.claim_id?.type !== "null" || schema.properties.source_kind?.const !== "NOTE_REVISION" || schema.properties.topic_id !== undefined)) {
+    throw new Error(`${name} must expose exact note sources without fabricating formal Claim evidence`);
+  }
+}
+if (["source_version_id", "source_span_id", "evidence_hash"].some((field) => schemas.LearningPathNoteStep.properties[field]?.type !== "null") ||
+    schemas.InterviewClaimScore.properties.evidence?.minItems !== 1 || schemas.InterviewClaimFinding.properties.evidence?.minItems !== 1 ||
+    schemas.LearningPathClaimStep.properties.claim_id?.format !== "uuid") {
+  throw new Error("Claim interview contracts must retain formal evidence while Note steps keep those fields null");
 }
 if (schemas.StartInterviewRequest.required?.join(",") !== "workspace_id,config" || schemas.SubmitInterviewTurnRequest.required?.join(",") !== "workspace_id,question_id" ||
     schemas.SubmitInterviewTurnRequest.properties.user_answer["x-max-utf8-bytes"] !== 65536 || schemas.SubmitInterviewTurnRequest.properties.user_answer.default !== "" || schemas.CompleteInterviewRequest.required?.join(",") !== "workspace_id" || schemas.CompleteInterviewRequest.properties.manual_end.default !== false ||
@@ -4055,6 +4179,51 @@ if (schemas.StartInterviewRequest.required?.join(",") !== "workspace_id,config" 
     schemas.UpdateLearningPathStatusRequest.properties.status.enum?.join(",") !== "ACTIVE,PAUSED,COMPLETED" || schemas.UpdateLearningPathStepRequest.properties.status.enum?.join(",") !== "IN_PROGRESS,COMPLETED,SKIPPED" ||
     schemas.UpdateLearningPathStatusRequest.properties.expected_version.minimum !== 1 || schemas.UpdateLearningPathStepRequest.properties.expected_version.minimum !== 1) {
   throw new Error("Interview or Learning Path command shape drifted");
+}
+const synthesisPrefix = "/api/v1/workspaces/{workspace_id}/synthesis";
+for (const [suffix, method, schema] of [
+  ["/notes", "get", "SynthesisNotePage"],
+  ["/notes/{note_id}", "get", "SynthesisNoteDetail"],
+  ["/notes/{note_id}/revisions", "get", "SynthesisRevisionPage"],
+  ["/notes/{note_id}/revisions/{revision_id}", "get", "SynthesisRevisionResult"],
+  ["/notes/{note_id}/revisions/{revision_id}/sources/{source_span_id}", "get", "SynthesisSourceView"],
+  ["/processing", "get", "SynthesisProcessingPage"],
+  ["/processing/{processing_id}", "get", "SynthesisProcessingResult"],
+  ["/processing/{processing_id}/retry", "post", "SynthesisRetryResult"],
+  ["/notes/{note_id}/interviews", "post", "InterviewNotePreparationResult"],
+  ["/notes/{note_id}/interviews", "get", "InterviewNotePreparationPage"],
+  ["/notes/{note_id}/interviews/{preparation_id}", "get", "InterviewNotePreparationResult"],
+  ["/notes/{note_id}/interviews/{preparation_id}/retry", "post", "InterviewNotePreparationResult"],
+]) {
+  const operation = document.paths[synthesisPrefix + suffix]?.[method];
+  const status = method === "post" ? "202" : "200";
+  if (!operation || operation.security !== undefined || operation["x-required-capability"] !== (method === "post" ? "WRITE_PROPOSAL" : "READ_LOCAL") ||
+      operation.responses?.[status]?.content?.["application/json"]?.schema?.$ref !== `#/components/schemas/${schema}` ||
+      method === "post" && (!operation.parameters?.some((item) => item.$ref === "#/components/parameters/IdempotencyKey") || operation.requestBody?.required !== true)) {
+    throw new Error(`Synthesis operation must retain authentication, scope, exact response and idempotency: ${method} ${suffix}`);
+  }
+}
+for (const name of ["SynthesisNote", "SynthesisRevision", "SynthesisProcessing", "SynthesisSourceRef", "SynthesisSourceView", "InterviewNotePreparation"]) {
+  if (schemas[name]?.additionalProperties !== false || ["request_hash", "model_run_id", "model_output", "idempotency_key", "delta", "answer_points", "follow_up_plan"].some((field) => schemas[name]?.properties?.[field] !== undefined)) {
+    throw new Error(`${name} must remain a closed redacted public projection`);
+  }
+}
+if (schemas.SynthesisItem?.oneOf?.map((item) => item.$ref).join(",") !== "#/components/schemas/SynthesisFactItem,#/components/schemas/SynthesisConflictItem,#/components/schemas/SynthesisGapItem" ||
+    schemas.SynthesisProcessingStatus?.enum?.join(",") !== "PENDING,RUNNING,SUCCEEDED,NO_CHANGE,SKIPPED,FAILED,RECOVERY_REQUIRED" ||
+    schemas.SynthesisSourceView.properties.availability?.enum?.join(",") !== "AVAILABLE,STALE,UNAVAILABLE" ||
+    schemas.SynthesisRetryRequest.required?.join(",") !== "expected_version" || Object.keys(schemas.SynthesisRetryRequest.properties).join(",") !== "expected_version" ||
+    schemas.InterviewNotePreparationPage.properties.items?.maxItems !== 20 || schemas.InterviewNotePreparation.properties.options?.$ref !== "#/components/schemas/InterviewNotePreparationOptions") {
+  throw new Error("Synthesis content, recovery and interview preparation contracts drifted");
+}
+for (const [schema, fields] of [
+  ["SynthesisNote", ["current_revision_id", "workflow_run_id", "failure"]],
+  ["SynthesisProcessing", ["workflow_run_id", "failure", "completed_at"]],
+  ["InterviewNotePreparation", ["session_id", "failure"]],
+  ["SynthesisSourceView", ["text"]],
+]) {
+  if (fields.some((field) => !schemas[schema].required?.includes(field) || !schemas[schema].properties[field]?.oneOf?.some((branch) => branch.type === "null"))) {
+    throw new Error(`${schema} must retain explicit nullable fields`);
+  }
 }
 const organizingOperations = [
   ["/api/v1/workspaces/{workspace_id}/organizing/drafts", "post", "201", "OrganizingDraftCommandResult", "WRITE_PROPOSAL"],

@@ -16,15 +16,18 @@ import * as runtime from '../runtime';
 import type {
     Answer,
     AnswerFeedback,
+    AnswerV2,
     Conversation,
     ConversationPage,
     CreateConversationRequest,
     Problem,
     QuestionAcceptance,
+    QuestionAcceptanceV2,
     SubmitFeedbackRequest,
     SubmitQuestionRequest,
     SubscribeAnswerDraft200Response,
     TurnPage,
+    TurnPageV2,
 } from '../models/index';
 
 export interface CreateConversationOperationRequest {
@@ -33,6 +36,11 @@ export interface CreateConversationOperationRequest {
 }
 
 export interface GetAnswerRequest {
+    answerId: string;
+    workspaceId: string;
+}
+
+export interface GetAnswerV2Request {
     answerId: string;
     workspaceId: string;
 }
@@ -50,6 +58,14 @@ export interface ListConversationTurnsRequest {
     latest?: ListConversationTurnsLatestEnum;
 }
 
+export interface ListConversationTurnsV2Request {
+    conversationId: string;
+    workspaceId: string;
+    cursor?: string;
+    limit?: number;
+    latest?: ListConversationTurnsV2LatestEnum;
+}
+
 export interface ListConversationsRequest {
     workspaceId: string;
     cursor?: string;
@@ -63,6 +79,12 @@ export interface SubmitAnswerFeedbackRequest {
 }
 
 export interface SubmitQuestionOperationRequest {
+    conversationId: string;
+    idempotencyKey: string;
+    submitQuestionRequest: SubmitQuestionRequest;
+}
+
+export interface SubmitQuestionV2Request {
     conversationId: string;
     idempotencyKey: string;
     submitQuestionRequest: SubmitQuestionRequest;
@@ -190,6 +212,7 @@ export class ConversationApi extends runtime.BaseAPI {
     }
 
     /**
+     * Preserves the v1 response contract.
      */
     async getAnswerRaw(requestParameters: GetAnswerRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<Answer>> {
         const requestOptions = await this.getAnswerRequestOpts(requestParameters);
@@ -199,9 +222,74 @@ export class ConversationApi extends runtime.BaseAPI {
     }
 
     /**
+     * Preserves the v1 response contract.
      */
     async getAnswer(requestParameters: GetAnswerRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<Answer> {
         const response = await this.getAnswerRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for getAnswerV2 without sending the request
+     */
+    async getAnswerV2RequestOpts(requestParameters: GetAnswerV2Request): Promise<runtime.RequestOpts> {
+        if (requestParameters['answerId'] == null) {
+            throw new runtime.RequiredError(
+                'answerId',
+                'Required parameter "answerId" was null or undefined when calling getAnswerV2().'
+            );
+        }
+
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling getAnswerV2().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        if (requestParameters['workspaceId'] != null) {
+            queryParameters['workspace_id'] = requestParameters['workspaceId'];
+        }
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v2/answers/{answer_id}`;
+        urlPath = urlPath.replace('{answer_id}', encodeURIComponent(String(requestParameters['answerId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * Uses the v2 HTTP representation and also accepts compatible historical records.
+     */
+    async getAnswerV2Raw(requestParameters: GetAnswerV2Request, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<AnswerV2>> {
+        const requestOptions = await this.getAnswerV2RequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Uses the v2 HTTP representation and also accepts compatible historical records.
+     */
+    async getAnswerV2(requestParameters: GetAnswerV2Request, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<AnswerV2> {
+        const response = await this.getAnswerV2Raw(requestParameters, initOverrides);
         return await response.value();
     }
 
@@ -326,6 +414,7 @@ export class ConversationApi extends runtime.BaseAPI {
     }
 
     /**
+     * Preserves the v1 response contract. Lists only RAG and historical v1 analysis records, filtering before pagination. Use the matching v2 endpoint to include dynamic-analysis records. Turn cursors are bound to the HTTP API version; restart from the first page when switching versions.
      */
     async listConversationTurnsRaw(requestParameters: ListConversationTurnsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<TurnPage>> {
         const requestOptions = await this.listConversationTurnsRequestOpts(requestParameters);
@@ -335,9 +424,86 @@ export class ConversationApi extends runtime.BaseAPI {
     }
 
     /**
+     * Preserves the v1 response contract. Lists only RAG and historical v1 analysis records, filtering before pagination. Use the matching v2 endpoint to include dynamic-analysis records. Turn cursors are bound to the HTTP API version; restart from the first page when switching versions.
      */
     async listConversationTurns(requestParameters: ListConversationTurnsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<TurnPage> {
         const response = await this.listConversationTurnsRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for listConversationTurnsV2 without sending the request
+     */
+    async listConversationTurnsV2RequestOpts(requestParameters: ListConversationTurnsV2Request): Promise<runtime.RequestOpts> {
+        if (requestParameters['conversationId'] == null) {
+            throw new runtime.RequiredError(
+                'conversationId',
+                'Required parameter "conversationId" was null or undefined when calling listConversationTurnsV2().'
+            );
+        }
+
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling listConversationTurnsV2().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        if (requestParameters['workspaceId'] != null) {
+            queryParameters['workspace_id'] = requestParameters['workspaceId'];
+        }
+
+        if (requestParameters['cursor'] != null) {
+            queryParameters['cursor'] = requestParameters['cursor'];
+        }
+
+        if (requestParameters['limit'] != null) {
+            queryParameters['limit'] = requestParameters['limit'];
+        }
+
+        if (requestParameters['latest'] != null) {
+            queryParameters['latest'] = requestParameters['latest'];
+        }
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v2/conversations/{conversation_id}/turns`;
+        urlPath = urlPath.replace('{conversation_id}', encodeURIComponent(String(requestParameters['conversationId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * Uses the v2 HTTP representation and also accepts compatible historical records. Turn cursors are bound to the HTTP API version; restart from the first page when switching versions.
+     */
+    async listConversationTurnsV2Raw(requestParameters: ListConversationTurnsV2Request, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<TurnPageV2>> {
+        const requestOptions = await this.listConversationTurnsV2RequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Uses the v2 HTTP representation and also accepts compatible historical records. Turn cursors are bound to the HTTP API version; restart from the first page when switching versions.
+     */
+    async listConversationTurnsV2(requestParameters: ListConversationTurnsV2Request, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<TurnPageV2> {
+        const response = await this.listConversationTurnsV2Raw(requestParameters, initOverrides);
         return await response.value();
     }
 
@@ -532,6 +698,7 @@ export class ConversationApi extends runtime.BaseAPI {
     }
 
     /**
+     * Preserves the v1 response contract. Historical v1 analysis and RAG idempotent requests remain replayable. With dynamic-analysis admission enabled, new workspace_analysis requests require /api/v2 and are rejected here before creating a workflow.
      */
     async submitQuestionRaw(requestParameters: SubmitQuestionOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<QuestionAcceptance>> {
         const requestOptions = await this.submitQuestionRequestOpts(requestParameters);
@@ -541,9 +708,84 @@ export class ConversationApi extends runtime.BaseAPI {
     }
 
     /**
+     * Preserves the v1 response contract. Historical v1 analysis and RAG idempotent requests remain replayable. With dynamic-analysis admission enabled, new workspace_analysis requests require /api/v2 and are rejected here before creating a workflow.
      */
     async submitQuestion(requestParameters: SubmitQuestionOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<QuestionAcceptance> {
         const response = await this.submitQuestionRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for submitQuestionV2 without sending the request
+     */
+    async submitQuestionV2RequestOpts(requestParameters: SubmitQuestionV2Request): Promise<runtime.RequestOpts> {
+        if (requestParameters['conversationId'] == null) {
+            throw new runtime.RequiredError(
+                'conversationId',
+                'Required parameter "conversationId" was null or undefined when calling submitQuestionV2().'
+            );
+        }
+
+        if (requestParameters['idempotencyKey'] == null) {
+            throw new runtime.RequiredError(
+                'idempotencyKey',
+                'Required parameter "idempotencyKey" was null or undefined when calling submitQuestionV2().'
+            );
+        }
+
+        if (requestParameters['submitQuestionRequest'] == null) {
+            throw new runtime.RequiredError(
+                'submitQuestionRequest',
+                'Required parameter "submitQuestionRequest" was null or undefined when calling submitQuestionV2().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+        if (requestParameters['idempotencyKey'] != null) {
+            headerParameters['Idempotency-Key'] = String(requestParameters['idempotencyKey']);
+        }
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v2/conversations/{conversation_id}/questions`;
+        urlPath = urlPath.replace('{conversation_id}', encodeURIComponent(String(requestParameters['conversationId'])));
+
+        return {
+            path: urlPath,
+            method: 'POST',
+            headers: headerParameters,
+            query: queryParameters,
+            body: requestParameters['submitQuestionRequest'],
+        };
+    }
+
+    /**
+     * Uses the v2 HTTP representation and also accepts compatible historical records. Starts dynamic Workspace Analysis for new analysis questions; an existing idempotency key retains its original workflow and analysis version.
+     */
+    async submitQuestionV2Raw(requestParameters: SubmitQuestionV2Request, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<QuestionAcceptanceV2>> {
+        const requestOptions = await this.submitQuestionV2RequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Uses the v2 HTTP representation and also accepts compatible historical records. Starts dynamic Workspace Analysis for new analysis questions; an existing idempotency key retains its original workflow and analysis version.
+     */
+    async submitQuestionV2(requestParameters: SubmitQuestionV2Request, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<QuestionAcceptanceV2> {
+        const response = await this.submitQuestionV2Raw(requestParameters, initOverrides);
         return await response.value();
     }
 
@@ -622,3 +864,10 @@ export const ListConversationTurnsLatestEnum = {
     True: true
 } as const;
 export type ListConversationTurnsLatestEnum = typeof ListConversationTurnsLatestEnum[keyof typeof ListConversationTurnsLatestEnum];
+/**
+ * @export
+ */
+export const ListConversationTurnsV2LatestEnum = {
+    True: true
+} as const;
+export type ListConversationTurnsV2LatestEnum = typeof ListConversationTurnsV2LatestEnum[keyof typeof ListConversationTurnsV2LatestEnum];

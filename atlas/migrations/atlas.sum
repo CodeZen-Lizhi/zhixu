@@ -1,4 +1,4 @@
-h1:XeFRMAhR3d0HNGWLnQry2X+YY9I6DTaQIi+dvz/OtvM=
+h1:14LXqtFmFIwou61G7uhbqCqLsAoSb+H5ydMCF4gG0/M=
 00001_extensions.sql h1:d9aMFu8nO2EHE85BwWYfyPtq1diocz3EZqmHnnvBVcE=
 00002_workspace_sources.sql h1:EgP2K1gvI1QbrwK6p0ywvQjcfAU7I1a2TbZvs9yM52w=
 00003_workflow.sql h1:RdYmj4ve7wSQmnqz9Y0qa9KQ2/ILf2eKfzkQU06/qFo=
@@ -92,3 +92,9 @@ h1:XeFRMAhR3d0HNGWLnQry2X+YY9I6DTaQIi+dvz/OtvM=
 00091_workspace_analysis_runtime_failure_terminalization.sql h1:PLOJsVUqecMZyPDWky5s5DXnZZd3LoVn5KgvsUhYYZY=
 00092_drop_goose_db_version.sql h1:My7SJRwO8D78QtoRY3syXoebTLYCTCCRMWFSTIidW1Q=
 00093_proposal_revision_backfill_compatibility.sql h1:h5BEJAHkZv61wXSkBYCLr258LfVyYWTGnnZ+zPsI5lA=
+00094_generated_authoring_revisions.sql h1:esSwCaCuRXJaibjPDtx6vCk0A7Pvdpd3DOjC5Kaat5o=
+00095_synthesis_notes.sql h1:8+XpYuP03P7qEw8jJr9fqi1YxCB+UCZkviBOfF6dM+I=
+00096_synthesis_execution.sql h1:mT6+MQLSxIBqjDa9ytZmC15ZUf0ilgjnKXPQydO+hx0=
+00097_synthesis_note_interview.sql h1:KCJfHjKgcn8orde/0ImZ5v2lC2czefO/Ks+yO4HiEMA=
+00098_workspace_analysis_dynamic.sql h1:8i5w9lDheFfuWirREqzLQW8NKvbxXZ1sEXcIpkD+KAA=
+00099_workspace_analysis_dynamic_tools.sql h1:FucRQvXtBsu+0QxiOtcAHONynVru2ScoOCGNmXzJN8Q=

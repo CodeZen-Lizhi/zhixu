@@ -150,6 +150,9 @@ type AuthorizeWorkspaceAnalysisModelCallCommand struct {
 
 // Validate 校验候选 Run/Call 逐项绑定实际 Provider 请求和冻结操作槽位。
 func (command AuthorizeWorkspaceAnalysisModelCallCommand) Validate() error {
+	if command.Identity.DefinitionVersion == 2 {
+		return validateWorkspaceAnalysisV2ModelAuthorization(command)
+	}
 	if err := command.Identity.Validate(); err != nil {
 		return err
 	}
@@ -181,6 +184,9 @@ type WorkspaceAnalysisModelAuthorizationResult struct {
 
 // ValidateFor 校验持久授权没有替换本次模型请求或首次创建的候选身份。
 func (result WorkspaceAnalysisModelAuthorizationResult) ValidateFor(command AuthorizeWorkspaceAnalysisModelCallCommand) error {
+	if command.Identity.DefinitionVersion == 2 && command.OperationKey.Kind == domain.WorkspaceAnalysisOperationDecision {
+		return validateWorkspaceAnalysisV2DecisionAuthorizationResult(result, command)
+	}
 	if err := command.Validate(); err != nil {
 		return err
 	}
@@ -470,6 +476,9 @@ type WorkspaceAnalysisModelOperationRepository interface {
 }
 
 func workspaceAnalysisSchemaVersion(value string) int64 {
+	if value == "2" {
+		return 2
+	}
 	version, err := strconv.ParseInt(value, 10, 64)
 	if err != nil {
 		return 0
@@ -501,7 +510,7 @@ func validateWorkspaceAnalysisModelTerminalBinding(
 		domain.ValidateModelRun(run) != nil || run.Status == domain.ModelRunRunning ||
 		domain.ValidateModelCall(call) != nil || call.Status == domain.ModelCallStarted ||
 		!workspaceAnalysisModelRunCallBinding(AuthorizeWorkspaceAnalysisModelCallCommand{Identity: identity, OperationKey: key, Run: run, Call: call}) ||
-		!workspaceAnalysisModelSlotBinding(key.Kind, run, call) || call.CompletedAt == nil || run.CompletedAt == nil ||
+		!workspaceAnalysisVersionedModelSlotBinding(identity.DefinitionVersion, key.Kind, run, call) || call.CompletedAt == nil || run.CompletedAt == nil ||
 		!run.CompletedAt.Equal(run.UpdatedAt) || run.CompletedAt.Before(*call.CompletedAt) {
 		return workspaceAnalysisModelError(errors.New("workspace analysis model terminal binding is invalid"))
 	}
@@ -533,6 +542,17 @@ func workspaceAnalysisModelSlotBinding(kind domain.WorkspaceAnalysisOperationKin
 	default:
 		return false
 	}
+}
+
+func workspaceAnalysisVersionedModelSlotBinding(version int64, kind domain.WorkspaceAnalysisOperationKind, run domain.ModelRun, call domain.ModelCall) bool {
+	if version == 2 {
+		if kind == domain.WorkspaceAnalysisOperationAnswerSynthesis {
+			return call.Phase == domain.ModelCallAnswer && call.MaxOutputTokens > 0 && call.MaxOutputTokens <= int(domain.WorkspaceAnalysisV2SynthesisMaxOutputTokens) &&
+				run.Schema == (domain.SchemaRef{ID: domain.WorkspaceAnalysisCandidateSchemaID, Version: "2"}) && run.ReducedSchema == run.Schema
+		}
+		return kind == domain.WorkspaceAnalysisOperationFaithfulnessReview && workspaceAnalysisModelSlotBinding(kind, run, call)
+	}
+	return version == 1 && workspaceAnalysisModelSlotBinding(kind, run, call)
 }
 
 func workspaceAnalysisModelCandidateIDs(command AuthorizeWorkspaceAnalysisModelCallCommand) bool {

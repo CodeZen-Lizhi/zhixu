@@ -6,7 +6,7 @@
     "primitiveConst": "replace const with an equivalent typed single-value enum",
     "uniqueItems": {
       "strategy": "remove from generator-only input so JSON arrays are not emitted as unserializable TypeScript Set values",
-      "expectedCount": 43
+      "expectedCount": 50
     },
     "openJsonObjects": [
       "#/components/schemas/StartWorkflowRequest/properties/graph",

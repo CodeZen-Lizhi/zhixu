@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"time"
 
 	agentdomain "github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
@@ -201,12 +202,23 @@ const (
 // AuthorizeWorkspaceAnalysisToolCallCommand 原子授权一个服务端选择的 Workspace Analysis Tool Operation。
 // OperationID、ReservationID 与 Call.ID 只供首次创建；逻辑键已存在时实现必须忽略这些候选 ID 并返回持久事实。
 type AuthorizeWorkspaceAnalysisToolCallCommand struct {
-	Identity      domain.TrustedExecutionIdentity
-	OperationKey  agentdomain.WorkspaceAnalysisOperationKey
-	OperationID   foundation.ID
-	ReservationID foundation.ID
-	Call          domain.ToolCall
-	Definition    domain.Definition
+	Identity         domain.TrustedExecutionIdentity
+	OperationKey     agentdomain.WorkspaceAnalysisOperationKey
+	OperationID      foundation.ID
+	ReservationID    foundation.ID
+	Call             domain.ToolCall
+	Definition       domain.Definition
+	CanonicalRequest json.RawMessage `json:"-"`
+}
+
+func (AuthorizeWorkspaceAnalysisToolCallCommand) String() string {
+	return "AuthorizeWorkspaceAnalysisToolCallCommand{[REDACTED]}"
+}
+
+func (command AuthorizeWorkspaceAnalysisToolCallCommand) GoString() string { return command.String() }
+
+func (command AuthorizeWorkspaceAnalysisToolCallCommand) LogValue() slog.Value {
+	return slog.StringValue(command.String())
 }
 
 // WorkspaceAnalysisToolAuthorizationResult 返回实际持久 Call 及其 Operation/Reservation 身份。

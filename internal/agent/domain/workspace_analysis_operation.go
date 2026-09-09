@@ -371,6 +371,9 @@ func WorkspaceAnalysisOperationReplay(operation WorkspaceAnalysisOperation, cano
 }
 
 func workspaceAnalysisOperationContract(nodeKey WorkspaceAnalysisOperationNodeKey, kind WorkspaceAnalysisOperationKind, ordinal int) (WorkspaceAnalysisOperationContract, bool) {
+	if nodeKey == WorkspaceAnalysisOperationNodeDecideNext {
+		return workspaceAnalysisV2LoopOperationContract(nodeKey, kind, ordinal)
+	}
 	for _, contract := range workspaceAnalysisV1OperationContracts {
 		if contract.NodeKey == nodeKey && contract.Kind == kind && contract.Ordinal == ordinal {
 			return contract, true

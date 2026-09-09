@@ -209,9 +209,10 @@ func (repository *GORMRepository) List(ctx context.Context, query interviewapp.S
 		   AND session.workspace_id=shell.workspace_id
 		 WHERE shell.workspace_id=?::uuid
 		   AND shell.session_type='INTERVIEW'
+		   AND (NOT ?::boolean OR jsonb_extract_path(shell.config,'scope','note_revision') IS NULL)
 		   AND (?::timestamptz IS NULL OR (shell.started_at,session.session_id)<(?::timestamptz,?::uuid))
 		 ORDER BY shell.started_at DESC,session.session_id DESC
-		 LIMIT ?`, string(query.WorkspaceID), cursorTime, cursorTime, cursorID, query.Limit+1)
+		 LIMIT ?`, string(query.WorkspaceID), query.ClaimOnly, cursorTime, cursorTime, cursorID, query.Limit+1)
 	if err != nil {
 		return interviewapp.SessionListPage{}, gormInterviewClassify(ctx, err, domain.ErrorCodeDependencyUnavailable)
 	}
@@ -348,7 +349,7 @@ func gormInterviewScanSession(row interface{ Scan(...any) error }) (domain.Sessi
 func gormInterviewLoadQuestions(ctx context.Context, database *gorm.DB, workspaceID, sessionID foundation.ID) ([]domain.Question, error) {
 	rows, err := gormInterviewRawRows(ctx, database, `
 		SELECT id::text,workspace_id::text,session_id::text,question_no,follow_up_no,parent_question_id::text,
-		       claim_id::text,topic_id::text,prompt,answer_points,evidence,status,fingerprint,created_at,answered_at
+		       COALESCE(claim_id::text,''),topic_id::text,prompt,answer_points,evidence,status,fingerprint,created_at,answered_at,source_kind,note_source,follow_up_plan
 		  FROM learning.interview_question
 		 WHERE workspace_id=?::uuid AND session_id=?::uuid
 		 ORDER BY question_no,follow_up_no,id`, string(workspaceID), string(sessionID))
@@ -362,9 +363,24 @@ func gormInterviewLoadQuestions(ctx context.Context, database *gorm.DB, workspac
 		var parentID, topicID *string
 		var points, evidence interviewJSONB
 		var status string
+		var sourceKind string
+		var noteSource, followUpPlan []byte
 		if err := rows.Scan(&question.ID, &question.WorkspaceID, &question.SessionID, &question.QuestionNo, &question.FollowUpNo, &parentID,
-			&question.ClaimID, &topicID, &question.Prompt, &points, &evidence, &status, &question.Fingerprint, &question.CreatedAt, &question.AnsweredAt); err != nil {
+			&question.ClaimID, &topicID, &question.Prompt, &points, &evidence, &status, &question.Fingerprint, &question.CreatedAt, &question.AnsweredAt, &sourceKind, &noteSource, &followUpPlan); err != nil {
 			return nil, gormInterviewClassify(ctx, err, domain.ErrorCodePersistenceInvalid)
+		}
+		if sourceKind != string(domain.QuestionSourceClaim) {
+			question.SourceKind = domain.QuestionSourceKind(sourceKind)
+		}
+		if len(noteSource) > 0 {
+			if err := decodeJSON(noteSource, &question.NoteSource); err != nil {
+				return nil, persistenceInvalid("decode interview note source", err)
+			}
+		}
+		if len(followUpPlan) > 0 {
+			if err := decodeJSON(followUpPlan, &question.FollowUpPlan); err != nil {
+				return nil, persistenceInvalid("decode interview follow-up plan", err)
+			}
 		}
 		if parentID != nil {
 			value := foundation.ID(*parentID)
@@ -541,8 +557,8 @@ func gormInterviewScanPath(row interface{ Scan(...any) error }) (domain.Learning
 
 func gormInterviewLoadPathSteps(ctx context.Context, database *gorm.DB, workspaceID, pathID foundation.ID) ([]domain.PathStep, error) {
 	rows, err := gormInterviewRawRows(ctx, database, `
-		SELECT id::text,workspace_id::text,path_id::text,step_no,claim_id::text,topic_id::text,source_version_id::text,
-		       source_span_id::text,evidence_hash,title,rationale,status,version,created_at,updated_at
+		SELECT id::text,workspace_id::text,path_id::text,step_no,COALESCE(claim_id::text,''),topic_id::text,COALESCE(source_version_id::text,''),
+		       COALESCE(source_span_id::text,''),COALESCE(evidence_hash,''),title,rationale,status,version,created_at,updated_at,source_kind,note_source
 		  FROM learning.interview_learning_path_step
 		 WHERE workspace_id=?::uuid AND path_id=?::uuid
 		 ORDER BY step_no,id`, string(workspaceID), string(pathID))
@@ -556,9 +572,19 @@ func gormInterviewLoadPathSteps(ctx context.Context, database *gorm.DB, workspac
 		var step domain.PathStep
 		var topicID *string
 		var status string
+		var sourceKind string
+		var noteSource []byte
 		if err := rows.Scan(&step.ID, &step.WorkspaceID, &step.PathID, &step.StepNo, &step.ClaimID, &topicID, &step.SourceVersionID, &step.SourceSpanID,
-			&step.EvidenceHash, &step.Title, &step.Rationale, &status, &step.Version, &step.CreatedAt, &step.UpdatedAt); err != nil {
+			&step.EvidenceHash, &step.Title, &step.Rationale, &status, &step.Version, &step.CreatedAt, &step.UpdatedAt, &sourceKind, &noteSource); err != nil {
 			return nil, gormInterviewClassify(ctx, err, domain.ErrorCodePersistenceInvalid)
+		}
+		if sourceKind != string(domain.QuestionSourceClaim) {
+			step.SourceKind = domain.QuestionSourceKind(sourceKind)
+		}
+		if len(noteSource) > 0 {
+			if err := decodeJSON(noteSource, &step.NoteSource); err != nil {
+				return nil, persistenceInvalid("decode interview path note source", err)
+			}
 		}
 		if topicID != nil {
 			value := foundation.ID(*topicID)

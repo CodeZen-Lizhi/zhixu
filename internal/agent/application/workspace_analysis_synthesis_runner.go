@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -102,7 +103,7 @@ func (runner *WorkspaceAnalysisSynthesisRunner) Run(
 		return WorkspaceAnalysisSynthesisResult{}, err
 	}
 
-	schemaRef := domain.SchemaRef{ID: domain.WorkspaceAnalysisCandidateSchemaID, Version: "1"}
+	schemaRef := domain.SchemaRef{ID: domain.WorkspaceAnalysisCandidateSchemaID, Version: strconv.FormatInt(request.Identity.DefinitionVersion, 10)}
 	snapshot, err := runner.catalog.Snapshot(request.PromptRef, schemaRef, schemaRef, request.ProfileRef)
 	if err != nil {
 		return WorkspaceAnalysisSynthesisResult{}, err
@@ -253,7 +254,7 @@ func (runner *WorkspaceAnalysisSynthesisRunner) Run(
 			ctx, authorizationCommand, authorized, response, err,
 		)
 	}
-	if !workspaceAnalysisCandidateRefsAllowed(providerCandidate.Payload.CitationRefs, request.AllowedEvidenceRefs) ||
+	if providerCandidate.SchemaVersion != schemaRef.Version || !workspaceAnalysisCandidateRefsAllowedForVersion(providerCandidate.Payload.CitationRefs, request.AllowedEvidenceRefs, request.Identity.DefinitionVersion) ||
 		workspaceAnalysisSynthesisDocumentLeaksIdentity(response.Content, request, generated, authorized) {
 		abortErr := abortWorkspaceAnalysisSynthesisDraft(ctx, draft)
 		return WorkspaceAnalysisSynthesisResult{}, runner.finalizeWorkspaceAnalysisSynthesisFailure(
@@ -339,7 +340,7 @@ func validateWorkspaceAnalysisSynthesisRequest(request WorkspaceAnalysisSynthesi
 		request.ProfileRef.Validate() != nil || request.PromptRef.Validate() != nil || request.Retrieval.Validate() != nil ||
 		(request.ModelSettingsRevision != nil && *request.ModelSettingsRevision < 0) || request.AttemptNo < 1 ||
 		request.Identity.LeaseFence != int64(request.AttemptNo) || len(request.Input) == 0 ||
-		len(request.Input) > MaxStructuredInputBytes || !workspaceAnalysisAllowedEvidenceRefs(request.AllowedEvidenceRefs) {
+		len(request.Input) > MaxStructuredInputBytes || !workspaceAnalysisAllowedEvidenceRefsForVersion(request.AllowedEvidenceRefs, request.Identity.DefinitionVersion) {
 		return workspaceAnalysisModelError(errors.New("workspace analysis synthesis request is invalid"))
 	}
 	ids := []foundation.ID{
@@ -447,7 +448,7 @@ func (runner *WorkspaceAnalysisSynthesisRunner) finalizeWorkspaceAnalysisSynthes
 		AnalysisRunID: authorizationCommand.OperationKey.AnalysisRunID, AnswerID: answerID,
 		SynthesisOperationID: authorized.OperationID, NodeAttemptID: authorized.Run.NodeAttemptID,
 		SynthesisModelRunID: authorized.Run.ID, SchemaID: authorized.Run.Schema.ID,
-		SchemaVersion: 1, Document: append(json.RawMessage(nil), document...),
+		SchemaVersion: authorizationCommand.Identity.DefinitionVersion, Document: append(json.RawMessage(nil), document...),
 		DocumentHash: call.ResponseHash, DocumentBytes: int64(len(document)), CreatedAt: completedAt,
 	}
 	command := FinalizeWorkspaceAnalysisModelCandidateCommand{
@@ -568,7 +569,7 @@ func (runner *WorkspaceAnalysisSynthesisRunner) loadWorkspaceAnalysisSynthesisRe
 	limits := domain.DefaultDecodeLimits()
 	limits.MaxDocumentBytes = int(domain.MaxWorkspaceAnalysisCandidateBytes)
 	result, err := domain.DecodeWorkspaceAnalysisCandidate(candidate.Document, limits)
-	if err != nil || !workspaceAnalysisCandidateRefsAllowed(result.Payload.CitationRefs, request.AllowedEvidenceRefs) {
+	if err != nil || !workspaceAnalysisCandidateRefsAllowedForVersion(result.Payload.CitationRefs, request.AllowedEvidenceRefs, request.Identity.DefinitionVersion) {
 		return WorkspaceAnalysisSynthesisResult{}, workspaceAnalysisModelAuthorizationError(
 			errOrWorkspaceAnalysisPlan(err, "workspace analysis synthesis replay references drifted"),
 		)
@@ -586,6 +587,7 @@ func validateLoadedWorkspaceAnalysisSynthesis(
 	candidate domain.WorkspaceAnalysisCandidate,
 ) error {
 	if domain.ValidateWorkspaceAnalysisCandidate(candidate) != nil || candidate.WorkspaceID != request.Identity.WorkspaceID ||
+		candidate.SchemaVersion != request.Identity.DefinitionVersion || candidate.SchemaID != authorized.Run.Schema.ID ||
 		candidate.AnalysisRunID != request.AnalysisRunID || candidate.AnswerID != request.AnswerID ||
 		candidate.SynthesisOperationID != authorized.OperationID || candidate.NodeAttemptID != authorized.Run.NodeAttemptID ||
 		candidate.SynthesisModelRunID != authorized.Run.ID || authorized.Run.Status != domain.ModelRunSucceeded ||

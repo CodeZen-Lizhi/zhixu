@@ -77,6 +77,11 @@ func (repository *GORMWorkspaceAnalysisRepository) FinalizeCallWithReceipt(ctx c
 		if err != nil {
 			return err
 		}
+		if receipt.Tool == (domain.ToolRef{Name: "SearchKnowledge", Version: 3}) {
+			if err := repository.appendDynamicSearchEvidence(callbackCtx, scope, identity, settled.Operation, receipt); err != nil {
+				return err
+			}
+		}
 		if err := repository.appendCompleted(callbackCtx, scope, settled.Operation, completed, "succeeded", false); err != nil {
 			return err
 		}

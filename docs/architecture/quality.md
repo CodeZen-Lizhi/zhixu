@@ -2,6 +2,8 @@
 
 本章统一安全、工具权限、可观测、审计、性能、测试和 AI 评测。它定义长期门禁，不记录某次里程碑的通过日期；具体运行命令与恢复操作见 [运行手册](../operations.md)，任务证据见 `.trellis/tasks/`。
 
+开发收尾采用精简验收：只运行实际改动必要的测试和检查，复用有效的既有证据。完整容量/灾备/跨平台矩阵、长期观察、覆盖率趋势与全仓复评不阻塞开发归档；未执行不记 PASS，真实缺陷不以豁免代替修复。M11 的最终 E2E、AI Eval 与发布包验收在整体开发完成后单独处理。以下安全、状态和数据不变量继续有效，验证方法按改动风险选用。
+
 ## 1. 安全模型
 
 ### 1.1 资产与威胁
@@ -38,7 +40,7 @@
 - Managed model 主密钥只存在受保护 named volume；API/Worker/modelctl 只读，Migrate/Proxy/Web/Workspace 不可访问。
 - 模型 API Key 只存在于请求瞬时明文、短生命周期 buffer 和数据库加密密文；AAD 绑定 revision、用途、schema、Provider 与规范 Endpoint。
 - Secret、密文、长度、完整 Endpoint、Cookie、Authorization、DSN 和绝对 Secret path 不得进入响应、Problem、Audit、日志、Metric、Trace、URL、Browser Storage、镜像历史或配置摘要。
-- UI 只显示掩码；Secret 不进入 DB 导出或发送给模型；disabled capability 对 gated 环境变量零查询。
+- UI 只显示掩码；产品导出不包含 Secret，也不发送给模型；disabled capability 对 gated 环境变量零查询。操作者整库灾备包含数据库中的加密配置，按敏感数据保管，解密主密钥另行保护，见运行手册。
 
 ### 1.4 文件与 Git
 
@@ -126,11 +128,11 @@
 - 外部 Prometheus/Grafana/Collector 可选；本项目 Metrics 不保存跨重启历史。
 - Eino API/Worker 的 OTLP 证据必须与普通服务指标分开标识。六项 live gate 与 host-relay 外部 Chat/本地 Ollama
   Embedding 的浏览器终态已作为发布证据通过；容器直连外部 HTTPS 网络路径及真实连续 7 天、至少 100 个合格终态的
-  稳定观察尚未完成，不能标记为 PASS。观察操作见 [Eino 稳定发布观察 Runbook](runbooks/eino-stable-observation.md)。
+  稳定观察未执行且不再作为开发交付门禁，不能标记为 PASS。可选运营观察见 [Eino 稳定发布观察 Runbook](runbooks/eino-stable-observation.md)。
 
 ### 3.5 Append-only Audit
 
-必须审计 Auth/Session/API Token、Approval、Tool Authorization、File/Git、Settings/Secret、Memory、Rollback 和 Security Block。
+当前交付保留现有 append-only Audit 和各 owner 的变更/执行事实，并提供操作者有界查询。跨 Auth/Session/API Token、Approval、Tool Authorization、File/Git、Settings/Secret、Memory、Rollback 和 Security Block 的统一全覆盖是扩展目标，不宣称当前通用 Audit 已覆盖每个生产者；独立 Tool/Binding/Workflow 记录不能冒充通用 Audit。
 
 - 事件使用版本化 canonical JSON、递归脱敏、稳定 Actor/Outcome/error code、业务生成的 ID/occurred_at/idempotency key。
 - Repository 只追加，不提供 Update/Delete。相同 key+binding replay 返回既有事件；同 key 不同 binding 返回冲突。
@@ -205,7 +207,7 @@ Unit / domain state machine
 
 最高层验收围绕知识变更闭环、文章优化、RAG、Artifact、Graph/Health、Collection/Review/Interview（含 Export）组织；外围模块必须直接支撑这些 seam。
 
-### 5.2 必测类别
+### 5.2 按改动风险选择的验证类别
 
 - Domain：状态转移、Invariant、Idempotency、Version Conflict、Applicability、Relation 端点兼容和 Error classification。
 - Adapter Contract：timeout/cancel、retryability、batch、resource cleanup、disabled/unavailable/degraded 和 Fake parity。
@@ -216,6 +218,8 @@ Unit / domain state machine
 - Security：Path Traversal、SSRF redirect/rebinding、Prompt Injection corpus、XSS、CSRF、SQL injection、unauthorized write、Secret leak 和 Audit redaction。
 
 E2E 使用固定 Fixture Workspace 与 Fake Model 保证确定性；真实模型质量在独立 Eval 中运行。两者不能互相替代。
+
+上述类别是选取相关验证的依据，不要求每个开发任务执行全表。数据库升级/权限/文件写入等真实行为修改保留必要回归；只有文档、范围和状态变化时，以事实与链接核对为准。
 
 ## 6. AI 评测
 
@@ -249,6 +253,8 @@ flowchart LR
 生产反馈只有脱敏、人工标注后才能进入 Gold Set；测试数据不得含真实 Secret。
 
 ## 7. 发布 Definition of Done
+
+以下用于最终发布评估，不是本轮开发收尾清单。M11 单独处理，长期观察与大型演练按实际需求选择；没有执行证据的项目保留未验证结论。
 
 - 主路径、异常、恢复和取消路径均有证据。
 - Unit、Contract、受影响 Integration、Migration、Security negative、Fault Injection 和浏览器闭环通过。

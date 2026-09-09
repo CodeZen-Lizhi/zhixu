@@ -133,8 +133,8 @@ type workspaceAnalysisSuccessProofModel struct {
 	FinalizationNodeAttemptID string    `gorm:"column:finalization_node_attempt_id;type:uuid"`
 	CandidateID               string    `gorm:"column:candidate_id;type:uuid"`
 	CandidateHash             string    `gorm:"column:candidate_hash"`
-	GitReceiptID              string    `gorm:"column:git_receipt_id;type:uuid"`
-	GitReceiptHash            string    `gorm:"column:git_receipt_hash"`
+	GitReceiptID              *string   `gorm:"column:git_receipt_id;type:uuid"`
+	GitReceiptHash            *string   `gorm:"column:git_receipt_hash"`
 	ValidationReceiptID       string    `gorm:"column:validation_receipt_id;type:uuid"`
 	ValidationReceiptHash     string    `gorm:"column:validation_receipt_hash"`
 	ReviewModelResultID       string    `gorm:"column:review_model_result_id;type:uuid"`

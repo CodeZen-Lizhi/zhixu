@@ -187,6 +187,9 @@ type CanonicalWorkspaceAnalysisTimeline struct {
 
 // Validate 校验时间线身份、状态、顺序、安全摘要和预算边界。
 func (timeline WorkspaceAnalysisTimeline) Validate() error {
+	if timeline.SchemaVersion == WorkspaceAnalysisTimelineSchemaVersionV2 {
+		return timeline.validateV2()
+	}
 	if timeline.SchemaID != WorkspaceAnalysisTimelineSchemaID || timeline.SchemaVersion != WorkspaceAnalysisTimelineSchemaVersionV1 ||
 		!validWorkspaceAnalysisID(timeline.WorkspaceID) || !validWorkspaceAnalysisID(timeline.AnswerID) ||
 		!validWorkspaceAnalysisID(timeline.AnalysisRunID) || timeline.WorkspaceID == timeline.AnswerID ||
@@ -511,18 +514,21 @@ func decodeWorkspaceAnalysisTimeline(raw json.RawMessage) (WorkspaceAnalysisTime
 		persisted.LatestServerEventSequence == nil {
 		return WorkspaceAnalysisTimeline{}, workspaceAnalysisTimelineInvalid("workspace analysis timeline document is invalid", err)
 	}
+	if *persisted.SchemaVersion != WorkspaceAnalysisTimelineSchemaVersionV1 && *persisted.SchemaVersion != WorkspaceAnalysisTimelineSchemaVersionV2 {
+		return WorkspaceAnalysisTimeline{}, workspaceAnalysisTimelineInvalid("workspace analysis timeline version is unsupported", nil)
+	}
 	reason, err := decodeWorkspaceAnalysisNullableString(persisted.TerminationReason)
 	if err != nil {
 		return WorkspaceAnalysisTimeline{}, workspaceAnalysisTimelineInvalid("workspace analysis timeline termination reason is invalid", err)
 	}
 	items := make([]WorkspaceAnalysisTimelineItem, len(*persisted.Items))
 	for index, itemRaw := range *persisted.Items {
-		items[index], err = decodeWorkspaceAnalysisTimelineItem(itemRaw)
+		items[index], err = decodeWorkspaceAnalysisTimelineItem(itemRaw, *persisted.SchemaVersion)
 		if err != nil {
 			return WorkspaceAnalysisTimeline{}, err
 		}
 	}
-	budget, err := decodeWorkspaceAnalysisTimelineBudget(persisted.Budget)
+	budget, err := decodeWorkspaceAnalysisTimelineBudget(persisted.Budget, *persisted.SchemaVersion)
 	if err != nil {
 		return WorkspaceAnalysisTimeline{}, err
 	}
@@ -538,7 +544,7 @@ func decodeWorkspaceAnalysisTimeline(raw json.RawMessage) (WorkspaceAnalysisTime
 	return timeline, nil
 }
 
-func decodeWorkspaceAnalysisTimelineItem(raw json.RawMessage) (WorkspaceAnalysisTimelineItem, error) {
+func decodeWorkspaceAnalysisTimelineItem(raw json.RawMessage, schemaVersion string) (WorkspaceAnalysisTimelineItem, error) {
 	persisted, err := foundationstrictjson.DecodeObject[workspaceAnalysisTimelineItemPersistence](raw, workspaceAnalysisTimelineDecodeLimits(), nil)
 	if err != nil || persisted.Sequence == nil || persisted.Kind == nil || persisted.Phase == nil || persisted.Status == nil ||
 		len(persisted.ToolRef) == 0 || len(persisted.DurationMS) == 0 || len(persisted.ErrorCode) == 0 || len(persisted.Summary) == 0 {
@@ -556,7 +562,7 @@ func decodeWorkspaceAnalysisTimelineItem(raw json.RawMessage) (WorkspaceAnalysis
 	if err != nil {
 		return WorkspaceAnalysisTimelineItem{}, workspaceAnalysisTimelineInvalid("workspace analysis timeline error code is invalid", err)
 	}
-	summary, err := decodeWorkspaceAnalysisTimelineSummary(persisted.Summary)
+	summary, err := decodeWorkspaceAnalysisTimelineSummary(persisted.Summary, schemaVersion)
 	if err != nil {
 		return WorkspaceAnalysisTimelineItem{}, err
 	}
@@ -564,7 +570,12 @@ func decodeWorkspaceAnalysisTimelineItem(raw json.RawMessage) (WorkspaceAnalysis
 		Sequence: *persisted.Sequence, Kind: *persisted.Kind, Phase: *persisted.Phase, Status: *persisted.Status,
 		ToolRef: toolRef, DurationMS: duration, ErrorCode: errorCode, Summary: summary,
 	}
-	if err := item.Validate(); err != nil {
+	if schemaVersion == WorkspaceAnalysisTimelineSchemaVersionV2 {
+		err = item.ValidateV2()
+	} else {
+		err = item.Validate()
+	}
+	if err != nil {
 		return WorkspaceAnalysisTimelineItem{}, err
 	}
 	return item, nil
@@ -581,7 +592,7 @@ func decodeWorkspaceAnalysisTimelineToolRef(raw json.RawMessage) (*WorkspaceAnal
 	return &WorkspaceAnalysisTimelineToolRef{Name: *persisted.Name, Version: *persisted.Version}, nil
 }
 
-func decodeWorkspaceAnalysisTimelineBudget(raw json.RawMessage) (WorkspaceAnalysisTimelineBudget, error) {
+func decodeWorkspaceAnalysisTimelineBudget(raw json.RawMessage, schemaVersion string) (WorkspaceAnalysisTimelineBudget, error) {
 	persisted, err := foundationstrictjson.DecodeObject[workspaceAnalysisTimelineBudgetPersistence](raw, workspaceAnalysisTimelineDecodeLimits(), nil)
 	if err != nil || len(persisted.ModelCalls) == 0 || len(persisted.ToolCalls) == 0 || len(persisted.SourceReads) == 0 || len(persisted.InputTokens) == 0 ||
 		len(persisted.OutputTokens) == 0 || len(persisted.EstimatedCostMicrounits) == 0 {
@@ -619,7 +630,12 @@ func decodeWorkspaceAnalysisTimelineBudget(raw json.RawMessage) (WorkspaceAnalys
 		ModelCalls: modelCalls, ToolCalls: toolCalls, SourceReads: sourceReads, InputTokens: inputTokens, OutputTokens: outputTokens,
 		EstimatedCostMicrounits: cost,
 	}
-	if err := budget.Validate(); err != nil {
+	if schemaVersion == WorkspaceAnalysisTimelineSchemaVersionV2 {
+		err = budget.ValidateV2()
+	} else {
+		err = budget.Validate()
+	}
+	if err != nil {
 		return WorkspaceAnalysisTimelineBudget{}, err
 	}
 	return budget, nil
@@ -633,7 +649,7 @@ func decodeWorkspaceAnalysisTimelineCounter(raw json.RawMessage) (WorkspaceAnaly
 	return WorkspaceAnalysisTimelineCounter{Used: *persisted.Used, Max: *persisted.Max}, nil
 }
 
-func decodeWorkspaceAnalysisTimelineSummary(raw json.RawMessage) (*WorkspaceAnalysisTimelineSummary, error) {
+func decodeWorkspaceAnalysisTimelineSummary(raw json.RawMessage, schemaVersion string) (*WorkspaceAnalysisTimelineSummary, error) {
 	if isJSONNull(raw) {
 		return nil, nil
 	}
@@ -659,7 +675,12 @@ func decodeWorkspaceAnalysisTimelineSummary(raw json.RawMessage) (*WorkspaceAnal
 	if err != nil || hasUnexpectedWorkspaceAnalysisSummaryMember(persisted, summary.Kind) {
 		return nil, workspaceAnalysisTimelineInvalid("workspace analysis timeline summary member is invalid", err)
 	}
-	if err := summary.Validate(); err != nil {
+	if schemaVersion == WorkspaceAnalysisTimelineSchemaVersionV2 {
+		err = summary.ValidateV2()
+	} else {
+		err = summary.Validate()
+	}
+	if err != nil {
 		return nil, err
 	}
 	return &summary, nil

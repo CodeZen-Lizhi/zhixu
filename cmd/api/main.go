@@ -16,6 +16,7 @@ import (
 	agentworkflow "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/workflow"
 	agentapplication "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/app"
+	artifactauthoring "github.com/CodeZen-Lizhi/zhixu/internal/artifact/adapter/authoring"
 	artifactchangecontrol "github.com/CodeZen-Lizhi/zhixu/internal/artifact/adapter/changecontrol"
 	artifactlearningpath "github.com/CodeZen-Lizhi/zhixu/internal/artifact/adapter/learningpath"
 	artifactlocalfs "github.com/CodeZen-Lizhi/zhixu/internal/artifact/adapter/localfs"
@@ -407,6 +408,8 @@ func runAPI() (exitCode int) {
 	authoringHandler := authoringhttp.NewHandler(nil, cfg.GraphQueryTimeout)
 	captureHandler := capturehttp.NewHandler(nil, 0)
 	organizingHandler := organizinghttp.NewHandler(nil, nil, nil, cfg.GraphQueryTimeout)
+	synthesisHandler := organizinghttp.NewSynthesisHandler(nil, nil, cfg.GraphQueryTimeout)
+	synthesisInterviewHandler := interviewhttp.NewNotePreparationHandler(nil)
 	documentHistoryHandler := documenthistoryhttp.NewHandler(nil, cfg.GraphQueryTimeout)
 	gitSyncHandler := gitsynchttp.NewHandler(nil, cfg.GraphQueryTimeout)
 	var ragInitErr error
@@ -477,6 +480,7 @@ func runAPI() (exitCode int) {
 		var workflowService *workflowapplication.Service
 		var workflowControlService *workflowapplication.Service
 		var workflowRuntime *workflowpostgres.GORMRuntimeRepository
+		var synthesisRuntime *apiSynthesisRuntimeComponents
 		var workspaceAnalysisRuntimeHooks *apiWorkspaceAnalysisRuntimeHooks
 		if changeControlRepositoryErr != nil {
 			logger.Error("change control repository is unavailable", "error_code", "CHANGE_CONTROL_DATABASE_UNAVAILABLE")
@@ -509,11 +513,16 @@ func runAPI() (exitCode int) {
 			} else if repositoryErr != nil {
 				workflowServiceErr = repositoryErr
 			} else {
-				workflowService, runtime, artifactGeneration, workflowServiceErr = newAPIArtifactWorkflowComponents(
-					database, cfg, workspaceRepository, fileScanner, cancellationGuard, artifactIDs, artifactClock,
-					workspaceAnalysisRuntimeHooks,
-					modelEnqueueFences...,
-				)
+				factory, factoryErr := newAPIRuntimeRepositoryFactory(database, cfg, modelEnqueueFences...)
+				if factoryErr != nil {
+					workflowServiceErr = factoryErr
+				} else {
+					synthesisRuntime = factory.synthesis
+					workflowService, runtime, artifactGeneration, workflowServiceErr = newAPIArtifactWorkflowComponentsWithFactory(
+						factory, workspaceRepository, fileScanner, cancellationGuard, artifactIDs, artifactClock,
+						workspaceAnalysisRuntimeHooks,
+					)
+				}
 			}
 			if workflowServiceErr != nil {
 				logger.Error("workflow service is unavailable", "error_code", "WORKFLOW_SERVICE_UNAVAILABLE")
@@ -589,10 +598,10 @@ func runAPI() (exitCode int) {
 				retrievalHandler = configuredRetrievalHandler
 			}
 
-			gormDB, ingestionRepositoryErr := database.GORM()
+			sourceReadyOutbox, ingestionRepositoryErr := workflowpostgres.NewGORMSourceReadyOutbox(database)
 			var ingestionRepository *ingestionpostgres.GORMRepository
 			if ingestionRepositoryErr == nil {
-				ingestionRepository, ingestionRepositoryErr = ingestionpostgres.NewGORMRepository(gormDB)
+				ingestionRepository, ingestionRepositoryErr = ingestionpostgres.NewGORMRepositoryWithSourceReady(database, sourceReadyOutbox)
 			}
 			sourceReader, sourceReaderErr := ingestionworkspace.NewReader(workspaceRepository, fileScanner)
 			parserRegistry := platformparser.NewRegistry(platformparser.Options{MaxBytes: filesystem.DefaultMaxBytes})
@@ -667,6 +676,16 @@ func runAPI() (exitCode int) {
 			if authoringHandlerErr != nil {
 				logger.Error("authoring service is unavailable", "error_code", "AUTHORING_DEPENDENCY_UNAVAILABLE")
 			} else {
+				configuredSynthesis, synthesisErr := newAPISynthesisComponents(synthesisRuntime, apiSynthesisDependencies{
+					Workspaces: workspaceRepository, Files: fileScanner, Publications: configuredAuthoringService,
+					Retirements: changeControlRepository, Runtime: workflowRuntime, Timeout: cfg.GraphQueryTimeout,
+				})
+				if synthesisErr != nil {
+					logger.Error("synthesis note services are unavailable", "error_code", "SYNTHESIS_COMPOSITION_UNAVAILABLE")
+				} else {
+					synthesisHandler = configuredSynthesis.handler
+					synthesisInterviewHandler = configuredSynthesis.interviewHandler
+				}
 				configuredOrganizingHandler, organizingHandlerErr := newOrganizingHandler(
 					context.Background(), database, fixedSearchEmbedder, workspaceRepository,
 					fileScanner, configuredAuthoringService, workflowService, cfg.GraphQueryTimeout,
@@ -710,7 +729,7 @@ func runAPI() (exitCode int) {
 		dispatchReady := questionDispatchEnabled(true, ragInitErr)
 		var workspaceAnalysisStarters []agentapplication.ScopedWorkspaceAnalysisRunStarter
 		if cfg.WorkspaceAnalysisAPIEnabled && dispatchReady && workspaceAnalysisRuntimeHooks != nil {
-			starter, starterErr := newAPIWorkspaceAnalysisRunStarter(database, cfg, configuredModels)
+			starter, starterErr := newAPIWorkspaceAnalysisRunStarter(database, cfg, configuredModels, modelRuntimeHost)
 			if starterErr != nil {
 				logger.Warn("workspace analysis API capability is unavailable", "error_code", "WORKSPACE_ANALYSIS_CAPABILITY_UNAVAILABLE")
 			} else {
@@ -736,46 +755,48 @@ func runAPI() (exitCode int) {
 	}
 
 	deps := app.Dependencies{
-		Version:           cfg.Version,
-		Database:          database,
-		DatabaseConfigErr: firstError(loadErr, databaseConfigErr),
-		DatabaseInitErr:   databaseErr,
-		PingTimeout:       cfg.DatabasePingTimeout,
-		Static:            static,
-		Workspace:         workspaceHandler,
-		Collection:        collectionHandler,
-		Health:            healthHandler,
-		Workflow:          workflowHandler,
-		ChangeControl:     changeControlHandler,
-		Ingestion:         ingestionHandler,
-		Retrieval:         retrievalHandler,
-		Conversation:      conversationHandler,
-		DraftStream:       draftStreamHandler,
-		Events:            eventsHandler,
-		Export:            exportHandler,
-		Review:            reviewHandler,
-		LearningPath:      learningPathHandler,
-		Memory:            memoryHandler,
-		Interview:         interviewHandler,
-		Knowledge:         knowledgeHandler,
-		Artifact:          artifactHandler,
-		Authoring:         authoringHandler,
-		Capture:           captureHandler,
-		Organizing:        organizingHandler,
-		DocumentHistory:   documentHistoryHandler,
-		GitSync:           gitSyncHandler,
-		ModelSettings:     modelSettingsHandler,
-		Auth:              authHandler,
-		AuthRequired:      authRequired,
-		AuthInitErr:       authInitErr,
-		AuthCheck:         authCheck,
-		Graph:             graphHandler,
-		Candidate:         candidateHandler,
-		RAGEnabled:        true,
-		RAGInitErr:        ragInitErr,
-		Logger:            logger,
-		Tracer:            telemetry.Tracer(),
-		MetricsHandler:    telemetry.MetricsHandler(),
+		Version:            cfg.Version,
+		Database:           database,
+		DatabaseConfigErr:  firstError(loadErr, databaseConfigErr),
+		DatabaseInitErr:    databaseErr,
+		PingTimeout:        cfg.DatabasePingTimeout,
+		Static:             static,
+		Workspace:          workspaceHandler,
+		Collection:         collectionHandler,
+		Health:             healthHandler,
+		Workflow:           workflowHandler,
+		ChangeControl:      changeControlHandler,
+		Ingestion:          ingestionHandler,
+		Retrieval:          retrievalHandler,
+		Conversation:       conversationHandler,
+		DraftStream:        draftStreamHandler,
+		Events:             eventsHandler,
+		Export:             exportHandler,
+		Review:             reviewHandler,
+		LearningPath:       learningPathHandler,
+		Memory:             memoryHandler,
+		Interview:          interviewHandler,
+		Knowledge:          knowledgeHandler,
+		Artifact:           artifactHandler,
+		Authoring:          authoringHandler,
+		Capture:            captureHandler,
+		Organizing:         organizingHandler,
+		Synthesis:          synthesisHandler,
+		SynthesisInterview: synthesisInterviewHandler,
+		DocumentHistory:    documentHistoryHandler,
+		GitSync:            gitSyncHandler,
+		ModelSettings:      modelSettingsHandler,
+		Auth:               authHandler,
+		AuthRequired:       authRequired,
+		AuthInitErr:        authInitErr,
+		AuthCheck:          authCheck,
+		Graph:              graphHandler,
+		Candidate:          candidateHandler,
+		RAGEnabled:         true,
+		RAGInitErr:         ragInitErr,
+		Logger:             logger,
+		Tracer:             telemetry.Tracer(),
+		MetricsHandler:     telemetry.MetricsHandler(),
 	}
 	server := newAPIServer(cfg.HTTPAddr, workspaceGate.Wrap(producerGate.Wrap(app.NewRouter(deps))))
 	stop, stopCancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -911,7 +932,7 @@ func newAuthoringService(
 	proposals authoringchangecontrol.ProposalService,
 	targets authoringchangecontrol.TargetReader,
 ) (*authoringapplication.Service, error) {
-	if pool == nil || proposals == nil || targets == nil {
+	if pool == nil || apiCompositionNilDependency(proposals) || apiCompositionNilDependency(targets) {
 		return nil, errors.New("authoring database, proposal service and target reader are required")
 	}
 	repository, err := authoringpostgres.NewGORMRepository(pool)
@@ -1300,9 +1321,18 @@ func newInterviewService(
 	if err != nil {
 		return nil, err
 	}
+	authoringRepository, err := authoringpostgres.NewGORMRepository(pool)
+	if err != nil {
+		return nil, err
+	}
+	documentVerifier, err := artifactauthoring.NewVerifier(authoringRepository)
+	if err != nil {
+		return nil, err
+	}
 	artifactCommands, err := artifactapplication.NewCommandService(artifactapplication.Dependencies{
 		Repository: artifactRepository,
 		Evidence:   verifier,
+		Documents:  documentVerifier,
 		IDs:        foundation.NewUUIDGenerator(nil),
 		Clock:      foundation.SystemClock{},
 	})
@@ -1798,7 +1828,7 @@ func newConversationHandlers(
 			if auditErr != nil {
 				return nil, nil, auditErr
 			}
-			dispatcher, err = conversationpostgres.NewGORMQuestionDispatcherWithWorkspaceAnalysisAndAudit(
+			dispatcher, err = conversationpostgres.NewGORMQuestionDispatcherWithWorkspaceAnalysisV2AndAudit(
 				pool, runtime, eventStore, foundation.NewUUIDGenerator(nil), foundation.SystemClock{}, workspaceAnalysis[0], auditRecorder,
 			)
 		} else {
@@ -1839,9 +1869,10 @@ func newWorkflowService(pool *postgres.Pool) (*workflowapplication.Service, erro
 }
 
 type apiRuntimeRepositoryFactory struct {
-	pool    *postgres.Pool
-	options riveradapter.Options
-	fence   riveradapter.ScopedEnqueueFence
+	pool      *postgres.Pool
+	options   riveradapter.Options
+	fence     riveradapter.ScopedEnqueueFence
+	synthesis *apiSynthesisRuntimeComponents
 }
 
 // apiEnqueueFence 显式保持静态配置无 rollout 锁、受管配置必须有真实事务围栏的边界。
@@ -1875,12 +1906,20 @@ func newAPIRuntimeRepositoryFactory(pool *postgres.Pool, cfg config.Config, enqu
 	if err != nil {
 		return nil, err
 	}
-	return &apiRuntimeRepositoryFactory{pool: pool, options: riverOptions, fence: fence}, nil
+	synthesis, err := newAPISynthesisRuntimeComponents(pool)
+	if err != nil {
+		return nil, err
+	}
+	return &apiRuntimeRepositoryFactory{pool: pool, options: riverOptions, fence: fence, synthesis: synthesis}, nil
 }
 
 func (factory *apiRuntimeRepositoryFactory) newRepository(hooks workflowpostgres.GORMRuntimeRepositoryHooks) (*workflowpostgres.GORMRuntimeRepository, error) {
 	if factory == nil || factory.pool == nil || factory.fence == nil {
 		return nil, errors.New("workflow runtime repository factory is unavailable")
+	}
+	hooks, err := factory.withSynthesisRuntimeHooks(hooks)
+	if err != nil {
+		return nil, err
 	}
 	return workflowpostgres.NewGORMRuntimeRepositoryWithHooks(factory.pool, factory.options, factory.fence, hooks)
 }
@@ -1901,6 +1940,24 @@ func newAPIArtifactWorkflowComponents(
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	return newAPIArtifactWorkflowComponentsWithFactory(factory, workspaces, files, cancellation, ids, clock, workspaceAnalysis)
+}
+
+// The production entry point retains this factory's same-pool synthesis owners
+// for HTTP composition after the one authoritative Workflow runtime is built.
+func newAPIArtifactWorkflowComponentsWithFactory(
+	factory *apiRuntimeRepositoryFactory,
+	workspaces workspaceruntimegrant.GORMRepositoryPort,
+	files workspacedomain.FileScanner,
+	cancellation workflowapplication.ScopedCancellationSafetyGuard,
+	ids foundation.IDGenerator,
+	clock foundation.Clock,
+	workspaceAnalysis *apiWorkspaceAnalysisRuntimeHooks,
+) (*workflowapplication.Service, *workflowpostgres.GORMRuntimeRepository, *artifactpostgres.GORMSectionGenerationRepository, error) {
+	if factory == nil || factory.pool == nil {
+		return nil, nil, nil, errors.New("workflow runtime repository factory is unavailable")
+	}
+	pool := factory.pool
 	agentRepository, terminal, err := newArtifactGenerationAgent(pool)
 	if err != nil {
 		return nil, nil, nil, err
@@ -2027,7 +2084,7 @@ func registerAPIWorkflowExecutors(chatEnabled bool, executors *workflowapplicati
 			return err
 		}
 	}
-	return nil
+	return registerAPISynthesisWorkflowContracts(executors)
 }
 
 func registerAPIWorkflowDefinitions(chatEnabled bool, definitions *workflowapplication.DefinitionRegistry) error {
@@ -2056,7 +2113,7 @@ func registerAPIWorkflowDefinitions(chatEnabled bool, definitions *workflowappli
 			return err
 		}
 	}
-	return nil
+	return registerAPISynthesisWorkflowDefinitions(definitions)
 }
 
 func firstError(values ...error) error {

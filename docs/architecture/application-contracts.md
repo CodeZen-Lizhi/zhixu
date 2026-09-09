@@ -19,6 +19,15 @@
 - Cursor 只能由服务端生成，绑定规范请求、Workspace、版本/offset 和完整性校验；篡改、过期、重启失效或作用域变化都明确失败，不能静默回第一页。
 - 所有大列表和图查询服务端有界；排序必须稳定，页面不能先取全量再本地分页。
 
+### HTTP 表示版本
+
+- 新响应不能直接扩展严格旧客户端的成功联合。Conversation/Answer 与 Interview/Path Step 通过显式 v2 operation
+  承载动态分析和笔记来源；v1 保留历史分析、RAG 与 Claim 投影，v2 也读取旧事实。
+- 版本判断基于持久 Workflow Definition/不可变来源，在分页 LIMIT、ETag 和命令副作用之前执行；新事实经 v1
+  返回稳定版本不支持 Problem。HTTP 版本不改变业务身份、请求 hash 或幂等 receipt，跨 Workspace 仍使用统一 404。
+- 版本化列表 cursor 不能跨版本复用；切换接口从第一页开始。认证、Origin、CSRF、Capability 和 Workspace 约束
+  在两个版本保持一致。未变化的 API/SSE 继续使用原路径，不作全局前缀别名。
+
 ### 前端生成客户端与运行时校验
 
 - `api/openapi/openapi.json` 通过稳定领域 tag 生成 `web/src/api/generated/**` 的
@@ -53,7 +62,9 @@
 - Question 不可变并绑定一次 Answer Workflow；最终 Answer 只有经过 Plan → Retrieval → Eligibility → Citation/Faithfulness 门禁后发布。
 - Evidence 不足产生业务 Refusal；Provider、数据库、超时或数据损坏产生 Failure，二者不能混用。
 - Clarification 是结构化补充请求，不是 Answer、Error 或 Human Task。Feedback 只形成评测事实，不直接改答案或知识。
-- 当前 Conversation 运行时是固定 retrieval-first、单节点 RAG；接口不承诺对话内开放式 Tool Loop 或逐 Token 事实流。
+- `rag` 模式保持固定 retrieval-first、单节点流程；`workspace_analysis` 使用有界、只读的动态工具循环。
+  当前生产新建分析使用 HTTP v2；v1 新建分析在写入前返回 `CONVERSATION_API_VERSION_UNSUPPORTED`，历史 v1
+  重放仍可用。HTTP 路径版本与持久结果的 `schema_version` 独立，临时 Token 流不能作为已发布事实。
 
 ### Graph、Candidate、Collection 与 Health
 

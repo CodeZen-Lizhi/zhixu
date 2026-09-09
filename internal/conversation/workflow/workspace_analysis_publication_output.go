@@ -92,7 +92,7 @@ func (output WorkspaceAnalysisPublicationOutput) LogValue() slog.Value {
 }
 
 func validateWorkspaceAnalysisPublicationOutput(output WorkspaceAnalysisPublicationOutput) error {
-	if output.SchemaVersion != WorkspaceAnalysisOutputSchemaVersion || !validHash(output.ResultHash) ||
+	if (output.SchemaVersion != WorkspaceAnalysisOutputSchemaVersion && output.SchemaVersion != WorkspaceAnalysisOutputSchemaVersionV2) || !validHash(output.ResultHash) ||
 		!validWorkspaceAnalysisOutputID(output.AnswerID) || !validWorkspaceAnalysisOutputID(output.ProofID) ||
 		output.AnswerID == output.ProofID {
 		return workspaceAnalysisOutputError(errors.New("workspace analysis publication output binding is invalid"))

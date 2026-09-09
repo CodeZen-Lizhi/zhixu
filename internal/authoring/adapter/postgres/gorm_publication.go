@@ -108,6 +108,17 @@ func (repository *GORMRepository) ReservePublication(ctx context.Context, record
 		return result, err
 	}
 	err = repository.within(ctx, foundation.TransactionOptions{}, func(ctx context.Context, tx *gorm.DB) error {
+		result, err = gormReservePublication(ctx, tx, record)
+		return err
+	}, "AUTHORING_PUBLICATION_TRANSACTION_FAILED")
+	if err != nil {
+		return authoringapp.PublicationPreparation{}, err
+	}
+	return result, nil
+}
+
+func gormReservePublication(ctx context.Context, tx *gorm.DB, record authoringapp.ReservePublicationRecord) (result authoringapp.PublicationPreparation, err error) {
+	err = func() error {
 		if err := gormLockCommand(ctx, tx, record.Binding.WorkspaceID, record.Binding.IdempotencyKey); err != nil {
 			return err
 		}
@@ -212,7 +223,7 @@ func (repository *GORMRepository) ReservePublication(ctx context.Context, record
 		}
 		result = authoringapp.PublicationPreparation{Reservation: reservation, Document: document, Revision: revision}
 		return nil
-	}, "AUTHORING_PUBLICATION_TRANSACTION_FAILED")
+	}()
 	if err != nil {
 		return authoringapp.PublicationPreparation{}, err
 	}

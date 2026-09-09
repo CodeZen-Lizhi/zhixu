@@ -83,6 +83,13 @@ func TestPrometheusAdapterMapsEveryMetricAndRejectsBeforeMutation(t *testing.T) 
 	recordMetric(t, telemetry.Metrics(), MetricWorkspaceAnalysisOutcomeTotal, MetricKindCounter, 1, map[string]string{
 		"mode": "workspace_analysis", "definition": "workspace-analysis-v1", "outcome": "failure", "termination_reason": "WORKSPACE_ANALYSIS_BUDGET_EXHAUSTED",
 	})
+	v2, err := NewWorkspaceAnalysisOutcomeMeasurementForVersion(2, "succeeded", "COMPLETED")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := telemetry.Metrics().Record(context.Background(), v2); err != nil {
+		t.Fatal(err)
+	}
 
 	var wait sync.WaitGroup
 	for range 32 {
@@ -140,6 +147,7 @@ func TestPrometheusAdapterMapsEveryMetricAndRejectsBeforeMutation(t *testing.T) 
 		`zhixu_rag_outcome_total{error_code="",outcome="completed"} 1`,
 		`zhixu_agent_rag_graph_node_result_total{error_code="",node_kind="query_plan",result="success"} 1`,
 		`zhixu_workspace_analysis_outcome_total{definition="workspace-analysis-v1",mode="workspace_analysis",outcome="failure",termination_reason="WORKSPACE_ANALYSIS_BUDGET_EXHAUSTED"} 1`,
+		`zhixu_workspace_analysis_outcome_total{definition="workspace-analysis-v2",mode="workspace_analysis",outcome="completed",termination_reason="COMPLETED"} 1`,
 	} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("metrics body does not contain %q:\n%s", expected, body)

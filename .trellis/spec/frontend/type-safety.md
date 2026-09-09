@@ -124,7 +124,7 @@ transportFetch(input, init?): Promise<Response>
 
 ### 3. Contracts
 
-- 189 个 operation 必须各有一个稳定领域 tag；生成结果不得出现 `DefaultApi`。普通 JSON、multipart
+- OpenAPI 的每个 operation 必须有一个稳定领域 tag，总数由 Router inventory 与 tag manifest 验证；生成结果不得出现 `DefaultApi`。普通 JSON、multipart
   和下载请求都从相应 `*ApiRaw` 获取 path/method/params，不手拼生产 URL。
 - `transportFetch` 唯一拥有 API base URL、Cookie/API Token、CSRF、Header merge、Abort 与 401 Session
   失效。`generatedBrowserSecurity` 使用当前页面 Origin 满足生成签名，实际线路 Origin 由浏览器控制；
@@ -135,6 +135,11 @@ transportFetch(input, init?): Promise<Response>
   其他 owner 只保留真正的领域 binding/联合/范围校验，不复制一套完整 OpenAPI schema。
 - SSE 与 Answer Draft stream 保留专用 owner；Blob/multipart 只保留媒体、完整性和流生命周期 Adapter，
   不复制认证、URL 或错误 Transport。
+- Conversation 的提问、Turn/list/latest、Answer/Timeline 与 Interview 的列表/新建/详情/答题/完成/Path Step
+  使用各自生成的 `*V2Raw` 方法，以读取动态 Analysis 和 NOTE 来源；未版本化的 Conversation 创建、Feedback、
+  SSE、Path status 与 Memory Candidate 保持原方法。不能整体替换所有 `/api/v1` 路径。
+- HTTP v2 可返回历史 v1 事实。Question acceptance decoder 只接受与同一 Answer/Workspace 精确绑定的 v1/v2
+  `status_url`，拒绝未知版本或资源漂移；Feature 不解析 URL 中的版本，也不复用另一 HTTP 版本的分页 cursor。
 
 ### 4. Validation & Error Matrix
 
@@ -145,6 +150,7 @@ transportFetch(input, init?): Promise<Response>
 | 公共模型出现 `any` / `Set` | generated model/typecheck gate 失败 |
 | Problem/Auth 缺字段、未知字段或联合值非法 | Zod fail closed，返回稳定 `INVALID_RESPONSE`，不含正文 |
 | 模块 Workspace/ID/version/hash/状态 binding 漂移 | 模块 strict decoder 拒绝整个响应 |
+| Question status URL 是未知 HTTP 版本，或 Answer/Workspace 不匹配 | `INVALID_RESPONSE`；不得跟随该 URL |
 | Abort 或 401 | 保留 Abort identity；401 触发统一 Session 失效 |
 
 ### 5. Good / Base / Bad Cases
@@ -163,6 +169,8 @@ transportFetch(input, init?): Promise<Response>
   generated Origin 参数与浏览器实际 Origin 行为；
   每个 API owner 保留请求快照、Problem 与关键 strict decoder fixture。
 - multipart/Blob/SSE/stream owner 分别验证媒体完整性、取消、重连/游标或增量正文行为。
+- `conversation.test.ts`、`interview.test.ts` 覆盖实际 generated transport 的 v2 method/path、历史 v1 与新版响应、
+  NOTE 冻结来源及命令 replay；共享 v1 API 和未知 v3 status URL 的边界必须保留。
 
 ### 7. Wrong vs Correct
 

@@ -103,6 +103,10 @@ func (service *ExecutionService) Execute(ctx context.Context, command ExecuteToo
 	if err != nil {
 		return ToolExecutionResult{}, err
 	}
+	if domain.WorkspaceAnalysisToolWorkflowVersion(prepared.contract.Definition.Ref) == 2 {
+		return ToolExecutionResult{}, executionError(foundation.ErrorInvalidInput, errorCodeWorkspaceAnalysisToolCommandInvalid, false,
+			errors.New("dynamic tools require their durable Workspace Analysis operation authority"))
+	}
 
 	started, err := service.startedCall(command, prepared.contract, prepared.arguments)
 	if err != nil {
@@ -1011,9 +1015,22 @@ func validatePersistedReceiptResult(contract Contract, call domain.ToolCall, rec
 	if err := domain.ValidateResultReceipt(receipt, call, contract.Definition); err != nil {
 		return executionError(foundation.ErrorConsistencyViolation, errorCodeResultReplayUnavailable, false, err)
 	}
-	output, summary, err := validateExecutorResult(contract, ExecutorResult{Output: receipt.Output})
+	output, _, err := validateExecutorResult(contract, ExecutorResult{Output: receipt.Output})
 	if err != nil {
 		return err
+	}
+	// The canonical receipt is already sanitized. Its original redaction count
+	// is an execution fact, not a count that can be recovered by sanitizing again.
+	var persisted struct {
+		RedactedFieldCount *int `json:"redacted_field_count"`
+	}
+	if err := json.Unmarshal(call.ResponseSummary, &persisted); err != nil || persisted.RedactedFieldCount == nil ||
+		*persisted.RedactedFieldCount < 0 || int64(*persisted.RedactedFieldCount) > call.ResponseBytes {
+		return executionError(foundation.ErrorConsistencyViolation, errorCodeResultReplayUnavailable, false, errors.New("canonical result receipt redaction count is invalid"))
+	}
+	summary, err := responseSummary(contract.Definition, output, *persisted.RedactedFieldCount)
+	if err != nil {
+		return executionError(foundation.ErrorConsistencyViolation, errorCodeResultReplayUnavailable, false, err)
 	}
 	if hashBytes(output) != call.ResponseHash || int64(len(output)) != call.ResponseBytes || !jsonDocumentsEqual(summary, call.ResponseSummary) {
 		return executionError(foundation.ErrorConsistencyViolation, errorCodeResultReplayUnavailable, false, errors.New("canonical result receipt differs from persisted tool call"))

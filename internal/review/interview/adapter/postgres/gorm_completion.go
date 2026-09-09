@@ -32,6 +32,11 @@ func (repository *GORMRepository) BeginComplete(ctx context.Context, record inte
 	if err := validateBeginCompleteRecord(record); err != nil {
 		return interviewapp.BeginCompleteResult{}, err
 	}
+	if record.ClaimOnly {
+		if err := repository.requireClaimSession(ctx, record.WorkspaceID, record.SessionID); err != nil {
+			return interviewapp.BeginCompleteResult{}, err
+		}
+	}
 	var result interviewapp.BeginCompleteResult
 	err := repository.within(ctx, func(callbackCtx context.Context, transaction *gorm.DB) error {
 		if err := gormInterviewLockCommand(callbackCtx, transaction, record.WorkspaceID, record.IdempotencyKey); err != nil {
@@ -147,6 +152,11 @@ func (repository *GORMRepository) PrepareComplete(ctx context.Context, record in
 	if err := validatePrepareCompleteRecord(record); err != nil {
 		return interviewapp.PrepareCompleteResult{}, err
 	}
+	if record.ClaimOnly {
+		if err := repository.requireClaimSession(ctx, record.WorkspaceID, record.SessionID); err != nil {
+			return interviewapp.PrepareCompleteResult{}, err
+		}
+	}
 	var result interviewapp.PrepareCompleteResult
 	err := repository.within(ctx, func(callbackCtx context.Context, transaction *gorm.DB) error {
 		if err := gormInterviewLockCommand(callbackCtx, transaction, record.WorkspaceID, record.IdempotencyKey); err != nil {
@@ -246,6 +256,11 @@ func (repository *GORMRepository) Complete(ctx context.Context, record interview
 	}
 	if err := validateCompleteRecord(record); err != nil {
 		return interviewapp.CompleteResult{}, err
+	}
+	if record.ClaimOnly {
+		if err := repository.requireClaimSession(ctx, record.WorkspaceID, record.SessionID); err != nil {
+			return interviewapp.CompleteResult{}, err
+		}
 	}
 	var result interviewapp.CompleteResult
 	err := repository.within(ctx, func(callbackCtx context.Context, transaction *gorm.DB) error {

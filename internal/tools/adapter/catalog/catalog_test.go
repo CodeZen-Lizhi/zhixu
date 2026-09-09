@@ -36,8 +36,8 @@ type contractFixture struct {
 
 func TestContractsContainExactUniqueCoreToolSet(t *testing.T) {
 	contracts := mustContracts(t)
-	if len(contracts) != 17 {
-		t.Fatalf("Contracts() count = %d, want 17", len(contracts))
+	if len(contracts) != 21 {
+		t.Fatalf("Contracts() count = %d, want 21", len(contracts))
 	}
 	got := make([]string, 0, len(contracts))
 	seen := make(map[domain.ToolRef]struct{}, len(contracts))
@@ -52,8 +52,8 @@ func TestContractsContainExactUniqueCoreToolSet(t *testing.T) {
 	sort.Strings(got)
 	want := []string{
 		"ApplyApprovedPatch@1", "CalculateDiff@1", "CreateGitCommit@1", "FetchWebPage@1", "ReadDocument@1", "ReadGitStatus@1",
-		"ReadGitStatus@2", "ReadSource@1", "ReadSource@2", "ReadSource@3", "RebuildIndex@1", "RunRegressionEvaluation@1",
-		"SearchKnowledge@1", "SearchKnowledge@2", "ValidateCitation@1", "ValidateCitation@2", "ValidateCitation@3",
+		"ReadGitStatus@2", "ReadGitStatus@3", "ReadSource@1", "ReadSource@2", "ReadSource@3", "ReadSource@4", "RebuildIndex@1", "RunRegressionEvaluation@1",
+		"SearchKnowledge@1", "SearchKnowledge@2", "SearchKnowledge@3", "ValidateCitation@1", "ValidateCitation@2", "ValidateCitation@3", "ValidateCitation@4",
 	}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("tool names = %v, want %v", got, want)
@@ -64,6 +64,10 @@ func TestContractsHaveStableExactSchemaRefsAndHashes(t *testing.T) {
 	left := mustContracts(t)
 	right := mustContracts(t)
 	expectedHashes := map[domain.ToolRef]string{
+		{Name: "ReadGitStatus", Version: 3}:           "2aa8ae138367486c4f59e1459a47c9a86f3adca78a0d5c3305849fe7f68a6e19",
+		{Name: "SearchKnowledge", Version: 3}:         "cb3f96130645ebafc8500d6a54685a073f6b75d622f1348f194c8e88f871d832",
+		{Name: "ReadSource", Version: 4}:              "c6d5ffdc62d1837c3ca728a862bfc1968fc553cfe0493827e51d942abab8182c",
+		{Name: "ValidateCitation", Version: 4}:        "037f389043481ef4b5f8344d4ff35b4a032b1646adc03e7afff98418ac6f3333",
 		{Name: "SearchKnowledge", Version: 1}:         "c89a7f23de7ac737aefbbd91a7d2231ce303713a0ee451a5aaa152ac0e8024be",
 		{Name: "ReadSource", Version: 1}:              "c1984a7c2ef56e5fb59ea0c2d38c418023e6e82a814f74143ca9b92d6a111361",
 		{Name: "ReadSource", Version: 2}:              "a6ba6638bbc44db91c5cbb228d220538a80e7a672a7f0f8d07231eef00dbadb5",

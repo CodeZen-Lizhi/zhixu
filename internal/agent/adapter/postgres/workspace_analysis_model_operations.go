@@ -246,6 +246,9 @@ func validateWorkspaceAnalysisModelAdmission(
 	locked workspaceAnalysisModelLocks,
 	command application.AuthorizeWorkspaceAnalysisModelCallCommand,
 ) error {
+	if locked.analysisRun.PolicyVersion == domain.WorkspaceAnalysisPolicyVersionV2 {
+		return validateWorkspaceAnalysisV2ModelAdmission(locked, command)
+	}
 	run := locked.analysisRun
 	timeout, ok := workspaceAnalysisModelTimeout(run, command.OperationKey.Kind)
 	if !ok || timeout <= 0 {
@@ -273,6 +276,18 @@ func workspaceAnalysisModelReservedOutputTokens(
 	run domain.WorkspaceAnalysisRun,
 	kind domain.WorkspaceAnalysisOperationKind,
 ) (int64, bool) {
+	if run.PolicyVersion == domain.WorkspaceAnalysisPolicyVersionV2 {
+		switch kind {
+		case domain.WorkspaceAnalysisOperationDecision:
+			return domain.WorkspaceAnalysisV2DecisionMaxOutputTokens, true
+		case domain.WorkspaceAnalysisOperationAnswerSynthesis:
+			return run.Limits.Amount.OutputTokens - domain.WorkspaceAnalysisV2MaxDecisions*domain.WorkspaceAnalysisV2DecisionMaxOutputTokens - domain.WorkspaceAnalysisV2ReviewMaxOutputTokens, true
+		case domain.WorkspaceAnalysisOperationFaithfulnessReview:
+			return domain.WorkspaceAnalysisV2ReviewMaxOutputTokens, true
+		default:
+			return 0, false
+		}
+	}
 	switch kind {
 	case domain.WorkspaceAnalysisOperationRetrievalPlan:
 		return domain.WorkspaceAnalysisV1PlanMaxOutputTokens, true
@@ -288,6 +303,8 @@ func workspaceAnalysisModelReservedOutputTokens(
 
 func workspaceAnalysisModelTimeout(run domain.WorkspaceAnalysisRun, kind domain.WorkspaceAnalysisOperationKind) (time.Duration, bool) {
 	switch kind {
+	case domain.WorkspaceAnalysisOperationDecision:
+		return run.Timeouts.PlanModelTimeout, run.PolicyVersion == domain.WorkspaceAnalysisPolicyVersionV2
 	case domain.WorkspaceAnalysisOperationRetrievalPlan:
 		return run.Timeouts.PlanModelTimeout, true
 	case domain.WorkspaceAnalysisOperationAnswerSynthesis:

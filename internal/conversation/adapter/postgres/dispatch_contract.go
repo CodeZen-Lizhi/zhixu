@@ -20,6 +20,9 @@ const (
 )
 
 func validateQuestionDispatchRecord(record conversationapplication.SubmitQuestionRecord) (conversationdomain.QuestionRequest, error) {
+	if err := record.APIVersion.Validate(); err != nil {
+		return conversationdomain.QuestionRequest{}, err
+	}
 	if !canonicalIdempotencyKey(record.IdempotencyKey) {
 		return conversationdomain.QuestionRequest{}, invalid(ErrorCodeQuestionDispatchInvalid, errors.New("question idempotency key is invalid"))
 	}
@@ -50,6 +53,12 @@ type questionWorkflowInputBinding struct {
 }
 
 func buildQuestionWorkflowDispatchPlan(question conversationdomain.Question, answerID foundation.ID) (questionWorkflowDispatchPlan, error) {
+	return buildQuestionWorkflowDispatchPlanForVersion(question, answerID, conversationworkflow.WorkspaceAnalysisDefinitionVersion)
+}
+
+// A new submission uses the version selected by trusted composition. Replays
+// supply the immutable version read from the already bound Workflow definition.
+func buildQuestionWorkflowDispatchPlanForVersion(question conversationdomain.Question, answerID foundation.ID, analysisVersion int64) (questionWorkflowDispatchPlan, error) {
 	var definition workflowdomain.RegisteredDefinition
 	var input json.RawMessage
 	var err error
@@ -61,7 +70,14 @@ func buildQuestionWorkflowDispatchPlan(question conversationdomain.Question, ans
 			QuestionID: question.ID, AnswerID: answerID, QuestionOrdinal: question.Ordinal, ContextHash: question.ContextHash,
 		})
 	case conversationdomain.QuestionModeWorkspaceAnalysis:
-		definition = conversationworkflow.RegisteredWorkspaceAnalysisDefinition()
+		switch analysisVersion {
+		case 1:
+			definition = conversationworkflow.RegisteredWorkspaceAnalysisDefinition()
+		case 2:
+			definition = conversationworkflow.RegisteredWorkspaceAnalysisDefinitionV2()
+		default:
+			return questionWorkflowDispatchPlan{}, consistency(ErrorCodeQuestionDispatchCorrupt, errors.New("workspace analysis workflow version is unsupported"))
+		}
 		input, err = conversationworkflow.EncodeWorkspaceAnalysisInput(conversationworkflow.WorkspaceAnalysisInput{
 			SchemaVersion: conversationworkflow.WorkspaceAnalysisInputSchemaVersion, ConversationID: question.Request.ConversationID,
 			QuestionID: question.ID, AnswerID: answerID, QuestionOrdinal: question.Ordinal, ContextHash: question.ContextHash,
@@ -80,6 +96,29 @@ func buildQuestionWorkflowDispatchPlan(question conversationdomain.Question, ans
 		definition: definition, input: input,
 		idempotencyKey: questionWorkflowIdempotencyKeyForMode(question.Request.Mode, question.ID), root: root,
 	}, nil
+}
+
+func buildReplayedQuestionWorkflowDispatchPlan(question conversationdomain.Question, answerID foundation.ID, key string, version int64, graphJSON json.RawMessage) (questionWorkflowDispatchPlan, error) {
+	plan, err := buildQuestionWorkflowDispatchPlanForVersion(question, answerID, version)
+	if err != nil {
+		return questionWorkflowDispatchPlan{}, err
+	}
+	if question.Request.Mode == conversationdomain.QuestionModeRAG && version == 1 {
+		plan.definition = conversationworkflow.RegisteredDefinitionV1()
+		plan.root, err = uniqueQuestionWorkflowRoot(plan.definition)
+		if err != nil {
+			return questionWorkflowDispatchPlan{}, err
+		}
+	}
+	graph, err := workflowapplication.DecodeCanonicalGraph(graphJSON)
+	if err != nil {
+		return questionWorkflowDispatchPlan{}, consistency(ErrorCodeQuestionDispatchCorrupt, err)
+	}
+	hash, err := workflowapplication.ComputeCanonicalGraphHash(graph)
+	if err != nil || key != plan.definition.Key || version != plan.definition.Version || hash != plan.definition.GraphHash {
+		return questionWorkflowDispatchPlan{}, consistency(ErrorCodeQuestionDispatchCorrupt, errors.New("replayed question workflow definition differs from its immutable contract"))
+	}
+	return plan, nil
 }
 
 func uniqueQuestionWorkflowRoot(definition workflowdomain.RegisteredDefinition) (workflowdomain.NodeDefinition, error) {
@@ -192,6 +231,7 @@ func submitQuestionResult(question conversationdomain.Question, answerView conve
 		Question: question, Answer: answerView.Answer,
 		Workflow: conversationapplication.WorkflowRunView{
 			RunID: runtime.Run.ID, Status: runtime.Run.Status, Version: runtime.Run.Version, UpdatedAt: runtime.Run.UpdatedAt,
+			DefinitionKey: answerView.Workflow.DefinitionKey, DefinitionVersion: answerView.Workflow.DefinitionVersion,
 		},
 		NodeRunID: runtime.FirstNode.ID, JobID: runtime.Job.JobID, Replayed: replayed,
 	}

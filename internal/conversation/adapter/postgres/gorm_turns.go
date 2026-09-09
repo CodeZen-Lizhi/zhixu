@@ -7,6 +7,7 @@ import (
 
 	conversationapplication "github.com/CodeZen-Lizhi/zhixu/internal/conversation/application"
 	conversationdomain "github.com/CodeZen-Lizhi/zhixu/internal/conversation/domain"
+	conversationworkflow "github.com/CodeZen-Lizhi/zhixu/internal/conversation/workflow"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"gorm.io/gorm"
 )
@@ -25,7 +26,14 @@ func (repository *GORMRepository) ListTurns(ctx context.Context, query conversat
 	statement := repository.db.WithContext(ctx).Table("agent.question q").Select(turnViewColumns).
 		Joins("LEFT JOIN agent.answer a ON a.question_id=q.id AND a.workspace_id=q.workspace_id AND a.conversation_id=q.conversation_id").
 		Joins("LEFT JOIN workflow.run w ON w.id=a.workflow_run_id AND w.workspace_id=a.workspace_id").
+		Joins("LEFT JOIN workflow.definition d ON d.id=w.definition_id AND d.workspace_id=w.workspace_id").
 		Where("q.workspace_id=? AND q.conversation_id=?", string(query.WorkspaceID), string(query.ConversationID))
+	if query.APIVersion != 0 {
+		// Apply the immutable workflow-version boundary before both pagination
+		// and latest selection. Preserve missing bindings so scanning still
+		// reports corrupt persistence instead of silently hiding a broken turn.
+		statement = statement.Where("d.id IS NULL OR d.key <> ? OR d.version <= ?", conversationworkflow.WorkspaceAnalysisDefinitionKey, int64(query.APIVersion))
+	}
 	if query.Latest {
 		statement = statement.Order("q.ordinal DESC,q.id DESC").Limit(1)
 	} else {
@@ -73,6 +81,7 @@ func (repository *GORMRepository) GetAnswer(ctx context.Context, workspaceID, an
 	}
 	view, err := scanAnswerView(gormScanRow(repository.db.WithContext(ctx).Table("agent.answer a").Select(answerViewColumns).
 		Joins("JOIN workflow.run w ON w.id=a.workflow_run_id AND w.workspace_id=a.workspace_id").
+		Joins("JOIN workflow.definition d ON d.id=w.definition_id AND d.workspace_id=w.workspace_id").
 		Where("a.workspace_id=? AND a.id=?", string(workspaceID), string(answerID))))
 	if errors.Is(err, sql.ErrNoRows) {
 		return conversationapplication.AnswerView{}, notFound(ErrorCodeAnswerNotFound, err)
@@ -107,6 +116,7 @@ func loadGORMPublishedContext(ctx context.Context, db *gorm.DB, query conversati
 	rows, err := db.WithContext(ctx).Table("agent.question q").Select(turnViewColumns).
 		Joins("JOIN agent.answer a ON a.question_id=q.id AND a.workspace_id=q.workspace_id AND a.conversation_id=q.conversation_id").
 		Joins("JOIN workflow.run w ON w.id=a.workflow_run_id AND w.workspace_id=a.workspace_id").
+		Joins("JOIN workflow.definition d ON d.id=w.definition_id AND d.workspace_id=w.workspace_id").
 		Where("q.workspace_id=? AND q.conversation_id=? AND q.ordinal <= ?", string(query.WorkspaceID), string(query.ConversationID), query.ThroughOrdinal).
 		Where("a.publication_status IN ('completed','refused','clarification_required')").
 		Order("q.ordinal DESC,q.id DESC").Limit(conversationdomain.MaxContextTurns).Rows()
@@ -160,6 +170,7 @@ func (repository *GORMRepository) LoadQuestionExecutionContext(ctx context.Conte
 	turn, err := scanTurnView(gormScanRow(repository.db.WithContext(ctx).Table("agent.question q").Select(turnViewColumns).
 		Joins("JOIN agent.answer a ON a.question_id=q.id AND a.workspace_id=q.workspace_id AND a.conversation_id=q.conversation_id").
 		Joins("JOIN workflow.run w ON w.id=a.workflow_run_id AND w.workspace_id=a.workspace_id").
+		Joins("JOIN workflow.definition d ON d.id=w.definition_id AND d.workspace_id=w.workspace_id").
 		Where("q.workspace_id=? AND q.conversation_id=? AND q.id=?", string(query.WorkspaceID), string(query.ConversationID), string(query.QuestionID))))
 	if errors.Is(err, sql.ErrNoRows) {
 		return conversationapplication.QuestionExecutionContext{}, consistency(ErrorCodeExecutionContextCorrupt, errors.New("question execution context is missing"))

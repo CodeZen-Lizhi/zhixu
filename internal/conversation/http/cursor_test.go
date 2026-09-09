@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/CodeZen-Lizhi/zhixu/internal/conversation/application"
 	conversationdomain "github.com/CodeZen-Lizhi/zhixu/internal/conversation/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 )
@@ -39,15 +40,15 @@ func TestTurnCursorBindsConversation(t *testing.T) {
 	otherConversationID := foundation.ID("33333333-3333-4333-8333-333333333333")
 	boundary := conversationdomain.TurnCursor{Ordinal: 7, QuestionID: foundation.ID("44444444-4444-4444-8444-444444444444")}
 
-	raw, err := codec.encodeTurn(workspaceID, conversationID, boundary)
+	raw, err := codec.encodeTurn(workspaceID, conversationID, boundary, application.APIVersionV1)
 	if err != nil {
 		t.Fatalf("encode turn cursor: %v", err)
 	}
-	decoded, err := codec.decodeTurn(raw, workspaceID, conversationID)
+	decoded, err := codec.decodeTurn(raw, workspaceID, conversationID, application.APIVersionV1)
 	if err != nil || *decoded != boundary {
 		t.Fatalf("round trip = %#v, %v", decoded, err)
 	}
-	if _, err := codec.decodeTurn(raw, workspaceID, otherConversationID); err == nil {
+	if _, err := codec.decodeTurn(raw, workspaceID, otherConversationID, application.APIVersionV1); err == nil {
 		t.Fatal("expected cross-conversation cursor rejection")
 	}
 }

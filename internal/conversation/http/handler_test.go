@@ -13,6 +13,7 @@ import (
 	agentdomain "github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/conversation/application"
 	conversationdomain "github.com/CodeZen-Lizhi/zhixu/internal/conversation/domain"
+	conversationworkflow "github.com/CodeZen-Lizhi/zhixu/internal/conversation/workflow"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/gin-gonic/gin"
 )
@@ -178,6 +179,37 @@ func TestGetWorkspaceAnalysisTimelineUsesScopedQueryAndTypedResponse(t *testing.
 	}
 }
 
+func TestGetWorkspaceAnalysisTimelinePreservesV2VersionAndNullableFields(t *testing.T) {
+	t.Parallel()
+	runID := foundation.ID("78777777-7777-4777-8777-777777777777")
+	timeline := validWorkspaceAnalysisTimelineResponse(testWorkspaceID, testAnswerID, runID)
+	timeline.SchemaVersion = conversationdomain.WorkspaceAnalysisTimelineSchemaVersionV2
+	timeline.Budget = conversationdomain.WorkspaceAnalysisTimelineBudget{
+		ModelCalls:   conversationdomain.WorkspaceAnalysisTimelineCounter{Max: agentdomain.WorkspaceAnalysisV2MaxModelCalls},
+		ToolCalls:    conversationdomain.WorkspaceAnalysisTimelineCounter{Max: agentdomain.WorkspaceAnalysisV2MaxToolCalls},
+		SourceReads:  conversationdomain.WorkspaceAnalysisTimelineCounter{Max: agentdomain.WorkspaceAnalysisV2MaxSourceReads},
+		InputTokens:  conversationdomain.WorkspaceAnalysisTimelineCounter{Max: agentdomain.WorkspaceAnalysisV2MaxRunInputTokens},
+		OutputTokens: conversationdomain.WorkspaceAnalysisTimelineCounter{Max: agentdomain.WorkspaceAnalysisV2MaxRunOutputTokens},
+	}
+	timeline.Items = []conversationdomain.WorkspaceAnalysisTimelineItem{{Sequence: 1,
+		Kind: conversationdomain.WorkspaceAnalysisTimelineItemModel, Phase: conversationdomain.WorkspaceAnalysisPhaseDecideNext,
+		Status: conversationdomain.WorkspaceAnalysisTimelineItemPending}}
+	service := &fakeService{timeline: timeline}
+	router := testRouter(service)
+	request := httptest.NewRequest(http.MethodGet, "/api/v2/answers/"+string(testAnswerID)+"/analysis-timeline?workspace_id="+string(testWorkspaceID), nil)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("v2 timeline HTTP status=%d", recorder.Code)
+	}
+	decoded, err := conversationdomain.CanonicalizeWorkspaceAnalysisTimeline(recorder.Body.Bytes())
+	if err != nil || decoded.Timeline.SchemaVersion != conversationdomain.WorkspaceAnalysisTimelineSchemaVersionV2 ||
+		decoded.Timeline.Items[0].Phase != conversationdomain.WorkspaceAnalysisPhaseDecideNext ||
+		service.timelineQuery.WorkspaceID != testWorkspaceID || service.timelineQuery.AnswerID != testAnswerID {
+		t.Fatalf("v2 timeline HTTP boundary changed the response: %v", err)
+	}
+}
+
 func TestGetWorkspaceAnalysisTimelineRejectsInvalidScopeAndPropagatesServiceError(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -270,7 +302,9 @@ func TestCommandsAcceptCaseInsensitiveJSONMediaType(t *testing.T) {
 
 func testRouter(service Service) http.Handler {
 	router := gin.New()
-	NewHandler(service, NewCursorCodec()).Routes(router.Group("/api/v1"))
+	handler := NewHandler(service, NewCursorCodec())
+	handler.Routes(router.Group("/api/v1"))
+	handler.RoutesV2(router.Group("/api/v2"))
 	return router
 }
 
@@ -282,6 +316,8 @@ type fakeService struct {
 	timeline      conversationdomain.WorkspaceAnalysisTimeline
 	timelineQuery application.WorkspaceAnalysisTimelineQuery
 	turnsQuery    application.ListTurnsQuery
+	turns         application.TurnPage
+	submission    *application.SubmitQuestionResult
 	err           error
 }
 
@@ -295,8 +331,15 @@ func (service *fakeService) SubmitQuestion(_ context.Context, command applicatio
 	if err != nil {
 		return application.SubmitQuestionResult{}, err
 	}
+	if service.submission != nil {
+		return *service.submission, service.err
+	}
 	now := time.Now().UTC()
-	return application.SubmitQuestionResult{Question: conversationdomain.Question{ID: foundation.ID("44444444-4444-4444-8444-444444444444"), Request: canonical, Ordinal: 1, CreatedAt: now}, Answer: conversationdomain.Answer{ID: testAnswerID, WorkspaceID: testWorkspaceID, ConversationID: testConversationID, QuestionID: foundation.ID("44444444-4444-4444-8444-444444444444"), WorkflowRunID: foundation.ID("55555555-5555-4555-8555-555555555555"), PublicationStatus: conversationdomain.AnswerPublicationPending, Version: 1, CreatedAt: now, UpdatedAt: now}, Workflow: application.WorkflowRunView{RunID: foundation.ID("55555555-5555-4555-8555-555555555555"), Status: "pending", Version: 1, UpdatedAt: now}}, service.err
+	definitionKey, definitionVersion := conversationworkflow.DefinitionKey, conversationworkflow.DefinitionVersionV2
+	if canonical.Mode == conversationdomain.QuestionModeWorkspaceAnalysis {
+		definitionKey, definitionVersion = conversationworkflow.WorkspaceAnalysisDefinitionKey, 1
+	}
+	return application.SubmitQuestionResult{Question: conversationdomain.Question{ID: foundation.ID("44444444-4444-4444-8444-444444444444"), Request: canonical, Ordinal: 1, CreatedAt: now}, Answer: conversationdomain.Answer{ID: testAnswerID, WorkspaceID: testWorkspaceID, ConversationID: testConversationID, QuestionID: foundation.ID("44444444-4444-4444-8444-444444444444"), WorkflowRunID: foundation.ID("55555555-5555-4555-8555-555555555555"), PublicationStatus: conversationdomain.AnswerPublicationPending, Version: 1, CreatedAt: now, UpdatedAt: now}, Workflow: application.WorkflowRunView{RunID: foundation.ID("55555555-5555-4555-8555-555555555555"), Status: "pending", Version: 1, UpdatedAt: now, DefinitionKey: definitionKey, DefinitionVersion: definitionVersion}}, service.err
 }
 func (service *fakeService) SubmitFeedback(_ context.Context, command application.SubmitFeedbackCommand) (application.SubmitFeedbackResult, error) {
 	service.feedback = command
@@ -313,7 +356,7 @@ func (service *fakeService) GetConversation(context.Context, foundation.ID, foun
 }
 func (service *fakeService) ListTurns(_ context.Context, query application.ListTurnsQuery) (application.TurnPage, error) {
 	service.turnsQuery = query
-	return application.TurnPage{}, service.err
+	return service.turns, service.err
 }
 func (service *fakeService) GetAnswer(context.Context, foundation.ID, foundation.ID) (application.AnswerView, error) {
 	return service.answer, service.err
@@ -342,7 +385,7 @@ func validAnswerView() application.AnswerView {
 	now := time.Date(2026, 7, 20, 1, 2, 3, 0, time.UTC)
 	return application.AnswerView{
 		Answer:   conversationdomain.Answer{ID: testAnswerID, WorkspaceID: testWorkspaceID, ConversationID: testConversationID, QuestionID: foundation.ID("44444444-4444-4444-8444-444444444444"), WorkflowRunID: foundation.ID("55555555-5555-4555-8555-555555555555"), PublicationStatus: conversationdomain.AnswerPublicationPending, Version: 1, CreatedAt: now, UpdatedAt: now},
-		Workflow: application.WorkflowRunView{RunID: foundation.ID("55555555-5555-4555-8555-555555555555"), Status: "running", Version: 7, UpdatedAt: now},
+		Workflow: application.WorkflowRunView{RunID: foundation.ID("55555555-5555-4555-8555-555555555555"), Status: "running", Version: 7, UpdatedAt: now, DefinitionKey: conversationworkflow.DefinitionKey, DefinitionVersion: conversationworkflow.DefinitionVersionV2},
 	}
 }
 

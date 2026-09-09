@@ -1,5 +1,7 @@
 # Runbook：Workspace Analysis 发布与回滚
 
+> 当前实现保留 `workspace-analysis@1` 的固定六节点历史，新提交使用 `workspace-analysis@2` 的四节点持久流程及动态工具循环。以下是部署操作参考；实际本机验证与部署状态见 [统一集成记录](../../../.trellis/tasks/07-16-product-delivery/research/final-integration-2026-09-09.md)。目标环境 canary、OTLP 观察和现场回滚未执行时不得写成已通过。
+
 ## 1. 目的与边界
 
 本 Runbook 规定 `workspace_analysis` 的发布、灰度和回滚顺序。它只接受真实部署事实，不把本地 Compose、
@@ -9,7 +11,7 @@ fixture、截图或单元测试当成生产发布记录。
 `agent.question.mode='workspace_analysis'` 且绑定 `agent.workspace_analysis_run` 的事实，旧 API 就不能读取该
 Workspace 的 Question hash、Answer union 或 Timeline。该拓扑的回滚方式固定为：
 
-1. 保留 current API 作为兼容 reader；
+1. 保留能够读取 v1/v2 的 current API 与配套 Web；
 2. 关闭新 Workspace Analysis 准入；
 3. 排空或取消存量 Run；
 4. 只回退 Worker；
@@ -24,7 +26,7 @@ fail-closed 路由并单独验收；不能把盲目的 L4/L7 转发描述成 Wor
 
 ## 2. 仓库内发布演练
 
-发布候选必须先依次通过：
+需要重新验证相关发布风险时，按改动范围选择以下已有入口；本地完整演练记录见归档任务，不要求每次开发收尾全部重跑：
 
 ```bash
 make compose-workspace-analysis-compat-contract
@@ -36,7 +38,7 @@ make compose-workspace-analysis-otlp-smoke
 make compose-rag-browser-smoke
 ```
 
-这些门禁分别证明：
+原归档任务的 v1 演练已证明以下范围；不能将旧结果直接写成 v2 通过：
 
 - current migration 在 API/Worker feature-off 时可应用；
 - 四种旧/新 API/Worker 预启用组合保持固定 RAG，并对新模式 fail closed；
@@ -48,6 +50,10 @@ make compose-rag-browser-smoke
 - 含新事实后，API 以同一个 current image 和 feature-off 配置重建、`app-netns` ingress identity 不变，只有 Worker artifact 回退 legacy；历史 Answer、Turn、Timeline 和重连后的 SSE replay 仍可读；
 - 回滚后新模式返回稳定的非重试 `WORKSPACE_ANALYSIS_CAPABILITY_UNAVAILABLE`，固定 RAG 仍成功；
 - 固定 RAG 的桌面和移动浏览器链路保持可用。
+
+当前 `compose-workspace-analysis-smoke` 验证 v2 动态决策：两种成功输入具有不同的检索/阅读次数，支持省略 Git、重复检索/读取、预算终止、真实顺序时间线、Token 草稿、刷新与停止。实际执行结论见 [v2 Compose 记录](../../../.trellis/tasks/07-16-product-delivery/research/todo2-v2-compose-verification.md)。Worker restart 与 OTLP 脚本合同已适配 v2，未执行的新矩阵不能复用上面的 v1 PASS。
+
+动态 Answer/Timeline 与 NOTE_REVISION 通过显式 HTTP v2 operation 提供，v1 保留 RAG、历史 Analysis v1 与 Claim 响应。当前生产通过 v1 新建分析返回版本不支持 409，新建分析或访问新事实须迁移到 v2；旧记录 replay 保持原身份。固定原基线的 OpenAPI breaking 已从 21 error / 5 warning 修复为 0 / 0，未替换 base 或忽略报告。后续部署须同步 API/Web；当前修复与首次部署的区别见 [公共契约记录](../../../.trellis/tasks/07-16-product-delivery/research/public-contract-upgrade.md)。
 
 演练成功不代表目标环境已经迁移、灰度、观察或回滚。
 本地 Collector 演练也不代表生产 OTLP backend、告警或观察窗口已经验收。
@@ -114,7 +120,7 @@ Worker 通过 OTLP 导出的低基数指标为
 2. 查询所有 `queued|running` Workspace Analysis Run；让其完成，或通过公开 Workflow cancel 在安全检查点终止。
 3. 调查所有 Unknown、receipt failure 和 reserved budget；不得伪造成功或直接删除事实。
 4. 确认没有可运行的新 Definition 节点或未结算 reservation。
-5. 保留 current API version/兼容读取能力和稳定 ingress；如关闭准入需要重建 API，必须继续使用同一个批准的 current image。只把 Worker artifact 回退到批准的 legacy 版本。
+5. 保留 current API/Web 的 v1/v2 兼容读取能力和稳定 ingress；如关闭准入需要重建 API，必须继续使用同一个批准的 current image。只有确认旧 Worker 能承担全部剩余队列后，才回退 Worker artifact；不能将仍可运行的 v2 或 NOTE 节点交给不认识其 Definition 的旧 Worker。
 6. 重读每个含新事实 Workspace 的 Answer、latest Turn、Timeline 和 SSE；核对事实投影未变。
 7. 运行固定 RAG 回归。保留 schema、Question、Run、operation、receipt、candidate 和 proof。
 

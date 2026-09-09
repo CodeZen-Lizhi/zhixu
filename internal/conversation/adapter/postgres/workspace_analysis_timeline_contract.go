@@ -10,6 +10,7 @@ import (
 
 type workspaceAnalysisTimelineRunRow struct {
 	analysisRunID, workspaceID, answerID, workflowRunID foundation.ID
+	definitionVersion, policyVersion                    int64
 	status                                              string
 	terminationReason                                   *string
 	modelCalls, toolCalls, sourceReads                  int64
@@ -49,7 +50,14 @@ type workspaceAnalysisTimelineSortableItem struct {
 
 func scanWorkspaceAnalysisTimelineOperation(row scanner) (workspaceAnalysisTimelineOperationRow, error) {
 	var value workspaceAnalysisTimelineOperationRow
-	err := row.Scan(
+	if err := row.Scan(workspaceAnalysisTimelineOperationScanTargets(&value)...); err != nil {
+		return workspaceAnalysisTimelineOperationRow{}, consistency(ErrorCodePersistenceCorrupt, err)
+	}
+	return value, nil
+}
+
+func workspaceAnalysisTimelineOperationScanTargets(value *workspaceAnalysisTimelineOperationRow) []any {
+	return []any{
 		&value.nodeKey, &value.operationKind, &value.ordinal, &value.callKind, &value.status,
 		&value.durationMS, &value.errorCode,
 		&value.modelCallStatus, &value.inputTokens, &value.outputTokens,
@@ -58,11 +66,7 @@ func scanWorkspaceAnalysisTimelineOperation(row scanner) (workspaceAnalysisTimel
 		&value.searchHitCount, &value.searchDegradations,
 		&value.sourceEvidenceRef, &value.sourceContentHash, &value.sourceTruncated,
 		&value.citationValid, &value.citationInvalid, &value.citationReasons,
-	)
-	if err != nil {
-		return workspaceAnalysisTimelineOperationRow{}, consistency(ErrorCodePersistenceCorrupt, err)
 	}
-	return value, nil
 }
 
 func workspaceAnalysisTimelineOperationItem(
@@ -116,9 +120,17 @@ func workspaceAnalysisTimelineOperationSummary(
 	contract agentdomain.WorkspaceAnalysisOperationContract,
 	row workspaceAnalysisTimelineOperationRow,
 ) (*conversationdomain.WorkspaceAnalysisTimelineSummary, error) {
+	return workspaceAnalysisTimelineOperationSummaryForVersion(contract, row, 1)
+}
+
+func workspaceAnalysisTimelineOperationSummaryForVersion(
+	contract agentdomain.WorkspaceAnalysisOperationContract,
+	row workspaceAnalysisTimelineOperationRow,
+	definitionVersion int64,
+) (*conversationdomain.WorkspaceAnalysisTimelineSummary, error) {
 	summary := &conversationdomain.WorkspaceAnalysisTimelineSummary{}
 	switch contract.Kind {
-	case agentdomain.WorkspaceAnalysisOperationRetrievalPlan, agentdomain.WorkspaceAnalysisOperationAnswerSynthesis,
+	case agentdomain.WorkspaceAnalysisOperationDecision, agentdomain.WorkspaceAnalysisOperationRetrievalPlan, agentdomain.WorkspaceAnalysisOperationAnswerSynthesis,
 		agentdomain.WorkspaceAnalysisOperationFaithfulnessReview:
 		if row.modelCallStatus == nil || *row.modelCallStatus != "SUCCEEDED" || row.inputTokens == nil || row.outputTokens == nil {
 			return nil, errors.New("workspace analysis timeline model usage is incomplete")
@@ -162,7 +174,13 @@ func workspaceAnalysisTimelineOperationSummary(
 	default:
 		return nil, errors.New("workspace analysis timeline operation summary kind is unsupported")
 	}
-	if err := summary.Validate(); err != nil {
+	var err error
+	if definitionVersion == 2 {
+		err = summary.ValidateV2()
+	} else {
+		err = summary.Validate()
+	}
+	if err != nil {
 		return nil, err
 	}
 	return summary, nil
@@ -199,8 +217,12 @@ func workspaceAnalysisTimelineFromRows(
 	if run.cost != nil && run.maxCost != nil {
 		budget.EstimatedCostMicrounits = &conversationdomain.WorkspaceAnalysisTimelineCounter{Used: *run.cost, Max: *run.maxCost}
 	}
+	schemaVersion := conversationdomain.WorkspaceAnalysisTimelineSchemaVersionV1
+	if run.definitionVersion == 2 {
+		schemaVersion = conversationdomain.WorkspaceAnalysisTimelineSchemaVersionV2
+	}
 	return conversationdomain.WorkspaceAnalysisTimeline{
-		SchemaID: conversationdomain.WorkspaceAnalysisTimelineSchemaID, SchemaVersion: conversationdomain.WorkspaceAnalysisTimelineSchemaVersionV1,
+		SchemaID: conversationdomain.WorkspaceAnalysisTimelineSchemaID, SchemaVersion: schemaVersion,
 		WorkspaceID: run.workspaceID, AnswerID: run.answerID, AnalysisRunID: run.analysisRunID,
 		RunStatus: conversationdomain.WorkspaceAnalysisTimelineRunStatus(run.status), TerminationReason: run.terminationReason,
 		Items: items, Budget: budget, LatestServerEventSequence: run.latestServerEventSequence,

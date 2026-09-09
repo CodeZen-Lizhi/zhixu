@@ -116,7 +116,7 @@ const conversationIdFromPage = (page: Page): string => {
 
 const isQuestionRequest = (request: Request, conversationId: string): boolean => {
   const url = new URL(request.url());
-  return request.method() === "POST" && url.pathname === `/api/v1/conversations/${conversationId}/questions`;
+  return request.method() === "POST" && url.pathname === `/api/v2/conversations/${conversationId}/questions`;
 };
 
 const assertKeywordRagRequest = (request: Request): void => {

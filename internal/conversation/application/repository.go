@@ -40,6 +40,7 @@ type CreateConversationResult struct {
 type SubmitQuestionCommand struct {
 	Request        conversationdomain.QuestionRequest
 	IdempotencyKey string
+	APIVersion     APIVersion
 }
 
 // SubmitQuestionRecord 是原子派发端口接收的 canonical Question 绑定。
@@ -47,6 +48,7 @@ type SubmitQuestionRecord struct {
 	Request        conversationdomain.QuestionRequest
 	IdempotencyKey string
 	RequestHash    string
+	APIVersion     APIVersion
 }
 
 // SubmitQuestionResult 返回 Question、Answer slot 与持久 Workflow/Job 身份。
@@ -97,6 +99,7 @@ type ListTurnsQuery struct {
 	Cursor         *conversationdomain.TurnCursor
 	Limit          int
 	Latest         bool
+	APIVersion     APIVersion
 }
 
 // TurnPage 是 Question 与 Answer 读投影的有界页面。
@@ -117,6 +120,10 @@ type WorkflowRunView struct {
 	Status    workflowdomain.RunStatus
 	Version   int64
 	UpdatedAt time.Time
+	// Definition metadata is read from the immutable Workflow binding and is
+	// never serialized into the public workflow response.
+	DefinitionKey     string `json:"-"`
+	DefinitionVersion int64  `json:"-"`
 }
 
 // RAGCurrentStage 是刷新后可从持久事件恢复的冻结执行阶段。

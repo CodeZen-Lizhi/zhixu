@@ -25,6 +25,7 @@ import type {
     Problem,
     TimelineAggregateType,
     WorkspaceAnalysisTimeline,
+    WorkspaceAnalysisTimelineResponse,
 } from '../models/index';
 
 export interface AnalyzeKnowledgeImpactRequest {
@@ -52,6 +53,11 @@ export interface GetKnowledgeTimelineEventRequest {
 }
 
 export interface GetWorkspaceAnalysisTimelineRequest {
+    answerId: string;
+    workspaceId: string;
+}
+
+export interface GetWorkspaceAnalysisTimelineV2Request {
     answerId: string;
     workspaceId: string;
 }
@@ -400,6 +406,7 @@ export class TimelineApi extends runtime.BaseAPI {
     }
 
     /**
+     * Preserves the v1 response contract.
      */
     async getWorkspaceAnalysisTimelineRaw(requestParameters: GetWorkspaceAnalysisTimelineRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<WorkspaceAnalysisTimeline>> {
         const requestOptions = await this.getWorkspaceAnalysisTimelineRequestOpts(requestParameters);
@@ -409,9 +416,74 @@ export class TimelineApi extends runtime.BaseAPI {
     }
 
     /**
+     * Preserves the v1 response contract.
      */
     async getWorkspaceAnalysisTimeline(requestParameters: GetWorkspaceAnalysisTimelineRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<WorkspaceAnalysisTimeline> {
         const response = await this.getWorkspaceAnalysisTimelineRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for getWorkspaceAnalysisTimelineV2 without sending the request
+     */
+    async getWorkspaceAnalysisTimelineV2RequestOpts(requestParameters: GetWorkspaceAnalysisTimelineV2Request): Promise<runtime.RequestOpts> {
+        if (requestParameters['answerId'] == null) {
+            throw new runtime.RequiredError(
+                'answerId',
+                'Required parameter "answerId" was null or undefined when calling getWorkspaceAnalysisTimelineV2().'
+            );
+        }
+
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling getWorkspaceAnalysisTimelineV2().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        if (requestParameters['workspaceId'] != null) {
+            queryParameters['workspace_id'] = requestParameters['workspaceId'];
+        }
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v2/answers/{answer_id}/analysis-timeline`;
+        urlPath = urlPath.replace('{answer_id}', encodeURIComponent(String(requestParameters['answerId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * Uses the v2 HTTP representation and also accepts compatible historical records.
+     */
+    async getWorkspaceAnalysisTimelineV2Raw(requestParameters: GetWorkspaceAnalysisTimelineV2Request, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<WorkspaceAnalysisTimelineResponse>> {
+        const requestOptions = await this.getWorkspaceAnalysisTimelineV2RequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Uses the v2 HTTP representation and also accepts compatible historical records.
+     */
+    async getWorkspaceAnalysisTimelineV2(requestParameters: GetWorkspaceAnalysisTimelineV2Request, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<WorkspaceAnalysisTimelineResponse> {
+        const response = await this.getWorkspaceAnalysisTimelineV2Raw(requestParameters, initOverrides);
         return await response.value();
     }
 

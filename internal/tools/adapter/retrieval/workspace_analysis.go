@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -60,13 +61,17 @@ func NewSearchKnowledgeV2Executor(
 
 // Execute 最多返回五个 E<n>，并在私有 binding 中冻结完整 Citation 身份和前 1-3 个读取引用。
 func (executor *SearchKnowledgeV2Executor) Execute(ctx context.Context, request toolsapplication.ExecutorRequest) (toolsapplication.ExecutorResult, error) {
+	return executor.execute(ctx, request, searchKnowledgeV2Ref, maxWorkspaceAnalysisSourceReads)
+}
+
+func (executor *SearchKnowledgeV2Executor) execute(ctx context.Context, request toolsapplication.ExecutorRequest, ref toolsdomain.ToolRef, selectedLimit int) (toolsapplication.ExecutorResult, error) {
 	if executor == nil || nilDependency(executor.search) || nilDependency(executor.citations) {
 		return toolsapplication.ExecutorResult{}, dependencyUnavailable(errors.New("retrieval search or citation evidence store is unavailable"))
 	}
 	if ctx == nil {
 		return toolsapplication.ExecutorResult{}, inputError(errorCodeSearchInputInvalid, errors.New("search context is required"))
 	}
-	if err := validateExactRequestTool(request, searchKnowledgeV2Ref); err != nil {
+	if err := validateExactRequestTool(request, ref); err != nil {
 		return toolsapplication.ExecutorResult{}, inputError(errorCodeSearchInputInvalid, err)
 	}
 	input, err := decodeSearchKnowledgeV2Input(request.Arguments)
@@ -95,11 +100,11 @@ func (executor *SearchKnowledgeV2Executor) Execute(ctx context.Context, request 
 			return toolsapplication.ExecutorResult{}, err
 		}
 	}
-	output, privateBinding, err := searchKnowledgeV2Documents(request.Identity.WorkspaceID, result, bindings)
+	output, privateBinding, err := searchKnowledgeDocuments(request.Identity.WorkspaceID, result, bindings, ref, selectedLimit)
 	if err != nil {
 		return toolsapplication.ExecutorResult{}, resultError(errorCodeSearchResultInvalid, err)
 	}
-	contract, found := toolsdomain.WorkspaceAnalysisResultReceiptContract(searchKnowledgeV2Ref)
+	contract, found := toolsdomain.WorkspaceAnalysisResultReceiptContract(ref)
 	if !found {
 		return toolsapplication.ExecutorResult{}, resultError(errorCodeSearchResultInvalid, errors.New("search receipt contract is unavailable"))
 	}
@@ -180,6 +185,10 @@ func searchKnowledgeV2Documents(
 	result retrievaldomain.SearchResult,
 	bindings []retrievalapplication.CitationSourceSpanBinding,
 ) (json.RawMessage, json.RawMessage, error) {
+	return searchKnowledgeDocuments(workspaceID, result, bindings, searchKnowledgeV2Ref, maxWorkspaceAnalysisSourceReads)
+}
+
+func searchKnowledgeDocuments(workspaceID foundation.ID, result retrievaldomain.SearchResult, bindings []retrievalapplication.CitationSourceSpanBinding, ref toolsdomain.ToolRef, selectedLimit int) (json.RawMessage, json.RawMessage, error) {
 	if len(result.Items) > maxWorkspaceAnalysisSearchHits {
 		return nil, nil, errors.New("search result exceeds workspace analysis hit limit")
 	}
@@ -197,7 +206,7 @@ func searchKnowledgeV2Documents(
 	}
 	binding := searchKnowledgeV2PrivateBinding{
 		Items:        make([]readSourceV3IdentityDocument, len(result.Items)),
-		SelectedRefs: make([]string, min(maxWorkspaceAnalysisSourceReads, len(result.Items))),
+		SelectedRefs: make([]string, min(selectedLimit, len(result.Items))),
 	}
 	seenCitations := make(map[string]struct{}, len(result.Items))
 	for index, item := range result.Items {
@@ -246,7 +255,7 @@ func searchKnowledgeV2Documents(
 	if err != nil {
 		return nil, nil, err
 	}
-	contract, found := toolsdomain.WorkspaceAnalysisResultReceiptContract(searchKnowledgeV2Ref)
+	contract, found := toolsdomain.WorkspaceAnalysisResultReceiptContract(ref)
 	if !found || int64(len(outputDocument)) > contract.MaxOutputBytes || int64(len(bindingDocument)) > contract.MaxPrivateBindingBytes {
 		return nil, nil, errors.New("search receipt documents exceed the frozen byte limits")
 	}
@@ -665,11 +674,18 @@ func validWorkspaceAnalysisText(value string, minimum, maximum int) bool {
 }
 
 func validEvidenceRef(value string, maximum int) bool {
-	return len(value) == 2 && value[0] == 'E' && value[1] >= '1' && value[1] <= byte('0'+maximum)
+	if maximum <= 5 {
+		return len(value) == 2 && value[0] == 'E' && value[1] >= '1' && value[1] <= byte('0'+maximum)
+	}
+	if !toolsdomain.ValidDynamicEvidenceRef(value) {
+		return false
+	}
+	n, _ := strconv.Atoi(value[1:])
+	return n <= maximum
 }
 
 func evidenceRef(ordinal int) string {
-	return string([]byte{'E', byte('0' + ordinal)})
+	return "E" + strconv.Itoa(ordinal)
 }
 
 func lowerHexValue(value string, length int) bool {

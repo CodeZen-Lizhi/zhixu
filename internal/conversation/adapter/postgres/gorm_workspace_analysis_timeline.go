@@ -9,13 +9,14 @@ import (
 	agentdomain "github.com/CodeZen-Lizhi/zhixu/internal/agent/domain"
 	conversationapplication "github.com/CodeZen-Lizhi/zhixu/internal/conversation/application"
 	conversationdomain "github.com/CodeZen-Lizhi/zhixu/internal/conversation/domain"
+	conversationworkflow "github.com/CodeZen-Lizhi/zhixu/internal/conversation/workflow"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"gorm.io/gorm"
 )
 
 const gormWorkspaceAnalysisTimelineRunSQL = `
 SELECT r.id::text,r.workspace_id::text,r.answer_id::text,r.workflow_run_id::text,
-       r.status,r.termination_reason,
+       r.status,r.termination_reason,r.definition_version,r.policy_version,
 	       (r.reserved_model_calls+r.settled_model_calls)::bigint,
 	       (r.reserved_tool_calls+r.settled_tool_calls)::bigint,
 	       (r.reserved_source_reads+r.settled_source_reads)::bigint,
@@ -46,8 +47,8 @@ LEFT JOIN LATERAL (
 WHERE node.run_id=?
 ORDER BY node.node_key`
 
-const gormWorkspaceAnalysisTimelineOperationsSQL = `
-SELECT operation.node_key,operation.operation_kind,operation.ordinal,operation.call_kind,operation.status,
+const gormWorkspaceAnalysisTimelineOperationColumnsSQL = `
+operation.node_key,operation.operation_kind,operation.ordinal,operation.call_kind,operation.status,
        CASE WHEN operation.completed_at IS NULL OR operation.started_at IS NULL THEN NULL
             ELSE floor(extract(epoch FROM (operation.completed_at-operation.started_at))*1000)::bigint END,
        operation.error_code,
@@ -82,7 +83,9 @@ SELECT operation.node_key,operation.operation_kind,operation.ordinal,operation.c
                SELECT DISTINCT result.value->>'reason_code' AS code
                FROM jsonb_array_elements(receipt.document->'results') AS result(value)
            ) AS reason
-       ) END
+       ) END`
+
+const gormWorkspaceAnalysisTimelineOperationJoinsSQL = `
 FROM agent.workspace_analysis_operation AS operation
 LEFT JOIN agent.model_call AS model_call ON model_call.id=operation.model_call_id
 LEFT JOIN workflow.tool_call AS tool_call
@@ -98,9 +101,20 @@ LEFT JOIN LATERAL (
       AND result_receipt.workspace_id=operation.workspace_id
       AND result_receipt.workflow_run_id=operation.workflow_run_id
       AND result_receipt.node_run_id=operation.node_run_id
-) AS receipt ON operation.status='SUCCEEDED' AND operation.call_kind='TOOL'
+) AS receipt ON operation.status='SUCCEEDED' AND operation.call_kind='TOOL'`
+
+const gormWorkspaceAnalysisTimelineOperationsSQL = `SELECT ` + gormWorkspaceAnalysisTimelineOperationColumnsSQL + gormWorkspaceAnalysisTimelineOperationJoinsSQL + `
 WHERE operation.analysis_run_id=? AND operation.workspace_id=? AND operation.workflow_run_id=?
 ORDER BY operation.node_key,operation.operation_kind,operation.ordinal`
+
+// LEFT JOIN keeps a missing journal row visible as corrupt persistence instead of silently omitting an operation.
+const gormWorkspaceAnalysisTimelineOperationsV2SQL = `SELECT journal.sequence,` + gormWorkspaceAnalysisTimelineOperationColumnsSQL + gormWorkspaceAnalysisTimelineOperationJoinsSQL + `
+LEFT JOIN agent.workspace_analysis_journal AS journal
+  ON journal.operation_id=operation.id
+ AND journal.analysis_run_id=operation.analysis_run_id
+ AND journal.workspace_id=operation.workspace_id
+WHERE operation.analysis_run_id=? AND operation.workspace_id=? AND operation.workflow_run_id=?
+ORDER BY journal.sequence`
 
 // GetWorkspaceAnalysisTimeline 在只读一致快照中构造脱敏时间线。
 func (repository *GORMRepository) GetWorkspaceAnalysisTimeline(ctx context.Context, query conversationapplication.WorkspaceAnalysisTimelineQuery) (conversationdomain.WorkspaceAnalysisTimeline, error) {
@@ -110,11 +124,17 @@ func (repository *GORMRepository) GetWorkspaceAnalysisTimeline(ctx context.Conte
 	if ctx == nil || !validCanonicalID(query.WorkspaceID) || !validCanonicalID(query.AnswerID) || query.WorkspaceID == query.AnswerID {
 		return conversationdomain.WorkspaceAnalysisTimeline{}, invalid(ErrorCodePersistenceInvalid, errors.New("workspace analysis timeline query is invalid"))
 	}
+	if err := query.APIVersion.Validate(); err != nil {
+		return conversationdomain.WorkspaceAnalysisTimeline{}, err
+	}
 	var timeline conversationdomain.WorkspaceAnalysisTimeline
 	options := foundation.TransactionOptions{Isolation: foundation.TransactionIsolationRepeatableRead, ReadOnly: true}
 	err := withinConversationTransaction(ctx, repository.uow, options, func(ctx context.Context, tx *gorm.DB, _ foundation.TransactionScope) error {
 		run, err := gormLoadWorkspaceAnalysisTimelineRun(ctx, tx, query)
 		if err != nil {
+			return err
+		}
+		if err := query.APIVersion.CheckWorkflow(conversationworkflow.WorkspaceAnalysisDefinitionKey, run.definitionVersion); err != nil {
 			return err
 		}
 		items, err := gormLoadWorkspaceAnalysisTimelineItems(ctx, tx, run)
@@ -142,6 +162,7 @@ func gormLoadWorkspaceAnalysisTimelineRun(
 	var analysisRunID, workspaceID, answerID, workflowRunID string
 	err := gormScanRow(tx.WithContext(ctx).Raw(gormWorkspaceAnalysisTimelineRunSQL, string(query.WorkspaceID), string(query.AnswerID))).Scan(
 		&analysisRunID, &workspaceID, &answerID, &workflowRunID, &row.status, &row.terminationReason,
+		&row.definitionVersion, &row.policyVersion,
 		&row.modelCalls, &row.toolCalls, &row.sourceReads, &row.inputTokens, &row.outputTokens,
 		&row.maxModelCalls, &row.maxToolCalls, &row.maxSourceReads, &row.maxInputTokens, &row.maxOutputTokens,
 		&row.cost, &row.maxCost, &row.latestServerEventSequence,
@@ -161,7 +182,8 @@ func gormLoadWorkspaceAnalysisTimelineRun(
 		*ids[index] = parsed
 	}
 	if row.workspaceID != query.WorkspaceID || row.answerID != query.AnswerID || row.analysisRunID == row.answerID ||
-		row.analysisRunID == row.workspaceID || row.latestServerEventSequence < 0 {
+		row.analysisRunID == row.workspaceID || row.latestServerEventSequence < 0 ||
+		!validWorkspaceAnalysisTimelineVersions(row.definitionVersion, row.policyVersion) || (row.cost == nil) != (row.maxCost == nil) {
 		return workspaceAnalysisTimelineRunRow{}, consistency(ErrorCodePersistenceCorrupt, errors.New("workspace analysis timeline run scope is inconsistent"))
 	}
 	return row, nil
@@ -172,6 +194,9 @@ func gormLoadWorkspaceAnalysisTimelineItems(
 	tx *gorm.DB,
 	run workspaceAnalysisTimelineRunRow,
 ) ([]workspaceAnalysisTimelineSortableItem, error) {
+	if run.definitionVersion == 2 {
+		return gormLoadWorkspaceAnalysisTimelineOperationsV2(ctx, tx, run)
+	}
 	nodes, err := gormLoadWorkspaceAnalysisTimelineNodes(ctx, tx, run)
 	if err != nil {
 		return nil, err
@@ -192,6 +217,39 @@ func gormLoadWorkspaceAnalysisTimelineItems(
 	})
 	for index := range items {
 		items[index].item.Sequence = index + 1
+	}
+	return items, nil
+}
+
+func gormLoadWorkspaceAnalysisTimelineOperationsV2(
+	ctx context.Context,
+	tx *gorm.DB,
+	run workspaceAnalysisTimelineRunRow,
+) ([]workspaceAnalysisTimelineSortableItem, error) {
+	rows, err := tx.WithContext(ctx).Raw(gormWorkspaceAnalysisTimelineOperationsV2SQL, string(run.analysisRunID), string(run.workspaceID), string(run.workflowRunID)).Rows()
+	if err != nil {
+		return nil, classify(err, ErrorCodeDatabaseUnavailable)
+	}
+	defer rows.Close()
+	items := make([]workspaceAnalysisTimelineSortableItem, 0, conversationdomain.MaxWorkspaceAnalysisTimelineItemsV2)
+	for rows.Next() {
+		var sequence *int64
+		var row workspaceAnalysisTimelineOperationRow
+		targets := append([]any{&sequence}, workspaceAnalysisTimelineOperationScanTargets(&row)...)
+		if err := rows.Scan(targets...); err != nil {
+			return nil, consistency(ErrorCodePersistenceCorrupt, err)
+		}
+		if sequence == nil || *sequence != int64(len(items)+1) || len(items) >= conversationdomain.MaxWorkspaceAnalysisTimelineItemsV2 {
+			return nil, consistency(ErrorCodePersistenceCorrupt, errors.New("workspace analysis v2 journal sequence is missing, discontinuous or out of bounds"))
+		}
+		item, buildErr := workspaceAnalysisTimelineOperationItemV2(run, row, int(*sequence))
+		if buildErr != nil {
+			return nil, consistency(ErrorCodePersistenceCorrupt, buildErr)
+		}
+		items = append(items, workspaceAnalysisTimelineSortableItem{item: item})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, classify(err, ErrorCodeDatabaseUnavailable)
 	}
 	return items, nil
 }

@@ -158,7 +158,7 @@ export interface WorkspaceAnalysisBudgetSummary {
   estimatedCostMicrounits: number | null;
 }
 export interface WorkspaceAnalysisProposalSuggestion { summary: string; citationIds: string[]; href: "/proposals" }
-export interface WorkspaceAnalysisAnswerResult {
+export interface WorkspaceAnalysisAnswerResultV1 {
   resultType: "workspace_analysis";
   schemaId: "conversation.workspace_analysis_answer";
   schemaVersion: "v1";
@@ -172,6 +172,15 @@ export interface WorkspaceAnalysisAnswerResult {
     terminationReason: "COMPLETED";
   };
 }
+export interface WorkspaceAnalysisBudgetSummaryV2 extends Omit<WorkspaceAnalysisBudgetSummary, "modelCalls"> { modelCalls: number }
+export interface WorkspaceAnalysisAnswerResultV2 extends Omit<WorkspaceAnalysisAnswerResultV1, "schemaVersion" | "payload"> {
+  schemaVersion: "v2";
+  payload: Omit<WorkspaceAnalysisAnswerResultV1["payload"], "gitStatus" | "budget"> & {
+    gitStatus: WorkspaceAnalysisGitStatus | null;
+    budget: WorkspaceAnalysisBudgetSummaryV2;
+  };
+}
+export type WorkspaceAnalysisAnswerResult = WorkspaceAnalysisAnswerResultV1 | WorkspaceAnalysisAnswerResultV2;
 export type WorkspaceAnalysisRefusalReasonCode = "WORKSPACE_ANALYSIS_EVIDENCE_INSUFFICIENT" | "WORKSPACE_ANALYSIS_CITATION_INVALID" | "WORKSPACE_ANALYSIS_FAITHFULNESS_REJECTED" | "WORKSPACE_ANALYSIS_MODEL_REFUSED";
 export interface WorkspaceAnalysisRefusalResult {
   resultType: "workspace_analysis_refusal";
@@ -287,13 +296,13 @@ export interface WorkspaceAnalysisCancelledAnswer extends AnswerBase {
 export type Answer = PendingAnswer | CompletedAnswer | RefusedAnswer | ClarificationAnswer | WorkspaceAnalysisClarificationAnswer | WorkspaceAnalysisCompletedAnswer | WorkspaceAnalysisRefusedAnswer | WorkspaceAnalysisFailedAnswer | WorkspaceAnalysisCancelledAnswer;
 
 export type WorkspaceAnalysisTimelineRunStatus = "queued" | "running" | "succeeded" | "refused" | "clarification_required" | "failed" | "cancelled";
-export type WorkspaceAnalysisTimelinePhase = "inspect_workspace" | "retrieve_evidence" | "read_evidence" | "synthesize_answer" | "validate_citations" | "review_publish";
+export type WorkspaceAnalysisTimelinePhase = "decide_next" | "inspect_workspace" | "retrieve_evidence" | "read_evidence" | "synthesize_answer" | "validate_citations" | "review_publish";
 export type WorkspaceAnalysisTimelineItemKind = "node" | "model" | "tool";
 export type WorkspaceAnalysisTimelineItemStatus = "pending" | "waiting" | "started" | "succeeded" | "failed" | "refused" | "unknown" | "cancelled";
 export interface WorkspaceAnalysisTimelineCounter { used: number; max: number }
 export type WorkspaceAnalysisTimelineToolRef =
-  | { name: "ReadGitStatus" | "SearchKnowledge"; version: 2 }
-  | { name: "ReadSource" | "ValidateCitation"; version: 3 };
+  | { name: "ReadGitStatus" | "SearchKnowledge"; version: 2 | 3 }
+  | { name: "ReadSource" | "ValidateCitation"; version: 3 | 4 };
 export type WorkspaceAnalysisTimelineSummary =
   | { kind: "git"; git: WorkspaceAnalysisGitStatus }
   | { kind: "search"; search: { hitCount: number; degradationCodes: string[] } }
@@ -312,7 +321,7 @@ export interface WorkspaceAnalysisTimelineItem {
 }
 export interface WorkspaceAnalysisTimeline {
   schemaId: "conversation.workspace_analysis_timeline";
-  schemaVersion: "v1";
+  schemaVersion: "v1" | "v2";
   workspaceId: string;
   answerId: string;
   analysisRunId: string;
@@ -546,6 +555,16 @@ const decodeWorkspaceAnalysisBudget = (value: unknown, field: string): Workspace
     estimatedCostMicrounits: nullable(value.estimated_cost_microunits, (item) => integer(item, `${field}.estimated_cost_microunits`, 0)),
   };
 };
+const decodeWorkspaceAnalysisBudgetV2 = (value: unknown, field: string): WorkspaceAnalysisBudgetSummaryV2 => {
+  if (!isRecord(value)) throw invalidResponse(field);
+  exact(value, ["model_calls", "tool_calls", "input_tokens", "output_tokens", "estimated_cost_microunits"], field);
+  const modelCalls = integer(value.model_calls, `${field}.model_calls`, 5, 14);
+  const toolCalls = integer(value.tool_calls, `${field}.tool_calls`, 3, 13);
+  const inputTokens = integer(value.input_tokens, `${field}.input_tokens`, 0, 917_504);
+  const outputTokens = integer(value.output_tokens, `${field}.output_tokens`, 0, 11_264);
+  if (modelCalls !== toolCalls + 2 || inputTokens > modelCalls * 65_536 || outputTokens > (modelCalls - 2) * 512 + 4_096 + 1_024) throw invalidResponse(field);
+  return { modelCalls, toolCalls, inputTokens, outputTokens, estimatedCostMicrounits: nullable(value.estimated_cost_microunits, (item) => integer(item, `${field}.estimated_cost_microunits`, 0)) };
+};
 const decodeWorkspaceAnalysisSuggestion = (value: unknown, citations: ReadonlySet<string>, field: string): WorkspaceAnalysisProposalSuggestion | null => {
   if (value === null) return null;
   if (!isRecord(value)) throw invalidResponse(field);
@@ -555,6 +574,7 @@ const decodeWorkspaceAnalysisSuggestion = (value: unknown, citations: ReadonlySe
   return { summary: bounded(value.summary, `${field}.summary`, 4096), citationIds, href: "/proposals" };
 };
 const decodeWorkspaceAnalysisAnswer = (value: Record<string, unknown>): WorkspaceAnalysisAnswerResult => {
+  if (value.schema_version === "v2") return decodeWorkspaceAnalysisAnswerV2(value);
   exact(value, ["result_type", "schema_id", "schema_version", "model_run_ref", "payload"], "result");
   if (value.result_type !== "workspace_analysis" || value.schema_id !== "conversation.workspace_analysis_answer" || value.schema_version !== "v1" || !isRecord(value.payload)) throw invalidResponse("result");
   const payload = value.payload;
@@ -569,6 +589,23 @@ const decodeWorkspaceAnalysisAnswer = (value: Record<string, unknown>): Workspac
       proposalSuggestion: decodeWorkspaceAnalysisSuggestion(payload.proposal_suggestion, new Set(citations.map((citation) => citation.id)), "result.payload.proposal_suggestion"), terminationReason: "COMPLETED",
     },
   };
+};
+const decodeWorkspaceAnalysisAnswerV2 = (value: Record<string, unknown>): WorkspaceAnalysisAnswerResultV2 => {
+  exact(value, ["result_type", "schema_id", "schema_version", "model_run_ref", "payload"], "result");
+  if (value.result_type !== "workspace_analysis" || value.schema_id !== "conversation.workspace_analysis_answer" || value.schema_version !== "v2" || !isRecord(value.payload)) throw invalidResponse("result");
+  const payload = value.payload;
+  exact(payload, ["answer_markdown", "citations", "git_status", "budget", "proposal_suggestion", "termination_reason"], "result.payload");
+  const modelRunRef = uuid(value.model_run_ref, "result.model_run_ref");
+  const citations = unique(array(payload.citations, "result.payload.citations", 32, decodeCitationIdentity, 1), "result.payload.citations", (item) => item.id);
+  unique(citations, "result.payload.citations", (item) => JSON.stringify([item.workspaceId, item.indexVersionId, item.chunkId, item.sourceVersionId, item.sourceSpanId]));
+  const first = citations[0];
+  if (payload.termination_reason !== "COMPLETED" || citations.some((item) => item.workspaceId !== first?.workspaceId || item.indexVersionId !== first.indexVersionId ||
+      [item.workspaceId, item.indexVersionId, item.chunkId, item.sourceVersionId, item.sourceSpanId].includes(modelRunRef))) throw invalidResponse("result.payload.citations");
+  return { resultType: "workspace_analysis", schemaId: "conversation.workspace_analysis_answer", schemaVersion: "v2", modelRunRef,
+    payload: { answerMarkdown: bounded(payload.answer_markdown, "result.payload.answer_markdown", 65_536), citations,
+      gitStatus: nullable(payload.git_status, (item) => decodeWorkspaceAnalysisGitStatus(item, "result.payload.git_status")),
+      budget: decodeWorkspaceAnalysisBudgetV2(payload.budget, "result.payload.budget"),
+      proposalSuggestion: decodeWorkspaceAnalysisSuggestion(payload.proposal_suggestion, new Set(citations.map((citation) => citation.id)), "result.payload.proposal_suggestion"), terminationReason: "COMPLETED" } };
 };
 const decodeResult = (value: unknown): AnswerResult => {
   if (!isRecord(value)) throw invalidResponse("result");
@@ -641,7 +678,7 @@ export const decodeAnswer = (value: unknown): Answer => {
   const citations = unique(array(value.citations, "answer.citations", 500, decodeAnswerCitation), "answer.citations", (item) => item.id);
   const result = value.result === undefined ? undefined : decodeResult(value.result);
   const resultType = value.result_type === undefined ? undefined : enumValue(value.result_type, ["rag_answer", "refusal", "clarification", "workspace_analysis", "workspace_analysis_refusal", "workspace_analysis_termination"], "answer.result_type");
-  const assistantText = value.assistant_text === undefined ? undefined : bounded(value.assistant_text, "answer.assistant_text", 16384);
+  const assistantText = value.assistant_text === undefined ? undefined : bounded(value.assistant_text, "answer.assistant_text", result?.resultType === "workspace_analysis" ? 65_536 : 16_384);
   const retrievalSummary = decodeSummary(value.retrieval_summary);
   if (publicationStatus === "pending") {
     if (result !== undefined || resultType !== undefined || assistantText !== undefined || citations.length !== 0 || retrievalSummary !== null) throw invalidResponse("answer.pending");
@@ -712,6 +749,7 @@ export const decodeAnswer = (value: unknown): Answer => {
 };
 
 const workspaceAnalysisPhases = ["inspect_workspace", "retrieve_evidence", "read_evidence", "synthesize_answer", "validate_citations", "review_publish"] as const;
+const workspaceAnalysisPhasesV2 = ["decide_next", ...workspaceAnalysisPhases] as const;
 const workspaceAnalysisFailedItemErrors = ["WORKSPACE_ANALYSIS_BUDGET_EXHAUSTED", "WORKSPACE_ANALYSIS_RECEIPT_INVALID", "WORKSPACE_ANALYSIS_DEADLINE_EXCEEDED", "WORKSPACE_ANALYSIS_MODEL_FAILED", "WORKSPACE_ANALYSIS_TOOL_FAILED", "WORKSPACE_ANALYSIS_RUNTIME_FAILED"] as const;
 const workspaceAnalysisStableCode = (value: unknown, field: string): string => {
   const code = bounded(value, field, 128);
@@ -739,7 +777,7 @@ const decodeWorkspaceAnalysisTimelineCounter = (value: unknown, field: string): 
   const used = integer(value.used, `${field}.used`, 0, max);
   return { used, max };
 };
-const decodeWorkspaceAnalysisTimelineSummary = (value: unknown, field: string): WorkspaceAnalysisTimelineSummary | null => {
+const decodeWorkspaceAnalysisTimelineSummary = (value: unknown, field: string, schemaVersion: "v1" | "v2"): WorkspaceAnalysisTimelineSummary | null => {
   if (value === null) return null;
   if (!isRecord(value)) throw invalidResponse(field);
   const kind = enumValue(value.kind, ["git", "search", "source", "citation_validation", "model_usage"], `${field}.kind`);
@@ -757,53 +795,56 @@ const decodeWorkspaceAnalysisTimelineSummary = (value: unknown, field: string): 
     exact(value, ["kind", "source"], field);
     if (!isRecord(value.source)) throw invalidResponse(`${field}.source`);
     exact(value.source, ["evidence_ref", "content_hash", "truncated"], `${field}.source`);
-    const evidenceRef = bounded(value.source.evidence_ref, `${field}.source.evidence_ref`, 2);
+    const evidenceRef = bounded(value.source.evidence_ref, `${field}.source.evidence_ref`, schemaVersion === "v2" ? 3 : 2);
     const contentHash = string(value.source.content_hash, `${field}.source.content_hash`);
-    if (!/^E[1-3]$/.test(evidenceRef) || !lowerHashPattern.test(contentHash)) throw invalidResponse(`${field}.source`);
+    const evidencePattern = schemaVersion === "v2" ? /^E(?:[1-9]|[12][0-9]|3[0-2])$/ : /^E[1-3]$/;
+    if (!evidencePattern.test(evidenceRef) || !lowerHashPattern.test(contentHash)) throw invalidResponse(`${field}.source`);
     return { kind, source: { evidenceRef, contentHash, truncated: boolean(value.source.truncated, `${field}.source.truncated`) } };
   }
   if (kind === "citation_validation") {
     exact(value, ["kind", "citation_validation"], field);
     if (!isRecord(value.citation_validation)) throw invalidResponse(`${field}.citation_validation`);
     exact(value.citation_validation, ["valid_count", "invalid_count", "reason_codes"], `${field}.citation_validation`);
-    const validCount = integer(value.citation_validation.valid_count, `${field}.citation_validation.valid_count`, 0, 3);
-    const invalidCount = integer(value.citation_validation.invalid_count, `${field}.citation_validation.invalid_count`, 0, 3);
+    const limit = schemaVersion === "v2" ? 32 : 3;
+    const validCount = integer(value.citation_validation.valid_count, `${field}.citation_validation.valid_count`, 0, limit);
+    const invalidCount = integer(value.citation_validation.invalid_count, `${field}.citation_validation.invalid_count`, 0, limit);
     const reasonCodes = requireSortedCodes(unique(array(value.citation_validation.reason_codes, `${field}.citation_validation.reason_codes`, 4, (entry, entryField) => enumValue(entry, ["OK", "BINDING_MISMATCH", "CITATION_UNRESOLVABLE", "EVIDENCE_INELIGIBLE"], entryField), 1), `${field}.citation_validation.reason_codes`), `${field}.citation_validation.reason_codes`);
-    if (validCount + invalidCount < 1 || validCount + invalidCount > 3) throw invalidResponse(`${field}.citation_validation`);
+    if (validCount + invalidCount < 1 || validCount + invalidCount > limit || schemaVersion === "v2" && ((validCount > 0) !== reasonCodes.includes("OK") || invalidCount === 0 && reasonCodes.length !== 1 || invalidCount > 0 && reasonCodes.length === 1 && reasonCodes[0] === "OK")) throw invalidResponse(`${field}.citation_validation`);
     return { kind, citationValidation: { validCount, invalidCount, reasonCodes } };
   }
   exact(value, ["kind", "model_usage"], field);
   if (!isRecord(value.model_usage)) throw invalidResponse(`${field}.model_usage`);
   exact(value.model_usage, ["input_tokens", "output_tokens"], `${field}.model_usage`);
-  return { kind, modelUsage: { inputTokens: integer(value.model_usage.input_tokens, `${field}.model_usage.input_tokens`, 0, 65_536), outputTokens: integer(value.model_usage.output_tokens, `${field}.model_usage.output_tokens`, 0, 5_376) } };
+  return { kind, modelUsage: { inputTokens: integer(value.model_usage.input_tokens, `${field}.model_usage.input_tokens`, 0, 65_536), outputTokens: integer(value.model_usage.output_tokens, `${field}.model_usage.output_tokens`, 0, schemaVersion === "v2" ? 4_096 : 5_376) } };
 };
-const decodeWorkspaceAnalysisTimelineItem = (value: unknown, field: string): WorkspaceAnalysisTimelineItem => {
+const decodeWorkspaceAnalysisTimelineItem = (value: unknown, field: string, schemaVersion: "v1" | "v2"): WorkspaceAnalysisTimelineItem => {
   if (!isRecord(value)) throw invalidResponse(field);
   exact(value, ["sequence", "kind", "phase", "status", "tool_ref", "duration_ms", "error_code", "summary"], field);
   const kind = enumValue(value.kind, ["node", "model", "tool"], `${field}.kind`);
-  const phase = enumValue(value.phase, workspaceAnalysisPhases, `${field}.phase`);
+  const phase = enumValue(value.phase, schemaVersion === "v2" ? workspaceAnalysisPhasesV2 : workspaceAnalysisPhases, `${field}.phase`);
   const status = enumValue(value.status, ["pending", "waiting", "started", "succeeded", "failed", "refused", "unknown", "cancelled"], `${field}.status`);
   const toolRef = nullable(value.tool_ref, (item): WorkspaceAnalysisTimelineToolRef => {
     if (!isRecord(item)) throw invalidResponse(`${field}.tool_ref`);
     exact(item, ["name", "version"], `${field}.tool_ref`);
-    const version = integer(item.version, `${field}.tool_ref.version`, 2, 3);
-    if (version !== 2 && version !== 3) throw invalidResponse(`${field}.tool_ref.version`);
     const name = enumValue(item.name, ["ReadGitStatus", "SearchKnowledge", "ReadSource", "ValidateCitation"], `${field}.tool_ref.name`);
-    if (version === 2) {
-      if (name !== "ReadGitStatus" && name !== "SearchKnowledge") throw invalidResponse(`${field}.tool_ref`);
+    if (name === "ReadGitStatus" || name === "SearchKnowledge") {
+      const version = schemaVersion === "v2" ? 3 : 2;
+      if (item.version !== version) throw invalidResponse(`${field}.tool_ref`);
       return { name, version };
     }
-    if (name !== "ReadSource" && name !== "ValidateCitation") throw invalidResponse(`${field}.tool_ref`);
+    const version = schemaVersion === "v2" ? 4 : 3;
+    if (item.version !== version) throw invalidResponse(`${field}.tool_ref`);
     return { name, version };
   });
   const durationMs = nullable(value.duration_ms, (item) => integer(item, `${field}.duration_ms`, 0, 3_600_000));
   const errorCode = nullable(value.error_code, (item) => workspaceAnalysisStableCode(item, `${field}.error_code`));
-  const summary = decodeWorkspaceAnalysisTimelineSummary(value.summary, `${field}.summary`);
-  const item = { sequence: integer(value.sequence, `${field}.sequence`, 1, 32), kind, phase, status, toolRef, durationMs, errorCode, summary };
-  const expectedTool = phase === "inspect_workspace" ? { name: "ReadGitStatus", version: 2 } : phase === "retrieve_evidence" ? { name: "SearchKnowledge", version: 2 } : phase === "read_evidence" ? { name: "ReadSource", version: 3 } : phase === "validate_citations" ? { name: "ValidateCitation", version: 3 } : undefined;
-  if ((kind === "node" && toolRef !== null) || (kind === "model" && (toolRef !== null || !["retrieve_evidence", "synthesize_answer", "review_publish"].includes(phase)))) throw invalidResponse(field);
+  const summary = decodeWorkspaceAnalysisTimelineSummary(value.summary, `${field}.summary`, schemaVersion);
+  const item = { sequence: integer(value.sequence, `${field}.sequence`, 1, schemaVersion === "v2" ? 27 : 32), kind, phase, status, toolRef, durationMs, errorCode, summary };
+  const expectedTool = phase === "inspect_workspace" ? "ReadGitStatus" : phase === "retrieve_evidence" ? "SearchKnowledge" : phase === "read_evidence" ? "ReadSource" : phase === "validate_citations" ? "ValidateCitation" : undefined;
+  if ((kind === "node" && (toolRef !== null || schemaVersion === "v2" && !["decide_next", "synthesize_answer", "validate_citations", "review_publish"].includes(phase))) ||
+      (kind === "model" && (toolRef !== null || ![schemaVersion === "v2" ? "decide_next" : "retrieve_evidence", "synthesize_answer", "review_publish"].includes(phase)))) throw invalidResponse(field);
   if (kind === "tool") {
-    if (expectedTool === undefined || toolRef?.name !== expectedTool.name || toolRef.version !== expectedTool.version) throw invalidResponse(field);
+    if (expectedTool === undefined || toolRef?.name !== expectedTool) throw invalidResponse(field);
   }
   const active = status === "pending" || status === "waiting" || status === "started";
   if ((active && (durationMs !== null || errorCode !== null || summary !== null)) || (!active && (durationMs === null || (status === "succeeded" ? errorCode !== null : errorCode === null) || (status !== "succeeded" && summary !== null)))) throw invalidResponse(field);
@@ -812,7 +853,7 @@ const decodeWorkspaceAnalysisTimelineItem = (value: unknown, field: string): Wor
     const expectedSummary = kind === "node" ? null : kind === "model" ? "model_usage" : phase === "inspect_workspace" ? "git" : phase === "retrieve_evidence" ? "search" : phase === "read_evidence" ? "source" : "citation_validation";
     if ((expectedSummary === null && summary !== null) || (expectedSummary !== null && summary?.kind !== expectedSummary)) throw invalidResponse(field);
     if (kind === "model" && summary?.kind === "model_usage") {
-      const maximumOutputTokens = phase === "retrieve_evidence" ? 256 : phase === "synthesize_answer" ? 4_096 : 1_024;
+      const maximumOutputTokens = phase === "decide_next" ? 512 : phase === "retrieve_evidence" ? 256 : phase === "synthesize_answer" ? 4_096 : 1_024;
       if (summary.modelUsage.outputTokens > maximumOutputTokens) throw invalidResponse(`${field}.summary.model_usage.output_tokens`);
     }
   }
@@ -842,16 +883,76 @@ const hasCompleteWorkspaceAnalysisProjection = (items: WorkspaceAnalysisTimeline
     modelCalls === budget.modelCalls.used && toolCalls === budget.toolCalls.used && sourceReads === budget.sourceReads.used &&
     inputTokens === budget.inputTokens.used && outputTokens === budget.outputTokens.used;
 };
+const validateWorkspaceAnalysisProjectionV2 = (timeline: WorkspaceAnalysisTimeline): void => {
+  const invalid = (): never => { throw invalidResponse("workspace_analysis_timeline.operation_order"); };
+  let previous: WorkspaceAnalysisTimelineItem | undefined;
+  let decisions = 0, modelCalls = 0, toolCalls = 0, sourceReads = 0, inputTokens = 0, outputTokens = 0;
+  let haveSearch = false, awaitingChoice = false, haveCandidate = false, haveValidation = false, haveReview = false, haveUnknown = false;
+  const sources = new Map<string, string>();
+  const nodes = new Set<WorkspaceAnalysisTimelinePhase>();
+  for (const item of timeline.items) {
+    if (item.kind === "node") {
+      if (nodes.has(item.phase) || timeline.runStatus === "succeeded" && item.status !== "succeeded") invalid();
+      nodes.add(item.phase);
+      continue;
+    }
+    if (previous !== undefined && previous.status !== "succeeded") invalid();
+    if (item.status !== "pending") {
+      if (item.kind === "model") modelCalls += 1; else toolCalls += 1;
+    }
+    if (haveCandidate) {
+      if (!haveValidation && item.kind === "tool" && item.phase === "validate_citations") {
+        haveValidation = true;
+      } else if (haveValidation && !haveReview && item.kind === "model" && item.phase === "review_publish") {
+        if (previous?.summary?.kind !== "citation_validation" || previous.summary.citationValidation.invalidCount !== 0) invalid();
+        haveReview = true;
+      } else invalid();
+    } else if (!awaitingChoice && item.kind === "model" && item.phase === "decide_next") {
+      if (item.status !== "pending") decisions += 1;
+      awaitingChoice = true;
+    } else if (awaitingChoice && item.kind === "tool") {
+      awaitingChoice = false;
+      if ((item.phase === "validate_citations" || item.phase === "read_evidence") && !haveSearch) invalid();
+      if (item.phase === "read_evidence" && item.status !== "pending") sourceReads += 1;
+    } else if (awaitingChoice && item.kind === "model" && item.phase === "synthesize_answer") {
+      if (!haveSearch || sources.size === 0) invalid();
+      haveCandidate = true;
+    } else invalid();
+    if (item.status === "succeeded") {
+      const summary = item.summary;
+      if (summary?.kind === "search") haveSearch ||= summary.search.hitCount > 0;
+      else if (summary?.kind === "source") {
+        const previousHash = sources.get(summary.source.evidenceRef);
+        if (previousHash !== undefined && previousHash !== summary.source.contentHash) invalid();
+        sources.set(summary.source.evidenceRef, summary.source.contentHash);
+      } else if (summary?.kind === "citation_validation" && haveCandidate) {
+        if (summary.citationValidation.validCount + summary.citationValidation.invalidCount > sources.size) invalid();
+      } else if (summary?.kind === "model_usage") {
+        inputTokens += summary.modelUsage.inputTokens;
+        outputTokens += summary.modelUsage.outputTokens;
+      }
+    }
+    haveUnknown ||= item.status === "unknown";
+    previous = item;
+  }
+  const budget = timeline.budget;
+  if (decisions > 12 || modelCalls > 14 || toolCalls > 13 || sourceReads > 8 ||
+      modelCalls > budget.modelCalls.used || toolCalls > budget.toolCalls.used || sourceReads > budget.sourceReads.used || inputTokens > budget.inputTokens.used || outputTokens > budget.outputTokens.used) invalid();
+  if (timeline.runStatus === "queued" && (modelCalls !== 0 || toolCalls !== 0) || timeline.terminationReason === "WORKSPACE_ANALYSIS_RESULT_UNKNOWN" && !haveUnknown) invalid();
+  if (timeline.runStatus === "succeeded" && (!haveReview || previous?.status !== "succeeded" ||
+      modelCalls !== budget.modelCalls.used || toolCalls !== budget.toolCalls.used || sourceReads !== budget.sourceReads.used || inputTokens !== budget.inputTokens.used || outputTokens !== budget.outputTokens.used)) invalid();
+};
 export const decodeWorkspaceAnalysisTimeline = (value: unknown): WorkspaceAnalysisTimeline => {
   if (!isRecord(value)) throw invalidResponse("workspace_analysis_timeline");
   exact(value, ["schema_id", "schema_version", "workspace_id", "answer_id", "analysis_run_id", "run_status", "termination_reason", "items", "budget", "latest_server_event_sequence"], "workspace_analysis_timeline");
-  if (value.schema_id !== "conversation.workspace_analysis_timeline" || value.schema_version !== "v1" || !isRecord(value.budget)) throw invalidResponse("workspace_analysis_timeline");
+  if (value.schema_id !== "conversation.workspace_analysis_timeline" || !isRecord(value.budget)) throw invalidResponse("workspace_analysis_timeline");
+  const schemaVersion = enumValue(value.schema_version, ["v1", "v2"], "workspace_analysis_timeline.schema_version");
   exact(value.budget, ["model_calls", "tool_calls", "source_reads", "input_tokens", "output_tokens", "estimated_cost_microunits"], "workspace_analysis_timeline.budget");
   const runStatus = enumValue(value.run_status, ["queued", "running", "succeeded", "refused", "clarification_required", "failed", "cancelled"], "workspace_analysis_timeline.run_status");
   const terminationReason = nullable(value.termination_reason, (item) => enumValue(item, workspaceAnalysisTimelineReasons, "workspace_analysis_timeline.termination_reason"));
   const validReason = (runStatus === "queued" || runStatus === "running") ? terminationReason === null : runStatus === "succeeded" ? terminationReason === "COMPLETED" : runStatus === "refused" ? workspaceAnalysisRefusalReasons.includes(terminationReason as WorkspaceAnalysisRefusalReasonCode) : runStatus === "clarification_required" ? terminationReason === "WORKSPACE_ANALYSIS_CLARIFICATION_REQUIRED" : runStatus === "failed" ? terminationReason !== null && terminationReason !== "WORKSPACE_ANALYSIS_CANCELLED" && workspaceAnalysisTerminationReasons.includes(terminationReason as WorkspaceAnalysisTerminationReason) : terminationReason === "WORKSPACE_ANALYSIS_CANCELLED";
   if (!validReason) throw invalidResponse("workspace_analysis_timeline.termination_reason");
-  const items = array(value.items, "workspace_analysis_timeline.items", 32, decodeWorkspaceAnalysisTimelineItem);
+  const items = array(value.items, "workspace_analysis_timeline.items", schemaVersion === "v2" ? 27 : 32, (item, field) => decodeWorkspaceAnalysisTimelineItem(item, field, schemaVersion));
   if (items.some((item, index) => item.sequence !== index + 1)) throw invalidResponse("workspace_analysis_timeline.items");
   const modelCalls = decodeWorkspaceAnalysisTimelineCounter(value.budget.model_calls, "workspace_analysis_timeline.budget.model_calls");
   const toolCalls = decodeWorkspaceAnalysisTimelineCounter(value.budget.tool_calls, "workspace_analysis_timeline.budget.tool_calls");
@@ -859,14 +960,19 @@ export const decodeWorkspaceAnalysisTimeline = (value: unknown): WorkspaceAnalys
   const inputTokens = decodeWorkspaceAnalysisTimelineCounter(value.budget.input_tokens, "workspace_analysis_timeline.budget.input_tokens");
   const outputTokens = decodeWorkspaceAnalysisTimelineCounter(value.budget.output_tokens, "workspace_analysis_timeline.budget.output_tokens");
   const estimatedCostMicrounits = nullable(value.budget.estimated_cost_microunits, (item) => decodeWorkspaceAnalysisTimelineCounter(item, "workspace_analysis_timeline.budget.estimated_cost_microunits"));
-  if (modelCalls.max !== 3 || toolCalls.max !== 6 || sourceReads.max !== 3 || inputTokens.max !== 196_608 || outputTokens.max > 5_376 || outputTokens.max < 1_281) throw invalidResponse("workspace_analysis_timeline.budget");
+  if (schemaVersion === "v1") {
+    if (modelCalls.max !== 3 || toolCalls.max !== 6 || sourceReads.max !== 3 || inputTokens.max !== 196_608 || outputTokens.max > 5_376 || outputTokens.max < 1_281) throw invalidResponse("workspace_analysis_timeline.budget");
+  } else if (modelCalls.max !== 14 || toolCalls.max !== 13 || sourceReads.max !== 8 || inputTokens.max !== 917_504 || outputTokens.max < 7_169 || outputTokens.max > 11_264 ||
+      sourceReads.used > toolCalls.used || inputTokens.used > modelCalls.used * 65_536 || outputTokens.used > modelCalls.used * 4_096) throw invalidResponse("workspace_analysis_timeline.budget");
   const workspaceId = uuid(value.workspace_id, "workspace_analysis_timeline.workspace_id");
   const answerId = uuid(value.answer_id, "workspace_analysis_timeline.answer_id");
   const analysisRunId = uuid(value.analysis_run_id, "workspace_analysis_timeline.analysis_run_id");
   if (new Set([workspaceId, answerId, analysisRunId]).size !== 3) throw invalidResponse("workspace_analysis_timeline.identity");
   const budget = { modelCalls, toolCalls, sourceReads, inputTokens, outputTokens, estimatedCostMicrounits };
-  if (runStatus === "succeeded" && (modelCalls.used !== 3 || toolCalls.used < 4 || !hasCompleteWorkspaceAnalysisProjection(items, budget))) throw invalidResponse("workspace_analysis_timeline.success");
-  return { schemaId: "conversation.workspace_analysis_timeline", schemaVersion: "v1", workspaceId, answerId, analysisRunId, runStatus, terminationReason, items, budget, latestServerEventSequence: integer(value.latest_server_event_sequence, "workspace_analysis_timeline.latest_server_event_sequence", 0) };
+  if (schemaVersion === "v1" && runStatus === "succeeded" && (modelCalls.used !== 3 || toolCalls.used < 4 || !hasCompleteWorkspaceAnalysisProjection(items, budget))) throw invalidResponse("workspace_analysis_timeline.success");
+  const timeline: WorkspaceAnalysisTimeline = { schemaId: "conversation.workspace_analysis_timeline", schemaVersion, workspaceId, answerId, analysisRunId, runStatus, terminationReason, items, budget, latestServerEventSequence: integer(value.latest_server_event_sequence, "workspace_analysis_timeline.latest_server_event_sequence", 0) };
+  if (schemaVersion === "v2") validateWorkspaceAnalysisProjectionV2(timeline);
+  return timeline;
 };
 
 const decodePage = <T>(value: unknown, reader: (item: unknown, field?: string) => T): Page<T> => {
@@ -895,7 +1001,7 @@ export const decodeQuestionAcceptance = (value: unknown): QuestionAcceptance => 
   if (answer.questionId !== question.id || answer.conversationId !== question.conversationId || answer.workspaceId !== question.workspaceId) throw invalidResponse("acceptance");
   const statusUrl = bounded(value.status_url, "acceptance.status_url", 2048);
   const separator = statusUrl.indexOf("?");
-  if (separator < 0 || statusUrl.slice(separator + 1).includes("?") || statusUrl.slice(0, separator) !== `/api/v1/answers/${answer.id}`) throw invalidResponse("acceptance.status_url");
+  if (separator < 0 || statusUrl.slice(separator + 1).includes("?") || ![`/api/v1/answers/${answer.id}`, `/api/v2/answers/${answer.id}`].includes(statusUrl.slice(0, separator))) throw invalidResponse("acceptance.status_url");
   const parameters = new URLSearchParams(statusUrl.slice(separator + 1));
   if ([...parameters.keys()].length !== 1 || parameters.getAll("workspace_id").length !== 1 || parameters.get("workspace_id") !== answer.workspaceId) throw invalidResponse("acceptance.status_url");
   return { question, answer, statusUrl };
@@ -977,7 +1083,7 @@ export const submitQuestion = async (input: SubmitQuestionInput, signal?: AbortS
   if (from !== null && before !== null && Date.parse(from) >= Date.parse(before)) throw invalidRequest("scope.timeRange");
   const depth = input.answerDepth ?? "standard"; const format = input.outputFormat ?? "markdown"; if (!["concise", "standard", "detailed"].includes(depth)) throw invalidRequest("answerDepth"); if (!["markdown", "outline"].includes(format)) throw invalidRequest("outputFormat");
   const body = { workspace_id: input.workspaceId, ...(input.mode === undefined ? {} : { mode: input.mode }), question: questionText, scope: { retrieval_mode: mode, source_ids: [...sourceIds], source_version_ids: [...sourceVersionIds], path_prefixes: [...paths], captured_at_from: from, captured_at_before: before, allow_original_sources: input.scope?.allowOriginalSources ?? false, allow_web: input.scope?.allowWeb ?? false }, answer_depth: depth, output_format: format };
-  const operation = conversationApi.submitQuestionRaw({
+  const operation = conversationApi.submitQuestionV2Raw({
     conversationId: input.conversationId,
     idempotencyKey: key,
     submitQuestionRequest: body,
@@ -987,12 +1093,12 @@ export const submitQuestion = async (input: SubmitQuestionInput, signal?: AbortS
 export const listTurns = async (input: ListInput & { conversationId: string }, signal?: AbortSignal): Promise<Page<Turn>> => {
   const conversationId = validateUuid(input.conversationId, "conversationId");
   const parameters = listRequestParameters(input);
-  const operation = conversationApi.listConversationTurnsRaw({ conversationId, ...parameters }, generatedRequestInit(signal));
+  const operation = conversationApi.listConversationTurnsV2Raw({ conversationId, ...parameters }, generatedRequestInit(signal));
   return (await request(generatedRawResponse(operation), decodeTurnPage)).value;
 };
 export const getLatestTurn = async (input: { workspaceId: string; conversationId: string }, signal?: AbortSignal): Promise<Turn | null> => {
   validateUuid(input.workspaceId, "workspaceId"); validateUuid(input.conversationId, "conversationId");
-  const operation = conversationApi.listConversationTurnsRaw({
+  const operation = conversationApi.listConversationTurnsV2Raw({
     conversationId: input.conversationId,
     workspaceId: input.workspaceId,
     latest: true,
@@ -1005,14 +1111,14 @@ export const getAnswer = async (input: GetInput, signal?: AbortSignal): Promise<
   const answerId = validateUuid(input.id, "id");
   if (input.ifNoneMatch !== undefined && !etagPattern.test(input.ifNoneMatch)) throw invalidRequest("ifNoneMatch");
   const { workspaceId } = listRequestParameters(input);
-  const operation = conversationApi.getAnswerRaw({ answerId, workspaceId }, generatedRequestInit(signal,
+  const operation = conversationApi.getAnswerV2Raw({ answerId, workspaceId }, generatedRequestInit(signal,
     input.ifNoneMatch === undefined ? {} : { headers: { "If-None-Match": input.ifNoneMatch } }));
   return getVersioned(generatedRawResponse(operation), input.ifNoneMatch, decodeAnswer);
 };
 export const getWorkspaceAnalysisTimeline = async (input: { workspaceId: string; answerId: string }, signal?: AbortSignal): Promise<WorkspaceAnalysisTimeline> => {
   const workspaceId = validateUuid(input.workspaceId, "workspaceId");
   const answerId = validateUuid(input.answerId, "answerId");
-  const operation = timelineApi.getWorkspaceAnalysisTimelineRaw({ answerId, workspaceId }, generatedRequestInit(signal));
+  const operation = timelineApi.getWorkspaceAnalysisTimelineV2Raw({ answerId, workspaceId }, generatedRequestInit(signal));
   const timeline = (await request(generatedRawResponse(operation), decodeWorkspaceAnalysisTimeline)).value;
   if (timeline.workspaceId !== workspaceId || timeline.answerId !== answerId) throw invalidResponse("workspace_analysis_timeline.binding");
   return timeline;

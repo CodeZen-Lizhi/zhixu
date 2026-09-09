@@ -30,6 +30,8 @@ const InterviewSessionPage = lazy(() => import("../features/interview/InterviewP
 const TimelinePage = lazy(() => import("../features/timeline/TimelinePage").then((module) => ({ default: module.TimelinePage })));
 const TimelineEventPage = lazy(() => import("../features/timeline/TimelinePage").then((module) => ({ default: module.TimelineEventPage })));
 const AuthoringPage = lazy(() => import("../features/authoring/AuthoringPage").then((module) => ({ default: module.AuthoringPage })));
+const SynthesisNotesPage = lazy(() => import("../features/synthesis").then((module) => ({ default: module.SynthesisNotesPage })));
+const SynthesisNotePage = lazy(() => import("../features/synthesis").then((module) => ({ default: module.SynthesisNotePage })));
 const NewDocumentPage = lazy(() => import("../features/authoring/NewDocumentPage").then((module) => ({ default: module.NewDocumentPage })));
 const DocumentHistoryPage = lazy(() => import("../features/document-history").then((module) => ({ default: module.DocumentHistoryPage })));
 const OrganizingPage = lazy(() => import("../features/organizing").then((module) => ({ default: module.OrganizingPage })));
@@ -57,6 +59,8 @@ export const AppRoutes = () => (
       <Route path="/documents/:sourceVersionId" element={<DocumentsPage />} />
       <Route path="/search" element={<SearchPage />} />
       <Route path="/authoring" element={<AuthoringPage />} />
+      <Route path="/authoring/notes" element={<SynthesisNotesPage />} />
+      <Route path="/authoring/notes/:noteId" element={<SynthesisNotePage />} />
       <Route path="/authoring/new" element={<NewDocumentPage />} />
       <Route path="/authoring/documents/:documentId/history" element={<DocumentHistoryPage />} />
       <Route path="/authoring/organize" element={<OrganizingPage />} />

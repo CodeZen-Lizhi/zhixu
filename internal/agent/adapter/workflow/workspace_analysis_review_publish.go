@@ -405,7 +405,7 @@ func workspaceAnalysisPublicationLookup(
 	root conversationworkflow.WorkspaceAnalysisInput,
 	analysisRunID foundation.ID,
 ) conversationapplication.WorkspaceAnalysisPublicationLookup {
-	return conversationapplication.WorkspaceAnalysisPublicationLookup{
+	lookup := conversationapplication.WorkspaceAnalysisPublicationLookup{
 		AnswerPublicationLookup: conversationapplication.AnswerPublicationLookup{
 			WorkspaceID: execution.WorkspaceID, WorkflowRunID: execution.RunID,
 			NodeRunID: execution.NodeRunID, NodeAttemptID: execution.NodeAttemptID,
@@ -415,6 +415,10 @@ func workspaceAnalysisPublicationLookup(
 		ExpectedLeaseOwner: execution.LeaseOwner,
 		ExpectedLeaseFence: int64(execution.AttemptNo),
 	}
+	if execution.DefinitionVersion == 2 {
+		lookup.DefinitionVersion = 2
+	}
+	return lookup
 }
 
 func validateWorkspaceAnalysisReviewCandidate(

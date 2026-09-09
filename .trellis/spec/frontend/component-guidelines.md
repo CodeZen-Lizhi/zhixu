@@ -4,7 +4,15 @@
 
 ## 适用范围
 
-适用于 React 组件和路由级 UI。仓库当前没有生产组件，以下内容是已确认设计约束，不是已有代码描述，M1 必须用真实组件和测试验证。
+适用于现有 React 组件和路由级 UI；具体实现以 `web/src` 和相应行为测试为准。
+
+## Route Content 恢复边界
+
+- `web/src/routes/RouteContentBoundary.tsx` 只包裹 AppShell 内容区内的 Suspense/Outlet；导航、认证与 Workspace Provider 留在边界外。
+- render throw 与 lazy rejection 显示同一稳定恢复状态，按钮可重试或显式刷新；不自动无限刷新，不把错误正文/stack 放入 UI。
+- location key 变化只清除错误，健康页面的 URL 筛选变化不得无故重挂、丢失本地草稿；Workspace 变化则必须重建该内容边界。
+- React 19 的默认 caught-error reporter 会记录原始 Error，单靠不实现 `componentDidCatch` 不能防止泄漏。`main.tsx` 通过 root `onCaughtError` 对该边界仅记录固定 `ROUTE_CONTENT_ERROR`。
+- 恢复状态使用文本、可操作按钮与可访问焦点；业务 API 错误仍由页面处理，不交给此渲染边界。
 
 ## 已确认事实
 

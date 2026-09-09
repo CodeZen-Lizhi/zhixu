@@ -449,8 +449,11 @@ func TestWorkspaceAnalysisCapabilityCheckedRunStarterAtomicityIntegration(t *tes
 			if _, err := harness.capability.ReleaseWorkspaceAnalysisWorker(ctx, advertisement); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := harness.start(ctx, replay, false); agentErrorCode(err) != application.ErrorCodeWorkspaceAnalysisCapabilityUnavailable {
-				t.Fatalf("replay after release code=%s err=%v", agentErrorCode(err), err)
+			replayed, err = harness.start(ctx, replay, false)
+			if err != nil || replayed.ID != created.ID || replayed.DefinitionVersion != created.DefinitionVersion ||
+				replayed.DefinitionHash != created.DefinitionHash || replayed.ToolCatalogHash != created.ToolCatalogHash ||
+				replayed.PolicyVersion != created.PolicyVersion || replayed.ConfigRevision != created.ConfigRevision {
+				t.Fatalf("historical run replay after capability release=%#v err=%v", replayed, err)
 			}
 			assertWorkspaceAnalysisDispatchCountsIntegration(t, ctx, platform.DB(), command.QuestionID, 1)
 		})

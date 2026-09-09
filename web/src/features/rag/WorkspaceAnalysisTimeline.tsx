@@ -1,6 +1,7 @@
 import {
   AlertTriangle,
   BadgeCheck,
+  Brain,
   Circle,
   Clock3,
   FileText,
@@ -26,6 +27,7 @@ import { ragQueryKeys } from "./query-keys";
 import { useWorkspaceAnalysisTimeline } from "./queries";
 
 const phaseLabels: Record<WorkspaceAnalysisTimelinePhase, string> = {
+  decide_next: "决定下一步",
   inspect_workspace: "检查工作区",
   retrieve_evidence: "检索证据",
   read_evidence: "读取证据",
@@ -67,6 +69,7 @@ const statusIcons: Record<WorkspaceAnalysisTimelineItem["status"], LucideIcon> =
 };
 
 const phaseIcons: Record<WorkspaceAnalysisTimelinePhase, LucideIcon> = {
+  decide_next: Brain,
   inspect_workspace: GitBranch,
   retrieve_evidence: Search,
   read_evidence: FileText,
@@ -101,7 +104,7 @@ const TimelineSummary = ({ item }: { item: WorkspaceAnalysisTimelineItem }) => {
   return <span>输入 {summary.modelUsage.inputTokens} · 输出 {summary.modelUsage.outputTokens} tokens</span>;
 };
 
-const TimelineItem = ({ item }: { item: WorkspaceAnalysisTimelineItem }) => {
+const TimelineItem = ({ item, isFinalCitation }: { item: WorkspaceAnalysisTimelineItem; isFinalCitation: boolean | undefined }) => {
   const StatusIcon = statusIcons[item.status];
   const PhaseIcon = phaseIcons[item.phase];
   const duration = formatDuration(item.durationMs);
@@ -109,7 +112,7 @@ const TimelineItem = ({ item }: { item: WorkspaceAnalysisTimelineItem }) => {
     <span className="rag-analysis-item__marker"><StatusIcon size={16} aria-hidden="true" /></span>
     <div className="rag-analysis-item__body">
       <div className="rag-analysis-item__heading">
-        <span><PhaseIcon size={16} aria-hidden="true" />{phaseLabels[item.phase]}</span>
+        <span><PhaseIcon size={16} aria-hidden="true" />{item.phase === "validate_citations" && isFinalCitation !== undefined ? (isFinalCitation ? "发布前校验引用" : "检查已取得的引用") : phaseLabels[item.phase]}</span>
         <small>{statusLabels[item.status]}{duration === null ? "" : ` · ${duration}`}</small>
       </div>
       {item.toolRef === null ? null : <p className="rag-analysis-item__tool"><Wrench size={14} aria-hidden="true" />{item.toolRef.name}@{item.toolRef.version}</p>}
@@ -221,8 +224,9 @@ export const WorkspaceAnalysisTimeline = ({
 	        <div><dt>证据读取</dt><dd>{query.data.budget.sourceReads.used}/{query.data.budget.sourceReads.max}</dd></div>
 	        <div><dt>输入 tokens</dt><dd>{query.data.budget.inputTokens.used}/{query.data.budget.inputTokens.max}</dd></div>
         <div><dt>输出 tokens</dt><dd>{query.data.budget.outputTokens.used}/{query.data.budget.outputTokens.max}</dd></div>
+        {query.data.budget.estimatedCostMicrounits === null ? null : <div><dt>估算成本（微单位）</dt><dd>{query.data.budget.estimatedCostMicrounits.used}/{query.data.budget.estimatedCostMicrounits.max}</dd></div>}
       </dl>
-      <ol className="rag-analysis-list">{query.data.items.map((item) => <TimelineItem key={item.sequence} item={item} />)}</ol>
+      <ol className="rag-analysis-list">{query.data.items.map((item) => <TimelineItem key={item.sequence} item={item} isFinalCitation={query.data.schemaVersion === "v2" ? query.data.items.some((previous) => previous.sequence < item.sequence && previous.kind === "model" && previous.phase === "synthesize_answer") : undefined} />)}</ol>
     </>}
   </section>;
 };

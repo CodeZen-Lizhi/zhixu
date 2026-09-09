@@ -102,6 +102,8 @@ export const EventStoreProvider = ({ children }: { children: ReactNode }) => {
         assertActive();
         await queryClient.refetchQueries({ queryKey: ["organizing", workspaceId], type: "all" }, { throwOnError: true });
         assertActive();
+        await queryClient.resetQueries({ queryKey: ["synthesis", workspaceId] }, { throwOnError: true });
+        assertActive();
         await queryClient.refetchQueries({ queryKey: ["settings", "git-sync", workspaceId], type: "all" }, { throwOnError: true });
         assertActive();
         await recoverRagWorkspace(queryClient, workspaceId);
@@ -250,6 +252,7 @@ export const EventStoreProvider = ({ children }: { children: ReactNode }) => {
       if (authoringEvent || event.type === "proposal.applied") await invalidate(["authoring", workspaceId]);
       if (documentHistoryEvent) await invalidateBestEffort(["document-history", workspaceId]);
       if (organizingEvent || workflowEvent) await invalidate(["organizing", workspaceId]);
+      if (event.type.startsWith("synthesis.") || sourceEvent || workflowEvent || authoringEvent || proposalEvent || event.type.startsWith("interview.")) await invalidateBestEffort(["synthesis", workspaceId]);
       if (gitSyncEvent) await invalidate(["settings", "git-sync", workspaceId]);
       // Search cursor 绑定 Active Index/result fingerprint。Index 事件只把快照标 stale，不能用旧 cursor
       // 强制 refetch，否则 409 stale 会阻止 SSE 事件游标提交并形成重放循环。

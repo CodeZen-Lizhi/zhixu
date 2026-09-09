@@ -220,7 +220,7 @@ func TestWorkspaceAnalysisOutcomeMetricUsesOnlyFixedLowCardinalityLabels(t *test
 			"termination_reason": "WORKSPACE_ANALYSIS_BUDGET_EXHAUSTED", "run_id": "10000000-0000-4000-8000-000000000002",
 		},
 		"unknown definition": {
-			"mode": "workspace_analysis", "definition": "workspace-analysis-v2", "outcome": "failure",
+			"mode": "workspace_analysis", "definition": "workspace-analysis-v3", "outcome": "failure",
 			"termination_reason": "WORKSPACE_ANALYSIS_BUDGET_EXHAUSTED",
 		},
 		"unknown reason": {
@@ -264,6 +264,27 @@ func TestWorkspaceAnalysisOutcomeMetricUsesOnlyFixedLowCardinalityLabels(t *test
 		if _, err := NewWorkspaceAnalysisOutcomeMeasurement(test[0], test[1]); !errors.Is(err, ErrInvalidMetric) {
 			t.Fatalf("status=%q reason=%q error=%v, want invalid metric", test[0], test[1], err)
 		}
+	}
+}
+
+func TestWorkspaceAnalysisOutcomeMeasurementKeepsDefinitionVersionBounded(t *testing.T) {
+	for version, definition := range map[int64]string{1: "workspace-analysis-v1", 2: "workspace-analysis-v2"} {
+		measurement, err := NewWorkspaceAnalysisOutcomeMeasurementForVersion(version, "succeeded", "COMPLETED")
+		if err != nil || measurement.Validate() != nil || measurement.Labels.Map()["definition"] != definition || len(measurement.Labels.Map()) != 4 {
+			t.Fatalf("version=%d measurement=%#v err=%v", version, measurement, err)
+		}
+	}
+	for _, version := range []int64{-1, 0, 3, 9999} {
+		if _, err := NewWorkspaceAnalysisOutcomeMeasurementForVersion(version, "succeeded", "COMPLETED"); !errors.Is(err, ErrInvalidMetric) {
+			t.Fatalf("version=%d error=%v, want invalid metric", version, err)
+		}
+	}
+	if _, err := NewWorkspaceAnalysisOutcomeMeasurementForVersion(2, "succeeded", "WORKSPACE_ANALYSIS_TOOL_FAILED"); !errors.Is(err, ErrInvalidMetric) {
+		t.Fatalf("v2 admitted an impossible terminal pair: %v", err)
+	}
+	legacy, err := NewWorkspaceAnalysisOutcomeMeasurement("succeeded", "COMPLETED")
+	if err != nil || legacy.Labels.Map()["definition"] != "workspace-analysis-v1" {
+		t.Fatal("legacy metric definition changed")
 	}
 }
 

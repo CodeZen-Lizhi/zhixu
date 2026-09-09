@@ -42,6 +42,10 @@
       "description": "Material organizing drafts, templates, snapshots, and runs."
     },
     {
+      "name": "Synthesis",
+      "description": "Continuously evolving synthesis notes, exact sources, and durable processing."
+    },
+    {
       "name": "GitSync",
       "description": "Git remote configuration and synchronization operations."
     },
@@ -295,6 +299,28 @@
     "listGitSyncRuns": "GitSync",
     "createGitSyncRun": "GitSync",
     "getGitSyncRun": "GitSync",
-    "retryGitSyncRun": "GitSync"
+    "retryGitSyncRun": "GitSync",
+    "listSynthesisNotes": "Synthesis",
+    "getSynthesisNote": "Synthesis",
+    "listSynthesisRevisions": "Synthesis",
+    "getSynthesisRevision": "Synthesis",
+    "openSynthesisSource": "Synthesis",
+    "listSynthesisProcessing": "Synthesis",
+    "getSynthesisProcessing": "Synthesis",
+    "retrySynthesisProcessing": "Synthesis",
+    "prepareSynthesisNoteInterview": "Interview",
+    "listSynthesisNoteInterviewPreparations": "Interview",
+    "getSynthesisNoteInterviewPreparation": "Interview",
+    "retrySynthesisNoteInterviewPreparation": "Interview",
+    "submitQuestionV2": "Conversation",
+    "listConversationTurnsV2": "Conversation",
+    "getAnswerV2": "Conversation",
+    "getWorkspaceAnalysisTimelineV2": "Timeline",
+    "listInterviewsV2": "Interview",
+    "startInterviewV2": "Interview",
+    "getInterviewV2": "Interview",
+    "submitInterviewTurnV2": "Interview",
+    "completeInterviewV2": "Interview",
+    "updateLearningPathStepV2": "Review"
   }
 }

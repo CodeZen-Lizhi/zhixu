@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -15,6 +16,76 @@ import (
 	gitsyncdomain "github.com/CodeZen-Lizhi/zhixu/internal/gitsync/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
 )
+
+func TestDisabledGitSyncCompositionDoesNotDispatch(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.GitSyncKeyFile = ""
+	worker, scheduler, err := newGitSyncWorker(nil, cfg, nil, nil, sourceProcessingComponents{}, nil, "")
+	if err != nil || worker != nil || scheduler != nil {
+		t.Fatalf("disabled composition: worker=%v scheduler=%v err=%v", worker, scheduler, err)
+	}
+
+	t.Run("background loop", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		stopped := startGitSyncDispatchLoop(ctx, slog.New(slog.NewTextHandler(io.Discard, nil)),
+			scheduler, worker, time.Hour, gitSyncDispatchTimeout, nil)
+		t.Cleanup(func() {
+			cancel()
+			select {
+			case <-stopped:
+			case <-time.After(time.Second):
+				t.Error("disabled Git sync loop did not stop after cancellation")
+			}
+		})
+		select {
+		case <-stopped:
+		default:
+			t.Fatal("disabled Git sync composition started a background loop")
+		}
+	})
+
+	t.Run("scheduler and outbox", func(t *testing.T) {
+		var output bytes.Buffer
+		batch, processed, err := dispatchGitSync(context.Background(),
+			slog.New(slog.NewJSONHandler(&output, nil)), scheduler, worker, gitSyncDispatchStartupPhase)
+		if err != nil || batch != (gitsyncapplication.AutoSyncBatchResult{}) || processed != 0 || output.Len() != 0 {
+			t.Fatalf("disabled dispatch: batch=%+v processed=%d err=%v log=%s", batch, processed, err, output.String())
+		}
+	})
+
+	t.Run("outbox alone", func(t *testing.T) {
+		var output bytes.Buffer
+		processed, err := dispatchGitSyncOutbox(context.Background(),
+			slog.New(slog.NewJSONHandler(&output, nil)), worker, gitSyncDispatchPeriodicPhase)
+		if err != nil || processed != 0 || output.Len() != 0 {
+			t.Fatalf("disabled outbox: processed=%d err=%v log=%s", processed, err, output.String())
+		}
+	})
+}
+
+func TestDispatchGitSyncRejectsTypedNilPartialComposition(t *testing.T) {
+	for _, missing := range []string{"scheduler", "worker"} {
+		t.Run(missing, func(t *testing.T) {
+			events := make([]string, 0, 1)
+			realWorker := &orderedGitSyncWorkerFake{events: &events}
+			var scheduler gitSyncAutoScheduler = &gitSyncSchedulerFake{events: &events}
+			var worker gitSyncOutboxWorker = realWorker
+			if missing == "scheduler" {
+				scheduler = (*gitsyncapplication.AutoSyncScheduler)(nil)
+			} else {
+				worker = (*gitsyncapplication.Worker)(nil)
+			}
+			batch, processed, err := dispatchGitSync(context.Background(),
+				slog.New(slog.NewTextHandler(io.Discard, nil)), scheduler, worker, gitSyncDispatchStartupPhase)
+			if err == nil || batch != (gitsyncapplication.AutoSyncBatchResult{}) || processed != 0 {
+				t.Fatalf("partial composition: batch=%+v processed=%d err=%v", batch, processed, err)
+			}
+			if len(events) != 0 {
+				t.Fatalf("partial composition dispatched work: events=%v", events)
+			}
+		})
+	}
+}
 
 func TestDispatchGitSyncOutboxRedactsUnderlyingFailure(t *testing.T) {
 	secret := "https://user:token@example.invalid/private.git"

@@ -18,6 +18,7 @@ RUN CGO_ENABLED=0 go build -mod=vendor -trimpath -ldflags='-s -w' -o /out/zhixu-
 RUN CGO_ENABLED=0 go build -mod=vendor -trimpath -ldflags='-s -w' -o /out/zhixu-modelctl ./cmd/modelctl
 RUN CGO_ENABLED=0 go build -mod=vendor -trimpath -ldflags='-s -w' -o /out/zhixu-runtime-wait ./cmd/runtimewait
 RUN CGO_ENABLED=0 go build -mod=vendor -trimpath -ldflags='-s -w' -o /out/zhixu-workspace-probe ./cmd/workspaceprobe
+RUN CGO_ENABLED=0 go build -mod=vendor -trimpath -ldflags='-s -w' -o /out/zhixu-audit ./cmd/audit
 
 FROM go-source AS rag-model-fixture-build
 RUN CGO_ENABLED=0 go build -mod=vendor -trimpath -ldflags='-s -w' -o /out/zhixu-rag-model-fixture ./cmd/rag-model-fixture
@@ -51,6 +52,7 @@ COPY --from=go-build /out/zhixu-migrate /app/zhixu-migrate
 COPY --from=go-build /out/zhixu-modelctl /app/zhixu-modelctl
 COPY --from=go-build /out/zhixu-runtime-wait /app/zhixu-runtime-wait
 COPY --from=go-build /out/zhixu-workspace-probe /app/zhixu-workspace-probe
+COPY --from=go-build /out/zhixu-audit /app/zhixu-audit
 COPY --from=web-build /src/web/dist /app/web
 COPY --chmod=0755 deploy/loopback-firewall.sh /app/loopback-firewall.sh
 COPY --chmod=0755 deploy/netns-ingress.sh /app/netns-ingress.sh

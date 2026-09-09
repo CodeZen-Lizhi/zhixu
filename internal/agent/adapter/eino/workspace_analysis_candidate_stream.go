@@ -66,7 +66,7 @@ func (runtime *WorkspaceAnalysisCandidateStreamRuntime) Stream(
 		projectWorkspaceAnalysisCandidateMessages(request.Messages),
 		einomodel.WithToolChoice(schema.ToolChoiceForbidden),
 		einomodel.WithMaxTokens(request.MaxOutputTokens),
-		einoopenai.WithExtraFields(newWorkspaceAnalysisCandidateExtraFields(request.OutputSchema)),
+		einoopenai.WithExtraFields(workspaceAnalysisCandidateExtraFieldsForVersion(request.OutputSchema, request.SchemaRef.Version)),
 	)
 	if err != nil {
 		return agentapplication.ChatResponse{}, mapEinoRuntimeError(err)
@@ -116,11 +116,19 @@ func (runtime *WorkspaceAnalysisCandidateStreamRuntime) Stream(
 }
 
 func newWorkspaceAnalysisCandidateExtraFields(outputSchema []byte) map[string]any {
+	return workspaceAnalysisCandidateExtraFieldsForVersion(outputSchema, "1")
+}
+
+func workspaceAnalysisCandidateExtraFieldsForVersion(outputSchema []byte, version string) map[string]any {
+	name := workspaceAnalysisCandidateResponseSchemaName
+	if version == "2" {
+		name = "zhixu_workspace_analysis_candidate_v2"
+	}
 	return map[string]any{
 		"response_format": workspaceAnalysisCandidateResponseFormat{
 			Type: "json_schema",
 			JSONSchema: workspaceAnalysisCandidateResponseJSONSchema{
-				Name:   workspaceAnalysisCandidateResponseSchemaName,
+				Name:   name,
 				Strict: true,
 				Schema: append(json.RawMessage(nil), outputSchema...),
 			},

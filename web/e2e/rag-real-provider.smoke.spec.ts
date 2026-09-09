@@ -289,7 +289,7 @@ const sourceSpanPath = (): string =>
 const isQuestionAcceptance = (response: PlaywrightResponse, conversationId: string): boolean => {
   const url = new URL(response.url());
   return response.request().method() === "POST" &&
-    url.pathname === `/api/v1/conversations/${conversationId}/questions`;
+    url.pathname === `/api/v2/conversations/${conversationId}/questions`;
 };
 
 const answerIdFromDraftStream = (response: PlaywrightResponse): string | undefined => {
@@ -427,7 +427,7 @@ test("真实 Provider RAG 在桌面和移动端观察多帧草稿后恢复已校
   let mobileQuestionPosts = 0;
   mobilePage.on("request", (request) => {
     const url = new URL(request.url());
-    if (request.method() === "POST" && url.pathname === `/api/v1/conversations/${conversationId}/questions`) mobileQuestionPosts += 1;
+    if (request.method() === "POST" && url.pathname === `/api/v2/conversations/${conversationId}/questions`) mobileQuestionPosts += 1;
   });
   let receipt: RealProviderReceipt;
   try {

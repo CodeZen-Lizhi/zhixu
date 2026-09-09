@@ -33,10 +33,10 @@ type WorkspaceAnalysisCapabilityContract struct {
 	ConfigRevision    int64
 }
 
-// Validate 拒绝非 workspace-analysis@1 的能力合同和非 canonical 哈希。
+// Validate accepts only the two frozen definition/policy pairs and canonical hashes.
 func (contract WorkspaceAnalysisCapabilityContract) Validate() error {
-	if contract.DefinitionKey != "workspace-analysis" || contract.DefinitionVersion != 1 ||
-		contract.PolicyVersion != 1 || !canonicalWorkspaceAnalysisSHA256(contract.DefinitionHash) ||
+	versioned := contract.DefinitionVersion == 1 && contract.PolicyVersion == 1 || contract.DefinitionVersion == 2 && contract.PolicyVersion == 2
+	if contract.DefinitionKey != "workspace-analysis" || !versioned || !canonicalWorkspaceAnalysisSHA256(contract.DefinitionHash) ||
 		!canonicalWorkspaceAnalysisSHA256(contract.ToolCatalogHash) || contract.ConfigRevision < 0 {
 		return workspaceAnalysisCapabilityError(
 			foundation.ErrorInvalidInput,

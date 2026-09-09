@@ -17,7 +17,12 @@ func (repository *GORMWorkspaceAnalysisRepository) AuthorizeWorkspaceAnalysisToo
 	if err != nil {
 		return application.WorkspaceAnalysisToolAuthorizationResult{}, err
 	}
+	arguments, err := workspaceAnalysisAuthorizedArguments(command)
+	if err != nil {
+		return application.WorkspaceAnalysisToolAuthorizationResult{}, err
+	}
 	var result application.WorkspaceAnalysisToolAuthorizationResult
+	var denial *agentapplication.WorkspaceAnalysisAdmissionDenial
 	callbackCompleted := false
 	err = repository.within(ctx, foundation.TransactionOptions{}, func(callbackCtx context.Context, database *gorm.DB, scope foundation.TransactionScope) error {
 		fence, identity, err := repository.lockExecution(callbackCtx, scope, command.Identity)
@@ -33,7 +38,7 @@ func (repository *GORMWorkspaceAnalysisRepository) AuthorizeWorkspaceAnalysisToo
 		}); err != nil {
 			return err
 		}
-		snapshot, err := repository.participant.PrepareWorkspaceAnalysisToolOperationScoped(callbackCtx, scope, agentapplication.PrepareWorkspaceAnalysisToolOperationCommand{Identity: identity, OperationKey: command.OperationKey, CandidateOperationID: command.OperationID, RequestHash: call.RequestHash, ExpectedToolCatalogHash: workspaceAnalysisCatalogHash()})
+		snapshot, err := repository.participant.PrepareWorkspaceAnalysisToolOperationScoped(callbackCtx, scope, agentapplication.PrepareWorkspaceAnalysisToolOperationCommand{Identity: identity, OperationKey: command.OperationKey, CandidateOperationID: command.OperationID, RequestHash: call.RequestHash, ExpectedToolCatalogHash: workspaceAnalysisCatalogHashForVersion(command.Identity.DefinitionVersion), Arguments: arguments})
 		if err != nil {
 			return err
 		}
@@ -42,6 +47,19 @@ func (repository *GORMWorkspaceAnalysisRepository) AuthorizeWorkspaceAnalysisToo
 		}
 		switch snapshot.Operation.Status {
 		case agentdomain.WorkspaceAnalysisOperationPending:
+			if snapshot.Run.DefinitionVersion == 2 {
+				denial, err = repository.dynamicToolAdmissionDenial(callbackCtx, scope, snapshot, definition)
+				if err != nil {
+					return err
+				}
+				if denial != nil {
+					if err := gormToolsExec(database, "SET CONSTRAINTS ALL IMMEDIATE"); err != nil {
+						return classifyGORMTools(callbackCtx, err)
+					}
+					callbackCompleted = true
+					return nil
+				}
+			}
 			if err := gormEnsureNoActiveWorkspaceAnalysisToolCall(callbackCtx, database, call.WorkflowRunID); err != nil {
 				return err
 			}
@@ -169,11 +187,17 @@ func (repository *GORMWorkspaceAnalysisRepository) AuthorizeWorkspaceAnalysisToo
 	})
 	if err != nil {
 		if callbackCompleted && gormToolsCommitFailure(err) {
+			if denial != nil {
+				return application.WorkspaceAnalysisToolAuthorizationResult{}, repository.recoverDynamicToolAdmissionDenial(ctx, command, call, definition, arguments, denial, err)
+			}
 			return repository.gormRecoverWorkspaceAnalysisAuthorizationAfterCommitError(ctx, command, call, result, err)
 		}
 		return application.WorkspaceAnalysisToolAuthorizationResult{}, classifyGORMTools(ctx, err)
 	}
 	_ = contract
+	if denial != nil {
+		return application.WorkspaceAnalysisToolAuthorizationResult{}, denial
+	}
 	return result, nil
 }
 

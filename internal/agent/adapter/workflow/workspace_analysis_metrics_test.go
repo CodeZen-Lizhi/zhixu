@@ -77,6 +77,36 @@ func TestWorkspaceAnalysisFinalizerMetricsCannotBreakPublication(t *testing.T) {
 	}
 }
 
+func TestWorkspaceAnalysisFinalizerMetricsKeepV2DefinitionOnFreshCommit(t *testing.T) {
+	metrics := observability.NewMemoryMetrics()
+	next := &workspaceAnalysisFinalizerMetricsFake{}
+	finalizer, err := NewWorkspaceAnalysisFinalizerWithMetrics(next, metrics)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lookup := conversationapplication.WorkspaceAnalysisPublicationLookup{DefinitionVersion: 2}
+	success := conversationapplication.FinalizeWorkspaceAnalysisSuccessCommand{WorkspaceAnalysisPublicationLookup: lookup}
+	if _, _, err := finalizer.FinalizeSuccess(context.Background(), success); err != nil {
+		t.Fatal(err)
+	}
+	termination := conversationapplication.FinalizeWorkspaceAnalysisTerminationCommand{WorkspaceAnalysisPublicationLookup: lookup, Reason: agentdomain.WorkspaceAnalysisRunToolFailed}
+	if _, _, err := finalizer.FinalizeTermination(context.Background(), termination); err != nil {
+		t.Fatal(err)
+	}
+	next.replayed = true
+	_, _, _ = finalizer.FinalizeSuccess(context.Background(), success)
+	_, _, _ = finalizer.FinalizeTermination(context.Background(), termination)
+	measurements := metrics.Snapshot()
+	if len(measurements) != 2 {
+		t.Fatalf("fresh v2 metric count=%d", len(measurements))
+	}
+	for _, measurement := range measurements {
+		if measurement.Labels.Map()["definition"] != "workspace-analysis-v2" {
+			t.Fatal("v2 publication was recorded as a different definition")
+		}
+	}
+}
+
 type workspaceAnalysisFinalizerMetricsFake struct {
 	replayed bool
 	err      error

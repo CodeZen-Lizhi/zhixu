@@ -125,7 +125,7 @@ func NewFrozenContractRegistry() (*application.Registry, error) {
 func builtinSeeds() []contractSeed {
 	localRetry := domain.RetryPolicy{MaxAttempts: 3, BaseDelay: 250 * time.Millisecond, MaxDelay: 2 * time.Second}
 	noRetry := domain.RetryPolicy{MaxAttempts: 1}
-	return []contractSeed{
+	seeds := []contractSeed{
 		{
 			name: "SearchKnowledge", version: toolVersionV1, description: "Search approved knowledge in the current workspace through the frozen retrieval index.",
 			inputSchemaID: "tool.search_knowledge.input", inputSchema: searchKnowledgeInputSchema,
@@ -291,4 +291,5 @@ func builtinSeeds() []contractSeed {
 			maxInputBytes: 16 * 1024, maxOutputBytes: domain.ValidateCitationV3ReceiptMaxOutputBytes,
 		},
 	}
+	return append(seeds, workspaceAnalysisDynamicSeeds(seeds)...)
 }

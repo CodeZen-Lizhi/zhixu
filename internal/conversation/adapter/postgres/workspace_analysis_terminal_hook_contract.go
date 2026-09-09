@@ -23,17 +23,20 @@ type workspaceAnalysisCancellationRuntime struct {
 }
 
 type workspaceAnalysisCancellationRun struct {
-	ID             foundation.ID
-	WorkspaceID    foundation.ID
-	ConversationID foundation.ID
-	QuestionID     foundation.ID
-	AnswerID       foundation.ID
-	WorkflowRunID  foundation.ID
-	Status         agentdomain.WorkspaceAnalysisRunStatus
-	Reason         *agentdomain.WorkspaceAnalysisRunTerminationReason
-	Version        int64
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	DefinitionVersion int64
+	PolicyVersion     int
+	DefinitionHash    string
+	ID                foundation.ID
+	WorkspaceID       foundation.ID
+	ConversationID    foundation.ID
+	QuestionID        foundation.ID
+	AnswerID          foundation.ID
+	WorkflowRunID     foundation.ID
+	Status            agentdomain.WorkspaceAnalysisRunStatus
+	Reason            *agentdomain.WorkspaceAnalysisRunTerminationReason
+	Version           int64
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
 }
 
 func workspaceAnalysisCancellationNodeKey(kind string) (string, bool) {
@@ -42,7 +45,26 @@ func workspaceAnalysisCancellationNodeKey(kind string) (string, bool) {
 			return node.Key, true
 		}
 	}
+	for _, node := range conversationworkflow.RegisteredWorkspaceAnalysisDefinitionV2().Graph.Nodes {
+		if node.Kind == kind {
+			return node.Key, true
+		}
+	}
 	return "", false
+}
+
+func workspaceAnalysisCancellationNodeVersion(kind string) int64 {
+	for _, node := range conversationworkflow.RegisteredWorkspaceAnalysisDefinitionV2().Graph.Nodes {
+		if node.Kind == kind {
+			return 2
+		}
+	}
+	for _, node := range conversationworkflow.RegisteredWorkspaceAnalysisDefinition().Graph.Nodes {
+		if node.Kind == kind {
+			return 1
+		}
+	}
+	return 0
 }
 
 func validateWorkspaceAnalysisCancellationEvent(event workflowapplication.WorkflowNodeTerminalEvent) error {
@@ -65,9 +87,9 @@ func validateWorkspaceAnalysisCancellationEvent(event workflowapplication.Workfl
 }
 
 func validateWorkspaceAnalysisRuntimeFailureEvent(event workflowapplication.WorkflowNodeTerminalEvent) error {
-	values := []string{
-		string(event.WorkspaceID), string(event.WorkflowRunID),
-		string(event.NodeRunID), string(event.NodeAttemptID),
+	values := []string{string(event.WorkspaceID), string(event.WorkflowRunID), string(event.NodeRunID)}
+	if event.NodeAttemptID != "" || workspaceAnalysisCancellationNodeVersion(event.NodeKind) != 2 {
+		values = append(values, string(event.NodeAttemptID))
 	}
 	if _, err := parseWorkspaceAnalysisIDs(values...); err != nil || event.NodeKind == "" ||
 		event.Outcome != workflowapplication.WorkflowTerminalOutcomeFailed ||

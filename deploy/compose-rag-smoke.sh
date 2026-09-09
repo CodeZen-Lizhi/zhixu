@@ -15,6 +15,7 @@ readonly ENV_FILE="${REPOSITORY_ROOT}/.env.example"
 readonly REAL_PROVIDER_MODE="${ZHIXU_COMPOSE_RAG_REAL_PROVIDER:-0}"
 readonly REAL_PROVIDER_PREFLIGHT_ONLY="${ZHIXU_COMPOSE_RAG_REAL_PROVIDER_PREFLIGHT_ONLY:-0}"
 readonly RAG_BROWSER_MODE="${ZHIXU_COMPOSE_RAG_BROWSER:-0}"
+readonly SYNTHESIS_MODE="${ZHIXU_COMPOSE_SYNTHESIS:-0}"
 readonly WORKSPACE_ANALYSIS_MODE="${ZHIXU_COMPOSE_WORKSPACE_ANALYSIS:-0}"
 readonly WORKSPACE_ANALYSIS_OTLP_MODE="${ZHIXU_COMPOSE_WORKSPACE_ANALYSIS_OTLP:-0}"
 readonly WORKSPACE_ANALYSIS_WORKER_RESTART_MODE="${ZHIXU_COMPOSE_WORKSPACE_ANALYSIS_WORKER_RESTART:-0}"
@@ -128,7 +129,7 @@ resource = {
 expected = {
     "workspace_analysis_outcome_total": (resource | {
         "mode": "workspace_analysis",
-        "definition": "workspace-analysis-v1",
+        "definition": "workspace-analysis-v2",
         "outcome": "completed",
         "termination_reason": "COMPLETED",
     }, 1.0),
@@ -852,28 +853,12 @@ wait_for_workspace_analysis_capability() {
   local started_at=${SECONDS} ready
   while (( SECONDS - started_at < TIMEOUT_SECONDS )); do
     ready="$(compose exec -T postgres psql -Atq --username "${ZHIXU_POSTGRES_USER}" --dbname "${ZHIXU_POSTGRES_DB}" -c \
-      "SELECT count(*) FROM agent.workspace_analysis_worker_capability WHERE released_at IS NULL AND lease_until>clock_timestamp() AND config_revision=1")" || \
+      "SELECT count(*) FROM agent.workspace_analysis_worker_capability WHERE released_at IS NULL AND lease_until>clock_timestamp() AND config_revision=1 AND definition_version=2 AND policy_version=2")" || \
       fail 'could not read Workspace Analysis capability'
     [[ "${ready}" =~ ^[1-9][0-9]*$ ]] && return 0
     sleep "${POLL_INTERVAL_SECONDS}"
   done
   fail 'Workspace Analysis worker did not advertise a fresh capability'
-}
-
-workspace_analysis_database_projection() {
-  local answer_id=$1
-  compose exec -T postgres psql -Atq --username "${ZHIXU_POSTGRES_USER}" --dbname "${ZHIXU_POSTGRES_DB}" \
-    --set workspace_id="${WORKSPACE_ID}" --set answer_id="${answer_id}" <<'SQL'
-SELECT concat_ws('|',run.status,run.settled_model_calls,run.settled_tool_calls,run.settled_source_reads,
-  (SELECT count(*) FROM agent.workspace_analysis_operation operation WHERE operation.analysis_run_id=run.id AND operation.call_kind='MODEL' AND operation.status='SUCCEEDED'),
-  (SELECT count(*) FROM agent.workspace_analysis_operation operation WHERE operation.analysis_run_id=run.id AND operation.call_kind='TOOL' AND operation.status='SUCCEEDED'),
-  (SELECT count(*) FROM workflow.tool_result_receipt receipt JOIN agent.workspace_analysis_operation operation ON operation.result_id=receipt.id WHERE operation.analysis_run_id=run.id),
-  (SELECT count(*) FROM agent.workspace_analysis_candidate candidate WHERE candidate.analysis_run_id=run.id),
-  (SELECT count(*) FROM agent.workspace_analysis_model_result result WHERE result.analysis_run_id=run.id),
-  (SELECT count(*) FROM agent.workspace_analysis_publication_proof proof WHERE proof.analysis_run_id=run.id))
-FROM agent.workspace_analysis_run run
-WHERE run.workspace_id=:'workspace_id' AND run.answer_id=:'answer_id';
-SQL
 }
 
 wait_for_workspace_analysis_fixture_barrier_entered() {
@@ -989,7 +974,7 @@ wait_for_workspace_analysis_restart_terminal() {
     if workspace_analysis_fixture_barrier_entered; then
       fail 'replacement Workspace Analysis Attempt duplicated the interrupted model call'
     fi
-    request_json GET "/api/v1/answers/${answer_id}?workspace_id=${WORKSPACE_ID}" 200 '' 'Workspace Analysis restart answer status'
+    request_json GET "/api/v2/answers/${answer_id}?workspace_id=${WORKSPACE_ID}" 200 '' 'Workspace Analysis restart answer status'
     publication="$(jq -r '.publication_status' "${LAST_RESPONSE_FILE}")"
     workflow="$(jq -r '.workflow.status' "${LAST_RESPONSE_FILE}")"
     if [[ "${publication}:${workflow}" == 'failed:failed' ]]; then
@@ -1091,7 +1076,7 @@ run_workspace_analysis_worker_restart_smoke() {
     'Workspace Analysis restart conversation creation' "workspace-analysis-restart-conversation-${run_id}"
   conversation_id="$(jq -er '.id' "${LAST_RESPONSE_FILE}")"
   payload="$(jq -cn --arg workspace "${WORKSPACE_ID}" --arg question "${analysis_question}" '{workspace_id:$workspace,mode:"workspace_analysis",question:$question,scope:{retrieval_mode:"keyword"},answer_depth:"standard",output_format:"markdown"}')"
-  request_json POST "/api/v1/conversations/${conversation_id}/questions" 202 "${payload}" \
+  request_json POST "/api/v2/conversations/${conversation_id}/questions" 202 "${payload}" \
     'Workspace Analysis restart question submission' "workspace-analysis-restart-question-${run_id}"
   answer_id="$(jq -er '.answer.id' "${LAST_RESPONSE_FILE}")"
   CURRENT_ANSWER_ID="${answer_id}"
@@ -1124,10 +1109,10 @@ run_workspace_analysis_worker_restart_smoke() {
   [[ "${run_status}|${termination}|${publication}|${result_type}|${workflow_status}|${answer_reason}" == \
     'failed|WORKSPACE_ANALYSIS_RESULT_UNKNOWN|failed|workspace_analysis_termination|failed|WORKSPACE_ANALYSIS_RESULT_UNKNOWN' ]] || \
     fail 'Workspace Analysis restart did not converge to the authoritative RESULT_UNKNOWN terminal state'
-  [[ "${source_reads}" =~ ^[1-3]$ && "${model_operations}" == 2 && "${tool_operations}" -eq $((source_reads + 2)) && \
+  [[ "${source_reads}" == 1 && "${model_operations}" == 6 && "${tool_operations}" == 4 && \
     "${operation_count}" -eq $((model_operations + tool_operations)) && "${logical_count}" == "${operation_count}" ]] || \
     fail 'Workspace Analysis restart logical operation projection is inconsistent'
-  [[ "${model_calls}" == "${model_operations}" && "${model_runs}" == "${model_operations}" && \
+  [[ "${model_calls}" == "${model_operations}" && "${model_runs}" == 2 && \
     "${tool_calls}" == "${tool_operations}" && "${receipts}" == "${tool_operations}" && "${reservations}" == "${operation_count}" ]] || \
     fail 'Workspace Analysis restart duplicated a Call, receipt, Model Run, or reservation'
   [[ "${open_reservations}" == 0 && "${unknown_operations}" == 1 && "${unknown_model_calls}" == 1 && \
@@ -1138,7 +1123,7 @@ run_workspace_analysis_worker_restart_smoke() {
     "${river_jobs}" == 1 && "${attempt_rebound}" == 1 && "${river_rescues}" -ge 1 && "${river_attempt}" -ge 2 ]] || \
     fail 'Workspace Analysis restart omitted River rescue, lease_lost, or replacement Attempt evidence'
   [[ "${reserved_models}|${reserved_tools}|${reserved_sources}|${reserved_input}|${reserved_output}" == '0|0|0|0|0' && \
-    "${settled_models}" == 2 && "${settled_tools}" == "${tool_operations}" && "${settled_sources}" == "${source_reads}" && "${budget_matches}" == 1 ]] || \
+    "${settled_models}" == 6 && "${settled_tools}" == "${tool_operations}" && "${settled_sources}" == "${source_reads}" && "${budget_matches}" == 1 ]] || \
     fail 'Workspace Analysis restart duplicated or stranded budget accounting'
   candidate_requests_after="$(workspace_analysis_candidate_fixture_request_count)" || fail 'could not read the candidate fixture request count after restart'
   [[ "${candidate_requests_after}" -eq $((candidate_requests_before + 1)) ]] || \
@@ -1169,7 +1154,7 @@ wait_for_proposal() {
 wait_for_answer() {
   local answer_id=$1 started_at=${SECONDS} publication workflow
   while (( SECONDS - started_at < TIMEOUT_SECONDS )); do
-    request_json GET "/api/v1/answers/${answer_id}?workspace_id=${WORKSPACE_ID}" 200 '' 'answer status'
+    request_json GET "/api/v2/answers/${answer_id}?workspace_id=${WORKSPACE_ID}" 200 '' 'answer status'
     publication="$(jq -r '.publication_status' "${LAST_RESPONSE_FILE}")"
     workflow="$(jq -r '.workflow.status' "${LAST_RESPONSE_FILE}")"
     if [[ "${publication}:${workflow}" == 'completed:succeeded' ]]; then
@@ -1337,6 +1322,7 @@ main() {
   [[ "${REAL_PROVIDER_MODE}" =~ ^[01]$ ]] || fail 'real Provider mode must be 0 or 1'
   [[ "${REAL_PROVIDER_PREFLIGHT_ONLY}" =~ ^[01]$ ]] || fail 'real Provider preflight-only mode must be 0 or 1'
   [[ "${RAG_BROWSER_MODE}" =~ ^[01]$ ]] || fail 'fixed RAG browser mode must be 0 or 1'
+  [[ "${SYNTHESIS_MODE}" =~ ^[01]$ ]] || fail 'Synthesis mode must be 0 or 1'
   [[ "${WORKSPACE_ANALYSIS_MODE}" =~ ^[01]$ ]] || fail 'Workspace Analysis mode must be 0 or 1'
   [[ "${WORKSPACE_ANALYSIS_OTLP_MODE}" =~ ^[01]$ ]] || fail 'Workspace Analysis OTLP mode must be 0 or 1'
   [[ "${WORKSPACE_ANALYSIS_WORKER_RESTART_MODE}" =~ ^[01]$ ]] || fail 'Workspace Analysis Worker restart mode must be 0 or 1'
@@ -1348,6 +1334,9 @@ main() {
   fi
   if [[ "${WORKSPACE_ANALYSIS_MODE}" == 1 && "${REAL_PROVIDER_MODE}" == 1 ]]; then
     fail 'Workspace Analysis deterministic smoke cannot be combined with real Provider mode'
+  fi
+  if [[ "${SYNTHESIS_MODE}" == 1 && ( "${WORKSPACE_ANALYSIS_MODE}" == 1 || "${REAL_PROVIDER_MODE}" == 1 || "${RAG_BROWSER_MODE}" == 1 ) ]]; then
+    fail 'Synthesis smoke cannot be combined with Workspace Analysis, real Provider, or fixed RAG browser mode'
   fi
   if [[ "${WORKSPACE_ANALYSIS_WORKER_RESTART_MODE}" == 1 && "${WORKSPACE_ANALYSIS_MODE}" != 1 ]]; then
     fail 'Workspace Analysis Worker restart smoke requires Workspace Analysis mode'
@@ -1363,7 +1352,7 @@ main() {
   [[ "${REQUEST_TIMEOUT_SECONDS}" =~ ^[1-9][0-9]*$ ]] || fail 'request timeout must be a positive integer'
   if [[ "${REAL_PROVIDER_PREFLIGHT_ONLY}" != 1 ]]; then
     for command in curl git go; do require_command "${command}"; done
-    if [[ "${REAL_PROVIDER_MODE}" == 1 || "${RAG_BROWSER_MODE}" == 1 || "${WORKSPACE_ANALYSIS_MODE}" == 1 ]]; then
+    if [[ "${REAL_PROVIDER_MODE}" == 1 || "${RAG_BROWSER_MODE}" == 1 || "${WORKSPACE_ANALYSIS_MODE}" == 1 || "${SYNTHESIS_MODE}" == 1 ]]; then
       require_command node
       require_command npm
     fi
@@ -1385,9 +1374,9 @@ main() {
   local fixture_answer_stream_frame_delay_ms=''
   local chat_runtime_base_url='' embedding_runtime_base_url='' ollama_tags_url=''
   run_id="$(random_hex 6)"; PROJECT_NAME="zhixu-rag-smoke-${run_id}"; http_port="$(allocate_port)"; POSTGRES_PORT="$(allocate_port)"
-  [[ "${REAL_PROVIDER_MODE}" != 1 && "${RAG_BROWSER_MODE}" != 1 && "${WORKSPACE_ANALYSIS_MODE}" != 1 ]] || vite_port="$(allocate_port)"
+  [[ "${REAL_PROVIDER_MODE}" != 1 && "${RAG_BROWSER_MODE}" != 1 && "${WORKSPACE_ANALYSIS_MODE}" != 1 && "${SYNTHESIS_MODE}" != 1 ]] || vite_port="$(allocate_port)"
   API_BASE_URL="http://127.0.0.1:${http_port}"; AUTH_ORIGIN="${API_BASE_URL}"; WORKSPACE_ROOT="${STATE_DIR}/project"; target_path='docs/rag-smoke.md'
-  [[ "${REAL_PROVIDER_MODE}" != 1 && "${RAG_BROWSER_MODE}" != 1 && "${WORKSPACE_ANALYSIS_MODE}" != 1 ]] || VITE_BASE_URL="http://127.0.0.1:${vite_port}"
+  [[ "${REAL_PROVIDER_MODE}" != 1 && "${RAG_BROWSER_MODE}" != 1 && "${WORKSPACE_ANALYSIS_MODE}" != 1 && "${SYNTHESIS_MODE}" != 1 ]] || VITE_BASE_URL="http://127.0.0.1:${vite_port}"
   evidence_token="durable-rag-${run_id}"; chat_canary="chat_${run_id}_$(random_hex 12)"
   [[ "${WORKSPACE_ANALYSIS_MODE}" != 1 ]] || workspace_analysis_barrier_stage='workspace_analysis_candidate_stream'
   [[ "${RAG_BROWSER_MODE}" != 1 ]] || fixture_answer_stream_frame_delay_ms='750'
@@ -1501,7 +1490,7 @@ YAML
     export ZHIXU_EMBEDDING_BASE_URL="${embedding_runtime_base_url}" ZHIXU_EMBEDDING_API_KEY="${RAG_REAL_PROVIDER_EMBEDDING_API_KEY}"
     export ZHIXU_EMBEDDING_MODEL="${RAG_REAL_PROVIDER_EMBEDDING_MODEL}" ZHIXU_EMBEDDING_DIMENSIONS="${RAG_REAL_PROVIDER_EMBEDDING_DIMENSIONS}"
     export ZHIXU_EMBEDDING_NORMALIZATION='l2' ZHIXU_EMBEDDING_DISTANCE_METRIC='cosine' ZHIXU_EMBEDDING_TIMEOUT="${RAG_REAL_PROVIDER_EMBEDDING_TIMEOUT}"
-  elif [[ "${RAG_BROWSER_MODE}" == 1 || "${WORKSPACE_ANALYSIS_MODE}" == 1 ]]; then
+  elif [[ "${RAG_BROWSER_MODE}" == 1 || "${WORKSPACE_ANALYSIS_MODE}" == 1 || "${SYNTHESIS_MODE}" == 1 ]]; then
     export ZHIXU_AUTH_ALLOWED_ORIGINS="${AUTH_ORIGIN},${VITE_BASE_URL}" ZHIXU_AUTH_SECURE_COOKIE='false'
     export ZHIXU_EMBEDDING_PROVIDER='disabled' ZHIXU_EMBEDDING_BASE_URL='' ZHIXU_EMBEDDING_API_KEY='' ZHIXU_EMBEDDING_MODEL='' ZHIXU_EMBEDDING_DIMENSIONS='0'
   else
@@ -1650,6 +1639,12 @@ YAML
   activate_workspace_grant
   authenticate
 
+  if [[ "${SYNTHESIS_MODE}" == 1 ]]; then
+    source "${SCRIPT_DIR}/compose-synthesis-smoke-functions.sh"
+    run_synthesis_smoke "${run_id}" "${vite_port}"
+    return 0
+  fi
+
   local payload base_hash proposal_id revision_id change_hash workflow_path search_payload citation_href
   request_json POST "/api/v1/workspaces/${WORKSPACE_ID}/scan" 200 '{}' 'workspace scan'
   SOURCE_VERSION_ID="$(jq -er --arg path "${target_path}" '.files[] | select(.relative_path==$path) | .source_version_id' "${LAST_RESPONSE_FILE}")"
@@ -1657,7 +1652,7 @@ YAML
   request_json POST "/api/v1/source-versions/${SOURCE_VERSION_ID}/ingestion-attempts" 201 '{"attempt_number":1}' 'source ingestion' "ingest-${run_id}"
   jq -e '.status=="chunked" and .security_status=="passed" and .chunk_count>0' "${LAST_RESPONSE_FILE}" >/dev/null || fail 'source ingestion did not produce approved chunks'
 
-  payload="$(jq -cn --arg path "${target_path}" --arg base "${base_hash}" --arg token "${evidence_token}" '{target_path:$path,base_hash:$base,content:("# RAG Compose Smoke\n\nApproved recovery requires durable replay without duplicate provider work. "+$token+"\n"),evidence_summary:"compose rag smoke",risk_level:"LOW",risk:"low",rollback_plan:"revert generated commit"}')"
+  payload="$(jq -cn --arg path "${target_path}" --arg base "${base_hash}" --arg token "${evidence_token}" '{target_path:$path,base_hash:$base,content:("# RAG Compose Smoke\n\nApproved recovery requires durable replay without duplicate provider work. Evidence marker "+$token+"\n"),evidence_summary:"compose rag smoke",risk_level:"LOW",risk:"low",rollback_plan:"revert generated commit"}')"
   request_json POST "/api/v1/workspaces/${WORKSPACE_ID}/proposals" 201 "${payload}" 'proposal creation' "proposal-${run_id}"
   proposal_id="$(jq -er '.id' "${LAST_RESPONSE_FILE}")"; revision_id="$(jq -er '.revision.id' "${LAST_RESPONSE_FILE}")"; change_hash="$(jq -er '.revision.change_hash' "${LAST_RESPONSE_FILE}")"
   payload="$(jq -cn --arg revision "${revision_id}" --arg hash "${change_hash}" '{revision_id:$revision,change_hash:$hash,decision:"approved"}')"
@@ -1675,10 +1670,11 @@ YAML
   seed_knowledge_eligibility
 
   if [[ "${WORKSPACE_ANALYSIS_MODE}" == 1 ]]; then
-    local analysis_question analysis_conversation_id analysis_answer_id analysis_replay_id analysis_timeline_path
+    source "${SCRIPT_DIR}/compose-workspace-analysis-v2-smoke-functions.sh"
+    local analysis_question analysis_conversation_id analysis_answer_id analysis_replay_id
     local analysis_projection replay_projection proposal_count_before proposal_count_after git_head_before git_head_after git_status_before git_status_after
-    local run_status settled_models settled_tools settled_sources model_operations tool_operations receipts candidates model_results publication_proofs
     local analysis_watermark analysis_sse_file analysis_curl_status
+    local question_payload analysis_provider_before analysis_provider_after
 
     wait_for_workspace_analysis_capability
     proposal_count_before="$(compose exec -T postgres psql -Atq --username "${ZHIXU_POSTGRES_USER}" --dbname "${ZHIXU_POSTGRES_DB}" -c \
@@ -1693,43 +1689,23 @@ YAML
     [[ "${analysis_watermark}" =~ ^[1-9][0-9]*$ ]] || fail 'could not establish the Workspace Analysis SSE watermark'
     analysis_question="Analyze the approved recovery evidence token ${evidence_token} and recommend the bounded next step with citations."
     question_payload="$(jq -cn --arg workspace "${WORKSPACE_ID}" --arg question "${analysis_question}" '{workspace_id:$workspace,mode:"workspace_analysis",question:$question,scope:{retrieval_mode:"keyword"},answer_depth:"standard",output_format:"markdown"}')"
-    request_json POST "/api/v1/conversations/${analysis_conversation_id}/questions" 202 "${question_payload}" 'Workspace Analysis question submission' "workspace-analysis-question-${run_id}"
+    request_json POST "/api/v2/conversations/${analysis_conversation_id}/questions" 202 "${question_payload}" 'Workspace Analysis question submission' "workspace-analysis-question-${run_id}"
     jq -e '.question.mode=="workspace_analysis" and .answer.publication_status=="pending"' "${LAST_RESPONSE_FILE}" >/dev/null || fail 'Workspace Analysis submission omitted canonical mode or pending Answer'
     analysis_answer_id="$(jq -er '.answer.id' "${LAST_RESPONSE_FILE}")"
     CURRENT_ANSWER_ID="${analysis_answer_id}"
     wait_for_answer "${analysis_answer_id}"
-    jq -e --arg workspace "${WORKSPACE_ID}" '
-      .publication_status=="completed" and .result_type=="workspace_analysis" and .workflow.status=="succeeded"
-      and .retrieval_summary==null and .current_stage==null and (.citations|length)>0
-      and ([.citations[].workspace_id]|all(.==$workspace))
-      and .result.payload.termination_reason=="COMPLETED"
-      and .result.payload.proposal_suggestion.href=="/proposals"
-    ' "${STATE_DIR}/completed-answer.json" >/dev/null || fail 'Workspace Analysis Answer omitted its validated terminal projection'
+    assert_workspace_analysis_v2_completed "${analysis_answer_id}" default 5 5 1 true
+    analysis_projection="$(cat "${STATE_DIR}/analysis-default-database.json")"
+    analysis_provider_before="$(workspace_analysis_fixture_request_count workspace_analysis_decision)"
 
-    analysis_timeline_path="/api/v1/answers/${analysis_answer_id}/analysis-timeline?workspace_id=${WORKSPACE_ID}"
-    request_json GET "${analysis_timeline_path}" 200 '' 'Workspace Analysis timeline'
-    jq -e '
-      .schema_id=="conversation.workspace_analysis_timeline" and .schema_version=="v1"
-      and .run_status=="succeeded" and .termination_reason=="COMPLETED"
-	      and .budget.model_calls.used==3 and .budget.tool_calls.used>=4
-	      and (.budget.source_reads.used>=1 and .budget.source_reads.used<=3 and .budget.source_reads.max==3)
-      and ([.items[]|select(.kind=="node" and .status=="succeeded")]|length)==6
-      and ([.items[]|select(.kind=="model" and .status=="succeeded")]|length)==3
-      and ([.items[]|select(.kind=="tool" and .status=="succeeded")]|length)==.budget.tool_calls.used
-    ' "${LAST_RESPONSE_FILE}" >/dev/null || fail 'Workspace Analysis timeline omitted the complete safe dependency projection'
-
-    analysis_projection="$(workspace_analysis_database_projection "${analysis_answer_id}")" || fail 'could not read Workspace Analysis database projection'
-    IFS='|' read -r run_status settled_models settled_tools settled_sources model_operations tool_operations receipts candidates model_results publication_proofs <<<"${analysis_projection}"
-    [[ "${run_status}" == succeeded && "${settled_models}" == 3 && "${model_operations}" == 3 && "${candidates}" == 1 && "${model_results}" == 2 && "${publication_proofs}" == 1 ]] || \
-      fail 'Workspace Analysis database projection omitted model, candidate, review, or publication facts'
-    [[ "${settled_sources}" =~ ^[1-3]$ && "${settled_tools}" -eq $((settled_sources + 3)) && "${tool_operations}" == "${settled_tools}" && "${receipts}" == "${settled_tools}" ]] || \
-      fail 'Workspace Analysis database projection omitted the exact Git/Search/Read/Validate receipt chain'
-
-    request_json POST "/api/v1/conversations/${analysis_conversation_id}/questions" 200 "${question_payload}" 'Workspace Analysis exact replay' "workspace-analysis-question-${run_id}"
+    request_json POST "/api/v2/conversations/${analysis_conversation_id}/questions" 200 "${question_payload}" 'Workspace Analysis exact replay' "workspace-analysis-question-${run_id}"
     analysis_replay_id="$(jq -er '.answer.id' "${LAST_RESPONSE_FILE}")"
     [[ "${analysis_replay_id}" == "${analysis_answer_id}" ]] || fail 'Workspace Analysis replay created another Answer'
-    replay_projection="$(workspace_analysis_database_projection "${analysis_answer_id}")" || fail 'could not reread Workspace Analysis database projection'
+    replay_projection="$(workspace_analysis_v2_database_projection "${analysis_answer_id}")" || fail 'could not reread Workspace Analysis database projection'
     [[ "${replay_projection}" == "${analysis_projection}" ]] || fail 'Workspace Analysis replay duplicated or mutated durable facts'
+    analysis_provider_after="$(workspace_analysis_fixture_request_count workspace_analysis_decision)"
+    [[ "${analysis_provider_before}" == "${analysis_provider_after}" ]] || fail 'Workspace Analysis replay repeated a Provider decision'
+    assert_workspace_analysis_v2_timeline_replay "${analysis_answer_id}" default
 
     analysis_sse_file="${STATE_DIR}/workspace-analysis-events.sse"
     set +e
@@ -1748,11 +1724,12 @@ YAML
     if [[ "${WORKSPACE_ANALYSIS_OTLP_MODE}" == 1 ]]; then
       assert_workspace_analysis_otlp_metrics
     else
+      run_workspace_analysis_v2_additional_scenarios "${analysis_question}" "${run_id}"
       arm_workspace_analysis_fixture_barrier
       start_vite "${vite_port}"
       run_workspace_analysis_browser "${analysis_question}" "${WORKSPACE_ROOT}" cancelled
       arm_workspace_analysis_fixture_barrier
-      run_workspace_analysis_browser "${analysis_question}" "${WORKSPACE_ROOT}" completed
+      run_workspace_analysis_browser "extended ${analysis_question}" "${WORKSPACE_ROOT}" completed
       if [[ "${WORKSPACE_ANALYSIS_WORKER_RESTART_MODE}" == 1 ]]; then
         run_workspace_analysis_worker_restart_smoke "${analysis_question}" "${run_id}"
       fi
@@ -1767,7 +1744,7 @@ YAML
     if [[ "${WORKSPACE_ANALYSIS_OTLP_MODE}" == 1 ]]; then
       log 'passed: deterministic Workspace Analysis Worker OTLP Metrics export, exact labels, replay uniqueness, and graceful flush'
     else
-      log 'passed: deterministic Workspace Analysis API/River/Worker/PostgreSQL receipts, replay, SSE, Stop cancellation, read-only boundary, and desktop/mobile browser'
+      log 'passed: dynamic Workspace Analysis default 5/7/5/1, extended 6/8/6/2, budget 12 decisions/12 Git with persistent denial and no 13th Provider call, replay, SSE, Stop, read-only boundary, and desktop/mobile browser'
     fi
     return 0
   fi
@@ -1816,7 +1793,7 @@ YAML
   watermark="$(compose exec -T postgres psql -Atq --username "${ZHIXU_POSTGRES_USER}" --dbname "${ZHIXU_POSTGRES_DB}" -c "SELECT COALESCE(max(seq),0) FROM ops.server_event WHERE workspace_id='${WORKSPACE_ID}'")"
   [[ "${watermark}" =~ ^[1-9][0-9]*$ ]] || fail 'could not establish a positive SSE replay watermark'
   question_payload="$(jq -cn --arg workspace "${WORKSPACE_ID}" '{workspace_id:$workspace,question:"What does the approved recovery evidence require?",scope:{retrieval_mode:"keyword"},answer_depth:"standard",output_format:"markdown"}')"
-  request_json POST "/api/v1/conversations/${conversation_id}/questions" 202 "${question_payload}" 'question submission' "question-${run_id}"
+  request_json POST "/api/v2/conversations/${conversation_id}/questions" 202 "${question_payload}" 'question submission' "question-${run_id}"
   answer_id="$(jq -er '.answer.id' "${LAST_RESPONSE_FILE}")"
   CURRENT_ANSWER_ID="${answer_id}"
   wait_for_answer "${answer_id}"
@@ -1831,7 +1808,7 @@ YAML
   draft_sessions="$(draft_session_projection)" || fail 'could not read draft session projection'
   [[ "${draft_sessions}" == '1|PUBLISHED' ]] || fail 'Compose RAG did not atomically publish the final draft session'
 
-  request_json POST "/api/v1/conversations/${conversation_id}/questions" 200 "${question_payload}" 'question exact replay' "question-${run_id}"
+  request_json POST "/api/v2/conversations/${conversation_id}/questions" 200 "${question_payload}" 'question exact replay' "question-${run_id}"
   replay_answer_id="$(jq -er '.answer.id' "${LAST_RESPONSE_FILE}")"; [[ "${replay_answer_id}" == "${answer_id}" ]] || fail 'question replay created another Answer'
   model_calls_after="$(model_call_projection)" || fail 'could not reread persisted model call projection'
   [[ "${model_calls_after}" == "${model_calls_before}" ]] || fail 'question replay repeated a Provider model call'
@@ -1852,7 +1829,7 @@ YAML
   feedback_id="$(jq -er '.id' "${LAST_RESPONSE_FILE}")"
   request_json POST "/api/v1/answers/${answer_id}/feedback" 200 "${payload}" 'feedback exact replay' "feedback-${run_id}"
   [[ "$(jq -er '.id' "${LAST_RESPONSE_FILE}")" == "${feedback_id}" ]] || fail 'feedback replay created another record'
-  request_json GET "/api/v1/answers/${answer_id}?workspace_id=${WORKSPACE_ID}" 200 '' 'answer after feedback'
+  request_json GET "/api/v2/answers/${answer_id}?workspace_id=${WORKSPACE_ID}" 200 '' 'answer after feedback'
   jq -e --slurpfile before "${STATE_DIR}/completed-answer.json" '.publication_status==$before[0].publication_status and .result==$before[0].result and .citations==$before[0].citations' "${LAST_RESPONSE_FILE}" >/dev/null || fail 'feedback mutated the published Answer'
 
   if [[ "${RAG_BROWSER_MODE}" == 1 ]]; then

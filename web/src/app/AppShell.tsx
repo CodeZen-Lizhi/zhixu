@@ -35,6 +35,7 @@ import { useEventStore } from "../events/event-store";
 import { QuickCaptureDialog } from "../features/capture/QuickCaptureDialog";
 import { quickCaptureIntentEvent } from "../features/capture/quick-capture-intent";
 import { Sheet, Tooltip } from "../shared/ui";
+import { RouteContentBoundary } from "../routes/RouteContentBoundary";
 import { getRouteDisplay, routeBelongsToSection, routeDisplayRegistry, type RouteNavigationIcon, type RouteSection } from "../routes/route-display";
 import { useActiveWorkspaceId } from "./active-workspace";
 import { useAuth } from "./auth-context";
@@ -402,7 +403,11 @@ export const AppShell = () => {
         </>}
       </header>
       {signOutError ? <p className="topbar-auth-error" role="alert">退出登录失败：{signOutError.message}。请重试。</p> : null}
-      <div className="workbench__content"><Suspense fallback={<div className="page-loading">正在加载…</div>}><Outlet /></Suspense></div>
+      <div className="workbench__content">
+        <RouteContentBoundary key={workspaceId} resetKey={location.key}>
+          <Suspense fallback={<div className="page-loading">正在加载…</div>}><Outlet /></Suspense>
+        </RouteContentBoundary>
+      </div>
     </main>
     {workspaceConnected ? <QuickCaptureDialog
       key={workspaceId}

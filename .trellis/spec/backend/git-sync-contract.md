@@ -66,6 +66,10 @@ PENDING -> FETCHING -> COMPARING
 - 索引失败不能回滚 Git；只重试 follow-up。自动同步失败不能回滚已完成 Proposal、Commit 或 Active Index。
 - 配置删除或变更不会删除历史 Run/Attempt/Audit；旧 pending Run 在执行前因配置栅栏进入 stale。
 - Capability 可独立关闭。关闭 Git sync 后，本地 Workspace、Authoring、Safe Writeback、History 和 Search 仍继续工作。
+- `ZHIXU_GIT_SYNC_KEY_FILE` 为空时，`newGitSyncWorker` 返回的 Worker/Scheduler 均为 typed nil。
+  `startGitSyncDispatchLoop`、`dispatchGitSync` 与 `dispatchGitSyncOutbox` 必须复用
+  `nilLifecycleDependency` 识别接口中的空指针：禁用组合不启动 goroutine、扫描候选、领取 Outbox 或记录失败。
+  两个组件只存在一个时，直接 dispatch 仍须在任何调用前拒绝，不能按完整禁用忽略错误。
 
 ## HTTP 与公开投影
 
@@ -140,6 +144,9 @@ if len(changes) < domain.MaxChangedFiles { changes = append(changes, change) }
 - Security：SSRF、DNS re-resolution/pinning、redirect/proxy、argv/config/log/error redaction、key file 模式、共享
   `secretstore` 原语、Git 独立 purpose/schema、AAD 篡改和 buffer 清零。
 - Composition：API/Worker capability、空密钥禁用、有效密钥启用、Worker restart 和安全关闭。
+- 禁用回归：`TestDisabledGitSyncCompositionDoesNotDispatch` 使用真实空密钥构造结果，断言 loop 的 stopped
+  channel 已关闭且直接 dispatch 无操作/无日志；`TestDispatchGitSyncRejectsTypedNilPartialComposition`
+  断言单组件缺失时返回错误，另一组件零调用。不能只测试字面量 `nil`，遗漏生产指针转接口的情况。
 - 公共契约：OpenAPI drift、Go race/vet/tidy、相关集成测试和 `git diff --check`。
 - 浏览器：真实 API/Worker 下覆盖配置、连接测试、持久 Run 恢复、diverged 冲突、双方 OID、`500` 条预览提示和重试入口；桌面与 `390x844` 均检查 Console、Secret 回显和横向溢出。
 

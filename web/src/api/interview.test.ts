@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { synthesisId, synthesisNoteRefFixture, synthesisSourceFixture } from "../test/synthesis-fixtures";
 
 const fetchMock = vi.fn<typeof fetch>();
 
@@ -9,10 +10,12 @@ import {
   completeInterview,
   decodeInterviewSessionPage,
   decodeInterviewSnapshot,
+  getInterview,
   listInterviewSessions,
   suggestInterviewMemoryCandidate,
   startInterview,
   submitInterviewTurn,
+  updateLearningPathStep,
 } from "./interview";
 
 const workspaceId = "71000000-0000-4000-8000-000000000001";
@@ -55,7 +58,7 @@ describe("interview API", () => {
     fetchMock.mockResolvedValue(jsonResponse({ session: session(), questions: [question], replayed: false }, 201));
 
     await expect(startInterview({ workspaceId, config, idempotencyKey: "interview-start-1" })).resolves.toMatchObject({ session: { id: sessionId }, questions: [{ prompt: question.prompt }] });
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/v1/review/interviews");
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/v2/review/interviews");
     const init = fetchMock.mock.calls[0]?.[1];
     expect(new Headers(init?.headers).get("Idempotency-Key")).toBe("interview-start-1");
     if (typeof init?.body !== "string") throw new Error("expected JSON request body");
@@ -73,9 +76,9 @@ describe("interview API", () => {
       items: [{ id: sessionId, config: { role: "Go engineer" } }],
       nextCursor: cursor,
     });
-    expect(fetchMock.mock.calls[0]?.[0]).toBe(`/api/v1/review/interviews?workspace_id=${workspaceId}&limit=20`);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(`/api/v2/review/interviews?workspace_id=${workspaceId}&limit=20`);
     await expect(listInterviewSessions({ workspaceId, limit: 20, cursor })).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
-    expect(fetchMock.mock.calls[1]?.[0]).toBe(`/api/v1/review/interviews?workspace_id=${workspaceId}&limit=20&cursor=${cursor}`);
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(`/api/v2/review/interviews?workspace_id=${workspaceId}&limit=20&cursor=${cursor}`);
 
     expect(() => decodeInterviewSessionPage({
       workspace_id: workspaceId,
@@ -166,5 +169,60 @@ describe("interview API", () => {
       turns: [primaryTurn, followUpTurn],
       steps: [],
     })).toMatchObject({ questions: [{ status: "ANSWERED" }, { status: "ANSWERED" }], turns: [{ questionId }, { questionId: followUpQuestionId }] });
+    expect(decodeInterviewSnapshot({
+      session: { ...session("COMPLETED"), follow_up_count: 1, version: 4 },
+      questions: [answeredPrimary, answeredFollowUp], turns: [primaryTurn, followUpTurn], report, path, steps: [step],
+    }).report?.summary.questionsTotal).toBe(1);
+  });
+
+  it("通过 v2 恢复 NOTE_REVISION 题面，且不能泄露答案或原始来源", async () => {
+    const reference = synthesisNoteRefFixture(workspaceId);
+    const noteItem = { revision: reference, item_id: synthesisId(11), item_kind: "FACT" };
+    const noteQuestion = { ...question, claim_id: null, source_kind: "NOTE_REVISION", note_item: noteItem };
+    const noteSession = { ...session(), config: { ...session().config, scope: { note_revision: reference } } };
+    const snapshot = { session: noteSession, questions: [noteQuestion], turns: [], steps: [] };
+    fetchMock.mockResolvedValueOnce(jsonResponse(snapshot));
+    await expect(getInterview(workspaceId, sessionId)).resolves.toMatchObject({ questions: [{ claimId: null, sourceKind: "NOTE_REVISION" }] });
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(`/api/v2/review/interviews/${sessionId}?workspace_id=${workspaceId}`);
+    expect(decodeInterviewSnapshot(snapshot)).toMatchObject({ questions: [{ claimId: null, sourceKind: "NOTE_REVISION", noteItem: { revision: { revisionId: reference.revision_id } } }] });
+    for (const patch of [
+      { answer_points: ["hidden"] }, { evidence: [] }, { note_source: { ...noteItem, sources: [synthesisSourceFixture(workspaceId)] } },
+      { claim_id: claimId }, { note_item: { ...noteItem, revision: { ...reference, workspace_id: synthesisId(100) } } },
+      { note_item: { ...noteItem, revision: { ...reference, revision_id: synthesisId(100) } } },
+    ]) expect(() => decodeInterviewSnapshot({ ...snapshot, questions: [{ ...noteQuestion, ...patch }] })).toThrow(InterviewApiError);
+    expect(() => decodeInterviewSnapshot({ ...snapshot, session: { ...noteSession, config: { ...noteSession.config, scope: { note_revision: reference, claim_ids: [] } } } })).toThrow(InterviewApiError);
+  });
+
+  it("通过 v2 提交 NOTE_REVISION 评分、报告和学习步骤，并校验同一冻结来源", async () => {
+    const reference = synthesisNoteRefFixture(workspaceId);
+    const noteItem = { revision: reference, item_id: synthesisId(11), item_kind: "FACT" };
+    const noteSource = { ...noteItem, sources: [synthesisSourceFixture(workspaceId)] };
+    const noteQuestion = { ...question, claim_id: null, source_kind: "NOTE_REVISION", note_item: noteItem, status: "ANSWERED", answered_at: createdAt };
+    const noteSession = { ...session("COMPLETED"), config: { ...session().config, scope: { note_revision: reference } } };
+    const noteTurn = { ...turn, scorer_version: "interview-deterministic/v2", score: { ...score, evidence: [], note_source: noteSource } };
+    const noteReport = { ...report, evidence: [], note_sources: [noteSource], gaps: [{ claim_id: null, source_kind: "NOTE_REVISION", note_source: noteSource, detail: "需要加强边界判断", evidence: [] }] };
+    const noteStep = { ...step, claim_id: null, source_kind: "NOTE_REVISION", note_source: noteSource, source_version_id: null, source_span_id: null, evidence_hash: null };
+    const snapshot = { session: noteSession, questions: [noteQuestion], turns: [noteTurn], report: noteReport, path, steps: [noteStep] };
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ turn: noteTurn, replayed: false }))
+      .mockResolvedValueOnce(jsonResponse({ session: noteSession, report: noteReport, path, steps: [noteStep], replayed: false }))
+      .mockResolvedValueOnce(jsonResponse({ path: { ...path, version: 2 }, step: { ...noteStep, status: "IN_PROGRESS", version: 2 }, replayed: false }));
+    await expect(submitInterviewTurn({ workspaceId, sessionId, questionId, userAnswer: "回答", idempotencyKey: "note-turn-v2" })).resolves.toMatchObject({ turn: { score: { noteSource: { itemId: noteItem.item_id } } } });
+    await expect(completeInterview({ workspaceId, sessionId, manualEnd: true, idempotencyKey: "note-complete-v2" })).resolves.toMatchObject({ steps: [{ claimId: null }] });
+    await expect(updateLearningPathStep({ workspaceId, pathId, stepId, expectedVersion: 1, status: "IN_PROGRESS", idempotencyKey: "note-step-v2" })).resolves.toMatchObject({ step: { claimId: null, status: "IN_PROGRESS" } });
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      `/api/v2/review/interviews/${sessionId}/turns`,
+      `/api/v2/review/interviews/${sessionId}/complete`,
+      `/api/v2/review/learning-paths/${pathId}/steps/${stepId}`,
+    ]);
+    expect(decodeInterviewSnapshot(snapshot)).toMatchObject({ turns: [{ score: { noteSource: { itemId: synthesisId(11) }, evidence: [] } }], steps: [{ claimId: null, sourceSpanId: null }] });
+    for (const value of [
+      { ...snapshot, turns: [{ ...noteTurn, score: { ...noteTurn.score, evidence: [evidence] } }] },
+      { ...snapshot, turns: [{ ...noteTurn, score: { ...noteTurn.score, note_source: { ...noteSource, item_id: synthesisId(12) } } }] },
+      { ...snapshot, steps: [{ ...noteStep, source_span_id: sourceSpanId }] },
+      { ...snapshot, steps: [{ ...noteStep, note_source: { ...noteSource, item_id: synthesisId(12) } }] },
+      { ...snapshot, report: { ...noteReport, note_sources: undefined } },
+      { ...snapshot, report: { ...noteReport, note_sources: [{ ...noteSource, revision: { ...reference, revision_id: synthesisId(100) } }] } },
+    ]) expect(() => decodeInterviewSnapshot(value)).toThrow(InterviewApiError);
   });
 });

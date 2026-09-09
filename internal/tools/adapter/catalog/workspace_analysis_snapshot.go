@@ -78,33 +78,40 @@ func WorkspaceAnalysisToolCatalogSnapshot() (WorkspaceAnalysisToolCatalog, error
 }
 
 func workspaceAnalysisToolCatalogSnapshot(registry workspaceAnalysisContractResolver) (WorkspaceAnalysisToolCatalog, error) {
+	return workspaceAnalysisToolCatalogSnapshotVersion(registry, 1)
+}
+
+func workspaceAnalysisToolCatalogSnapshotVersion(registry workspaceAnalysisContractResolver, version int64) (WorkspaceAnalysisToolCatalog, error) {
 	if registry == nil {
 		return WorkspaceAnalysisToolCatalog{}, errors.New("workspace analysis tool catalog registry is nil")
 	}
 
 	snapshot := WorkspaceAnalysisToolCatalog{
-		SchemaVersion: workspaceAnalysisToolCatalogSnapshotSchemaVersion,
+		SchemaVersion: version,
 		Tools:         make([]WorkspaceAnalysisToolCatalogEntry, 0, len(workspaceAnalysisToolCatalogRefs)),
 	}
 	for _, ref := range workspaceAnalysisToolCatalogRefs {
+		if version == 2 {
+			ref.Version++
+		}
 		contract, err := registry.ResolveContract(ref)
 		if err != nil {
 			return WorkspaceAnalysisToolCatalog{}, fmt.Errorf("resolve workspace analysis tool %s@%d: %w", ref.Name, ref.Version, err)
 		}
-		if err := validateWorkspaceAnalysisToolCatalogContract(ref, contract); err != nil {
+		if err := validateWorkspaceAnalysisToolCatalogContractVersion(ref, contract, version); err != nil {
 			return WorkspaceAnalysisToolCatalog{}, err
 		}
 		snapshot.Tools = append(snapshot.Tools, WorkspaceAnalysisToolCatalogEntry{
 			Name: ref.Name, Version: ref.Version, DefinitionHash: contract.Definition.DefinitionHash,
 		})
-		switch ref {
-		case domain.ToolRef{Name: "ReadGitStatus", Version: toolVersionV2}:
+		switch ref.Name {
+		case "ReadGitStatus":
 			snapshot.ReadGitStatusTimeout = contract.Definition.Timeout
-		case domain.ToolRef{Name: "SearchKnowledge", Version: toolVersionV2}:
+		case "SearchKnowledge":
 			snapshot.SearchKnowledgeTimeout = contract.Definition.Timeout
-		case domain.ToolRef{Name: "ReadSource", Version: toolVersionV3}:
+		case "ReadSource":
 			snapshot.ReadSourceTimeout = contract.Definition.Timeout
-		case domain.ToolRef{Name: "ValidateCitation", Version: toolVersionV3}:
+		case "ValidateCitation":
 			snapshot.ValidateCitationTimeout = contract.Definition.Timeout
 		}
 	}
@@ -122,6 +129,10 @@ func workspaceAnalysisToolCatalogSnapshot(registry workspaceAnalysisContractReso
 }
 
 func validateWorkspaceAnalysisToolCatalogContract(ref domain.ToolRef, contract application.Contract) error {
+	return validateWorkspaceAnalysisToolCatalogContractVersion(ref, contract, 1)
+}
+
+func validateWorkspaceAnalysisToolCatalogContractVersion(ref domain.ToolRef, contract application.Contract, version int64) error {
 	definition := contract.Definition
 	if definition.Ref != ref {
 		return fmt.Errorf("workspace analysis tool %s@%d reference drifted", ref.Name, ref.Version)
@@ -131,7 +142,11 @@ func validateWorkspaceAnalysisToolCatalogContract(ref domain.ToolRef, contract a
 		!workspaceAnalysisToolCatalogHashPattern.MatchString(definition.DefinitionHash) {
 		return fmt.Errorf("workspace analysis tool %s@%d definition hash drifted", ref.Name, ref.Version)
 	}
-	expectedTimeout, found := workspaceAnalysisToolCatalogExpectedTimeouts[ref]
+	timeoutRef := ref
+	if version == 2 {
+		timeoutRef.Version--
+	}
+	expectedTimeout, found := workspaceAnalysisToolCatalogExpectedTimeouts[timeoutRef]
 	if !found {
 		return fmt.Errorf("workspace analysis tool %s@%d timeout contract is missing", ref.Name, ref.Version)
 	}
@@ -142,7 +157,7 @@ func validateWorkspaceAnalysisToolCatalogContract(ref domain.ToolRef, contract a
 		definition.ResultPersistencePolicy != domain.ResultPersistenceCanonical || definition.IdempotencyMode != domain.IdempotencyNone ||
 		definition.RetryPolicy.MaxAttempts != 1 || definition.Timeout != expectedTimeout || definition.Timeout > domain.MaxToolTimeout ||
 		len(definition.AllowedWorkflows) != 1 ||
-		definition.AllowedWorkflows[0] != (domain.WorkflowBinding{Key: workspaceAnalysisFlow, Version: builtinWorkflowVersionV1}) {
+		definition.AllowedWorkflows[0] != (domain.WorkflowBinding{Key: workspaceAnalysisFlow, Version: version}) {
 		return fmt.Errorf("workspace analysis tool %s@%d contract drifted", ref.Name, ref.Version)
 	}
 	return nil

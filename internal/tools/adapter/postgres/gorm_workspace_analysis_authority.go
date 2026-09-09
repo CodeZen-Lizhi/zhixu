@@ -108,6 +108,10 @@ func (repository *GORMWorkspaceAnalysisRepository) LoadWorkspaceAnalysisSynthesi
 		if run.AnalysisRunID != query.AnalysisRunID {
 			return consistency(errors.New("synthesis evidence analysis run binding differs"))
 		}
+		if run.DefinitionVersion == 2 {
+			result, err = repository.dynamicSynthesisEvidence(callbackCtx, database, scope, query)
+			return err
+		}
 		search, err := repository.gormLoadWorkspaceAnalysisSuccessfulReceipt(
 			callbackCtx, database, scope, query.WorkspaceID, query.WorkflowRunID,
 			gormWorkspaceAnalysisOperationKey(query.AnalysisRunID, agentdomain.WorkspaceAnalysisOperationNodeRetrieveEvidence, agentdomain.WorkspaceAnalysisOperationKnowledgeSearch, 1),

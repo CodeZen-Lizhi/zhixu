@@ -44,7 +44,7 @@ func TestWorkspaceAnalysisResultReceiptContractsFreezeExactLimits(t *testing.T) 
 	if again[0].MaxOutputBytes != ReadGitStatusV2ReceiptMaxOutputBytes {
 		t.Fatal("contract accessor returned mutable shared state")
 	}
-	for _, ref := range []ToolRef{{}, {Name: "ReadGitStatus", Version: 1}, {Name: "SearchKnowledge", Version: 3}, {Name: "Unknown", Version: 1}} {
+	for _, ref := range []ToolRef{{}, {Name: "ReadGitStatus", Version: 1}, {Name: "SearchKnowledge", Version: 4}, {Name: "Unknown", Version: 1}} {
 		if _, found := WorkspaceAnalysisResultReceiptContract(ref); found {
 			t.Fatalf("unexpected receipt contract for %+v", ref)
 		}
@@ -779,7 +779,7 @@ func validResultReceiptDefinition(t *testing.T, ref ToolRef) Definition {
 		RequiredCapability:   capability.ReadLocal, SideEffectLevel: SideEffectNone,
 		InvocationPolicy: InvocationTrustedWorkflowOnly, ResultPersistencePolicy: ResultPersistenceCanonical,
 		Timeout: 15 * time.Second, RetryPolicy: RetryPolicy{MaxAttempts: 1}, IdempotencyMode: IdempotencyNone,
-		AllowedWorkflows: []WorkflowBinding{{Key: workspaceAnalysisWorkflowKey, Version: workspaceAnalysisWorkflowVersion}},
+		AllowedWorkflows: []WorkflowBinding{{Key: workspaceAnalysisWorkflowKey, Version: WorkspaceAnalysisToolWorkflowVersion(ref)}},
 		MaxInputBytes:    4096, MaxOutputBytes: contract.MaxOutputBytes,
 	})
 	if err != nil {

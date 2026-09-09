@@ -161,6 +161,7 @@ func proposalRequestFixture(t *testing.T) authoringapp.PublicationProposal {
 	return authoringapp.PublicationProposal{
 		WorkspaceID: workspaceID, TargetPath: targetPath, TargetMode: authoringdomain.ProposalTargetCreateOnly,
 		BaseVersion: token, Content: content, ContentHash: authoringdomain.ComputeContentHash(content),
+		CreatedByType:  "USER",
 		IdempotencyKey: "authoring-publication/v1:" + strings.Repeat("b", 64),
 	}
 }

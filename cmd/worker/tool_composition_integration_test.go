@@ -58,7 +58,7 @@ func TestWorkerToolCompositionSeparatesContractsExecutorsAndTrustedAudit(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if enabled.contracts == nil || enabled.executions == nil || enabled.execution == nil || enabled.repository == nil || enabled.writebackAudit == nil || enabled.workflow == nil || enabled.definition == nil || !enabled.runtimeEnabled || len(enabled.enabledRefs) != 11 {
+	if enabled.contracts == nil || enabled.executions == nil || enabled.execution == nil || enabled.repository == nil || enabled.writebackAudit == nil || enabled.workflow == nil || enabled.definition == nil || !enabled.runtimeEnabled || len(enabled.enabledRefs) != 15 {
 		t.Fatalf("enabled components=%+v", enabled)
 	}
 	for _, ref := range enabled.enabledRefs {
@@ -82,6 +82,10 @@ func TestWorkerToolCompositionSeparatesContractsExecutorsAndTrustedAudit(t *test
 		{Name: "SearchKnowledge", Version: 2},
 		{Name: "ReadSource", Version: 3},
 		{Name: "ValidateCitation", Version: 3},
+		{Name: "ReadGitStatus", Version: 3},
+		{Name: "SearchKnowledge", Version: 3},
+		{Name: "ReadSource", Version: 4},
+		{Name: "ValidateCitation", Version: 4},
 	} {
 		if _, err := enabled.executions.ResolveExecutor(ref); err != nil {
 			t.Fatalf("workspace analysis executor %s@%d is unreachable: %v", ref.Name, ref.Version, err)

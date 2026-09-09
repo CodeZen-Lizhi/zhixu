@@ -10,9 +10,16 @@
 - 级别语义为：DEBUG 开发诊断，INFO 状态变化，WARN 降级/重试/低置信度，ERROR 节点失败或依赖失败（依据 [`quality.md`](../../../docs/architecture/quality.md)）。
 - 相关字段包括 `request_id`、`trace_id`、`workspace_id`、`workflow_run_id`、`node_run_id`、`proposal_id`、`tool_call_id`、`document_id`；异步边界必须保持关联（依据 [`quality.md`](../../../docs/architecture/quality.md)）。
 - 禁止记录 API Key、Authorization Header、完整 Prompt/Source（默认）、无保留期限的用户回答全文；不展示模型私有思维链。
-- Audit 独立记录 Approval、Tool Permission、File Write、Git Commit、Rollback、Memory/Settings Change 和 Security Block，并且不能由普通清理任务删除。
+- Approval、Tool Permission、File Write、Git Commit、Rollback、Memory/Settings Change 和 Security Block 需要保留各 owner 的独立事实；现有通用 Audit 覆盖按实际生产者核对，不能把该目标写成全域已经接入。Audit 不由普通清理任务删除。
 
 ## 目标代码落点（M1 起）
+
+M10 的当前精简交付保留已接入的 append-only Audit 生产者，完整跨领域覆盖与自动留存/归档不是本次承诺。
+`cmd/audit` 提供操作者只读查询：显式 `--workspace UUID` 或 `--global`，后者仅表示 `workspace_id IS NULL`，
+不表示跨所有 Workspace。limit 默认 50、最大 200，后续页同时使用 `before` 与 `before-id`；连接强制默认只读，
+工具不迁移数据库、不写事件。输出只包含 ID/时间/主体类型/动作/资源类型/结果/安全错误码，省略任意 correlation、
+metadata、ActorRef、ResourceRef 和幂等键；错误使用固定安全 code，不回显 DSN/原始数据库错误。
+它通过操作者数据库凭据授权，不是公开 HTTP API 或产品 `AUDIT_JSON` 导出；各 owner 独立历史与通用 Audit 不互相冒充。
 
 - `cmd/api`、`cmd/worker`：创建带统一字段和级别策略的 slog Handler，并注入应用与 Worker。
 - `internal/observability/`：业务包使用的稳定 facade；不复制实现。
@@ -32,7 +39,7 @@
 
 ## 脱敏与审计
 
-1. Secret 在进入 logger、Trace、Model Prompt、DB Export 前统一脱敏；禁止把 Authorization、Cookie、API Key、Secret File 内容写入任何普通日志。
+1. Secret 在进入 logger、Trace、Model Prompt、产品 Export 前统一脱敏；禁止把 Authorization、Cookie、API Key、Secret File 内容写入任何普通日志。操作者整库备份会包含数据库加密配置，必须受保护保存，解密主密钥另存，不把灾备当作公开产品导出。
 2. Source、用户回答和模型原始响应只记录摘要、哈希、长度或稳定对象 ID；如确需调试原文，必须显式开启短期 debug 配置并有保留期限。
 3. Tool Audit 记录调用者、Workflow/Node、Tool、权限、参数摘要、目标、幂等键、耗时和结果/错误；不记录完整敏感参数。
 4. Audit 与普通日志分别有生命周期和访问权限；审计事件必须支持按 Proposal、Commit、Tool Call、Security Block 和 Workflow 反查。
@@ -213,7 +220,9 @@ Wrong: 用 NUL 拼接 workspace 与幂等键，再把失败分类为可重试 Au
 Correct: 用 canonical UUID + ':' + 已验证幂等键构造可打印锁键，并用真实 PG replay 回归测试锁定。
 ```
 
-## 后续待验证
+## 可选运营与扩展范围
+
+以下未执行验证与未实现扩展均不阻塞当前开发交付；只在实际运维或明确新需求中选择，不登记为本轮测试欠项。
 
 - 生产采样/保留策略、外部 Collector/Prometheus/Trace 后端部署，以及全部安全/业务决策
   调用点对 Audit Recorder 的接入覆盖。
@@ -224,19 +233,21 @@ Correct: 用 canonical UUID + ':' + 已验证幂等键构造可打印锁键，�
 
 ### 1. Scope / Trigger
 
-- `workspace-analysis@1` 的 Answer/Analysis Run 终态成功提交后，记录一个低基数结果计数；
+- `workspace-analysis@1` 或 `workspace-analysis@2` 的 Answer/Analysis Run 终态成功提交后，记录一个低基数结果计数；
   临时节点状态、重放和提交前状态不得产生指标。
 
 ### 2. Signatures
 
 - 业务指标名固定为 `workspace_analysis.outcome_total`，Prometheus 名固定为
   `zhixu_workspace_analysis_outcome_total`。
-- 构造入口固定为 `NewWorkspaceAnalysisOutcomeMeasurement(status, terminationReason)`。
+- 新调用使用 `NewWorkspaceAnalysisOutcomeMeasurementForVersion(definitionVersion, status, terminationReason)`，
+  版本来自持久 Run 的绑定；旧 `NewWorkspaceAnalysisOutcomeMeasurement(status, terminationReason)` 保持 v1 语义。
 
 ### 3. Contracts
 
-- 标签必须且只能包含 `mode=workspace_analysis`、`definition=workspace-analysis-v1`、
+- 标签必须且只能包含 `mode=workspace_analysis`、`definition=workspace-analysis-v1|workspace-analysis-v2`、
   `outcome` 和 `termination_reason`。
+- Definition 只接受版本 1 或 2，并精确映射对应标签；不得按当前默认版本重标历史 Run。
 - `outcome` 只允许 `completed|refused|clarification_required|failure|cancelled`；
   `termination_reason` 只允许领域冻结的 13 个终态原因。
 - Workspace、Workflow、Answer、Tool、Operation、Receipt 等身份不得成为标签。

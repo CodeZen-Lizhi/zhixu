@@ -65,10 +65,10 @@ const requiredProgressPath = (name: string): string => {
   return value;
 };
 
-const expectedTerminal = (): "completed" | "refused" | "cancelled" => {
+const expectedTerminal = (): "completed" | "refused" | "cancelled" | "failed" => {
   const value = process.env.ZHIXU_WORKSPACE_ANALYSIS_SMOKE_EXPECTED_TERMINAL?.trim() ?? "completed";
-  if (value !== "completed" && value !== "refused" && value !== "cancelled") {
-    throw new Error("ZHIXU_WORKSPACE_ANALYSIS_SMOKE_EXPECTED_TERMINAL must be completed, refused, or cancelled");
+  if (value !== "completed" && value !== "refused" && value !== "cancelled" && value !== "failed") {
+    throw new Error("ZHIXU_WORKSPACE_ANALYSIS_SMOKE_EXPECTED_TERMINAL must be completed, refused, cancelled, or failed");
   }
   return value;
 };
@@ -202,7 +202,7 @@ const assertComposerFollowsPublishedAnswer = async (page: Page): Promise<void> =
 
 const isQuestionRequest = (request: Request, conversationId: string): boolean => {
   const url = new URL(request.url());
-  return request.method() === "POST" && url.pathname === `/api/v1/conversations/${conversationId}/questions`;
+  return request.method() === "POST" && url.pathname === `/api/v2/conversations/${conversationId}/questions`;
 };
 
 const conversationIdFromPage = (page: Page): string => {
@@ -345,6 +345,7 @@ const assertWorkflowCancellationAccepted = async (
 const terminalHeading = (): string => {
   if (fixture.terminal === "completed") return "已校验分析";
   if (fixture.terminal === "refused") return "现有证据不足以形成可靠结论";
+  if (fixture.terminal === "failed") return "分析未完成";
   return "分析已取消";
 };
 
@@ -353,25 +354,104 @@ const waitForTerminal = async (page: Page): Promise<void> => {
     if (await page.getByText("已校验分析", { exact: true }).isVisible()) return "completed";
     if (await page.getByText("现有证据不足以形成可靠结论", { exact: true }).isVisible()) return "refused";
     if (await page.getByText("分析已取消", { exact: true }).isVisible()) return "cancelled";
+    if (await page.getByText("分析未完成", { exact: true }).isVisible()) return "failed";
     return "pending";
   }, { timeout: smokeTimeoutMs }).toBe(fixture.terminal);
 };
 
-const assertSafeTimeline = async (page: Page): Promise<void> => {
+const readAnalysisResource = async (page: Page, answerId: string, timeline = false): Promise<Record<string, unknown>> => {
+  const path = `/api/v2/answers/${answerId}${timeline ? "/analysis-timeline" : ""}`;
+  const response = await page.request.get(path, {
+    params: { workspace_id: fixture.workspaceId },
+    headers: { "X-Workspace-Id": fixture.workspaceId },
+  });
+  expect(response.status()).toBe(200);
+  const value = record(await response.json() as unknown, timeline ? "Analysis timeline" : "Analysis answer");
+  expect(value.workspace_id).toBe(fixture.workspaceId);
+  expect(timeline ? value.answer_id : value.id).toBe(answerId);
+  return value;
+};
+
+const timelinePhaseLabels: Record<string, string> = {
+  decide_next: "决定下一步",
+  inspect_workspace: "检查工作区",
+  retrieve_evidence: "检索证据",
+  read_evidence: "读取证据",
+  synthesize_answer: "生成回答",
+  validate_citations: "校验引用",
+  review_publish: "审查发布",
+};
+
+const assertSafeTimeline = async (page: Page, answerId: string): Promise<Record<string, unknown>> => {
   const timeline = page.getByRole("region", { name: "工作区分析进度" });
   await expect(timeline).toBeVisible();
-  const terminalStatus = fixture.terminal === "completed" ? "已完成" : fixture.terminal === "cancelled" ? "已取消" : "未发布";
-  await expect(timeline.getByText(terminalStatus, { exact: true })).toBeVisible({ timeout: smokeTimeoutMs });
-  await expect(timeline.getByText("模型调用", { exact: true })).toBeVisible();
-  await expect(timeline.getByText("工具调用", { exact: true })).toBeVisible();
-  await expect(timeline.getByText("输入 tokens", { exact: true })).toBeVisible();
-  await expect(timeline.getByText("输出 tokens", { exact: true })).toBeVisible();
+  const expand = timeline.getByRole("button", { name: "查看分析过程" });
+  if (await expand.isVisible()) await expand.click();
+  const terminalStatus = fixture.terminal === "completed" ? "已完成" : fixture.terminal === "cancelled" ? "已取消" : fixture.terminal === "failed" ? "失败" : "未发布";
+  await expect(timeline.locator(".rag-analysis__header").getByText(terminalStatus, { exact: true })).toBeVisible({ timeout: smokeTimeoutMs });
+  const snapshot = await readAnalysisResource(page, answerId, true);
+  expect(snapshot.schema_id).toBe("conversation.workspace_analysis_timeline");
+  expect(["v1", "v2"]).toContain(snapshot.schema_version);
+  expect(snapshot.run_status).toBe(fixture.terminal === "completed" ? "succeeded" : fixture.terminal);
+  const v2 = snapshot.schema_version === "v2";
+  const budget = record(snapshot.budget, "Analysis budget");
+  const counters = [
+    ["model_calls", "模型调用"], ["tool_calls", "工具调用"], ["source_reads", "证据读取"],
+    ["input_tokens", "输入 tokens"], ["output_tokens", "输出 tokens"],
+  ] as const;
+  for (const [key, label] of counters) {
+    const counter = record(budget[key], label);
+    expect(Number.isSafeInteger(counter.used)).toBe(true);
+    expect(Number.isSafeInteger(counter.max)).toBe(true);
+    expect(Number(counter.used)).toBeGreaterThanOrEqual(0);
+    expect(Number(counter.used)).toBeLessThanOrEqual(Number(counter.max));
+    const row = timeline.locator(".rag-analysis-budget > div").filter({ has: page.getByText(label, { exact: true }) });
+    await expect(row.locator("dd")).toHaveText(`${String(counter.used)}/${String(counter.max)}`);
+  }
+  const models = record(budget.model_calls, "Model calls");
+  const tools = record(budget.tool_calls, "Tool calls");
+  expect(models.max).toBe(v2 ? 14 : 3);
+  expect(tools.max).toBe(v2 ? 13 : 6);
+  expect(record(budget.source_reads, "Source reads").max).toBe(v2 ? 8 : 3);
+  const cost = timeline.locator(".rag-analysis-budget > div").filter({ has: page.getByText("估算成本（微单位）", { exact: true }) });
+  if (budget.estimated_cost_microunits === null) await expect(cost).toHaveCount(0);
+  else {
+    const counter = record(budget.estimated_cost_microunits, "Estimated cost");
+    await expect(cost.locator("dd")).toHaveText(`${String(counter.used)}/${String(counter.max)}`);
+  }
+  if (!Array.isArray(snapshot.items)) throw new Error("Analysis journal must be an array");
+  const items = (snapshot.items as unknown[]).map((item) => record(item, "Analysis journal item"));
+  expect(items.length).toBeLessThanOrEqual(v2 ? 27 : 32);
+  let synthesized = false;
+  const phaseLabels = items.map((item, index) => {
+    expect(item.sequence).toBe(index + 1);
+    const phaseLabel = typeof item.phase === "string" ? timelinePhaseLabels[item.phase] : undefined;
+    if (phaseLabel === undefined) throw new Error("Unknown analysis phase");
+    const label = v2 && item.phase === "validate_citations"
+      ? synthesized ? "发布前校验引用" : "检查已取得的引用"
+      : phaseLabel;
+    if (item.kind === "model" && item.phase === "synthesize_answer") synthesized = true;
+    return label;
+  });
+  await expect(timeline.locator(".rag-analysis-item__heading > span")).toHaveText(phaseLabels);
+  const toolLabels = items.flatMap((item) => {
+    if (item.tool_ref === null) return [];
+    const tool = record(item.tool_ref, "Analysis tool");
+    return [`${String(tool.name)}@${String(tool.version)}`];
+  });
+  await expect(timeline.locator(".rag-analysis-item__tool")).toHaveText(toolLabels);
   if (fixture.terminal === "completed") {
-    await expect(timeline.getByText("3/3", { exact: true })).toBeVisible();
-    await expect(timeline.getByText("4/6", { exact: true })).toBeVisible();
+    if (v2) {
+      expect(models.used).toBe(Number(tools.used) + 2);
+      expect(Number(models.used)).toBeGreaterThanOrEqual(5);
+      const operations = items.filter((item) => item.kind !== "node");
+      expect(operations[0]?.phase).toBe("decide_next");
+      expect(operations.slice(-3).map((item) => item.phase)).toEqual(["synthesize_answer", "validate_citations", "review_publish"]);
+    } else expect(models.used).toBe(3);
   }
   await expect(timeline).not.toContainText(fixture.privateMarker);
   await expect(timeline).not.toContainText("server_binding");
+  return snapshot;
 };
 
 test("工作区分析在真实 UI 中保持只读边界并通过桌面和移动端冒烟", async ({ browser }, testInfo) => {
@@ -518,23 +598,38 @@ test("工作区分析在真实 UI 中保持只读边界并通过桌面和移动�
     await writeFile(fixture.barrierReadyPath, "ready\n", { encoding: "utf8", mode: 0o600, flag: "wx" });
     await waitForTerminal(desktop);
     await markProgress("TERMINAL_VISIBLE");
-    await assertSafeTimeline(desktop);
+    const terminalTimeline = await assertSafeTimeline(desktop, accepted.answerId);
     await markProgress("TIMELINE_VERIFIED");
 
     await desktop.reload({ waitUntil: "domcontentloaded" });
     await expect(desktop).toHaveURL(new RegExp(`/chat/${conversationId}$`));
     await waitForTerminal(desktop);
-    await assertSafeTimeline(desktop);
+    const restoredTimeline = await assertSafeTimeline(desktop, accepted.answerId);
+    expect(restoredTimeline.items).toEqual(terminalTimeline.items);
+    expect(restoredTimeline.budget).toEqual(terminalTimeline.budget);
 
     const answer = desktop.locator(".rag-answer").filter({ has: desktop.getByText(terminalHeading(), { exact: true }) });
     await expect(answer).toBeVisible();
     await expect(answer).not.toContainText(fixture.privateMarker);
 
     if (fixture.terminal === "completed") {
+      const authoritativeAnswer = await readAnalysisResource(desktop, accepted.answerId);
+      const result = record(authoritativeAnswer.result, "Published analysis result");
+      expect(result.schema_version).toBe(restoredTimeline.schema_version);
+      const payload = record(result.payload, "Published analysis payload");
       const gitAggregate = answer.locator(".rag-analysis-git");
-      await expect(gitAggregate).toBeVisible();
-      await expect(gitAggregate.getByText("工作树", { exact: true })).toBeVisible();
-      await expect(gitAggregate).not.toContainText(fixture.privateMarker);
+      if (payload.git_status === null) {
+        expect(result.schema_version).toBe("v2");
+        await expect(gitAggregate).toHaveCount(0);
+        await expect(answer.getByText("本次分析未查询 Git 状态。", { exact: true })).toBeVisible();
+      } else {
+        const git = record(payload.git_status, "Git status");
+        await expect(gitAggregate).toBeVisible();
+        await expect(gitAggregate.getByText("工作树", { exact: true })).toBeVisible();
+        await expect(gitAggregate.getByText(git.branch === "" ? "detached" : String(git.branch), { exact: true })).toBeVisible();
+        await expect(gitAggregate).not.toContainText(fixture.privateMarker);
+        await expect(answer.getByText("本次分析未查询 Git 状态。", { exact: true })).toHaveCount(0);
+      }
       const citation = answer.getByRole("button", { name: "打开段落证据" }).first();
       await expect(citation).toBeVisible();
       await citation.click();
@@ -552,8 +647,14 @@ test("工作区分析在真实 UI 中保持只读边界并通过桌面和移动�
       await sourceDialog.getByRole("button", { name: "关闭来源片段" }).click();
       await expect(sourceDialog).toBeHidden();
       const proposal = answer.getByRole("link", { name: "查看提案" });
-      await expect(proposal).toBeVisible();
-      await expect(proposal).toHaveAttribute("href", "/proposals");
+      if (payload.proposal_suggestion === null) await expect(proposal).toHaveCount(0);
+      else {
+        const suggestion = record(payload.proposal_suggestion, "Proposal suggestion");
+        expect(suggestion.href).toBe("/proposals");
+        await expect(answer.getByText(String(suggestion.summary), { exact: true })).toBeVisible();
+        await expect(proposal).toBeVisible();
+        await expect(proposal).toHaveAttribute("href", "/proposals");
+      }
     } else {
       await expect(answer.locator(".rag-analysis-git")).toHaveCount(0);
       await expect(answer.getByRole("link", { name: "查看提案" })).toHaveCount(0);
@@ -577,6 +678,9 @@ test("工作区分析在真实 UI 中保持只读边界并通过桌面和移动�
       await mobile.goto(`/chat/${conversationId}`);
       await expect(mobile.getByText(terminalHeading(), { exact: true })).toBeVisible();
       await expect(mobile.getByRole("region", { name: "工作区分析进度" })).toBeVisible();
+      const mobileTimeline = await assertSafeTimeline(mobile, accepted.answerId);
+      expect(mobileTimeline.items).toEqual(restoredTimeline.items);
+      expect(mobileTimeline.budget).toEqual(restoredTimeline.budget);
       await expect(mobile.getByRole("complementary", { name: "引用证据", includeHidden: true })).toBeHidden();
       await assertComposerFollowsPublishedAnswer(mobile);
       await assertNoHorizontalOverflow(mobile);

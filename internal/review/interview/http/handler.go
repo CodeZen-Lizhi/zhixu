@@ -63,8 +63,9 @@ type Service interface {
 // Identity is required at this edge. The current Interview application contract
 // is workspace-scoped and has no persistent owner field to forward.
 type Handler struct {
-	service Service
-	timeout time.Duration
+	service   Service
+	timeout   time.Duration
+	claimOnly bool
 }
 
 // NewHandler creates a fail-closed Interview HTTP handler.
@@ -72,7 +73,7 @@ func NewHandler(service Service, timeout time.Duration) *Handler {
 	if timeout <= 0 {
 		timeout = defaultRequestTimeout
 	}
-	return &Handler{service: service, timeout: timeout}
+	return &Handler{service: service, timeout: timeout, claimOnly: true}
 }
 
 // Available reports whether this handler has a concrete application dependency.
@@ -82,13 +83,32 @@ func (handler *Handler) Available() bool {
 
 // Routes registers routes beneath the caller's /api/v1 router.
 func (handler *Handler) Routes(router gin.IRouter) {
+	handler = handler.withClaimOnly(true)
+	handler.versionedRoutes(router)
+	router.POST("/review/interviews/:session_id/learning-paths/:path_id/steps/:step_id/memory-candidate", httpapi.GinHandler(handler.suggestMemoryCandidate))
+	router.PUT("/review/learning-paths/:path_id/status", httpapi.GinHandler(handler.updatePathStatus))
+}
+
+// RoutesV2 registers only the six operations whose responses support NOTE sources.
+func (handler *Handler) RoutesV2(router gin.IRouter) {
+	handler.withClaimOnly(false).versionedRoutes(router)
+}
+
+func (handler *Handler) withClaimOnly(claimOnly bool) *Handler {
+	if handler == nil {
+		handler = NewHandler(nil, 0)
+	}
+	copy := *handler
+	copy.claimOnly = claimOnly
+	return &copy
+}
+
+func (handler *Handler) versionedRoutes(router gin.IRouter) {
 	router.POST("/review/interviews", httpapi.GinHandler(handler.start))
 	router.GET("/review/interviews", httpapi.GinHandler(handler.list))
 	router.GET("/review/interviews/:session_id", httpapi.GinHandler(handler.get))
 	router.POST("/review/interviews/:session_id/turns", httpapi.GinHandler(handler.submitTurn))
 	router.POST("/review/interviews/:session_id/complete", httpapi.GinHandler(handler.complete))
-	router.POST("/review/interviews/:session_id/learning-paths/:path_id/steps/:step_id/memory-candidate", httpapi.GinHandler(handler.suggestMemoryCandidate))
-	router.PUT("/review/learning-paths/:path_id/status", httpapi.GinHandler(handler.updatePathStatus))
 	router.PUT("/review/learning-paths/:path_id/steps/:step_id", httpapi.GinHandler(handler.updatePathStep))
 }
 
@@ -107,7 +127,7 @@ func (handler *Handler) list(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	after, err := decodeSessionCursor(input.Cursor, workspaceID)
+	after, err := decodeSessionCursor(input.Cursor, workspaceID, handler.sessionCursorVersion())
 	if err != nil {
 		writeError(w, err)
 		return
@@ -117,7 +137,7 @@ func (handler *Handler) list(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), handler.timeout)
 	defer cancel()
-	page, err := handler.service.List(ctx, interviewapp.SessionListQuery{WorkspaceID: workspaceID, Limit: input.Limit, After: after})
+	page, err := handler.service.List(ctx, interviewapp.SessionListQuery{WorkspaceID: workspaceID, Limit: input.Limit, After: after, ClaimOnly: handler.claimOnly})
 	if err != nil {
 		writeError(w, err)
 		return
@@ -126,13 +146,17 @@ func (handler *Handler) list(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	next, err := encodeSessionCursor(workspaceID, page.Next)
+	next, err := encodeSessionCursor(workspaceID, page.Next, handler.sessionCursorVersion())
 	if err != nil {
 		writeError(w, err)
 		return
 	}
 	items := make([]sessionResponse, 0, len(page.Items))
 	for _, session := range page.Items {
+		if handler.claimOnly && interviewapp.RequireClaimSessionSource(session) != nil {
+			writeError(w, resultInvalid("interview session list escaped its requested source set"))
+			return
+		}
 		items = append(items, toSessionResponse(session))
 	}
 	httpapi.WriteJSON(w, http.StatusOK, sessionListResponse{WorkspaceID: string(workspaceID), Items: items, NextCursor: next})
@@ -167,6 +191,10 @@ func (handler *Handler) start(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	if config.Scope.NoteRevision != nil {
+		writeError(w, domain.InvalidError(domain.ErrorCodeConfigInvalid, "note interviews require the background preparation command"))
+		return
+	}
 	if !handler.available(w) {
 		return
 	}
@@ -182,6 +210,12 @@ func (handler *Handler) start(w http.ResponseWriter, r *http.Request) {
 	if err := validateStartResult(result, workspaceID, config); err != nil {
 		writeError(w, err)
 		return
+	}
+	if handler.claimOnly {
+		if err := interviewapp.RequireClaimSources(interviewapp.Snapshot{Session: result.Session, Questions: result.Questions}); err != nil {
+			writeError(w, err)
+			return
+		}
 	}
 	status := http.StatusCreated
 	if result.Replayed {
@@ -215,6 +249,12 @@ func (handler *Handler) get(w http.ResponseWriter, r *http.Request) {
 	if err := validateSnapshot(snapshot, workspaceID, sessionID); err != nil {
 		writeError(w, err)
 		return
+	}
+	if handler.claimOnly {
+		if err := interviewapp.RequireClaimSources(snapshot); err != nil {
+			writeError(w, err)
+			return
+		}
 	}
 	httpapi.WriteJSON(w, http.StatusOK, toSnapshotResponse(snapshot, workspaceID))
 }
@@ -263,6 +303,7 @@ func (handler *Handler) submitTurn(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), handler.timeout)
 	defer cancel()
 	result, err := handler.service.SubmitTurn(ctx, interviewapp.SubmitTurnCommand{
+		ClaimOnly:   handler.claimOnly,
 		WorkspaceID: workspaceID, SessionID: sessionID, QuestionID: questionID, UserAnswer: input.UserAnswer, IdempotencyKey: key,
 	})
 	if err != nil {
@@ -272,6 +313,18 @@ func (handler *Handler) submitTurn(w http.ResponseWriter, r *http.Request) {
 	if err := validateSubmitTurnResult(result, workspaceID, sessionID, questionID, input.UserAnswer, key); err != nil {
 		writeError(w, err)
 		return
+	}
+	if handler.claimOnly {
+		snapshot := interviewapp.Snapshot{Turns: []domain.Turn{result.Turn}}
+		for _, question := range []*domain.Question{result.FollowUp, result.NextQuestion} {
+			if question != nil {
+				snapshot.Questions = append(snapshot.Questions, *question)
+			}
+		}
+		if err := interviewapp.RequireClaimSources(snapshot); err != nil {
+			writeError(w, err)
+			return
+		}
 	}
 	httpapi.WriteJSON(w, http.StatusOK, submitTurnResponse{
 		Turn: toTurnResponse(result.Turn, workspaceID), FollowUp: toQuestionResponsePointer(result.FollowUp),
@@ -314,6 +367,7 @@ func (handler *Handler) complete(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), handler.timeout)
 	defer cancel()
 	result, err := handler.service.Complete(ctx, interviewapp.CompleteCommand{
+		ClaimOnly:   handler.claimOnly,
 		WorkspaceID: workspaceID, SessionID: sessionID, ManualEnd: input.ManualEnd, IdempotencyKey: key,
 	})
 	if err != nil {
@@ -323,6 +377,12 @@ func (handler *Handler) complete(w http.ResponseWriter, r *http.Request) {
 	if err := validateCompleteResult(result, workspaceID, sessionID); err != nil {
 		writeError(w, err)
 		return
+	}
+	if handler.claimOnly {
+		if err := interviewapp.RequireClaimSources(interviewapp.Snapshot{Session: result.Session, Report: &result.Report, Steps: result.Steps}); err != nil {
+			writeError(w, err)
+			return
+		}
 	}
 	httpapi.WriteJSON(w, http.StatusOK, completeResponse{
 		Session: toSessionResponse(result.Session), Report: toReportResponse(result.Report, workspaceID), Path: toPathResponse(result.Path),
@@ -426,6 +486,7 @@ func (handler *Handler) updatePathStep(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), handler.timeout)
 	defer cancel()
 	result, err := handler.service.UpdatePathStep(ctx, interviewapp.UpdatePathStepCommand{
+		ClaimOnly:   handler.claimOnly,
 		WorkspaceID: workspaceID, PathID: pathID, StepID: stepID, ExpectedVersion: input.ExpectedVersion, Status: input.Status, IdempotencyKey: key,
 	})
 	if err != nil {
@@ -435,6 +496,12 @@ func (handler *Handler) updatePathStep(w http.ResponseWriter, r *http.Request) {
 	if err := validatePathStepResult(result, workspaceID, pathID, stepID, input.ExpectedVersion, input.Status); err != nil {
 		writeError(w, err)
 		return
+	}
+	if handler.claimOnly {
+		if err := interviewapp.RequireClaimPathSources(interviewapp.PathSnapshot{Steps: []domain.PathStep{result.Step}}); err != nil {
+			writeError(w, err)
+			return
+		}
 	}
 	httpapi.WriteJSON(w, http.StatusOK, pathStepCommandResponse{Path: toPathResponse(result.Path), Step: toPathStepResponse(result.Step), Replayed: result.Replayed})
 }
@@ -609,8 +676,9 @@ type configResponse struct {
 }
 
 type scopeResponse struct {
-	ClaimIDs []string `json:"claim_ids,omitempty"`
-	TopicIDs []string `json:"topic_ids,omitempty"`
+	NoteRevision *domain.NoteRevisionRef `json:"note_revision,omitempty"`
+	ClaimIDs     []string                `json:"claim_ids,omitempty"`
+	TopicIDs     []string                `json:"topic_ids,omitempty"`
 }
 
 type sessionResponse struct {
@@ -627,18 +695,20 @@ type sessionResponse struct {
 // questionResponse deliberately excludes AnswerPoints and Evidence. Both are
 // scoring references and must not reach the participant before an answer.
 type questionResponse struct {
-	ID               string  `json:"id"`
-	WorkspaceID      string  `json:"workspace_id"`
-	SessionID        string  `json:"session_id"`
-	QuestionNo       int     `json:"question_no"`
-	FollowUpNo       int     `json:"follow_up_no"`
-	ParentQuestionID *string `json:"parent_question_id,omitempty"`
-	ClaimID          string  `json:"claim_id"`
-	TopicID          *string `json:"topic_id,omitempty"`
-	Prompt           string  `json:"prompt"`
-	Status           string  `json:"status"`
-	CreatedAt        string  `json:"created_at"`
-	AnsweredAt       *string `json:"answered_at,omitempty"`
+	ID               string            `json:"id"`
+	WorkspaceID      string            `json:"workspace_id"`
+	SessionID        string            `json:"session_id"`
+	QuestionNo       int               `json:"question_no"`
+	FollowUpNo       int               `json:"follow_up_no"`
+	ParentQuestionID *string           `json:"parent_question_id,omitempty"`
+	ClaimID          *string           `json:"claim_id"`
+	SourceKind       string            `json:"source_kind,omitempty"`
+	NoteItem         *noteItemResponse `json:"note_item,omitempty"`
+	TopicID          *string           `json:"topic_id,omitempty"`
+	Prompt           string            `json:"prompt"`
+	Status           string            `json:"status"`
+	CreatedAt        string            `json:"created_at"`
+	AnsweredAt       *string           `json:"answered_at,omitempty"`
 }
 
 type evidenceResponse struct {
@@ -657,15 +727,22 @@ type scoreDimensionResponse struct {
 	Rationale string  `json:"rationale"`
 }
 
+type noteItemResponse struct {
+	Revision domain.NoteRevisionRef `json:"revision"`
+	ItemID   foundation.ID          `json:"item_id"`
+	ItemKind string                 `json:"item_kind"`
+}
+
 type scoreResponse struct {
-	SchemaVersion string                 `json:"schema_version"`
-	Correctness   scoreDimensionResponse `json:"correctness"`
-	Coverage      scoreDimensionResponse `json:"coverage"`
-	Boundaries    scoreDimensionResponse `json:"boundaries"`
-	Clarity       scoreDimensionResponse `json:"clarity"`
-	Errors        []string               `json:"errors,omitempty"`
-	Omissions     []string               `json:"omissions,omitempty"`
-	Evidence      []evidenceResponse     `json:"evidence"`
+	NoteSource    *domain.NoteQuestionSource `json:"note_source,omitempty"`
+	SchemaVersion string                     `json:"schema_version"`
+	Correctness   scoreDimensionResponse     `json:"correctness"`
+	Coverage      scoreDimensionResponse     `json:"coverage"`
+	Boundaries    scoreDimensionResponse     `json:"boundaries"`
+	Clarity       scoreDimensionResponse     `json:"clarity"`
+	Errors        []string                   `json:"errors,omitempty"`
+	Omissions     []string                   `json:"omissions,omitempty"`
+	Evidence      []evidenceResponse         `json:"evidence"`
 }
 
 type turnDecisionResponse struct {
@@ -688,10 +765,12 @@ type turnResponse struct {
 }
 
 type findingResponse struct {
-	ClaimID  string             `json:"claim_id"`
-	TopicID  *string            `json:"topic_id,omitempty"`
-	Detail   string             `json:"detail"`
-	Evidence []evidenceResponse `json:"evidence"`
+	ClaimID    *string                    `json:"claim_id"`
+	SourceKind string                     `json:"source_kind,omitempty"`
+	NoteSource *domain.NoteQuestionSource `json:"note_source,omitempty"`
+	TopicID    *string                    `json:"topic_id,omitempty"`
+	Detail     string                     `json:"detail"`
+	Evidence   []evidenceResponse         `json:"evidence"`
 }
 
 type reportSummaryResponse struct {
@@ -712,17 +791,18 @@ type artifactBindingResponse struct {
 }
 
 type reportResponse struct {
-	ID            string                  `json:"id"`
-	WorkspaceID   string                  `json:"workspace_id"`
-	SessionID     string                  `json:"session_id"`
-	SchemaVersion string                  `json:"schema_version"`
-	Summary       reportSummaryResponse   `json:"summary"`
-	Strengths     []findingResponse       `json:"strengths"`
-	Gaps          []findingResponse       `json:"gaps"`
-	Expression    []findingResponse       `json:"expression"`
-	Evidence      []evidenceResponse      `json:"evidence"`
-	Artifact      artifactBindingResponse `json:"artifact"`
-	CreatedAt     string                  `json:"created_at"`
+	NoteSources   []domain.NoteQuestionSource `json:"note_sources,omitempty"`
+	ID            string                      `json:"id"`
+	WorkspaceID   string                      `json:"workspace_id"`
+	SessionID     string                      `json:"session_id"`
+	SchemaVersion string                      `json:"schema_version"`
+	Summary       reportSummaryResponse       `json:"summary"`
+	Strengths     []findingResponse           `json:"strengths"`
+	Gaps          []findingResponse           `json:"gaps"`
+	Expression    []findingResponse           `json:"expression"`
+	Evidence      []evidenceResponse          `json:"evidence"`
+	Artifact      artifactBindingResponse     `json:"artifact"`
+	CreatedAt     string                      `json:"created_at"`
 }
 
 type pathResponse struct {
@@ -738,21 +818,23 @@ type pathResponse struct {
 }
 
 type pathStepResponse struct {
-	ID              string  `json:"id"`
-	WorkspaceID     string  `json:"workspace_id"`
-	PathID          string  `json:"path_id"`
-	StepNo          int     `json:"step_no"`
-	ClaimID         string  `json:"claim_id"`
-	TopicID         *string `json:"topic_id,omitempty"`
-	SourceVersionID string  `json:"source_version_id"`
-	SourceSpanID    string  `json:"source_span_id"`
-	EvidenceHash    string  `json:"evidence_hash"`
-	Title           string  `json:"title"`
-	Rationale       string  `json:"rationale"`
-	Status          string  `json:"status"`
-	Version         int64   `json:"version"`
-	CreatedAt       string  `json:"created_at"`
-	UpdatedAt       string  `json:"updated_at"`
+	SourceKind      string                     `json:"source_kind,omitempty"`
+	NoteSource      *domain.NoteQuestionSource `json:"note_source,omitempty"`
+	ID              string                     `json:"id"`
+	WorkspaceID     string                     `json:"workspace_id"`
+	PathID          string                     `json:"path_id"`
+	StepNo          int                        `json:"step_no"`
+	ClaimID         *string                    `json:"claim_id"`
+	TopicID         *string                    `json:"topic_id,omitempty"`
+	SourceVersionID *string                    `json:"source_version_id"`
+	SourceSpanID    *string                    `json:"source_span_id"`
+	EvidenceHash    *string                    `json:"evidence_hash"`
+	Title           string                     `json:"title"`
+	Rationale       string                     `json:"rationale"`
+	Status          string                     `json:"status"`
+	Version         int64                      `json:"version"`
+	CreatedAt       string                     `json:"created_at"`
+	UpdatedAt       string                     `json:"updated_at"`
 }
 
 func toSnapshotResponse(value interviewapp.Snapshot, workspaceID foundation.ID) snapshotResponse {
@@ -773,7 +855,7 @@ func toSnapshotResponse(value interviewapp.Snapshot, workspaceID foundation.ID) 
 
 func toConfigResponse(value domain.Config) configResponse {
 	return configResponse{
-		SchemaVersion: value.SchemaVersion, Role: value.Role, Scope: scopeResponse{ClaimIDs: idStrings(value.Scope.ClaimIDs), TopicIDs: idStrings(value.Scope.TopicIDs)},
+		SchemaVersion: value.SchemaVersion, Role: value.Role, Scope: scopeResponse{ClaimIDs: idStrings(value.Scope.ClaimIDs), TopicIDs: idStrings(value.Scope.TopicIDs), NoteRevision: value.Scope.NoteRevision},
 		Difficulty: string(value.Difficulty), DurationMinutes: value.DurationMinutes, QuestionCount: value.QuestionCount, MaxFollowUps: value.MaxFollowUps,
 	}
 }
@@ -804,7 +886,7 @@ func toQuestionResponsePointer(value *domain.Question) *questionResponse {
 func toQuestionResponse(value domain.Question) questionResponse {
 	return questionResponse{
 		ID: string(value.ID), WorkspaceID: string(value.WorkspaceID), SessionID: string(value.SessionID), QuestionNo: value.QuestionNo,
-		FollowUpNo: value.FollowUpNo, ParentQuestionID: optionalID(value.ParentQuestionID), ClaimID: string(value.ClaimID), TopicID: optionalID(value.TopicID),
+		FollowUpNo: value.FollowUpNo, ParentQuestionID: optionalID(value.ParentQuestionID), ClaimID: nullableSourceString(string(value.ClaimID)), SourceKind: responseSourceKind(value.SourceKind), NoteItem: questionNoteItem(value.NoteSource), TopicID: optionalID(value.TopicID),
 		Prompt: value.Prompt, Status: string(value.Status), CreatedAt: formatTime(value.CreatedAt), AnsweredAt: optionalTime(value.AnsweredAt),
 	}
 }
@@ -844,7 +926,7 @@ func toScoreResponse(value domain.Score, workspaceID foundation.ID) scoreRespons
 	return scoreResponse{
 		SchemaVersion: value.SchemaVersion, Correctness: toScoreDimensionResponse(value.Correctness), Coverage: toScoreDimensionResponse(value.Coverage),
 		Boundaries: toScoreDimensionResponse(value.Boundaries), Clarity: toScoreDimensionResponse(value.Clarity), Errors: append([]string(nil), value.Errors...),
-		Omissions: append([]string(nil), value.Omissions...), Evidence: toEvidenceResponses(value.Evidence, workspaceID),
+		Omissions: append([]string(nil), value.Omissions...), NoteSource: domain.CloneNoteSource(value.NoteSource), Evidence: toEvidenceResponses(value.Evidence, workspaceID),
 	}
 }
 
@@ -859,7 +941,7 @@ func toReportResponse(value domain.Report, workspaceID foundation.ID) reportResp
 			QuestionsTotal: value.Summary.QuestionsTotal, AnsweredTotal: value.Summary.AnsweredTotal, SkippedTotal: value.Summary.SkippedTotal,
 			Correctness: value.Summary.Correctness, Coverage: value.Summary.Coverage, Boundaries: value.Summary.Boundaries, Clarity: value.Summary.Clarity,
 		},
-		Strengths: toFindingResponses(value.Strengths, workspaceID), Gaps: toFindingResponses(value.Gaps, workspaceID),
+		NoteSources: value.NoteSources, Strengths: toFindingResponses(value.Strengths, workspaceID), Gaps: toFindingResponses(value.Gaps, workspaceID),
 		Expression: toFindingResponses(value.Expression, workspaceID), Evidence: toEvidenceResponses(value.Evidence, workspaceID),
 		Artifact: toArtifactBindingResponse(value.Artifact), CreatedAt: formatTime(value.CreatedAt),
 	}
@@ -868,7 +950,7 @@ func toReportResponse(value domain.Report, workspaceID foundation.ID) reportResp
 func toFindingResponses(values []domain.Finding, workspaceID foundation.ID) []findingResponse {
 	response := make([]findingResponse, 0, len(values))
 	for _, value := range values {
-		response = append(response, findingResponse{ClaimID: string(value.ClaimID), TopicID: optionalID(value.TopicID), Detail: value.Detail, Evidence: toEvidenceResponses(value.Evidence, workspaceID)})
+		response = append(response, findingResponse{ClaimID: nullableSourceString(string(value.ClaimID)), SourceKind: responseSourceKind(value.SourceKind), NoteSource: domain.CloneNoteSource(value.NoteSource), TopicID: optionalID(value.TopicID), Detail: value.Detail, Evidence: toEvidenceResponses(value.Evidence, workspaceID)})
 	}
 	return response
 }
@@ -895,8 +977,8 @@ func toPathStepResponses(values []domain.PathStep) []pathStepResponse {
 func toPathStepResponse(value domain.PathStep) pathStepResponse {
 	return pathStepResponse{
 		ID: string(value.ID), WorkspaceID: string(value.WorkspaceID), PathID: string(value.PathID), StepNo: value.StepNo,
-		ClaimID: string(value.ClaimID), TopicID: optionalID(value.TopicID), SourceVersionID: string(value.SourceVersionID), SourceSpanID: string(value.SourceSpanID),
-		EvidenceHash: value.EvidenceHash, Title: value.Title, Rationale: value.Rationale, Status: string(value.Status), Version: value.Version,
+		ClaimID: nullableSourceString(string(value.ClaimID)), TopicID: optionalID(value.TopicID), SourceVersionID: nullableSourceString(string(value.SourceVersionID)), SourceSpanID: nullableSourceString(string(value.SourceSpanID)),
+		SourceKind: responseSourceKind(value.SourceKind), NoteSource: domain.CloneNoteSource(value.NoteSource), EvidenceHash: nullableSourceString(value.EvidenceHash), Title: value.Title, Rationale: value.Rationale, Status: string(value.Status), Version: value.Version,
 		CreatedAt: formatTime(value.CreatedAt), UpdatedAt: formatTime(value.UpdatedAt),
 	}
 }
@@ -1018,7 +1100,7 @@ func validateSubmitTurnResult(value interviewapp.SubmitTurnResult, workspaceID, 
 	turn := value.Turn
 	if !isCanonicalID(turn.ID) || turn.WorkspaceID != workspaceID || turn.SessionID != sessionID || turn.QuestionID != questionID ||
 		turn.UserAnswer != userAnswer || turn.IdempotencyKey != idempotencyKey || !validHash(turn.RequestHash) || turn.CreatedAt.IsZero() ||
-		!validRequiredText(turn.ScorerVersion, 128) || domain.ValidateScore(turn.Score, turn.Score.Evidence) != nil {
+		!validRequiredText(turn.ScorerVersion, 128) || validateScoreResponse(turn.Score, workspaceID) != nil {
 		return resultInvalid("interview turn response crossed its requested binding")
 	}
 	for _, evidence := range turn.Score.Evidence {
@@ -1211,7 +1293,14 @@ func parseQuery(r *http.Request, allowed map[string]queryRule) (url.Values, erro
 	return values, nil
 }
 
-func encodeSessionCursor(workspaceID foundation.ID, cursor *interviewapp.SessionCursor) (string, error) {
+func (handler *Handler) sessionCursorVersion() int {
+	if handler.claimOnly {
+		return 1
+	}
+	return 2
+}
+
+func encodeSessionCursor(workspaceID foundation.ID, cursor *interviewapp.SessionCursor, version int) (string, error) {
 	if cursor == nil {
 		return "", nil
 	}
@@ -1219,7 +1308,7 @@ func encodeSessionCursor(workspaceID foundation.ID, cursor *interviewapp.Session
 		return "", cursorInvalid()
 	}
 	payload, err := json.Marshal(sessionCursorDocument{
-		Version: 1, WorkspaceID: string(workspaceID), StartedAt: formatTime(cursor.StartedAt), ID: string(cursor.ID),
+		Version: version, WorkspaceID: string(workspaceID), StartedAt: formatTime(cursor.StartedAt), ID: string(cursor.ID),
 	})
 	if err != nil || len(payload) == 0 || len(payload) > maxCursorBytes {
 		return "", cursorInvalid()
@@ -1227,7 +1316,7 @@ func encodeSessionCursor(workspaceID foundation.ID, cursor *interviewapp.Session
 	return base64.RawURLEncoding.EncodeToString(payload), nil
 }
 
-func decodeSessionCursor(raw string, workspaceID foundation.ID) (*interviewapp.SessionCursor, error) {
+func decodeSessionCursor(raw string, workspaceID foundation.ID, version int) (*interviewapp.SessionCursor, error) {
 	if raw == "" {
 		return nil, nil
 	}
@@ -1244,7 +1333,7 @@ func decodeSessionCursor(raw string, workspaceID foundation.ID) (*interviewapp.S
 	}
 	startedAt, timeErr := time.Parse(time.RFC3339Nano, cursor.StartedAt)
 	id, idErr := parseID(cursor.ID)
-	if timeErr != nil || idErr != nil || cursor.Version != 1 || cursor.WorkspaceID != string(workspaceID) ||
+	if timeErr != nil || idErr != nil || cursor.Version != version || cursor.WorkspaceID != string(workspaceID) ||
 		startedAt.UTC().Format(time.RFC3339Nano) != cursor.StartedAt {
 		return nil, cursorInvalid()
 	}
@@ -1384,6 +1473,8 @@ func writeError(w http.ResponseWriter, err error) {
 		status, message = http.StatusNotFound, "Interview resource was not found"
 	case domain.ErrorCodeSessionClosed, domain.ErrorCodeSessionExpired, domain.ErrorCodeQuestionOrderConflict, domain.ErrorCodeIdempotencyConflict:
 		status, message = http.StatusConflict, "Interview state conflicts with the request"
+	case interviewapp.ErrorCodeAPIVersionUnsupported:
+		status, message = http.StatusConflict, "This interview source requires API v2"
 	case domain.ErrorCodeScorerUnavailable, domain.ErrorCodeDependencyUnavailable:
 		status, message = http.StatusServiceUnavailable, "Interview dependency is unavailable"
 	case errorCodeResultInvalid, domain.ErrorCodePersistenceInvalid:
@@ -1441,3 +1532,29 @@ func nilDependency(value any) bool {
 }
 
 var _ Service = (*interviewapp.Service)(nil)
+
+func nullableSourceString(value string) *string {
+	if value == "" {
+		return nil
+	}
+	return &value
+}
+func responseSourceKind(value domain.QuestionSourceKind) string {
+	if value == domain.QuestionSourceNoteRevision {
+		return string(value)
+	}
+	// Claim is the historical wire default; strict legacy clients reject new fields.
+	return ""
+}
+func questionNoteItem(value *domain.NoteQuestionSource) *noteItemResponse {
+	if value == nil {
+		return nil
+	}
+	return &noteItemResponse{Revision: value.Revision, ItemID: value.ItemID, ItemKind: string(value.ItemKind)}
+}
+func validateScoreResponse(score domain.Score, workspaceID foundation.ID) error {
+	if score.NoteSource == nil {
+		return domain.ValidateScore(score, score.Evidence)
+	}
+	return domain.ValidateScoreForQuestion(score, domain.Question{WorkspaceID: workspaceID, SourceKind: domain.QuestionSourceNoteRevision, NoteSource: score.NoteSource})
+}

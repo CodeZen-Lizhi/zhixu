@@ -239,10 +239,14 @@ func TestRepositoryListTurnsRejectsQuestionWithoutAnswerSlot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = repository.ListTurns(ctx, conversationapplication.ListTurnsQuery{
-		WorkspaceID: workspaceID, ConversationID: conversationRecord.Conversation.ID, Limit: 10,
-	})
-	requireConversationRepositoryError(t, err, foundation.ErrorConsistencyViolation, ErrorCodePersistenceCorrupt)
+	for _, version := range []conversationapplication.APIVersion{0, conversationapplication.APIVersionV1, conversationapplication.APIVersionV2} {
+		for _, latest := range []bool{false, true} {
+			_, err = repository.ListTurns(ctx, conversationapplication.ListTurnsQuery{
+				WorkspaceID: workspaceID, ConversationID: conversationRecord.Conversation.ID, Limit: 10, APIVersion: version, Latest: latest,
+			})
+			requireConversationRepositoryError(t, err, foundation.ErrorConsistencyViolation, ErrorCodePersistenceCorrupt)
+		}
+	}
 }
 
 type conversationRuntimeFixture struct {

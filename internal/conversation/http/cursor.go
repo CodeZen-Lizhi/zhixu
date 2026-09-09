@@ -8,6 +8,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/CodeZen-Lizhi/zhixu/internal/conversation/application"
 	conversationdomain "github.com/CodeZen-Lizhi/zhixu/internal/conversation/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 )
@@ -42,7 +43,7 @@ func (codec *CursorCodec) decodeConversation(raw string, workspaceID foundation.
 		return nil, nil
 	}
 	document, err := decodeCursor(raw)
-	if err != nil || document.Kind != "conversation" || document.WorkspaceID != string(workspaceID) || document.ConversationID != "" || document.Ordinal != 0 {
+	if err != nil || document.SchemaVersion != cursorSchemaVersion || document.Kind != "conversation" || document.WorkspaceID != string(workspaceID) || document.ConversationID != "" || document.Ordinal != 0 {
 		return nil, invalidCursor()
 	}
 	boundary, err := time.Parse(time.RFC3339Nano, document.Time)
@@ -56,19 +57,22 @@ func (codec *CursorCodec) decodeConversation(raw string, workspaceID foundation.
 	return cursor, nil
 }
 
-func (codec *CursorCodec) encodeTurn(workspaceID, conversationID foundation.ID, cursor conversationdomain.TurnCursor) (string, error) {
-	if codec == nil || cursor.Validate() != nil {
+func (codec *CursorCodec) encodeTurn(workspaceID, conversationID foundation.ID, cursor conversationdomain.TurnCursor, version application.APIVersion) (string, error) {
+	if codec == nil || cursor.Validate() != nil || !validTurnCursorVersion(version) {
 		return "", invalidCursor()
 	}
-	return encodeCursor(cursorDocument{SchemaVersion: cursorSchemaVersion, Kind: "turn", WorkspaceID: string(workspaceID), ConversationID: string(conversationID), Ordinal: cursor.Ordinal, ID: string(cursor.QuestionID)})
+	return encodeCursor(cursorDocument{SchemaVersion: int(version), Kind: "turn", WorkspaceID: string(workspaceID), ConversationID: string(conversationID), Ordinal: cursor.Ordinal, ID: string(cursor.QuestionID)})
 }
 
-func (codec *CursorCodec) decodeTurn(raw string, workspaceID, conversationID foundation.ID) (*conversationdomain.TurnCursor, error) {
+func (codec *CursorCodec) decodeTurn(raw string, workspaceID, conversationID foundation.ID, version application.APIVersion) (*conversationdomain.TurnCursor, error) {
+	if codec == nil || !validTurnCursorVersion(version) {
+		return nil, invalidCursor()
+	}
 	if raw == "" {
 		return nil, nil
 	}
 	document, err := decodeCursor(raw)
-	if err != nil || document.Kind != "turn" || document.WorkspaceID != string(workspaceID) || document.ConversationID != string(conversationID) || document.Time != "" {
+	if err != nil || document.SchemaVersion != int(version) || document.Kind != "turn" || document.WorkspaceID != string(workspaceID) || document.ConversationID != string(conversationID) || document.Time != "" {
 		return nil, invalidCursor()
 	}
 	cursor := &conversationdomain.TurnCursor{Ordinal: document.Ordinal, QuestionID: foundation.ID(document.ID)}
@@ -94,7 +98,7 @@ func decodeCursor(raw string) (cursorDocument, error) {
 	var document cursorDocument
 	decoder := json.NewDecoder(bytes.NewReader(encoded))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&document); err != nil || document.SchemaVersion != cursorSchemaVersion || document.ID == "" {
+	if err := decoder.Decode(&document); err != nil || !validTurnCursorVersion(application.APIVersion(document.SchemaVersion)) || document.ID == "" {
 		return cursorDocument{}, invalidCursor()
 	}
 	var trailing any
@@ -102,6 +106,10 @@ func decodeCursor(raw string) (cursorDocument, error) {
 		return cursorDocument{}, invalidCursor()
 	}
 	return document, nil
+}
+
+func validTurnCursorVersion(version application.APIVersion) bool {
+	return version == application.APIVersionV1 || version == application.APIVersionV2
 }
 
 func invalidCursor() error {

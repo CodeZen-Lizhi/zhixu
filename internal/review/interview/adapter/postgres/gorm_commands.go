@@ -82,6 +82,21 @@ func (repository *GORMRepository) Start(ctx context.Context, record interviewapp
 	}
 	var result interviewapp.StartResult
 	err := repository.within(ctx, func(callbackCtx context.Context, transaction *gorm.DB) error {
+		var err error
+		result, err = gormInterviewStart(callbackCtx, transaction, record)
+		return err
+	})
+	if err != nil {
+		if replay, found, replayErr := repository.FindStartReplay(ctx, record.Session.WorkspaceID, record.IdempotencyKey, record.RequestHash); replayErr == nil && found {
+			return replay, nil
+		}
+	}
+	return result, err
+}
+
+func gormInterviewStart(ctx context.Context, transaction *gorm.DB, record interviewapp.StartRecord) (interviewapp.StartResult, error) {
+	var result interviewapp.StartResult
+	err := func(callbackCtx context.Context) error {
 		if err := gormInterviewLockCommand(callbackCtx, transaction, record.Session.WorkspaceID, record.IdempotencyKey); err != nil {
 			return err
 		}
@@ -122,12 +137,7 @@ func (repository *GORMRepository) Start(ctx context.Context, record interviewapp
 		result = interviewapp.StartResult{Session: record.Session, Questions: append([]domain.Question(nil), record.Questions...)}
 		return gormInterviewInsertReceipt(callbackCtx, transaction, record.Session.WorkspaceID, record.IdempotencyKey,
 			record.RequestHash, "START", record.Session.ID, result, record.Session.StartedAt)
-	})
-	if err != nil {
-		if replay, found, replayErr := repository.FindStartReplay(ctx, record.Session.WorkspaceID, record.IdempotencyKey, record.RequestHash); replayErr == nil && found {
-			return replay, nil
-		}
-	}
+	}(ctx)
 	return result, err
 }
 
@@ -137,6 +147,11 @@ func (repository *GORMRepository) Submit(ctx context.Context, record interviewap
 	}
 	if err := validateSubmitRecord(record); err != nil {
 		return interviewapp.SubmitTurnResult{}, err
+	}
+	if record.ClaimOnly {
+		if err := repository.requireClaimSession(ctx, record.WorkspaceID, record.SessionID); err != nil {
+			return interviewapp.SubmitTurnResult{}, err
+		}
 	}
 	var result interviewapp.SubmitTurnResult
 	err := repository.within(ctx, func(callbackCtx context.Context, transaction *gorm.DB) error {
@@ -180,7 +195,7 @@ func (repository *GORMRepository) Submit(ctx context.Context, record interviewap
 		}
 		if record.FollowUp != nil && (session.FollowUpCount >= session.Config.MaxFollowUps || record.FollowUp.ParentQuestionID == nil ||
 			*record.FollowUp.ParentQuestionID != current.ID || record.FollowUp.QuestionNo != current.QuestionNo ||
-			record.FollowUp.FollowUpNo != current.FollowUpNo+1 || record.FollowUp.ClaimID != current.ClaimID) {
+			record.FollowUp.FollowUpNo != current.FollowUpNo+1 || record.FollowUp.ClaimID != current.ClaimID || !domain.SameNoteSource(record.FollowUp.NoteSource, current.NoteSource)) {
 			return domain.ConflictError(domain.ErrorCodeQuestionOrderConflict, "interview follow-up budget or chain changed")
 		}
 		if err := domain.ValidateTurn(record.Turn, *current); err != nil {
@@ -268,6 +283,11 @@ func (repository *GORMRepository) UpdatePathStep(ctx context.Context, record int
 	}
 	if err := validatePathStepRecord(record); err != nil {
 		return interviewapp.PathStepResult{}, err
+	}
+	if record.ClaimOnly {
+		if err := repository.requireClaimPath(ctx, record.WorkspaceID, record.PathID); err != nil {
+			return interviewapp.PathStepResult{}, err
+		}
 	}
 	var result interviewapp.PathStepResult
 	err := repository.within(ctx, func(callbackCtx context.Context, transaction *gorm.DB) error {

@@ -170,6 +170,7 @@ selection 才原子更新。
 | Worker | `config.LoadWorker(path)` | `zhixu-worker -config <path>` | non-API |
 | Migrate | `config.LoadMigration(path)` | `zhixu-migrate -config <path>` | non-API |
 | ModelCtl | `config.LoadMigration("")` | 当前无 `-config` | non-API |
+| Audit | `config.LoadMigration(path)` | `zhixu-audit --config <path>` | non-API、数据库连接默认只读 |
 
 字段优先级固定 `environment > YAML > Defaults()`；显式空环境变量仍覆盖低优先级并按字段规则验证。`-config` 只选 YAML，不提供逐字段 CLI override。API-only Secret 在 Worker/Migrate/ModelCtl 零环境查询并清空返回字段；这不等于共享 YAML 的字节级隔离，更强边界使用进程专用配置/Secret mount。
 
@@ -274,7 +275,7 @@ active，不自动应用 pending desired。正常配置生效不要使用 Docker
 该脚本使用 disposable Compose project、数据库和模型卷，以脚本内受控 HTTPS 线上 fixture 验证全线上、仅 Chat 本地、仅 Embedding 本地、两者本地、切回全线上，
 以及单 child、cached model 复用、管理容器重启恢复、`child_epoch` 单调递增和 60 秒空闲内存采样；结束时只清理它创建的隔离资源。
 它不会验证原生 Linux、真实公网 Provider 出口、Docker daemon restart、显式 child crash/signal/reap、旧 generation 在途栅栏、
-多架构、浏览器或真实 legacy volume 迁移，也不能替代这些发布门禁。
+多架构、浏览器或真实 legacy volume 迁移；这些扩展验证按实际运行需求选择，未执行不记 PASS，也不阻塞本轮开发交付。
 
 2026-08-14 在当前 Docker Desktop 的记录为：五种模式通过，模型复用零新增 pull；全线上 anonymous RSS 峰值 6.39 MiB，
 manager process RSS 峰值 9.69 MiB，相对 700 MiB 基线下降 99.1%。
@@ -285,6 +286,22 @@ manager process RSS 峰值 9.69 MiB，相对 700 MiB 基线下降 99.1%。
 保留 previous active；这不是“重启后已生效”。先检查 Snapshot 中 desired/active/applied revision，再从 API/Worker 所在 Docker
 网络验证批准的远程 Endpoint DNS、TLS 和出口代理。恢复出口后重试 exact desired revision 的 Apply；不要手改 active SQL，也不要用
 `./zhixu restart` 绕过 production Probe。
+
+### 4.5 操作者审计查询
+
+构建后的应用镜像包含 `/app/zhixu-audit`，使用既有数据库配置查询安全摘要，不修改数据库或执行迁移。将下列 `WORKSPACE_UUID` 换为页面/状态命令显示的实际 ID：
+
+```bash
+docker compose --project-name zhixu --profile workspace-runtime \
+  -f deploy/compose.yml --env-file .env exec -T app \
+  /app/zhixu-audit --workspace WORKSPACE_UUID --limit 50
+```
+
+使用 `--global` 替换 `--workspace WORKSPACE_UUID` 只读取没有 Workspace 的全局事件，不跨所有 Workspace。结果按时间和 ID 倒序；有 `next_cursor` 时同时传入 `--before` 和 `--before-id` 继续查询。每页默认 50、最大 200，总查询默认 10 秒、最大 1 分钟；满页末尾可以再返回一个空页。
+
+开发环境也可在已配置、可连接的数据库上执行 `go run -mod=vendor ./cmd/audit --workspace WORKSPACE_UUID`。数据库配置仍使用 `ZHIXU_DATABASE_*` 或 `--config` 指定的受保护 YAML；不要把密码/DSN 放进命令参数。此入口通过操作者的 Docker/数据库权限授权，连接强制默认只读，不是公开业务 API。
+
+当前查询只覆盖 `ops.audit_event` 中已接入生产者的事实，返回 ID、时间、Actor Type、Action、Resource Type、Outcome 和安全错误码；不输出任意 metadata/correlation、正文、ActorRef、ResourceRef 或幂等键。查询为空不代表其他 owner 没有操作记录，Tool/Workspace binding/Workflow 等独立记录不由此命令读取。保留数据随数据库备份保存；全域审计 UI、自动清理/归档和产品 `AUDIT_JSON` 导出不在当前范围。
 
 ## 5. 启动顺序与健康
 
@@ -315,15 +332,17 @@ Liveness 只证明进程存活。Worker readiness 还要求 DB、River schema/cl
 
 ## 6. 升级与兼容回滚
 
-当前 Docker、依赖感知 readiness、Migration Job 与启动 smoke 已有代码和历史运行证据；备份、临时实例恢复和一致性演练尚无仓库内自动化入口及最终演练证据。以下升级/回滚顺序是人工目标流程，不能据此宣称恢复能力已经交付。
+当前 Docker、依赖感知 readiness、Migration Job 与启动 smoke 已有实现。第 7 节提供最小停写备份、完整性校验与隔离恢复步骤；完整灾备和跨文件/Git/数据库/索引自动一致性演练不作为开发交付门禁。以下仍是操作者的升级/回滚顺序，不表示本次已经执行部署或现场恢复。
 
 升级：
 
-1. 创建 Backup Marker，记录 Git HEAD、DB Schema、Active Index 和应用版本。
-2. 备份 Workspace/Git 与 PostgreSQL。
-3. 停止 Worker 领取新任务，摘 readiness，等待 graceful Stop 到安全 checkpoint。
+1. 按第 7 节停止全部数据库和 Workspace 写者，等待在途副作用到安全 checkpoint；保留 PostgreSQL 运行。
+2. 使用 `deploy/backup.py create` 备份 Workspace/Git 与 PostgreSQL，记录 HEAD、Schema、Active Index 和不可变应用版本。
+3. 执行 `verify` 并保留原安装的配置、主密钥和身份材料；备份失败时保持停止，先排除失败。
 4. 使用新版本 `./zhixu restart` 执行受控 bootstrap 与前向 Migration；失败保持旧应用停止，不启动不兼容 Worker。
-5. launcher 启动新 API/Worker 后，执行 consistency、readiness 和业务 Smoke，再恢复任务。
+5. 核对迁移结果、readiness 和受影响业务，确认文件/Git/数据库没有无法解释的差异后恢复使用；没有通用自动 consistency 修复命令。
+
+包含历史 Proposal 的旧库必须使用带 `00093` 兼容逻辑的项目 migration runner 升级。它在原 `00082` 的同一事务内完成受限回填和正式约束复核，前 92 个迁移与校验和保持不变；不要绕过 runner 单独执行历史 SQL。实际隔离验证见 [升级收尾记录](../.trellis/tasks/07-16-product-delivery/research/proposal-upgrade-closeout.md)，不代表用户数据库已经升级。
 
 回滚：
 
@@ -334,36 +353,113 @@ Liveness 只证明进程存活。Worker readiness 还要求 DB、River schema/cl
 - 模型 activation 在 commit 前可恢复 previous active；commit 后不得 schema/SQL 回滚 active。回到旧模型应保存旧值为新的 immutable revision并正常 Apply。
 - 回滚应用前停止全部 Worker，保留 River Job、Attempt、Writeback Execution、temp/backup 与 lease；不兼容时保持停止并进入恢复流程。
 
-## 7. 一致备份与恢复
+## 7. 最小停写备份与恢复
 
-> **当前状态：人工目标流程，待自动化与演练。** 仓库尚无 `make backup`、`make restore-drill`、`make consistency-drill` 或等价受支持脚本，也未保留一次临时 PostgreSQL 实例恢复和跨文件/Git/数据库/索引一致性演练的验收记录。执行前必须由操作者补齐部署专属命令、备份位置、加密、RPO/RTO 和回滚方案；本节只定义顺序、校验点与停止条件。
+受支持入口是 [`deploy/backup.py`](../deploy/backup.py) 的 `create` / `verify`，使用 Python 标准库及所选 PostgreSQL 容器内的 `pg_dump`。工具只创建新备份、检查完整性；停启服务和向新目标还原由操作者显式执行。当前 27 条保护测试通过，包括合法 unborn Git、坏引用与缺失对象、Atlas 与旧 Goose 历史识别；见 [unborn 支持与验证](../.trellis/tasks/07-16-product-delivery/research/backup-unborn-deployment.md) 和 [本轮集成与部署记录](../.trellis/tasks/07-16-product-delivery/research/final-integration-2026-09-09.md)。已有一次隔离 PG18 基本备份恢复，详细命令与结果见 [原备份交付记录](../.trellis/tasks/07-16-product-delivery/research/backup-closeout.md)。该次使用最小数据 fixture，未执行完整应用迁移恢复、跨域业务一致性、跨版本/跨机或容量灾备演练；这些不作为开发交付门禁。
 
-### 7.1 备份
+### 7.1 停写与创建备份
 
-适用于定期备份、升级前、迁移机器和灾难恢复：
+先停止外部编辑器、同步、导入器及其他数据库写者，等待在途写回到安全 checkpoint。默认安装使用以下命令；定制安装须使用自己的 Compose 项目和配置。Worker 默认 hard stop 为 60 秒、Compose grace 为 70 秒，示例给 app/worker 90 秒；自定义超时更长时相应增加。
 
-1. 开启 Maintenance/停止新 Proposal Apply 和新 Side Effect。
-2. 等待在途写回到安全 checkpoint。
-3. 记录时间、Git HEAD、DB Schema Version、Active Index Version。
-4. 备份 Workspace（含 `.git`）和非敏感配置。
-5. 执行 PostgreSQL 逻辑或物理备份；模型主密钥按部署 Secret 策略单独保护。
-6. 验证大小和校验和，恢复到临时实例并查询 marker/关键对象数量。
-7. 关闭 Maintenance。
+```bash
+(
+set -eu
+docker compose --project-name zhixu --profile workspace-runtime \
+  -f deploy/compose.yml --env-file .env stop --timeout 90 app worker
+docker compose --project-name zhixu --profile workspace-runtime \
+  -f deploy/compose.yml --env-file .env stop \
+  local-model-runtime app-model-relay worker-model-relay
+docker compose --project-name zhixu --profile workspace-runtime \
+  -f deploy/compose.yml --env-file .env ps --all
+)
+```
 
-### 7.2 恢复
+保留 PostgreSQL 和 namespace anchors 运行。`./zhixu down` 会移除 PostgreSQL 容器，不能作为本工具的停写前置。强杀、超时或副作用未知不能当成安全 checkpoint，须先按第 8 节保留并处理现场。备份完成前保持所有写者停止。
 
-1. 停 API/Worker。
-2. 把 Workspace/Git 恢复到新目录并验证 `git fsck/status`。
-3. 恢复 PostgreSQL。
-4. 使用本机命令注册/迁移新 Root；不要直接改 DB `root_path`。
-5. 运行 migration compatibility check，先不接写流量。
-6. 运行 consistency check，检查 Active Index。
-7. Smoke 文档浏览、Keyword Search、Proposal 与 Workflow 查询。
-8. 启动 Worker，确认 recovery/queue 后再退出只读。
+用原安装的实际信息替换下列值；备份父目录须已存在且位于受保护的加密存储中：
 
-停止条件：Git HEAD 与 marker 不同、DB Schema 高于应用支持、正式文件缺失或存在不可解释 Commit。保持只读，进入下一节。
+```bash
+BACKUP_WORKSPACE='/original/canonical/workspace'
+BACKUP_WORKSPACE_ID='canonical-workspace-uuid'
+BACKUP_POSTGRES_CONTAINER='exact-running-postgres-container-id'
+BACKUP_APP_REF='full-git-commit-sha-or-sha256-image-id'
+BACKUP_DIRECTORY='/private/encrypted/backups/new-backup-directory'
 
-只有文件/Git 备份时可重建 Document/Chunk/FTS/vector；Confirmed Relation、Approval、Workflow、Review、Memory 和 Audit 需要 PostgreSQL 备份/批准的元数据导出，并在完成前标记历史不完整。
+python3 deploy/backup.py create \
+  --workspace "$BACKUP_WORKSPACE" --workspace-id "$BACKUP_WORKSPACE_ID" \
+  --postgres-container "$BACKUP_POSTGRES_CONTAINER" \
+  --database zhixu --username zhixu --app-version "$BACKUP_APP_REF" \
+  --output "$BACKUP_DIRECTORY" --confirm-stopped
+python3 deploy/backup.py verify --backup "$BACKUP_DIRECTORY"
+```
+
+`--confirm-stopped` 是操作者的停写声明，脚本不能证明所有业务写入已停止。`--app-version` 只接受完整 Git SHA 或 `sha256:` 镜像 ID，不接受移动标签，且仍是操作者提供的版本。工具通过容器本地 socket 连接，不读取密码或修改认证；不把 DSN/密码放进命令参数。
+
+升级前可备份 Atlas 库或只有 `public.goose_db_version` 的历史库。Goose 每个版本的最后事件须形成受支持的连续已应用范围（最高 91），不能有缺口、未知版本或混合历史；脚本不会替数据库迁移或补写 history。marker 的 `migration_engine`、`migration_history_table`、`migration_history_sha256` 与原有 `schema_version` 一起记录真实历史，备份前后须完全一致。已停在 Atlas 接管中间态、同时有两套历史时，应先按迁移恢复流程处理，不能把任一历史忽略后冒充正常备份。
+
+Workspace 必须是数据库登记的 canonical Root，含独立 `.git`；HEAD 为有效 Commit，或为经过检查、尚无首次提交的合法 unborn 分支。unborn 在 manifest 中记录 `head=null`，无需为备份创建首次 Commit。输出必须是 Root 外的新绝对目录；拒绝已有输出、符号链接、特殊文件、跨文件系统目录、linked worktree/submodule、共享对象库、partial clone（包括仅有配置而没有 promisor pack）和 tracked Git content filter 等不支持形态。Git 读取禁止 lazy fetch 与远程协议，不能为补对象触发远程 helper；循环链接等无效路径只返回稳定错误码。中途失败保留本次私有目录供检查，重试使用另一新目录。
+
+成功的 `0700` 目录包含四个 `0600` 文件：
+
+| 产物 | 内容 |
+|---|---|
+| `workspace.tar.gz` | 指定 Root 的普通文件和目录，包括 `.git`、未提交文件与 `.knowledge`；顶层固定为 `workspace/` |
+| `database.dump` | 整个指定数据库的 custom dump |
+| `manifest.json` | Workspace/Root、HEAD/dirty、branch/branch_state、Schema/Active Index、登记 Workspace 数、应用引用、PG 镜像/版本与验证边界 |
+| `SHA256SUMS` | 三个产物的 SHA-256，最后写入作为完成标记 |
+
+这是**单 Root 文件＋整库**备份。登记多个 Workspace 时，其他 Root 文件必须在同一停写窗口另行备份；一个包不等于所有 Workspace 文件全备份。数据库加密配置、正文、运行历史和 Git 元数据均需按敏感数据保管。部署 `.env`、模型/Git 主密钥、认证材料、数据库全局角色/密码/tablespace，以及 `.zhixu/workspace-selection`、`.zhixu/control-instance-id` 不在 bundle 中，按原安装 Secret/配置策略分别保护。
+
+`verify` 只检查权限、完成标记、hash、dump 格式头和归档可读性/路径/类型；`create` 另执行 `pg_restore --list`。这些检查不等于已完成数据库还原或应用一致性验证，manifest 中相应两个 checked 字段保持 `false`。校验和只能发现损坏，不能认证外来备份来源。
+
+### 7.2 向新目录、新空数据库还原核验
+
+只还原可信备份。准备使用兼容 PG major/extension 的独立 PostgreSQL 容器，不连接运行中的用户数据库；填写其实际 ID、操作员和全新目标：
+
+```bash
+RESTORE_POSTGRES_CONTAINER='exact-isolated-postgres-container-id'
+RESTORE_DATABASE='backup_restore_new'
+RESTORE_USERNAME='restore_operator'
+RESTORE_PARENT='/private/restore-check-new'
+
+(
+set -eu
+python3 deploy/backup.py verify --backup "$BACKUP_DIRECTORY"
+umask 077
+mkdir -m 0700 "$RESTORE_PARENT"
+tar --no-same-owner -xzf "$BACKUP_DIRECTORY/workspace.tar.gz" -C "$RESTORE_PARENT"
+git -C "$RESTORE_PARENT/workspace" fsck --full --strict
+python3 - "$RESTORE_PARENT/workspace" "$BACKUP_DIRECTORY/manifest.json" <<'PY'
+import json
+import runpy
+import sys
+from pathlib import Path
+
+actual = runpy.run_path("deploy/backup.py")["git_state"](Path(sys.argv[1]).resolve(strict=True))
+expected = json.loads(Path(sys.argv[2]).read_text())["workspace"]["git"]
+for key in ("head", "dirty", "status_sha256", "branch", "branch_state"):
+    if key in expected and actual[key] != expected[key]:
+        raise SystemExit("RESTORE_GIT_STATE_MISMATCH")
+print("RESTORE_GIT_STATE_MATCHED")
+PY
+docker exec "$RESTORE_POSTGRES_CONTAINER" createdb \
+  --no-password --host=/var/run/postgresql --port=5432 \
+  --username="$RESTORE_USERNAME" --template=template0 "$RESTORE_DATABASE"
+docker exec -i "$RESTORE_POSTGRES_CONTAINER" pg_restore \
+  --no-password --host=/var/run/postgresql --port=5432 \
+  --username="$RESTORE_USERNAME" --dbname="$RESTORE_DATABASE" \
+  --exit-on-error --single-transaction --no-owner --no-privileges --no-tablespaces \
+  < "$BACKUP_DIRECTORY/database.dump"
+)
+```
+
+任一步失败就停止；已有目录或数据库不得覆盖、清空或改成原地恢复。将新副本的 HEAD/dirty 状态、Workspace 数量、原 Root、Schema 和 Active Index 与 manifest 比较，具体只读查询见备份交付记录。`--no-owner --no-privileges --no-tablespaces` 只为隔离核验省去原安装的角色和存储布局，不证明正式权限模型已恢复，也不启动应用。
+
+### 7.3 原安装恢复边界
+
+临时目录只验证文件/Git 字节，数据库仍保存原 canonical Root。正式身份恢复需要原配置、主密钥、selection/control identity、兼容数据库与运行权限，并将文件副本恢复到原 canonical path。物理 fingerprint 改变后由操作者运行已有 `./zhixu workspace rebind --confirm REBIND`；它依赖原 selection，不接受任意新 Root。不要修改 immutable `root_path`，也不要注册临时路径后声称保留了原 Workspace ID。
+
+缺少身份/密钥材料、更换 canonical path、权限不明、HEAD/marker 不符或文件/Commit 无法解释时，保持服务停止并按第 8 节恢复。当前工具不提供任意新机自动恢复或跨域自动一致性修复。仅有文件/Git 无法恢复 Approval、Workflow、Review、Memory 和 Audit 等数据库历史，必须另有数据库备份。
 
 ## 8. 文件、Git 与数据库不一致恢复
 
@@ -515,6 +611,7 @@ make compose-up
 make compose-rag-smoke
 make compose-workspace-analysis-compat-smoke
 make compose-workspace-analysis-smoke
+make compose-synthesis-smoke
 make compose-workspace-analysis-worker-restart-smoke
 make compose-workspace-analysis-otlp-smoke
 make compose-rag-browser-smoke
@@ -554,13 +651,13 @@ CODEOWNERS、branch protection 与 bypass audit 是仓库外配置，发布管�
 digest 的 oasdiff 镜像。升级工具时单独更新 manifest/lock 或 digest，并运行现有 OpenAPI 门禁和 audit；
 详情见 [ADR-0028](architecture/adr/0028-openapi-contract-gates.md)。
 
-Workspace Analysis 的本地兼容/回滚演练不能替代生产 canary 与 OTLP 观察。正式顺序、停止条件、
+Workspace Analysis 的本地兼容/回滚演练不证明生产 canary 与 OTLP 观察已经完成；目标环境验证按部署需要选用，不再阻塞开发归档。正式顺序、停止条件、
 Worker-only 回滚和含新事实 Workspace 的兼容 API 约束见
 [Workspace Analysis 发布与回滚 Runbook](architecture/runbooks/workspace-analysis-rollout.md)。
 
 `make eino-live-smoke` 覆盖受控真实 Provider 的即时门禁，不能替代稳定观察。六项 live gate 与 host-relay 外部
 Chat/本地 Ollama Embedding 的浏览器终态已通过；容器直连外部 HTTPS 路径以及连续 7 天、100 个非 replay RAG v2
-终态的观察仍未完成，但该独立观察不阻塞 Eino 迁移任务归档。正式观察必须按 [Eino Runtime 稳定发布观察 Runbook](architecture/runbooks/eino-stable-observation.md)
+终态的观察未执行，按用户要求作为可选运营验证，不保留为未完成开发任务。选择开展时按 [Eino Runtime 稳定发布观察 Runbook](architecture/runbooks/eino-stable-observation.md)
 执行，先运行 preflight，再由受保护 Collector 归档证据。
 
 配置加载修改的局部门禁：

@@ -34,6 +34,8 @@ type StartCommand struct {
 
 // SubmitTurnCommand 提交当前题目的用户回答；评分字段永不来自调用方。
 type SubmitTurnCommand struct {
+	// ClaimOnly restricts this call to frozen Claim sources without changing its durable identity.
+	ClaimOnly      bool
 	WorkspaceID    foundation.ID
 	SessionID      foundation.ID
 	QuestionID     foundation.ID
@@ -43,6 +45,8 @@ type SubmitTurnCommand struct {
 
 // CompleteCommand 固定报告与 Learning Path；ManualEnd 只允许结束未答题目。
 type CompleteCommand struct {
+	// ClaimOnly rejects NOTE sources before replay or completion side effects.
+	ClaimOnly      bool
 	WorkspaceID    foundation.ID
 	SessionID      foundation.ID
 	ManualEnd      bool
@@ -51,6 +55,8 @@ type CompleteCommand struct {
 
 // UpdatePathStepCommand 更新一条学习路径步骤的用户进度。
 type UpdatePathStepCommand struct {
+	// ClaimOnly restricts this call to Claim-backed learning steps.
+	ClaimOnly       bool
 	WorkspaceID     foundation.ID
 	PathID          foundation.ID
 	StepID          foundation.ID
@@ -138,6 +144,8 @@ type SessionCursor struct {
 
 // SessionListQuery 读取一个 Workspace 内的有界 Interview Session 页面。
 type SessionListQuery struct {
+	// ClaimOnly filters the persisted source set before applying the keyset limit.
+	ClaimOnly   bool
 	WorkspaceID foundation.ID
 	Limit       int
 	After       *SessionCursor
@@ -221,10 +229,11 @@ type Scorer interface {
 
 // ArtifactDraftSection 是 Interview 确定性渲染的一节正文及完整内部证据绑定。
 type ArtifactDraftSection struct {
-	Key      string
-	Title    string
-	Markdown string
-	Evidence []domain.EvidenceRef
+	Key             string
+	Title           string
+	Markdown        string
+	Evidence        []domain.EvidenceRef
+	DocumentSources []domain.NoteRevisionRef
 }
 
 // ArtifactVisibilityHoldRole 标识 Interview completion 中暂不可见的产物角色。
@@ -327,6 +336,8 @@ type CompletionReservation struct {
 
 // BeginCompleteRecord 是在 Session 行锁下创建或恢复 reservation 的输入。
 type BeginCompleteRecord struct {
+	// ClaimOnly is a per-call source constraint, never a persisted reservation field.
+	ClaimOnly bool
 	// WorkspaceID 是命令所属 Workspace。
 	WorkspaceID foundation.ID
 	// SessionID 是待完成的 Interview Session。
@@ -351,6 +362,8 @@ type BeginCompleteResult struct {
 
 // PrepareCompleteRecord 把完整 Artifact digest 绑定到冻结 reservation。
 type PrepareCompleteRecord struct {
+	// ClaimOnly preserves the source constraint across completion phases.
+	ClaimOnly bool
 	// WorkspaceID 是命令所属 Workspace。
 	WorkspaceID foundation.ID
 	// SessionID 是待完成的 Interview Session。
@@ -393,6 +406,8 @@ type StartRecord struct {
 
 // SubmitRecord 是 Store 原子写入 Turn、可选追问和 receipt 的输入。
 type SubmitRecord struct {
+	// ClaimOnly is checked against immutable persisted sources before replay or writes.
+	ClaimOnly       bool
 	WorkspaceID     foundation.ID
 	SessionID       foundation.ID
 	ExpectedVersion int64
@@ -405,6 +420,8 @@ type SubmitRecord struct {
 
 // CompleteRecord 是 Store 原子关闭 Session、固定 Report/Path 和 receipt 的输入。
 type CompleteRecord struct {
+	// ClaimOnly is checked before committing or replaying the completion.
+	ClaimOnly       bool
 	WorkspaceID     foundation.ID
 	SessionID       foundation.ID
 	ExpectedVersion int64
@@ -421,6 +438,8 @@ type CompleteRecord struct {
 
 // UpdatePathStepRecord 是 Store 原子推进单步骤和 receipt 的输入。
 type UpdatePathStepRecord struct {
+	// ClaimOnly is checked against immutable persisted step sources.
+	ClaimOnly       bool
 	WorkspaceID     foundation.ID
 	PathID          foundation.ID
 	StepID          foundation.ID

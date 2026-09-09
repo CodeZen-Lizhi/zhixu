@@ -431,6 +431,7 @@ func (repository *GORMWorkspaceAnalysisRepository) AuthorizeWorkspaceAnalysisMod
 	}
 	var result application.WorkspaceAnalysisModelAuthorizationResult
 	callbackSucceeded := false
+	var admissionDenial *application.WorkspaceAnalysisAdmissionDenial
 	err := repository.within(ctx, func(callbackCtx context.Context, transaction *gorm.DB, scope foundation.TransactionScope) error {
 		locked, err := gormLockWorkspaceAnalysisModelOperation(callbackCtx, transaction, scope, repository.fence, command, true)
 		if err != nil {
@@ -450,6 +451,10 @@ func (repository *GORMWorkspaceAnalysisRepository) AuthorizeWorkspaceAnalysisMod
 		case domain.WorkspaceAnalysisOperationPending:
 			authorizeResult, authorizeErr := gormAuthorizePendingWorkspaceAnalysisModelCall(callbackCtx, transaction, locked, command)
 			if authorizeErr != nil {
+				if command.Identity.DefinitionVersion == 2 && errors.As(authorizeErr, &admissionDenial) {
+					callbackSucceeded = true
+					return gormForceWorkspaceAnalysisModelConstraints(callbackCtx, transaction)
+				}
 				return authorizeErr
 			}
 			result = authorizeResult
@@ -494,10 +499,16 @@ func (repository *GORMWorkspaceAnalysisRepository) AuthorizeWorkspaceAnalysisMod
 		return nil
 	})
 	if err != nil {
+		if callbackSucceeded && admissionDenial != nil {
+			return application.WorkspaceAnalysisModelAuthorizationResult{}, repository.recoverWorkspaceAnalysisAdmissionDenial(ctx, command, admissionDenial, err)
+		}
 		if callbackSucceeded {
 			return repository.recoverGORMWorkspaceAnalysisModelAuthorization(ctx, command, err)
 		}
 		return application.WorkspaceAnalysisModelAuthorizationResult{}, err
+	}
+	if admissionDenial != nil {
+		return application.WorkspaceAnalysisModelAuthorizationResult{}, admissionDenial
 	}
 	return result, nil
 }

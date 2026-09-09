@@ -71,17 +71,19 @@ func gormLockWorkspaceAnalysisCancellationAuditRun(
 		id, workspaceID, conversationID, questionID, answerID, workflowRunID string
 		analysisDefinitionKey, workflowDefinitionKey                         string
 		analysisDefinitionVersion, workflowDefinitionVersion                 int64
+		policyVersion                                                        int
+		definitionHash                                                       string
 	)
 	err := gormScanRow(tx.WithContext(ctx).Raw(`SELECT
 		a.id::text,a.workspace_id::text,a.conversation_id::text,a.question_id::text,a.answer_id::text,a.workflow_run_id::text,
-		a.definition_key,a.definition_version,d.key,d.version
+		a.definition_key,a.definition_version,d.key,d.version,a.policy_version,a.definition_hash
 		FROM agent.workspace_analysis_run a
 		JOIN workflow.run r ON r.id=a.workflow_run_id AND r.workspace_id=a.workspace_id
 		JOIN workflow.definition d ON d.id=r.definition_id AND d.workspace_id=r.workspace_id
 		WHERE a.workspace_id=? AND a.workflow_run_id=?
 		FOR UPDATE OF a`, string(event.WorkspaceID), string(event.WorkflowRunID))).Scan(
 		&id, &workspaceID, &conversationID, &questionID, &answerID, &workflowRunID,
-		&analysisDefinitionKey, &analysisDefinitionVersion, &workflowDefinitionKey, &workflowDefinitionVersion,
+		&analysisDefinitionKey, &analysisDefinitionVersion, &workflowDefinitionKey, &workflowDefinitionVersion, &policyVersion, &definitionHash,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return workspaceAnalysisCancellationAuditRun{}, false, nil
@@ -96,12 +98,16 @@ func gormLockWorkspaceAnalysisCancellationAuditRun(
 	run.ID, run.WorkspaceID, run.ConversationID = ids[0], ids[1], ids[2]
 	run.QuestionID, run.AnswerID, run.WorkflowRunID = ids[3], ids[4], ids[5]
 	if run.WorkspaceID != event.WorkspaceID || run.WorkflowRunID != event.WorkflowRunID ||
-		analysisDefinitionKey != "workspace-analysis" || analysisDefinitionVersion != 1 ||
-		workflowDefinitionKey != "workspace-analysis" || workflowDefinitionVersion != 1 {
+		analysisDefinitionKey != "workspace-analysis" || (analysisDefinitionVersion != 1 && analysisDefinitionVersion != 2) ||
+		workflowDefinitionKey != "workspace-analysis" || workflowDefinitionVersion != analysisDefinitionVersion {
 		return workspaceAnalysisCancellationAuditRun{}, false, consistency(
 			ErrorCodeWorkspaceAnalysisFinalizeCorrupt,
 			errors.New("workspace analysis cancellation definition binding is invalid"),
 		)
+	}
+	run.DefinitionVersion = analysisDefinitionVersion
+	if err := gormValidateWorkspaceAnalysisPersistedDefinition(ctx, tx, run.WorkspaceID, run.WorkflowRunID, run.DefinitionVersion, policyVersion, definitionHash); err != nil {
+		return workspaceAnalysisCancellationAuditRun{}, false, err
 	}
 	return run, true, nil
 }
@@ -132,7 +138,7 @@ func appendScopedWorkspaceAnalysisCancelRequestedAudit(
 		WorkflowStatus    string `json:"workflow_status"`
 		CancelRequested   bool   `json:"cancel_requested"`
 	}{
-		DefinitionKey: "workspace-analysis", DefinitionVersion: 1,
+		DefinitionKey: "workspace-analysis", DefinitionVersion: workspaceAnalysisPublicationVersion(run.DefinitionVersion),
 		WorkflowStatus: string(control.PersistedControl.Status), CancelRequested: control.PersistedControl.CancelRequested,
 	})
 	if err != nil {

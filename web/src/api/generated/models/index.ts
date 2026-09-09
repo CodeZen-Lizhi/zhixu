@@ -545,6 +545,152 @@ export type AnswerResult = ClarificationResult | RAGAnswerResult | RefusalResult
 /**
  *
  * @export
+ * @interface AnswerV2
+ */
+export interface AnswerV2 {
+    /**
+     *
+     * @type {string}
+     * @memberof AnswerV2
+     */
+    id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof AnswerV2
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof AnswerV2
+     */
+    conversation_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof AnswerV2
+     */
+    question_id: string;
+    /**
+     *
+     * @type {AnswerV2PublicationStatusEnum}
+     * @memberof AnswerV2
+     */
+    publication_status: AnswerV2PublicationStatusEnum;
+    /**
+     *
+     * @type {WorkflowProjection}
+     * @memberof AnswerV2
+     */
+    workflow: WorkflowProjection;
+    /**
+     *
+     * @type {AnswerV2ResultTypeEnum}
+     * @memberof AnswerV2
+     */
+    result_type?: AnswerV2ResultTypeEnum;
+    /**
+     *
+     * @type {string}
+     * @memberof AnswerV2
+     */
+    assistant_text?: string;
+    /**
+     *
+     * @type {Array<AnswerCitation>}
+     * @memberof AnswerV2
+     */
+    citations: Array<AnswerCitation>;
+    /**
+     *
+     * @type {AnswerV2Result}
+     * @memberof AnswerV2
+     */
+    result?: AnswerV2Result;
+    /**
+     *
+     * @type {RetrievalSummary}
+     * @memberof AnswerV2
+     */
+    retrieval_summary: RetrievalSummary | null;
+    /**
+     *
+     * @type {AnswerV2CurrentStageEnum}
+     * @memberof AnswerV2
+     */
+    current_stage: AnswerV2CurrentStageEnum | null;
+    /**
+     *
+     * @type {number}
+     * @memberof AnswerV2
+     */
+    version: number;
+    /**
+     *
+     * @type {string}
+     * @memberof AnswerV2
+     */
+    created_at: string;
+    /**
+     *
+     * @type {string}
+     * @memberof AnswerV2
+     */
+    updated_at: string;
+}
+
+
+/**
+ * @export
+ */
+export const AnswerV2PublicationStatusEnum = {
+    Pending: 'pending',
+    Completed: 'completed',
+    Refused: 'refused',
+    ClarificationRequired: 'clarification_required',
+    Failed: 'failed',
+    Cancelled: 'cancelled'
+} as const;
+export type AnswerV2PublicationStatusEnum = typeof AnswerV2PublicationStatusEnum[keyof typeof AnswerV2PublicationStatusEnum];
+
+/**
+ * @export
+ */
+export const AnswerV2ResultTypeEnum = {
+    RagAnswer: 'rag_answer',
+    Refusal: 'refusal',
+    Clarification: 'clarification',
+    WorkspaceAnalysis: 'workspace_analysis',
+    WorkspaceAnalysisRefusal: 'workspace_analysis_refusal',
+    WorkspaceAnalysisTermination: 'workspace_analysis_termination'
+} as const;
+export type AnswerV2ResultTypeEnum = typeof AnswerV2ResultTypeEnum[keyof typeof AnswerV2ResultTypeEnum];
+
+/**
+ * @export
+ */
+export const AnswerV2CurrentStageEnum = {
+    PlanStarted: 'plan.started',
+    PlanCompleted: 'plan.completed',
+    RetrievalStarted: 'retrieval.started',
+    RetrievalCompleted: 'retrieval.completed',
+    ValidationStarted: 'validation.started',
+    ValidationCompleted: 'validation.completed'
+} as const;
+export type AnswerV2CurrentStageEnum = typeof AnswerV2CurrentStageEnum[keyof typeof AnswerV2CurrentStageEnum];
+
+/**
+ * @type AnswerV2Result
+ *
+ * @export
+ */
+// OpenAPI Generator 7.24.0 override: preserve the null branch of nullable oneOf aliases.
+export type AnswerV2Result = ClarificationResult | RAGAnswerResult | RefusalResult | WorkspaceAnalysisPublishedAnswerResult | WorkspaceAnalysisRefusalResult | WorkspaceAnalysisTerminationResult;
+
+/**
+ *
+ * @export
  * @interface AppendProposalRevision200Response
  */
 export interface AppendProposalRevision200Response {
@@ -11649,6 +11795,311 @@ export type InterviewArtifactBindingKindEnum = typeof InterviewArtifactBindingKi
 /**
  *
  * @export
+ * @interface InterviewClaimConfig
+ */
+export interface InterviewClaimConfig {
+    /**
+     *
+     * @type {InterviewClaimConfigSchemaVersionEnum}
+     * @memberof InterviewClaimConfig
+     */
+    schema_version: InterviewClaimConfigSchemaVersionEnum;
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewClaimConfig
+     */
+    role: string;
+    /**
+     *
+     * @type {InterviewClaimScope}
+     * @memberof InterviewClaimConfig
+     */
+    scope: InterviewClaimScope | null;
+    /**
+     *
+     * @type {InterviewClaimConfigDifficultyEnum}
+     * @memberof InterviewClaimConfig
+     */
+    difficulty: InterviewClaimConfigDifficultyEnum;
+    /**
+     *
+     * @type {number}
+     * @memberof InterviewClaimConfig
+     */
+    duration_minutes: number;
+    /**
+     *
+     * @type {number}
+     * @memberof InterviewClaimConfig
+     */
+    question_count: number;
+    /**
+     *
+     * @type {number}
+     * @memberof InterviewClaimConfig
+     */
+    max_follow_ups: number;
+}
+
+
+/**
+ * @export
+ */
+export const InterviewClaimConfigSchemaVersionEnum = {
+    InterviewV1: 'interview/v1'
+} as const;
+export type InterviewClaimConfigSchemaVersionEnum = typeof InterviewClaimConfigSchemaVersionEnum[keyof typeof InterviewClaimConfigSchemaVersionEnum];
+
+/**
+ * @export
+ */
+export const InterviewClaimConfigDifficultyEnum = {
+    Foundation: 'FOUNDATION',
+    Intermediate: 'INTERMEDIATE',
+    Advanced: 'ADVANCED'
+} as const;
+export type InterviewClaimConfigDifficultyEnum = typeof InterviewClaimConfigDifficultyEnum[keyof typeof InterviewClaimConfigDifficultyEnum];
+
+/**
+ *
+ * @export
+ * @interface InterviewClaimFinding
+ */
+export interface InterviewClaimFinding {
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewClaimFinding
+     */
+    claim_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewClaimFinding
+     */
+    topic_id?: string;
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewClaimFinding
+     */
+    detail: string;
+    /**
+     *
+     * @type {Array<InterviewEvidence>}
+     * @memberof InterviewClaimFinding
+     */
+    evidence: Array<InterviewEvidence>;
+    /**
+     *
+     * @type {InterviewClaimFindingSourceKindEnum}
+     * @memberof InterviewClaimFinding
+     */
+    source_kind?: InterviewClaimFindingSourceKindEnum;
+}
+
+
+/**
+ * @export
+ */
+export const InterviewClaimFindingSourceKindEnum = {
+    Claim: 'CLAIM'
+} as const;
+export type InterviewClaimFindingSourceKindEnum = typeof InterviewClaimFindingSourceKindEnum[keyof typeof InterviewClaimFindingSourceKindEnum];
+
+/**
+ * Participant question projection. Canonical answer_points are deliberately not present.
+ * @export
+ * @interface InterviewClaimQuestion
+ */
+export interface InterviewClaimQuestion {
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewClaimQuestion
+     */
+    id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewClaimQuestion
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewClaimQuestion
+     */
+    session_id: string;
+    /**
+     *
+     * @type {number}
+     * @memberof InterviewClaimQuestion
+     */
+    question_no: number;
+    /**
+     *
+     * @type {number}
+     * @memberof InterviewClaimQuestion
+     */
+    follow_up_no: number;
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewClaimQuestion
+     */
+    parent_question_id?: string;
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewClaimQuestion
+     */
+    claim_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewClaimQuestion
+     */
+    topic_id?: string;
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewClaimQuestion
+     */
+    prompt: string;
+    /**
+     *
+     * @type {InterviewClaimQuestionStatusEnum}
+     * @memberof InterviewClaimQuestion
+     */
+    status: InterviewClaimQuestionStatusEnum;
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewClaimQuestion
+     */
+    created_at: string;
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewClaimQuestion
+     */
+    answered_at?: string;
+    /**
+     *
+     * @type {InterviewClaimQuestionSourceKindEnum}
+     * @memberof InterviewClaimQuestion
+     */
+    source_kind?: InterviewClaimQuestionSourceKindEnum;
+}
+
+
+/**
+ * @export
+ */
+export const InterviewClaimQuestionStatusEnum = {
+    Pending: 'PENDING',
+    Answered: 'ANSWERED',
+    Skipped: 'SKIPPED'
+} as const;
+export type InterviewClaimQuestionStatusEnum = typeof InterviewClaimQuestionStatusEnum[keyof typeof InterviewClaimQuestionStatusEnum];
+
+/**
+ * @export
+ */
+export const InterviewClaimQuestionSourceKindEnum = {
+    Claim: 'CLAIM'
+} as const;
+export type InterviewClaimQuestionSourceKindEnum = typeof InterviewClaimQuestionSourceKindEnum[keyof typeof InterviewClaimQuestionSourceKindEnum];
+
+/**
+ *
+ * @export
+ * @interface InterviewClaimScope
+ */
+export interface InterviewClaimScope {
+    /**
+     *
+     * @type {Array<string>}
+     * @memberof InterviewClaimScope
+     */
+    claim_ids?: Array<string>;
+    /**
+     *
+     * @type {Array<string>}
+     * @memberof InterviewClaimScope
+     */
+    topic_ids?: Array<string>;
+}
+/**
+ *
+ * @export
+ * @interface InterviewClaimScore
+ */
+export interface InterviewClaimScore {
+    /**
+     *
+     * @type {InterviewClaimScoreSchemaVersionEnum}
+     * @memberof InterviewClaimScore
+     */
+    schema_version: InterviewClaimScoreSchemaVersionEnum;
+    /**
+     *
+     * @type {InterviewScoreDimension}
+     * @memberof InterviewClaimScore
+     */
+    correctness: InterviewScoreDimension;
+    /**
+     *
+     * @type {InterviewScoreDimension}
+     * @memberof InterviewClaimScore
+     */
+    coverage: InterviewScoreDimension;
+    /**
+     *
+     * @type {InterviewScoreDimension}
+     * @memberof InterviewClaimScore
+     */
+    boundaries: InterviewScoreDimension;
+    /**
+     *
+     * @type {InterviewScoreDimension}
+     * @memberof InterviewClaimScore
+     */
+    clarity: InterviewScoreDimension;
+    /**
+     *
+     * @type {Array<string>}
+     * @memberof InterviewClaimScore
+     */
+    errors?: Array<string>;
+    /**
+     *
+     * @type {Array<string>}
+     * @memberof InterviewClaimScore
+     */
+    omissions?: Array<string>;
+    /**
+     *
+     * @type {Array<InterviewEvidence>}
+     * @memberof InterviewClaimScore
+     */
+    evidence: Array<InterviewEvidence>;
+}
+
+
+/**
+ * @export
+ */
+export const InterviewClaimScoreSchemaVersionEnum = {
+    InterviewScoreV1: 'interview-score/v1'
+} as const;
+export type InterviewClaimScoreSchemaVersionEnum = typeof InterviewClaimScoreSchemaVersionEnum[keyof typeof InterviewClaimScoreSchemaVersionEnum];
+
+/**
+ *
+ * @export
  * @interface InterviewCompletionResult
  */
 export interface InterviewCompletionResult {
@@ -11680,6 +12131,43 @@ export interface InterviewCompletionResult {
      *
      * @type {boolean}
      * @memberof InterviewCompletionResult
+     */
+    replayed: boolean;
+}
+/**
+ *
+ * @export
+ * @interface InterviewCompletionResultV2
+ */
+export interface InterviewCompletionResultV2 {
+    /**
+     *
+     * @type {InterviewSessionV2}
+     * @memberof InterviewCompletionResultV2
+     */
+    session: InterviewSessionV2;
+    /**
+     *
+     * @type {InterviewReportV2}
+     * @memberof InterviewCompletionResultV2
+     */
+    report: InterviewReportV2;
+    /**
+     *
+     * @type {LearningPath}
+     * @memberof InterviewCompletionResultV2
+     */
+    path: LearningPath;
+    /**
+     *
+     * @type {Array<LearningPathStepV2>}
+     * @memberof InterviewCompletionResultV2
+     */
+    steps: Array<LearningPathStepV2>;
+    /**
+     *
+     * @type {boolean}
+     * @memberof InterviewCompletionResultV2
      */
     replayed: boolean;
 }
@@ -11751,6 +12239,75 @@ export const InterviewConfigDifficultyEnum = {
     Advanced: 'ADVANCED'
 } as const;
 export type InterviewConfigDifficultyEnum = typeof InterviewConfigDifficultyEnum[keyof typeof InterviewConfigDifficultyEnum];
+
+/**
+ *
+ * @export
+ * @interface InterviewConfigV2
+ */
+export interface InterviewConfigV2 {
+    /**
+     *
+     * @type {InterviewConfigV2SchemaVersionEnum}
+     * @memberof InterviewConfigV2
+     */
+    schema_version: InterviewConfigV2SchemaVersionEnum;
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewConfigV2
+     */
+    role: string;
+    /**
+     *
+     * @type {InterviewScopeV2}
+     * @memberof InterviewConfigV2
+     */
+    scope: InterviewScopeV2;
+    /**
+     *
+     * @type {InterviewConfigV2DifficultyEnum}
+     * @memberof InterviewConfigV2
+     */
+    difficulty: InterviewConfigV2DifficultyEnum;
+    /**
+     *
+     * @type {number}
+     * @memberof InterviewConfigV2
+     */
+    duration_minutes: number;
+    /**
+     *
+     * @type {number}
+     * @memberof InterviewConfigV2
+     */
+    question_count: number;
+    /**
+     *
+     * @type {number}
+     * @memberof InterviewConfigV2
+     */
+    max_follow_ups: number;
+}
+
+
+/**
+ * @export
+ */
+export const InterviewConfigV2SchemaVersionEnum = {
+    InterviewV1: 'interview/v1'
+} as const;
+export type InterviewConfigV2SchemaVersionEnum = typeof InterviewConfigV2SchemaVersionEnum[keyof typeof InterviewConfigV2SchemaVersionEnum];
+
+/**
+ * @export
+ */
+export const InterviewConfigV2DifficultyEnum = {
+    Foundation: 'FOUNDATION',
+    Intermediate: 'INTERMEDIATE',
+    Advanced: 'ADVANCED'
+} as const;
+export type InterviewConfigV2DifficultyEnum = typeof InterviewConfigV2DifficultyEnum[keyof typeof InterviewConfigV2DifficultyEnum];
 
 /**
  *
@@ -11857,6 +12414,14 @@ export interface InterviewFinding {
     evidence: Array<InterviewEvidence>;
 }
 /**
+ * @type InterviewFindingV2
+ *
+ * @export
+ */
+// OpenAPI Generator 7.24.0 override: preserve the null branch of nullable oneOf aliases.
+export type InterviewFindingV2 = InterviewClaimFinding | InterviewNoteFinding;
+
+/**
  *
  * @export
  * @interface InterviewMemoryCandidateRequest
@@ -11888,6 +12453,552 @@ export interface InterviewMemoryCandidateResult {
      */
     replayed: boolean;
 }
+/**
+ *
+ * @export
+ * @interface InterviewNoteFinding
+ */
+export interface InterviewNoteFinding {
+    /**
+     *
+     * @type {null}
+     * @memberof InterviewNoteFinding
+     */
+    claim_id: null;
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewNoteFinding
+     */
+    detail: string;
+    /**
+     *
+     * @type {Array<InterviewEvidence>}
+     * @memberof InterviewNoteFinding
+     */
+    evidence: Array<InterviewEvidence>;
+    /**
+     *
+     * @type {InterviewNoteFindingSourceKindEnum}
+     * @memberof InterviewNoteFinding
+     */
+    source_kind: InterviewNoteFindingSourceKindEnum;
+    /**
+     *
+     * @type {InterviewNoteQuestionSource}
+     * @memberof InterviewNoteFinding
+     */
+    note_source: InterviewNoteQuestionSource;
+}
+
+
+/**
+ * @export
+ */
+export const InterviewNoteFindingSourceKindEnum = {
+    NoteRevision: 'NOTE_REVISION'
+} as const;
+export type InterviewNoteFindingSourceKindEnum = typeof InterviewNoteFindingSourceKindEnum[keyof typeof InterviewNoteFindingSourceKindEnum];
+
+/**
+ *
+ * @export
+ * @interface InterviewNoteItem
+ */
+export interface InterviewNoteItem {
+    /**
+     *
+     * @type {InterviewNoteRevisionRef}
+     * @memberof InterviewNoteItem
+     */
+    revision: InterviewNoteRevisionRef;
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewNoteItem
+     */
+    item_id: string;
+    /**
+     *
+     * @type {InterviewNoteItemItemKindEnum}
+     * @memberof InterviewNoteItem
+     */
+    item_kind: InterviewNoteItemItemKindEnum;
+}
+
+
+/**
+ * @export
+ */
+export const InterviewNoteItemItemKindEnum = {
+    Fact: 'FACT',
+    Conflict: 'CONFLICT',
+    Gap: 'GAP'
+} as const;
+export type InterviewNoteItemItemKindEnum = typeof InterviewNoteItemItemKindEnum[keyof typeof InterviewNoteItemItemKindEnum];
+
+/**
+ *
+ * @export
+ * @interface InterviewNotePreparation
+ */
+export interface InterviewNotePreparation {
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewNotePreparation
+     */
+    id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewNotePreparation
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {InterviewNoteRevisionRef}
+     * @memberof InterviewNotePreparation
+     */
+    note_revision: InterviewNoteRevisionRef;
+    /**
+     *
+     * @type {InterviewNotePreparationOptions}
+     * @memberof InterviewNotePreparation
+     */
+    options: InterviewNotePreparationOptions;
+    /**
+     *
+     * @type {InterviewNotePreparationStatusEnum}
+     * @memberof InterviewNotePreparation
+     */
+    status: InterviewNotePreparationStatusEnum;
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewNotePreparation
+     */
+    workflow_run_id: string;
+    /**
+     *
+     * @type {DocumentDraftCurrentPublishedRevisionId}
+     * @memberof InterviewNotePreparation
+     */
+    session_id: DocumentDraftCurrentPublishedRevisionId;
+    /**
+     *
+     * @type {SynthesisProcessingFailure}
+     * @memberof InterviewNotePreparation
+     */
+    failure: SynthesisProcessingFailure;
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewNotePreparation
+     */
+    created_at: string;
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewNotePreparation
+     */
+    updated_at: string;
+}
+
+
+/**
+ * @export
+ */
+export const InterviewNotePreparationStatusEnum = {
+    Queued: 'QUEUED',
+    Generating: 'GENERATING',
+    Ready: 'READY',
+    Failed: 'FAILED',
+    CapabilityUnavailable: 'CAPABILITY_UNAVAILABLE',
+    RecoveryRequired: 'RECOVERY_REQUIRED'
+} as const;
+export type InterviewNotePreparationStatusEnum = typeof InterviewNotePreparationStatusEnum[keyof typeof InterviewNotePreparationStatusEnum];
+
+/**
+ *
+ * @export
+ * @interface InterviewNotePreparationOptions
+ */
+export interface InterviewNotePreparationOptions {
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewNotePreparationOptions
+     */
+    role: string;
+    /**
+     *
+     * @type {InterviewNotePreparationOptionsDifficultyEnum}
+     * @memberof InterviewNotePreparationOptions
+     */
+    difficulty: InterviewNotePreparationOptionsDifficultyEnum;
+    /**
+     *
+     * @type {number}
+     * @memberof InterviewNotePreparationOptions
+     */
+    duration_minutes: number;
+    /**
+     *
+     * @type {number}
+     * @memberof InterviewNotePreparationOptions
+     */
+    question_count: number;
+    /**
+     *
+     * @type {number}
+     * @memberof InterviewNotePreparationOptions
+     */
+    max_follow_ups: number;
+}
+
+
+/**
+ * @export
+ */
+export const InterviewNotePreparationOptionsDifficultyEnum = {
+    Foundation: 'FOUNDATION',
+    Intermediate: 'INTERMEDIATE',
+    Advanced: 'ADVANCED'
+} as const;
+export type InterviewNotePreparationOptionsDifficultyEnum = typeof InterviewNotePreparationOptionsDifficultyEnum[keyof typeof InterviewNotePreparationOptionsDifficultyEnum];
+
+/**
+ *
+ * @export
+ * @interface InterviewNotePreparationPage
+ */
+export interface InterviewNotePreparationPage {
+    /**
+     *
+     * @type {Array<InterviewNotePreparation>}
+     * @memberof InterviewNotePreparationPage
+     */
+    items: Array<InterviewNotePreparation>;
+}
+/**
+ *
+ * @export
+ * @interface InterviewNotePreparationResult
+ */
+export interface InterviewNotePreparationResult {
+    /**
+     *
+     * @type {InterviewNotePreparation}
+     * @memberof InterviewNotePreparationResult
+     */
+    preparation: InterviewNotePreparation;
+    /**
+     *
+     * @type {boolean}
+     * @memberof InterviewNotePreparationResult
+     */
+    replayed: boolean;
+}
+/**
+ * Participant question projection. Canonical answer_points are deliberately not present.
+ * @export
+ * @interface InterviewNoteQuestion
+ */
+export interface InterviewNoteQuestion {
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewNoteQuestion
+     */
+    id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewNoteQuestion
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewNoteQuestion
+     */
+    session_id: string;
+    /**
+     *
+     * @type {number}
+     * @memberof InterviewNoteQuestion
+     */
+    question_no: number;
+    /**
+     *
+     * @type {number}
+     * @memberof InterviewNoteQuestion
+     */
+    follow_up_no: number;
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewNoteQuestion
+     */
+    parent_question_id?: string;
+    /**
+     *
+     * @type {null}
+     * @memberof InterviewNoteQuestion
+     */
+    claim_id: null;
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewNoteQuestion
+     */
+    prompt: string;
+    /**
+     *
+     * @type {InterviewNoteQuestionStatusEnum}
+     * @memberof InterviewNoteQuestion
+     */
+    status: InterviewNoteQuestionStatusEnum;
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewNoteQuestion
+     */
+    created_at: string;
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewNoteQuestion
+     */
+    answered_at?: string;
+    /**
+     *
+     * @type {InterviewNoteQuestionSourceKindEnum}
+     * @memberof InterviewNoteQuestion
+     */
+    source_kind: InterviewNoteQuestionSourceKindEnum;
+    /**
+     *
+     * @type {InterviewNoteItem}
+     * @memberof InterviewNoteQuestion
+     */
+    note_item: InterviewNoteItem;
+}
+
+
+/**
+ * @export
+ */
+export const InterviewNoteQuestionStatusEnum = {
+    Pending: 'PENDING',
+    Answered: 'ANSWERED',
+    Skipped: 'SKIPPED'
+} as const;
+export type InterviewNoteQuestionStatusEnum = typeof InterviewNoteQuestionStatusEnum[keyof typeof InterviewNoteQuestionStatusEnum];
+
+/**
+ * @export
+ */
+export const InterviewNoteQuestionSourceKindEnum = {
+    NoteRevision: 'NOTE_REVISION'
+} as const;
+export type InterviewNoteQuestionSourceKindEnum = typeof InterviewNoteQuestionSourceKindEnum[keyof typeof InterviewNoteQuestionSourceKindEnum];
+
+/**
+ *
+ * @export
+ * @interface InterviewNoteQuestionSource
+ */
+export interface InterviewNoteQuestionSource {
+    /**
+     *
+     * @type {InterviewNoteRevisionRef}
+     * @memberof InterviewNoteQuestionSource
+     */
+    revision: InterviewNoteRevisionRef;
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewNoteQuestionSource
+     */
+    item_id: string;
+    /**
+     *
+     * @type {InterviewNoteQuestionSourceItemKindEnum}
+     * @memberof InterviewNoteQuestionSource
+     */
+    item_kind: InterviewNoteQuestionSourceItemKindEnum;
+    /**
+     *
+     * @type {Array<SynthesisSourceRef>}
+     * @memberof InterviewNoteQuestionSource
+     */
+    sources: Array<SynthesisSourceRef>;
+}
+
+
+/**
+ * @export
+ */
+export const InterviewNoteQuestionSourceItemKindEnum = {
+    Fact: 'FACT',
+    Conflict: 'CONFLICT',
+    Gap: 'GAP'
+} as const;
+export type InterviewNoteQuestionSourceItemKindEnum = typeof InterviewNoteQuestionSourceItemKindEnum[keyof typeof InterviewNoteQuestionSourceItemKindEnum];
+
+/**
+ *
+ * @export
+ * @interface InterviewNoteRevisionRef
+ */
+export interface InterviewNoteRevisionRef {
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewNoteRevisionRef
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewNoteRevisionRef
+     */
+    note_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewNoteRevisionRef
+     */
+    revision_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewNoteRevisionRef
+     */
+    document_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewNoteRevisionRef
+     */
+    article_revision_id: string;
+    /**
+     *
+     * @type {number}
+     * @memberof InterviewNoteRevisionRef
+     */
+    revision_no: number;
+    /**
+     *
+     * @type {number}
+     * @memberof InterviewNoteRevisionRef
+     */
+    article_revision_no: number;
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewNoteRevisionRef
+     */
+    content_hash: string;
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewNoteRevisionRef
+     */
+    projection_hash: string;
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewNoteRevisionRef
+     */
+    title: string;
+}
+/**
+ *
+ * @export
+ * @interface InterviewNoteScope
+ */
+export interface InterviewNoteScope {
+    /**
+     *
+     * @type {InterviewNoteRevisionRef}
+     * @memberof InterviewNoteScope
+     */
+    note_revision: InterviewNoteRevisionRef;
+}
+/**
+ *
+ * @export
+ * @interface InterviewNoteScore
+ */
+export interface InterviewNoteScore {
+    /**
+     *
+     * @type {InterviewNoteScoreSchemaVersionEnum}
+     * @memberof InterviewNoteScore
+     */
+    schema_version: InterviewNoteScoreSchemaVersionEnum;
+    /**
+     *
+     * @type {InterviewScoreDimension}
+     * @memberof InterviewNoteScore
+     */
+    correctness: InterviewScoreDimension;
+    /**
+     *
+     * @type {InterviewScoreDimension}
+     * @memberof InterviewNoteScore
+     */
+    coverage: InterviewScoreDimension;
+    /**
+     *
+     * @type {InterviewScoreDimension}
+     * @memberof InterviewNoteScore
+     */
+    boundaries: InterviewScoreDimension;
+    /**
+     *
+     * @type {InterviewScoreDimension}
+     * @memberof InterviewNoteScore
+     */
+    clarity: InterviewScoreDimension;
+    /**
+     *
+     * @type {Array<string>}
+     * @memberof InterviewNoteScore
+     */
+    errors?: Array<string>;
+    /**
+     *
+     * @type {Array<string>}
+     * @memberof InterviewNoteScore
+     */
+    omissions?: Array<string>;
+    /**
+     *
+     * @type {Array<InterviewEvidence>}
+     * @memberof InterviewNoteScore
+     */
+    evidence: Array<InterviewEvidence>;
+    /**
+     *
+     * @type {InterviewNoteQuestionSource}
+     * @memberof InterviewNoteScore
+     */
+    note_source: InterviewNoteQuestionSource;
+}
+
+
+/**
+ * @export
+ */
+export const InterviewNoteScoreSchemaVersionEnum = {
+    InterviewScoreV1: 'interview-score/v1'
+} as const;
+export type InterviewNoteScoreSchemaVersionEnum = typeof InterviewNoteScoreSchemaVersionEnum[keyof typeof InterviewNoteScoreSchemaVersionEnum];
+
 /**
  * Participant question projection. Canonical answer_points are deliberately not present.
  * @export
@@ -11978,6 +13089,14 @@ export const InterviewQuestionStatusEnum = {
     Skipped: 'SKIPPED'
 } as const;
 export type InterviewQuestionStatusEnum = typeof InterviewQuestionStatusEnum[keyof typeof InterviewQuestionStatusEnum];
+
+/**
+ * @type InterviewQuestionV2
+ *
+ * @export
+ */
+// OpenAPI Generator 7.24.0 override: preserve the null branch of nullable oneOf aliases.
+export type InterviewQuestionV2 = InterviewClaimQuestion | InterviewNoteQuestion;
 
 /**
  *
@@ -12155,6 +13274,95 @@ export interface InterviewReportSummary {
 /**
  *
  * @export
+ * @interface InterviewReportV2
+ */
+export interface InterviewReportV2 {
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewReportV2
+     */
+    id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewReportV2
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewReportV2
+     */
+    session_id: string;
+    /**
+     *
+     * @type {InterviewReportV2SchemaVersionEnum}
+     * @memberof InterviewReportV2
+     */
+    schema_version: InterviewReportV2SchemaVersionEnum;
+    /**
+     *
+     * @type {InterviewReportSummary}
+     * @memberof InterviewReportV2
+     */
+    summary: InterviewReportSummary;
+    /**
+     *
+     * @type {Array<InterviewFindingV2>}
+     * @memberof InterviewReportV2
+     */
+    strengths: Array<InterviewFindingV2>;
+    /**
+     *
+     * @type {Array<InterviewFindingV2>}
+     * @memberof InterviewReportV2
+     */
+    gaps: Array<InterviewFindingV2>;
+    /**
+     *
+     * @type {Array<InterviewFindingV2>}
+     * @memberof InterviewReportV2
+     */
+    expression: Array<InterviewFindingV2>;
+    /**
+     *
+     * @type {Array<InterviewEvidence>}
+     * @memberof InterviewReportV2
+     */
+    evidence: Array<InterviewEvidence>;
+    /**
+     *
+     * @type {InterviewReportArtifactBinding}
+     * @memberof InterviewReportV2
+     */
+    artifact: InterviewReportArtifactBinding;
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewReportV2
+     */
+    created_at: string;
+    /**
+     *
+     * @type {Array<InterviewNoteQuestionSource>}
+     * @memberof InterviewReportV2
+     */
+    note_sources?: Array<InterviewNoteQuestionSource>;
+}
+
+
+/**
+ * @export
+ */
+export const InterviewReportV2SchemaVersionEnum = {
+    InterviewReportV1: 'interview-report/v1'
+} as const;
+export type InterviewReportV2SchemaVersionEnum = typeof InterviewReportV2SchemaVersionEnum[keyof typeof InterviewReportV2SchemaVersionEnum];
+
+/**
+ *
+ * @export
  * @interface InterviewScope
  */
 export interface InterviewScope {
@@ -12171,6 +13379,14 @@ export interface InterviewScope {
      */
     topic_ids?: Array<string>;
 }
+/**
+ * @type InterviewScopeV2
+ *
+ * @export
+ */
+// OpenAPI Generator 7.24.0 override: preserve the null branch of nullable oneOf aliases.
+export type InterviewScopeV2 = InterviewClaimScope | InterviewNoteScope;
+
 /**
  *
  * @export
@@ -12255,6 +13471,14 @@ export interface InterviewScoreDimension {
      */
     rationale: string;
 }
+/**
+ * @type InterviewScoreV2
+ *
+ * @export
+ */
+// OpenAPI Generator 7.24.0 override: preserve the null branch of nullable oneOf aliases.
+export type InterviewScoreV2 = InterviewClaimScore | InterviewNoteScore;
+
 /**
  *
  * @export
@@ -12350,6 +13574,98 @@ export interface InterviewSessionPage {
 /**
  *
  * @export
+ * @interface InterviewSessionPageV2
+ */
+export interface InterviewSessionPageV2 {
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewSessionPageV2
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {Array<InterviewSessionV2>}
+     * @memberof InterviewSessionPageV2
+     */
+    items: Array<InterviewSessionV2>;
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewSessionPageV2
+     */
+    next_cursor?: string;
+}
+/**
+ *
+ * @export
+ * @interface InterviewSessionV2
+ */
+export interface InterviewSessionV2 {
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewSessionV2
+     */
+    id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewSessionV2
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {InterviewConfigV2}
+     * @memberof InterviewSessionV2
+     */
+    config: InterviewConfigV2;
+    /**
+     *
+     * @type {InterviewSessionV2StatusEnum}
+     * @memberof InterviewSessionV2
+     */
+    status: InterviewSessionV2StatusEnum;
+    /**
+     *
+     * @type {number}
+     * @memberof InterviewSessionV2
+     */
+    version: number;
+    /**
+     *
+     * @type {number}
+     * @memberof InterviewSessionV2
+     */
+    follow_up_count: number;
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewSessionV2
+     */
+    started_at: string;
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewSessionV2
+     */
+    ended_at?: string;
+}
+
+
+/**
+ * @export
+ */
+export const InterviewSessionV2StatusEnum = {
+    Active: 'ACTIVE',
+    Completed: 'COMPLETED',
+    Cancelled: 'CANCELLED'
+} as const;
+export type InterviewSessionV2StatusEnum = typeof InterviewSessionV2StatusEnum[keyof typeof InterviewSessionV2StatusEnum];
+
+/**
+ *
+ * @export
  * @interface InterviewSnapshot
  */
 export interface InterviewSnapshot {
@@ -12393,6 +13709,49 @@ export interface InterviewSnapshot {
 /**
  *
  * @export
+ * @interface InterviewSnapshotV2
+ */
+export interface InterviewSnapshotV2 {
+    /**
+     *
+     * @type {InterviewSessionV2}
+     * @memberof InterviewSnapshotV2
+     */
+    session: InterviewSessionV2;
+    /**
+     *
+     * @type {Array<InterviewQuestionV2>}
+     * @memberof InterviewSnapshotV2
+     */
+    questions: Array<InterviewQuestionV2>;
+    /**
+     *
+     * @type {Array<InterviewTurnV2>}
+     * @memberof InterviewSnapshotV2
+     */
+    turns: Array<InterviewTurnV2>;
+    /**
+     *
+     * @type {InterviewReportV2}
+     * @memberof InterviewSnapshotV2
+     */
+    report?: InterviewReportV2;
+    /**
+     *
+     * @type {LearningPath}
+     * @memberof InterviewSnapshotV2
+     */
+    path?: LearningPath;
+    /**
+     *
+     * @type {Array<LearningPathStepV2>}
+     * @memberof InterviewSnapshotV2
+     */
+    steps: Array<LearningPathStepV2>;
+}
+/**
+ *
+ * @export
  * @interface InterviewStartResult
  */
 export interface InterviewStartResult {
@@ -12412,6 +13771,31 @@ export interface InterviewStartResult {
      *
      * @type {boolean}
      * @memberof InterviewStartResult
+     */
+    replayed: boolean;
+}
+/**
+ *
+ * @export
+ * @interface InterviewStartResultV2
+ */
+export interface InterviewStartResultV2 {
+    /**
+     *
+     * @type {InterviewSessionV2}
+     * @memberof InterviewStartResultV2
+     */
+    session: InterviewSessionV2;
+    /**
+     *
+     * @type {Array<InterviewQuestionV2>}
+     * @memberof InterviewStartResultV2
+     */
+    questions: Array<InterviewQuestionV2>;
+    /**
+     *
+     * @type {boolean}
+     * @memberof InterviewStartResultV2
      */
     replayed: boolean;
 }
@@ -12525,6 +13909,92 @@ export interface InterviewTurnResult {
      * @memberof InterviewTurnResult
      */
     replayed: boolean;
+}
+/**
+ *
+ * @export
+ * @interface InterviewTurnResultV2
+ */
+export interface InterviewTurnResultV2 {
+    /**
+     *
+     * @type {InterviewTurnV2}
+     * @memberof InterviewTurnResultV2
+     */
+    turn: InterviewTurnV2;
+    /**
+     *
+     * @type {InterviewQuestionV2}
+     * @memberof InterviewTurnResultV2
+     */
+    follow_up?: InterviewQuestionV2;
+    /**
+     *
+     * @type {InterviewQuestionV2}
+     * @memberof InterviewTurnResultV2
+     */
+    next_question?: InterviewQuestionV2;
+    /**
+     *
+     * @type {boolean}
+     * @memberof InterviewTurnResultV2
+     */
+    replayed: boolean;
+}
+/**
+ * Raw user_answer and request receipt identity are deliberately excluded from recovery projections.
+ * @export
+ * @interface InterviewTurnV2
+ */
+export interface InterviewTurnV2 {
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewTurnV2
+     */
+    id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewTurnV2
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewTurnV2
+     */
+    session_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewTurnV2
+     */
+    question_id: string;
+    /**
+     *
+     * @type {InterviewScoreV2}
+     * @memberof InterviewTurnV2
+     */
+    score: InterviewScoreV2;
+    /**
+     *
+     * @type {InterviewTurnDecision}
+     * @memberof InterviewTurnV2
+     */
+    decision: InterviewTurnDecision;
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewTurnV2
+     */
+    scorer_version: string;
+    /**
+     *
+     * @type {string}
+     * @memberof InterviewTurnV2
+     */
+    created_at: string;
 }
 /**
  * @type JSONValue
@@ -13555,6 +15025,254 @@ export type LearningPathArtifactBindingKindEnum = typeof LearningPathArtifactBin
 /**
  *
  * @export
+ * @interface LearningPathClaimStep
+ */
+export interface LearningPathClaimStep {
+    /**
+     *
+     * @type {string}
+     * @memberof LearningPathClaimStep
+     */
+    id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof LearningPathClaimStep
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof LearningPathClaimStep
+     */
+    path_id: string;
+    /**
+     *
+     * @type {number}
+     * @memberof LearningPathClaimStep
+     */
+    step_no: number;
+    /**
+     *
+     * @type {string}
+     * @memberof LearningPathClaimStep
+     */
+    claim_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof LearningPathClaimStep
+     */
+    topic_id?: string;
+    /**
+     *
+     * @type {string}
+     * @memberof LearningPathClaimStep
+     */
+    source_version_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof LearningPathClaimStep
+     */
+    source_span_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof LearningPathClaimStep
+     */
+    evidence_hash: string;
+    /**
+     *
+     * @type {string}
+     * @memberof LearningPathClaimStep
+     */
+    title: string;
+    /**
+     *
+     * @type {string}
+     * @memberof LearningPathClaimStep
+     */
+    rationale: string;
+    /**
+     *
+     * @type {LearningPathClaimStepStatusEnum}
+     * @memberof LearningPathClaimStep
+     */
+    status: LearningPathClaimStepStatusEnum;
+    /**
+     *
+     * @type {number}
+     * @memberof LearningPathClaimStep
+     */
+    version: number;
+    /**
+     *
+     * @type {string}
+     * @memberof LearningPathClaimStep
+     */
+    created_at: string;
+    /**
+     *
+     * @type {string}
+     * @memberof LearningPathClaimStep
+     */
+    updated_at: string;
+    /**
+     *
+     * @type {LearningPathClaimStepSourceKindEnum}
+     * @memberof LearningPathClaimStep
+     */
+    source_kind?: LearningPathClaimStepSourceKindEnum;
+}
+
+
+/**
+ * @export
+ */
+export const LearningPathClaimStepStatusEnum = {
+    Pending: 'PENDING',
+    InProgress: 'IN_PROGRESS',
+    Completed: 'COMPLETED',
+    Skipped: 'SKIPPED'
+} as const;
+export type LearningPathClaimStepStatusEnum = typeof LearningPathClaimStepStatusEnum[keyof typeof LearningPathClaimStepStatusEnum];
+
+/**
+ * @export
+ */
+export const LearningPathClaimStepSourceKindEnum = {
+    Claim: 'CLAIM'
+} as const;
+export type LearningPathClaimStepSourceKindEnum = typeof LearningPathClaimStepSourceKindEnum[keyof typeof LearningPathClaimStepSourceKindEnum];
+
+/**
+ *
+ * @export
+ * @interface LearningPathNoteStep
+ */
+export interface LearningPathNoteStep {
+    /**
+     *
+     * @type {string}
+     * @memberof LearningPathNoteStep
+     */
+    id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof LearningPathNoteStep
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof LearningPathNoteStep
+     */
+    path_id: string;
+    /**
+     *
+     * @type {number}
+     * @memberof LearningPathNoteStep
+     */
+    step_no: number;
+    /**
+     *
+     * @type {null}
+     * @memberof LearningPathNoteStep
+     */
+    claim_id: null;
+    /**
+     *
+     * @type {null}
+     * @memberof LearningPathNoteStep
+     */
+    source_version_id: null;
+    /**
+     *
+     * @type {null}
+     * @memberof LearningPathNoteStep
+     */
+    source_span_id: null;
+    /**
+     *
+     * @type {null}
+     * @memberof LearningPathNoteStep
+     */
+    evidence_hash: null;
+    /**
+     *
+     * @type {string}
+     * @memberof LearningPathNoteStep
+     */
+    title: string;
+    /**
+     *
+     * @type {string}
+     * @memberof LearningPathNoteStep
+     */
+    rationale: string;
+    /**
+     *
+     * @type {LearningPathNoteStepStatusEnum}
+     * @memberof LearningPathNoteStep
+     */
+    status: LearningPathNoteStepStatusEnum;
+    /**
+     *
+     * @type {number}
+     * @memberof LearningPathNoteStep
+     */
+    version: number;
+    /**
+     *
+     * @type {string}
+     * @memberof LearningPathNoteStep
+     */
+    created_at: string;
+    /**
+     *
+     * @type {string}
+     * @memberof LearningPathNoteStep
+     */
+    updated_at: string;
+    /**
+     *
+     * @type {LearningPathNoteStepSourceKindEnum}
+     * @memberof LearningPathNoteStep
+     */
+    source_kind: LearningPathNoteStepSourceKindEnum;
+    /**
+     *
+     * @type {InterviewNoteQuestionSource}
+     * @memberof LearningPathNoteStep
+     */
+    note_source: InterviewNoteQuestionSource;
+}
+
+
+/**
+ * @export
+ */
+export const LearningPathNoteStepStatusEnum = {
+    Pending: 'PENDING',
+    InProgress: 'IN_PROGRESS',
+    Completed: 'COMPLETED',
+    Skipped: 'SKIPPED'
+} as const;
+export type LearningPathNoteStepStatusEnum = typeof LearningPathNoteStepStatusEnum[keyof typeof LearningPathNoteStepStatusEnum];
+
+/**
+ * @export
+ */
+export const LearningPathNoteStepSourceKindEnum = {
+    NoteRevision: 'NOTE_REVISION'
+} as const;
+export type LearningPathNoteStepSourceKindEnum = typeof LearningPathNoteStepSourceKindEnum[keyof typeof LearningPathNoteStepSourceKindEnum];
+
+/**
+ *
+ * @export
  * @interface LearningPathStatusResult
  */
 export interface LearningPathStatusResult {
@@ -13706,6 +15424,39 @@ export interface LearningPathStepResult {
      */
     replayed: boolean;
 }
+/**
+ *
+ * @export
+ * @interface LearningPathStepResultV2
+ */
+export interface LearningPathStepResultV2 {
+    /**
+     *
+     * @type {LearningPath}
+     * @memberof LearningPathStepResultV2
+     */
+    path: LearningPath;
+    /**
+     *
+     * @type {LearningPathStepV2}
+     * @memberof LearningPathStepResultV2
+     */
+    step: LearningPathStepV2;
+    /**
+     *
+     * @type {boolean}
+     * @memberof LearningPathStepResultV2
+     */
+    replayed: boolean;
+}
+/**
+ * @type LearningPathStepV2
+ *
+ * @export
+ */
+// OpenAPI Generator 7.24.0 override: preserve the null branch of nullable oneOf aliases.
+export type LearningPathStepV2 = LearningPathClaimStep | LearningPathNoteStep;
+
 /**
  *
  * @export
@@ -19093,6 +20844,31 @@ export interface QuestionAcceptance {
 /**
  *
  * @export
+ * @interface QuestionAcceptanceV2
+ */
+export interface QuestionAcceptanceV2 {
+    /**
+     *
+     * @type {Question}
+     * @memberof QuestionAcceptanceV2
+     */
+    question: Question;
+    /**
+     *
+     * @type {AnswerV2}
+     * @memberof QuestionAcceptanceV2
+     */
+    answer: AnswerV2;
+    /**
+     *
+     * @type {string}
+     * @memberof QuestionAcceptanceV2
+     */
+    status_url: string;
+}
+/**
+ *
+ * @export
  * @interface QuestionScope
  */
 export interface QuestionScope {
@@ -23687,10 +25463,10 @@ export interface StartInterviewRequest {
     workspace_id: string;
     /**
      *
-     * @type {InterviewConfig}
+     * @type {InterviewClaimConfig}
      * @memberof StartInterviewRequest
      */
-    config: InterviewConfig;
+    config: InterviewClaimConfig;
 }
 /**
  *
@@ -24068,6 +25844,1023 @@ export type SuccessfulEmbeddingConnectionTestEndpointPathEnum = typeof Successfu
 /**
  *
  * @export
+ * @interface SynthesisConflictContent
+ */
+export interface SynthesisConflictContent {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisConflictContent
+     */
+    subject: string;
+    /**
+     *
+     * @type {Array<SynthesisStatement>}
+     * @memberof SynthesisConflictContent
+     */
+    alternatives: Array<SynthesisStatement>;
+}
+/**
+ *
+ * @export
+ * @interface SynthesisConflictItem
+ */
+export interface SynthesisConflictItem {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisConflictItem
+     */
+    id: string;
+    /**
+     *
+     * @type {SynthesisConflictItemKindEnum}
+     * @memberof SynthesisConflictItem
+     */
+    kind: SynthesisConflictItemKindEnum;
+    /**
+     *
+     * @type {null}
+     * @memberof SynthesisConflictItem
+     */
+    fact: null;
+    /**
+     *
+     * @type {SynthesisConflictContent}
+     * @memberof SynthesisConflictItem
+     */
+    conflict: SynthesisConflictContent;
+    /**
+     *
+     * @type {null}
+     * @memberof SynthesisConflictItem
+     */
+    gap: null;
+}
+
+
+/**
+ * @export
+ */
+export const SynthesisConflictItemKindEnum = {
+    Conflict: 'CONFLICT'
+} as const;
+export type SynthesisConflictItemKindEnum = typeof SynthesisConflictItemKindEnum[keyof typeof SynthesisConflictItemKindEnum];
+
+/**
+ *
+ * @export
+ * @interface SynthesisFactItem
+ */
+export interface SynthesisFactItem {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisFactItem
+     */
+    id: string;
+    /**
+     *
+     * @type {SynthesisFactItemKindEnum}
+     * @memberof SynthesisFactItem
+     */
+    kind: SynthesisFactItemKindEnum;
+    /**
+     *
+     * @type {SynthesisStatement}
+     * @memberof SynthesisFactItem
+     */
+    fact: SynthesisStatement;
+    /**
+     *
+     * @type {null}
+     * @memberof SynthesisFactItem
+     */
+    conflict: null;
+    /**
+     *
+     * @type {null}
+     * @memberof SynthesisFactItem
+     */
+    gap: null;
+}
+
+
+/**
+ * @export
+ */
+export const SynthesisFactItemKindEnum = {
+    Fact: 'FACT'
+} as const;
+export type SynthesisFactItemKindEnum = typeof SynthesisFactItemKindEnum[keyof typeof SynthesisFactItemKindEnum];
+
+/**
+ *
+ * @export
+ * @interface SynthesisFailure
+ */
+export interface SynthesisFailure {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisFailure
+     */
+    code: string;
+    /**
+     *
+     * @type {boolean}
+     * @memberof SynthesisFailure
+     */
+    retryable: boolean;
+}
+/**
+ *
+ * @export
+ * @interface SynthesisGapContent
+ */
+export interface SynthesisGapContent {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisGapContent
+     */
+    question: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisGapContent
+     */
+    context: string;
+    /**
+     *
+     * @type {Array<SynthesisSourceRef>}
+     * @memberof SynthesisGapContent
+     */
+    sources: Array<SynthesisSourceRef>;
+    /**
+     *
+     * @type {SynthesisStatement}
+     * @memberof SynthesisGapContent
+     */
+    resolution: SynthesisStatement | null;
+}
+/**
+ *
+ * @export
+ * @interface SynthesisGapItem
+ */
+export interface SynthesisGapItem {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisGapItem
+     */
+    id: string;
+    /**
+     *
+     * @type {SynthesisGapItemKindEnum}
+     * @memberof SynthesisGapItem
+     */
+    kind: SynthesisGapItemKindEnum;
+    /**
+     *
+     * @type {null}
+     * @memberof SynthesisGapItem
+     */
+    fact: null;
+    /**
+     *
+     * @type {null}
+     * @memberof SynthesisGapItem
+     */
+    conflict: null;
+    /**
+     *
+     * @type {SynthesisGapContent}
+     * @memberof SynthesisGapItem
+     */
+    gap: SynthesisGapContent;
+}
+
+
+/**
+ * @export
+ */
+export const SynthesisGapItemKindEnum = {
+    Gap: 'GAP'
+} as const;
+export type SynthesisGapItemKindEnum = typeof SynthesisGapItemKindEnum[keyof typeof SynthesisGapItemKindEnum];
+
+/**
+ * @type SynthesisItem
+ *
+ * @export
+ */
+// OpenAPI Generator 7.24.0 override: preserve the null branch of nullable oneOf aliases.
+export type SynthesisItem = SynthesisConflictItem | SynthesisFactItem | SynthesisGapItem;
+
+/**
+ *
+ * @export
+ * @interface SynthesisNote
+ */
+export interface SynthesisNote {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisNote
+     */
+    id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisNote
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisNote
+     */
+    document_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisNote
+     */
+    topic_key: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisNote
+     */
+    title: string;
+    /**
+     *
+     * @type {Array<string>}
+     * @memberof SynthesisNote
+     */
+    aliases: Array<string>;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisNote
+     */
+    current_revision_id: string | null;
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisNote
+     */
+    version: number;
+    /**
+     *
+     * @type {SynthesisNoteStatus}
+     * @memberof SynthesisNote
+     */
+    status: SynthesisNoteStatus;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisNote
+     */
+    workflow_run_id: string | null;
+    /**
+     *
+     * @type {SynthesisFailure}
+     * @memberof SynthesisNote
+     */
+    failure: SynthesisFailure | null;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisNote
+     */
+    created_at: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisNote
+     */
+    updated_at: string;
+}
+
+
+/**
+ *
+ * @export
+ * @interface SynthesisNoteDetail
+ */
+export interface SynthesisNoteDetail {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisNoteDetail
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {SynthesisNote}
+     * @memberof SynthesisNoteDetail
+     */
+    note: SynthesisNote;
+    /**
+     *
+     * @type {SynthesisRevision}
+     * @memberof SynthesisNoteDetail
+     */
+    current_revision: SynthesisRevision | null;
+    /**
+     *
+     * @type {SynthesisRevision}
+     * @memberof SynthesisNoteDetail
+     */
+    published_revision: SynthesisRevision | null;
+    /**
+     *
+     * @type {SynthesisPublication}
+     * @memberof SynthesisNoteDetail
+     */
+    publication: SynthesisPublication | null;
+    /**
+     *
+     * @type {SynthesisProcessing}
+     * @memberof SynthesisNoteDetail
+     */
+    latest_processing: SynthesisProcessing | null;
+}
+/**
+ *
+ * @export
+ * @interface SynthesisNotePage
+ */
+export interface SynthesisNotePage {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisNotePage
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {Array<SynthesisNoteSummary>}
+     * @memberof SynthesisNotePage
+     */
+    items: Array<SynthesisNoteSummary>;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisNotePage
+     */
+    next_cursor: string | null;
+}
+
+/**
+ *
+ * @export
+ */
+export const SynthesisNoteStatus = {
+    Queued: 'QUEUED',
+    Generating: 'GENERATING',
+    PendingApproval: 'PENDING_APPROVAL',
+    Ready: 'READY',
+    Failed: 'FAILED',
+    Conflict: 'CONFLICT',
+    CapabilityUnavailable: 'CAPABILITY_UNAVAILABLE',
+    RecoveryRequired: 'RECOVERY_REQUIRED'
+} as const;
+export type SynthesisNoteStatus = typeof SynthesisNoteStatus[keyof typeof SynthesisNoteStatus];
+
+/**
+ *
+ * @export
+ * @interface SynthesisNoteSummary
+ */
+export interface SynthesisNoteSummary {
+    /**
+     *
+     * @type {SynthesisNote}
+     * @memberof SynthesisNoteSummary
+     */
+    note: SynthesisNote;
+    /**
+     *
+     * @type {SynthesisRevisionSummary}
+     * @memberof SynthesisNoteSummary
+     */
+    current_revision: SynthesisRevisionSummary | null;
+    /**
+     *
+     * @type {SynthesisRevisionSummary}
+     * @memberof SynthesisNoteSummary
+     */
+    published_revision: SynthesisRevisionSummary | null;
+    /**
+     *
+     * @type {SynthesisPublication}
+     * @memberof SynthesisNoteSummary
+     */
+    publication: SynthesisPublication | null;
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisNoteSummary
+     */
+    item_count: number;
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisNoteSummary
+     */
+    conflict_count: number;
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisNoteSummary
+     */
+    gap_count: number;
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisNoteSummary
+     */
+    open_gap_count: number;
+}
+/**
+ *
+ * @export
+ * @interface SynthesisProcessing
+ */
+export interface SynthesisProcessing {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisProcessing
+     */
+    id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisProcessing
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisProcessing
+     */
+    source_version_id: string;
+    /**
+     *
+     * @type {DocumentDraftCurrentPublishedRevisionId}
+     * @memberof SynthesisProcessing
+     */
+    workflow_run_id: DocumentDraftCurrentPublishedRevisionId;
+    /**
+     *
+     * @type {SynthesisProcessingStatus}
+     * @memberof SynthesisProcessing
+     */
+    status: SynthesisProcessingStatus;
+    /**
+     *
+     * @type {Array<string>}
+     * @memberof SynthesisProcessing
+     */
+    revision_ids: Array<string>;
+    /**
+     *
+     * @type {SynthesisProcessingFailure}
+     * @memberof SynthesisProcessing
+     */
+    failure: SynthesisProcessingFailure;
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisProcessing
+     */
+    version: number;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisProcessing
+     */
+    created_at: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisProcessing
+     */
+    updated_at: string;
+    /**
+     *
+     * @type {SynthesisProcessingCompletedAt}
+     * @memberof SynthesisProcessing
+     */
+    completed_at: SynthesisProcessingCompletedAt;
+}
+
+
+/**
+ * @type SynthesisProcessingCompletedAt
+ *
+ * @export
+ */
+// OpenAPI Generator 7.24.0 override: preserve the null branch of nullable oneOf aliases.
+export type SynthesisProcessingCompletedAt = null | string;
+
+/**
+ * @type SynthesisProcessingFailure
+ *
+ * @export
+ */
+// OpenAPI Generator 7.24.0 override: preserve the null branch of nullable oneOf aliases.
+export type SynthesisProcessingFailure = SynthesisFailure | null;
+
+/**
+ *
+ * @export
+ * @interface SynthesisProcessingPage
+ */
+export interface SynthesisProcessingPage {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisProcessingPage
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {Array<SynthesisProcessing>}
+     * @memberof SynthesisProcessingPage
+     */
+    items: Array<SynthesisProcessing>;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisProcessingPage
+     */
+    next_cursor: string | null;
+}
+/**
+ *
+ * @export
+ * @interface SynthesisProcessingResult
+ */
+export interface SynthesisProcessingResult {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisProcessingResult
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {SynthesisProcessing}
+     * @memberof SynthesisProcessingResult
+     */
+    processing: SynthesisProcessing;
+}
+
+/**
+ *
+ * @export
+ */
+export const SynthesisProcessingStatus = {
+    Pending: 'PENDING',
+    Running: 'RUNNING',
+    Succeeded: 'SUCCEEDED',
+    NoChange: 'NO_CHANGE',
+    Skipped: 'SKIPPED',
+    Failed: 'FAILED',
+    RecoveryRequired: 'RECOVERY_REQUIRED'
+} as const;
+export type SynthesisProcessingStatus = typeof SynthesisProcessingStatus[keyof typeof SynthesisProcessingStatus];
+
+/**
+ *
+ * @export
+ * @interface SynthesisPublication
+ */
+export interface SynthesisPublication {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisPublication
+     */
+    revision_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisPublication
+     */
+    article_revision_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisPublication
+     */
+    proposal_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisPublication
+     */
+    proposal_revision_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisPublication
+     */
+    content_hash: string;
+}
+/**
+ *
+ * @export
+ * @interface SynthesisRetryRequest
+ */
+export interface SynthesisRetryRequest {
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisRetryRequest
+     */
+    expected_version: number;
+}
+/**
+ *
+ * @export
+ * @interface SynthesisRetryResult
+ */
+export interface SynthesisRetryResult {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisRetryResult
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {SynthesisProcessing}
+     * @memberof SynthesisRetryResult
+     */
+    processing: SynthesisProcessing;
+    /**
+     *
+     * @type {boolean}
+     * @memberof SynthesisRetryResult
+     */
+    replayed: boolean;
+}
+/**
+ *
+ * @export
+ * @interface SynthesisRevision
+ */
+export interface SynthesisRevision {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisRevision
+     */
+    id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisRevision
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisRevision
+     */
+    note_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisRevision
+     */
+    document_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisRevision
+     */
+    article_revision_id: string;
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisRevision
+     */
+    revision_no: number;
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisRevision
+     */
+    article_revision_no: number;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisRevision
+     */
+    parent_revision_id: string | null;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisRevision
+     */
+    title: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisRevision
+     */
+    content_hash: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisRevision
+     */
+    projection_hash: string;
+    /**
+     *
+     * @type {Array<SynthesisItem>}
+     * @memberof SynthesisRevision
+     */
+    items: Array<SynthesisItem>;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisRevision
+     */
+    created_at: string;
+}
+/**
+ *
+ * @export
+ * @interface SynthesisRevisionPage
+ */
+export interface SynthesisRevisionPage {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisRevisionPage
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {Array<SynthesisRevisionSummary>}
+     * @memberof SynthesisRevisionPage
+     */
+    items: Array<SynthesisRevisionSummary>;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisRevisionPage
+     */
+    next_cursor: string | null;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisRevisionPage
+     */
+    note_id: string;
+}
+/**
+ *
+ * @export
+ * @interface SynthesisRevisionResult
+ */
+export interface SynthesisRevisionResult {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisRevisionResult
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisRevisionResult
+     */
+    note_id: string;
+    /**
+     *
+     * @type {SynthesisRevision}
+     * @memberof SynthesisRevisionResult
+     */
+    revision: SynthesisRevision;
+}
+/**
+ *
+ * @export
+ * @interface SynthesisRevisionSummary
+ */
+export interface SynthesisRevisionSummary {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisRevisionSummary
+     */
+    id: string;
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisRevisionSummary
+     */
+    revision_no: number;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisRevisionSummary
+     */
+    article_revision_id: string;
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisRevisionSummary
+     */
+    article_revision_no: number;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisRevisionSummary
+     */
+    content_hash: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisRevisionSummary
+     */
+    created_at: string;
+}
+/**
+ *
+ * @export
+ * @interface SynthesisSourceRef
+ */
+export interface SynthesisSourceRef {
+    /**
+     *
+     * @type {SynthesisSourceVersion}
+     * @memberof SynthesisSourceRef
+     */
+    source: SynthesisSourceVersion;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceRef
+     */
+    source_span_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceRef
+     */
+    excerpt_hash: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceRef
+     */
+    title: string;
+}
+/**
+ *
+ * @export
+ * @interface SynthesisSourceVersion
+ */
+export interface SynthesisSourceVersion {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceVersion
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceVersion
+     */
+    source_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceVersion
+     */
+    source_version_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceVersion
+     */
+    content_artifact_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceVersion
+     */
+    parse_projection_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceVersion
+     */
+    content_hash: string;
+}
+/**
+ *
+ * @export
+ * @interface SynthesisSourceView
+ */
+export interface SynthesisSourceView {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceView
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceView
+     */
+    note_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceView
+     */
+    revision_id: string;
+    /**
+     *
+     * @type {SynthesisSourceRef}
+     * @memberof SynthesisSourceView
+     */
+    reference: SynthesisSourceRef;
+    /**
+     *
+     * @type {SynthesisSourceViewAvailabilityEnum}
+     * @memberof SynthesisSourceView
+     */
+    availability: SynthesisSourceViewAvailabilityEnum;
+    /**
+     *
+     * @type {SynthesisSourceViewText}
+     * @memberof SynthesisSourceView
+     */
+    text: SynthesisSourceViewText;
+}
+
+
+/**
+ * @export
+ */
+export const SynthesisSourceViewAvailabilityEnum = {
+    Available: 'AVAILABLE',
+    Stale: 'STALE',
+    Unavailable: 'UNAVAILABLE'
+} as const;
+export type SynthesisSourceViewAvailabilityEnum = typeof SynthesisSourceViewAvailabilityEnum[keyof typeof SynthesisSourceViewAvailabilityEnum];
+
+/**
+ * @type SynthesisSourceViewText
+ *
+ * @export
+ */
+// OpenAPI Generator 7.24.0 override: preserve the null branch of nullable oneOf aliases.
+export type SynthesisSourceViewText = null | string;
+
+/**
+ *
+ * @export
+ * @interface SynthesisStatement
+ */
+export interface SynthesisStatement {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisStatement
+     */
+    text: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisStatement
+     */
+    applicability: string;
+    /**
+     *
+     * @type {Array<SynthesisSourceRef>}
+     * @memberof SynthesisStatement
+     */
+    sources: Array<SynthesisSourceRef>;
+}
+/**
+ *
+ * @export
  * @interface SystemStatus
  */
 export interface SystemStatus {
@@ -24318,6 +27111,44 @@ export interface TurnPage {
      * @memberof TurnPage
      */
     next_cursor?: string;
+}
+/**
+ *
+ * @export
+ * @interface TurnPageV2
+ */
+export interface TurnPageV2 {
+    /**
+     *
+     * @type {Array<TurnV2>}
+     * @memberof TurnPageV2
+     */
+    items: Array<TurnV2>;
+    /**
+     * Opaque versioned base64url cursor bound to the resource and sort order.
+     * @type {string}
+     * @memberof TurnPageV2
+     */
+    next_cursor?: string;
+}
+/**
+ *
+ * @export
+ * @interface TurnV2
+ */
+export interface TurnV2 {
+    /**
+     *
+     * @type {Question}
+     * @memberof TurnV2
+     */
+    question: Question;
+    /**
+     *
+     * @type {AnswerV2}
+     * @memberof TurnV2
+     */
+    answer: AnswerV2;
 }
 /**
  *
@@ -25920,6 +28751,122 @@ export const WorkspaceAnalysisAnswerResultPayloadTerminationReasonEnum = {
 export type WorkspaceAnalysisAnswerResultPayloadTerminationReasonEnum = typeof WorkspaceAnalysisAnswerResultPayloadTerminationReasonEnum[keyof typeof WorkspaceAnalysisAnswerResultPayloadTerminationReasonEnum];
 
 /**
+ * Published dynamic workspace analysis with same-workspace/index unique Citation tuples, independent review, and settled usage. Model Run identity must not reuse an evidence identity.
+ * @export
+ * @interface WorkspaceAnalysisAnswerResultV2
+ */
+export interface WorkspaceAnalysisAnswerResultV2 {
+    /**
+     *
+     * @type {WorkspaceAnalysisAnswerResultV2ResultTypeEnum}
+     * @memberof WorkspaceAnalysisAnswerResultV2
+     */
+    result_type: WorkspaceAnalysisAnswerResultV2ResultTypeEnum;
+    /**
+     *
+     * @type {WorkspaceAnalysisAnswerResultV2SchemaIdEnum}
+     * @memberof WorkspaceAnalysisAnswerResultV2
+     */
+    schema_id: WorkspaceAnalysisAnswerResultV2SchemaIdEnum;
+    /**
+     *
+     * @type {WorkspaceAnalysisAnswerResultV2SchemaVersionEnum}
+     * @memberof WorkspaceAnalysisAnswerResultV2
+     */
+    schema_version: WorkspaceAnalysisAnswerResultV2SchemaVersionEnum;
+    /**
+     *
+     * @type {string}
+     * @memberof WorkspaceAnalysisAnswerResultV2
+     */
+    model_run_ref: string;
+    /**
+     *
+     * @type {WorkspaceAnalysisAnswerResultV2Payload}
+     * @memberof WorkspaceAnalysisAnswerResultV2
+     */
+    payload: WorkspaceAnalysisAnswerResultV2Payload;
+}
+
+
+/**
+ * @export
+ */
+export const WorkspaceAnalysisAnswerResultV2ResultTypeEnum = {
+    WorkspaceAnalysis: 'workspace_analysis'
+} as const;
+export type WorkspaceAnalysisAnswerResultV2ResultTypeEnum = typeof WorkspaceAnalysisAnswerResultV2ResultTypeEnum[keyof typeof WorkspaceAnalysisAnswerResultV2ResultTypeEnum];
+
+/**
+ * @export
+ */
+export const WorkspaceAnalysisAnswerResultV2SchemaIdEnum = {
+    ConversationWorkspaceAnalysisAnswer: 'conversation.workspace_analysis_answer'
+} as const;
+export type WorkspaceAnalysisAnswerResultV2SchemaIdEnum = typeof WorkspaceAnalysisAnswerResultV2SchemaIdEnum[keyof typeof WorkspaceAnalysisAnswerResultV2SchemaIdEnum];
+
+/**
+ * @export
+ */
+export const WorkspaceAnalysisAnswerResultV2SchemaVersionEnum = {
+    V2: 'v2'
+} as const;
+export type WorkspaceAnalysisAnswerResultV2SchemaVersionEnum = typeof WorkspaceAnalysisAnswerResultV2SchemaVersionEnum[keyof typeof WorkspaceAnalysisAnswerResultV2SchemaVersionEnum];
+
+/**
+ *
+ * @export
+ * @interface WorkspaceAnalysisAnswerResultV2Payload
+ */
+export interface WorkspaceAnalysisAnswerResultV2Payload {
+    /**
+     *
+     * @type {string}
+     * @memberof WorkspaceAnalysisAnswerResultV2Payload
+     */
+    answer_markdown: string;
+    /**
+     *
+     * @type {Array<RAGResultCitation>}
+     * @memberof WorkspaceAnalysisAnswerResultV2Payload
+     */
+    citations: Array<RAGResultCitation>;
+    /**
+     * Present only if ReadGitStatus was actually executed; otherwise explicitly null.
+     * @type {WorkspaceAnalysisGitStatus}
+     * @memberof WorkspaceAnalysisAnswerResultV2Payload
+     */
+    git_status: WorkspaceAnalysisGitStatus | null;
+    /**
+     *
+     * @type {WorkspaceAnalysisBudgetSummaryV2}
+     * @memberof WorkspaceAnalysisAnswerResultV2Payload
+     */
+    budget: WorkspaceAnalysisBudgetSummaryV2;
+    /**
+     *
+     * @type {WorkspaceAnalysisProposalSuggestion}
+     * @memberof WorkspaceAnalysisAnswerResultV2Payload
+     */
+    proposal_suggestion: WorkspaceAnalysisProposalSuggestion | null;
+    /**
+     *
+     * @type {WorkspaceAnalysisAnswerResultV2PayloadTerminationReasonEnum}
+     * @memberof WorkspaceAnalysisAnswerResultV2Payload
+     */
+    termination_reason: WorkspaceAnalysisAnswerResultV2PayloadTerminationReasonEnum;
+}
+
+
+/**
+ * @export
+ */
+export const WorkspaceAnalysisAnswerResultV2PayloadTerminationReasonEnum = {
+    Completed: 'COMPLETED'
+} as const;
+export type WorkspaceAnalysisAnswerResultV2PayloadTerminationReasonEnum = typeof WorkspaceAnalysisAnswerResultV2PayloadTerminationReasonEnum[keyof typeof WorkspaceAnalysisAnswerResultV2PayloadTerminationReasonEnum];
+
+/**
  *
  * @export
  * @interface WorkspaceAnalysisBudgetSummary
@@ -25966,6 +28913,43 @@ export const WorkspaceAnalysisBudgetSummaryModelCallsEnum = {
 } as const;
 export type WorkspaceAnalysisBudgetSummaryModelCallsEnum = typeof WorkspaceAnalysisBudgetSummaryModelCallsEnum[keyof typeof WorkspaceAnalysisBudgetSummaryModelCallsEnum];
 
+/**
+ * Settled dynamic-loop usage. model_calls = tool_calls + 2; input tokens cannot exceed model_calls × 65536 and output tokens cannot exceed (model_calls − 2) × 512 + 4096 + 1024.
+ * @export
+ * @interface WorkspaceAnalysisBudgetSummaryV2
+ */
+export interface WorkspaceAnalysisBudgetSummaryV2 {
+    /**
+     *
+     * @type {number}
+     * @memberof WorkspaceAnalysisBudgetSummaryV2
+     */
+    model_calls: number;
+    /**
+     *
+     * @type {number}
+     * @memberof WorkspaceAnalysisBudgetSummaryV2
+     */
+    tool_calls: number;
+    /**
+     *
+     * @type {number}
+     * @memberof WorkspaceAnalysisBudgetSummaryV2
+     */
+    input_tokens: number;
+    /**
+     *
+     * @type {number}
+     * @memberof WorkspaceAnalysisBudgetSummaryV2
+     */
+    output_tokens: number;
+    /**
+     *
+     * @type {number}
+     * @memberof WorkspaceAnalysisBudgetSummaryV2
+     */
+    estimated_cost_microunits: number | null;
+}
 /**
  *
  * @export
@@ -26049,6 +29033,14 @@ export const WorkspaceAnalysisProposalSuggestionHrefEnum = {
     Proposals: '/proposals'
 } as const;
 export type WorkspaceAnalysisProposalSuggestionHrefEnum = typeof WorkspaceAnalysisProposalSuggestionHrefEnum[keyof typeof WorkspaceAnalysisProposalSuggestionHrefEnum];
+
+/**
+ * @type WorkspaceAnalysisPublishedAnswerResult
+ *
+ * @export
+ */
+// OpenAPI Generator 7.24.0 override: preserve the null branch of nullable oneOf aliases.
+export type WorkspaceAnalysisPublishedAnswerResult = WorkspaceAnalysisAnswerResult | WorkspaceAnalysisAnswerResultV2;
 
 /**
  *
@@ -26408,6 +29400,184 @@ export interface WorkspaceAnalysisTimelineBudget {
     estimated_cost_microunits: WorkspaceAnalysisTimelineCounter | null;
 }
 /**
+ * Authoritative usage ledger; successful operation facts cannot exceed used counters. Pending slots do not count. Only success requires exact settled equality. Output maximum includes the configured synthesis allowance.
+ * @export
+ * @interface WorkspaceAnalysisTimelineBudgetV2
+ */
+export interface WorkspaceAnalysisTimelineBudgetV2 {
+    /**
+     *
+     * @type {WorkspaceAnalysisTimelineBudgetV2ModelCalls}
+     * @memberof WorkspaceAnalysisTimelineBudgetV2
+     */
+    model_calls: WorkspaceAnalysisTimelineBudgetV2ModelCalls;
+    /**
+     *
+     * @type {WorkspaceAnalysisTimelineBudgetV2ToolCalls}
+     * @memberof WorkspaceAnalysisTimelineBudgetV2
+     */
+    tool_calls: WorkspaceAnalysisTimelineBudgetV2ToolCalls;
+    /**
+     *
+     * @type {WorkspaceAnalysisTimelineBudgetV2SourceReads}
+     * @memberof WorkspaceAnalysisTimelineBudgetV2
+     */
+    source_reads: WorkspaceAnalysisTimelineBudgetV2SourceReads;
+    /**
+     *
+     * @type {WorkspaceAnalysisTimelineBudgetV2InputTokens}
+     * @memberof WorkspaceAnalysisTimelineBudgetV2
+     */
+    input_tokens: WorkspaceAnalysisTimelineBudgetV2InputTokens;
+    /**
+     *
+     * @type {WorkspaceAnalysisTimelineBudgetV2OutputTokens}
+     * @memberof WorkspaceAnalysisTimelineBudgetV2
+     */
+    output_tokens: WorkspaceAnalysisTimelineBudgetV2OutputTokens;
+    /**
+     *
+     * @type {WorkspaceAnalysisTimelineCounter}
+     * @memberof WorkspaceAnalysisTimelineBudgetV2
+     */
+    estimated_cost_microunits: WorkspaceAnalysisTimelineCounter | null;
+}
+/**
+ *
+ * @export
+ * @interface WorkspaceAnalysisTimelineBudgetV2InputTokens
+ */
+export interface WorkspaceAnalysisTimelineBudgetV2InputTokens {
+    /**
+     *
+     * @type {number}
+     * @memberof WorkspaceAnalysisTimelineBudgetV2InputTokens
+     */
+    used: number;
+    /**
+     *
+     * @type {WorkspaceAnalysisTimelineBudgetV2InputTokensMaxEnum}
+     * @memberof WorkspaceAnalysisTimelineBudgetV2InputTokens
+     */
+    max: WorkspaceAnalysisTimelineBudgetV2InputTokensMaxEnum;
+}
+
+
+/**
+ * @export
+ */
+export const WorkspaceAnalysisTimelineBudgetV2InputTokensMaxEnum = {
+    NUMBER_917504: 917504
+} as const;
+export type WorkspaceAnalysisTimelineBudgetV2InputTokensMaxEnum = typeof WorkspaceAnalysisTimelineBudgetV2InputTokensMaxEnum[keyof typeof WorkspaceAnalysisTimelineBudgetV2InputTokensMaxEnum];
+
+/**
+ *
+ * @export
+ * @interface WorkspaceAnalysisTimelineBudgetV2ModelCalls
+ */
+export interface WorkspaceAnalysisTimelineBudgetV2ModelCalls {
+    /**
+     *
+     * @type {number}
+     * @memberof WorkspaceAnalysisTimelineBudgetV2ModelCalls
+     */
+    used: number;
+    /**
+     *
+     * @type {WorkspaceAnalysisTimelineBudgetV2ModelCallsMaxEnum}
+     * @memberof WorkspaceAnalysisTimelineBudgetV2ModelCalls
+     */
+    max: WorkspaceAnalysisTimelineBudgetV2ModelCallsMaxEnum;
+}
+
+
+/**
+ * @export
+ */
+export const WorkspaceAnalysisTimelineBudgetV2ModelCallsMaxEnum = {
+    NUMBER_14: 14
+} as const;
+export type WorkspaceAnalysisTimelineBudgetV2ModelCallsMaxEnum = typeof WorkspaceAnalysisTimelineBudgetV2ModelCallsMaxEnum[keyof typeof WorkspaceAnalysisTimelineBudgetV2ModelCallsMaxEnum];
+
+/**
+ *
+ * @export
+ * @interface WorkspaceAnalysisTimelineBudgetV2OutputTokens
+ */
+export interface WorkspaceAnalysisTimelineBudgetV2OutputTokens {
+    /**
+     *
+     * @type {number}
+     * @memberof WorkspaceAnalysisTimelineBudgetV2OutputTokens
+     */
+    used: number;
+    /**
+     *
+     * @type {number}
+     * @memberof WorkspaceAnalysisTimelineBudgetV2OutputTokens
+     */
+    max: number;
+}
+/**
+ *
+ * @export
+ * @interface WorkspaceAnalysisTimelineBudgetV2SourceReads
+ */
+export interface WorkspaceAnalysisTimelineBudgetV2SourceReads {
+    /**
+     *
+     * @type {number}
+     * @memberof WorkspaceAnalysisTimelineBudgetV2SourceReads
+     */
+    used: number;
+    /**
+     *
+     * @type {WorkspaceAnalysisTimelineBudgetV2SourceReadsMaxEnum}
+     * @memberof WorkspaceAnalysisTimelineBudgetV2SourceReads
+     */
+    max: WorkspaceAnalysisTimelineBudgetV2SourceReadsMaxEnum;
+}
+
+
+/**
+ * @export
+ */
+export const WorkspaceAnalysisTimelineBudgetV2SourceReadsMaxEnum = {
+    NUMBER_8: 8
+} as const;
+export type WorkspaceAnalysisTimelineBudgetV2SourceReadsMaxEnum = typeof WorkspaceAnalysisTimelineBudgetV2SourceReadsMaxEnum[keyof typeof WorkspaceAnalysisTimelineBudgetV2SourceReadsMaxEnum];
+
+/**
+ *
+ * @export
+ * @interface WorkspaceAnalysisTimelineBudgetV2ToolCalls
+ */
+export interface WorkspaceAnalysisTimelineBudgetV2ToolCalls {
+    /**
+     *
+     * @type {number}
+     * @memberof WorkspaceAnalysisTimelineBudgetV2ToolCalls
+     */
+    used: number;
+    /**
+     *
+     * @type {WorkspaceAnalysisTimelineBudgetV2ToolCallsMaxEnum}
+     * @memberof WorkspaceAnalysisTimelineBudgetV2ToolCalls
+     */
+    max: WorkspaceAnalysisTimelineBudgetV2ToolCallsMaxEnum;
+}
+
+
+/**
+ * @export
+ */
+export const WorkspaceAnalysisTimelineBudgetV2ToolCallsMaxEnum = {
+    NUMBER_13: 13
+} as const;
+export type WorkspaceAnalysisTimelineBudgetV2ToolCallsMaxEnum = typeof WorkspaceAnalysisTimelineBudgetV2ToolCallsMaxEnum[keyof typeof WorkspaceAnalysisTimelineBudgetV2ToolCallsMaxEnum];
+
+/**
  *
  * @export
  * @interface WorkspaceAnalysisTimelineCitationSummary
@@ -26458,6 +29628,60 @@ export interface WorkspaceAnalysisTimelineCitationSummaryCitationValidation {
      *
      * @type {Array<string>}
      * @memberof WorkspaceAnalysisTimelineCitationSummaryCitationValidation
+     */
+    reason_codes: Array<string>;
+}
+/**
+ * Run-global Citation result: total count 1..32. OK is present exactly when valid_count > 0; invalid_count > 0 requires a failure code.
+ * @export
+ * @interface WorkspaceAnalysisTimelineCitationSummaryV2
+ */
+export interface WorkspaceAnalysisTimelineCitationSummaryV2 {
+    /**
+     *
+     * @type {WorkspaceAnalysisTimelineCitationSummaryV2KindEnum}
+     * @memberof WorkspaceAnalysisTimelineCitationSummaryV2
+     */
+    kind: WorkspaceAnalysisTimelineCitationSummaryV2KindEnum;
+    /**
+     *
+     * @type {WorkspaceAnalysisTimelineCitationSummaryV2CitationValidation}
+     * @memberof WorkspaceAnalysisTimelineCitationSummaryV2
+     */
+    citation_validation: WorkspaceAnalysisTimelineCitationSummaryV2CitationValidation;
+}
+
+
+/**
+ * @export
+ */
+export const WorkspaceAnalysisTimelineCitationSummaryV2KindEnum = {
+    CitationValidation: 'citation_validation'
+} as const;
+export type WorkspaceAnalysisTimelineCitationSummaryV2KindEnum = typeof WorkspaceAnalysisTimelineCitationSummaryV2KindEnum[keyof typeof WorkspaceAnalysisTimelineCitationSummaryV2KindEnum];
+
+/**
+ *
+ * @export
+ * @interface WorkspaceAnalysisTimelineCitationSummaryV2CitationValidation
+ */
+export interface WorkspaceAnalysisTimelineCitationSummaryV2CitationValidation {
+    /**
+     *
+     * @type {number}
+     * @memberof WorkspaceAnalysisTimelineCitationSummaryV2CitationValidation
+     */
+    valid_count: number;
+    /**
+     *
+     * @type {number}
+     * @memberof WorkspaceAnalysisTimelineCitationSummaryV2CitationValidation
+     */
+    invalid_count: number;
+    /**
+     *
+     * @type {Array<string>}
+     * @memberof WorkspaceAnalysisTimelineCitationSummaryV2CitationValidation
      */
     reason_codes: Array<string>;
 }
@@ -26632,6 +29856,129 @@ export type WorkspaceAnalysisTimelineItemErrorCodeEnum = typeof WorkspaceAnalysi
 export type WorkspaceAnalysisTimelineItemSummary = WorkspaceAnalysisTimelineCitationSummary | WorkspaceAnalysisTimelineGitSummary | WorkspaceAnalysisTimelineModelSummary | WorkspaceAnalysisTimelineSearchSummary | WorkspaceAnalysisTimelineSourceSummary | null;
 
 /**
+ * One persisted operation in journal order. No reasoning text, model request, source excerpt or permissions are exposed. Pending is an unauthorised slot and does not consume a call.
+ * @export
+ * @interface WorkspaceAnalysisTimelineItemV2
+ */
+export interface WorkspaceAnalysisTimelineItemV2 {
+    /**
+     *
+     * @type {number}
+     * @memberof WorkspaceAnalysisTimelineItemV2
+     */
+    sequence: number;
+    /**
+     *
+     * @type {WorkspaceAnalysisTimelineItemV2KindEnum}
+     * @memberof WorkspaceAnalysisTimelineItemV2
+     */
+    kind: WorkspaceAnalysisTimelineItemV2KindEnum;
+    /**
+     *
+     * @type {WorkspaceAnalysisTimelineItemV2PhaseEnum}
+     * @memberof WorkspaceAnalysisTimelineItemV2
+     */
+    phase: WorkspaceAnalysisTimelineItemV2PhaseEnum;
+    /**
+     *
+     * @type {WorkspaceAnalysisTimelineItemV2StatusEnum}
+     * @memberof WorkspaceAnalysisTimelineItemV2
+     */
+    status: WorkspaceAnalysisTimelineItemV2StatusEnum;
+    /**
+     *
+     * @type {WorkspaceAnalysisTimelineToolRefV2}
+     * @memberof WorkspaceAnalysisTimelineItemV2
+     */
+    tool_ref: WorkspaceAnalysisTimelineToolRefV2 | null;
+    /**
+     *
+     * @type {number}
+     * @memberof WorkspaceAnalysisTimelineItemV2
+     */
+    duration_ms: number | null;
+    /**
+     *
+     * @type {WorkspaceAnalysisTimelineItemV2ErrorCodeEnum}
+     * @memberof WorkspaceAnalysisTimelineItemV2
+     */
+    error_code: WorkspaceAnalysisTimelineItemV2ErrorCodeEnum | null;
+    /**
+     *
+     * @type {WorkspaceAnalysisTimelineItemV2Summary}
+     * @memberof WorkspaceAnalysisTimelineItemV2
+     */
+    summary: WorkspaceAnalysisTimelineItemV2Summary | null;
+}
+
+
+/**
+ * @export
+ */
+export const WorkspaceAnalysisTimelineItemV2KindEnum = {
+    Node: 'node',
+    Model: 'model',
+    Tool: 'tool'
+} as const;
+export type WorkspaceAnalysisTimelineItemV2KindEnum = typeof WorkspaceAnalysisTimelineItemV2KindEnum[keyof typeof WorkspaceAnalysisTimelineItemV2KindEnum];
+
+/**
+ * @export
+ */
+export const WorkspaceAnalysisTimelineItemV2PhaseEnum = {
+    DecideNext: 'decide_next',
+    InspectWorkspace: 'inspect_workspace',
+    RetrieveEvidence: 'retrieve_evidence',
+    ReadEvidence: 'read_evidence',
+    SynthesizeAnswer: 'synthesize_answer',
+    ValidateCitations: 'validate_citations',
+    ReviewPublish: 'review_publish'
+} as const;
+export type WorkspaceAnalysisTimelineItemV2PhaseEnum = typeof WorkspaceAnalysisTimelineItemV2PhaseEnum[keyof typeof WorkspaceAnalysisTimelineItemV2PhaseEnum];
+
+/**
+ * @export
+ */
+export const WorkspaceAnalysisTimelineItemV2StatusEnum = {
+    Pending: 'pending',
+    Waiting: 'waiting',
+    Started: 'started',
+    Succeeded: 'succeeded',
+    Failed: 'failed',
+    Refused: 'refused',
+    Unknown: 'unknown',
+    Cancelled: 'cancelled'
+} as const;
+export type WorkspaceAnalysisTimelineItemV2StatusEnum = typeof WorkspaceAnalysisTimelineItemV2StatusEnum[keyof typeof WorkspaceAnalysisTimelineItemV2StatusEnum];
+
+/**
+ * @export
+ */
+export const WorkspaceAnalysisTimelineItemV2ErrorCodeEnum = {
+    WorkspaceAnalysisEvidenceInsufficient: 'WORKSPACE_ANALYSIS_EVIDENCE_INSUFFICIENT',
+    WorkspaceAnalysisCitationInvalid: 'WORKSPACE_ANALYSIS_CITATION_INVALID',
+    WorkspaceAnalysisFaithfulnessRejected: 'WORKSPACE_ANALYSIS_FAITHFULNESS_REJECTED',
+    WorkspaceAnalysisModelRefused: 'WORKSPACE_ANALYSIS_MODEL_REFUSED',
+    WorkspaceAnalysisBudgetExhausted: 'WORKSPACE_ANALYSIS_BUDGET_EXHAUSTED',
+    WorkspaceAnalysisReceiptInvalid: 'WORKSPACE_ANALYSIS_RECEIPT_INVALID',
+    WorkspaceAnalysisResultUnknown: 'WORKSPACE_ANALYSIS_RESULT_UNKNOWN',
+    WorkspaceAnalysisDeadlineExceeded: 'WORKSPACE_ANALYSIS_DEADLINE_EXCEEDED',
+    WorkspaceAnalysisModelFailed: 'WORKSPACE_ANALYSIS_MODEL_FAILED',
+    WorkspaceAnalysisToolFailed: 'WORKSPACE_ANALYSIS_TOOL_FAILED',
+    WorkspaceAnalysisRuntimeFailed: 'WORKSPACE_ANALYSIS_RUNTIME_FAILED',
+    WorkspaceAnalysisCancelled: 'WORKSPACE_ANALYSIS_CANCELLED'
+} as const;
+export type WorkspaceAnalysisTimelineItemV2ErrorCodeEnum = typeof WorkspaceAnalysisTimelineItemV2ErrorCodeEnum[keyof typeof WorkspaceAnalysisTimelineItemV2ErrorCodeEnum];
+
+/**
+ * @type WorkspaceAnalysisTimelineItemV2Summary
+ *
+ * @export
+ */
+// OpenAPI Generator 7.24.0 override: preserve the null branch of nullable oneOf aliases.
+export type WorkspaceAnalysisTimelineItemV2Summary = WorkspaceAnalysisTimelineCitationSummaryV2 | WorkspaceAnalysisTimelineGitSummary | WorkspaceAnalysisTimelineModelSummaryV2 | WorkspaceAnalysisTimelineSearchSummary | WorkspaceAnalysisTimelineSourceSummaryV2 | null;
+
+/**
  *
  * @export
  * @interface WorkspaceAnalysisTimelineModelSummary
@@ -26679,6 +30026,62 @@ export interface WorkspaceAnalysisTimelineModelSummaryModelUsage {
      */
     output_tokens: number;
 }
+/**
+ * Settled model usage; output limits are 512 for decide_next, 4096 for synthesize_answer, and 1024 for review_publish.
+ * @export
+ * @interface WorkspaceAnalysisTimelineModelSummaryV2
+ */
+export interface WorkspaceAnalysisTimelineModelSummaryV2 {
+    /**
+     *
+     * @type {WorkspaceAnalysisTimelineModelSummaryV2KindEnum}
+     * @memberof WorkspaceAnalysisTimelineModelSummaryV2
+     */
+    kind: WorkspaceAnalysisTimelineModelSummaryV2KindEnum;
+    /**
+     *
+     * @type {WorkspaceAnalysisTimelineModelSummaryV2ModelUsage}
+     * @memberof WorkspaceAnalysisTimelineModelSummaryV2
+     */
+    model_usage: WorkspaceAnalysisTimelineModelSummaryV2ModelUsage;
+}
+
+
+/**
+ * @export
+ */
+export const WorkspaceAnalysisTimelineModelSummaryV2KindEnum = {
+    ModelUsage: 'model_usage'
+} as const;
+export type WorkspaceAnalysisTimelineModelSummaryV2KindEnum = typeof WorkspaceAnalysisTimelineModelSummaryV2KindEnum[keyof typeof WorkspaceAnalysisTimelineModelSummaryV2KindEnum];
+
+/**
+ *
+ * @export
+ * @interface WorkspaceAnalysisTimelineModelSummaryV2ModelUsage
+ */
+export interface WorkspaceAnalysisTimelineModelSummaryV2ModelUsage {
+    /**
+     *
+     * @type {number}
+     * @memberof WorkspaceAnalysisTimelineModelSummaryV2ModelUsage
+     */
+    input_tokens: number;
+    /**
+     *
+     * @type {number}
+     * @memberof WorkspaceAnalysisTimelineModelSummaryV2ModelUsage
+     */
+    output_tokens: number;
+}
+/**
+ * @type WorkspaceAnalysisTimelineResponse
+ *
+ * @export
+ */
+// OpenAPI Generator 7.24.0 override: preserve the null branch of nullable oneOf aliases.
+export type WorkspaceAnalysisTimelineResponse = WorkspaceAnalysisTimeline | WorkspaceAnalysisTimelineV2;
+
 /**
  *
  * @export
@@ -26778,6 +30181,60 @@ export interface WorkspaceAnalysisTimelineSourceSummarySource {
      *
      * @type {boolean}
      * @memberof WorkspaceAnalysisTimelineSourceSummarySource
+     */
+    truncated: boolean;
+}
+/**
+ *
+ * @export
+ * @interface WorkspaceAnalysisTimelineSourceSummaryV2
+ */
+export interface WorkspaceAnalysisTimelineSourceSummaryV2 {
+    /**
+     *
+     * @type {WorkspaceAnalysisTimelineSourceSummaryV2KindEnum}
+     * @memberof WorkspaceAnalysisTimelineSourceSummaryV2
+     */
+    kind: WorkspaceAnalysisTimelineSourceSummaryV2KindEnum;
+    /**
+     *
+     * @type {WorkspaceAnalysisTimelineSourceSummaryV2Source}
+     * @memberof WorkspaceAnalysisTimelineSourceSummaryV2
+     */
+    source: WorkspaceAnalysisTimelineSourceSummaryV2Source;
+}
+
+
+/**
+ * @export
+ */
+export const WorkspaceAnalysisTimelineSourceSummaryV2KindEnum = {
+    Source: 'source'
+} as const;
+export type WorkspaceAnalysisTimelineSourceSummaryV2KindEnum = typeof WorkspaceAnalysisTimelineSourceSummaryV2KindEnum[keyof typeof WorkspaceAnalysisTimelineSourceSummaryV2KindEnum];
+
+/**
+ *
+ * @export
+ * @interface WorkspaceAnalysisTimelineSourceSummaryV2Source
+ */
+export interface WorkspaceAnalysisTimelineSourceSummaryV2Source {
+    /**
+     *
+     * @type {string}
+     * @memberof WorkspaceAnalysisTimelineSourceSummaryV2Source
+     */
+    evidence_ref: string;
+    /**
+     *
+     * @type {string}
+     * @memberof WorkspaceAnalysisTimelineSourceSummaryV2Source
+     */
+    content_hash: string;
+    /**
+     *
+     * @type {boolean}
+     * @memberof WorkspaceAnalysisTimelineSourceSummaryV2Source
      */
     truncated: boolean;
 }
@@ -26936,6 +30393,282 @@ export const WorkspaceAnalysisTimelineToolRefOneOf3VersionEnum = {
     NUMBER_3: 3
 } as const;
 export type WorkspaceAnalysisTimelineToolRefOneOf3VersionEnum = typeof WorkspaceAnalysisTimelineToolRefOneOf3VersionEnum[keyof typeof WorkspaceAnalysisTimelineToolRefOneOf3VersionEnum];
+
+/**
+ * @type WorkspaceAnalysisTimelineToolRefV2
+ *
+ * @export
+ */
+// OpenAPI Generator 7.24.0 override: preserve the null branch of nullable oneOf aliases.
+export type WorkspaceAnalysisTimelineToolRefV2 = WorkspaceAnalysisTimelineToolRefV2OneOf | WorkspaceAnalysisTimelineToolRefV2OneOf1 | WorkspaceAnalysisTimelineToolRefV2OneOf2 | WorkspaceAnalysisTimelineToolRefV2OneOf3;
+
+/**
+ *
+ * @export
+ * @interface WorkspaceAnalysisTimelineToolRefV2OneOf
+ */
+export interface WorkspaceAnalysisTimelineToolRefV2OneOf {
+    /**
+     *
+     * @type {WorkspaceAnalysisTimelineToolRefV2OneOfNameEnum}
+     * @memberof WorkspaceAnalysisTimelineToolRefV2OneOf
+     */
+    name: WorkspaceAnalysisTimelineToolRefV2OneOfNameEnum;
+    /**
+     *
+     * @type {WorkspaceAnalysisTimelineToolRefV2OneOfVersionEnum}
+     * @memberof WorkspaceAnalysisTimelineToolRefV2OneOf
+     */
+    version: WorkspaceAnalysisTimelineToolRefV2OneOfVersionEnum;
+}
+
+
+/**
+ * @export
+ */
+export const WorkspaceAnalysisTimelineToolRefV2OneOfNameEnum = {
+    ReadGitStatus: 'ReadGitStatus'
+} as const;
+export type WorkspaceAnalysisTimelineToolRefV2OneOfNameEnum = typeof WorkspaceAnalysisTimelineToolRefV2OneOfNameEnum[keyof typeof WorkspaceAnalysisTimelineToolRefV2OneOfNameEnum];
+
+/**
+ * @export
+ */
+export const WorkspaceAnalysisTimelineToolRefV2OneOfVersionEnum = {
+    NUMBER_3: 3
+} as const;
+export type WorkspaceAnalysisTimelineToolRefV2OneOfVersionEnum = typeof WorkspaceAnalysisTimelineToolRefV2OneOfVersionEnum[keyof typeof WorkspaceAnalysisTimelineToolRefV2OneOfVersionEnum];
+
+/**
+ *
+ * @export
+ * @interface WorkspaceAnalysisTimelineToolRefV2OneOf1
+ */
+export interface WorkspaceAnalysisTimelineToolRefV2OneOf1 {
+    /**
+     *
+     * @type {WorkspaceAnalysisTimelineToolRefV2OneOf1NameEnum}
+     * @memberof WorkspaceAnalysisTimelineToolRefV2OneOf1
+     */
+    name: WorkspaceAnalysisTimelineToolRefV2OneOf1NameEnum;
+    /**
+     *
+     * @type {WorkspaceAnalysisTimelineToolRefV2OneOf1VersionEnum}
+     * @memberof WorkspaceAnalysisTimelineToolRefV2OneOf1
+     */
+    version: WorkspaceAnalysisTimelineToolRefV2OneOf1VersionEnum;
+}
+
+
+/**
+ * @export
+ */
+export const WorkspaceAnalysisTimelineToolRefV2OneOf1NameEnum = {
+    SearchKnowledge: 'SearchKnowledge'
+} as const;
+export type WorkspaceAnalysisTimelineToolRefV2OneOf1NameEnum = typeof WorkspaceAnalysisTimelineToolRefV2OneOf1NameEnum[keyof typeof WorkspaceAnalysisTimelineToolRefV2OneOf1NameEnum];
+
+/**
+ * @export
+ */
+export const WorkspaceAnalysisTimelineToolRefV2OneOf1VersionEnum = {
+    NUMBER_3: 3
+} as const;
+export type WorkspaceAnalysisTimelineToolRefV2OneOf1VersionEnum = typeof WorkspaceAnalysisTimelineToolRefV2OneOf1VersionEnum[keyof typeof WorkspaceAnalysisTimelineToolRefV2OneOf1VersionEnum];
+
+/**
+ *
+ * @export
+ * @interface WorkspaceAnalysisTimelineToolRefV2OneOf2
+ */
+export interface WorkspaceAnalysisTimelineToolRefV2OneOf2 {
+    /**
+     *
+     * @type {WorkspaceAnalysisTimelineToolRefV2OneOf2NameEnum}
+     * @memberof WorkspaceAnalysisTimelineToolRefV2OneOf2
+     */
+    name: WorkspaceAnalysisTimelineToolRefV2OneOf2NameEnum;
+    /**
+     *
+     * @type {WorkspaceAnalysisTimelineToolRefV2OneOf2VersionEnum}
+     * @memberof WorkspaceAnalysisTimelineToolRefV2OneOf2
+     */
+    version: WorkspaceAnalysisTimelineToolRefV2OneOf2VersionEnum;
+}
+
+
+/**
+ * @export
+ */
+export const WorkspaceAnalysisTimelineToolRefV2OneOf2NameEnum = {
+    ReadSource: 'ReadSource'
+} as const;
+export type WorkspaceAnalysisTimelineToolRefV2OneOf2NameEnum = typeof WorkspaceAnalysisTimelineToolRefV2OneOf2NameEnum[keyof typeof WorkspaceAnalysisTimelineToolRefV2OneOf2NameEnum];
+
+/**
+ * @export
+ */
+export const WorkspaceAnalysisTimelineToolRefV2OneOf2VersionEnum = {
+    NUMBER_4: 4
+} as const;
+export type WorkspaceAnalysisTimelineToolRefV2OneOf2VersionEnum = typeof WorkspaceAnalysisTimelineToolRefV2OneOf2VersionEnum[keyof typeof WorkspaceAnalysisTimelineToolRefV2OneOf2VersionEnum];
+
+/**
+ *
+ * @export
+ * @interface WorkspaceAnalysisTimelineToolRefV2OneOf3
+ */
+export interface WorkspaceAnalysisTimelineToolRefV2OneOf3 {
+    /**
+     *
+     * @type {WorkspaceAnalysisTimelineToolRefV2OneOf3NameEnum}
+     * @memberof WorkspaceAnalysisTimelineToolRefV2OneOf3
+     */
+    name: WorkspaceAnalysisTimelineToolRefV2OneOf3NameEnum;
+    /**
+     *
+     * @type {WorkspaceAnalysisTimelineToolRefV2OneOf3VersionEnum}
+     * @memberof WorkspaceAnalysisTimelineToolRefV2OneOf3
+     */
+    version: WorkspaceAnalysisTimelineToolRefV2OneOf3VersionEnum;
+}
+
+
+/**
+ * @export
+ */
+export const WorkspaceAnalysisTimelineToolRefV2OneOf3NameEnum = {
+    ValidateCitation: 'ValidateCitation'
+} as const;
+export type WorkspaceAnalysisTimelineToolRefV2OneOf3NameEnum = typeof WorkspaceAnalysisTimelineToolRefV2OneOf3NameEnum[keyof typeof WorkspaceAnalysisTimelineToolRefV2OneOf3NameEnum];
+
+/**
+ * @export
+ */
+export const WorkspaceAnalysisTimelineToolRefV2OneOf3VersionEnum = {
+    NUMBER_4: 4
+} as const;
+export type WorkspaceAnalysisTimelineToolRefV2OneOf3VersionEnum = typeof WorkspaceAnalysisTimelineToolRefV2OneOf3VersionEnum[keyof typeof WorkspaceAnalysisTimelineToolRefV2OneOf3VersionEnum];
+
+/**
+ * Dynamic decision/tool prefixes in persisted journal order, followed by synthesis, final Citation validation and review. Loop Citation checks can occur before synthesis and do not constitute the final publishing gate.
+ * @export
+ * @interface WorkspaceAnalysisTimelineV2
+ */
+export interface WorkspaceAnalysisTimelineV2 {
+    /**
+     *
+     * @type {WorkspaceAnalysisTimelineV2SchemaIdEnum}
+     * @memberof WorkspaceAnalysisTimelineV2
+     */
+    schema_id: WorkspaceAnalysisTimelineV2SchemaIdEnum;
+    /**
+     *
+     * @type {WorkspaceAnalysisTimelineV2SchemaVersionEnum}
+     * @memberof WorkspaceAnalysisTimelineV2
+     */
+    schema_version: WorkspaceAnalysisTimelineV2SchemaVersionEnum;
+    /**
+     *
+     * @type {string}
+     * @memberof WorkspaceAnalysisTimelineV2
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof WorkspaceAnalysisTimelineV2
+     */
+    answer_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof WorkspaceAnalysisTimelineV2
+     */
+    analysis_run_id: string;
+    /**
+     *
+     * @type {WorkspaceAnalysisTimelineV2RunStatusEnum}
+     * @memberof WorkspaceAnalysisTimelineV2
+     */
+    run_status: WorkspaceAnalysisTimelineV2RunStatusEnum;
+    /**
+     *
+     * @type {WorkspaceAnalysisTimelineV2TerminationReasonEnum}
+     * @memberof WorkspaceAnalysisTimelineV2
+     */
+    termination_reason: WorkspaceAnalysisTimelineV2TerminationReasonEnum | null;
+    /**
+     *
+     * @type {Array<WorkspaceAnalysisTimelineItemV2>}
+     * @memberof WorkspaceAnalysisTimelineV2
+     */
+    items: Array<WorkspaceAnalysisTimelineItemV2>;
+    /**
+     *
+     * @type {WorkspaceAnalysisTimelineBudgetV2}
+     * @memberof WorkspaceAnalysisTimelineV2
+     */
+    budget: WorkspaceAnalysisTimelineBudgetV2;
+    /**
+     *
+     * @type {number}
+     * @memberof WorkspaceAnalysisTimelineV2
+     */
+    latest_server_event_sequence: number;
+}
+
+
+/**
+ * @export
+ */
+export const WorkspaceAnalysisTimelineV2SchemaIdEnum = {
+    ConversationWorkspaceAnalysisTimeline: 'conversation.workspace_analysis_timeline'
+} as const;
+export type WorkspaceAnalysisTimelineV2SchemaIdEnum = typeof WorkspaceAnalysisTimelineV2SchemaIdEnum[keyof typeof WorkspaceAnalysisTimelineV2SchemaIdEnum];
+
+/**
+ * @export
+ */
+export const WorkspaceAnalysisTimelineV2SchemaVersionEnum = {
+    V2: 'v2'
+} as const;
+export type WorkspaceAnalysisTimelineV2SchemaVersionEnum = typeof WorkspaceAnalysisTimelineV2SchemaVersionEnum[keyof typeof WorkspaceAnalysisTimelineV2SchemaVersionEnum];
+
+/**
+ * @export
+ */
+export const WorkspaceAnalysisTimelineV2RunStatusEnum = {
+    Queued: 'queued',
+    Running: 'running',
+    Succeeded: 'succeeded',
+    Refused: 'refused',
+    ClarificationRequired: 'clarification_required',
+    Failed: 'failed',
+    Cancelled: 'cancelled'
+} as const;
+export type WorkspaceAnalysisTimelineV2RunStatusEnum = typeof WorkspaceAnalysisTimelineV2RunStatusEnum[keyof typeof WorkspaceAnalysisTimelineV2RunStatusEnum];
+
+/**
+ * @export
+ */
+export const WorkspaceAnalysisTimelineV2TerminationReasonEnum = {
+    Completed: 'COMPLETED',
+    WorkspaceAnalysisEvidenceInsufficient: 'WORKSPACE_ANALYSIS_EVIDENCE_INSUFFICIENT',
+    WorkspaceAnalysisCitationInvalid: 'WORKSPACE_ANALYSIS_CITATION_INVALID',
+    WorkspaceAnalysisFaithfulnessRejected: 'WORKSPACE_ANALYSIS_FAITHFULNESS_REJECTED',
+    WorkspaceAnalysisClarificationRequired: 'WORKSPACE_ANALYSIS_CLARIFICATION_REQUIRED',
+    WorkspaceAnalysisModelRefused: 'WORKSPACE_ANALYSIS_MODEL_REFUSED',
+    WorkspaceAnalysisBudgetExhausted: 'WORKSPACE_ANALYSIS_BUDGET_EXHAUSTED',
+    WorkspaceAnalysisReceiptInvalid: 'WORKSPACE_ANALYSIS_RECEIPT_INVALID',
+    WorkspaceAnalysisResultUnknown: 'WORKSPACE_ANALYSIS_RESULT_UNKNOWN',
+    WorkspaceAnalysisDeadlineExceeded: 'WORKSPACE_ANALYSIS_DEADLINE_EXCEEDED',
+    WorkspaceAnalysisModelFailed: 'WORKSPACE_ANALYSIS_MODEL_FAILED',
+    WorkspaceAnalysisToolFailed: 'WORKSPACE_ANALYSIS_TOOL_FAILED',
+    WorkspaceAnalysisRuntimeFailed: 'WORKSPACE_ANALYSIS_RUNTIME_FAILED',
+    WorkspaceAnalysisCancelled: 'WORKSPACE_ANALYSIS_CANCELLED'
+} as const;
+export type WorkspaceAnalysisTimelineV2TerminationReasonEnum = typeof WorkspaceAnalysisTimelineV2TerminationReasonEnum[keyof typeof WorkspaceAnalysisTimelineV2TerminationReasonEnum];
 
 /**
  *

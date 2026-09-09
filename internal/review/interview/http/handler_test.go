@@ -576,7 +576,11 @@ func protectedInterviewRouter(t *testing.T, service Service, principal authdomai
 	router := gin.New()
 	protected := router.Group("/api/v1")
 	protected.Use(authHandler.Middleware)
-	NewHandler(service, 25*time.Millisecond).Routes(protected)
+	handler := NewHandler(service, 25*time.Millisecond)
+	handler.Routes(protected)
+	protectedV2 := router.Group("/api/v2")
+	protectedV2.Use(authHandler.Middleware)
+	handler.RoutesV2(protectedV2)
 	return router
 }
 

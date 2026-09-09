@@ -64,6 +64,40 @@ func TestServiceGetWorkspaceAnalysisTimelineFailsClosedWhenReaderIsUnavailable(t
 	}
 }
 
+func TestServiceGetWorkspaceAnalysisTimelineValidatesV2ByItsPersistedVersion(t *testing.T) {
+	t.Parallel()
+	workspaceID, answerID, runID := conversationApplicationID(180), conversationApplicationID(181), conversationApplicationID(182)
+	timeline := validWorkspaceAnalysisTimelineForApplication(workspaceID, answerID, runID)
+	timeline.SchemaVersion = conversationdomain.WorkspaceAnalysisTimelineSchemaVersionV2
+	timeline.Budget = conversationdomain.WorkspaceAnalysisTimelineBudget{
+		ModelCalls:   conversationdomain.WorkspaceAnalysisTimelineCounter{Max: agentdomain.WorkspaceAnalysisV2MaxModelCalls},
+		ToolCalls:    conversationdomain.WorkspaceAnalysisTimelineCounter{Max: agentdomain.WorkspaceAnalysisV2MaxToolCalls},
+		SourceReads:  conversationdomain.WorkspaceAnalysisTimelineCounter{Max: agentdomain.WorkspaceAnalysisV2MaxSourceReads},
+		InputTokens:  conversationdomain.WorkspaceAnalysisTimelineCounter{Max: agentdomain.WorkspaceAnalysisV2MaxRunInputTokens},
+		OutputTokens: conversationdomain.WorkspaceAnalysisTimelineCounter{Max: agentdomain.WorkspaceAnalysisV2MaxRunOutputTokens},
+	}
+	timeline.Items = []conversationdomain.WorkspaceAnalysisTimelineItem{{Sequence: 1, Kind: conversationdomain.WorkspaceAnalysisTimelineItemModel,
+		Phase: conversationdomain.WorkspaceAnalysisPhaseDecideNext, Status: conversationdomain.WorkspaceAnalysisTimelineItemPending}}
+	reader := &recordingWorkspaceAnalysisTimelineReader{timeline: timeline}
+	service, err := NewService(Dependencies{Repository: &recordingRepository{}, WorkspaceAnalysisTimelineReader: reader,
+		IDs: fixedIDGenerator{id: conversationApplicationID(183)}, Clock: foundation.SystemClock{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := WorkspaceAnalysisTimelineQuery{WorkspaceID: workspaceID, AnswerID: answerID}
+	got, err := service.GetWorkspaceAnalysisTimeline(context.Background(), query)
+	if err != nil || got.SchemaVersion != conversationdomain.WorkspaceAnalysisTimelineSchemaVersionV2 || got.Items[0].Phase != conversationdomain.WorkspaceAnalysisPhaseDecideNext {
+		t.Fatalf("v2 authoritative projection was not preserved: %v", err)
+	}
+	reader.timeline.SchemaVersion = conversationdomain.WorkspaceAnalysisTimelineSchemaVersionV1
+	_, err = service.GetWorkspaceAnalysisTimeline(context.Background(), query)
+	requireConversationApplicationError(t, err, foundation.ErrorConsistencyViolation, errorCodeResultInconsistent)
+	reader.timeline = timeline
+	reader.timeline.Budget = validWorkspaceAnalysisTimelineForApplication(workspaceID, answerID, runID).Budget
+	_, err = service.GetWorkspaceAnalysisTimeline(context.Background(), query)
+	requireConversationApplicationError(t, err, foundation.ErrorConsistencyViolation, errorCodeResultInconsistent)
+}
+
 type recordingWorkspaceAnalysisTimelineReader struct {
 	query    WorkspaceAnalysisTimelineQuery
 	timeline conversationdomain.WorkspaceAnalysisTimeline

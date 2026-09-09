@@ -18,7 +18,7 @@ const answerViewColumns = `
 	a.id::text,a.workspace_id::text,a.conversation_id::text,a.question_id::text,a.workflow_run_id::text,
 	a.model_run_id::text,a.publication_status,a.result_type,a.result::text,a.result_hash,a.retrieval_summary::text,
 	a.version,a.created_at,a.updated_at,a.published_at,
-	w.id::text,w.status,w.version,w.updated_at,
+	w.id::text,w.status,w.version,w.updated_at,d.key,d.version,
 	(
 		SELECT CASE
 			WHEN (se.event_type,se.payload_summary->>'stage') IN (
@@ -47,6 +47,9 @@ const answerViewColumns = `
 const turnViewColumns = questionViewColumns + `,` + answerViewColumns
 
 func validateTurnListQuery(query conversationapplication.ListTurnsQuery) error {
+	if err := query.APIVersion.Validate(); err != nil {
+		return err
+	}
 	if err := validateScopedConversationIDs(query.WorkspaceID, query.ConversationID); err != nil {
 		return err
 	}

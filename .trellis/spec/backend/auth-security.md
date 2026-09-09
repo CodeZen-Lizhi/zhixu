@@ -1,5 +1,9 @@
 # 后端认证与安全契约
 
+Session 框架评估已收口为 [ADR-0030](../../../docs/architecture/adr/0030-retain-auth-session-boundary.md)：不采用
+`gin-contrib/sessions v1.1.0`。GORM 已交付也不允许引入第二 Session Values Store、表、连接池或生命周期；
+继续由标准库 Cookie 投影与 Auth Application/Repository 维护现有契约。
+
 ## Scenario: M10 单用户认证、Cookie Session 与受限 API Token
 
 ### 1. Scope / Trigger
