@@ -2,7 +2,7 @@
   "id": "product-delivery",
   "name": "product-delivery",
   "title": "ZHIXU 产品级建设与交付",
-  "description": "TODO2/TODO4 开发及原本机部署已完成；后续 OpenAPI 21 error / 5 warning 已通过显式 HTTP v2 修复并验证，修复尚未重新部署；M11 最终验收暂缓。",
+  "description": "TODO2/TODO4 及 OpenAPI 兼容修复已完成开发、验证和本机重新部署；模型接口连通已核对，用户保留 Chat 免费额度限制并接受连通性验收，整套模型仍待激活；M11 最终验收暂缓。",
   "status": "in_progress",
   "dev_type": null,
   "scope": null,
@@ -57,7 +57,7 @@
   ],
   "parent": null,
   "relatedFiles": [],
-  "notes": "2026-09-09 TODO2 动态循环及 TODO4 AC1–AC10 完成开发、实库与真实 Compose/桌面/窄屏验证；已交付开发任务关闭。已修复现场 Git Sync 禁用组合的 typed nil 空循环误报，定向 race/vet 与最终重建通过。本机 Runtime ready、Atlas 00099，原 Workspace/数据/密钥保留。原模型激活失败与 active disabled 配置保持不变，现场 AI 准入尚未开启。M11 暂缓；随后 OpenAPI 原 21 error / 5 warning 已修复，固定原基线 0 / 0，生成漂移、Go/实库/Web 验证及独立审查通过；修复尚未重新部署；源码已提交 789692e2，用户已授权同步本批次到 origin/dev。",
+  "notes": "2026-09-09 TODO2 动态循环及 TODO4 AC1–AC10 完成开发、实库与真实 Compose/桌面/窄屏验证；已交付开发任务关闭。已修复现场 Git Sync 禁用组合的 typed nil 空循环误报，定向 race/vet 与最终重建通过。本机 Runtime ready、Atlas 00099，原 Workspace/数据/密钥保留。原模型激活失败与 active disabled 配置保持不变，现场 AI 准入尚未开启。M11 暂缓；随后 OpenAPI 原 21 error / 5 warning 已修复，固定原基线 0 / 0，生成漂移、Go/实库/Web 验证及独立审查通过；修复已从 7c720dc0 重新部署；源码已提交 789692e2，用户已授权同步本批次到 origin/dev。 本轮已修复本机代理的 Fake-IP 与 DashScope 出口规则；Embedding 真实测试通过，Chat 上游返回 AllocationQuota.FreeTierOnly。用户明确保留免费额度限制，接受接口连通即可；未强制激活。",
   "meta": {
     "m9_legacy_upgrade": {
       "status": "completed",
@@ -97,17 +97,20 @@
       "deployment_url": "http://127.0.0.1:8080/",
       "migration_head": "00099",
       "model_activation": {
-        "status": "preexisting_configuration_not_active",
+        "status": "connectivity_accepted_activation_pending_free_quota",
         "active_revision": 2,
         "desired_revision": 6,
         "active_chat": "disabled",
         "active_embedding": "disabled",
         "last_error_code": "MODEL_CHAT_REQUEST_FAILED",
         "preserved_from_backup": true,
-        "live_provider_execution": "not_performed"
+        "live_provider_execution": "embedding_test_passed_chat_provider_403",
+        "chat_provider_error": "AllocationQuota.FreeTierOnly",
+        "user_decision": "retain_free_tier_only_connectivity_is_sufficient",
+        "evidence": "research/model-connectivity-redeploy-2026-09-09.md"
       },
       "openapi_breaking_gate": {
-        "status": "passed_in_worktree",
+        "status": "passed",
         "errors": 0,
         "warnings": 0,
         "evidence": "research/openapi-compatibility-fix.md",
@@ -118,16 +121,22 @@
           "evidence": "research/final-integration-2026-09-09.md"
         },
         "base_revision": "a4c16248ce1082ce500aea2a99d640e4e0195ddf",
-        "deployment": "not_redeployed"
+        "deployment": "completed_locally"
       },
       "git_sync_disabled_fix": "completed_and_deployed",
       "completedAt": "2026-09-09",
       "deployed_images": {
+        "zhixu-app-1": "sha256:9a75beb6106a9e2b700ed4418dd122b9ecc9d1154a49ad722fd708f8062169fc",
+        "zhixu-worker-1": "sha256:11c7d50720df753d64f097ee8e25a06ed840b6f43ab7c22c01f0e7e1f1925cde"
+      },
+      "code_commit": "789692e2b8e7029e78fb23e3041995c781675eff",
+      "git_target": "origin/dev",
+      "previous_deployed_images": {
         "zhixu-app-1": "sha256:f15ddce436fcf5937a1e4e630191b9254157861fd5d817736389a41a6e464930",
         "zhixu-worker-1": "sha256:1aec641162bb951858f3a9f361ef392a1862740828d5216673124c428a862567"
       },
-      "code_commit": "789692e2b8e7029e78fb23e3041995c781675eff",
-      "git_target": "origin/dev"
+      "deployed_source_commit": "7c720dc02f84d2046ebbea823250673629b6af01",
+      "latest_deployment_evidence": "research/model-connectivity-redeploy-2026-09-09.md"
     },
     "openapi_compatibility_fix": {
       "status": "completed",
@@ -140,10 +149,20 @@
       "warnings": 0,
       "operations": 211,
       "check_evidence": "research/openapi-compatibility-check.md",
-      "deployment": "not_redeployed",
+      "deployment": "completed_locally",
       "validation": "原基线 oasdiff、OpenAPI/生成漂移、Go 普通/race/vet/build、两个 owner 隔离 PostgreSQL、Web 64 测试及 lint/typecheck/build 均通过",
       "code_commit": "789692e2b8e7029e78fb23e3041995c781675eff",
-      "git_target": "origin/dev"
+      "git_target": "origin/dev",
+      "deployment_evidence": "research/model-connectivity-redeploy-2026-09-09.md"
+    },
+    "model_connectivity_redeploy": {
+      "status": "completed_with_user_accepted_connectivity_scope",
+      "source_commit": "7c720dc02f84d2046ebbea823250673629b6af01",
+      "evidence": "research/model-connectivity-redeploy-2026-09-09.md",
+      "models_activated": false,
+      "chat_free_tier_only_preserved": true,
+      "runtime_ready": true,
+      "completedAt": "2026-09-09"
     }
   }
 }

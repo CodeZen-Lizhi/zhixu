@@ -4,7 +4,7 @@
 
 > 当前核对（2026-09-09）：TODO 2 的动态工具循环与 TODO 4 均已完成开发、必要数据库及真实桌面/窄屏验证，TODO 4 已归档；TODO 2、4、10 已随本轮统一部署到本机 Docker，Runtime ready，原数据与密钥保留。TODO 11 已评估并正式决定不采用。下列用户诉求与验收标准保留原始边界，任务归档本身不证明满足全部原始需求。
 >
-> 交付边界：本清单当前没有剩余的已约定开发项，但不代表最终发布验收完成。M11 全产品 E2E、AI Eval 与发布包仍按用户要求暂缓；本机原有模型配置尚未成功激活，Chat / Embedding 保持 disabled。随后要求处理的 OpenAPI 21 个错误、5 个警告已修复，固定原基线为 0 / 0；兼容修复代码尚未重新部署，见 [修复与版本边界](../../../../07-16-product-delivery/research/openapi-compatibility-fix.md)。首次部署证据仍见 [统一交付记录](../../../../07-16-product-delivery/research/final-integration-2026-09-09.md)。
+> 交付边界：本清单当前没有剩余的已约定开发项，但不代表最终发布验收完成。M11 全产品 E2E、AI Eval 与发布包仍按用户要求暂缓；本机模型接口已连通；用户保留 Chat 免费额度限制并接受连通性验收，整套配置仍待激活，active Chat / Embedding 为 disabled。随后要求处理的 OpenAPI 21 个错误、5 个警告已修复，固定原基线为 0 / 0；兼容修复代码已重新部署，见 [修复与版本边界](../../../../07-16-product-delivery/research/openapi-compatibility-fix.md)。首次部署证据仍见 [统一交付记录](../../../../07-16-product-delivery/research/final-integration-2026-09-09.md)。
 
 ## TODO 概览
 

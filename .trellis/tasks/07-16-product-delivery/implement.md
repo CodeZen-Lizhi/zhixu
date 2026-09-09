@@ -1,6 +1,6 @@
 # ZHIXU 产品级建设实施清单
 
-> 当前增量 [OpenAPI 兼容修复](research/openapi-compatibility-fix.md) 已完成：Interview/Conversation、公共路由、OpenAPI 与 Web 已集成，固定原基线 0 error / 0 warning，必要验证与独立检查通过。修复尚未重新部署；M11 继续暂缓。源码已按后续授权提交为 `789692e2`，本批次推送目标为 `origin/dev`。
+> 当前增量 [OpenAPI 兼容修复](research/openapi-compatibility-fix.md) 已完成：Interview/Conversation、公共路由、OpenAPI 与 Web 已集成，固定原基线 0 error / 0 warning，必要验证与独立检查通过。修复已重新部署，见 [连通性与部署记录](research/model-connectivity-redeploy-2026-09-09.md)；M11 继续暂缓。源码已按后续授权提交为 `789692e2`，本批次推送目标为 `origin/dev`。
 
 > **2026-09-09 本轮执行结果**：原始 TODO2 的动态工具调用循环已按 [本轮 PRD](research/todo2-dynamic-loop-prd.md) 补齐并通过真实整栈验证；TODO4 与已有开发收尾已核对，已交付任务关闭，本机 Docker 统一重建部署成功。下表旧首期的“已完成”只证明当时范围，动态需求有新的独立证据。M11 保持暂缓；实际迁移、HTTP/页面、数据保留与本机原有模型禁用限制见 [统一交付记录](research/final-integration-2026-09-09.md)。
 
@@ -28,7 +28,7 @@
 - 当前登记 35 个 child；计数只表示各 child 的约定交付范围，不表示父任务或 M11 完成。
 - 2026-09-08 至 09-09 按用户要求完成非 GORM、非 M11 精简收尾；具体实现/验证见 [收尾记录](research/lean-closeout-2026-09-08.md)。完整测试矩阵、长期观察与大型重构不再阻塞开发归档。
 - M10-02 已完成；M9-03 已满足当前导出范围，`EVALUATION_JSON`/`AUDIT_JSON` 不再作为缺口。
-- TODO2/TODO4 与统一部署已完成：Atlas 00099、Runtime ready，新 API/页面上线，原 Workspace/数据/密钥保留。本机 Chat/Embedding 保持升级前的 disabled 状态，现场 AI 准入尚未启用。随后 OpenAPI 兼容修复已清零原 21/5 报告，修复代码尚未重新部署。
+- TODO2/TODO4 与统一部署已完成：Atlas 00099、Runtime ready，新 API/页面上线，原 Workspace/数据/密钥保留。本机 Chat/Embedding 保持升级前的 disabled 状态，现场 AI 准入尚未启用。随后 OpenAPI 兼容修复已清零原 21/5 报告并重新部署；模型接口连通已核对，用户保留 Chat 免费额度限制并接受连通性验收，整套配置仍待激活。
 - 最终验收以 `docs/requirements.md` AC-01..AC-42 和 `prd.md#final-demonstration` 的 14 步演示为准。
 
 ## 2. Ordered Task Table

@@ -10,11 +10,11 @@
 
 按 2026-09-08 用户要求，开发交付只保留必要验证：完成业务缺口/真实缺陷，精简大型工作。Proposal Revision 编辑和三方合并已经实现；旧库升级缺陷、路由恢复、最小审计查询和停写备份操作已完成必要验证。2026-09-09 已补齐原始清单要求的动态工具循环，并完成 TODO4 合成笔记。旧 Workspace Agent AC1–AC11 只证明固定六阶段首期；当前 v2 的不同调用顺序/次数、追加检索/阅读、预算终止、停止与桌面/窄屏均有新的真实整栈证据。
 
-本轮 TODO 2、TODO 4 及已授权开发尾项均已完成必要验证，并通过受支持 launcher 统一重新部署本机 Docker：Runtime ready、Atlas 00099、原数据与密钥保留，入口为 `http://127.0.0.1:8080/`。本机原有模型激活失败状态仍保留，Chat / Embedding 为 disabled，AI 准入尚未启用；新功能执行闭环已有隔离 Compose 证据。M11 最终验收继续暂缓，详细结果见 [统一交付记录](../.trellis/tasks/07-16-product-delivery/research/final-integration-2026-09-09.md)。
+本轮 TODO 2、TODO 4 及已授权开发尾项均已完成必要验证，并通过受支持 launcher 统一重新部署本机 Docker：Runtime ready、Atlas 00099、原数据与密钥保留，入口为 `http://127.0.0.1:8080/`。本机模型接口已连通；用户保留 Chat 免费额度限制并接受连通性验收，整套配置仍待激活，active Chat / Embedding 为 disabled；新功能执行闭环已有隔离 Compose 证据。M11 最终验收继续暂缓，详细结果见 [统一交付记录](../.trellis/tasks/07-16-product-delivery/research/final-integration-2026-09-09.md)。
 
 完整容量/FPS、灾备/跨平台矩阵、长期观察和全仓评分不保留为未完成开发任务，未执行也不记 PASS。审计以已接入生产者与最小查询为本次范围，不宣称全域审计平台交付。详细结果见 [产品交付父任务](../.trellis/tasks/07-16-product-delivery) 和 [本轮收尾记录](../.trellis/tasks/07-16-product-delivery/research/lean-closeout-2026-09-08.md)。
 
-M11 的六条 seam/14 步演示、AI Eval、SBOM/发布包等最终验收按用户要求留待整体开发完成后单独处理。稳定验收矩阵现为 [AC-01..AC-42](requirements.md#7-正式验收矩阵)。TODO 4 持续演进知识笔记已完成开发、必要验证、归档与本机部署。OpenAPI 的 21 error / 5 warning 已通过显式 HTTP v2 接口修复，固定原基线复查为 0 / 0；本次兼容修复尚未重新部署，版本范围见 [兼容修复记录](../.trellis/tasks/07-16-product-delivery/research/openapi-compatibility-fix.md)。
+M11 的六条 seam/14 步演示、AI Eval、SBOM/发布包等最终验收按用户要求留待整体开发完成后单独处理。稳定验收矩阵现为 [AC-01..AC-42](requirements.md#7-正式验收矩阵)。TODO 4 持续演进知识笔记已完成开发、必要验证、归档与本机部署。OpenAPI 的 21 error / 5 warning 已通过显式 HTTP v2 接口修复，固定原基线复查为 0 / 0；本次兼容修复已重新部署，十个 v2 operation 与数据保留已核对，版本范围见 [兼容修复记录](../.trellis/tasks/07-16-product-delivery/research/openapi-compatibility-fix.md)。
 
 ## 工程质量精简范围
 

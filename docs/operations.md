@@ -287,6 +287,15 @@ manager process RSS 峰值 9.69 MiB，相对 700 MiB 基线下降 99.1%。
 网络验证批准的远程 Endpoint DNS、TLS 和出口代理。恢复出口后重试 exact desired revision 的 Apply；不要手改 active SQL，也不要用
 `./zhixu restart` 绕过 production Probe。
 
+若容器把远程模型域名解析为 `198.18.0.0/15`，先检查本机代理的 Fake-IP；项目会拒绝这类保留地址。
+对已批准的 Provider 域名及其 CNAME 子域名配置 DNS 例外，再核对实际出口规则。DashScope 的现场修复使用
+`+.dashscope.aliyuncs.com` 的 Fake-IP 例外和专用直连规则；不要为此放宽模型 Transport 的公网地址或 TLS 校验。
+
+连接到 Provider 后的 HTTP 403 还需核对权限和额度。`AllocationQuota.FreeTierOnly` 表示免费额度耗尽且禁止付费调用；
+关闭该费用限制需要用户明确授权。用户若只要求接口连通，可以完成连通性验收和软件部署，但应如实保留 pending desired
+与 previous active；Embedding 单项测试通过不代表整套 Chat/Embedding 配置已激活。现场证据见
+[模型连通性与重新部署](../.trellis/tasks/07-16-product-delivery/research/model-connectivity-redeploy-2026-09-09.md)。
+
 ### 4.5 操作者审计查询
 
 构建后的应用镜像包含 `/app/zhixu-audit`，使用既有数据库配置查询安全摘要，不修改数据库或执行迁移。将下列 `WORKSPACE_UUID` 换为页面/状态命令显示的实际 ID：

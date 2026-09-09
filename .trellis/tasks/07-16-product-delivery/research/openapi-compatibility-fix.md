@@ -19,7 +19,7 @@
 
 HTTP 版本与持久结果版本独立。版本判断依据 Workflow Definition/冻结面试来源，而非 result envelope；动态 pending、refusal、failed、cancelled 同样受限。两个版本的列表 cursor 分别绑定版本 1/2，跨版本返回 400，切换从第一页开始。`startInterviewV2` 仍只直接创建 Claim；NOTE 由既有 synthesis preparation 创建。
 
-本次不改数据库 Schema、模型配置或发布保护；代码修复尚未重新部署。
+本次代码修复不改数据库 Schema、模型配置或发布保护；修复完成时尚未重新部署，后续已完成 [模型连通性核对与重新部署](model-connectivity-redeploy-2026-09-09.md)。
 
 ## 验收
 
@@ -76,4 +76,4 @@ HTTP 版本与持久结果版本独立。版本判断依据 Workflow Definition/
 
 ## 后续提交授权与代码版本
 
-2026-09-09 用户明确要求将全部未提交代码提交并推送。源码、迁移、前后端、规格及公共文档已提交为 `789692e2b8e7029e78fb23e3041995c781675eff`（`feat: 交付动态分析、合成笔记及 API 兼容修复`），推送目标为 `origin/dev`；任务归档与会话记录纳入随后的记录提交。上文 Session 81 的“未提交”保留为当时事实。仅增加本机编译产物 `/worker` 和本地对话记忆 `/.workbuddy/` 的忽略规则；原文件留在本地。部署状态仍为未重新部署，M11 暂缓。
+2026-09-09 用户明确要求将全部未提交代码提交并推送。源码、迁移、前后端、规格及公共文档已提交为 `789692e2b8e7029e78fb23e3041995c781675eff`（`feat: 交付动态分析、合成笔记及 API 兼容修复`），推送目标为 `origin/dev`；任务归档与会话记录纳入随后的记录提交。上文 Session 81 的“未提交”保留为当时事实。仅增加本机编译产物 `/worker` 和本地对话记忆 `/.workbuddy/` 的忽略规则；原文件留在本地。该次提交时尚未重新部署；随后已从 `7c720dc0` 完成受支持 launcher 重建，十个 v2 operation、健康状态和数据保留通过核验，见 [后续部署](model-connectivity-redeploy-2026-09-09.md)。M11 暂缓。

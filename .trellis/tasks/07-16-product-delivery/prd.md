@@ -1,6 +1,6 @@
 # ZHIXU 产品开发交付与最终发布
 
-> **2026-09-09 OpenAPI 兼容修复已完成**：原 21 个错误、5 个警告已清零，固定原基线、生成漂移、受影响测试与独立审查通过。十个显式 HTTP v2 operation 承载新版响应；v1 新建分析须迁移到 v2，历史 replay 与 RAG 保留。详见 [兼容修复记录](research/openapi-compatibility-fix.md)。本增量尚未重新部署，此前部署事实保留。源码已按后续授权提交为 `789692e2`，本批次推送目标为 `origin/dev`。
+> **2026-09-09 OpenAPI 兼容修复已完成**：原 21 个错误、5 个警告已清零，固定原基线、生成漂移、受影响测试与独立审查通过。十个显式 HTTP v2 operation 承载新版响应；v1 新建分析须迁移到 v2，历史 replay 与 RAG 保留。详见 [兼容修复记录](research/openapi-compatibility-fix.md)。本增量已重新部署，见 [模型连通性与部署记录](research/model-connectivity-redeploy-2026-09-09.md)；用户确认保留免费额度限制，以接口连通验收，整套模型仍待激活。源码已按后续授权提交为 `789692e2`，本批次推送目标为 `origin/dev`。
 
 > **2026-09-09 新增开发与部署授权**：用户要求补齐原始优化清单的未完成开发，完成必要验证并关闭已交付开发任务，最后重新部署本机 Docker。TODO2 旧首期的固定六阶段已交付，当前已补齐原始模型动态选择工具的循环并通过新的真实整栈验证；不得再用首期归档状态代表原始需求完成。本轮新增需求与验收见 [动态工具循环及统一收口](research/todo2-dynamic-loop-prd.md)。TODO4 仍以自身完整验收为准。M11 最终验收暂缓，未执行项不写 PASS；旧记录的“本轮不部署”仅适用于旧会话，本次 Docker 部署已获授权。
 
@@ -20,9 +20,9 @@
 | M9-02 Proposal Revision / Merge | 功能已实现，历史升级兼容修复及必要实库回归已通过 | 验收见 [M9 修复记录](research/m9-legacy-upgrade-2026-09-08.md)；完整浏览器/资源矩阵不在此次修复范围，未执行不记 PASS |
 | M9-03 Export | 当前范围已完成 | Collection Markdown/Metadata JSON、Workspace Attachments ZIP；Evaluation/Audit JSON、CSV/XLSX 不在当前范围 |
 | Workspace Agent 固定首期 | v1 与其 AC1–AC11 已归档 | 仅证明固定六阶段，不能代表原始动态需求完成 |
-| TODO2 动态循环 | AC-D1–D6 开发验收完成，已部署本机 | 不同调用序列、预算、停止、重放及桌面/窄屏已通过；旧 v1 与固定 RAG 继续兼容；本机 AI 准入仍受原有禁用模型配置限制 |
+| TODO2 动态循环 | AC-D1–D6 开发验收完成，已部署本机 | 不同调用序列、预算、停止、重放及桌面/窄屏已通过；旧 v1 与固定 RAG 继续兼容；本机接口已连通；Chat 免费额度耗尽且限制保留，整套模型仍待激活 |
 | TODO4 合成笔记 | AC1–AC10 开发验收完成，已归档并部署本机 | 真实连续录入/审批/Git/恢复/桌面与窄屏面试通过；本机新页面与列表正常，模型生成需有效配置 |
-| OpenAPI 兼容修复 | 固定原基线 0 error / 0 warning，必要验证与独立审查通过 | HTTP v1/v2 表示隔离，Web 同步；修复代码尚未重新部署 |
+| OpenAPI 兼容修复 | 固定原基线 0 error / 0 warning，必要验证与独立审查通过 | HTTP v1/v2 表示隔离，Web 同步；已重新部署并核对十个 v2 operation |
 | M10-01 Audit | slog/脱敏/OTel/Prometheus/append-only Store 与操作者只读查询已交付，镜像打包已补 | 覆盖已接入生产者，不建设全领域统一审计 UI、自动留存/归档平台 |
 | M10-02 Auth / Security | 当前实现已完成 | Session/API Token、CSRF/Origin/Capability 与写授权仍独立；不重复重做认证 |
 | M10-03 Capacity | 交付既有确定性容量工具与有界查询实现 | 完整 500k、目标硬件 P95、正式 Graph FPS 未作为本轮必测，不宣称达到阈值 |
@@ -32,7 +32,7 @@
 | M11-02 AI Eval | 保留为最终验收，未在本轮执行 | 版本化套件、真实 Provider 与统一基线由 M11 处理 |
 | M11-03 Release Package | 保留为最终发布，未在本轮执行 | 统一验证、SBOM/扫描、发布包/校验和与发布 review 由 M11 处理 |
 
-父任务登记 35 个 child，均已完成；归档数量只表示各 child 的约定范围，不能替代 M11 或新增需求验收。TODO4 的 [独立任务](../archive/2026-09/09-08-evolving-knowledge-notes/) 已完成开发并归档，统一部署已由本父任务完成。父任务继续保持 `in_progress`，承载暂缓的 M11；模型激活限制与首次部署事实见 [统一交付记录](research/final-integration-2026-09-09.md)，随后 OpenAPI 修复与未部署边界见 [兼容记录](research/openapi-compatibility-fix.md)。
+父任务登记 35 个 child，均已完成；归档数量只表示各 child 的约定范围，不能替代 M11 或新增需求验收。TODO4 的 [独立任务](../archive/2026-09/09-08-evolving-knowledge-notes/) 已完成开发并归档，统一部署已由本父任务完成。父任务继续保持 `in_progress`，承载暂缓的 M11；模型激活限制与首次部署事实见 [统一交付记录](research/final-integration-2026-09-09.md)，随后 OpenAPI 修复的版本边界见 [兼容记录](research/openapi-compatibility-fix.md)。
 
 ## 本轮要求
 
@@ -84,4 +84,4 @@
 
 ## 数据与发布边界
 
-数据库使用前向兼容迁移；不改写已发布 SQL、不用 destructive Down 作为回滚。文件/Git 正式变化继续走 Proposal/Approval/Safe Writeback，未知结果保留恢复现场。此前 TODO2/TODO4 已按授权部署到原本机 Docker；随后 OpenAPI 修复尚未重新部署。修复验收时尚未提交；用户随后授权全部提交并推送，源码已提交为 `789692e2`。未合入其他分支、未变更其他项目；实际发布仍遵守原授权与受保护分支要求。
+数据库使用前向兼容迁移；不改写已发布 SQL、不用 destructive Down 作为回滚。文件/Git 正式变化继续走 Proposal/Approval/Safe Writeback，未知结果保留恢复现场。此前 TODO2/TODO4 已按授权部署到原本机 Docker；随后 OpenAPI 修复也已通过受支持 launcher 重新部署。修复验收时尚未提交；用户随后授权全部提交并推送，源码已提交为 `789692e2`。未合入其他分支、未变更其他项目；实际发布仍遵守原授权与受保护分支要求。

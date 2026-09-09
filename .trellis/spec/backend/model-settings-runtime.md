@@ -339,6 +339,8 @@ Correct: 保留历史协议身份与前向迁移保护；当前制品在构造�
 | API production probe 成功/失败 | owner+epoch+version CAS 原子写 `succeeded`/`failed` + `terminal_at` 并 exactly-once release operation hold |
 | local activation preparation 未 ready | preparing 不得进入 arming，active revision 不变 |
 | 远程 Provider 在 pre-commit Probe 期间 TLS/transport 失败 | activation 失败并保留 previous active；desired 继续 pending，`restart` 不得替代重试 exact desired Apply |
+| 远程域名被代理解析到 `198.18.0.0/15` Fake-IP | 保留公网地址拒绝；修复批准域名及 CNAME 的 DNS/出口配置，不扩大 Transport 地址 allowlist |
+| Chat Provider 返回 `403 AllocationQuota.FreeTierOnly` | 网络连通不等于 Probe 成功；保留费用限制和 previous active，付费限制变更须有用户授权 |
 | Snapshot 缺少 `local_runtime` 或返回未知 phase/字段 | OpenAPI/client fail closed，不以 stopped fallback 掩盖旧服务端 |
 
 ### 5. Good / Base / Bad Cases
