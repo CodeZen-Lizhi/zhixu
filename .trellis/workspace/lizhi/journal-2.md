@@ -948,3 +948,39 @@ Eino/eino-ext 已成为生产唯一 AI Runtime，旧 direct 实现已删除并�
 ### Next Steps
 
 - 推送本批次提交到 origin/dev；不重新部署，父任务继续承载暂缓的 M11。
+
+
+## Session 83: 模型连通性修复与兼容版本部署
+
+**Date**: 2026-09-09
+**Task**: 模型连通性修复与兼容版本部署
+**Branch**: `dev`
+
+### Summary
+
+修复本机 DashScope DNS 与出口规则，完成接口连通验收和最新 OpenAPI 兼容版本部署；用户保留 Chat 免费额度限制，整套模型仍待激活。
+
+### Main Changes
+
+- 修复本机 Clash 的 DashScope Fake-IP 与直连规则，保留 Provider、凭据及费用限制。
+- 停写备份后通过 launcher 重新部署 7c720dc0，同步任务、运维和验收状态记录。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `1491577b` | (see git log) |
+
+### Testing
+
+- [OK] 8 个容器 healthy；健康、v2 路由和前端资源核验通过；Embedding 测试 200，Chat 已连通并返回免费额度耗尽 403。
+- [OK] Atlas 00099、原业务 ID、19 个 Workspace 文件、PGDATA 命名卷及安装凭据保持一致；临时验证 Session 已注销。
+- [OK] 10 个文档与任务文件的 JSON、76 个本地链接、状态断言和 git diff --check 通过；应用代码未改。
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- M11 按原决定暂缓；后续如需实际 AI 生成，再处理有效额度与模型激活。

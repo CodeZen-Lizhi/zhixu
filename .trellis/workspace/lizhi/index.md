@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-2.md`
-- **Total Sessions**: 82
+- **Total Sessions**: 83
 - **Last Active**: 2026-09-09
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-2.md` | ~950 | Active |
+| `journal-2.md` | ~986 | Active |
 | `journal-1.md` | ~2005 | Archived |
 <!-- @@@/auto:active-documents -->
 
@@ -30,6 +30,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 83 | 2026-09-09 | 模型连通性修复与兼容版本部署 | `1491577b` | `dev` |
 | 82 | 2026-09-09 | 提交产品开发与 OpenAPI 兼容修复 | `789692e2b8e7029e78fb23e3041995c781675eff` | `dev` |
 | 81 | 2026-09-09 | OpenAPI v1/v2 兼容修复 | - | `dev` |
 | 80 | 2026-09-09 | TODO2/TODO4 整栈收口与本机 Docker 升级 | - | `dev` |
