@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-2.md`
-- **Total Sessions**: 78
+- **Total Sessions**: 82
 - **Last Active**: 2026-09-09
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-2.md` | ~810 | Active |
+| `journal-2.md` | ~950 | Active |
 | `journal-1.md` | ~2005 | Archived |
 <!-- @@@/auto:active-documents -->
 
@@ -30,6 +30,10 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 82 | 2026-09-09 | 提交产品开发与 OpenAPI 兼容修复 | `789692e2b8e7029e78fb23e3041995c781675eff` | `dev` |
+| 81 | 2026-09-09 | OpenAPI v1/v2 兼容修复 | - | `dev` |
+| 80 | 2026-09-09 | TODO2/TODO4 整栈收口与本机 Docker 升级 | - | `dev` |
+| 79 | 2026-09-09 | 非 GORM 开发收尾与精简验收 | - | `dev` |
 | 78 | 2026-09-09 | M9 历史 Proposal 升级修复 | `a1f05ca6ae47072bba2118714adb14c27b998c25` | `dev` |
 | 77 | 2026-09-08 | TODO 10 提交推送与状态同步 | `cb93565561498674cda1dc1230fed587fba66075`, `bf2def7172ab1b19966556951d8c0eee12d4167c` | `dev` |
 | 76 | 2026-09-08 | TODO 10 全部子任务开发完成 | - | `dev` |

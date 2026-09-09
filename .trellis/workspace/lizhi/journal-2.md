@@ -808,3 +808,143 @@ Eino/eino-ext 已成为生产唯一 AI Runtime，旧 direct 实现已删除并�
 ### Next Steps
 
 - 尚未部署；目标环境升级应按 rollout runbook 安排停写并使用本次修复后的迁移器，PostgreSQL 18 与完整 Goose adoption 矩阵未在本轮验证。
+
+
+## Session 79: 非 GORM 开发收尾与精简验收
+
+**Date**: 2026-09-09
+**Task**: 非 GORM 开发收尾与精简验收
+**Branch**: `dev`
+
+### Summary
+
+完成路由恢复、Proposal 历史升级、审计查询与最小备份恢复；归档三个开发任务，M11 留待整体开发后。
+
+### Main Changes
+
+- 交付路由内容错误恢复、只读有界 audit CLI 与镜像入口、00093 同事务历史升级兼容、停写单 Root/Git＋整库备份和恢复操作。
+- 备份独立检查修复 Git lazy fetch/remote helper 与循环链接错误泄漏，10 条保护回归通过。
+- 归档架构质量、Workspace Agent、Session 不采用评估；同步 PRD、路线图、规格、操作手册与逐项收尾原因清单。
+
+### Git Commits
+
+(No commits - planning session)
+
+### Testing
+
+- [OK] 复用已通过的 61 项前端测试、Web lint/typecheck/build、Audit 单测/vet/隔离实库/Linux 构建；迁移 PG16/race 与 6813 项 catalog facts 一致。
+- [OK] 备份 10/10、隔离 PG18 基本恢复、最终独立代码检查通过；当前 13 个文件摘要与报告一致。
+- [OK] 活跃 task-context-check、三个归档 task validate、47 个 Markdown/190 个本地链接核对通过。
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- M11 的 E2E、AI Eval 与发布包按用户要求在整体开发完成后执行。
+- TODO 4 已有独立任务正在实施，本会话不重复接管；完整容量/灾备/长期观察不作为开发欠项。
+
+
+## Session 80: TODO2/TODO4 整栈收口与本机 Docker 升级
+
+**Date**: 2026-09-09
+**Task**: TODO2/TODO4 整栈收口与本机 Docker 升级
+**Branch**: `dev`
+
+### Summary
+
+补齐原始动态工具循环和持续演进知识笔记，完成必要验证、清单文档收口及本机 Docker 部署；M11 继续暂缓。
+
+### Main Changes
+
+- TODO2 动态循环与 TODO4 合成笔记完成真实 Compose、桌面和窄屏验证；TODO4 已归档，产品父任务保留 M11。
+- 原 Goose 81 数据库通过受支持 launcher 升级至 Atlas 00099；8 个容器 healthy，原 Workspace、业务 ID、Git 状态与密钥保留。
+- 修复 Git Sync 禁用组合转接口后的 typed nil 误判；禁用时不启动空后台循环，部分组件缺失仍拒绝。最终重新构建后同类 Worker 误报为 0。
+
+### Git Commits
+
+(No commits - planning session)
+
+### Testing
+
+- [OK] 复用已通过的 Web 112 文件/1281 项、Atlas lint/schema drift、persistence-check 30 owner/1969 Go 文件、compose-check 与 TODO2/TODO4 整栈证据。
+- [OK] Git Sync 新增 2 个测试/5 个子场景先失败后通过；Worker GitSync/Lifecycle/WorkerRuntime 定向 race 2.527s，vet 通过。
+- [OK] 最终 launcher restart/status exit 0；认证 HTTP 与 Chromium 页面通过；原记录 ID、配置/密钥比对通过；变更文档本地链接与 git diff --check 通过。
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- M11 全产品 E2E、AI Eval、SBOM/发布包按用户要求暂缓，父任务保持 in_progress。
+- 原模型 active revision 2 为 disabled，desired revision 6 激活失败；需在模型设置成功应用有效配置后启用现场 AI，本轮未替换选型或调用付费模型。
+- OpenAPI breaking gate 仍为 21 error/5 warning，未来合入按 ADR-0028 处理；本轮未 commit/push/merge。
+
+
+## Session 81: OpenAPI v1/v2 兼容修复
+
+**Date**: 2026-09-09
+**Task**: OpenAPI v1/v2 兼容修复
+**Branch**: `dev`
+
+### Summary
+
+固定原基线的 21 个错误、5 个警告已清零，完成版本化 HTTP 边界、生成客户端、Web 集成与独立审查；修复尚未重新部署。
+
+### Main Changes
+
+- 新增十个显式 v2 operation；v1 保留历史 Analysis/RAG/Claim，版本与来源检查在分页、ETag、replay 和新副作用前执行。
+- Web、smoke 调用方、规格、需求优化清单、路线图与任务状态同步；保留首次部署的历史失败证据。
+
+### Git Commits
+
+(No commits - planning session)
+
+### Testing
+
+- [OK] 固定 SHA a4c16248ce1082ce500aea2a99d640e4e0195ddf 的 oasdiff 0/0；OpenAPI/生成漂移、Go 普通/race/vet/build、隔离 PostgreSQL、Web 64 测试及 lint/typecheck/build 全部通过。
+- [OK] 独立 trellis-check/go-review 无新增缺陷；未修改基线、normalizer、warning 策略或门禁阈值。
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- 修复代码尚未提交、推送或重新部署；v1 新建分析返回 409，须使用已接入的 v2 入口；M11 继续暂缓。
+
+
+## Session 82: 提交产品开发与 OpenAPI 兼容修复
+
+**Date**: 2026-09-09
+**Task**: 提交产品开发与 OpenAPI 兼容修复
+**Branch**: `dev`
+
+### Summary
+
+用户授权将当前未提交源码、迁移、前后端、规格与交付记录统一提交并推送到 origin/dev。
+
+### Main Changes
+
+- 源码及规格提交为 789692e2；任务归档、交付记录和日志按第二笔提交整理。
+- 本机 worker 编译产物和 .workbuddy 对话记忆加入忽略，文件继续保留在本地。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `789692e2b8e7029e78fb23e3041995c781675eff` | (see git log) |
+
+### Testing
+
+- [OK] 复用同一代码范围已通过的 OpenAPI 原基线 0/0、生成漂移、Go/实库/Web 验证与独立审查；本次暂存检查通过。
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- 推送本批次提交到 origin/dev；不重新部署，父任务继续承载暂缓的 M11。

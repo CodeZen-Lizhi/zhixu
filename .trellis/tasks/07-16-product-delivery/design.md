@@ -1,12 +1,16 @@
-# ZHIXU 发布收口技术设计
+# ZHIXU 开发收尾与最终发布设计
+
+> 当前增量：通过显式版本化 HTTP 接口修复 OpenAPI breaking，保留旧客户端成功响应与新功能。边界及验收见 [兼容修复记录](research/openapi-compatibility-fix.md)。
+
+> 2026-09-08：本轮开发收尾以新版 prd.md 和 research/lean-closeout-2026-09-08.md 为准；以下完整发布证据模型属于 M11，不作为开发归档的前置。
 
 ## 1. Design Objective
 
-本设计只组织当前剩余发布工作，不再复制全量产品架构。当前系统边界分别以 `docs/architecture/system-design.md`、`domain-and-data.md`、`application-contracts.md`、`ai-runtime.md` 和 `quality.md` 为准；运行与恢复边界以 `docs/operations.md` 为准。
+本设计区分本轮开发交付与后续 M11 发布工作，不再复制全量产品架构。当前系统边界分别以 `docs/architecture/system-design.md`、`domain-and-data.md`、`application-contracts.md`、`ai-runtime.md` 和 `quality.md` 为准；运行与恢复边界以 `docs/operations.md` 为准。
 
-稳定产品验收来自 `docs/requirements.md` AC-01..AC-41，用户链路来自 `docs/user-guide.md`。本任务负责把仍未关闭的实现、生产装配和最终证据连成发布门禁。
+稳定产品验收来自 `docs/requirements.md` AC-01..AC-42，用户链路来自 `docs/user-guide.md`。本轮补齐已确认的业务缺口与真实缺陷，按用户授权精简审计/备份与验证；最终发布证据由 M11 单独处理。
 
-## 2. Completion Model
+## 2. Completion Model（最终发布）
 
 每个发布项按同一证据链判断：
 
@@ -23,11 +27,11 @@ stable requirement
 - 已归档 child 只证明该 child 的约定范围；父任务仍须对当前稳定需求重新验收。
 - 被稳定需求明确移除的候选能力不再计作缺口，例如 `EVALUATION_JSON` 与 `AUDIT_JSON`。
 
-## 3. Release Workstreams
+## 3. 当前交付与后续工作
 
 ### 3.1 M9-02 Proposal Revision 与三方合并
 
-当前链路已有 Proposal 创建、current/proposed 双向 Diff、approve/reject、preflight 与 base-hash 漂移阻断。缺口位于冲突后的继续编辑和合并：
+Proposal Revision 编辑、服务端三方合并和重新审批已实现，以下是当前合同，不再作为未开发清单：
 
 1. Change Control 拥有新的 Proposal Revision；编辑必须生成新 revision/change hash，旧审批不得复用。
 2. 合并输入至少绑定 base、current、proposed 三个不可变版本及 Workspace/target identity。
@@ -35,29 +39,37 @@ stable requirement
 4. Web 展示三方差异、允许用户形成新 Proposal Revision，并重新走 Evidence、Approval、preflight 与 Safe Writeback。
 5. current 再次漂移、并发编辑、重复命令、恢复重放和未知副作用必须 fail closed。
 
-完成证据必须贯穿 Domain/Application、持久化、HTTP/OpenAPI、生产 Composition、Web 和真实冲突链路；只增加 Diff 组件不能关闭 AC-13。
+既有 Domain/Application、持久化、HTTP/OpenAPI、生产 Composition 和 Web 实现证据保存在 Proposal Revision 归档任务。本轮真实缺陷是历史库升级：新增 `00093` 和 Atlas runner 在原 `00082` 同一事务内限定回填、验证正式 guard、执行并恢复 deferred completion 约束，保持前 92 个迁移和历史行不变。原失败回归、失败回滚重试及 Schema 对比已通过，见 [升级收尾记录](research/proposal-upgrade-closeout.md)。完整浏览器/资源矩阵移出本轮门禁，未执行不记 PASS。
 
-### 3.2 M10 质量与运行收口
+### 3.2 路由内容恢复
+
+- Error Boundary 只包 route content，保留导航、Auth/Workspace Provider 和现有 Suspense。
+- render/lazy 失败提供中文恢复 UI、用户重试和页面刷新；日志只记录稳定错误码。
+- 路由变化清除错误而不重挂健康页面，Workspace 变化重建内容树，避免丢失健康页面筛选草稿或跨作用域保留失败状态。
+- 定向组件行为、Web lint/typecheck/build 与独立检查已通过；完整 M11 E2E 不作为此次交付前置。
+
+### 3.3 M10 质量与运行收尾
 
 #### M10-01
 
 - 保留已交付的 slog/Secret Redaction、OTel exporter、API/Worker Prometheus 和 append-only Audit store。
-- 对 `docs/architecture/quality.md` 列出的关键业务/安全决策补齐统一 Audit producer 覆盖、查询边界、留存/归档和恢复演练。
+- `cmd/audit` 和镜像内 `/app/zhixu-audit` 提供现有生产者的安全摘要查询，显式选择一个 Workspace 或仅全局事件；连接默认只读、分页与超时有界，不迁移、不追加。
+- 覆盖以 [审计收尾记录](research/audit-closeout.md) 的实际调用点为准；全域生产者、审计 UI、自动留存/归档平台不在当前交付范围。
 - Audit 是独立业务事实，不以日志或 Trace 代替；OTel/Metrics 不重复实现。
 
 #### M10-03
 
-- 复用现有 500k graph/retrieval benchmark 与 EXPLAIN runner，在目标环境生成版本化 manifest、summary、samples、plan 和环境信息。
-- 前端必须测量真实 Graph render/layout/interaction，并执行正式 FPS 阈值；当前非正式 frame probe 只保留为诊断。
-- 未保存完整产物、阈值失败或环境不可比时保持部分完成。
+- 交付现有 500k graph/retrieval benchmark、EXPLAIN runner 与有界查询；按实际性能问题选用。
+- 完整目标环境 P95、Graph render/layout/interaction 和正式 FPS 阈值移出本轮交付门禁，未执行；frame probe 保留为诊断，不据此宣称正式阈值通过。
 
 #### M10-04
 
 - 保留现有 Docker、Compose 依赖顺序、Migration Job、readiness 和启动 smoke。
-- 新增单一受支持的备份入口、临时实例恢复演练和文件/Git/数据库/索引一致性检查；操作规则来自 `docs/operations.md`，但脚本和运行结果才是交付证据。
+- `deploy/backup.py create/verify` 提供停写前提下的单 Root/Git 文件与整库 dump，附私有 manifest 和校验和；操作员向新目录、新空库恢复。10 条保护测试及一次隔离 PG18 基本备份恢复已通过。
+- 原安装配置、密钥、selection/control identity 和数据库全局角色另行保护；临时路径不能冒充原 Workspace 身份。完整应用恢复/一致性、跨机/容量演练与自动修复不在当前交付范围，见 [备份收尾记录](research/backup-closeout.md)。
 - 失败时保持服务停止或只读，保留 marker、Git、数据库和 Workflow 现场，不执行破坏性回滚。
 
-### 3.3 M11 最终验收
+### 3.4 M11 最终验收（本轮排除）
 
 #### M11-01
 
@@ -75,7 +87,7 @@ stable requirement
 
 - 建立单一 release verification 入口，复用现有 Make/CI 目标并明确哪些是 PR、main/nightly 和 release 门禁。
 - 生成版本化交付 manifest、二进制/Web/Image/Compose/Migration/OpenAPI、SBOM、许可证/依赖报告、校验和与扫描结果。
-- 最终 review 逐项关联 AC-01..AC-41、14 步演示和发布产物，不以 `children done` 或某次局部测试代替。
+- 最终 review 逐项关联 AC-01..AC-42、14 步演示和发布产物，不以 `children done` 或某次局部测试代替。
 
 ## 4. Verification Aggregation
 
@@ -88,10 +100,10 @@ stable requirement
 | Integration / Fault | 现有显式 PostgreSQL/River/Filesystem/Git targets | 必需环境缺失时失败或明确阻断发布 |
 | Browser E2E | `web/e2e/` 与 `deploy/*browser-smoke.sh` | 六 seam 与 14 步演示可重复 |
 | AI Eval | `eval/` | 全矩阵、baseline、真实 Provider 与回归比较 |
-| Capacity / Recovery | 现有 benchmark，加待实现恢复工具 | 保存目标环境产物和临时实例恢复证据 |
+| Capacity / Recovery | 现有 benchmark 与 `deploy/backup.py` | 现有基本恢复证据已保留；完整目标环境矩阵按后续需要选择，不恢复为本轮欠账 |
 | Security / Supply Chain | 现有负测，加待实现扫描/SBOM | 高风险失败非零退出，产物可追踪 |
 
-具体命令以 `Makefile` 和实现为准。尚不存在的 `make verify`、`make e2e`、`make eval-regression`、`make backup`、`make restore-drill` 和 `make consistency-drill` 仍是 M10/M11 交付目标，不得在实现前写成已通过。
+具体命令以 `Makefile` 和实现为准。`make verify`、`make e2e`、`make eval-regression` 等统一发布入口仍属 M11，未实现/未执行不得写成通过。备份已有直接 Python 入口；不再为形式化的 `make backup`、`make restore-drill` 或 `make consistency-drill` 名称保留开发欠项。
 
 ## 5. Compatibility And Rollback
 

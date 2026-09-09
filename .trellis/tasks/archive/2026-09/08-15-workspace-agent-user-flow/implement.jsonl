@@ -1,0 +1,19 @@
+{"file":".trellis/spec/backend/index.md","reason":"后端分层、依赖方向、生产装配与验证入口"}
+{"file":".trellis/spec/backend/auth-security.md","reason":"Workspace、Capability、服务端身份、权限与敏感信息边界"}
+{"file":".trellis/spec/backend/http-boundary.md","reason":"Gin、严格 JSON、OpenAPI 对等、SSE 和 no-store 边界"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Prompt、Tool result、路径、私有 receipt 与低基数观测约束"}
+{"file":".trellis/spec/backend/git-sync-contract.md","reason":"固定 Git CLI、Workspace root、禁止 raw argv 与写操作边界"}
+{"file":".trellis/spec/backend/eino-runtime-adoption-gates.md","reason":"Eino 隔离、fallback、故障恢复、Provider 类型与采用门禁"}
+{"file":".trellis/spec/backend/eino-chat-adapter.md","reason":"Chat/stream 模型调用、严格边界与现有 Eino Adapter 复用"}
+{"file":".trellis/spec/frontend/index.md","reason":"前端工作台入口与整体交付规则"}
+{"file":".trellis/spec/frontend/directory-structure.md","reason":"Conversation API、RAG feature、events 与 shared 依赖边界"}
+{"file":".trellis/spec/frontend/state-management.md","reason":"TanStack Query、SSE、Draft 与本地 Composer 状态事实归属"}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"Question mode、Answer union、timeline 和 Problem 的严格 decoder"}
+{"file":".trellis/spec/frontend/component-guidelines.md","reason":"时间线、分段控件、Stop、Citation 与响应式组件规范"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Question 到 Workflow、Tool、Answer、SSE、Web 的完整数据流"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"复用现有 Workflow/Eino/Tool/SSE，避免建立第二事实源"}
+{"file":".trellis/tasks/archive/2026-09/08-15-workspace-agent-user-flow/research/runtime-persistence.md","reason":"静态持久 DAG、跨节点预算、canonical receipt 与候选答案研究"}
+{"file":".trellis/tasks/archive/2026-09/08-15-workspace-agent-user-flow/research/tool-security-user-flow.md","reason":"四类精确工具、dirty Git 聚合、短引用和用户链路研究"}
+{"file": ".trellis/tasks/archive/2026-09/08-15-workspace-agent-user-flow/research/stop-double-409.md", "reason": "Stop 连续版本冲突的可达性、有界恢复上限与 fail-closed 契约"}
+{"file": ".trellis/tasks/archive/2026-09/08-15-workspace-agent-user-flow/research/terminal-fault-matrix.md", "reason": "14 个终止原因的可达性矩阵与 13+预算性质聚合门禁方案"}
+{"file": ".trellis/tasks/archive/2026-09/08-15-workspace-agent-user-flow/research/post-fact-rollback-routing.md", "reason": "事实落库后的兼容读取与 Worker-only 回滚路由边界"}

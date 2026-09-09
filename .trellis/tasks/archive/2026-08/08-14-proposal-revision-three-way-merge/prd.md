@@ -2,6 +2,8 @@
 
 > **M9 历史升级修复（2026-09-08）**：已补 00093/Atlas runner 兼容，原失败回归、最新所属 Revision、历史保持、重复升级、失败回滚重试及非法回填拒绝均已通过。后续结果见 [M9 修复记录](../../../07-16-product-delivery/research/m9-legacy-upgrade-2026-09-08.md)；早期规划与未执行的其他矩阵保留各自事实。
 
+> 当前：已实现并按 2026-09-08 用户精简口径交付；历史大矩阵不再作为开发欠项。升级缺陷与最终检查记录于产品父任务。
+
 ## Goal
 
 补齐正式文件 Proposal 在审批期间发生目标漂移后的可恢复流程：用户能够同时核对生成提案时的基线、Workspace 当前内容和提案建议，解决冲突并创建新的不可变 Proposal Revision，再重新完成证据校验、审批、预检查和 Safe Writeback，而不是只能放弃并重新生成整个提案。
@@ -12,7 +14,7 @@
 - 对互不冲突的修改给出可核验的合并候选，对真实冲突交给用户明确处理。
 - 延续现有 Proposal、Approval、Change Hash、Git CAS 和 Safe Writeback 审计链，不增加绕过审批的写入路径。
 
-## Confirmed Facts
+## Confirmed Facts（实施前基线，非当前缺口）
 
 - 当前 `file_patch` / `restore_document` 已有不可变 `ProposalRevision`、current/proposed 双向 Diff、Approval、Apply Preflight、base-hash 漂移阻断和 Safe Writeback。
 - 当前创建路径只写入 `revision_no=1`，Change Control Repository、Application、HTTP/OpenAPI 和 Web 均没有追加 Revision 或三方合并命令。
@@ -58,18 +60,21 @@
 - 正文、绝对路径、内部 Git 命令和敏感错误不得进入日志、Problem Details、URL、Browser Storage 或遥测；错误只返回稳定代码和有界摘要。
 - 合并不会直接修改 Workspace、Git、数据库知识对象或索引；唯一正式写入路径仍是 Proposal Revision -> Approval -> Safe Writeback。
 
-## Acceptance Criteria
+## Acceptance Criteria（2026-09-08 精简开发口径）
 
-- [ ] AC1：`file_patch/REPLACE` 的目标文件在 Proposal 创建后发生非重叠修改时，页面展示 base/current/proposed，服务端生成无冲突候选，用户确认后创建 `revision_no+1`，旧 Revision 保持可读。
-- [ ] AC2：双方修改同一区域时，页面逐处展示三方上下文；存在未解决冲突时不能创建新 Revision，全部解决后可创建并重新审批。
-- [ ] AC3：新 Revision 使用当前 Workspace 内容作为新 Base，重新计算 Change Hash；旧 Approval、Write Authorization、Preflight 和 Workflow 不能用于新 Revision。
-- [ ] AC4：创建新 Revision 后 Proposal 回到 `ready_for_review`；审批、preflight、Safe Writeback 和 Git Commit 全链路绑定新 Revision，最终内容同时保留 current 与 proposed 的已确认修改。
-- [ ] AC5：合并过程中 current 再次漂移、Proposal version 变化或并发创建 Revision时返回稳定 409；不会覆盖文件、丢失旧 Revision或产生两个最新 Revision。
-- [ ] AC6：相同 Idempotency Key 与相同绑定可安全重放；不同载荷复用同键被拒绝；响应丢失后恢复同一 Revision。
-- [ ] AC7：空 base/current、文件末尾、CRLF/LF、相邻修改、删除/新增同一区域、较大但受限 Markdown 和非法/超限输入有确定测试；最终空白正文继续按现有契约拒绝，合并输出不会残留未解析冲突标记。
-- [ ] AC8：OpenAPI、后端领域/Application/PostgreSQL/HTTP、生产 Composition、前端严格 Decoder/UI 与事件失效均完成；不存在仅前端实现的合并规则或第二写入路径。
-- [ ] AC9：桌面和 `390x844` 移动端真实浏览器链路覆盖无冲突与冲突解决、成功创建后的刷新恢复、再次漂移和重新审批；未提交正文不进入 Browser Storage，且无横向溢出、控制台错误或失败假成功。
-- [ ] AC10：现有 Proposal 类型、Approval、current-content、preflight、Safe Writeback、Document Restore 和 typed Proposal 测试无回归，`docs/requirements.md` AC-13 与产品交付父任务状态同步。
+用户已明确：已实现项目不再因完整环境/浏览器/性能矩阵挂账。以下区分实现与验证，不把未执行的验收写成通过。
+
+| 原 AC | 开发结果与证据 | 完整验证边界 |
+|---|---|---|
+| AC1–AC2 非重叠与冲突合并 | 服务端固定 merge Adapter、冲突 ID/候选、Revision Workbench 和 domain/API/组件验证已实现 | 未重跑独立桌面/移动真实浏览器矩阵 |
+| AC3–AC4 新 Revision 与重新审批 | current pointer、Change Hash、Approval/Authorization/Preflight/Workflow/Writeback binding 已实现并有既有局部/后续实库证据 | 新 Revision→再次审批→Git Commit 的完整专属端到端链本轮未执行 |
+| AC5–AC6 版本冲突与精确重放 | CAS、receipt、lineage、幂等冲突、页面 delivery-unknown 恢复已实现 | 两浏览器并发与全部故障排列未执行 |
+| AC7 文本边界 | 固定 merge algorithm/limits、CRLF/空 base/current/conflict marker 等既有 contract 测试 | 目标镜像 30 轮 RSS/延迟基准未执行 |
+| AC8 生产接线 | 后端/HTTP/OpenAPI/前端 decoder、历史与 SSE invalidation 已完成 | 不存在第二写入路径或前端合并权威规则 |
+| AC9 多端浏览器专项 | 从开发交付门禁移除 | 未执行，不记 PASS |
+| AC10 兼容与文档 | 复用既有 Change Control 验收；本轮修复历史旧库升级并同步父任务状态 | 不重跑 M11 全量门禁 |
+
+原先“缺测试环境”是历史原因，目前已有 Testcontainers。本次取消大矩阵基于用户调整交付范围；真实升级失败并未豁免，已由产品收尾中的 00093/Atlas 兼容处理修复，原失败 M9 实库用例通过。最终实现、检查与命令见 [产品收尾记录](../../../07-16-product-delivery/research/lean-closeout-2026-09-08.md)。
 
 ## Out Of Scope
 

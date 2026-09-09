@@ -1,5 +1,5 @@
 {"file": "docs/user-guide.md", "reason": "Current user-visible behavior, entry points and product limitations; not delivery status"}
-{"file": "docs/requirements.md", "reason": "Authoritative stable product scope and final AC-01..AC-41 acceptance matrix"}
+{"file": "docs/requirements.md", "reason": "Authoritative stable product scope and final AC-01..AC-42 acceptance matrix"}
 {"file": "docs/roadmap.md", "reason": "High-level undelivered directions and dependencies; detailed status remains in Trellis"}
 {"file": "docs/architecture/system-design.md", "reason": "Current system topology, module boundaries and deployment shape"}
 {"file": "docs/architecture/domain-and-data.md", "reason": "Current domain vocabulary, data ownership and consistency rules; physical schema remains in migrations"}
@@ -10,3 +10,12 @@
 {"file": ".trellis/spec/guides/index.md", "reason": "Product delivery implementation contract and evidence source"}
 {"file": ".trellis/spec/backend/index.md", "reason": "Current backend spec entry point and production composition constraints"}
 {"file": ".trellis/spec/frontend/index.md", "reason": "Current frontend spec entry point and user-flow quality constraints"}
+{"file": ".trellis/tasks/07-16-product-delivery/research/lean-closeout-2026-09-08.md", "reason": "用户确认的非 GORM/非 M11 精简开发范围、必要验证与未执行门禁处理"}
+{"file": ".trellis/tasks/07-16-product-delivery/research/audit-closeout.md", "reason": "审计 CLI 实际作用域、镜像打包、安全输出与必要验证"}
+{"file": ".trellis/tasks/07-16-product-delivery/research/backup-closeout.md", "reason": "单 Root＋整库备份、原安装恢复边界和隔离还原证据"}
+{"file": ".trellis/tasks/07-16-product-delivery/research/proposal-upgrade-closeout.md", "reason": "历史迁移兼容与事务、约束、Schema 的最新实际证据"}
+{"file": ".trellis/tasks/07-16-product-delivery/research/final-code-check.md", "reason": "独立 Go/SQL/备份检查、两处自修及冻结代码验证"}
+{"file": ".trellis/tasks/07-16-product-delivery/research/todo2-dynamic-loop-prd.md", "reason": "用户本轮完整开发与部署授权、动态循环原始验收"}
+{"file": ".trellis/tasks/07-16-product-delivery/research/todo2-dynamic-loop-design.md", "reason": "v1兼容/v2持久循环、实现分工与验证顺序"}
+{"file": ".trellis/tasks/07-16-product-delivery/research/todo2-dynamic-loop-surface.md", "reason": "公共合同、Dispatcher replay、readiness与Web接线研究"}
+{"file": ".trellis/tasks/07-16-product-delivery/research/openapi-compatibility-fix.md", "reason": "当前增量：固定原基线的 HTTP v1/v2 兼容修复与验收边界"}

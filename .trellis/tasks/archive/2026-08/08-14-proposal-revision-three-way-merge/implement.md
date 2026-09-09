@@ -2,7 +2,7 @@
 
 > **M9 历史升级修复（2026-09-08）**：已补 00093/Atlas runner 兼容，原失败回归、最新所属 Revision、历史保持、重复升级、失败回滚重试及非法回填拒绝均已通过。后续结果见 [M9 修复记录](../../../07-16-product-delivery/research/m9-legacy-upgrade-2026-09-08.md)；早期规划与未执行的其他矩阵保留各自事实。
 
-> 状态：主要代码路径已实现并完成局部门禁；真实 PostgreSQL 迁移/并发验证、目标镜像资源基准和浏览器链路尚未执行，因此任务仍保持 `in_progress`。本清单只把有直接证据的部分标为完成。
+> 状态（2026-09-08）：按用户精简口径完成开发交付，task.json 与本记录一致。下文实现证据保留；未执行的大型专项改为范围说明，不记 PASS。真实旧库升级缺陷由产品收尾修复并通过原失败实库用例。
 
 ## 1. Delivery Order
 
@@ -13,7 +13,7 @@
 - [x] 先更新 `docs/architecture/quality.md` 与 Git 相关 spec，批准固定、无 repository 副作用的 `merge-file` plumbing；继续禁止 branch merge/rebase/raw argv。
 - [x] 固定空正文语义：首期只测试空 base/current；最终正文继续遵守现有非空 Markdown 契约，truncate-to-empty 不在本期。
 - [x] 建立并覆盖 text merge contract fixtures：clean、same-region conflict、empty base、EOF、adjacent edit、add/delete、CRLF/LF、Unicode、marker-like content、超限和非法 UTF-8。
-- [ ] 在目标 API 镜像冻结并验证资源合同：1 MiB/4 MiB/64 KiB 输入输出上限、1024 conflicts、5 秒 deadline、每进程并发 2；用上限与病理 fixture 双并发跑 30 轮，要求全部在 deadline 内且增量峰值 RSS 不超过 128 MiB，并保存 Git version/fingerprint、延迟和 RSS 证据。失败则回到规划审阅，不进入 Phase 2，也不切换算法。
+- 原专项已移出开发交付门禁（未在本轮执行）：在目标 API 镜像冻结并验证资源合同：1 MiB/4 MiB/64 KiB 输入输出上限、1024 conflicts、5 秒 deadline、每进程并发 2；用上限与病理 fixture 双并发跑 30 轮，要求全部在 deadline 内且增量峰值 RSS 不超过 128 MiB，并保存 Git version/fingerprint、延迟和 RSS 证据。失败则回到规划审阅，不进入 Phase 2，也不切换算法。
 
 Rollback point: 只含测试 fixture/合同草案，可直接停止，不产生 Schema 或运行时行为变化。
 
@@ -24,7 +24,7 @@ Rollback point: 只含测试 fixture/合同草案，可直接停止，不产生 
 - [x] 为 legacy Proposal Workflow binding 增加一致性审计与 fail-closed 围栏；孤儿/多义绑定不会被猜测投影。
 - [x] 扩展 Proposal/Revision domain：aggregate version wire projection、base snapshot/lineage、editable capability、append command/result 和稳定错误。
 - [x] 扩展状态迁移事实源与数据库 trigger：只有 `current_revision_id` 严格切换到 `revision_no+1` 时允许 `ready_for_review|needs_revision -> ready_for_review`；保持其它同状态 update/type/status 不变。
-- [ ] 添加真实 PostgreSQL migration/并发测试；当前仅有 domain、repository contract/fixture 和 integration compile 证据。
+- 原专项已移出开发交付门禁（未在本轮执行）：添加真实 PostgreSQL migration/并发测试；当前仅有 domain、repository contract/fixture 和 integration compile 证据。
 
 Rollback point: Schema 保持 additive；应用可不开放新 capability。禁止删除已经生成的 Revision 或执行破坏性 Down。
 
@@ -50,7 +50,7 @@ Rollback point: Adapter 未接写路径，可关闭 composition capability；Pro
 - [x] 给 Authorization issue/consume、Atomic Begin 和数据库 trigger 增加 `revision_id=current_revision_id`；历史 exact replay 可读但不能恢复旧能力。
 - [x] 重构 Approval dispatch 的当前投影与 replay 为 per-Approval binding，并加入第二 Revision 的 current fence。
 - [x] 实现 bounded Revision list/detail Repository；历史 Approval/Workflow 只按所选 Revision 返回。
-- [ ] 添加真实 PostgreSQL 事务故障/并发和新 Revision 完整 Approval -> Preflight -> Writeback -> Commit 链路测试；局部 service/repository/adapter 测试已通过。
+- 原专项已移出开发交付门禁（未在本轮执行）：添加真实 PostgreSQL 事务故障/并发和新 Revision 完整 Approval -> Preflight -> Writeback -> Commit 链路测试；局部 service/repository/adapter 测试已通过。
 
 Rollback point: 关闭 append/preview capability，保留只读 history；已提交 Revision 和旧执行事实不可删除。
 
@@ -61,7 +61,7 @@ Rollback point: 关闭 append/preview capability，保留只读 history；已提
 - [x] 实现稳定 Problem 映射和 bounded details；测试错误响应、日志与 event 不含正文、绝对路径、argv/stderr。
 - [x] 更新 `api/openapi/openapi.json`、operation 对等、严格 schema 和前端所需 examples。
 - [x] 新增 `proposal.revised` append-only event；更新事件 contract，只承载失效元数据。
-- [ ] 完成真实 PostgreSQL HTTP integration tests；API composition/readiness 已实现并通过局部测试。
+- 原专项已移出开发交付门禁（未在本轮执行）：完成真实 PostgreSQL HTTP integration tests；API composition/readiness 已实现并通过局部测试。
 
 Rollback point: 路由可关闭写 capability；历史读仍可保留。不得把 5xx fallback 成前端 merge。
 
@@ -80,10 +80,10 @@ Rollback point: 隐藏入口即可退回现有只读 Diff/漂移阻断；服务�
 
 ### Phase 6: End-to-end verification and documentation
 
-- [ ] 新增隔离的 Proposal Revision browser smoke fixture/脚本/Make target，使用真实 PostgreSQL、API、Worker、Vite、Workspace 文件与 Git（当前环境没有可用测试库，且用户未要求启动浏览器）。
-- [ ] 桌面和 `390x844` 覆盖：非重叠合并、同区冲突、再次漂移、两个浏览器并发、历史查看、刷新恢复、重新审批/preflight/writeback/Commit。
-- [ ] response-loss 在 Repository/API fault seam 验证 exact replay；服务端 receipt/replay 已有局部测试，浏览器 delivery-unknown 尚未在真实链路验证。
-- [ ] 执行敏感信息扫描，确认正文不在 logs/events/Problems/URL/Browser Storage（已完成静态代码检查，正式扫描脚本待补）。
+- 原专项已移出开发交付门禁（未在本轮执行）：新增隔离的 Proposal Revision browser smoke fixture/脚本/Make target，使用真实 PostgreSQL、API、Worker、Vite、Workspace 文件与 Git（原计划；现已有隔离测试库，本次按用户要求精简）。
+- 原专项已移出开发交付门禁（未在本轮执行）：桌面和 `390x844` 覆盖：非重叠合并、同区冲突、再次漂移、两个浏览器并发、历史查看、刷新恢复、重新审批/preflight/writeback/Commit。
+- 原专项已移出开发交付门禁（未在本轮执行）：response-loss 在 Repository/API fault seam 验证 exact replay；服务端 receipt/replay 已有局部测试，浏览器 delivery-unknown 尚未在真实链路验证。
+- 原专项已移出开发交付门禁（未在本轮执行）：执行敏感信息扫描，确认正文不在 logs/events/Problems/URL/Browser Storage（已完成静态代码检查，正式扫描脚本待补）。
 - [x] 同步 `docs/requirements.md` AC-13、`docs/user-guide.md`、架构/运行说明和对应 Trellis spec；父任务状态未擅自改为完成。
 - [x] 运行 `go-review`、`sql-code-review`、`code-review-and-quality` 与跨层静态复核；发现的当前范围问题已修复，剩余真实环境盲区已列明。
 
@@ -103,9 +103,9 @@ Rollback point: merge/append 没有直接 Workspace 副作用；停止 feature c
 
 Migration filename must use the next free number at implementation time; current dirty worktree may add migrations before this task starts。
 
-## 3. Verification Commands
+## 3. Verification Commands（历史/按需参考）
 
-先运行直接相关且受限的命令，再扩大到任务完整门禁：
+历史验证入口保留。当前只按实际改动选取必要命令，不再自动扩大为完整矩阵：
 
 ```bash
 go test ./internal/changecontrol/domain ./internal/changecontrol/application ./internal/changecontrol/http
@@ -131,9 +131,9 @@ git diff --check
 - [x] Frontend review：strict decoder、Query/local/SSE ownership、Monaco lifecycle、409/delivery-unknown、响应式、键盘/focus/a11y、无 Browser Storage 正文。
 - [x] Cross-layer review：OpenAPI/HTTP/Web 字段与错误完全对等；latest Revision/Approval/Workflow 语义在 list/detail/history/writeback 一致。
 - [x] Security review：正文/路径/Git/临时文件/日志/Problem/Event/浏览器缓存和命令注入边界。
-- [ ] Final Trellis check：PRD AC 仍有真实 PostgreSQL、浏览器和完整 Writeback 链路证据缺口，不能标为完成。
+- 收尾检查：本轮升级修复和独立检查由产品父任务记录；原完整数据库/浏览器/Writeback 矩阵不再作为开发归档前置。
 
-## 5. Completion Evidence
+## 5. Completion Evidence（原实施记录）
 
 当前已保存/可复核的证据：
 
@@ -143,3 +143,10 @@ git diff --check
 - Revision history/detail、409 草稿保留和 conflict-id 处理的组件/API 测试；desktop/`390x844` 浏览器 trace 待补。
 - Append receipt、current pointer、snapshot/lineage、dispatch/current fence 的局部可反查事实；完整新 Revision Approval -> Preflight -> Safe Writeback -> Git Commit 链待真实环境补验。
 - Go/SQL/frontend/cross-layer/security review 发现、修复项、剩余风险和 capability 回滚开关。
+
+## 2026-09-08 开发收尾补充
+
+- Revision 编辑、三方合并、历史和新版本审批接线早已实现；父任务“尚未实现”描述已修正。
+- 原专属浏览器/全链路/性能/正式敏感扫描大矩阵按用户要求移出开发门禁，未执行不记 PASS；已有局部行为与安全检查保留。
+- 已完成 GORM 整合中的 Change Control 必要 PG/写回/HTTP-River 结果作为既有证据，不在本轮重复运行或修改 GORM。
+- M9 旧库迁移中发现的真实 00082 指针回填/延迟约束缺陷，已由产品收尾的 Atlas 兼容前置处理修复；不改历史 SQL、不禁用约束。原 `TestM9BusinessContractHardeningMigrationBackfillConstraints` 实库用例通过，具体最终结果见产品父任务的 `research/proposal-upgrade-closeout.md`。

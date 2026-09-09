@@ -2,7 +2,7 @@
   "id": "product-delivery",
   "name": "product-delivery",
   "title": "ZHIXU 产品级建设与交付",
-  "description": "父任务仍有 M9 Proposal Revision/三方合并、M10 审计/容量/恢复和 M11 最终发布门禁缺口；33/33 只表示当前登记的 children 均已归档，不表示 AC-01..AC-41 或父任务完成。",
+  "description": "TODO2/TODO4 开发及原本机部署已完成；后续 OpenAPI 21 error / 5 warning 已通过显式 HTTP v2 修复并验证，修复尚未重新部署；M11 最终验收暂缓。",
   "status": "in_progress",
   "dev_type": null,
   "scope": null,
@@ -57,14 +57,93 @@
   ],
   "parent": null,
   "relatedFiles": [],
-  "notes": "M9 历史升级修复（2026-09-08）已完成：00093/Atlas runner 保留已发布迁移与历史数据，原失败回归、回滚重试及独立审查通过。详情见 meta.m9_legacy_upgrade；目标环境未部署。",
+  "notes": "2026-09-09 TODO2 动态循环及 TODO4 AC1–AC10 完成开发、实库与真实 Compose/桌面/窄屏验证；已交付开发任务关闭。已修复现场 Git Sync 禁用组合的 typed nil 空循环误报，定向 race/vet 与最终重建通过。本机 Runtime ready、Atlas 00099，原 Workspace/数据/密钥保留。原模型激活失败与 active disabled 配置保持不变，现场 AI 准入尚未开启。M11 暂缓；随后 OpenAPI 原 21 error / 5 warning 已修复，固定原基线 0 / 0，生成漂移、Go/实库/Web 验证及独立审查通过；修复尚未重新部署；源码已提交 789692e2，用户已授权同步本批次到 origin/dev。",
   "meta": {
     "m9_legacy_upgrade": {
       "status": "completed",
       "completedAt": "2026-09-08",
       "evidence": ".trellis/tasks/07-16-product-delivery/research/m9-legacy-upgrade-2026-09-08.md",
       "validation": "M9 原失败用例、历史保持、重复升级、失败回滚重试、拒绝场景、单连接 race、Go/vet 与 Atlas 校验通过；独立 Go/SQL 审查无阻断",
-      "deployment": "not_performed"
+      "deployment": "completed_locally_2026-09-09",
+      "deployment_evidence": "research/final-integration-2026-09-09.md"
+    },
+    "development_closeout": {
+      "status": "completed",
+      "completedAt": "2026-09-09",
+      "scope": "非 GORM、非 M11；用户批准精简完整矩阵与大型计划",
+      "evidence": ".trellis/tasks/07-16-product-delivery/research/lean-closeout-2026-09-08.md",
+      "code_review": ".trellis/tasks/07-16-product-delivery/research/final-code-check.md",
+      "remaining": [
+        "M11-01 E2E 与最终演示",
+        "M11-02 AI Eval",
+        "M11-03 发布包与最终发布验收"
+      ],
+      "independent_business_task": ".trellis/tasks/archive/2026-09/09-08-evolving-knowledge-notes",
+      "deployment": "completed_locally_2026-09-09",
+      "deployment_evidence": "research/final-integration-2026-09-09.md"
+    },
+    "current_delivery": {
+      "status": "completed",
+      "todo2": "completed",
+      "todo4": "completed",
+      "todo4_task": ".trellis/tasks/archive/2026-09/09-08-evolving-knowledge-notes",
+      "evidence": "research/final-integration-2026-09-09.md",
+      "deployment": "completed_locally",
+      "deferred": [
+        "M11-01",
+        "M11-02",
+        "M11-03"
+      ],
+      "deployment_url": "http://127.0.0.1:8080/",
+      "migration_head": "00099",
+      "model_activation": {
+        "status": "preexisting_configuration_not_active",
+        "active_revision": 2,
+        "desired_revision": 6,
+        "active_chat": "disabled",
+        "active_embedding": "disabled",
+        "last_error_code": "MODEL_CHAT_REQUEST_FAILED",
+        "preserved_from_backup": true,
+        "live_provider_execution": "not_performed"
+      },
+      "openapi_breaking_gate": {
+        "status": "passed_in_worktree",
+        "errors": 0,
+        "warnings": 0,
+        "evidence": "research/openapi-compatibility-fix.md",
+        "original_deployment_result": {
+          "status": "failed",
+          "errors": 21,
+          "warnings": 5,
+          "evidence": "research/final-integration-2026-09-09.md"
+        },
+        "base_revision": "a4c16248ce1082ce500aea2a99d640e4e0195ddf",
+        "deployment": "not_redeployed"
+      },
+      "git_sync_disabled_fix": "completed_and_deployed",
+      "completedAt": "2026-09-09",
+      "deployed_images": {
+        "zhixu-app-1": "sha256:f15ddce436fcf5937a1e4e630191b9254157861fd5d817736389a41a6e464930",
+        "zhixu-worker-1": "sha256:1aec641162bb951858f3a9f361ef392a1862740828d5216673124c428a862567"
+      },
+      "code_commit": "789692e2b8e7029e78fb23e3041995c781675eff",
+      "git_target": "origin/dev"
+    },
+    "openapi_compatibility_fix": {
+      "status": "completed",
+      "base_revision": "a4c16248ce1082ce500aea2a99d640e4e0195ddf",
+      "evidence": "research/openapi-compatibility-fix.md",
+      "initial_errors": 21,
+      "initial_warnings": 5,
+      "completedAt": "2026-09-09",
+      "errors": 0,
+      "warnings": 0,
+      "operations": 211,
+      "check_evidence": "research/openapi-compatibility-check.md",
+      "deployment": "not_redeployed",
+      "validation": "原基线 oasdiff、OpenAPI/生成漂移、Go 普通/race/vet/build、两个 owner 隔离 PostgreSQL、Web 64 测试及 lint/typecheck/build 均通过",
+      "code_commit": "789692e2b8e7029e78fb23e3041995c781675eff",
+      "git_target": "origin/dev"
     }
   }
 }

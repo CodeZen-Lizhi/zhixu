@@ -1,0 +1,9 @@
+{"file": ".trellis/spec/backend/gorm-persistence.md", "reason": "同池 GORM/UoW、事务、幂等与模型/迁移边界"}
+{"file": ".trellis/spec/backend/organizing-contract.md", "reason": "保留手工 Confirm、证据与现有生成合同，新增独立自动合成业务"}
+{"file": ".trellis/spec/backend/authoring-contract.md", "reason": "Document/ArticleRevision、AGENT 内部生成与 Proposal 发布唯一 owner"}
+{"file": ".trellis/spec/backend/eino-structured-scheduler.md", "reason": "复用 Eino StructuredRunner 的预算、模型审计与严格输出"}
+{"file": ".trellis/spec/frontend/type-safety.md", "reason": "生成客户端、strict decoder 与 Workspace 绑定"}
+{"file": ".trellis/tasks/archive/2026-09/09-08-evolving-knowledge-notes/research/quality-gate.md", "reason": "本任务风险、AC证据和相关长期质量章节索引，避免大文件注入截断"}
+{"file": ".trellis/tasks/archive/2026-09/09-08-evolving-knowledge-notes/research/implementation-contract.md", "reason": "W1 已实现核心合同，所有后续工作复用"}
+{"file": ".trellis/tasks/archive/2026-09/09-08-evolving-knowledge-notes/research/generated-publication-contract.md", "reason": "Authoring 00094 生成版本与安全退役接口"}
+{"file": ".trellis/tasks/archive/2026-09/09-08-evolving-knowledge-notes/research/source-ready-contract.md", "reason": "已实现 Ingestion/Workflow 原子 Source-ready 接口"}

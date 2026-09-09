@@ -1,0 +1,36 @@
+{
+  "id": "architecture-quality-optimization",
+  "name": "architecture-quality-optimization",
+  "title": "代码质量与架构优化计划",
+  "description": "按用户批准的精简范围完成：Health/静态/OpenAPI 三项基线已交付，WP2 路由错误恢复及必要验证通过；完整治理、大型重构和评分不属于本次交付。",
+  "status": "completed",
+  "dev_type": null,
+  "scope": "cross-layer-architecture",
+  "package": null,
+  "priority": "P2",
+  "creator": "lizhi",
+  "assignee": "lizhi",
+  "createdAt": "2026-08-05",
+  "completedAt": "2026-09-09",
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "08-05-health-bounded-history",
+    "08-05-architecture-quality-baseline",
+    "08-18-openapi-contract-gates"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "2026-09-09 开发收尾完成；61 项路由相关行为测试、Web lint/typecheck/build 和独立检查通过。未执行的完整矩阵不记 PASS，未实施的 WP3–6 大型方案不冒充完成。",
+  "meta": {
+    "lean_closeout": {
+      "evidence": "research/route-recovery-closeout.md",
+      "scope_decision": ".trellis/tasks/07-16-product-delivery/research/lean-closeout-2026-09-08.md",
+      "deployment": "not_performed"
+    }
+  }
+}

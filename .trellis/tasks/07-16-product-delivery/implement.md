@@ -1,5 +1,9 @@
 # ZHIXU 产品级建设实施清单
 
+> 当前增量 [OpenAPI 兼容修复](research/openapi-compatibility-fix.md) 已完成：Interview/Conversation、公共路由、OpenAPI 与 Web 已集成，固定原基线 0 error / 0 warning，必要验证与独立检查通过。修复尚未重新部署；M11 继续暂缓。源码已按后续授权提交为 `789692e2`，本批次推送目标为 `origin/dev`。
+
+> **2026-09-09 本轮执行结果**：原始 TODO2 的动态工具调用循环已按 [本轮 PRD](research/todo2-dynamic-loop-prd.md) 补齐并通过真实整栈验证；TODO4 与已有开发收尾已核对，已交付任务关闭，本机 Docker 统一重建部署成功。下表旧首期的“已完成”只证明当时范围，动态需求有新的独立证据。M11 保持暂缓；实际迁移、HTTP/页面、数据保留与本机原有模型禁用限制见 [统一交付记录](research/final-integration-2026-09-09.md)。
+
 > 本文件是复杂任务的执行顺序和验证门禁。规划已获批准并进入持续实施；状态以代码、子任务归档和实际验证为准，不以早期计划表中的默认值推断完成度。
 
 ## 1. Milestones
@@ -16,15 +20,16 @@
 | M7 | Graph/Collection/Health/Timeline | 图谱可操作、候选可确认、问题可追踪、集合不复制事实 |
 | M8 | Artifact/Review/Interview/Memory | 产物、复习、评分、FSRS、记忆生命周期可用 |
 | M9 | 前端业务页面与表格能力 | 主要页面、Diff、图谱、表格、SSE、错误和空状态可用 |
-| M10 | 安全、性能、可观测与部署 | 安全负测、容量基线、审计、备份恢复、Docker Smoke 通过 |
-| M11 | 全量测试、文档和发布验收 | `docs/requirements.md` AC-01..AC-41、14 步演示、六条 seam 和交付包全部通过 |
+| M10 | 安全、性能、可观测与部署 | 现有安全/运行基线、容量工具、审计查询和最小停写备份恢复交付，必要验证通过；完整矩阵移出本轮门禁 |
+| M11 | 全量测试、文档和发布验收 | `docs/requirements.md` AC-01..AC-42、14 步演示、六条 seam 和交付包全部通过 |
 
-## 当前发布收口状态
+## 当前开发与发布状态
 
-- 当前登记的 33 个 child 均已归档；该计数只表示 `33/33 children done`，不表示父任务完成。
-- M10-01、M10-03、M10-04、M11-01、M11-02、M11-03 均为部分完成，剩余边界见本表状态列与 `prd.md`。
+- 当前登记 35 个 child；计数只表示各 child 的约定交付范围，不表示父任务或 M11 完成。
+- 2026-09-08 至 09-09 按用户要求完成非 GORM、非 M11 精简收尾；具体实现/验证见 [收尾记录](research/lean-closeout-2026-09-08.md)。完整测试矩阵、长期观察与大型重构不再阻塞开发归档。
 - M10-02 已完成；M9-03 已满足当前导出范围，`EVALUATION_JSON`/`AUDIT_JSON` 不再作为缺口。
-- 最终验收以 `docs/requirements.md` AC-01..AC-41 和 `prd.md#final-demonstration` 的 14 步演示为准。
+- TODO2/TODO4 与统一部署已完成：Atlas 00099、Runtime ready，新 API/页面上线，原 Workspace/数据/密钥保留。本机 Chat/Embedding 保持升级前的 disabled 状态，现场 AI 准入尚未启用。随后 OpenAPI 兼容修复已清零原 21/5 报告，修复代码尚未重新部署。
+- 最终验收以 `docs/requirements.md` AC-01..AC-42 和 `prd.md#final-demonstration` 的 14 步演示为准。
 
 ## 2. Ordered Task Table
 
@@ -67,13 +72,13 @@
 | M9-02 | M9 | Proposal Revision 编辑、三方合并、历史和重新审批 | `internal/changecontrol/**`, `web/src/features/business/**`, `api/openapi/**` | M5-03,M5-04 | 复用已有 merge/domain/HTTP/组件验证；本轮定向修复旧库升级 | 历史数据升级失败 | 子 Agent | 功能已实现；旧库迁移兼容、历史保持、重复升级、失败回滚重试与非法回填拒绝已通过必要实库回归，见 [M9 修复记录](research/m9-legacy-upgrade-2026-09-08.md)。完整浏览器/资源/并发矩阵不在此次修复范围，未执行不记 PASS。 |
 | M9-03 | M9 | 实现异步导出任务、脱敏、权限/过期和结果追踪 | `internal/export/**`, `web/src/features/{collections,settings}/**` | M7-03,M1-04 | Markdown/JSON/附件导出、权限/过期、任务恢复；复用已交付 Collection 三视图 | 擅自引入 XLSX/CSV | 子 Agent | 当前范围完成：Collection `MARKDOWN|METADATA_JSON` 与 Workspace `ATTACHMENTS_ZIP` 已交付，AC-33 已关闭。`EVALUATION_JSON`、`AUDIT_JSON`、CSV/XLSX 已移出当前产品范围，不作为 M9 残留。 |
 | M9-04 | M9 | 实现统一 SSE Event Store、重连、查询失效和异步 UX | `web/src/events/**`, `internal/presentation/sse/**` | M1-04,M4-02 | Last-Event-ID、超窗重查、页面刷新恢复 | SSE 被当事实源 | 子 Agent | 已完成：Workspace 唯一连接、Last-Event-ID、权威回查、定向失效、切换清理和 RAG 迁移已交付 |
-| M10-01 | M10 | 实现 slog/OTel/Metrics/append-only Audit/Secret Redaction | `internal/audit/**`, `internal/platform/observability/**` | M4-01,M5-03,M6-03 | correlation、重试不重复审计、敏感字段扫描 | 日志泄密 | 子 Agent | 部分完成：slog/Secret Redaction、OTel exporter、API/Worker Prometheus 与 append-only Audit store/部分生产者已交付；跨领域生产者覆盖、查询、留存/归档和恢复演练仍待完成。 |
+| M10-01 | M10 | slog/OTel/Metrics/append-only Audit 与最小查询 | `internal/audit/**`, `cmd/audit/**`, `internal/platform/observability/**` | M4-01,M5-03,M6-03 | 有界查询、作用域与安全输出的必要验证 | 日志泄密 | 子 Agent | 已按精简范围交付：显式 Workspace/global、只读连接、有界分页/超时及固定安全摘要查询，镜像打包已补；Go 单测/vet、隔离实库和 Linux 构建通过。见 [审计记录](research/audit-closeout.md)；全域审计 UI/自动归档平台移出范围。 |
 | M10-02 | M10 | 完成认证、Session/Token、CSRF/Origin、Capability 和安全负测 | `internal/auth/**`, `internal/tools/**`, `web/**` | M1-04,M6-03 | auth/security suite 全通过 | 自托管越权 | 主 Agent + 子 Agent | 已完成：工作提交 `1d2e341`；单用户 Auth、Cookie Session、受限 API Token、CSRF/Origin、Capability、真实 PostgreSQL/Compose smoke、全量 Go/Web/OpenAPI 门禁与独立复验均通过。 |
-| M10-03 | M10 | 完成 50 万容量、EXPLAIN、图谱和前端性能基线 | `internal/capacity/**`, `internal/{graph,retrieval}/**`, `deploy/capacity-benchmark.sh`, `web/e2e/**` | M6-01,M7-01,M9-03 | `make benchmark-capacity`; P95 或 ADR 记录 | 性能预算不达标 | 子 Agent | 部分完成：确定性 500k 数据 harness、graph/retrieval 正式 P95/EXPLAIN runner 已存在；缺目标环境完整运行产物和达到阈值的真实 Graph render/layout/interaction FPS 证据。 |
-| M10-04 | M10 | 完成 Docker、Readiness、Migration Job、备份/恢复/一致性演练 | `deploy/**`, `cmd/migrate/**`, `docs/operations.md` | M1-03,M5-04,M10-01 | `docker compose -f deploy/compose.yml up -d --wait`; restore/consistency drill | 灾难不可恢复 | 子 Agent | 部分完成：Docker/Compose、依赖感知 readiness、Migration Job 和真实启动 smoke 已交付；备份工具、临时实例 restore drill 与可执行 consistency drill 尚未实现。 |
-| M11-01 | M11 | 完成六条 seam、需求矩阵与用户指南最终演示和 Playwright E2E | `web/e2e/**`, `deploy/*smoke*.sh`, `testdata/**` | M5–M10 | 固定 Fixture 14 步场景通过 | E2E 只测假页面 | 主 Agent + 子 Agent | 部分完成：Artifact、Graph/Health、Collection/Review/Interview/Export 有局部真实浏览器 smoke，Knowledge Change/RAG 有 Compose/API smoke；缺统一六 seam Playwright、若干完整用户链路和 14 步最终演示。 |
-| M11-02 | M11 | 完成 AI Eval、关系/文章/图谱/Review 回归门禁 | `eval/**`, `docs/architecture/quality.md`, `docs/requirements.md` | M2-02,M6-02,M8-02,M11-01 | 指标基线、高风险下降非零退出 | 质量只看通过率 | 子 Agent | 部分完成：Agent 与 Semantic Link 两套确定性门禁可运行；缺 Article、Artifact、Graph、Review/Interview 等版本化套件、真实 Provider 门禁、批准 baseline 比较和统一回归入口。 |
-| M11-03 | M11 | 完成全量 review、文档同步、SBOM、运行/部署/回滚说明和交付包 | `README.md`, `docs/**`, `deploy/**`, `Makefile` | 全部前置 | `make verify`; 文档与行为逐项核对 | 漏交付物 | 主 Agent | 部分完成：README、MIT License、运行/部署/回滚文档和 Docker 基线已存在；缺统一 `make verify`、SBOM、漏洞/镜像扫描、发布包/校验和、全量发布 CI 和最终 review 证据。 |
+| M10-03 | M10 | 交付容量工具与有界查询基线 | `internal/capacity/**`, `internal/{graph,retrieval}/**`, `deploy/capacity-benchmark.sh` | M6-01,M7-01,M9-03 | 按实际性能问题选择已有工具 | 容量阈值未实测 | 子 Agent | 按精简范围交付：500k harness、P95/EXPLAIN runner 已有；完整目标环境运行与正式 Graph FPS 未执行，不保留为开发欠项，也不宣称阈值通过。 |
+| M10-04 | M10 | Docker/readiness/migration 与最小停写备份恢复 | `deploy/**`, `cmd/migrate/**`, `docs/operations.md` | M1-03,M5-04,M10-01 | 参数/文件保护、隔离样例备份读取与恢复 | 停写/数据身份前提 | 子 Agent | 已按精简范围交付：`backup.py create/verify`、单 Root/Git＋整库、私有 marker/hash 和新目标还原步骤。10 条保护测试与隔离 PG18 基本恢复通过，见 [备份记录](research/backup-closeout.md)；完整应用一致性/灾备/跨机和自动修复未执行或未实现，移出本轮范围。 |
+| M11-01 | M11 | 完成六条 seam、需求矩阵与用户指南最终演示和 Playwright E2E | `web/e2e/**`, `deploy/*smoke*.sh`, `testdata/**` | M5–M10 | 固定 Fixture 14 步场景通过 | E2E 只测假页面 | 主 Agent + 子 Agent | 按用户要求延后，未在本轮执行：Artifact、Graph/Health、Collection/Review/Interview/Export 有局部真实浏览器 smoke，Knowledge Change/RAG 有 Compose/API smoke；缺统一六 seam Playwright、若干完整用户链路和 14 步最终演示。 |
+| M11-02 | M11 | 完成 AI Eval、关系/文章/图谱/Review 回归门禁 | `eval/**`, `docs/architecture/quality.md`, `docs/requirements.md` | M2-02,M6-02,M8-02,M11-01 | 指标基线、高风险下降非零退出 | 质量只看通过率 | 子 Agent | 按用户要求延后，未在本轮执行：Agent 与 Semantic Link 两套确定性门禁可运行；缺 Article、Artifact、Graph、Review/Interview 等版本化套件、真实 Provider 门禁、批准 baseline 比较和统一回归入口。 |
+| M11-03 | M11 | 完成全量 review、文档同步、SBOM、运行/部署/回滚说明和交付包 | `README.md`, `docs/**`, `deploy/**`, `Makefile` | 全部前置 | `make verify`; 文档与行为逐项核对 | 漏交付物 | 主 Agent | 按用户要求延后，未在本轮执行：README、MIT License、运行/部署/回滚文档和 Docker 基线已存在；缺统一 `make verify`、SBOM、漏洞/镜像扫描、发布包/校验和、全量发布 CI 和最终 review 证据。 |
 
 ## 3. Parallelization Rules
 
@@ -86,21 +91,24 @@
 
 ## 4. Per-Task Definition of Done
 
+本节按当前改动风险选用，不累加为每个开发任务的完整测试门禁；M11 与长期/跨环境矩阵按新版 PRD 分离。
+
 每项任务关闭前必须：
 
 1. 更新本任务状态和对应需求追踪。
 2. 读取目标模块 `.trellis/spec` 与相关 docs。
-3. 添加正常、边界、失败路径测试。
-4. 执行单测、集成/契约测试、lint/typecheck/compile 和受影响构建。
-5. 执行最小业务烟测，页面必须实际打开并操作。
+3. 为行为变更与真实缺陷保留有意义的回归证据，低影响文档/状态修改不新增形式化测试。
+4. 按受影响范围运行必要单测、集成/契约、lint/typecheck/compile 和构建，已有同版本有效证据可复用。
+5. 对需要实际运行才能确认的行为补最小烟测，不把完整页面/浏览器矩阵作为每次开发关闭的统一前置。
 6. 检查 diff，确认无第二事实源、静默 fallback、吞异常或未授权写入。
-7. 运行适用的 `go-review`、`code-review-and-quality`、`sql-code-review` 或前端质量审查。
+7. 运行适用的 Go 或前端/脚本质量审查；SQL 与数据边界并入同一次检查，不叠加同义流程。
 8. 同步 API、迁移、配置、产品/架构/运行文档。
 
 ## 5. Canonical Verification Commands
 
-最终应提供并持续维护以下命令。当前 `make test`、`rag-integration`、`openapi-check`、Compose
-Search/Tool/RAG smoke 等入口已存在；下列尚不存在的最终发布命令仍由 M10/M11 补齐，不能视为已通过：
+本轮实际命令、结果和未执行边界集中在 [收尾记录](research/lean-closeout-2026-09-08.md)。必要检查覆盖路由组件、审计查询、历史迁移兼容与备份工具，未重跑全仓矩阵。
+
+当前 `make test`、`rag-integration`、`openapi-check`、Compose Search/Tool/RAG smoke 等入口已存在。以下保留为 M11 的候选发布编排，不表示所有命令均已实现或本轮必须运行；最终采用范围由 M11 明确：
 
 ```bash
 make verify
@@ -120,11 +128,9 @@ make e2e
 make eval-regression
 make security-test
 make benchmark-capacity
-make backup
-make restore-drill
-make consistency-drill
-docker compose -f deploy/compose.yml down -v
 ```
+
+备份直接使用 `python3 deploy/backup.py create` / `verify`，新目标恢复步骤见运行手册；不为额外 Make 包装或大型灾备矩阵挂开发欠项。清理只允许针对验证自行创建的隔离资源，禁止把 `down -v` 当作用户安装的常规验收步骤。
 
 ## 6. Rollback Points
 

@@ -222,7 +222,7 @@ git diff --check
   commit 前失败（`MODEL_CHAT_REQUEST_FAILED`）；active revision 2（原 disabled 配置）保持不变，本地 runtime stopped。恢复出口后需要重新 Apply，
   不能把 restart 当成应用 pending desired。
 
-本轮未执行、仍保留为发布门禁：原生 Linux、真实公网 Provider 出口、Docker daemon restart、显式强制 child crash/signal/reap、
+以下扩展矩阵未执行；2026-09-08 按用户要求移出开发交付门禁，保留支持边界说明：原生 Linux、真实公网 Provider 出口、Docker daemon restart、显式强制 child crash/signal/reap、
 浏览器闭环、旧 generation 在途停止栅栏、真实 `0.9.6 -> 0.32.9` legacy migration 和多架构验收。
 
 ## 5. Review Gates

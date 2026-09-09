@@ -1,8 +1,0 @@
-{"file":".trellis/spec/backend/quality-guidelines.md","reason":"检查 Go、数据库、集成、故障与交付门禁"}
-{"file":".trellis/spec/backend/database-guidelines.md","reason":"检查无界查询、分页、索引、迁移和事务风险"}
-{"file":".trellis/spec/backend/error-handling.md","reason":"检查 Problem、兼容性与错误分类"}
-{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"检查 TypeScript、测试、构建与浏览器恢复路径"}
-{"file":".trellis/spec/frontend/type-safety.md","reason":"检查 runtime decoder 和边界类型安全"}
-{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"检查抽象是否消除真实重复且未引入大共享层"}
-{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"检查 API、后端、前端和 CI 数据流完整性"}
-{"file":".trellis/tasks/08-05-architecture-quality-optimization/research/audit-baseline.md","reason":"对照原始风险、数量基线和已验证盲区"}

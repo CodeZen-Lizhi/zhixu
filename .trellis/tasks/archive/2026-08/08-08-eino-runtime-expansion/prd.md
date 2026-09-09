@@ -45,20 +45,20 @@
 - [x] 旧 direct Chat/Embedding/scheduler、selector、legacy metric、专用 Claim exclusion/drain guard 和部署回滚入口全部删除；历史 v1 持久回放保持 Eino-backed。稳定观察不是删除前置条件。
 - [x] Go/前端/SQL review、相关测试、race、vet、OpenAPI、Compose、浏览器桌面/移动 UI 烟测和 `git diff --check` 全部通过；2026-08-12 当前树已完成真实 Provider 桌面/移动多帧终态、全仓与高风险 race 门禁，并在独立 PostgreSQL 18 + pgvector 实例中验证 River replay/fence、草稿与 Finalizer 事务合同。
 - [x] ADR、架构、运维、README、项目介绍和面试材料已同步为 Eino-only 生产路径；历史 ADR/演练作为迁移证据保留，材料明确区分已通过的外部 Provider live gate、host-relay 浏览器闭环、尚未证明的容器直连外部 TLS 路径和真实稳定观察。
-- [ ] 受保护 Collector 已在真实 Prometheus/Tempo 查询面连续采集至少 7 个完整自然日、累计至少 100 个非 replay RAG v2 终态；固定阈值、backend trust、逐份 evidence HMAC 和最终 attestation 均经独立 verifier 验收为 `passed`。（独立发布质量证据；不阻塞本任务归档，当前仍为 `incomplete`。）
+- 可选运营观察（2026-09-08 移出开发交付门禁，未执行）：受保护 Collector 已在真实 Prometheus/Tempo 查询面连续采集至少 7 个完整自然日、累计至少 100 个非 replay RAG v2 终态；固定阈值、backend trust、逐份 evidence HMAC 和最终 attestation 均经独立 verifier 验收为 `passed`。（独立发布质量证据；不阻塞本任务归档，当前仍为 `incomplete`。）
 
 ## Current Baseline
 
 - 已完成并有本地证据：Chat、Embedding、五类 Structured Scheduler、Compose/Worker 默认使用 Eino；Eino Graph 驱动 RAG 路由，`RAGExecutor` 保留领域节点；classic Agent/ToolsNode、tool-free final Stream、短引用 metadata envelope、PostgreSQL draft/SSE、Finalizer 和前端草稿路径已实现；ModelCall/RunBudgetLedger、Eino 类型隔离及真实 PostgreSQL/River `make rag-integration` 已通过。Agent、ANSWER 和 metadata 三类模型输入只携带 `E*/C*/T*` 投影，Tool bridge 在项目侧恢复完整 Citation tuple 并脱敏模型可见结果。
 - 当前工作树的 `make compose-rag-smoke` 使用真实进程和 Eino Runtime fixture，覆盖 direct-return Agent Tool Calling、`ReadSource@2` receipt、最终多帧 Stream、metadata、Review、原子 `PUBLISHED` 与 exact replay；其精确 ModelCall 序列为 `PLAN,AGENT,ANSWER,INITIAL,REVIEW`。早期真实 Ollama 复验暴露并验证修复了 Attempt budget 与慢模型超时问题；2026-08-12 当前树最终以外部 OpenAI-Compatible Chat host relay 和原生 Ollama Embedding 完成同一 Eino 链路，且最终指纹化网络扫描版本的桌面/移动浏览器分别在正式发布前观察到 2/8 个连续非空草稿 SSE chunk 事件。
 - 历史回滚门禁证据已归档：旧树曾由 `make compose-rag-rollback-smoke` 真实执行 managed modelctl 的 preflight/drain/quiesce/prepared/commit，完成 Eino→direct→Eino；该脚本、overlay、专用 Claim exclusion/drain guard 和排空索引已按 2026-08-11 决策删除，当前恢复依赖 Git 发布记录，不再切换 AI 实现。正常 managed revision drain 与真实 PostgreSQL/River 竞态合同继续保留。
-- 已实现正式 OTLP/HTTP Metrics+Trace Provider，并在 API/Worker Composition 注入；本地接收器合同验证了真实导出路径，但不把本地接收器当作发布观察证据。稳定观察的不可伪造门禁见 [`Eino Runtime 稳定发布观察 Runbook`](../../../docs/architecture/runbooks/eino-stable-observation.md)：受保护采集器固定 Prometheus/Tempo 查询、阈值与 backend trust，以逐份 HMAC evidence 绑定完整 manifest，并由 `make eino-stable-observation-verify` 独立复核 evidence、连续窗口、样本、hash chain 和最终 attestation。阈值、backend trust 与 attestation trust policy 仍为 `unconfigured`，真实观察尚未执行。
+- 已实现正式 OTLP/HTTP Metrics+Trace Provider，并在 API/Worker Composition 注入；本地接收器合同验证了真实导出路径，但不把本地接收器当作发布观察证据。稳定观察的不可伪造门禁见 [`Eino Runtime 稳定发布观察 Runbook`](../../../../../docs/architecture/runbooks/eino-stable-observation.md)：受保护采集器固定 Prometheus/Tempo 查询、阈值与 backend trust，以逐份 HMAC evidence 绑定完整 manifest，并由 `make eino-stable-observation-verify` 独立复核 evidence、连续窗口、样本、hash chain 和最终 attestation。阈值、backend trust 与 attestation trust policy 仍为 `unconfigured`，真实观察尚未执行。
 - 完整浏览器门禁支持 `direct|host-relay` 网络传输和独立 Chat/Embedding Provider 选择。离线 preflight 已证明缺配置/HTTP URL fail closed、app/worker Eino 装配一致且不输出 endpoint/Credential；2026-08-12 完整 gate 又实际证明 host-relay 外部 Chat + 本地 Ollama Embedding 能通过 metadata、REVIEW、草稿发布及桌面/移动浏览器多帧终态。浏览器回执记录首次草稿观察延迟；Provider 首 Token 延迟由 `agent.answer.first_token.duration_ms` 指标记录，二者不得混称。
 - `make eino-live-smoke` 已独立证明当前生产 Adapter 对外部 HTTPS OpenAI-Compatible Chat/Embedding、原生 Ollama Embedding 及三类结构化阶段的真实协议兼容。host-relay 浏览器成功不等于容器直连外部 HTTPS 网络路径通过；真实稳定观察也仍未执行。稳定观察作为独立发布质量证据，不决定是否保留第二套 Runtime，旧 direct 已按 2026-08-11 决策删除；本任务已按用户决定归档为 `completed`，不等待该观察窗口。
 
 ## Completion Decision (2026-08-25)
 
-本任务的 Eino-only 生产迁移、真实 Provider/live gate、浏览器闭环和既定质量门禁已经完成并归档为 `completed`。按用户决定，连续 7 天/100 个终态的稳定观察不再作为本任务完成或删除旧 direct 实现的前置条件；它仍是独立的发布质量证据，必须由受保护 Collector 和 verifier 真实采集，当前不得宣称 `passed`。
+本任务的 Eino-only 生产迁移、真实 Provider/live gate、浏览器闭环和既定质量门禁已经完成并归档为 `completed`。按用户决定，连续 7 天/100 个终态的稳定观察不再作为本任务完成或删除旧 direct 实现的前置条件；2026-09-08 用户进一步明确将其作为可选运营观察，不保留为待完成开发任务；若后续选择执行，仍须真实采集，不得宣称当前已 `passed`。
 
 ## Non-Goals
 

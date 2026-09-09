@@ -1,0 +1,386 @@
+{
+  "head": "68cea9ef486d98f693ff984e9980aa0f297b21ff",
+  "branch": "dev",
+  "entries": [
+    {
+      "status": " M",
+      "path": ".trellis/spec/backend/auth-security.md",
+      "sha256": "ec88f14c119be46d3304fb6b98b7584a313e01a9d5716cf53f02b43ab26a3af9"
+    },
+    {
+      "status": " M",
+      "path": ".trellis/spec/backend/database-guidelines.md",
+      "sha256": "46010e2013db16adea0534a57156d7cb7958ca1aad4d06da1376d089d99d5453"
+    },
+    {
+      "status": " M",
+      "path": ".trellis/spec/backend/logging-guidelines.md",
+      "sha256": "ef4b8140a943fd4651e74c36fab7918a84da5a38b9db6742f2121fddad2d5862"
+    },
+    {
+      "status": " M",
+      "path": ".trellis/spec/backend/quality-guidelines.md",
+      "sha256": "f9e0710ae342d686c3c1252e1d93ba82421a604135fac045665031f68d837d90"
+    },
+    {
+      "status": " M",
+      "path": ".trellis/spec/frontend/component-guidelines.md",
+      "sha256": "897409be22c464402ef2eab611c99f5b02121df20b9a8781bd32fd8497bc55d7"
+    },
+    {
+      "status": " M",
+      "path": ".trellis/spec/frontend/quality-guidelines.md",
+      "sha256": "b736d3fde66e93336918cc6da686e51da4e2909efcf91d33dbb33bff23b4396a"
+    },
+    {
+      "status": " M",
+      "path": ".trellis/tasks/07-16-product-delivery/check.jsonl",
+      "sha256": "068182347becb1d72d221ffcaa5a8b073e7f63b102f56b61b61e9b3177d07802"
+    },
+    {
+      "status": " M",
+      "path": ".trellis/tasks/07-16-product-delivery/design.md",
+      "sha256": "769edb117e0928984aaa378147b4a1970223dd2cac76e3b62a6267a8a2b785c0"
+    },
+    {
+      "status": " M",
+      "path": ".trellis/tasks/07-16-product-delivery/implement.jsonl",
+      "sha256": "cfb3a74808808efa489bdd4d22f8acb3392795f4e4fe3d09d4611ed41794f0e9"
+    },
+    {
+      "status": " M",
+      "path": ".trellis/tasks/07-16-product-delivery/implement.md",
+      "sha256": "0ac515e746014d708d6d9258ae9cfa03103ff46eae83952347ddf268f6593dbf"
+    },
+    {
+      "status": " M",
+      "path": ".trellis/tasks/07-16-product-delivery/prd.md",
+      "sha256": "90fa93817f2aa4a62ab993119c380659584eced2825b12d05f0e6d8c035784f2"
+    },
+    {
+      "status": " M",
+      "path": ".trellis/tasks/07-16-product-delivery/task.json",
+      "sha256": "b166e24c4675969910fc1de41591d3b8bb3ba9b22f74d1930e257657245427d4"
+    },
+    {
+      "status": " M",
+      "path": ".trellis/tasks/08-05-architecture-quality-optimization/check.jsonl",
+      "sha256": "28740d46bc8d0b8307933171bbe404d63bc11397bea977aae618e89a5c5066d5"
+    },
+    {
+      "status": " M",
+      "path": ".trellis/tasks/08-05-architecture-quality-optimization/design.md",
+      "sha256": "e0327ab511113d31f0d2c002c7712d97ed0177acc2292009277f0423cdcd08f1"
+    },
+    {
+      "status": " M",
+      "path": ".trellis/tasks/08-05-architecture-quality-optimization/implement.jsonl",
+      "sha256": "5f8401234ad2c30192e7c4c2588139fd5950b3120d814251d09258a045f49323"
+    },
+    {
+      "status": " M",
+      "path": ".trellis/tasks/08-05-architecture-quality-optimization/implement.md",
+      "sha256": "c630cecb60f2e69a5b9b5f9007e7259dfd1d69456322ab226585b9b3c76b5d73"
+    },
+    {
+      "status": " M",
+      "path": ".trellis/tasks/08-05-architecture-quality-optimization/prd.md",
+      "sha256": "bddc300cab367b3b6b3571e360fa20cc44afd388156822ec3a1ac6123beb0233"
+    },
+    {
+      "status": " M",
+      "path": ".trellis/tasks/08-05-architecture-quality-optimization/task.json",
+      "sha256": "f1ed852920e6e4d32159f2c607aa9d3b958784ce25dc65eaf19ffa52b4e94629"
+    },
+    {
+      "status": " D",
+      "path": ".trellis/tasks/08-14-gin-contrib-sessions-evaluation/check.jsonl"
+    },
+    {
+      "status": " D",
+      "path": ".trellis/tasks/08-14-gin-contrib-sessions-evaluation/design.md"
+    },
+    {
+      "status": " D",
+      "path": ".trellis/tasks/08-14-gin-contrib-sessions-evaluation/implement.jsonl"
+    },
+    {
+      "status": " D",
+      "path": ".trellis/tasks/08-14-gin-contrib-sessions-evaluation/implement.md"
+    },
+    {
+      "status": " D",
+      "path": ".trellis/tasks/08-14-gin-contrib-sessions-evaluation/prd.md"
+    },
+    {
+      "status": " D",
+      "path": ".trellis/tasks/08-14-gin-contrib-sessions-evaluation/research/current-session-contract.md"
+    },
+    {
+      "status": " D",
+      "path": ".trellis/tasks/08-14-gin-contrib-sessions-evaluation/research/session-framework-coverage.md"
+    },
+    {
+      "status": " D",
+      "path": ".trellis/tasks/08-14-gin-contrib-sessions-evaluation/task.json"
+    },
+    {
+      "status": " D",
+      "path": ".trellis/tasks/08-15-workspace-agent-user-flow/check.jsonl"
+    },
+    {
+      "status": " D",
+      "path": ".trellis/tasks/08-15-workspace-agent-user-flow/design.md"
+    },
+    {
+      "status": " D",
+      "path": ".trellis/tasks/08-15-workspace-agent-user-flow/implement.jsonl"
+    },
+    {
+      "status": " D",
+      "path": ".trellis/tasks/08-15-workspace-agent-user-flow/implement.md"
+    },
+    {
+      "status": " D",
+      "path": ".trellis/tasks/08-15-workspace-agent-user-flow/prd.md"
+    },
+    {
+      "status": " D",
+      "path": ".trellis/tasks/08-15-workspace-agent-user-flow/research/phase0-public-contracts.md"
+    },
+    {
+      "status": " D",
+      "path": ".trellis/tasks/08-15-workspace-agent-user-flow/research/post-fact-rollback-routing.md"
+    },
+    {
+      "status": " D",
+      "path": ".trellis/tasks/08-15-workspace-agent-user-flow/research/runtime-persistence.md"
+    },
+    {
+      "status": " D",
+      "path": ".trellis/tasks/08-15-workspace-agent-user-flow/research/stop-double-409.md"
+    },
+    {
+      "status": " D",
+      "path": ".trellis/tasks/08-15-workspace-agent-user-flow/research/terminal-fault-matrix.md"
+    },
+    {
+      "status": " D",
+      "path": ".trellis/tasks/08-15-workspace-agent-user-flow/research/tool-security-user-flow.md"
+    },
+    {
+      "status": " D",
+      "path": ".trellis/tasks/08-15-workspace-agent-user-flow/task.json"
+    },
+    {
+      "status": " M",
+      "path": ".trellis/tasks/archive/2026-08/08-08-eino-runtime-expansion/prd.md",
+      "sha256": "3bc78ed18ee3eefbaddc78761ee9b7a83ee28101cd4d92e9c4e8da057d8b0a7e"
+    },
+    {
+      "status": " M",
+      "path": ".trellis/tasks/archive/2026-08/08-11-docker-restart-recovery/implement.md",
+      "sha256": "e0bb7395c5aaf5474137cad7b8a0b820f293c40ff5c1977c97e366060cacf010"
+    },
+    {
+      "status": " M",
+      "path": ".trellis/tasks/archive/2026-08/08-11-managed-ollama-lifecycle/implement.md",
+      "sha256": "cd3cc5d5ab78f1abc2dbeffd431bf8840791c553f07a7711002ade633fef82d6"
+    },
+    {
+      "status": " M",
+      "path": ".trellis/tasks/archive/2026-08/08-14-proposal-revision-three-way-merge/implement.md",
+      "sha256": "bf0469b417a60b596f8600120160bd66e1f64a1ffada2235df5af910db32756c"
+    },
+    {
+      "status": " M",
+      "path": ".trellis/tasks/archive/2026-08/08-14-proposal-revision-three-way-merge/prd.md",
+      "sha256": "b045590fc9d8a06ee2055d3b10048dcbf8351f3fc7247a06c5386d7492b127bf"
+    },
+    {
+      "status": " M",
+      "path": ".trellis/tasks/archive/2026-09/08-18-gorm-data-access-migration/prd.md",
+      "sha256": "ab545fb202ab7dc49bf783afbed24b2ee08410b6ffb464d4405e3bbdfe1f6026"
+    },
+    {
+      "status": " M",
+      "path": ".trellis/tasks/archive/2026-09/08-19-gorm-composition-pgx-convergence/prd.md",
+      "sha256": "470f7454aff19df92fd40dd9de428dbff9cad3ed3c43925e8263b02e369e8825"
+    },
+    {
+      "status": " M",
+      "path": ".trellis/tasks/archive/2026-09/08-19-gorm-composition-pgx-convergence/research/changecontrol-final.md",
+      "sha256": "1177e20c58e6b63a22abc85ae65b500bf18b478d5c6cef88380efd22361485c8"
+    },
+    {
+      "status": " M",
+      "path": ".trellis/tasks/archive/2026-09/08-19-gorm-composition-pgx-convergence/research/final-acceptance.md",
+      "sha256": "777eb290e947304f4c88621ef3cd77a948b4a286f1a68c3dd06b440adf28db9d"
+    },
+    {
+      "status": " M",
+      "path": ".trellis/tasks/archive/2026-09/08-19-gorm-composition-pgx-convergence/research/final-quality-check.md",
+      "sha256": "ba752f1e53d034ded0ec85856463b61402711333bdd043d48bb06cbe6d852e93"
+    },
+    {
+      "status": " M",
+      "path": "atlas/migrations/atlas.sum",
+      "sha256": "51955b10fb5a24e6e3e60a8f01890ca165d79fb873103436636cc111ab56f2b1"
+    },
+    {
+      "status": " M",
+      "path": "deploy/Dockerfile",
+      "sha256": "86424e8bd7cff40837f861bc3f76b09960589ae1360c3c9456f20711f7ad417d"
+    },
+    {
+      "status": " M",
+      "path": "docs/architecture/adr/0029-atlas-sole-schema-migration.md",
+      "sha256": "43175c61d9eb22b025638d23e46024a286e78ecb8f3291a63e171866edb0393d"
+    },
+    {
+      "status": " M",
+      "path": "docs/architecture/adr/README.md",
+      "sha256": "8cabf7def36ceeec9c593acf950400e294d6eb773c2d13930d4aeaa3734bc2c8"
+    },
+    {
+      "status": " M",
+      "path": "docs/architecture/quality.md",
+      "sha256": "337f4de1c70944cbe93e4d36a578a4411805db6baf4aae6dcd3c42909eaef088"
+    },
+    {
+      "status": " M",
+      "path": "docs/architecture/runbooks/eino-stable-observation.md",
+      "sha256": "d207c11c961265a81a403d30716efbd93169d40edf0c05716644bbf2f4d4d191"
+    },
+    {
+      "status": " M",
+      "path": "docs/architecture/runbooks/gorm-persistence-rollout.md",
+      "sha256": "8a47cbe98fd54a1179c7df8b2e7fac48d7f65efbcdb9b5198b00086c9f2e1f0b"
+    },
+    {
+      "status": " M",
+      "path": "docs/architecture/runbooks/workspace-analysis-rollout.md",
+      "sha256": "a0ddc40da54b2035799dd9370b1eb42aa7119092c535713ef90b6f4106c48632"
+    },
+    {
+      "status": " M",
+      "path": "docs/operations.md",
+      "sha256": "7f5ff513de510b03f69c7685394d51d517d5e4303d7660d25a9c3d45883bacdb"
+    },
+    {
+      "status": " M",
+      "path": "docs/requirements.md",
+      "sha256": "ceac80aa0b17bf80a074104cfa8d76f7f7316905a95f677e5de086f2a40c639c"
+    },
+    {
+      "status": " M",
+      "path": "docs/roadmap.md",
+      "sha256": "a5cc90d57e0e216b67308edba3ef10620aa7e3a40ad3f22fd78337f5d25a6694"
+    },
+    {
+      "status": " M",
+      "path": "internal/platform/migration/atlas_adoption_integration_test.go",
+      "sha256": "35c8b13cb9e3028b166e89fd3d78d9a71e9f2ec0bd5dac9991b7ba448214cbc7"
+    },
+    {
+      "status": " M",
+      "path": "internal/platform/migration/atlas_spike_integration_test.go",
+      "sha256": "6f144524a0289e455937a869db52a3e0210837c26332054d75d87a0c8761116e"
+    },
+    {
+      "status": " M",
+      "path": "internal/platform/migration/atlasrunner.go",
+      "sha256": "5e0d52501e4670949094a00a4a0779c15f4d8c7a1c08fa307af3c99ac2707a32"
+    },
+    {
+      "status": " M",
+      "path": "internal/platform/migration/runner_test.go",
+      "sha256": "569964253331b877e2fa81094f0647f99f47d20a78be3cc6e06ff03bfc4026c5"
+    },
+    {
+      "status": " M",
+      "path": "internal/platform/migration/workspace_analysis_tool_refusal_migration_test.go",
+      "sha256": "10b6ef9d5170632ddbfc0887406646b1a563ac48edccd472bfa57633612f10d7"
+    },
+    {
+      "status": " M",
+      "path": "web/src/app/AppShell.test.tsx",
+      "sha256": "39fa6ab5c43f36ba584f19d4803a76578957d71c1c15d3842da0334b161c683d"
+    },
+    {
+      "status": " M",
+      "path": "web/src/app/AppShell.tsx",
+      "sha256": "4b3a9ecdb85e4b1d92e5e68d6ed972eeb3a47e2bdae30492c67031fa2cf7807a"
+    },
+    {
+      "status": " M",
+      "path": "web/src/main.tsx",
+      "sha256": "8fec563b3c75ac56d1e0227f4052156df31acb84a596f481aae3e131dcfede67"
+    },
+    {
+      "status": "??",
+      "path": ".trellis/tasks/07-16-product-delivery/research/"
+    },
+    {
+      "status": "??",
+      "path": ".trellis/tasks/08-05-architecture-quality-optimization/research/route-recovery-closeout.md",
+      "sha256": "864bcab44558315c12cd56290b47c79da7585af9bcf6ab37e7ae1303fa1b5f95"
+    },
+    {
+      "status": "??",
+      "path": ".trellis/tasks/archive/2026-09/08-14-gin-contrib-sessions-evaluation/"
+    },
+    {
+      "status": "??",
+      "path": ".trellis/tasks/archive/2026-09/08-15-workspace-agent-user-flow/"
+    },
+    {
+      "status": "??",
+      "path": ".workbuddy/"
+    },
+    {
+      "status": "??",
+      "path": "atlas/migrations/00093_proposal_revision_backfill_compatibility.sql",
+      "sha256": "574cd24cdded4588c02f790284effa0861156fdc1aad63bf4fcd31b0e6f4ce3b"
+    },
+    {
+      "status": "??",
+      "path": "cmd/audit/"
+    },
+    {
+      "status": "??",
+      "path": "deploy/backup.py",
+      "sha256": "a3f476ed98666d2c25955c7bd043b4fe644a6965cd1d103cedd66edc84cb6d3e"
+    },
+    {
+      "status": "??",
+      "path": "deploy/backup_test.py",
+      "sha256": "24823d2ab27488ebbdf07869947d5b8087ef4b7ae3ac01112813f5837f8fa407"
+    },
+    {
+      "status": "??",
+      "path": "docs/architecture/adr/0030-retain-auth-session-boundary.md",
+      "sha256": "f88490f1cadb30fe7cf9d8f82406e0a47243af53683bf7de4a46a9a1f021932f"
+    },
+    {
+      "status": "??",
+      "path": "internal/platform/migration/proposal_revision_compatibility.go",
+      "sha256": "9542f40c23ff707f6c2403b2f61225a3dfef8fb3420eb055f00d1be2ba5071cd"
+    },
+    {
+      "status": "??",
+      "path": "internal/platform/migration/proposal_revision_compatibility_integration_test.go",
+      "sha256": "029f71c572d8f1061f1a11fa4d2adcd5ddd18671e60d1db75c70d76e0ad94c6e"
+    },
+    {
+      "status": "??",
+      "path": "web/src/routes/RouteContentBoundary.test.tsx",
+      "sha256": "e0ac0be63b90e973323933a9edabe079a6c200dc6d92926e51aa3af044614733"
+    },
+    {
+      "status": "??",
+      "path": "web/src/routes/RouteContentBoundary.tsx",
+      "sha256": "229bc54447086798e8e7b17335b3cb4f831d1db7751556b99420885617b23c27"
+    }
+  ]
+}

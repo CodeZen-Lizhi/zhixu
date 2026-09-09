@@ -21,4 +21,4 @@
 - Go Review 修复 Go 1.25 同步 timer channel 下取消路径可能阻塞的旧式 drain。
 - 验证通过：`go test -race ./cmd/runtimewait ./internal/platform/config ./internal/platform/postgres`、`go vet`、Compose/launcher contract、shell syntax、Compose config、`git diff --check`。
 - 真实 `./zhixu restart` 成功；app、worker、proxy 与两个 model relay 均 running，核心 health healthy，`/readyz` 返回 ready。
-- 未执行 Docker daemon 全局重启，避免影响同一 daemon 上其他项目；下一次真实 daemon restart 仍是最终环境级观察点。
+- 未执行 Docker daemon 全局重启，避免影响同一 daemon 上其他项目；2026-09-08 按用户要求取消其开发交付门禁，实际使用时如遇 daemon 恢复问题再排查，未执行不记 PASS。

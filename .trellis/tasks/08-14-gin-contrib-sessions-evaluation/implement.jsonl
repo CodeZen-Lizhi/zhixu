@@ -1,7 +1,0 @@
-{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python3 .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
-{"file": ".trellis/spec/backend/index.md", "reason": "后端模块边界和实现前门禁"}
-{"file": ".trellis/spec/backend/auth-security.md", "reason": "Session、Cookie、CSRF、Capability 与真实 PostgreSQL 安全契约"}
-{"file": ".trellis/spec/backend/http-boundary.md", "reason": "Gin 中间件和 HTTP Adapter 边界"}
-{"file": "docs/architecture/adr/0019-mature-framework-first.md", "reason": "80% 成熟框架覆盖和自研例外门禁"}
-{"file": ".trellis/tasks/08-14-gin-contrib-sessions-evaluation/research/current-session-contract.md", "reason": "现有 Session 所有权、并发和公开契约审计"}
-{"file": ".trellis/tasks/08-14-gin-contrib-sessions-evaluation/research/session-framework-coverage.md", "reason": "v1.1.0 强制约束和加权覆盖矩阵"}

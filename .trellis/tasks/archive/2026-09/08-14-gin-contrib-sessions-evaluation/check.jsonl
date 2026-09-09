@@ -1,0 +1,7 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python3 .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/spec/backend/auth-security.md", "reason": "复核认证安全与数据库行为不退化"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "跨层质量和验证门禁"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "复核唯一 PostgreSQL 事实源、事务和 SQL 边界"}
+{"file": "docs/architecture/adr/0019-mature-framework-first.md", "reason": "复核覆盖矩阵与不采用结论满足 ADR 门禁"}
+{"file": ".trellis/tasks/archive/2026-09/08-14-gin-contrib-sessions-evaluation/research/current-session-contract.md", "reason": "复核现有行为证据和已知契约缺口"}
+{"file": ".trellis/tasks/archive/2026-09/08-14-gin-contrib-sessions-evaluation/research/session-framework-coverage.md", "reason": "复核覆盖计算、不采用结论和重评触发条件"}

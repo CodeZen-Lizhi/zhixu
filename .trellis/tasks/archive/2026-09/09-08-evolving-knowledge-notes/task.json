@@ -1,0 +1,29 @@
+{
+  "id": "evolving-knowledge-notes",
+  "name": "evolving-knowledge-notes",
+  "title": "TODO 4：持续演进知识笔记",
+  "description": "已交付资料自动增量合成、不可变版本与来源、冲突/缺口、Proposal 审批/Git 写回及冻结已发布笔记的 AI 面试闭环；必要数据库与真实桌面/窄屏验证通过。",
+  "status": "completed",
+  "dev_type": "fullstack",
+  "scope": "evolving-knowledge-notes",
+  "package": null,
+  "priority": "P0",
+  "creator": "lizhi",
+  "assignee": "lizhi",
+  "createdAt": "2026-09-08",
+  "completedAt": "2026-09-09",
+  "branch": null,
+  "base_branch": "dev",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "2026-09-09 W1–W6、AC1–AC10 开发验收完成，第三轮真实 Compose/浏览器 PASS。独立数据/运行/面试/接线验证见 research。OpenAPI 新响应联合的 breaking gate 21 error/5 warning 保持可见，未来合入另按约定处理。M11 暂缓；本机统一部署由 07-16-product-delivery 接续；未提交/推送。",
+  "meta": {
+    "implementation_authorization": "2026-09-08 用户明确选择：由 Codex 完成规划，并继续开发到完成；不含 commit/push/部署。",
+    "development_evidence": "research/synthesis-compose-verification.md"
+  }
+}
