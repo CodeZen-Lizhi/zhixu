@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import { lazy, type ReactNode } from "react";
 import { AppShell } from "../app/AppShell";
+import { useActiveWorkspaceId } from "../app/active-workspace";
 import { useAuth } from "../app/auth-context";
 import { PageHeader, UnavailableState } from "../shared/ui";
 
@@ -38,6 +39,11 @@ const OrganizingPage = lazy(() => import("../features/organizing").then((module)
 
 const Shell = () => <AppShell />;
 
+const HomePage = () => {
+  const workspaceId = useActiveWorkspaceId();
+  return workspaceId === "" ? <WorkspacePage /> : <Navigate to="/authoring/notes" replace />;
+};
+
 const AuthenticatedPrincipalRoute = ({ children, title, description }: { children: ReactNode; title: string; description: string }) => {
   const { state } = useAuth();
   if (state.status === "authenticated" && state.mode === "required") return <>{children}</>;
@@ -51,7 +57,7 @@ const AuthenticatedPrincipalRoute = ({ children, title, description }: { childre
 export const AppRoutes = () => (
   <Routes>
     <Route element={<Shell />}>
-      <Route path="/" element={<WorkspacePage />} />
+      <Route path="/" element={<HomePage />} />
       <Route path="/dashboard" element={<DashboardPage />} />
       <Route path="/inbox" element={<BasicPages />} />
       <Route path="/captures/:captureId" element={<CaptureDetailPage />} />
@@ -86,6 +92,6 @@ export const AppRoutes = () => (
       <Route path="/chat" element={<RagPage />} />
       <Route path="/chat/:conversationId" element={<RagPage />} />
     </Route>
-    <Route path="*" element={<Navigate to="/dashboard" replace />} />
+    <Route path="*" element={<Navigate to="/" replace />} />
   </Routes>
 );

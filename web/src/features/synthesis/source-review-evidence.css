@@ -1,0 +1,10 @@
+.source-review-evidence { min-width: 0; margin-block: 1.5rem; }
+.source-review-evidence article { margin-block: 1rem; padding-block: 1rem; border-top: 1px solid var(--border); }
+.source-review-evidence pre, .source-review-evidence blockquote { white-space: pre-wrap; overflow-wrap: anywhere; margin-inline: 0; }
+.source-review-evidence code { overflow-wrap: anywhere; word-break: break-word; }
+.source-review-evidence summary { cursor: pointer; padding-block: .6rem; }
+.source-review-evidence li { overflow-wrap: anywhere; }
+.source-review-evidence button { white-space: normal; min-height: 44px; text-align: start; }
+.source-review-command { margin-block: 1rem; padding: 1rem; border: 1px solid var(--border); border-radius: .5rem; }
+.source-review-actions, .source-review-links { display: flex; flex-wrap: wrap; gap: .75rem; align-items: center; margin-block: .75rem; }
+.source-review-links a { display: inline-flex; align-items: center; min-height: 44px; overflow-wrap: anywhere; }

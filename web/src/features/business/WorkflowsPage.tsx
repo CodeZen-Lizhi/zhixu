@@ -177,6 +177,7 @@ export const WorkflowHumanTaskDecision = ({ task, pending, error, onDecide }: {
   const defaultTargetPath = task.review?.kind === "MERGE_COMPARISON" ? task.review.defaultTargetPath : "";
   const [targetPath, setTargetPath] = useState(defaultTargetPath);
   useEffect(() => setTargetPath(defaultTargetPath), [defaultTargetPath, task.id]);
+  if (task.decisionKind === "synthesis_manuscript") return <section className="workflow-human-task"><h3>主笔记全文需要人工裁决</h3><p>逐份确认合并结果后才可生成候选，发布仍需原审批。</p>{task.manuscript ? <Link to={`/authoring/notes?processing=${task.manuscript.processingId}`}>处理主笔记冲突</Link> : null}</section>;
   const targetRequired = task.decisionKind === "approval_with_target_path";
   const reviewUnavailable = task.review === null;
   const approveDisabled = pending || reviewUnavailable || (targetRequired && targetPath.trim() === "");

@@ -17,21 +17,28 @@ export interface SynthesisSourceRef {
   title: string;
 }
 export interface SynthesisStatement { text: string; applicability: string; sources: SynthesisSourceRef[] }
-export type SynthesisItem =
+export interface SynthesisBodyReference {
+  workspaceId: string; noteId: string; revisionId: string; publicationId: string; itemId: string; projectionHash: string;
+}
+export type SynthesisItem = { bodyReference?: SynthesisBodyReference } & (
   | { id: string; kind: "FACT"; fact: SynthesisStatement }
   | { id: string; kind: "CONFLICT"; conflict: { subject: string; alternatives: SynthesisStatement[] } }
-  | { id: string; kind: "GAP"; gap: { question: string; context: string; sources: SynthesisSourceRef[]; resolution: SynthesisStatement | null } };
+  | { id: string; kind: "GAP"; gap: { question: string; context: string; sources: SynthesisSourceRef[]; resolution: SynthesisStatement | null } });
 export interface SynthesisNote {
   id: string; workspaceId: string; documentId: string; topicKey: string; title: string; aliases: string[];
   currentRevisionId: string | null; version: number; status: SynthesisNoteStatus; workflowRunId: string | null;
   failure: SynthesisFailure | null; createdAt: string; updatedAt: string;
 }
 export interface SynthesisRevisionSummary {
+  remergeSourceRevisionId?: string;
   id: string; revisionNo: number; articleRevisionId: string; articleRevisionNo: number; contentHash: string; createdAt: string;
 }
 export interface SynthesisRevision extends SynthesisRevisionSummary {
+  historicalRepublish?: { attemptId: string; selectedRevisionId: string; selectedPublicationId?: string; selectedProposalCommitId?: string };
+  remerge?: { attemptId: string; sourceRevisionId: string };
   workspaceId: string; noteId: string; documentId: string; parentRevisionId: string | null;
   title: string; projectionHash: string; items: SynthesisItem[];
+  display?: { rendererVersion: "synthesis-markdown/v2"; fullContent: string; manualChanges: boolean; reviewRequired: boolean; historicalSources: SynthesisSourceRef[] };
 }
 export interface SynthesisPublication {
   revisionId: string; articleRevisionId: string; proposalId: string; proposalRevisionId: string; contentHash: string;
@@ -49,7 +56,12 @@ export interface SynthesisNoteDetail {
   publication: SynthesisPublication | null; latestProcessing: SynthesisProcessing | null;
 }
 export interface SynthesisPage<T> { workspaceId: string; items: T[]; nextCursor: string | null }
-export interface SynthesisSourceView { reference: SynthesisSourceRef; availability: SynthesisAvailability; text: string | null }
+export interface SynthesisSourceView { reference: SynthesisSourceRef; availability: SynthesisAvailability; text: string | null; snapshotText?: string | null; role?: "HISTORICAL_REVIEW" }
+export interface SourceKnowledgePoint { profileRevisionId: string; kind: "KNOWLEDGE_POINT" | "EXAMPLE"; index: number; text: string; sourceSpanIds: string[] }
+export interface SourceKnowledgeDirectory {
+  workspaceId: string; sourceVersionId: string; status: "ANALYZED" | "UNANALYZED" | "UNAVAILABLE" | "UNRECORDED";
+  profileRevisionId: string | null; parseProjectionId: string | null; summary: string; points: SourceKnowledgePoint[];
+}
 export interface NoteRevisionRef {
   workspaceId: string; noteId: string; revisionId: string; documentId: string; articleRevisionId: string;
   revisionNo: number; articleRevisionNo: number; contentHash: string; projectionHash: string; title: string;
@@ -127,16 +139,24 @@ const statement = (value: unknown, workspaceId: string): SynthesisStatement => {
   return { text: text(v.text), applicability: text(v.applicability, 2048, true), sources: sources(v.sources, workspaceId, 1) };
 };
 const item = (value: unknown, workspaceId: string): SynthesisItem => {
-  const v = object(value, ["id", "kind", "fact", "conflict", "gap"]);
+  const keys = ["id", "kind", "fact", "conflict", "gap"];
+  if (isRecord(value) && Object.hasOwn(value, "body_reference")) keys.push("body_reference");
+  const v = object(value, keys);
   const id = uuid(v.id);
-  if (v.kind === "FACT" && v.conflict === null && v.gap === null) return { id, kind: "FACT", fact: statement(v.fact, workspaceId) };
+  const body = v.body_reference === undefined ? {} : { bodyReference: (() => {
+    const ref = object(v.body_reference, ["workspace_id", "note_id", "revision_id", "publication_id", "item_id", "projection_hash"]);
+    scope(uuid(ref.workspace_id), workspaceId);
+    return { workspaceId, noteId: uuid(ref.note_id), revisionId: uuid(ref.revision_id), publicationId: uuid(ref.publication_id), itemId: uuid(ref.item_id), projectionHash: hash(ref.projection_hash) };
+  })() };
+
+  if (v.kind === "FACT" && v.conflict === null && v.gap === null) return { ...body, id, kind: "FACT", fact: statement(v.fact, workspaceId) };
   if (v.kind === "CONFLICT" && v.fact === null && v.gap === null) {
     const c = object(v.conflict, ["subject", "alternatives"]);
-    return { id, kind: "CONFLICT", conflict: { subject: text(c.subject), alternatives: array(c.alternatives, (v) => statement(v, workspaceId), 4, 2) } };
+    return { ...body, id, kind: "CONFLICT", conflict: { subject: text(c.subject), alternatives: array(c.alternatives, (v) => statement(v, workspaceId), 4, 2) } };
   }
   if (v.kind === "GAP" && v.fact === null && v.conflict === null) {
     const g = object(v.gap, ["question", "context", "sources", "resolution"]);
-    return { id, kind: "GAP", gap: { question: text(g.question), context: text(g.context, 2048, true), sources: sources(g.sources, workspaceId), resolution: nullable(g.resolution, (v) => statement(v, workspaceId)) } };
+    return { ...body, id, kind: "GAP", gap: { question: text(g.question), context: text(g.context, 2048, true), sources: sources(g.sources, workspaceId), resolution: nullable(g.resolution, (v) => statement(v, workspaceId)) } };
   }
   return invalid();
 };
@@ -160,12 +180,25 @@ const note = (value: unknown, workspaceId: string): SynthesisNote => {
   return result;
 };
 const summaryFields = ["id", "revision_no", "article_revision_id", "article_revision_no", "content_hash", "created_at"];
-const revisionSummaryFields = (v: Record<string, unknown>): SynthesisRevisionSummary => ({ id: uuid(v.id), revisionNo: number(v.revision_no, 1), articleRevisionId: uuid(v.article_revision_id), articleRevisionNo: number(v.article_revision_no, 1), contentHash: hash(v.content_hash), createdAt: timestamp(v.created_at) });
-const revisionSummary = (value: unknown): SynthesisRevisionSummary => revisionSummaryFields(object(value, summaryFields));
+const revisionSummaryFields = (v: Record<string, unknown>): SynthesisRevisionSummary => ({ id: uuid(v.id), revisionNo: number(v.revision_no, 1), articleRevisionId: uuid(v.article_revision_id), articleRevisionNo: number(v.article_revision_no, 1), contentHash: hash(v.content_hash), createdAt: timestamp(v.created_at), ...(Object.hasOwn(v, "remerge_source_revision_id") ? { remergeSourceRevisionId: uuid(v.remerge_source_revision_id) } : {}) });
+const revisionSummary = (value: unknown): SynthesisRevisionSummary => revisionSummaryFields(object(value, [...summaryFields, ...(isRecord(value) && Object.hasOwn(value, "remerge_source_revision_id") ? ["remerge_source_revision_id"] : [])]));
 export const decodeSynthesisRevision = (value: unknown, workspaceId: string, noteId: string): SynthesisRevision => {
-  const v = object(value, [...summaryFields, "workspace_id", "note_id", "document_id", "parent_revision_id", "title", "projection_hash", "items"]);
+  const v = object(value, [...summaryFields, "workspace_id", "note_id", "document_id", "parent_revision_id", "title", "projection_hash", "items", ...(isRecord(value) && Object.hasOwn(value, "display") ? ["display"] : []), ...(isRecord(value) && Object.hasOwn(value, "remerge") ? ["remerge"] : []), ...(isRecord(value) && Object.hasOwn(value, "historical_republish") ? ["historical_republish"] : [])]);
   scope(uuid(v.workspace_id), workspaceId); scope(uuid(v.note_id), noteId);
-  const items = unique(array(v.items, (v) => item(v, workspaceId), 128, 1), (v) => v.id);
+  const display = Object.hasOwn(v, "display") ? (() => {
+    const d = object(v.display, ["renderer_version", "full_content", "manual_changes", "review_required", "historical_sources"]);
+    const fullContent = text(d.full_content, 1 << 20, true, true);
+    // TextEncoder 会替换非法 UTF-16；应拒绝输入，避免改变字节。
+    if (new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(new TextEncoder().encode(fullContent)) !== fullContent) return invalid();
+    const result = { rendererVersion: choice(d.renderer_version, ["synthesis-markdown/v2"]), fullContent,
+      manualChanges: boolean(d.manual_changes), reviewRequired: boolean(d.review_required),
+      historicalSources: unique(array(d.historical_sources, (ref) => decodeSynthesisSourceRef(ref, workspaceId), 256), synthesisSourceIdentity) };
+    if (result.manualChanges && !result.reviewRequired) return invalid();
+    return result;
+  })() : undefined;
+  const items = unique(array(v.items, (v) => item(v, workspaceId), 128, display === undefined ? 1 : 0), (v) => v.id);
+  if (display?.manualChanges && items.length > 0) return invalid();
+  if (items.some((item) => item.bodyReference?.noteId === noteId)) return invalid();
   const catalog = new Map<string, string>();
   for (const reference of items.flatMap(synthesisItemSources)) {
     const encoded = synthesisSourceIdentity(reference);
@@ -174,7 +207,20 @@ export const decodeSynthesisRevision = (value: unknown, workspaceId: string, not
     catalog.set(reference.sourceSpanId, encoded);
   }
   if (catalog.size > 256) return invalid();
-  const result = { ...revisionSummaryFields(v), workspaceId, noteId, documentId: uuid(v.document_id), parentRevisionId: nullable(v.parent_revision_id, uuid), title: text(v.title, 512), projectionHash: hash(v.projection_hash), items };
+  const historicalSpans = new Set<string>();
+  for (const reference of display?.historicalSources ?? []) {
+    if (catalog.has(reference.sourceSpanId) || historicalSpans.has(reference.sourceSpanId)) return invalid();
+    historicalSpans.add(reference.sourceSpanId);
+  }
+  const historicalRepublish = Object.hasOwn(v, "historical_republish") ? (() => {
+    const raw = v.historical_republish;
+    const h = object(raw, ["attempt_id", "selected_revision_id", ...(isRecord(raw) && Object.hasOwn(raw, "selected_publication_id") ? ["selected_publication_id", "selected_proposal_commit_id"] : [])]);
+    if (h.selected_revision_id === v.id || v.remerge !== undefined) return invalid();
+    return { attemptId: uuid(h.attempt_id), selectedRevisionId: uuid(h.selected_revision_id), ...(h.selected_publication_id === undefined ? {} : { selectedPublicationId: uuid(h.selected_publication_id), selectedProposalCommitId: uuid(h.selected_proposal_commit_id) }) };
+  })() : undefined;
+  const remerge = Object.hasOwn(v, "remerge") ? (() => { const p = object(v.remerge, ["attempt_id", "source_revision_id"]); return { attemptId: uuid(p.attempt_id), sourceRevisionId: uuid(p.source_revision_id) }; })() : undefined;
+  if (remerge && (!display || remerge.sourceRevisionId !== v.parent_revision_id || remerge.sourceRevisionId === v.id)) return invalid();
+  const result = { ...revisionSummaryFields(v), ...(historicalRepublish ? { historicalRepublish } : {}), ...(remerge ? { remerge } : {}), workspaceId, noteId, documentId: uuid(v.document_id), parentRevisionId: nullable(v.parent_revision_id, uuid), title: text(v.title, 512), projectionHash: hash(v.projection_hash), items, ...(display === undefined ? {} : { display }) };
   if ((result.revisionNo === 1) !== (result.parentRevisionId === null) || result.parentRevisionId === result.id) return invalid();
   return result;
 };
@@ -237,13 +283,13 @@ export const decodeSynthesisProcessingPage = (value: unknown, workspaceId: strin
   unique(result.items, (v) => v.id); return result;
 };
 export const decodeSynthesisSourceView = (value: unknown, workspaceId: string, noteId: string, revisionId: string, expected: SynthesisSourceRef): SynthesisSourceView => {
-  const v = object(value, ["workspace_id", "note_id", "revision_id", "reference", "availability", "text"]);
+  const v = object(value, ["workspace_id", "note_id", "revision_id", "reference", "availability", "text", ...(isRecord(value) && Object.hasOwn(value, "snapshot_text") ? ["snapshot_text"] : []), ...(isRecord(value) && Object.hasOwn(value, "role") ? ["role"] : [])]);
   scope(uuid(v.workspace_id), workspaceId); scope(uuid(v.note_id), noteId); scope(uuid(v.revision_id), revisionId);
   const reference = decodeSynthesisSourceRef(v.reference, workspaceId);
   if (synthesisSourceIdentity(reference) !== synthesisSourceIdentity(expected)) return invalid();
-  const result = { reference, availability: choice(v.availability, ["AVAILABLE", "STALE", "UNAVAILABLE"]), text: nullable(v.text, (v) => text(v, 16384, false, true)) };
-  if ((result.availability === "AVAILABLE") !== (result.text !== null)) return invalid();
-  return result;
+  const result = { reference, availability: choice(v.availability, ["AVAILABLE", "STALE", "UNAVAILABLE"]), text: nullable(v.text, (v) => text(v, 16384, false, true)), snapshotText: Object.hasOwn(v, "snapshot_text") ? text(v.snapshot_text, 16384, false, true) : null };
+  if ((result.availability === "AVAILABLE") !== (result.text !== null) || (result.availability === "AVAILABLE" && result.snapshotText !== null)) return invalid();
+  return { ...result, ...(Object.hasOwn(v, "role") ? { role: choice(v.role, ["HISTORICAL_REVIEW"]) } : {}) };
 };
 
 export const decodeNoteRevisionRef = (value: unknown, workspaceId: string): NoteRevisionRef => {
@@ -378,3 +424,330 @@ export const listNoteInterviewPreparations = (workspaceId: string, noteId: strin
   request(() => generatedRawResponse(interviewApi.listSynthesisNoteInterviewPreparationsRaw({ workspaceId: inputId(workspaceId), noteId: inputId(noteId) }, generatedRequestInit(signal))), (v) => {
     const value = object(v, ["items"]); return unique(array(value.items, (v) => preparation(v, workspaceId, noteId), 20), (v) => v.id);
   });
+
+export interface SynthesisSourceSupplement {
+  id: string; workspaceId: string; noteId: string; baseRevisionId: string; itemId: string;
+  slot: "FACT" | "CONFLICT" | "GAP_CONTEXT" | "GAP_RESOLUTION"; alternativeIndex: number;
+  processingId: string; reference: SynthesisSourceRef; createdAt: string;
+}
+export const decodeSynthesisSupplement = (value: unknown, workspaceId: string, noteId: string): SynthesisSourceSupplement => {
+  const v = object(value, ["id", "workspace_id", "note_id", "base_revision_id", "item_id", "slot", "alternative_index", "processing_id", "reference", "created_at"]);
+  scope(uuid(v.workspace_id), workspaceId); scope(uuid(v.note_id), noteId);
+  const slot = choice(v.slot, ["FACT", "CONFLICT", "GAP_CONTEXT", "GAP_RESOLUTION"]);
+  const alternativeIndex = number(v.alternative_index, -1, 3);
+  if ((slot === "CONFLICT") !== (alternativeIndex >= 0)) return invalid();
+  return { id: uuid(v.id), workspaceId, noteId, baseRevisionId: uuid(v.base_revision_id), itemId: uuid(v.item_id), slot, alternativeIndex,
+    processingId: uuid(v.processing_id), reference: decodeSynthesisSourceRef(v.reference, workspaceId), createdAt: timestamp(v.created_at) };
+};
+export const listSynthesisSupplements = (workspaceId: string, noteId: string, cursor: string | null = null, signal?: AbortSignal): Promise<SynthesisPage<SynthesisSourceSupplement>> =>
+  request(() => generatedRawResponse(api.listSynthesisSupplementsRaw({ ...listInput(workspaceId, cursor), noteId: inputId(noteId) }, generatedRequestInit(signal))), (v) => {
+    const result = page(v, workspaceId, (value) => decodeSynthesisSupplement(value, workspaceId, noteId), 20, noteId);
+    unique(result.items, (item) => item.id);
+    return result;
+  });
+export const openSynthesisSupplement = (workspaceId: string, noteId: string, expected: SynthesisSourceSupplement, signal?: AbortSignal): Promise<SynthesisSourceView> =>
+  request(() => generatedRawResponse(api.openSynthesisSupplementRaw({ workspaceId: inputId(workspaceId), noteId: inputId(noteId), supplementId: inputId(expected.id) }, generatedRequestInit(signal))), (value) => {
+    const v = object(value, ["workspace_id", "note_id", "supplement", "availability", "text", ...(isRecord(value) && Object.hasOwn(value, "snapshot_text") ? ["snapshot_text"] : [])]);
+    scope(uuid(v.workspace_id), workspaceId); scope(uuid(v.note_id), noteId);
+    const supplement = decodeSynthesisSupplement(v.supplement, workspaceId, noteId);
+    if (JSON.stringify(supplement) !== JSON.stringify(expected)) return invalid();
+    const result = { reference: supplement.reference, availability: choice(v.availability, ["AVAILABLE", "STALE", "UNAVAILABLE"]), text: nullable(v.text, (v) => text(v, 16384, false, true)), snapshotText: Object.hasOwn(v, "snapshot_text") ? text(v.snapshot_text, 16384, false, true) : null };
+    if ((result.availability === "AVAILABLE") !== (result.text !== null) || (result.availability === "AVAILABLE" && result.snapshotText !== null)) return invalid();
+    return result;
+  });
+
+export interface AnchorScope { topics: string[]; audiences: string[]; description: string }
+export interface KnowledgeAnchor {
+  id: string; workspaceId: string; noteId: string; basisRevisionId: string; title: string; scope: AnchorScope;
+  scopeVersion: number; version: number; createdAt: string; updatedAt: string;
+}
+export interface AnchorProposal {
+  id: string; workspaceId: string; anchorId: string; kind: "SCOPE_ADJUSTMENT" | "SOURCE_ASSOCIATION";
+  scopeVersion: number; before: AnchorScope | null; suggested: AnchorScope | null; reason: string;
+  evidence: SynthesisSourceRef[]; modelRunId: string; status: "PENDING" | "ACCEPTED" | "REJECTED"; version: number; createdAt: string;
+}
+export interface AnchorPage<T> { items: T[]; nextAfterId: string | null }
+const decodeAnchorScope = (value: unknown): AnchorScope => {
+  const v = object(value, ["topics", "audiences", "description"]);
+  return { topics: unique(array(v.topics, (x) => text(x, 256), 64, 1), (x) => x), audiences: unique(array(v.audiences, (x) => text(x, 256), 32, 1), (x) => x), description: text(v.description, 2048) };
+};
+export const decodeKnowledgeAnchor = (value: unknown, workspaceId: string): KnowledgeAnchor => {
+  const v = object(value, ["id", "workspace_id", "note_id", "basis_revision_id", "title", "scope", "scope_version", "version", "created_at", "updated_at"]);
+  scope(uuid(v.workspace_id), workspaceId);
+  const result = { id: uuid(v.id), workspaceId, noteId: uuid(v.note_id), basisRevisionId: uuid(v.basis_revision_id), title: text(v.title, 512), scope: decodeAnchorScope(v.scope),
+    scopeVersion: number(v.scope_version, 1), version: number(v.version, 1), createdAt: timestamp(v.created_at), updatedAt: timestamp(v.updated_at) };
+  if (Date.parse(result.updatedAt) < Date.parse(result.createdAt)) return invalid();
+  return result;
+};
+export const decodeAnchorProposal = (value: unknown, workspaceId: string, anchorId: string): AnchorProposal => {
+  const v = object(value, ["id", "workspace_id", "anchor_id", "kind", "scope_version", "before", "suggested", "reason", "evidence", "model_run_id", "status", "version", "created_at"]);
+  scope(uuid(v.workspace_id), workspaceId); scope(uuid(v.anchor_id), anchorId);
+  const result: AnchorProposal = { id: uuid(v.id), workspaceId, anchorId, kind: choice(v.kind, ["SCOPE_ADJUSTMENT", "SOURCE_ASSOCIATION"]), scopeVersion: number(v.scope_version, 1),
+    before: nullable(v.before, decodeAnchorScope), suggested: nullable(v.suggested, decodeAnchorScope), reason: text(v.reason, 2048), evidence: sources(v.evidence, workspaceId, 1, 32),
+    modelRunId: uuid(v.model_run_id), status: choice(v.status, ["PENDING", "ACCEPTED", "REJECTED"]), version: number(v.version, 1), createdAt: timestamp(v.created_at) };
+  if (result.kind === "SCOPE_ADJUSTMENT" ? result.before === null || result.suggested === null : result.before !== null || result.suggested !== null) return invalid();
+  return result;
+};
+const anchorPage = <T extends { id: string }>(value: unknown, decode: (value: unknown) => T, afterId: string | null): AnchorPage<T> => {
+  const v = object(value, ["items", "next_after_id"]);
+  const items = unique(array(v.items, decode, 20), (item) => item.id);
+  let previous = afterId ?? "";
+  for (const item of items) { if (item.id <= previous) return invalid(); previous = item.id; }
+  const nextAfterId = nullable(v.next_after_id, uuid);
+  if (nextAfterId !== null && (items.length !== 20 || nextAfterId !== previous)) return invalid();
+  return { items, nextAfterId };
+};
+export const listKnowledgeAnchors = (workspaceId: string, noteId: string, afterId: string | null = null, signal?: AbortSignal): Promise<AnchorPage<KnowledgeAnchor>> =>
+  request(() => generatedRawResponse(api.listKnowledgeAnchorsRaw({ workspaceId: inputId(workspaceId), noteId: inputId(noteId), limit: 20, ...(afterId === null ? {} : { afterId: inputId(afterId) }) }, generatedRequestInit(signal))), (value) => anchorPage(value, (v) => {
+    const anchor = decodeKnowledgeAnchor(v, workspaceId); scope(anchor.noteId, noteId); return anchor;
+  }, afterId));
+export const listAnchorProposals = (workspaceId: string, anchorId: string, kind: AnchorProposal["kind"], afterId: string | null = null, signal?: AbortSignal): Promise<AnchorPage<AnchorProposal>> => {
+  const params = { workspaceId: inputId(workspaceId), anchorId: inputId(anchorId), limit: 20, ...(afterId === null ? {} : { afterId: inputId(afterId) }) };
+  return request(() => generatedRawResponse(kind === "SCOPE_ADJUSTMENT" ? api.listAnchorScopeProposalsRaw(params, generatedRequestInit(signal)) : api.listAnchorAssociationsRaw(params, generatedRequestInit(signal))),
+    (value) => anchorPage(value, (v) => { const proposal = decodeAnchorProposal(v, workspaceId, anchorId); if (proposal.kind !== kind) return invalid(); return proposal; }, afterId));
+};
+export interface AnchorDecisionInput {
+  workspaceId: string; anchor: KnowledgeAnchor; kind: AnchorProposal["kind"]; decision: "ACCEPTED" | "REJECTED";
+  items: AnchorProposal[]; idempotencyKey: string; signal?: AbortSignal;
+}
+export const decideAnchorProposals = (input: AnchorDecisionInput): Promise<{ anchor: KnowledgeAnchor; items: AnchorProposal[]; replayed: boolean }> => {
+  if (input.anchor.workspaceId !== input.workspaceId || input.items.length < 1 || input.items.length > 32 || input.kind === "SCOPE_ADJUSTMENT" && input.items.length !== 1 ||
+    new Set(input.items.map((item) => item.id)).size !== input.items.length || input.items.some((item) => item.workspaceId !== input.workspaceId || item.anchorId !== input.anchor.id || item.kind !== input.kind || item.status !== "PENDING" || item.scopeVersion !== input.anchor.scopeVersion)) {
+    throw new SynthesisApiError("INVALID_REQUEST", "审核基线已变化，请刷新后重新选择。");
+  }
+  const params = { workspaceId: inputId(input.workspaceId), anchorId: inputId(input.anchor.id), idempotencyKey: text(input.idempotencyKey, 128),
+    decideAnchorRequest: { expected_anchor_version: input.anchor.version, decision: input.decision, items: input.items.map((item) => ({ proposal_id: item.id, expected_version: item.version })) } };
+  return request(() => generatedRawResponse(input.kind === "SCOPE_ADJUSTMENT" ? api.decideAnchorScopeProposalsRaw(params, generatedRequestInit(input.signal)) : api.decideAnchorAssociationsRaw(params, generatedRequestInit(input.signal))), (value) => {
+    const v = object(value, ["anchor", "items", "replayed"]);
+    const anchor = decodeKnowledgeAnchor(v.anchor, input.workspaceId); scope(anchor.id, input.anchor.id); scope(anchor.noteId, input.anchor.noteId);
+    const items = array(v.items, (item) => decodeAnchorProposal(item, input.workspaceId, anchor.id), 32, 1);
+    if (anchor.version !== input.anchor.version + 1 || items.length !== input.items.length || items.some((item, index) => item.id !== input.items[index]?.id || item.status !== input.decision || item.kind !== input.kind || item.version !== input.items[index].version + 1) ||
+      anchor.scopeVersion !== input.anchor.scopeVersion + (input.kind === "SCOPE_ADJUSTMENT" && input.decision === "ACCEPTED" ? 1 : 0)) return invalid();
+    const expectedScope = input.kind === "SCOPE_ADJUSTMENT" && input.decision === "ACCEPTED" ? input.items[0]?.suggested : input.anchor.scope;
+    if (anchor.basisRevisionId !== input.anchor.basisRevisionId || anchor.title !== input.anchor.title || anchor.createdAt !== input.anchor.createdAt || JSON.stringify(anchor.scope) !== JSON.stringify(expectedScope) ||
+      items.some((item, index) => JSON.stringify({ ...item, status: "PENDING", version: 1 }) !== JSON.stringify(input.items[index]))) return invalid();
+    return { anchor, items, replayed: boolean(v.replayed) };
+  });
+};
+
+const knowledgePoint = (value: unknown, profileRevisionId: string): SourceKnowledgePoint => {
+  const v = object(value, ["locator", "text", "source_span_ids"]);
+  const locator = object(v.locator, ["profile_revision_id", "kind", "index"]);
+  scope(uuid(locator.profile_revision_id), profileRevisionId);
+  return { profileRevisionId, kind: choice(locator.kind, ["KNOWLEDGE_POINT", "EXAMPLE"]), index: number(locator.index, 0, 255),
+    text: text(v.text, 4096, false, true), sourceSpanIds: unique(array(v.source_span_ids, uuid, 64, 1), (id) => id) };
+};
+export const decodeSourceKnowledgeDirectory = (value: unknown, workspaceId: string, sourceVersionId: string): SourceKnowledgeDirectory => {
+  if (!isRecord(value) || !hasExactKeys(value, ["workspace_id", "source_version_id", "status"], ["profile_status", "profile_revision_id", "parse_projection_id", "summary", "topics", "terms", "points"])) return invalid();
+  scope(uuid(value.workspace_id), workspaceId); scope(uuid(value.source_version_id), sourceVersionId);
+  const status = choice(value.status, ["ANALYZED", "UNANALYZED", "UNAVAILABLE", "UNRECORDED"]);
+  if (value.profile_status !== undefined) choice(value.profile_status, ["PENDING", "RUNNING", "READY", "STALE", "FAILED", "CAPABILITY_UNAVAILABLE"]);
+  if (status !== "ANALYZED") {
+    if (status === "UNRECORDED" && value.profile_status !== undefined) return invalid();
+    if (["profile_revision_id", "parse_projection_id", "summary", "topics", "terms", "points"].some((key) => Object.hasOwn(value, key))) return invalid();
+    if (status === "UNANALYZED" && value.profile_status !== undefined && value.profile_status !== "PENDING" && value.profile_status !== "RUNNING" ||
+      status === "UNAVAILABLE" && value.profile_status !== "FAILED" && value.profile_status !== "CAPABILITY_UNAVAILABLE") return invalid();
+    return { workspaceId, sourceVersionId, status, profileRevisionId: null, parseProjectionId: null, summary: "", points: [] };
+  }
+  if (value.profile_status !== "READY" && value.profile_status !== "STALE") return invalid();
+  const profileRevisionId = uuid(value.profile_revision_id);
+  const points = unique(array(value.points, (point) => knowledgePoint(point, profileRevisionId), 512, 1), (point) => `${point.kind}:${String(point.index)}`);
+  for (const [key, minimum] of [["topics", 1], ["terms", 0]] as const) {
+    if (value[key] === undefined && minimum === 0) continue;
+    array(value[key], (entry) => {
+      if (!isRecord(entry) || !hasExactKeys(entry, ["label", "source_span_ids"], ["aliases"])) return invalid();
+      text(entry.label, 512); array(entry.source_span_ids, uuid, 64, 1);
+      if (entry.aliases !== undefined) unique(array(entry.aliases, (alias) => text(alias, 512), 32), (alias) => alias);
+    }, 128, minimum);
+  }
+  return { workspaceId, sourceVersionId, status, profileRevisionId, parseProjectionId: uuid(value.parse_projection_id), summary: text(value.summary, 16384, false, true), points };
+};
+export const getSynthesisSourceKnowledgePoints = (workspaceId: string, noteId: string, revisionId: string, reference: SynthesisSourceRef, signal?: AbortSignal): Promise<{ directory: SourceKnowledgeDirectory; points: SourceKnowledgePoint[] }> =>
+  request(() => generatedRawResponse(api.getSynthesisSourceKnowledgePointsRaw({ workspaceId: inputId(workspaceId), noteId: inputId(noteId), revisionId: inputId(revisionId), sourceSpanId: inputId(reference.sourceSpanId) }, generatedRequestInit(signal))), (value) => {
+    const v = object(value, ["workspace_id", "note_id", "revision_id", "reference", "directory", "points"]);
+    scope(uuid(v.workspace_id), workspaceId); scope(uuid(v.note_id), noteId); scope(uuid(v.revision_id), revisionId);
+    if (JSON.stringify(decodeSynthesisSourceRef(v.reference, workspaceId)) !== JSON.stringify(reference)) return invalid();
+    const directory = decodeSourceKnowledgeDirectory(v.directory, workspaceId, reference.source.sourceVersionId);
+    const points = array(v.points, (point) => knowledgePoint(point, directory.profileRevisionId ?? ""), 512);
+    if (points.length > 0 && (directory.status !== "ANALYZED" || directory.parseProjectionId !== reference.source.parseProjectionId) ||
+      points.some((point) => !point.sourceSpanIds.includes(reference.sourceSpanId) || !directory.points.some((candidate) => JSON.stringify(candidate) === JSON.stringify(point)))) return invalid();
+    return { directory, points };
+  });
+
+export interface SynthesisSharedSourceNote { noteId: string; revisionId: string; revisionNo: number; title: string; sources: SynthesisSourceRef[] }
+export interface SynthesisSourceGraph { sources: SynthesisSourceRef[]; sharedNotes: SynthesisSharedSourceNote[]; nextAfterNoteId: string | null }
+export const decodeSynthesisSourceGraph = (value: unknown, revision: SynthesisRevision, afterNoteId: string | null = null): SynthesisSourceGraph => {
+  const v = object(value, ["workspace_id", "note_id", "revision_id", "sources", "shared_notes", "next_after_note_id"]);
+  scope(uuid(v.workspace_id), revision.workspaceId); scope(uuid(v.note_id), revision.noteId); scope(uuid(v.revision_id), revision.id);
+  const references = sources(v.sources, revision.workspaceId, 0, 256);
+  const expected = new Set(revision.items.flatMap(synthesisItemSources).map(synthesisSourceIdentity));
+  if (references.length !== expected.size || references.some((ref) => !expected.has(synthesisSourceIdentity(ref)))) return invalid();
+  const sourceIds = new Set(references.map((ref) => ref.source.sourceId));
+  let previous = afterNoteId ?? "";
+  const sharedNotes = array(v.shared_notes, (value): SynthesisSharedSourceNote => {
+    const n = object(value, ["note_id", "revision_id", "revision_no", "title", "sources"]);
+    const noteId = uuid(n.note_id);
+    if (noteId === revision.noteId || noteId <= previous) return invalid();
+    previous = noteId;
+    const references = sources(n.sources, revision.workspaceId, 1, 256);
+    if (references.some((ref) => !sourceIds.has(ref.source.sourceId))) return invalid();
+    return { noteId, revisionId: uuid(n.revision_id), revisionNo: number(n.revision_no, 1), title: text(n.title, 512), sources: references };
+  }, 20);
+  const nextAfterNoteId = nullable(v.next_after_note_id, uuid);
+  if (nextAfterNoteId !== null && (sharedNotes.length !== 20 || nextAfterNoteId !== previous)) return invalid();
+  return { sources: references, sharedNotes, nextAfterNoteId };
+};
+export const getSynthesisSourceGraph = (revision: SynthesisRevision, afterNoteId: string | null = null, signal?: AbortSignal): Promise<SynthesisSourceGraph> =>
+  request(() => generatedRawResponse(api.getSynthesisSourceGraphRaw({ workspaceId: inputId(revision.workspaceId), noteId: inputId(revision.noteId), revisionId: inputId(revision.id), limit: 20, ...(afterNoteId === null ? {} : { afterNoteId: inputId(afterNoteId) }) }, generatedRequestInit(signal))), (value) => decodeSynthesisSourceGraph(value, revision, afterNoteId));
+
+export interface AnchorFusionRequest {
+  id: string; workspaceId: string; anchorId: string; noteId: string; proposalId: string; scopeVersion: number;
+  sources: SynthesisSourceRef[]; status: "PENDING" | "DISPATCHED" | "STALE"; processingId: string | null; createdAt: string; updatedAt: string;
+}
+export const decodeAnchorFusionRecent = (value: unknown, anchor: KnowledgeAnchor): AnchorFusionRequest[] => {
+  const v = object(value, ["workspace_id", "anchor_id", "items"]);
+  scope(uuid(v.workspace_id), anchor.workspaceId); scope(uuid(v.anchor_id), anchor.id);
+  return unique(array(v.items, (value) => {
+    const r = object(value, ["id", "workspace_id", "anchor_id", "note_id", "proposal_id", "scope_version", "sources", "status", "processing_id", "created_at", "updated_at"]);
+    scope(uuid(r.workspace_id), anchor.workspaceId); scope(uuid(r.anchor_id), anchor.id); scope(uuid(r.note_id), anchor.noteId);
+    const result: AnchorFusionRequest = { id: uuid(r.id), workspaceId: anchor.workspaceId, anchorId: anchor.id, noteId: anchor.noteId, proposalId: uuid(r.proposal_id), scopeVersion: number(r.scope_version, 1),
+      sources: sources(r.sources, anchor.workspaceId, 1, 256), status: choice(r.status, ["PENDING", "DISPATCHED", "STALE"]), processingId: nullable(r.processing_id, uuid), createdAt: timestamp(r.created_at), updatedAt: timestamp(r.updated_at) };
+    if ((result.status === "DISPATCHED") !== (result.processingId !== null) || Date.parse(result.updatedAt) < Date.parse(result.createdAt) || new Set(result.sources.map((ref) => JSON.stringify(ref.source))).size !== 1) return invalid();
+    return result;
+  }, 20), (item) => item.id);
+};
+export const listRecentAnchorFusionRequests = (anchor: KnowledgeAnchor, signal?: AbortSignal): Promise<AnchorFusionRequest[]> =>
+  request(() => generatedRawResponse(api.listRecentAnchorFusionRequestsRaw({ workspaceId: inputId(anchor.workspaceId), anchorId: inputId(anchor.id) }, generatedRequestInit(signal))), (value) => decodeAnchorFusionRecent(value, anchor));
+
+export interface AnchorRecommendation {
+  id: string; workspaceId: string; noteId: string; anchorId: string | null; basisRevisionId: string; expectedScopeVersion: number | null;
+  kind: "INITIAL_SCOPE" | "SOURCE_ASSOCIATION" | "SCOPE_ADJUSTMENT";
+  status: "PENDING" | "RUNNING" | "SUCCEEDED" | "NO_RECOMMENDATION" | "FAILED" | "RECOVERY_REQUIRED";
+  recommendation: { title: string; kind: AnchorRecommendation["kind"]; scope: AnchorScope | null; reason: string; evidence: SynthesisSourceRef[] } | null;
+  proposalId: string | null; errorCode: string | null; retryable: boolean; version: number; createdAt: string; updatedAt: string;
+}
+export const decodeAnchorRecommendation = (value: unknown, workspaceId: string): AnchorRecommendation => {
+  const v = object(value, ["id", "workspace_id", "note_id", "anchor_id", "basis_revision_id", "expected_scope_version", "kind", "status", "recommendation", "proposal_id", "error_code", "retryable", "version", "created_at", "updated_at"]);
+  scope(uuid(v.workspace_id), workspaceId);
+  const result: AnchorRecommendation = { id: uuid(v.id), workspaceId, noteId: uuid(v.note_id), anchorId: nullable(v.anchor_id, uuid), basisRevisionId: uuid(v.basis_revision_id), expectedScopeVersion: nullable(v.expected_scope_version, (v) => number(v, 1)),
+    kind: choice(v.kind, ["INITIAL_SCOPE", "SOURCE_ASSOCIATION", "SCOPE_ADJUSTMENT"]), status: choice(v.status, ["PENDING", "RUNNING", "SUCCEEDED", "NO_RECOMMENDATION", "FAILED", "RECOVERY_REQUIRED"]),
+    recommendation: nullable(v.recommendation, (value) => { const r = object(value, ["title", "kind", "scope", "reason", "evidence"]); return { title: text(r.title, 512), kind: choice(r.kind, ["INITIAL_SCOPE", "SOURCE_ASSOCIATION", "SCOPE_ADJUSTMENT"]), scope: nullable(r.scope, decodeAnchorScope), reason: text(r.reason, 4096), evidence: sources(r.evidence, workspaceId, 1, 32) }; }),
+    proposalId: nullable(v.proposal_id, uuid), errorCode: nullable(v.error_code, (v) => text(v, 128)), retryable: boolean(v.retryable), version: number(v.version, 1), createdAt: timestamp(v.created_at), updatedAt: timestamp(v.updated_at) };
+  const initial = result.kind === "INITIAL_SCOPE";
+  if (initial ? result.anchorId !== null || result.expectedScopeVersion !== null : result.anchorId === null || result.expectedScopeVersion === null) return invalid();
+  if (Date.parse(result.updatedAt) < Date.parse(result.createdAt)) return invalid();
+  const failed = result.status === "FAILED" || result.status === "RECOVERY_REQUIRED";
+  if (failed ? result.errorCode === null || result.recommendation !== null || result.proposalId !== null : result.errorCode !== null || result.retryable) return invalid();
+  if (result.status === "RECOVERY_REQUIRED" && result.retryable) return invalid();
+  if (result.status === "SUCCEEDED") {
+    const recommendation = result.recommendation;
+    if (recommendation === null || (recommendation.kind === "INITIAL_SCOPE") !== initial || (recommendation.kind === "SOURCE_ASSOCIATION") !== (recommendation.scope === null) || initial !== (result.proposalId === null)) return invalid();
+  } else if (result.recommendation !== null || result.proposalId !== null) return invalid();
+  return result;
+};
+export const listAnchorRecommendations = (workspaceId: string, noteId: string, afterId: string | null = null, signal?: AbortSignal): Promise<AnchorPage<AnchorRecommendation>> =>
+  request(() => generatedRawResponse(api.listAnchorRecommendationsRaw({ workspaceId: inputId(workspaceId), noteId: inputId(noteId), limit: 20, ...(afterId === null ? {} : { afterId: inputId(afterId) }) }, generatedRequestInit(signal))), (value) => anchorPage(value, (v) => { const result = decodeAnchorRecommendation(v, workspaceId); scope(result.noteId, noteId); return result; }, afterId));
+export const getAnchorRecommendation = (workspaceId: string, requestId: string, signal?: AbortSignal): Promise<AnchorRecommendation> =>
+  request(() => generatedRawResponse(api.getAnchorRecommendationRaw({ workspaceId: inputId(workspaceId), requestId: inputId(requestId) }, generatedRequestInit(signal))), (value) => { const result = decodeAnchorRecommendation(value, workspaceId); scope(result.id, requestId); return result; });
+export interface AnchorAnalysisInput { note: SynthesisNote; idempotencyKey: string; signal?: AbortSignal }
+export const requestAnchorRecommendation = (input: AnchorAnalysisInput): Promise<AnchorRecommendation> => {
+  if (input.note.currentRevisionId === null) throw new SynthesisApiError("INVALID_REQUEST", "笔记尚无可分析的内容。");
+  const basis = input.note.currentRevisionId;
+  return request(() => generatedRawResponse(api.requestAnchorRecommendationRaw({ workspaceId: inputId(input.note.workspaceId), idempotencyKey: text(input.idempotencyKey, 128), requestAnchorRecommendation: { note_id: inputId(input.note.id), basis_revision_id: inputId(basis), expected_note_version: input.note.version } }, generatedRequestInit(input.signal))), (value) => { const result = decodeAnchorRecommendation(value, input.note.workspaceId); scope(result.noteId, input.note.id); scope(result.basisRevisionId, basis); if (result.kind !== "INITIAL_SCOPE") return invalid(); return result; }, 202);
+};
+export const retryAnchorRecommendation = (input: { request: AnchorRecommendation; idempotencyKey: string; signal?: AbortSignal }): Promise<AnchorRecommendation> => {
+  const prior = input.request;
+  if (prior.status !== "FAILED" || !prior.retryable) throw new SynthesisApiError("INVALID_REQUEST", "此分析不能直接重试。");
+  return request(() => generatedRawResponse(api.retryAnchorRecommendationRaw({ workspaceId: inputId(prior.workspaceId), requestId: inputId(prior.id), idempotencyKey: text(input.idempotencyKey, 128), retryAnchorRecommendation: { expected_version: prior.version } }, generatedRequestInit(input.signal))), (value) => { const result = decodeAnchorRecommendation(value, prior.workspaceId); scope(result.id, prior.id); scope(result.noteId, prior.noteId); scope(result.basisRevisionId, prior.basisRevisionId); if (result.version <= prior.version) return invalid(); return result; }, 202);
+};
+export const confirmInitialAnchor = (input: { note: SynthesisNote; request: AnchorRecommendation; title: string; scope: AnchorScope; idempotencyKey: string; signal?: AbortSignal }): Promise<KnowledgeAnchor> => {
+  const { note, request: recommendation } = input;
+  if (recommendation.status !== "SUCCEEDED" || recommendation.kind !== "INITIAL_SCOPE" || recommendation.recommendation?.scope === null || recommendation.recommendation === null || recommendation.noteId !== note.id || recommendation.workspaceId !== note.workspaceId || recommendation.basisRevisionId !== note.currentRevisionId) throw new SynthesisApiError("INVALID_REQUEST", "笔记内容已变化，请重新分析维护范围。");
+  const title = text(input.title, 512); const confirmedScope = decodeAnchorScope(input.scope);
+  return request(() => generatedRawResponse(api.createKnowledgeAnchorRaw({ workspaceId: inputId(note.workspaceId), idempotencyKey: text(input.idempotencyKey, 128), createAnchorRequest: { note_id: inputId(note.id), basis_revision_id: inputId(recommendation.basisRevisionId), expected_note_version: note.version, title, scope: confirmedScope } }, generatedRequestInit(input.signal))), (value) => { const v = object(value, ["anchor", "replayed"]); boolean(v.replayed); const anchor = decodeKnowledgeAnchor(v.anchor, note.workspaceId); scope(anchor.noteId, note.id); scope(anchor.basisRevisionId, recommendation.basisRevisionId); if (anchor.title !== title || JSON.stringify(anchor.scope) !== JSON.stringify(confirmedScope)) return invalid(); return anchor; }, 201);
+};
+
+export interface SynthesisSourceImpact {
+  id: string; reason: "SOURCE_REMOVED" | "SOURCE_QUARANTINED"; detectedAt: string; currentlyUnavailable: boolean;
+  reference: SynthesisSourceRef; itemIds: string[];
+}
+export const decodeSynthesisSourceImpacts = (value: unknown, revision: SynthesisRevision): SynthesisSourceImpact[] => {
+  const v = object(value, ["workspace_id", "note_id", "revision_id", "items"]);
+  scope(uuid(v.workspace_id), revision.workspaceId); scope(uuid(v.note_id), revision.noteId); scope(uuid(v.revision_id), revision.id);
+  const seen = new Set<string>();
+  return array(v.items, (value): SynthesisSourceImpact => {
+    const item = object(value, ["id", "reason", "detected_at", "currently_unavailable", "reference", "item_ids"]);
+    const id = uuid(item.id);
+    if (item.reason !== "SOURCE_REMOVED" && item.reason !== "SOURCE_QUARANTINED") return invalid();
+    const reference = decodeSynthesisSourceRef(item.reference, revision.workspaceId);
+    const identity = synthesisSourceIdentity(reference);
+    const expected = revision.items.filter((candidate) => synthesisItemSources(candidate).some((ref) => synthesisSourceIdentity(ref) === identity)).map((item) => item.id);
+    const itemIds = array(item.item_ids, uuid, 128);
+    const key = `${id}:${reference.sourceSpanId}`;
+    if (expected.length === 0 || itemIds.length !== expected.length || new Set(itemIds).size !== itemIds.length || itemIds.some((id) => !expected.includes(id)) || seen.has(key)) return invalid();
+    seen.add(key);
+    return { id, reason: item.reason, detectedAt: timestamp(item.detected_at), currentlyUnavailable: boolean(item.currently_unavailable), reference, itemIds };
+  }, 512);
+};
+export const getSynthesisSourceImpacts = (revision: SynthesisRevision, signal?: AbortSignal): Promise<SynthesisSourceImpact[]> =>
+  request(() => generatedRawResponse(api.getSynthesisSourceImpactsRaw({ workspaceId: inputId(revision.workspaceId), noteId: inputId(revision.noteId), revisionId: inputId(revision.id) }, generatedRequestInit(signal))), (value) => decodeSynthesisSourceImpacts(value, revision));
+
+export interface SynthesisBodyImpact {
+  id: string; itemId: string; upstreamNoteId: string; upstreamRevisionId: string; upstreamItemId: string;
+  upstreamPublicationId: string; publicationId: string; publishedRevisionId: string;
+  reason: "CONTENT_CHANGED" | "ITEM_MISSING"; detectedAt: string;
+}
+export interface SynthesisBodyImpactPage { items: SynthesisBodyImpact[]; nextAfterId: string | null }
+export const decodeSynthesisBodyImpacts = (value: unknown, revision: SynthesisRevision, afterId: string | null = null, limit = 20): SynthesisBodyImpactPage => {
+  const v = object(value, ["workspace_id", "note_id", "revision_id", "items", "next_after_id"]);
+  scope(uuid(v.workspace_id), revision.workspaceId); scope(uuid(v.note_id), revision.noteId); scope(uuid(v.revision_id), revision.id);
+  let previous = afterId ?? "";
+  const seen = new Set<string>();
+  const items = array(v.items, (value): SynthesisBodyImpact => {
+    const item = object(value, ["id", "item_id", "upstream_note_id", "upstream_revision_id", "upstream_item_id", "upstream_publication_id", "publication_id", "published_revision_id", "reason", "detected_at"]);
+    const id = uuid(item.id), itemId = uuid(item.item_id), upstreamNoteId = uuid(item.upstream_note_id), upstreamRevisionId = uuid(item.upstream_revision_id), upstreamItemId = uuid(item.upstream_item_id), upstreamPublicationId = uuid(item.upstream_publication_id), publicationId = uuid(item.publication_id), publishedRevisionId = uuid(item.published_revision_id);
+    const ref = revision.items.find((candidate) => candidate.id === itemId)?.bodyReference;
+    const key = `${itemId}:${publicationId}`;
+    if (id <= previous || seen.has(key) || ref?.workspaceId !== revision.workspaceId || ref.noteId !== upstreamNoteId || ref.revisionId !== upstreamRevisionId || ref.itemId !== upstreamItemId || ref.publicationId !== upstreamPublicationId || upstreamNoteId === revision.noteId || upstreamRevisionId === publishedRevisionId || upstreamPublicationId === publicationId || (item.reason !== "CONTENT_CHANGED" && item.reason !== "ITEM_MISSING")) return invalid();
+    previous = id; seen.add(key);
+    return { id, itemId, upstreamNoteId, upstreamRevisionId, upstreamItemId, upstreamPublicationId, publicationId, publishedRevisionId, reason: item.reason, detectedAt: timestamp(item.detected_at) };
+  }, limit);
+  const nextAfterId = v.next_after_id === null ? null : uuid(v.next_after_id);
+  if (nextAfterId !== null && (items.length !== limit || nextAfterId !== previous)) return invalid();
+  return { items, nextAfterId };
+};
+export const getSynthesisBodyImpacts = (revision: SynthesisRevision, afterId: string | null = null, signal?: AbortSignal): Promise<SynthesisBodyImpactPage> =>
+  request(() => generatedRawResponse(api.getSynthesisBodyImpactsRaw({ workspaceId: inputId(revision.workspaceId), noteId: inputId(revision.noteId), revisionId: inputId(revision.id), limit: 20, ...(afterId === null ? {} : { afterId: inputId(afterId) }) }, generatedRequestInit(signal))), (value) => decodeSynthesisBodyImpacts(value, revision, afterId));
+
+export interface SynthesisUpdateSummary { revisionId: string; sourceReviewCount: number; bodyReviewCount: number }
+export interface SynthesisNoteUpdateSummary { noteId: string; items: SynthesisUpdateSummary[] }
+export const decodeSynthesisUpdateSummaries = (value: unknown, workspaceId: string, notes: SynthesisNoteSummary[]): SynthesisNoteUpdateSummary[] => {
+  const v = object(value, ["workspace_id", "items"]);
+  scope(uuid(v.workspace_id), workspaceId);
+  const seen = new Set<string>();
+  const result = array(v.items, (raw): SynthesisNoteUpdateSummary => {
+    const n = object(raw, ["note_id", "current_revision_id", "published_revision_id", "items"]);
+    const noteId = uuid(n.note_id), note = notes.find((item) => item.note.id === noteId);
+    if (note?.note.workspaceId !== workspaceId || seen.has(noteId)) return invalid();
+    seen.add(noteId);
+    const current = uuid(n.current_revision_id), published = n.published_revision_id === "" ? null : uuid(n.published_revision_id);
+    if (current !== note.currentRevision?.id || current !== note.note.currentRevisionId || published !== (note.publishedRevision?.id ?? null)) return invalid();
+    const revisions = new Set<string>();
+    const items = array(n.items, (raw): SynthesisUpdateSummary => {
+      const r = object(raw, ["revision_id", "source_review_count", "body_review_count"]);
+      const revisionId = uuid(r.revision_id);
+      if (revisions.has(revisionId) || (revisionId !== current && revisionId !== published)) return invalid();
+      revisions.add(revisionId);
+      if (typeof r.source_review_count !== "number" || !Number.isSafeInteger(r.source_review_count) || r.source_review_count < 0 || typeof r.body_review_count !== "number" || !Number.isSafeInteger(r.body_review_count) || r.body_review_count < 0) return invalid();
+      return { revisionId, sourceReviewCount: r.source_review_count, bodyReviewCount: r.body_review_count };
+    }, 2);
+    if (!revisions.has(current) || (published !== null && !revisions.has(published))) return invalid();
+    return { noteId, items };
+  }, 50);
+  if (result.length !== notes.length) return invalid();
+  return result;
+};
+export const getSynthesisUpdateSummaries = (workspaceId: string, notes: SynthesisNoteSummary[], signal?: AbortSignal): Promise<SynthesisNoteUpdateSummary[]> => {
+  if (notes.length < 1 || notes.length > 50 || new Set(notes.map((n) => n.note.id)).size !== notes.length) return invalid();
+  return request(() => generatedRawResponse(api.getSynthesisUpdateSummariesRaw({ workspaceId: inputId(workspaceId), noteIds: notes.map((n) => inputId(n.note.id)).join(",") }, generatedRequestInit(signal))), (value) => decodeSynthesisUpdateSummaries(value, workspaceId, notes));
+};

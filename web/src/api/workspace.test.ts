@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { decodeWorkspaceScan, scanWorkspace, WorkspaceApiError } from "./workspace";
+import { decodeDiscoveryFailures, decodeWorkspaceScan, scanWorkspace, WorkspaceApiError } from "./workspace";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
 
@@ -64,5 +64,22 @@ describe("Workspace API decoders", () => {
     vi.spyOn(response, "json").mockRejectedValue(bodyAbort);
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
     await expect(scanWorkspace(workspaceId)).rejects.toBe(bodyAbort);
+  });
+});
+
+describe("discovery failures", () => {
+  const workspaceId = "11111111-1111-4111-8111-111111111111";
+  const item = { workspace_id: workspaceId, binding_version: 1, path: "notes/unreadable.md", stage: "OBSERVE", code: "FILE_OBSERVATION_FAILED", status: "FAILED", failure_count: 2, last_failed_at: "2026-09-15T08:00:00Z", recovered_at: null };
+  const page = { workspace_id: workspaceId, binding_version: 1, items: [item], next_cursor: "" };
+  it("decodes failed and recovered records with exact scope", () => {
+    expect(decodeDiscoveryFailures(page, workspaceId).items[0]?.status).toBe("FAILED");
+    expect(decodeDiscoveryFailures({ ...page, items: [{ ...item, status: "RECOVERED", recovered_at: "2026-09-15T08:01:00Z" }] }, workspaceId).items[0]?.status).toBe("RECOVERED");
+  });
+  it("rejects cross-workspace, unsafe paths, malformed state and extra fields", () => {
+    for (const bad of [
+      { ...page, workspace_id: "22222222-2222-4222-8222-222222222222" },
+      { ...page, extra: true },
+      ...[{ path: "/private/secret.md" }, { path: "../secret.md" }, { path: ".knowledge/private.md" }, { binding_version: 2 }, { status: "RECOVERED" }, { code: "RAW_ERROR" }, { recovered_at: "2026-09-15T08:01:00Z" }].map((patch) => ({ ...page, items: [{ ...item, ...patch }] })),
+    ]) expect(() => decodeDiscoveryFailures(bad, workspaceId)).toThrow();
   });
 });

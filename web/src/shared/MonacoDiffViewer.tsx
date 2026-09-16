@@ -52,6 +52,8 @@ export const MonacoDiffViewer = ({
     options={{
       readOnly: true,
       renderSideBySide: true,
+      // 只读对照无需行间操作菜单；避免菜单在编辑器卸载后访问已释放的上下文。
+      renderGutterMenu: false,
       minimap: { enabled: false },
       wordWrap: "on",
       originalEditable: false,

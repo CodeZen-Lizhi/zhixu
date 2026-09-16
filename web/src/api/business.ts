@@ -223,7 +223,7 @@ export type WorkflowMergeComparisonReview = {
 export type WorkflowHumanTaskReview = WorkflowTopicOutlineReview | WorkflowMergeComparisonReview;
 export type WorkflowHumanTask = {
   id: string; runId: string; nodeRunId: string; status: "pending"; targetVersion: number;
-  decisionKind: "approval" | "approval_with_target_path"; createdAt: string; expiresAt?: string;
+  decisionKind: "approval" | "approval_with_target_path" | "synthesis_manuscript"; manuscript?: { processingId: string; noteIds: string[] }; createdAt: string; expiresAt?: string;
   review: WorkflowHumanTaskReview | null;
 };
 export type ProposalCurrentContent = {
@@ -639,6 +639,28 @@ const decodeWorkflowHumanTask = (value: unknown, workspaceId: string, runId: str
     if (typeof item !== "string") throw new BusinessApiError("INVALID_RESPONSE", "Workflow Human Task required 无效", false);
     return item;
   });
+  const ownerKeys = ["version", "processing_id", "workflow_run_id", "note_ids", "result_hash"];
+  if (required.includes("processing_id")) {
+    const invalidOwner = (): never => { throw new BusinessApiError("INVALID_RESPONSE", "主笔记裁决 Schema 无效", false); };
+    if (required.length !== ownerKeys.length || new Set(required).size !== required.length || ownerKeys.some((key) => !required.includes(key))) return invalidOwner();
+    const properties = record(schema.properties, "manuscript.properties");
+    if (Object.keys(properties).length !== ownerKeys.length || ownerKeys.some((key) => !Object.hasOwn(properties, key))) return invalidOwner();
+    const boundEnum = (key: string): unknown => {
+      const field = record(properties[key], key);
+      if (Object.keys(field).length !== 2 || field.type !== (key === "note_ids" ? "array" : "string") || !Array.isArray(field.enum) || field.enum.length !== 1) return invalidOwner();
+      return field.enum[0];
+    };
+    if (boundEnum("version") !== "synthesis-manuscript-review/v1" || boundEnum("workflow_run_id") !== runId) return invalidOwner();
+    const processingId = uuidValue({ id: boundEnum("processing_id") }, "id");
+    const rawNotes = boundEnum("note_ids");
+    if (!Array.isArray(rawNotes) || rawNotes.length === 0 || rawNotes.length > 8) return invalidOwner();
+    const noteIds = rawNotes.map((id: unknown) => uuidValue({ id }, "id"));
+    if (noteIds.some((id, index) => index > 0 && id <= (noteIds[index - 1] ?? ""))) return invalidOwner();
+    const hash = record(properties.result_hash, "result_hash");
+    if (Object.keys(hash).length !== 2 || hash.type !== "string" || hash.pattern !== "^[0-9a-f]{64}$" || task.review !== null) return invalidOwner();
+    const expiresAt = task.expires_at === null ? undefined : dateTimeValue(task, "expires_at");
+    return { id: uuidValue(task, "id"), runId: boundValue(uuidValue(task, "run_id"), runId, "task.run_id"), nodeRunId: uuidValue(task, "node_run_id"), status: "pending", targetVersion: integerValue(task, "target_version", 1), decisionKind: "synthesis_manuscript", manuscript: { processingId, noteIds }, createdAt: dateTimeValue(task, "created_at"), ...(expiresAt === undefined ? {} : { expiresAt }), review: null };
+  }
   if (new Set(required).size !== required.length || !required.includes("approved") || required.some((item) => item !== "approved" && item !== "target_path")) throw new BusinessApiError("INVALID_RESPONSE", "Workflow Human Task required 不受支持", false);
   const properties = record(schema.properties, "workflow.human_task.expected_input_schema.properties");
   const decisionKind = Object.hasOwn(properties, "target_path") ? "approval_with_target_path" : "approval";
@@ -1302,6 +1324,7 @@ export const submitWorkflowHumanDecision = (
   task: WorkflowHumanTask,
   decision: { approved: boolean; targetPath?: string },
 ): Promise<void> => {
+  if (task.decisionKind === "synthesis_manuscript") throw new BusinessApiError("INVALID_RESPONSE", "请通过主笔记冲突工作台提交裁决。", false);
   if (task.runId !== runId || task.targetVersion < 1 || task.review === null) throw new BusinessApiError("INVALID_RESPONSE", "Workflow Human Task 绑定无效", false);
   const targetPath = decision.targetPath?.trim() ?? "";
   if (task.decisionKind === "approval_with_target_path" && decision.approved && !validWorkspaceMarkdownPath(targetPath)) {

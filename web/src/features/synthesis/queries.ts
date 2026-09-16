@@ -1,5 +1,6 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  listSynthesisSupplements, openSynthesisSupplement, type SynthesisSourceSupplement,
   getNoteInterviewPreparation, getSynthesisNote, getSynthesisProcessing, getSynthesisRevision,
   listNoteInterviewPreparations, listSynthesisNotes, listSynthesisProcessing, listSynthesisRevisions, openSynthesisSource, retrySynthesisProcessing,
   type SynthesisSourceRef,
@@ -96,3 +97,21 @@ export const useNoteInterviewPreparations = (noteId: string) => {
     enabled: workspaceId !== "" && noteId !== "", retry: false,
     refetchInterval: (query) => query.state.status === "error" ? false : query.state.data?.some((preparation) => noteActive(preparation.status)) ? 3000 : false });
 };
+
+export const useSynthesisSupplements = (noteId: string, enabled: boolean) => {
+  const workspaceId = useActiveWorkspaceId();
+  return useInfiniteQuery({ queryKey: ["synthesis", workspaceId, "supplements", noteId],
+    queryFn: ({ signal, pageParam }) => listSynthesisSupplements(workspaceId, noteId, pageParam, signal),
+    initialPageParam: pageStart(), getNextPageParam: (lastPage) => lastPage.nextCursor ?? undefined,
+    enabled: enabled && workspaceId !== "", retry: false });
+};
+export const useSynthesisSupplementSource = (noteId: string, supplement: SynthesisSourceSupplement | null) => {
+  const workspaceId = useActiveWorkspaceId();
+  return useQuery({ queryKey: ["synthesis", workspaceId, "supplement-source", noteId, supplement?.id ?? ""],
+    queryFn: ({ signal }) => {
+      if (supplement === null) throw new Error("尚未选择补充来源。");
+      return openSynthesisSupplement(workspaceId, noteId, supplement, signal);
+    }, enabled: supplement !== null && workspaceId === supplement.workspaceId && noteId === supplement.noteId, retry: false, gcTime: 0 });
+};
+
+export const manuscriptSummaryKey = (workspaceId: string, processingId: string) => [...synthesisQueryKeys.all(workspaceId), "manuscript-review", processingId] as const;

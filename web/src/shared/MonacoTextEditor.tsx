@@ -13,6 +13,7 @@ export interface MonacoTextEditorProps {
   loadingLabel?: string;
   onReady?: () => void;
   onError?: (error: Error) => void;
+  preserveWhitespace?: boolean;
 }
 
 export const MonacoTextEditor = ({
@@ -26,6 +27,7 @@ export const MonacoTextEditor = ({
   loadingLabel = "正在加载文本编辑器...",
   onReady,
   onError,
+  preserveWhitespace = false,
 }: MonacoTextEditorProps) => {
   configureLocalMonaco();
 
@@ -48,6 +50,7 @@ export const MonacoTextEditor = ({
     options={{
       ariaLabel,
       automaticLayout: true,
+      ...(preserveWhitespace ? { autoIndent: "none" as const, formatOnPaste: false, formatOnType: false } : {}),
       minimap: { enabled: false },
       padding: { top: 18, bottom: 18 },
       readOnly: disabled,

@@ -1822,3 +1822,21 @@ describe("business API boundary", () => {
     await expect(getProposal(workspaceId, proposalId)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
   });
 });
+
+it("accepts only the exact bound manuscript owner schema and rejects ordinary approvals", async () => {
+  const properties = { version: { type: "string", enum: ["synthesis-manuscript-review/v1"] }, processing_id: { type: "string", enum: [proposalId] }, workflow_run_id: { type: "string", enum: [workflowRunId] }, note_ids: { type: "array", enum: [[revisionId, approvalId]] }, result_hash: { type: "string", pattern: "^[0-9a-f]{64}$" } };
+  const original = waitingWorkflowResponse(workflowRunId, null);
+  const schema = { type: "object", additionalProperties: false, required: Object.keys(properties), properties };
+  const fixture = (expected_input_schema: unknown) => ({ ...original, human_task: { ...original.human_task, expected_input_schema } });
+  const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(fixture(schema)), { headers: { "content-type": "application/json" } })); vi.stubGlobal("fetch", fetchMock);
+  const result = await getWorkflow(workspaceId, workflowRunId);
+  expect(result.humanTask?.decisionKind).toBe("synthesis_manuscript");
+  if (!result.humanTask) throw new Error("fixture");
+  const task = result.humanTask;
+  expect(() => submitWorkflowHumanDecision(workspaceId, workflowRunId, task, { approved: true })).toThrow("主笔记冲突工作台");
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  for (const bad of [{ ...schema, required: [...schema.required, "version"] }, { ...schema, properties: { ...properties, extra: { type: "string" } } }, { ...schema, properties: { ...properties, version: { type: "string", enum: ["v2"] } } }, { ...schema, properties: { ...properties, workflow_run_id: { type: "string", enum: [proposalId] } } }, { ...schema, properties: { ...properties, note_ids: { type: "array", enum: [[approvalId, revisionId]] } } }, { ...schema, properties: { ...properties, note_ids: { type: "array", enum: [[revisionId, revisionId]] } } }, { ...schema, properties: { ...properties, result_hash: { type: "string", pattern: ".*" } } }]) {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify(fixture(bad)), { headers: { "content-type": "application/json" } }));
+    await expect(getWorkflow(workspaceId, workflowRunId)).rejects.toThrow();
+  }
+});

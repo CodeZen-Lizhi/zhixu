@@ -12,6 +12,7 @@ import {
 } from "../../api/captures";
 import { useActiveWorkspaceId } from "../../app/active-workspace";
 import { Badge, Button, Card, CardHeader, EmptyState, PageHeader, UnavailableState } from "../../shared/ui";
+import { SourcePromotion } from "../synthesis/SourcePromotion";
 import { SourceSpanViewer } from "../source-spans";
 import { useCapture, useKnowledgeProfile, useRetryCapture, useRetryKnowledgeProfile } from "./queries";
 
@@ -120,6 +121,7 @@ const ProfilePanel = ({ capture }: { capture: Capture }) => {
     {profile?.status === "CAPABILITY_UNAVAILABLE" ? <div className="capture-profile-warning"><CircleOff size={17} /><div><strong>模型能力不可用</strong><p>{profile.errorCode}</p></div></div> : null}
     {profile?.status === "STALE" ? <div className="capture-profile-warning"><TriangleAlert size={17} /><div><strong>当前画像已过期</strong><p>来源或处理依赖已经变化；旧修订版本仍可复核。</p></div></div> : null}
     {profile === undefined ? null : <ProfileProjection profile={profile} />}
+    {profile?.revision !== undefined && profile.status !== "FAILED" && profile.status !== "CAPABILITY_UNAVAILABLE" && (profile.revision.knowledgePoints.length + profile.revision.examples.length > 0) ? <SourcePromotion key={`${profile.workspaceId}:${profile.sourceVersionId}`} workspaceId={profile.workspaceId} sourceVersionId={profile.sourceVersionId} /> : null}
     {retry.isError ? <div className="ui-state ui-state--error" role="alert"><strong>画像重试未确认</strong><p>{errorText(retry.error)}</p><Button variant="secondary" onClick={() => retry.mutate(retry.variables)}>重试原请求</Button></div> : null}
   </Card>;
 };

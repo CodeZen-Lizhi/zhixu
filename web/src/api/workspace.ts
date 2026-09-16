@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { isAbortError, isRecord } from "../shared/codec";
 import { WorkspacesApi } from "./generated/apis/WorkspacesApi";
 import { generatedConfiguration, generatedRawResponse } from "./generated-client";
@@ -97,5 +98,49 @@ const scanWorkspaceResponse = async (workspaceId: string): Promise<unknown> => {
   return payload;
 };
 
-export const scanWorkspace = async (id: string): Promise<WorkspaceScan> =>
-  decodeWorkspaceScan(await scanWorkspaceResponse(id));
+export const scanWorkspace = async (id: string): Promise<WorkspaceScan> => {
+  const result = decodeWorkspaceScan(await scanWorkspaceResponse(id));
+  if (result.workspaceId !== id) throw invalidResponse("workspace binding");
+  return result;
+};
+
+const discoveryPath = z.string().min(1).max(1024).refine((value) =>
+  new TextEncoder().encode(value).length <= 1024 && !/[\\:\u0000-\u001f\u007f]/u.test(value) &&
+  value.split("/").every((part) => part !== "" && ![".", "..", ".git", ".knowledge", "tmp", ".tmp"].includes(part)));
+const discoveryItem = z.strictObject({
+  workspace_id: z.uuid(), binding_version: z.number().int().nonnegative(), path: discoveryPath,
+  stage: z.enum(["WALK", "OBSERVE", "REGISTER"]),
+  code: z.enum(["DIRECTORY_READ_FAILED", "FILE_OBSERVATION_FAILED", "SOURCE_REGISTRATION_FAILED"]),
+  status: z.enum(["FAILED", "RECOVERED"]), failure_count: z.number().int().positive(),
+  last_failed_at: z.iso.datetime({ offset: true }), recovered_at: z.iso.datetime({ offset: true }).nullable(),
+});
+const discoveryPage = z.strictObject({
+  workspace_id: z.uuid(), binding_version: z.number().int().nonnegative(),
+  items: z.array(discoveryItem).max(100), next_cursor: z.union([z.literal(""), discoveryPath]),
+});
+export type DiscoveryFailure = z.infer<typeof discoveryItem>;
+export type DiscoveryFailurePage = z.infer<typeof discoveryPage>;
+export const decodeDiscoveryFailures = (value: unknown, workspaceId: string): DiscoveryFailurePage => {
+  const parsed = discoveryPage.safeParse(value);
+  if (!parsed.success) throw invalidResponse("discovery failures");
+  const page = parsed.data;
+  const codes = { WALK: "DIRECTORY_READ_FAILED", OBSERVE: "FILE_OBSERVATION_FAILED", REGISTER: "SOURCE_REGISTRATION_FAILED" };
+  const paths = new Set<string>();
+  if (page.workspace_id !== workspaceId || page.items.some((item) => {
+    const duplicate = paths.has(item.path); paths.add(item.path);
+    return duplicate || item.workspace_id !== workspaceId || item.binding_version !== page.binding_version ||
+      item.code !== codes[item.stage] || (item.status === "FAILED") !== (item.recovered_at === null) ||
+      (item.recovered_at !== null && Date.parse(item.recovered_at) < Date.parse(item.last_failed_at));
+  }) || (page.next_cursor !== "" && page.next_cursor !== page.items.at(-1)?.path)) throw invalidResponse("discovery binding");
+  return page;
+};
+export const listDiscoveryFailures = async (workspaceId: string, cursor = "", signal?: AbortSignal): Promise<DiscoveryFailurePage> => {
+  if (!z.uuid().safeParse(workspaceId).success || (cursor !== "" && !discoveryPath.safeParse(cursor).success)) throw invalidResponse("discovery query");
+  const response = await generatedRawResponse(workspacesApi.listWorkspaceDiscoveryFailuresRaw({ workspaceId, ...(cursor === "" ? {} : { cursor }), limit: 50 }, signal === undefined ? {} : { signal }));
+  const payload: unknown = await response.json();
+  if (!response.ok) {
+    if (isRecord(payload) && typeof payload.error_code === "string" && typeof payload.message === "string" && typeof payload.retryable === "boolean") throw new WorkspaceApiError(payload.error_code, payload.message, payload.retryable);
+    throw invalidResponse("discovery error");
+  }
+  return decodeDiscoveryFailures(payload, workspaceId);
+};

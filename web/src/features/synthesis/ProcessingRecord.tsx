@@ -1,4 +1,7 @@
+import { SourceReviewEvidence } from "./SourceReviewEvidence";
 import { useEffect, useRef } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { getManuscriptSummary, ManuscriptApiError } from "../../api/synthesis-manuscript";
 import { Link } from "react-router-dom";
 import type { SynthesisProcessing, SynthesisProcessingStatus } from "../../api/synthesis";
 import { useActiveWorkspaceId } from "../../app/active-workspace";
@@ -12,6 +15,10 @@ const labels: Record<SynthesisProcessingStatus, string> = {
 export const ProcessingRecord = ({ processing }: { processing: SynthesisProcessing }) => {
   const workspaceId = useActiveWorkspaceId();
   const retry = useRetrySynthesis();
+  const active = processing.status === "RUNNING" || processing.status === "PENDING";
+  const review = useQuery({ queryKey: ["synthesis", workspaceId, "human-wait", processing.id, processing.workflowRunId], queryFn: ({ signal }) => getManuscriptSummary(workspaceId, processing.id, signal), enabled: workspaceId !== "" && processing.workflowRunId !== null && active, retry: false, refetchInterval: active ? 3000 : false });
+  const waiting = active && review.data?.binding.runId === processing.workflowRunId && !review.data.submitted;
+  const notWaiting = review.error instanceof ManuscriptApiError && review.error.status === 404 && review.error.code === "SYNTHESIS_MANUSCRIPT_REVIEW_NOT_PENDING";
   const pending = useRef<{ version: number; key: string; controller: AbortController } | null>(null);
   useEffect(() => () => { pending.current?.controller.abort(); }, [workspaceId]);
   const startRetry = () => {
@@ -26,8 +33,11 @@ export const ProcessingRecord = ({ processing }: { processing: SynthesisProcessi
     <div className="synthesis-item-heading"><Link to={`/documents/${processing.sourceVersionId}`}>资料 {processing.sourceVersionId.slice(0, 8)}</Link><Badge tone={failed ? "danger" : processing.status === "SUCCEEDED" || processing.status === "NO_CHANGE" ? "success" : "neutral"}>{labels[processing.status]}</Badge></div>
     <div className="synthesis-meta"><time dateTime={processing.updatedAt}>{new Date(processing.updatedAt).toLocaleString("zh-CN", { hour12: false })}</time>
       {processing.workflowRunId !== null ? <Link to={`/workflows/${processing.workflowRunId}`}>查看处理过程</Link> : null}</div>
+    {waiting ? <Link to={`/authoring/notes?processing=${processing.id}`}>处理主笔记冲突</Link> : null}
+    {review.isError && !notWaiting ? <p>人工处理状态读取失败，请查看处理过程或刷新。</p> : null}
     {processing.failure ? <p className="synthesis-failure">{processing.failure.code === "SYNTHESIS_MODEL_CAPABILITY_UNAVAILABLE" ? "模型暂不可用。请在设置中完成模型配置后重试。" : processing.status === "RECOVERY_REQUIRED" ? "上次执行结果尚不能确认，请先检查处理过程。" : "这份资料的整理未完成，原始资料仍然保留。"}<span>错误编号：{processing.failure.code}</span></p> : null}
     {canRetry ? <Button variant="secondary" disabled={retry.isPending} onClick={startRetry}>{retry.isPending ? "正在提交重试…" : "重试整理"}</Button> : null}
     {retry.isError ? <ErrorState title="重试未完成" description={retry.error.message} /> : null}
+    {processing.failure?.code === "SYNTHESIS_MANUSCRIPT_SOURCE_REVIEW_REQUIRED" ? <SourceReviewEvidence scope={{workspaceId: processing.workspaceId, processingId: processing.id}} /> : null}
   </article>;
 };

@@ -28,6 +28,13 @@ export const resolveSynthesisSourceLink = (params: URLSearchParams, revision: Sy
     ![reference.source.workspaceId, reference.source.sourceId, reference.source.sourceVersionId, reference.source.contentArtifactId, reference.source.parseProjectionId, reference.sourceSpanId].every((value) => canonicalUuidPattern.test(value)) ||
     ![reference.source.contentHash, reference.excerptHash].every((value) => /^[0-9a-f]{64}$/.test(value))) return { kind: "invalid" };
   const identity = synthesisSourceIdentity(reference);
-  const saved = revision.items.flatMap(synthesisItemSources).find((candidate) => synthesisSourceIdentity(candidate) === identity);
+  const saved = [...revision.items.flatMap(synthesisItemSources), ...(revision.display?.historicalSources ?? [])].find((candidate) => synthesisSourceIdentity(candidate) === identity);
   return saved === undefined ? { kind: "missing" } : { kind: "resolved", reference: saved };
+};
+
+export const synthesisSourceHref = (noteId: string, revisionId: string, ref: SynthesisSourceRef) => {
+  const params = new URLSearchParams({ revision_id: revisionId, workspace_id: ref.source.workspaceId, source_id: ref.source.sourceId,
+    source_version_id: ref.source.sourceVersionId, content_artifact_id: ref.source.contentArtifactId, parse_projection_id: ref.source.parseProjectionId,
+    source_span_id: ref.sourceSpanId, content_hash: ref.source.contentHash, excerpt_hash: ref.excerptHash });
+  return `/authoring/notes/${noteId}?${params.toString()}`;
 };

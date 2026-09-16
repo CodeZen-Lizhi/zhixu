@@ -46,12 +46,14 @@ vi.mock("../features/artifacts/ArtifactsPage", () => ({
   ArtifactsPage: () => <div>Artifacts route</div>,
   ArtifactDetailPage: () => <div>Artifact detail route</div>,
 }));
+vi.mock("../features/synthesis", () => ({ SynthesisNotesPage: () => <div>Main notes route</div> }));
 vi.mock("../features/authoring/AuthoringPage", () => ({ AuthoringPage: () => <div>Authoring route</div> }));
 vi.mock("../features/authoring/NewDocumentPage", () => ({ NewDocumentPage: () => <div>New document route</div> }));
 vi.mock("../features/document-history", () => ({ DocumentHistoryPage: () => <div>Document history route</div> }));
 vi.mock("../features/organizing", () => ({ OrganizingPage: () => <div>Organizing route</div> }));
 
 import { AppRoutes } from "./AppRoutes";
+import { setActiveWorkspaceId } from "../app/active-workspace";
 
 const LocationProbe = () => {
   const location = useLocation();
@@ -66,7 +68,16 @@ const renderRoute = (path: string) => render(
 );
 
 describe("AppRoutes compatibility", () => {
+  it("已连接工作区的首页进入主笔记中心", async () => {
+    setActiveWorkspaceId("00000000-0000-4000-8000-000000000001");
+    renderRoute("/");
+    expect(await screen.findByText("Main notes route")).toBeInTheDocument();
+    expect(screen.getByTestId("location")).toHaveTextContent("/authoring/notes");
+    setActiveWorkspaceId("");
+  });
+
   beforeEach(() => {
+    setActiveWorkspaceId("");
     auth.state = { status: "authenticated", mode: "required" };
   });
 

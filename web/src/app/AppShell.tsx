@@ -371,7 +371,7 @@ export const AppShell = () => {
     <aside className="workbench__rail">
       <div className="mobile-brand-row">{dashboardEntry
         ? <Link to="/dashboard" className="entry-mark" aria-label="知序首页">序</Link>
-        : <><Link to="/dashboard" className="wordmark"><span>知序</span></Link><button ref={mobileMenuButtonRef} className="mobile-menu-button" aria-label="打开主导航" onClick={() => setMobileNavigationOpen(true)}><Menu size={20} /></button></>}</div>
+        : <><Link to={workspaceConnected ? "/authoring/notes" : "/dashboard"} className="wordmark"><span>知序</span></Link><button ref={mobileMenuButtonRef} className="mobile-menu-button" aria-label="打开主导航" onClick={() => setMobileNavigationOpen(true)}><Menu size={20} /></button></>}</div>
       <div className="rail-section"><Navigation currentPath={location.pathname} workspaceConnected={workspaceConnected} compact={dashboardEntry} knowledgeState={knowledgeNavigationState} /></div>
     </aside>
     {dashboardEntry ? null : <Sheet open={mobileNavigationOpen} onOpenChange={setMobileNavigationOpen} title="主导航" restoreFocusRef={mobileMenuButtonRef}>

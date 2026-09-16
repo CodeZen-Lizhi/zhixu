@@ -1,4 +1,4 @@
-import { fireEvent, screen } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 
 import type { ActiveWorkspace } from "../../api/active-workspace";
@@ -31,12 +31,17 @@ const fixtures = vi.hoisted((): { workspace: ActiveWorkspace; active: ActiveWork
 });
 const { active, workspace: workspaceFixture } = fixtures;
 
+const discovery = vi.hoisted(() => ({ list: vi.fn(), scan: vi.fn() }));
+vi.mock("../../api/workspace", () => ({ listDiscoveryFailures: discovery.list, scanWorkspace: discovery.scan }));
 vi.mock("../../app/WorkspaceCacheBoundary", () => ({ useActiveWorkspace: () => active }));
 
 import { renderWithAppProviders } from "../../test/render";
 import { WorkspacePage } from "./WorkspacePage";
 
 beforeEach(() => {
+  discovery.list.mockReset(); discovery.scan.mockReset();
+  discovery.list.mockResolvedValue({ workspace_id: workspaceFixture.id, binding_version: 1, items: [], next_cursor: "" });
+  discovery.scan.mockResolvedValue({ workspaceId: workspaceFixture.id, files: [], count: 0 });
   active.status = "ready";
   active.workspace = { ...workspaceFixture, availability: "available" };
   active.error = undefined;
@@ -81,4 +86,39 @@ describe("WorkspacePage", () => {
     fireEvent.click(screen.getByRole("button", { name: "重新读取" }));
     expect(active.refresh).toHaveBeenCalledOnce();
   });
+});
+
+it("刷新服务端失败记录并在重新扫描后显示恢复", async () => {
+  const item = { workspace_id: workspaceFixture.id, binding_version: 1, path: "unreadable.md", stage: "OBSERVE", code: "FILE_OBSERVATION_FAILED", status: "FAILED", failure_count: 1, last_failed_at: "2026-09-15T08:00:00Z", recovered_at: null };
+  discovery.list.mockResolvedValue({ workspace_id: workspaceFixture.id, binding_version: 1, items: [item], next_cursor: "" });
+  renderWithAppProviders(<WorkspacePage />);
+  expect(await screen.findByText("unreadable.md")).toBeInTheDocument();
+  expect(screen.getByText("待处理")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "刷新记录" }));
+  await waitFor(() => expect(discovery.list).toHaveBeenCalledTimes(2));
+  discovery.list.mockResolvedValue({ workspace_id: workspaceFixture.id, binding_version: 1, items: [{ ...item, status: "RECOVERED", recovered_at: "2026-09-15T08:01:00Z" }], next_cursor: "" });
+  fireEvent.click(screen.getByRole("button", { name: "重新扫描" }));
+  expect(await screen.findByText("已恢复")).toBeInTheDocument();
+  expect(discovery.scan).toHaveBeenCalledWith(workspaceFixture.id);
+});
+
+
+it("丢弃不同目录绑定的分页并从首页刷新", async () => {
+  const item = { workspace_id: workspaceFixture.id, binding_version: 1, path: "old-root.md", stage: "OBSERVE", code: "FILE_OBSERVATION_FAILED", status: "FAILED", failure_count: 1, last_failed_at: "2026-09-15T08:00:00Z", recovered_at: null };
+  discovery.list.mockResolvedValueOnce({ workspace_id: workspaceFixture.id, binding_version: 1, items: [item], next_cursor: "old-root.md" });
+  discovery.list.mockResolvedValueOnce({ workspace_id: workspaceFixture.id, binding_version: 2, items: [{ ...item, binding_version: 2, path: "new-root-page2.md" }], next_cursor: "new-root-page2.md" });
+  renderWithAppProviders(<WorkspacePage />);
+  expect(await screen.findByText("old-root.md")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "更多记录" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("目录绑定已变更");
+  expect(screen.queryByText("old-root.md")).not.toBeInTheDocument();
+  expect(screen.queryByText("new-root-page2.md")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "更多记录" })).not.toBeInTheDocument();
+  expect(screen.queryByText("当前根目录暂无已记录的扫描失败。")).not.toBeInTheDocument();
+  discovery.list.mockResolvedValue({ workspace_id: workspaceFixture.id, binding_version: 2, items: [{ ...item, binding_version: 2, path: "new-root-page1.md" }], next_cursor: "" });
+  fireEvent.click(screen.getByRole("button", { name: "刷新记录" }));
+  expect(await screen.findByText("new-root-page1.md")).toBeInTheDocument();
+  expect(discovery.list).toHaveBeenLastCalledWith(workspaceFixture.id, "", expect.any(AbortSignal));
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(screen.queryByText("old-root.md")).not.toBeInTheDocument();
 });

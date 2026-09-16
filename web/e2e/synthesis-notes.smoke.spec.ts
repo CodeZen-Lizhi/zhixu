@@ -301,28 +301,32 @@ test("合成笔记在真实 API/Worker 下完成版本、原始来源和 NOTE �
     const frozen = frozenReference(published);
 
     await page.goto("/authoring/notes");
-    await expect(page.getByRole("heading", { name: "合成笔记", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "主笔记中心", exact: true })).toBeVisible();
     const entry = page.locator(`a.synthesis-note-main[href="${noteRoute}"]`);
     await expect(entry).toBeVisible();
     await assertNoHorizontalOverflow(page);
     await entry.click();
-    await assertRevisionVisible(page, current);
+    await assertRevisionVisible(page, published);
     await expect(page.locator(".synthesis-detail-status").getByText(`正式版本 ${String(published.number)}`, { exact: true })).toBeVisible();
-    await expect(page.locator(".synthesis-reading-heading").getByText("当前候选", { exact: true })).toBeVisible();
+    await expect(page.locator(".synthesis-reading-heading").getByText("已发布", { exact: true })).toBeVisible();
     await expect(page.getByRole("link", { name: "查看更新提案", exact: true })).toHaveAttribute("href", `/proposals/${id(record(detail.publication, "Current publication").proposal_id, "Proposal")}`);
     expect(sourceReads).toEqual([]);
     await screenshot(page, testInfo, "synthesis-desktop-note.png");
+    await page.getByRole("button", { name: `审阅候选版本 ${String(current.number)}`, exact: true }).click();
+    await assertRevisionVisible(page, current);
+    await page.getByRole("button", { name: "返回已发布内容", exact: true }).click();
+    await assertRevisionVisible(page, published);
     await selectRevision(page, published);
     expect(sourceReads).toEqual([]);
     await openManualSource(page, published, sourceItem, source);
 
-    await openSourceLink(page, current, source, false);
+    await openSourceLink(page, published, source, false);
     await page.getByRole("dialog").getByRole("button", { name: "关闭", exact: true }).click();
     const readsBeforeRefresh = sourceReads.length;
     const refreshed = page.waitForResponse((response) => isResponse(response, notePath));
     await page.getByRole("button", { name: "刷新", exact: true }).click();
     expect((await refreshed).status()).toBe(200);
-    await assertRevisionVisible(page, current);
+    await assertRevisionVisible(page, published);
     await expect(page.getByRole("dialog")).toHaveCount(0);
     expect(sourceReads).toHaveLength(readsBeforeRefresh);
     await openSourceLink(page, published, source, true);
@@ -337,7 +341,7 @@ test("合成笔记在真实 API/Worker 下完成版本、原始来源和 NOTE �
     expect(sourceReads).toHaveLength(readsBeforeInvalid);
 
     await page.goto(noteRoute);
-    await assertRevisionVisible(page, current);
+    await assertRevisionVisible(page, published);
     const panel = page.getByRole("region", { name: "用这篇笔记面试", exact: true });
     await panel.getByLabel("面试方向", { exact: true }).fill(interviewOptions.role);
     await panel.getByLabel("题目数", { exact: true }).fill(String(interviewOptions.question_count));
@@ -415,7 +419,7 @@ test("合成笔记在真实 API/Worker 下完成版本、原始来源和 NOTE �
     captureRuntime(mobile, "mobile", issues, sourceReads, writes);
     try {
       await mobile.goto(noteRoute);
-      await assertRevisionVisible(mobile, current);
+      await assertRevisionVisible(mobile, published);
       await screenshot(mobile, testInfo, "synthesis-mobile-note.png");
       await selectRevision(mobile, published);
       await openSourceLink(mobile, published, source, true);

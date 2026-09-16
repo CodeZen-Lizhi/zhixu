@@ -1,3 +1,5 @@
+import { useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { listDiscoveryFailures, scanWorkspace } from "../../api/workspace";
 import { Link } from "react-router-dom";
 
 import type { ActiveWorkspaceAvailability } from "../../api/active-workspace";
@@ -51,6 +53,35 @@ export const WorkspacePage = () => {
       <div className="settings-section__actions"><Button asChild variant="secondary"><Link to="/settings?section=workspace">查看设置中的运行上下文</Link></Button></div>
     </section> : null}
     {workspace === undefined && status !== "loading" && status !== "error" ? <EmptyState title="尚未激活 Workspace" description="先在本机命令行指定一个知识库目录，业务路由会在激活后自动恢复。" /> : null}
+    {status === "ready" && workspace ? <DiscoveryStatus key={`${workspace.id}:${String(workspace.version)}`} workspaceId={workspace.id} version={workspace.version} /> : null}
     <SwitchInstructions />
   </div>;
+};
+
+const DiscoveryStatus = ({ workspaceId, version }: { workspaceId: string; version: number }) => {
+  const client = useQueryClient();
+  const key = ["workspace", workspaceId, "discovery-failures", version];
+  const query = useInfiniteQuery({ queryKey: key, initialPageParam: "", queryFn: ({ pageParam, signal }) => listDiscoveryFailures(workspaceId, pageParam, signal), getNextPageParam: (page) => page.next_cursor === "" ? undefined : page.next_cursor, refetchInterval: 30000 });
+  const scan = useMutation({ mutationFn: () => scanWorkspace(workspaceId), onSettled: () => client.invalidateQueries({ queryKey: ["workspace", workspaceId, "discovery-failures", version] }) });
+  const pages = query.data?.pages ?? [];
+  const bindingChanged = pages.some((page) => page.workspace_id !== workspaceId || page.binding_version !== pages[0]?.binding_version);
+  const items = bindingChanged ? [] : pages.flatMap((page) => page.items);
+  const stages = { WALK: "读取目录", OBSERVE: "读取文件", REGISTER: "登记来源" };
+  return <section className="workspace-connection" aria-labelledby="discovery-title">
+    <header className="workspace-connection__heading"><h2 id="discovery-title">文件扫描记录</h2><p>文件发现失败会保留在这里。修复文件访问问题后，可等待自动重扫或重新扫描；成功登记后显示已恢复。</p></header>
+    <div className="settings-section__actions"><Button variant="secondary" disabled={scan.isPending} onClick={() => scan.mutate()}>{scan.isPending ? "正在扫描…" : "重新扫描"}</Button><Button variant="secondary" disabled={query.isFetching} onClick={() => void client.resetQueries({ queryKey: key, exact: true })}>刷新记录</Button></div>
+    {bindingChanged ? <p role="alert">目录绑定已变更，请刷新记录后继续查看。</p> : null}
+    {query.isPending ? <p role="status">正在读取扫描记录…</p> : null}
+    {query.isError ? <p role="alert">扫描记录读取失败：{query.error.message}</p> : null}
+    {scan.isError ? <p role="alert">扫描未完成：{scan.error.message}</p> : null}
+    {scan.isSuccess ? <p role="status">本次扫描已完成；请查看下方仍需处理的记录。</p> : null}
+    {query.isSuccess && !bindingChanged && items.length === 0 ? <p>当前根目录暂无已记录的扫描失败。</p> : null}
+    {items.map((item) => <article key={item.path} className="workspace-alert">
+      <strong style={{ overflowWrap: "anywhere" }}>{item.path}</strong>
+      <span><Badge tone={item.status === "FAILED" ? "warning" : "success"}>{item.status === "FAILED" ? "待处理" : "已恢复"}</Badge> {stages[item.stage]} · 失败 {item.failure_count} 次</span>
+      <span>最近失败：{new Date(item.last_failed_at).toLocaleString()} · {item.code}</span>
+      {item.recovered_at !== null ? <span>恢复时间：{new Date(item.recovered_at).toLocaleString()}</span> : null}
+    </article>)}
+    {!bindingChanged && query.hasNextPage ? <Button variant="secondary" disabled={query.isFetchingNextPage} onClick={() => void query.fetchNextPage()}>更多记录</Button> : null}
+  </section>;
 };

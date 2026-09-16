@@ -1,0 +1,5 @@
+.historical-republish { min-width: 0; }
+.historical-republish fieldset { display: grid; gap: var(--space-3, 12px); }
+.historical-republish label { display: flex; align-items: flex-start; gap: var(--space-2, 8px); padding-block: 8px; }
+.historical-republish pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.historical-republish a + a { margin-inline-start: 12px; }
