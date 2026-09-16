@@ -32,3 +32,4 @@
 | [0028](0028-openapi-contract-gates.md) | 锁定 Spectral/oasdiff 的 OpenAPI 质量与破坏性变更门禁 | accepted |
 | [0029](0029-atlas-sole-schema-migration.md) | Atlas 成为唯一 Schema 迁移事实源并移除 Goose | accepted |
 | [0030](0030-retain-auth-session-boundary.md) | 保留现有 Auth Session 边界，不采用 gin-contrib/sessions | accepted |
+| [0031](0031-stable-master-note-and-reviewed-evolution.md) | 稳定主笔记、独立范围审批与可追溯演进 | accepted |

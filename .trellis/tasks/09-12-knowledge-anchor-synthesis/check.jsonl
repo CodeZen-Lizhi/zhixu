@@ -1,0 +1,8 @@
+{"path": "atlas/schema.sql", "reason": "核验新增模型是否违反不可变、溯源和状态转换约束", "scope": "quality review"}
+{"path": ".trellis/tasks/09-12-knowledge-anchor-synthesis/design.md", "reason": "核验数据流、兼容性和失败路径", "scope": "design review"}
+{"path": ".trellis/tasks/09-12-knowledge-anchor-synthesis/research/remaining-acceptance.md", "reason": "复用已经完成的定向验收，保留真实模型与旧数据升级的未验证边界", "scope": "current acceptance"}
+{"path": ".trellis/tasks/09-12-knowledge-anchor-synthesis/research/source-review-127-final-review.md", "reason": "最终127四项P2关闭依据、SQL身份约束、共享证据及恢复完成谓词", "scope": "source review recovery"}
+{"path": ".trellis/tasks/09-12-knowledge-anchor-synthesis/research/current-source-review-command-browser-verification.md", "reason": "真实POST提交后丢响应、完整刷新、同键恢复与不重复调用的证据", "scope": "command recovery behavior"}
+{"path": ".trellis/tasks/09-12-knowledge-anchor-synthesis/research/history-republish-core-implementation.md", "reason": "128历史选择证明、无首次P、同字节发布续修状态", "scope": "historical republish"}
+{"path": ".trellis/tasks/09-12-knowledge-anchor-synthesis/research/history-republish-browser-verification.md", "reason": "真实主笔记页面中断恢复、原审批Git和默认发布阅读证据", "scope": "historical republish"}
+{"path": ".trellis/tasks/09-12-knowledge-anchor-synthesis/research/schema-128-validation.md", "reason": "最终128正式迁移及空库恢复证据", "scope": "historical republish"}

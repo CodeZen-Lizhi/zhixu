@@ -1,0 +1,8 @@
+{"path": "atlas/schema.sql", "reason": "现有知识主题、声明、溯源、合成运行和版本完整性约束", "scope": "schema and invariants"}
+{"path": ".trellis/tasks/09-12-knowledge-anchor-synthesis/prd.md", "reason": "已确认的产品需求、决策和验收标准", "scope": "requirements"}
+{"path": ".trellis/tasks/09-12-knowledge-anchor-synthesis/research/remaining-acceptance.md", "reason": "当前收口状态、已通过证据与未完成的真实模型验收；避免重做历史待办", "scope": "current acceptance"}
+{"path": ".trellis/spec/backend/synthesis-notes.md", "reason": "人工全文、候选重合并、当前全文补源及独立恢复的已实现合同", "scope": "backend contracts"}
+{"path": ".trellis/spec/frontend/organizing-workbench.md", "reason": "主笔记阅读、裁决、丢响应后同命令恢复及来源有效性展示", "scope": "frontend contracts"}
+{"path": ".trellis/tasks/09-12-knowledge-anchor-synthesis/research/history-republish-core-implementation.md", "reason": "128历史选择证明、无首次P、同字节发布续修状态", "scope": "historical republish"}
+{"path": ".trellis/tasks/09-12-knowledge-anchor-synthesis/research/history-republish-browser-verification.md", "reason": "真实主笔记页面中断恢复、原审批Git和默认发布阅读证据", "scope": "historical republish"}
+{"path": ".trellis/tasks/09-12-knowledge-anchor-synthesis/research/schema-128-validation.md", "reason": "最终128正式迁移及空库恢复证据", "scope": "historical republish"}
