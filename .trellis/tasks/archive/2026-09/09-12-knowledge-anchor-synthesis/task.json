@@ -12,15 +12,15 @@
   "assignee": "lizhi",
   "createdAt": "2026-09-12",
   "completedAt": "2026-09-16",
-  "branch": null,
+  "branch": "dev",
   "base_branch": "main",
   "worktree_path": null,
-  "commit": null,
+  "commit": "f3980246c468a9932206544f6d0fd891d3dae4d0",
   "pr_url": null,
   "subtasks": [],
   "children": [],
   "parent": null,
   "relatedFiles": [],
-  "notes": "已完成批准范围的实施、定向核验与真实模型有界质量验收；用户确认原目录后受控重绑成功，正式Schema135、DeepSeek与BGE配置revision10已由API/Worker共同生效。证据和限制见research/remaining-acceptance.md及deepseek-chat-activation-20260916.md。代码未提交或推送，任务目录保留供审阅。",
+  "notes": "已完成批准范围的实施、定向核验与真实模型有界验收；正式Schema135、DeepSeek与BGE配置revision10由API/Worker共同生效。已按用户授权分功能提交，新增手写注释中文化；独立全项目规范整理保留未提交。推送结果和提交清单见会话日志，验收限制见research/remaining-acceptance.md。",
   "meta": {}
 }
