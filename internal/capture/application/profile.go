@@ -166,6 +166,22 @@ type ProfileReader interface {
 	GetProfile(context.Context, ProfileQuery) (ProfileView, error)
 }
 
+// ProfileRevisionQuery 绝不通过可变的当前指针解析。
+type ProfileRevisionQuery struct {
+	WorkspaceID     foundation.ID
+	SourceVersionID foundation.ID
+	RevisionID      foundation.ID
+}
+
+type ProfileRevisionView struct {
+	Revision domain.ProfileRevision
+	Evidence []domain.ProfileEvidence
+}
+
+type ProfileRevisionReader interface {
+	GetProfileRevision(context.Context, ProfileRevisionQuery) (ProfileRevisionView, error)
+}
+
 // ProfileBatchReader hydrates Profile candidates without a per-material query loop.
 type ProfileBatchReader interface {
 	GetProfiles(context.Context, ProfileBatchQuery) ([]ProfileView, error)

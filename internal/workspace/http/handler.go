@@ -48,6 +48,7 @@ func (h *Handler) Routes(router gin.IRouter) {
 	router.GET("/workspaces/active", httpapi.GinHandler(h.active))
 	router.GET("/workspaces/:workspace_id", httpapi.GinHandler(h.detail))
 	router.POST("/workspaces/:workspace_id/scan", httpapi.GinHandler(h.scan))
+	router.GET("/workspaces/:workspace_id/discovery-failures", httpapi.GinHandler(h.listDiscoveryFailures))
 	router.GET("/workspaces/:workspace_id/source-versions", httpapi.GinHandler(h.listSourceVersions))
 }
 

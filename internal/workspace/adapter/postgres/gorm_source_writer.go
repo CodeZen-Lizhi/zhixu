@@ -93,7 +93,13 @@ func (repository *GORMRepository) registerSourceVersionGORM(ctx context.Context,
 	}
 	registration.Version.SourceID = source.ID
 	registration.Version.ContentArtifactID = artifact.ID
-	version, created, err := gormInsertOrGetSourceVersion(ctx, transaction, source.WorkspaceID, registration.Version)
+	var version domain.SourceVersion
+	var created bool
+	if registration.CurrentObservation {
+		version, created, err = gormObserveSourceVersion(ctx, transaction, source.WorkspaceID, registration.Version)
+	} else {
+		version, created, err = gormInsertOrGetSourceVersion(ctx, transaction, source.WorkspaceID, registration.Version)
+	}
 	if err != nil {
 		return domain.SourceRegistrationResult{}, classifyGORMWorkspace(ctx, err, "SOURCE_VERSION_REGISTER_FAILED")
 	}
@@ -150,7 +156,7 @@ func gormInsertOrGetSource(ctx context.Context, transaction *gorm.DB, source dom
 }
 
 func gormInsertOrGetSourceVersion(ctx context.Context, transaction *gorm.DB, workspaceID foundation.ID, version domain.SourceVersion) (domain.SourceVersion, bool, error) {
-	row, err := gormWorkspaceRawRow(transaction.WithContext(ctx), `INSERT INTO core.source_version (id,source_id,workspace_id,content_artifact_id,content_hash,byte_size,mime_type,original_content_location,security_status,parser_version,captured_at) VALUES (?,?,?,?,?,?,?,?,?,NULLIF(?,''),?) ON CONFLICT (source_id,content_hash) DO NOTHING RETURNING id::text,source_id::text,content_artifact_id::text,content_hash,byte_size,mime_type,original_content_location,security_status,COALESCE(parser_version,''),captured_at`, string(version.ID), string(version.SourceID), string(workspaceID), string(version.ContentArtifactID), version.ContentHash, version.ByteSize, version.MediaType, version.OriginalContentLocation, version.SecurityStatus, version.ParserVersion, version.CapturedAt.UTC())
+	row, err := gormWorkspaceRawRow(transaction.WithContext(ctx), `INSERT INTO core.source_version (id,source_id,workspace_id,content_artifact_id,content_hash,byte_size,mime_type,original_content_location,security_status,parser_version,captured_at) VALUES (?,?,?,?,?,?,?,?,?,NULLIF(?,''),?) ON CONFLICT (source_id,content_hash) WHERE observation_predecessor_id IS NULL DO NOTHING RETURNING id::text,source_id::text,content_artifact_id::text,content_hash,byte_size,mime_type,original_content_location,security_status,COALESCE(parser_version,''),captured_at`, string(version.ID), string(version.SourceID), string(workspaceID), string(version.ContentArtifactID), version.ContentHash, version.ByteSize, version.MediaType, version.OriginalContentLocation, version.SecurityStatus, version.ParserVersion, version.CapturedAt.UTC())
 	if err != nil {
 		return domain.SourceVersion{}, false, err
 	}
@@ -161,7 +167,7 @@ func gormInsertOrGetSourceVersion(ctx context.Context, transaction *gorm.DB, wor
 	if !gormWorkspaceNoRows(err) {
 		return domain.SourceVersion{}, false, err
 	}
-	row, err = gormWorkspaceRawRow(transaction.WithContext(ctx), `UPDATE core.source_version AS sv SET content_artifact_id=? WHERE sv.workspace_id=? AND sv.source_id=? AND sv.content_hash=? AND sv.content_artifact_id IS NULL RETURNING id::text,source_id::text,content_artifact_id::text,content_hash,byte_size,mime_type,original_content_location,security_status,COALESCE(parser_version,''),captured_at`, string(version.ContentArtifactID), string(workspaceID), string(version.SourceID), version.ContentHash)
+	row, err = gormWorkspaceRawRow(transaction.WithContext(ctx), `UPDATE core.source_version AS sv SET content_artifact_id=? WHERE sv.workspace_id=? AND sv.source_id=? AND sv.content_hash=? AND sv.observation_predecessor_id IS NULL AND sv.content_artifact_id IS NULL RETURNING id::text,source_id::text,content_artifact_id::text,content_hash,byte_size,mime_type,original_content_location,security_status,COALESCE(parser_version,''),captured_at`, string(version.ContentArtifactID), string(workspaceID), string(version.SourceID), version.ContentHash)
 	if err != nil {
 		return domain.SourceVersion{}, false, err
 	}
@@ -172,7 +178,7 @@ func gormInsertOrGetSourceVersion(ctx context.Context, transaction *gorm.DB, wor
 	if !gormWorkspaceNoRows(err) {
 		return domain.SourceVersion{}, false, err
 	}
-	row, err = gormWorkspaceRawRow(transaction.WithContext(ctx), `SELECT id::text,source_id::text,content_artifact_id::text,content_hash,byte_size,mime_type,original_content_location,security_status,COALESCE(parser_version,''),captured_at FROM core.source_version sv WHERE sv.workspace_id=? AND sv.source_id=? AND sv.content_hash=?`, string(workspaceID), string(version.SourceID), version.ContentHash)
+	row, err = gormWorkspaceRawRow(transaction.WithContext(ctx), `SELECT id::text,source_id::text,content_artifact_id::text,content_hash,byte_size,mime_type,original_content_location,security_status,COALESCE(parser_version,''),captured_at FROM core.source_version sv WHERE sv.workspace_id=? AND sv.source_id=? AND sv.content_hash=? AND sv.observation_predecessor_id IS NULL`, string(workspaceID), string(version.SourceID), version.ContentHash)
 	if err != nil {
 		return domain.SourceVersion{}, false, err
 	}

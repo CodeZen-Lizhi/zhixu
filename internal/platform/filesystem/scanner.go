@@ -3,6 +3,7 @@ package filesystem
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -12,7 +13,8 @@ import (
 
 // Scanner adapts the safe local Root implementation to the Workspace port.
 type Scanner struct {
-	Options ScanOptions
+	Options   ScanOptions
+	boundRoot *os.Root
 }
 
 // CanonicalRoot validates and resolves one existing Workspace directory.
@@ -56,11 +58,12 @@ func (s Scanner) Scan(ctx context.Context, rootPath string) ([]domain.ScannedFil
 }
 
 // Capture publishes an immutable managed copy after verifying the scan observation.
-func (Scanner) Capture(ctx context.Context, rootPath string, file domain.ScannedFile) (domain.ContentCapture, error) {
+func (s Scanner) Capture(ctx context.Context, rootPath string, file domain.ScannedFile) (domain.ContentCapture, error) {
 	root, err := NewRoot(rootPath)
 	if err != nil {
 		return domain.ContentCapture{}, fileError(foundation.ErrorInvalidInput, "WORKSPACE_ROOT_INVALID", false, err)
 	}
+	root.boundRoot = s.boundRoot
 	location, created, err := root.Capture(ctx, file.RelativePath, file.ContentHash, file.ByteSize)
 	if err != nil {
 		return domain.ContentCapture{}, err

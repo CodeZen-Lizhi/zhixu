@@ -524,3 +524,28 @@ func gormLoadProfileEvidence(ctx context.Context, database *gorm.DB, revision do
 
 var _ captureapp.ProfileReader = (*GORMProfileRepository)(nil)
 var _ captureapp.ProfileBatchReader = (*GORMProfileRepository)(nil)
+
+var _ captureapp.ProfileRevisionReader = (*GORMProfileRepository)(nil)
+
+// GetProfileRevision 读取精确的不可变证据，即使
+// 画像已重建、重试失败或原始来源文件已删除。
+func (repository *GORMProfileRepository) GetProfileRevision(ctx context.Context, query captureapp.ProfileRevisionQuery) (captureapp.ProfileRevisionView, error) {
+	if err := repository.ready(ctx); err != nil {
+		return captureapp.ProfileRevisionView{}, err
+	}
+	if !validID(query.WorkspaceID) || !validID(query.SourceVersionID) || !validID(query.RevisionID) {
+		return captureapp.ProfileRevisionView{}, invalid(profileQueryInvalidCode, "profile revision query is invalid")
+	}
+	revision, found, err := gormLoadProfileRevision(ctx, repository.database, query.WorkspaceID, query.RevisionID)
+	if err != nil {
+		return captureapp.ProfileRevisionView{}, classifyGORMCapture(ctx, err, "CAPTURE_PROFILE_REVISION_QUERY_FAILED")
+	}
+	if !found || revision.SourceVersionID != query.SourceVersionID {
+		return captureapp.ProfileRevisionView{}, foundation.NewError(foundation.ErrorNotFound, "CAPTURE_PROFILE_REVISION_NOT_FOUND", false, sql.ErrNoRows)
+	}
+	evidence, err := gormLoadProfileEvidence(ctx, repository.database, revision)
+	if err != nil {
+		return captureapp.ProfileRevisionView{}, err
+	}
+	return captureapp.ProfileRevisionView{Revision: revision, Evidence: evidence}, nil
+}

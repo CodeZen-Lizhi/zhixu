@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -149,6 +150,52 @@ func testRepositoryWorkspaceAndSourceVersionLifecycle(t *testing.T, platform *pl
 		t.Fatalf("changed registration = %#v, error = %v", changed, err)
 	}
 
+	observation := domain.SourceRegistration{Source: first.Source, Artifact: first.Artifact, Version: first.Version, CurrentObservation: true}
+	observation.Version.CapturedAt = now.Add(time.Second)
+	var observations [2]domain.SourceRegistrationResult
+	var observationErrors [2]error
+	var group sync.WaitGroup
+	for i := range observations {
+		request := observation
+		request.Version.ID, err = foundation.NewUUIDGenerator(nil).New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		group.Add(1)
+		go func(index int, request domain.SourceRegistration) {
+			defer group.Done()
+			observations[index], observationErrors[index] = repository.RegisterSourceVersion(ctx, request)
+		}(i, request)
+	}
+	group.Wait()
+	if observationErrors[0] != nil || observationErrors[1] != nil || observations[0].Version.ID != observations[1].Version.ID || observations[0].Created == observations[1].Created || observations[0].Version.ID == first.Version.ID || observations[0].Artifact.ID != first.Artifact.ID {
+		t.Fatalf("concurrent return to A: %+v %v", observations, observationErrors)
+	}
+	observation.CurrentObservation = false
+	observation.Version.ID, err = foundation.NewUUIDGenerator(nil).New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	commandReplay, err := repository.RegisterSourceVersion(ctx, observation)
+	if err != nil || commandReplay.Created || commandReplay.Version.ID != first.Version.ID {
+		t.Fatalf("canonical command replay changed: %+v %v", commandReplay, err)
+	}
+	stale := domain.SourceRegistration{Source: changed.Source, Artifact: changed.Artifact, Version: changed.Version, CurrentObservation: true}
+	stale.Version.ID, err = foundation.NewUUIDGenerator(nil).New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.RegisterSourceVersion(ctx, stale); err == nil {
+		t.Fatal("older observation replaced current A")
+	}
+	var latestID string
+	if err := pool.QueryRow(ctx, `SELECT id::text FROM core.source_version WHERE source_id=$1 ORDER BY captured_at DESC,id DESC LIMIT 1`, string(first.Source.ID)).Scan(&latestID); err != nil || latestID != string(observations[0].Version.ID) {
+		t.Fatalf("return to A not current: %s %v", latestID, err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO core.source_version(id,source_id,workspace_id,content_artifact_id,content_hash,byte_size,mime_type,original_content_location,security_status,captured_at,observation_predecessor_id) SELECT $1,source_id,workspace_id,content_artifact_id,content_hash,byte_size,mime_type,original_content_location,security_status,captured_at+interval '5 seconds',$2 FROM core.source_version WHERE id=$3`, "35000000-0000-4000-8000-000000000099", string(first.Version.ID), string(changed.Version.ID)); err == nil {
+		t.Fatal("outdated observation predecessor accepted")
+	}
+
 	registration.Source.ID = mustID(t, "20000000-0000-4000-8000-000000000004")
 	registration.Source.OriginalLocation = "sources/copy.md"
 	registration.Source.LogicalName = "copy"
@@ -233,6 +280,26 @@ func testRepositoryGetSourceMaterialRejectsLegacyAndCrossScopeRows(t *testing.T,
 	requireRepositoryErrorCode(t, err, "SOURCE_MATERIAL_SCOPE_INVALID")
 	_, err = repository.GetSourceMaterial(ctx, mustID(t, "54000000-0000-4000-8000-000000000099"))
 	requireRepositoryErrorCode(t, err, "SOURCE_VERSION_NOT_FOUND")
+	// 旧记录可能早于 NOT VALID 产物约束。当前
+	// 扫描必须保留既有受支持的修复方式，不创建新版本。
+	legacySource := mustID(t, "52000000-0000-4000-8000-000000000099")
+	legacyVersion := mustID(t, "54000000-0000-4000-8000-000000000098")
+	if _, err := pool.Exec(ctx, `INSERT INTO core.source(id,workspace_id,type,logical_name,original_location,created_at) VALUES($1,$2,'markdown','repair','repair.md',$3)`, string(legacySource), workspaceID, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO core.source_version(id,source_id,workspace_id,content_hash,byte_size,mime_type,original_content_location,security_status,captured_at) VALUES($1,$2,$3,$4,7,'text/markdown','repair.md','pending',$5)`, string(legacyVersion), string(legacySource), workspaceID, legacyHash, now); err != nil {
+		t.Fatal(err)
+	}
+	repaired, err := repository.RegisterSourceVersion(ctx, domain.SourceRegistration{
+		CurrentObservation: true,
+		Source:             domain.Source{ID: legacySource, WorkspaceID: mustID(t, workspaceID), Type: "markdown", LogicalName: "repair", OriginalLocation: "repair.md", CreatedAt: now},
+		Artifact:           domain.ContentArtifact{ID: mustID(t, "53000000-0000-4000-8000-000000000099"), WorkspaceID: mustID(t, workspaceID), ContentHash: legacyHash, ByteSize: 7, ManagedLocation: ".knowledge/sources/" + legacyHash, CreatedAt: now},
+		Version:            domain.SourceVersion{ID: mustID(t, "54000000-0000-4000-8000-000000000099"), ContentHash: legacyHash, ByteSize: 7, MediaType: "text/markdown", OriginalContentLocation: "repair.md", SecurityStatus: "pending", CapturedAt: now.Add(time.Second)},
+	})
+	if err != nil || repaired.Created || repaired.Version.ID != legacyVersion || repaired.Version.ContentArtifactID == "" {
+		t.Fatalf("legacy observation repair: %+v %v", repaired, err)
+	}
+
 }
 
 func TestRepositoryDatabaseConstraints(t *testing.T) {

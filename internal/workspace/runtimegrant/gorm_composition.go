@@ -17,6 +17,7 @@ import (
 type GORMRepositoryPort interface {
 	workspacedomain.Repository
 	workspacedomain.ActiveWorkspaceRepository
+	workspacedomain.SourcePresenceRepository
 	workspacedomain.SourceMaterialRepository
 	workspacedomain.SourceVersionListRepository
 	workspacedomain.GitCaptureRepository

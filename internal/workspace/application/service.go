@@ -279,6 +279,24 @@ func (s *Service) ScanWorkspace(ctx context.Context, workspaceID foundation.ID) 
 	if s == nil || s.dependencies.Repository == nil || s.dependencies.Files == nil || s.dependencies.IDs == nil || s.dependencies.Clock == nil {
 		return nil, dependencyError("WORKSPACE_SERVICE_UNAVAILABLE")
 	}
+	if _, ok := s.dependencies.Files.(domain.SourceDiscoveryBinder); ok {
+		collected := []domain.ScannedFile{}
+		after := ""
+		for {
+			page, err := s.DiscoverWorkspaceSources(ctx, workspaceID, after, 100)
+			if err != nil {
+				return nil, err
+			}
+			collected = append(collected, page.Files...)
+			if page.Done {
+				return collected, nil
+			}
+			if page.After == after {
+				return nil, dependencyError("SOURCE_DISCOVERY_NO_PROGRESS")
+			}
+			after = page.After
+		}
+	}
 	workspace, err := s.dependencies.Repository.GetWorkspaceByID(ctx, workspaceID)
 	if err != nil {
 		return nil, err
@@ -287,6 +305,10 @@ func (s *Service) ScanWorkspace(ctx context.Context, workspaceID foundation.ID) 
 	if err != nil {
 		return nil, err
 	}
+	return s.registerScannedFiles(ctx, workspace, files)
+}
+
+func (s *Service) registerScannedFiles(ctx context.Context, workspace domain.Workspace, files []domain.ScannedFile) ([]domain.ScannedFile, error) {
 	registrations := make([]domain.SourceRegistration, 0, len(files))
 	capturedAt := s.dependencies.Clock.Now()
 	for _, file := range files {
@@ -307,6 +329,7 @@ func (s *Service) ScanWorkspace(ctx context.Context, workspaceID foundation.ID) 
 			return nil, err
 		}
 		registrations = append(registrations, domain.SourceRegistration{
+			CurrentObservation: true,
 			Source: domain.Source{
 				ID: sourceID, WorkspaceID: workspace.ID, Type: sourceType(file.MediaType),
 				LogicalName: filepath.Base(file.RelativePath), OriginalLocation: file.RelativePath, CreatedAt: capturedAt,
@@ -321,6 +344,11 @@ func (s *Service) ScanWorkspace(ctx context.Context, workspaceID foundation.ID) 
 				SecurityStatus: "pending", CapturedAt: capturedAt,
 			},
 		})
+	}
+	if session, ok := s.dependencies.Files.(domain.SourceDiscoverySession); ok {
+		if err := session.Revalidate(ctx); err != nil {
+			return nil, err
+		}
 	}
 	results, err := s.dependencies.Repository.RegisterSourceVersions(ctx, registrations)
 	if err != nil {

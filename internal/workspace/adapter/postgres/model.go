@@ -122,8 +122,13 @@ func scanSource(row rowScanner) (domain.Source, error) {
 }
 
 func scanSourceVersion(row rowScanner) (domain.SourceVersion, error) {
+	return scanSourceVersionWithArtifactPolicy(row, false)
+}
+
+func scanSourceVersionWithArtifactPolicy(row rowScanner, allowMissingArtifact bool) (domain.SourceVersion, error) {
 	var version domain.SourceVersion
-	var id, sourceID, artifactID string
+	var id, sourceID string
+	var artifactID sql.NullString
 	if err := row.Scan(&id, &sourceID, &artifactID, &version.ContentHash, &version.ByteSize,
 		&version.MediaType, &version.OriginalContentLocation, &version.SecurityStatus,
 		&version.ParserVersion, &version.CapturedAt); err != nil {
@@ -139,7 +144,10 @@ func scanSourceVersion(row rowScanner) (domain.SourceVersion, error) {
 	}
 	version.ID = parsedID
 	version.SourceID = parsedSourceID
-	parsedArtifactID, err := foundation.ParseID(artifactID)
+	if !artifactID.Valid && allowMissingArtifact {
+		return version, nil
+	}
+	parsedArtifactID, err := foundation.ParseID(artifactID.String)
 	if err != nil {
 		return domain.SourceVersion{}, fmt.Errorf("parse source version content artifact id: %w", err)
 	}

@@ -33,11 +33,11 @@ func (r Root) Capture(ctx context.Context, relative, expectedHash string, expect
 	if expectedSize < 0 || !validSHA256(expectedHash) {
 		return "", false, fileError(foundation.ErrorInvalidInput, "SOURCE_VERSION_CAPTURE_INVALID", false, errors.New("invalid expected content metadata"))
 	}
-	workspaceRoot, err := os.OpenRoot(r.path)
+	workspaceRoot, closeRoot, err := (Scanner{boundRoot: r.boundRoot}).discoveryRoot(r.path)
 	if err != nil {
 		return "", false, fileError(foundation.ErrorDependencyUnavailable, "WORKSPACE_ROOT_UNAVAILABLE", false, err)
 	}
-	defer workspaceRoot.Close()
+	defer closeRoot()
 	if err := validateRelativePath(relative); err != nil {
 		return "", false, fileError(foundation.ErrorInvalidInput, "WORKSPACE_PATH_INVALID", false, err)
 	}
@@ -61,7 +61,7 @@ func (r Root) Capture(ctx context.Context, relative, expectedHash string, expect
 	if err := ensureManagedSourceDirectoryRoot(workspaceRoot); err != nil {
 		return "", false, err
 	}
-	if err := r.ensureManagedSourceIgnored(); err != nil {
+	if err := r.ensureCaptureIgnored(workspaceRoot); err != nil {
 		return "", false, err
 	}
 	temporary, temporaryRelative, err := createManagedTemp(workspaceRoot)
@@ -1087,4 +1087,40 @@ func contextError(ctx context.Context) error {
 
 func fileError(kind foundation.ErrorKind, code string, retryable bool, cause error) error {
 	return foundation.NewError(kind, code, retryable, fmt.Errorf("filesystem operation failed: %w", cause))
+}
+
+// 来源发现已持有物理根目录，因此 Git 忽略设置不得
+// 再次解析路径。此受管目录忽略其自身内容。
+func (r Root) ensureCaptureIgnored(root *os.Root) error {
+	if r.boundRoot == nil {
+		return r.ensureManagedSourceIgnored()
+	}
+	const name = ".knowledge/.gitignore"
+	file, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if errors.Is(err, os.ErrExist) {
+		info, err := root.Lstat(name)
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return errors.New("managed ignore is not a regular file")
+		}
+		data, err := root.ReadFile(name)
+		if err != nil {
+			return err
+		}
+		if string(data) != "*\n" {
+			return errors.New("managed ignore content is unexpected")
+		}
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	_, writeErr := file.WriteString("*\n")
+	closeErr := file.Close()
+	if writeErr != nil {
+		return writeErr
+	}
+	return closeErr
 }

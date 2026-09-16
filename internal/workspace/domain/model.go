@@ -97,12 +97,16 @@ type SourceMaterial struct {
 	ContentArtifact   ContentArtifact
 }
 
-// SourceRegistration supplies candidate IDs for a new Source and SourceVersion.
-// Existing records keep their original IDs when the stable location or hash matches.
+// SourceRegistration 为新的 Source 和 SourceVersion 提供候选 ID。
+// 命令保持规范的来源/哈希身份。新的本地观察在内容
+// 变化前保持当前版本；恢复为旧字节也属于内容变化。
 type SourceRegistration struct {
-	Source   Source
-	Artifact ContentArtifact
-	Version  SourceVersion
+	// CurrentObservation 区分新的本地文件观察与
+	// 对先前已采集命令/提交的幂等注册。
+	CurrentObservation bool
+	Source             Source
+	Artifact           ContentArtifact
+	Version            SourceVersion
 }
 
 // SourceRegistrationResult reports the persisted records and whether a version was created.

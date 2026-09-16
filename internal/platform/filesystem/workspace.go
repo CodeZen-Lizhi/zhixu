@@ -20,7 +20,8 @@ import (
 
 // Root is a canonical, existing Workspace directory.
 type Root struct {
-	path string
+	path      string
+	boundRoot *os.Root
 }
 
 // File is the safe metadata and content fingerprint returned by a scan.
