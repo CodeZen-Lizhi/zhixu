@@ -19,6 +19,10 @@ import {
 
 export type ChatModelProvider = "disabled" | "openai-compatible" | "ollama";
 export type ChatAPIStyle = "chat_completions" | "responses";
+export type ChatReasoningEffort = "" | "low" | "medium" | "high" | "xhigh" | "max";
+export const chatReasoningFunctions = ["file_profile", "knowledge_organization", "anchor_scope", "main_note_synthesis", "manuscript_source_review", "knowledge_qna", "workspace_analysis", "note_interview"] as const;
+export type ChatReasoningFunction = (typeof chatReasoningFunctions)[number];
+export type ChatReasoningEffortByFunction = Partial<Record<ChatReasoningFunction, ChatReasoningEffort>>;
 export type EmbeddingModelProvider = "disabled" | "openai-compatible" | "ollama";
 export type EmbeddingNormalization = "none" | "l2";
 export type EmbeddingDistanceMetric = "cosine" | "inner_product" | "euclidean";
@@ -51,6 +55,8 @@ export type ModelSecretInput =
 export interface ChatModelSettingsSummary {
   provider: ChatModelProvider;
   apiStyle: ChatAPIStyle;
+  reasoningEffort: ChatReasoningEffort;
+  reasoningEffortByFunction: ChatReasoningEffortByFunction;
   baseUrl: string;
   model: string;
   modelVersion: string;
@@ -140,6 +146,8 @@ export interface ModelLocalRuntimeStatus {
 export interface ChatModelSettingsInput {
   provider: ChatModelProvider;
   apiStyle: ChatAPIStyle;
+  reasoningEffort?: ChatReasoningEffort;
+  reasoningEffortByFunction?: ChatReasoningEffortByFunction;
   baseUrl: string;
   model: string;
   modelVersion: string;
@@ -209,6 +217,7 @@ export class ModelSettingsApiError extends Error {
 
 const chatProviders = ["disabled", "openai-compatible", "ollama"] as const;
 const chatAPIStyles = ["chat_completions", "responses"] as const;
+const chatReasoningEfforts = ["", "low", "medium", "high", "xhigh", "max"] as const;
 const embeddingProviders = ["disabled", "openai-compatible", "ollama"] as const;
 const normalizations = ["none", "l2"] as const;
 const distanceMetrics = ["cosine", "inner_product", "euclidean"] as const;
@@ -475,14 +484,26 @@ class StrictJsonParser {
 
 const strictJson = (source: string): unknown => new StrictJsonParser(source).parse();
 
+const decodeReasoningEffortByFunction = (value: unknown, field: string): ChatReasoningEffortByFunction => {
+  if (!isRecord(value)) throw invalidResponse(field);
+  const result: ChatReasoningEffortByFunction = {};
+  for (const [key, effort] of Object.entries(value)) {
+    const functionKey = enumValue(key, chatReasoningFunctions, field);
+    result[functionKey] = enumValue(effort, chatReasoningEfforts, `${field}.${functionKey}`);
+  }
+  return result;
+};
+
 const decodeChatSummary = (value: unknown, field: string): ChatModelSettingsSummary => {
   if (!isRecord(value)) throw invalidResponse(field);
-  exact(value, ["provider", "api_style", "base_url", "model", "model_version", "adapter_version", "api_key_configured"], field);
+  exact(value, ["provider", "api_style", "reasoning_effort", "reasoning_effort_by_function", "base_url", "model", "model_version", "adapter_version", "api_key_configured"], field);
   const provider = enumValue(value.provider, chatProviders, `${field}.provider`);
   const disabled = provider === "disabled";
   const result: ChatModelSettingsSummary = {
     provider,
     apiStyle: enumValue(value.api_style, chatAPIStyles, `${field}.api_style`),
+    reasoningEffort: enumValue(value.reasoning_effort, chatReasoningEfforts, `${field}.reasoning_effort`),
+    reasoningEffortByFunction: decodeReasoningEffortByFunction(value.reasoning_effort_by_function, `${field}.reasoning_effort_by_function`),
     baseUrl: disabled ? text(value.base_url, `${field}.base_url`) : endpointText(value.base_url, `${field}.base_url`),
     model: disabled ? text(value.model, `${field}.model`, 128) : identityText(value.model, `${field}.model`, 128),
     modelVersion: disabled ? text(value.model_version, `${field}.model_version`, 64) : identityText(value.model_version, `${field}.model_version`, 64),
@@ -493,6 +514,8 @@ const decodeChatSummary = (value: unknown, field: string): ChatModelSettingsSumm
     throw invalidResponse(`${field}.provider_settings`);
   }
   if (provider === "ollama" && (result.apiStyle !== "chat_completions" || result.apiKeyConfigured)) throw invalidResponse(`${field}.provider_settings`);
+  if (provider !== "openai-compatible" && result.reasoningEffort !== "") throw invalidResponse(`${field}.reasoning_effort`);
+  if (provider !== "openai-compatible" && Object.keys(result.reasoningEffortByFunction).length !== 0) throw invalidResponse(`${field}.reasoning_effort_by_function`);
   if (!disabled && canonicalizeStoredChatModelBaseUrl(provider, result.baseUrl) !== result.baseUrl) throw invalidResponse(`${field}.base_url`);
   return result;
 };
@@ -738,12 +761,15 @@ const requireEnum = <T extends string>(value: unknown, values: readonly T[], fie
 
 interface EncodedChatSettingsBase {
   api_style: ChatAPIStyle;
+  reasoning_effort: ChatReasoningEffort;
+  reasoning_effort_by_function: ChatReasoningEffortByFunction;
   adapter_version: string;
 }
 
 type EncodedChatSettings =
   | EncodedChatSettingsBase & {
     provider: "disabled";
+    reasoning_effort: "";
     base_url: "";
     model: "";
     model_version: "";
@@ -751,6 +777,7 @@ type EncodedChatSettings =
   }
   | EncodedChatSettingsBase & {
     provider: "ollama";
+    reasoning_effort: "";
     api_style: "chat_completions";
     base_url: typeof modelSettingsOllamaRelayUrl;
     model: string;
@@ -809,9 +836,20 @@ const encodeSecret = (secret: unknown, field: string, sensitiveValues: string[])
 
 const encodeChat = (input: unknown, field: string, sensitiveValues: string[]): EncodedChatSettings => {
   if (!isRecord(input)) throw invalidRequest(field);
-  exactRequest(input, ["provider", "apiStyle", "baseUrl", "model", "modelVersion", "adapterVersion", "apiKey"], field);
+  exactRequest(input, ["provider", "apiStyle", "baseUrl", "model", "modelVersion", "adapterVersion", "apiKey", ...("reasoningEffort" in input ? ["reasoningEffort"] : []), ...("reasoningEffortByFunction" in input ? ["reasoningEffortByFunction"] : [])], field);
   const provider = requireEnum(input.provider, chatProviders, `${field}.provider`);
   const apiStyle = requireEnum(input.apiStyle, chatAPIStyles, `${field}.apiStyle`);
+  const reasoningEffort = "reasoningEffort" in input ? requireEnum(input.reasoningEffort, chatReasoningEfforts, `${field}.reasoningEffort`) : "";
+  if (provider !== "openai-compatible" && reasoningEffort !== "") throw invalidRequest(`${field}.reasoningEffort`);
+  const reasoningEffortByFunction: ChatReasoningEffortByFunction = {};
+  if ("reasoningEffortByFunction" in input) {
+    if (!isRecord(input.reasoningEffortByFunction)) throw invalidRequest(`${field}.reasoningEffortByFunction`);
+    for (const [key, effort] of Object.entries(input.reasoningEffortByFunction)) {
+      const functionKey = requireEnum(key, chatReasoningFunctions, `${field}.reasoningEffortByFunction`);
+      reasoningEffortByFunction[functionKey] = requireEnum(effort, chatReasoningEfforts, `${field}.reasoningEffortByFunction.${functionKey}`);
+    }
+  }
+  if (provider !== "openai-compatible" && Object.keys(reasoningEffortByFunction).length !== 0) throw invalidRequest(`${field}.reasoningEffortByFunction`);
   const baseUrl = provider === "disabled" ? requireCanonical(input.baseUrl, `${field}.baseUrl`, 2048, true) : requireChatEndpoint(input.baseUrl, provider, `${field}.baseUrl`);
   if (baseUrl !== "") sensitiveValues.push(baseUrl);
   const model = requireIdentity(input.model, `${field}.model`, 128, provider === "disabled");
@@ -822,11 +860,11 @@ const encodeChat = (input: unknown, field: string, sensitiveValues: string[]): E
   if (provider === "ollama" && (apiStyle !== "chat_completions" || apiKey.action !== "clear")) throw invalidRequest(`${field}.providerSettings`);
   switch (provider) {
     case "disabled":
-      return { provider, api_style: apiStyle, base_url: "", model: "", model_version: "", adapter_version: adapterVersion, api_key: { action: "clear" } };
+      return { provider, api_style: apiStyle, reasoning_effort: "", reasoning_effort_by_function: {}, base_url: "", model: "", model_version: "", adapter_version: adapterVersion, api_key: { action: "clear" } };
     case "ollama":
-      return { provider, api_style: "chat_completions", base_url: modelSettingsOllamaRelayUrl, model, model_version: modelVersion, adapter_version: adapterVersion, api_key: { action: "clear" } };
+      return { provider, api_style: "chat_completions", reasoning_effort: "", reasoning_effort_by_function: {}, base_url: modelSettingsOllamaRelayUrl, model, model_version: modelVersion, adapter_version: adapterVersion, api_key: { action: "clear" } };
     case "openai-compatible":
-      return { provider, api_style: apiStyle, base_url: baseUrl, model, model_version: modelVersion, adapter_version: adapterVersion, api_key: apiKey };
+      return { provider, api_style: apiStyle, reasoning_effort: reasoningEffort, reasoning_effort_by_function: reasoningEffortByFunction, base_url: baseUrl, model, model_version: modelVersion, adapter_version: adapterVersion, api_key: apiKey };
   }
 };
 

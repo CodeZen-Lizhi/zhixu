@@ -26,6 +26,7 @@ func TestLoadWithLookupChatYAMLAndEnvironment(t *testing.T) {
 chat_base_url: https://yaml.example.test/base
 chat_api_key: yaml-secret
 chat_model: yaml-model
+chat_reasoning_effort: low
 chat_model_version: yaml-model-v1
 chat_adapter_version: yaml-v1
 chat_timeout: 45s
@@ -39,6 +40,7 @@ chat_max_response_bytes: 2000000
 		"ZHIXU_CHAT_BASE_URL":          "http://127.0.0.1:11434/compatible",
 		"ZHIXU_CHAT_API_KEY":           "env-secret",
 		"ZHIXU_CHAT_MODEL":             "env-model",
+		"ZHIXU_CHAT_REASONING_EFFORT":  "high",
 		"ZHIXU_CHAT_MODEL_VERSION":     "env-model-v2",
 		"ZHIXU_CHAT_ADAPTER_VERSION":   "env-v2",
 		"ZHIXU_CHAT_TIMEOUT":           "50s",
@@ -52,7 +54,7 @@ chat_max_response_bytes: 2000000
 		t.Fatal(err)
 	}
 	if cfg.ChatProvider != ChatProviderOpenAICompatible || cfg.ChatBaseURL != values["ZHIXU_CHAT_BASE_URL"] ||
-		cfg.ChatAPIKey != values["ZHIXU_CHAT_API_KEY"] || cfg.ChatModel != "env-model" || cfg.ChatModelVersion != "env-model-v2" || cfg.ChatAdapterVersion != "env-v2" ||
+		cfg.ChatReasoningEffort != "high" || cfg.ChatAPIKey != values["ZHIXU_CHAT_API_KEY"] || cfg.ChatModel != "env-model" || cfg.ChatModelVersion != "env-model-v2" || cfg.ChatAdapterVersion != "env-v2" ||
 		cfg.ChatTimeout != 50*time.Second || cfg.ChatMaxRequestBytes != 3_000_000 || cfg.ChatMaxResponseBytes != 2_000_000 {
 		t.Fatalf("chat config=%s", cfg)
 	}
@@ -117,6 +119,13 @@ func TestValidateChatProviderAndSecurityBoundaries(t *testing.T) {
 		change func(*Config)
 		want   string
 	}{
+		{name: "invalid reasoning effort", change: func(cfg *Config) { *cfg = enabled(); cfg.ChatReasoningEffort = "ultra" }, want: "chat_reasoning_effort"},
+		{name: "disabled reasoning effort", change: func(cfg *Config) { cfg.ChatReasoningEffort = "high" }, want: "chat_reasoning_effort"},
+		{name: "ollama reasoning effort", change: func(cfg *Config) {
+			*cfg = enabled()
+			cfg.ChatProvider = ChatProviderOllama
+			cfg.ChatReasoningEffort = "high"
+		}, want: "chat_reasoning_effort"},
 		{name: "unknown provider", change: func(cfg *Config) { cfg.ChatProvider = "native-ollama" }, want: "chat_provider"},
 		{name: "disabled endpoint", change: func(cfg *Config) { cfg.ChatBaseURL = "https://secret.example.test" }, want: "must be empty"},
 		{name: "remote http", change: func(cfg *Config) { *cfg = enabled(); cfg.ChatBaseURL = "http://models.example.test" }, want: "https"},
@@ -216,4 +225,55 @@ func configuredChatTestConfigForValidation() Config {
 	cfg.ChatModel = "chat-model"
 	cfg.ChatModelVersion = "chat-model"
 	return cfg
+}
+
+func TestFunctionReasoningOverridesYAMLEnvAndStrictShape(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "functions.yaml")
+	if err := os.WriteFile(path, []byte(`chat_provider: openai-compatible
+chat_base_url: https://models.example.test
+chat_model: model
+chat_model_version: model
+chat_reasoning_effort: high
+chat_reasoning_effort_by_function:
+  file_profile: low
+  main_note_synthesis: max
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadWithLookup(path, func(string) (string, bool) { return "", false })
+	if err != nil || cfg.ChatReasoningEffortByFunction["file_profile"] != "low" || len(cfg.ChatReasoningEffortByFunction) != 2 {
+		t.Fatalf("YAML function map failed: %v", err)
+	}
+	disabled, err := LoadWithLookup(path, func(key string) (string, bool) {
+		if key == "ZHIXU_CHAT_PROVIDER" {
+			return "disabled", true
+		}
+		if key == "ZHIXU_CHAT_REASONING_EFFORT_BY_FUNCTION" {
+			t.Fatal("disabled Chat consumed gated function overrides")
+		}
+		return "", false
+	})
+	if err != nil || len(disabled.ChatReasoningEffortByFunction) != 0 {
+		t.Fatalf("disabled Chat retained lower-priority function overrides: %v", err)
+	}
+	for _, raw := range []string{`{}`, `{"knowledge_qna":""}`} {
+		cfg, err = LoadWithLookup(path, func(key string) (string, bool) { return raw, key == "ZHIXU_CHAT_REASONING_EFFORT_BY_FUNCTION" })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, retained := cfg.ChatReasoningEffortByFunction["file_profile"]; retained {
+			t.Fatal("environment map retained lower-priority YAML overrides")
+		}
+		if raw != `{}` {
+			if effort, present := cfg.ChatReasoningEffortByFunction["knowledge_qna"]; !present || effort != "" {
+				t.Fatal("explicit provider default lost its presence")
+			}
+		}
+	}
+	for _, raw := range []string{`null`, `[]`, `{"unknown":"high"}`, `{"knowledge_qna":null}`, `{"knowledge_qna":"ultra"}`, `{"knowledge_qna":"low","knowledge_qna":"high"}`} {
+		_, err := LoadWithLookup(path, func(key string) (string, bool) { return raw, key == "ZHIXU_CHAT_REASONING_EFFORT_BY_FUNCTION" })
+		if err == nil || !strings.Contains(err.Error(), "ZHIXU_CHAT_REASONING_EFFORT_BY_FUNCTION") {
+			t.Fatalf("invalid function map accepted or error unsafe: %v", err)
+		}
+	}
 }

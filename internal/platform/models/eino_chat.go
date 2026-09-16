@@ -40,7 +40,7 @@ func NewEinoOpenAIChatModel(options OpenAIChatOptions, telemetry ...ModelTelemet
 		client: options.Client, baseURL: options.BaseURL, apiKey: options.APIKey,
 		model: options.Model, modelVersion: options.ModelVersion, adapterVersion: options.AdapterVersion, timeout: options.Timeout,
 		maxRequestBytes: options.MaxRequestBytes, maxResponseBytes: options.MaxResponseBytes,
-		apiStyle: options.APIStyle, provider: options.Provider,
+		apiStyle: options.APIStyle, provider: options.Provider, reasoningEffort: options.ReasoningEffort,
 	})
 	if err != nil {
 		return nil, err
@@ -86,6 +86,9 @@ func (model *EinoOpenAIChatModel) ProbeConnection(ctx context.Context) error {
 	if model == nil {
 		return chatError(foundation.ErrorDependencyUnavailable, ErrorCodeChatCapabilityUnavailable, false, errChatCapabilityOff)
 	}
+	// 即使模型名称无法识别，Provider 也可能默认启用
+	// 思考。允许有界的思考开销，不改变任务预算。
+	const maximumTokens = 2048
 	_, err := model.Chat(ctx, agentapplication.ChatRequest{
 		Phase:      agentdomain.ModelCallInitial,
 		ProfileRef: agentdomain.ModelProfileRef{ID: "connection-probe", Version: "v1"},
@@ -97,7 +100,7 @@ func (model *EinoOpenAIChatModel) ProbeConnection(ctx context.Context) error {
 			{Role: agentapplication.MessageRoleUser, Content: `Return {"ok":true}.`},
 		},
 		OutputSchema:    []byte(`{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"],"additionalProperties":false}`),
-		MaxOutputTokens: 64,
+		MaxOutputTokens: maximumTokens,
 	})
 	return err
 }
@@ -110,7 +113,7 @@ func (model *EinoOpenAIChatModel) Chat(ctx context.Context, request agentapplica
 	if err := model.http.validateRequest(request); err != nil {
 		return agentapplication.ChatResponse{}, err
 	}
-	payload, err := model.http.encodeRequest(buildOpenAIChatRequest(model.http.contract.Model.ModelID, request))
+	payload, err := model.http.encodeRequest(buildOpenAIChatRequest(model.http.contract, request))
 	if err != nil {
 		return agentapplication.ChatResponse{}, err
 	}
@@ -285,7 +288,8 @@ func (err *einoChatStatusError) Error() string {
 }
 
 type einoChatWireError struct {
-	code string
+	code   string
+	reason ConnectionValidationReason
 }
 
 func (err *einoChatWireError) Error() string {
@@ -301,11 +305,16 @@ func (err *einoChatReadError) Error() string { return "eino chat provider respon
 func (err *einoChatReadError) Unwrap() error { return err.cause }
 
 func newEinoChatWireError(err error) error {
+	wire := &einoChatWireError{code: ErrorCodeChatResponseInvalid, reason: ConnectionValidationInvalidResponse}
 	var classified *foundation.Error
 	if errors.As(err, &classified) && classified.Code == ErrorCodeChatResponseModelMismatch {
-		return &einoChatWireError{code: ErrorCodeChatResponseModelMismatch}
+		wire.code = ErrorCodeChatResponseModelMismatch
 	}
-	return &einoChatWireError{code: ErrorCodeChatResponseInvalid}
+	var diagnostic *ConnectionDiagnostic
+	if errors.As(err, &diagnostic) && diagnostic != nil && diagnostic.ValidationReason.IsKnown() {
+		wire.reason = diagnostic.ValidationReason
+	}
+	return wire
 }
 
 func classifyEinoChatError(ctx context.Context, err error, wireValidated bool) error {
@@ -322,7 +331,11 @@ func classifyEinoChatError(ctx context.Context, err error, wireValidated bool) e
 	}
 	var wireError *einoChatWireError
 	if errors.As(err, &wireError) {
-		return chatResponseError(wireError.code)
+		reason := wireError.reason
+		if !reason.IsKnown() {
+			reason = ConnectionValidationInvalidResponse
+		}
+		return chatResponseError(wireError.code, responseValidationDiagnosticWithReason(reason))
 	}
 	if wireValidated {
 		return chatResponseError(ErrorCodeChatResponseInvalid)

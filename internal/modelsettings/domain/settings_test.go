@@ -178,3 +178,27 @@ func assertDomainCode(t *testing.T, err error, code string) {
 		t.Fatalf("error=%v want code=%s", err, code)
 	}
 }
+
+func TestChatReasoningEffortRequiresExplicitCompatibleProvider(t *testing.T) {
+	settings := CanonicalDisabledSettings()
+	settings.Chat.Provider = ChatProviderOpenAICompatible
+	settings.Chat.BaseURL = "https://models.example.test"
+	settings.Chat.Model, settings.Chat.ModelVersion = "gpt-6-astra", "gpt-6-astra"
+	for _, effort := range []string{"", "low", "medium", "high", "xhigh", "max"} {
+		settings.Chat.ReasoningEffort = effort
+		if err := settings.ValidateStructural(); err != nil {
+			t.Fatalf("effort %q: %v", effort, err)
+		}
+	}
+	for _, effort := range []string{"none", "minimal", "ultra", "HIGH", " high"} {
+		settings.Chat.ReasoningEffort = effort
+		if err := settings.ValidateStructural(); err == nil {
+			t.Fatalf("accepted invalid effort %q", effort)
+		}
+	}
+	settings.Chat.Provider, settings.Chat.BaseURL = ChatProviderOllama, ManagedOllamaBaseURL
+	settings.Chat.ReasoningEffort = "high"
+	if err := settings.ValidateStructural(); err == nil {
+		t.Fatal("Ollama accepted explicit OpenAI reasoning effort")
+	}
+}

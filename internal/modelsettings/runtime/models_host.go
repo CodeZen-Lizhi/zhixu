@@ -102,20 +102,8 @@ func (factory *modelsGenerationFactory) Probe(ctx context.Context, models *Model
 	if factory == nil || ctx == nil || models == nil {
 		return runtimeNotReadyError(errors.New("model generation probe is unavailable"))
 	}
-	chat := models.Chat()
-	if chat.State() == platformmodels.CapabilityConfigured {
-		prober, ok := chat.Model().(platformmodels.ChatConnectionProber)
-		if !ok || prober == nil {
-			return foundation.NewError(
-				foundation.ErrorConsistencyViolation,
-				modelsettingsdomain.ErrorCodeUnavailable,
-				false,
-				errors.New("chat generation probe is unavailable"),
-			)
-		}
-		if err := prober.ProbeConnection(ctx); err != nil {
-			return err
-		}
+	if err := models.ProbeChatConnections(ctx); err != nil {
+		return err
 	}
 	embedding := models.Embedding()
 	if embedding.State() == platformmodels.CapabilityConfigured {

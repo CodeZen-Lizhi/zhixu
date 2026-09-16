@@ -83,6 +83,7 @@ func TestNewHandlerRejectsMissingDependenciesAndInvalidTimeout(t *testing.T) {
 func TestGetReturnsDesiredAndActiveSummariesWithoutSecrets(t *testing.T) {
 	t.Parallel()
 	snapshot := configuredSnapshot()
+	snapshot.DesiredSettings.Settings.Chat.ReasoningEffort = "max"
 	handler := mustHandler(t, managerForSnapshot(snapshot), Options{})
 	response := serve(t, handler, "GET", "/api/v1/settings/models", "", "")
 	if response.Code != 200 {
@@ -96,12 +97,12 @@ func TestGetReturnsDesiredAndActiveSummariesWithoutSecrets(t *testing.T) {
 	}
 	desired := body["desired_settings"].(map[string]any)
 	desiredChat := desired["chat"].(map[string]any)
-	if desiredChat["provider"] != "openai-compatible" || desiredChat["api_key_configured"] != true {
+	if desiredChat["reasoning_effort"] != "max" || desiredChat["provider"] != "openai-compatible" || desiredChat["api_key_configured"] != true {
 		t.Fatalf("desired chat = %#v", desiredChat)
 	}
 	active := body["active_settings"].(map[string]any)
 	activeChat := active["chat"].(map[string]any)
-	if activeChat["provider"] != "disabled" || activeChat["api_key_configured"] != false {
+	if activeChat["reasoning_effort"] != "" || activeChat["provider"] != "disabled" || activeChat["api_key_configured"] != false {
 		t.Fatalf("active chat = %#v", activeChat)
 	}
 	rollout := body["rollout"].(map[string]any)
@@ -187,6 +188,10 @@ func TestUpdateStrictJSONBoundary(t *testing.T) {
 		status      int
 		code        string
 	}{
+		{name: "null function map", body: strings.Replace(valid, `"api_style":"chat_completions"`, `"api_style":"chat_completions","reasoning_effort_by_function":null`, 1), contentType: "application/json", status: 400, code: modelsettingsdomain.ErrorCodeInvalid},
+		{name: "unknown function", body: strings.Replace(valid, `"api_style":"chat_completions"`, `"api_style":"chat_completions","reasoning_effort_by_function":{"unknown":"low"}`, 1), contentType: "application/json", status: 400, code: modelsettingsdomain.ErrorCodeInvalid},
+		{name: "null function effort", body: strings.Replace(valid, `"api_style":"chat_completions"`, `"api_style":"chat_completions","reasoning_effort_by_function":{"knowledge_qna":null}`, 1), contentType: "application/json", status: 400, code: modelsettingsdomain.ErrorCodeInvalid},
+		{name: "null effort", body: strings.Replace(valid, `"api_style":"chat_completions"`, `"api_style":"chat_completions","reasoning_effort":null`, 1), contentType: "application/json", status: 400, code: modelsettingsdomain.ErrorCodeInvalid},
 		{name: "unknown root", body: strings.Replace(valid, `"expected_revision":0`, `"expected_revision":0,"unknown":true`, 1), contentType: "application/json", status: 400, code: errorCodeInvalidJSON},
 		{name: "duplicate root", body: strings.Replace(valid, `"expected_revision":0`, `"expected_revision":0,"expected_revision":1`, 1), contentType: "application/json", status: 400, code: errorCodeInvalidJSON},
 		{name: "duplicate nested", body: strings.Replace(valid, `"provider":"disabled"`, `"provider":"disabled","provider":"disabled"`, 1), contentType: "application/json", status: 400, code: errorCodeInvalidJSON},
@@ -703,9 +708,9 @@ func TestConnectionTestBindsStrictDraftCommandToManager(t *testing.T) {
 		if command.Target != modelsettingsapplication.ConnectionTargetChat || command.Draft.ExpectedRevision != current.DesiredRevision {
 			t.Fatalf("test command identity=%+v", command)
 		}
-		if command.Draft.Settings.Chat != (modelsettingsdomain.ChatSettings{
+		if !reflect.DeepEqual(command.Draft.Settings.Chat, modelsettingsdomain.ChatSettings{
 			Provider: modelsettingsdomain.ChatProviderOpenAICompatible, APIStyle: modelsettingsdomain.ChatAPIStyleResponses, BaseURL: "https://test-chat.example.test/v1",
-			Model: "test-chat", ModelVersion: "2026-08", AdapterVersion: "v2",
+			Model: "test-chat", ModelVersion: "2026-08", AdapterVersion: "v2", ReasoningEffort: "xhigh", ReasoningEffortByFunction: modelsettingsdomain.ReasoningEffortOverrides{modelsettingsdomain.ReasoningFileProfile: "low", modelsettingsdomain.ReasoningKnowledgeQNA: ""},
 			Timeout: current.DesiredSettings.Settings.Chat.Timeout, MaxRequestBytes: current.DesiredSettings.Settings.Chat.MaxRequestBytes,
 			MaxResponseBytes: current.DesiredSettings.Settings.Chat.MaxResponseBytes,
 		}) {
@@ -722,7 +727,7 @@ func TestConnectionTestBindsStrictDraftCommandToManager(t *testing.T) {
 			APIStyle: command.Draft.Settings.Chat.APIStyle, EndpointPath: "/v1/responses"}, nil
 	}
 	handler := mustHandler(t, manager, Options{})
-	body := `{"target":"chat","chat":{"provider":"openai-compatible","api_style":"responses","base_url":"https://test-chat.example.test/v1","model":"test-chat","model_version":"2026-08","adapter_version":"v2","api_key":{"action":"replace","value":"draft-command-canary"}}}`
+	body := `{"target":"chat","chat":{"provider":"openai-compatible","api_style":"responses","base_url":"https://test-chat.example.test/v1","model":"test-chat","reasoning_effort":"xhigh","reasoning_effort_by_function":{"file_profile":"low","knowledge_qna":""},"model_version":"2026-08","adapter_version":"v2","api_key":{"action":"replace","value":"draft-command-canary"}}}`
 	response := serve(t, handler, "POST", "/api/v1/settings/models/test", body, "application/json")
 	if response.Code != nethttp.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())

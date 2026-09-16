@@ -135,13 +135,15 @@ type activationRequest struct {
 }
 
 type chatDraftRequest struct {
-	Provider       json.RawMessage `json:"provider"`
-	APIStyle       json.RawMessage `json:"api_style"`
-	BaseURL        json.RawMessage `json:"base_url"`
-	Model          json.RawMessage `json:"model"`
-	ModelVersion   json.RawMessage `json:"model_version"`
-	AdapterVersion json.RawMessage `json:"adapter_version"`
-	APIKey         json.RawMessage `json:"api_key"`
+	Provider                  json.RawMessage `json:"provider"`
+	APIStyle                  json.RawMessage `json:"api_style"`
+	ReasoningEffort           json.RawMessage `json:"reasoning_effort,omitempty"`
+	ReasoningEffortByFunction json.RawMessage `json:"reasoning_effort_by_function,omitempty"`
+	BaseURL                   json.RawMessage `json:"base_url"`
+	Model                     json.RawMessage `json:"model"`
+	ModelVersion              json.RawMessage `json:"model_version"`
+	AdapterVersion            json.RawMessage `json:"adapter_version"`
+	APIKey                    json.RawMessage `json:"api_key"`
 }
 
 type embeddingDraftRequest struct {
@@ -194,13 +196,15 @@ type settingsSummaryResponse struct {
 }
 
 type chatSettingsResponse struct {
-	Provider         modelsettingsdomain.ChatProvider `json:"provider"`
-	APIStyle         modelsettingsdomain.ChatAPIStyle `json:"api_style"`
-	BaseURL          string                           `json:"base_url"`
-	Model            string                           `json:"model"`
-	ModelVersion     string                           `json:"model_version"`
-	AdapterVersion   string                           `json:"adapter_version"`
-	APIKeyConfigured bool                             `json:"api_key_configured"`
+	Provider                  modelsettingsdomain.ChatProvider             `json:"provider"`
+	APIStyle                  modelsettingsdomain.ChatAPIStyle             `json:"api_style"`
+	ReasoningEffort           string                                       `json:"reasoning_effort"`
+	ReasoningEffortByFunction modelsettingsdomain.ReasoningEffortOverrides `json:"reasoning_effort_by_function"`
+	BaseURL                   string                                       `json:"base_url"`
+	Model                     string                                       `json:"model"`
+	ModelVersion              string                                       `json:"model_version"`
+	AdapterVersion            string                                       `json:"adapter_version"`
+	APIKeyConfigured          bool                                         `json:"api_key_configured"`
 }
 
 type embeddingSettingsResponse struct {
@@ -599,6 +603,24 @@ func decodeChat(raw json.RawMessage, base modelsettingsdomain.ChatSettings) (mod
 	if err != nil {
 		return modelsettingsdomain.ChatSettings{}, modelsettingsdomain.SecretAction{}, err
 	}
+	reasoningEffort := ""
+	if len(request.ReasoningEffort) != 0 {
+		reasoningEffort, err = decodeString(request.ReasoningEffort)
+		if err != nil {
+			secret.Value.Destroy()
+			return modelsettingsdomain.ChatSettings{}, modelsettingsdomain.SecretAction{}, err
+		}
+	}
+	overrides := modelsettingsdomain.ReasoningEffortOverrides{}
+	if len(request.ReasoningEffortByFunction) != 0 {
+		overrides, err = modelsettingsdomain.ParseReasoningEffortOverrides(request.ReasoningEffortByFunction)
+		if err != nil {
+			secret.Value.Destroy()
+			return modelsettingsdomain.ChatSettings{}, modelsettingsdomain.SecretAction{}, err
+		}
+	}
+	base.ReasoningEffortByFunction = overrides
+	base.ReasoningEffort = reasoningEffort
 	base.Provider = modelsettingsdomain.ChatProvider(provider)
 	base.APIStyle = modelsettingsdomain.ChatAPIStyle(apiStyle)
 	base.BaseURL = baseURL
@@ -820,7 +842,9 @@ func toSettingsSummaryResponse(summary modelsettingsdomain.SettingsSummary) sett
 	return settingsSummaryResponse{
 		Chat: chatSettingsResponse{
 			Provider: summary.Settings.Chat.Provider, APIStyle: summary.Settings.Chat.APIStyle, BaseURL: summary.Settings.Chat.BaseURL,
-			Model: summary.Settings.Chat.Model, ModelVersion: summary.Settings.Chat.ModelVersion,
+			ReasoningEffort:           summary.Settings.Chat.ReasoningEffort,
+			ReasoningEffortByFunction: summary.Settings.Chat.ReasoningEffortByFunction.Clone(),
+			Model:                     summary.Settings.Chat.Model, ModelVersion: summary.Settings.Chat.ModelVersion,
 			AdapterVersion: summary.Settings.Chat.AdapterVersion, APIKeyConfigured: summary.Secrets.ChatConfigured,
 		},
 		Embedding: embeddingSettingsResponse{
@@ -1032,6 +1056,8 @@ func destroyChatRequest(request *chatDraftRequest) {
 	}
 	destroyRaw(request.Provider)
 	destroyRaw(request.APIStyle)
+	destroyRaw(request.ReasoningEffort)
+	destroyRaw(request.ReasoningEffortByFunction)
 	destroyRaw(request.BaseURL)
 	destroyRaw(request.Model)
 	destroyRaw(request.ModelVersion)

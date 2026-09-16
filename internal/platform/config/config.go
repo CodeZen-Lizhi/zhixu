@@ -18,6 +18,7 @@ import (
 
 	authapplication "github.com/CodeZen-Lizhi/zhixu/internal/auth/application"
 	authorigin "github.com/CodeZen-Lizhi/zhixu/internal/auth/origin"
+	modelsettingsdomain "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/operability"
 )
@@ -229,16 +230,18 @@ type Config struct {
 	EmbeddingTimeout            time.Duration                 `yaml:"embedding_timeout"`
 	EmbeddingMaxResponseBytes   int64                         `yaml:"embedding_max_response_bytes"`
 
-	ChatProvider         ChatProvider  `yaml:"chat_provider"`
-	ChatAPIStyle         ChatAPIStyle  `yaml:"chat_api_style"`
-	ChatBaseURL          string        `yaml:"chat_base_url"`
-	ChatAPIKey           string        `yaml:"chat_api_key"`
-	ChatModel            string        `yaml:"chat_model"`
-	ChatModelVersion     string        `yaml:"chat_model_version"`
-	ChatAdapterVersion   string        `yaml:"chat_adapter_version"`
-	ChatTimeout          time.Duration `yaml:"chat_timeout"`
-	ChatMaxRequestBytes  int64         `yaml:"chat_max_request_bytes"`
-	ChatMaxResponseBytes int64         `yaml:"chat_max_response_bytes"`
+	ChatProvider                  ChatProvider                                 `yaml:"chat_provider"`
+	ChatAPIStyle                  ChatAPIStyle                                 `yaml:"chat_api_style"`
+	ChatReasoningEffort           string                                       `yaml:"chat_reasoning_effort"`
+	ChatReasoningEffortByFunction modelsettingsdomain.ReasoningEffortOverrides `yaml:"chat_reasoning_effort_by_function"`
+	ChatBaseURL                   string                                       `yaml:"chat_base_url"`
+	ChatAPIKey                    string                                       `yaml:"chat_api_key"`
+	ChatModel                     string                                       `yaml:"chat_model"`
+	ChatModelVersion              string                                       `yaml:"chat_model_version"`
+	ChatAdapterVersion            string                                       `yaml:"chat_adapter_version"`
+	ChatTimeout                   time.Duration                                `yaml:"chat_timeout"`
+	ChatMaxRequestBytes           int64                                        `yaml:"chat_max_request_bytes"`
+	ChatMaxResponseBytes          int64                                        `yaml:"chat_max_response_bytes"`
 
 	// ModelSettingsMode 显式选择静态或数据库受管的模型设置来源。
 	ModelSettingsMode ModelSettingsMode `yaml:"model_settings_mode"`
@@ -911,6 +914,17 @@ func (c Config) validateChat() error {
 	}
 	if c.ChatAPIStyle == ChatAPIStyleResponses {
 		return errors.New("chat_api_style responses is unavailable in the Eino runtime")
+	}
+	switch c.ChatReasoningEffort {
+	case "", "low", "medium", "high", "xhigh", "max":
+	default:
+		return errors.New("chat_reasoning_effort must be empty, low, medium, high, xhigh, or max")
+	}
+	if c.ChatReasoningEffortByFunction.Validate() != nil {
+		return errors.New("chat_reasoning_effort_by_function contains an invalid function or effort")
+	}
+	if c.ChatProvider != ChatProviderOpenAICompatible && (c.ChatReasoningEffort != "" || len(c.ChatReasoningEffortByFunction) != 0) {
+		return errors.New("chat_reasoning_effort requires openai-compatible provider")
 	}
 	switch c.ChatProvider {
 	case ChatProviderDisabled:

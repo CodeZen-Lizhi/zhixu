@@ -13,6 +13,7 @@ import (
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/models"
+	einoopenai "github.com/cloudwego/eino-ext/components/model/openai"
 	einomodel "github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 )
@@ -402,5 +403,80 @@ func receiveRuntimeStreamError(model *models.EinoRuntimeChatModel) error {
 			}
 			return receiveErr
 		}
+	}
+}
+
+func TestEinoChatReasoningEffortUsesFrozenWireSettings(t *testing.T) {
+	for _, test := range []struct {
+		name, model, effort string
+		reasoning           bool
+	}{
+		{name: "legacy default", model: "chat-v1"},
+		{name: "provider default reasoning", model: "deepseek-v4.1-flash"},
+		{name: "explicit high", model: "chat-v1", effort: "high", reasoning: true},
+		{name: "GPT6 default", model: "gpt-6-astra", reasoning: true},
+		{name: "GPT6 max", model: "gpt-6-astra", effort: "max", reasoning: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				var body map[string]json.RawMessage
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Error(err)
+					return
+				}
+				var effort string
+				_ = json.Unmarshal(body["reasoning_effort"], &effort)
+				if effort != test.effort || (test.effort == "" && body["reasoning_effort"] != nil) {
+					t.Error("wire effort differs from frozen configuration")
+				}
+				budgetKey := "max_tokens"
+				if test.reasoning {
+					budgetKey = "max_completion_tokens"
+					for _, forbidden := range []string{"temperature", "top_p", "logprobs", "top_logprobs", "max_tokens"} {
+						if body[forbidden] != nil {
+							t.Errorf("reasoning request retained %s", forbidden)
+						}
+					}
+				} else if string(body["temperature"]) != "0" || body["max_completion_tokens"] != nil {
+					t.Error("legacy defaults changed")
+				}
+				wantBudget := "256"
+				if calls == 3 {
+					wantBudget = "2048" // 探测额度独立于名称和思考强度。
+				}
+				if string(body[budgetKey]) != wantBudget {
+					t.Error("request did not retain the caller token budget")
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, validChatResponse(test.model, `{"result":"ok"}`))
+			}))
+			defer server.Close()
+			options := chatOptions(server.URL, server.Client())
+			options.Model, options.ModelVersion, options.ReasoningEffort = test.model, test.model, test.effort
+			structured, err := models.NewEinoOpenAIChatModel(options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := structured.Chat(context.Background(), validChatRequest(structured.Contract().Model)); err != nil {
+				t.Fatal(err)
+			}
+			runtime, err := models.NewEinoRuntimeChatModel(options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// 调用方选项不能覆盖不可变运行代次的思考强度。
+			if _, err := runtime.Generate(context.Background(), []*schema.Message{{Role: schema.User, Content: "test"}},
+				einomodel.WithMaxTokens(256), einoopenai.WithReasoningEffort(einoopenai.ReasoningEffortLevelLow)); err != nil {
+				t.Fatal(err)
+			}
+			if err := structured.ProbeConnection(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if calls != 3 {
+				t.Fatalf("provider calls=%d, want exactly 3", calls)
+			}
+		})
 	}
 }

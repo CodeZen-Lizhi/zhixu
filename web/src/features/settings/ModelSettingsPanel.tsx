@@ -12,8 +12,12 @@ import {
   testModelSettings,
   updateModelSettings,
   modelSettingsOllamaRelayUrl,
+  chatReasoningFunctions,
   type ChatModelProvider,
   type ChatAPIStyle,
+  type ChatReasoningEffort,
+  type ChatReasoningEffortByFunction,
+  type ChatReasoningFunction,
   type ChatModelSettingsInput,
   type ChatModelSettingsSummary,
   type EmbeddingDistanceMetric,
@@ -63,6 +67,8 @@ interface ChatDraft {
   provider: ChatModelProvider;
   legacyLocal: boolean;
   apiStyle: ChatAPIStyle;
+  reasoningEffort: ChatReasoningEffort;
+  reasoningEffortByFunction: ChatReasoningEffortByFunction;
   baseUrl: string;
   model: string;
   modelVersion: string;
@@ -124,6 +130,55 @@ const chatAPIStyleLabel: Record<ChatAPIStyle, string> = {
   responses: "Responses API",
 };
 
+const chatReasoningEffortOptions = [
+  { value: "", label: "模型默认" },
+  { value: "low", label: "低" },
+  { value: "medium", label: "中" },
+  { value: "high", label: "高" },
+  { value: "xhigh", label: "很高" },
+  { value: "max", label: "最高" },
+] as const satisfies readonly { value: ChatReasoningEffort; label: string }[];
+
+const chatReasoningFunctionLabels: Record<ChatReasoningFunction, string> = {
+  file_profile: "文件简介与标签",
+  knowledge_organization: "知识整理",
+  anchor_scope: "主笔记范围与关联建议",
+  main_note_synthesis: "主笔记融合",
+  manuscript_source_review: "当前主笔记来源复核",
+  knowledge_qna: "知识问答",
+  workspace_analysis: "工作区分析",
+  note_interview: "笔记访谈与复习准备",
+};
+
+const chatReasoningEffortLabel = (value: ChatReasoningEffort): string => {
+  const option = chatReasoningEffortOptions.find((item) => item.value === value);
+  if (option === undefined) throw new TypeError("unknown Chat reasoning effort");
+  return option.label;
+};
+
+const chatReasoningEffortValue = (value: string): ChatReasoningEffort => {
+  const option = chatReasoningEffortOptions.find((item) => item.value === value);
+  if (option === undefined) throw new TypeError("unknown Chat reasoning effort");
+  return option.value;
+};
+
+const changeFunctionReasoningEffort = (draft: ChatDraft, functionKey: ChatReasoningFunction, value: string): ChatDraft => {
+  const reasoningEffortByFunction: ChatReasoningEffortByFunction = {};
+  for (const key of chatReasoningFunctions) {
+    const current = draft.reasoningEffortByFunction[key];
+    if (key !== functionKey && current !== undefined) reasoningEffortByFunction[key] = current;
+  }
+  if (value !== "inherit") reasoningEffortByFunction[functionKey] = chatReasoningEffortValue(value);
+  return { ...draft, reasoningEffortByFunction };
+};
+
+const functionReasoningEffortLabel = (summary: ChatModelSettingsSummary, functionKey: ChatReasoningFunction): string => {
+  const override = summary.reasoningEffortByFunction[functionKey];
+  return override === undefined
+    ? `继承全局 · ${chatReasoningEffortLabel(summary.reasoningEffort)}`
+    : `${chatReasoningEffortLabel(override)}（单独设置）`;
+};
+
 const chatProviderValue = (value: string): ChatModelProvider => {
   if (value === "disabled" || value === "openai-compatible" || value === "ollama") return value;
   throw new TypeError("unknown Chat provider");
@@ -152,9 +207,9 @@ const distanceMetricValue = (value: string): EmbeddingDistanceMetric => {
 const changeChatProvider = (draft: ChatDraft, provider: ChatModelProvider): ChatDraft => {
   switch (provider) {
     case "disabled":
-      return { ...draft, provider, legacyLocal: false, baseUrl: "", model: "", modelVersion: "", secret: { action: "clear", value: "" } };
+      return { ...draft, provider, legacyLocal: false, reasoningEffort: "", reasoningEffortByFunction: {}, baseUrl: "", model: "", modelVersion: "", secret: { action: "clear", value: "" } };
     case "ollama":
-      return { ...draft, provider, legacyLocal: false, apiStyle: "chat_completions", baseUrl: modelSettingsOllamaRelayUrl, secret: { action: "clear", value: "" } };
+      return { ...draft, provider, legacyLocal: false, apiStyle: "chat_completions", reasoningEffort: "", reasoningEffortByFunction: {}, baseUrl: modelSettingsOllamaRelayUrl, secret: { action: "clear", value: "" } };
     case "openai-compatible":
       return draft.provider === "ollama" || draft.legacyLocal
         ? { ...draft, provider, legacyLocal: false, baseUrl: "", secret: { action: "clear", value: "" } }
@@ -225,6 +280,8 @@ const draftFromResponse = (settings: ModelSettingsResponse): ModelSettingsDraft 
     provider: settings.desiredSettings.chat.provider,
     legacyLocal: isLegacyLocalChat(settings.desiredSettings.chat),
     apiStyle: settings.desiredSettings.chat.apiStyle,
+    reasoningEffort: isLegacyLocalChat(settings.desiredSettings.chat) ? "" : settings.desiredSettings.chat.reasoningEffort,
+    reasoningEffortByFunction: isLegacyLocalChat(settings.desiredSettings.chat) ? {} : { ...settings.desiredSettings.chat.reasoningEffortByFunction },
     baseUrl: settings.desiredSettings.chat.baseUrl,
     model: settings.desiredSettings.chat.model,
     modelVersion: settings.desiredSettings.chat.modelVersion,
@@ -264,10 +321,12 @@ const secretInput = (secret: SecretDraft): ModelSecretInput => secret.action ===
   : { action: secret.action };
 
 const chatInput = (draft: ChatDraft): ChatModelSettingsInput => draft.provider === "disabled"
-  ? { provider: "disabled", apiStyle: draft.apiStyle, baseUrl: "", model: "", modelVersion: "", adapterVersion: draft.adapterVersion, apiKey: { action: "clear" } }
+  ? { provider: "disabled", apiStyle: draft.apiStyle, reasoningEffort: "", reasoningEffortByFunction: {}, baseUrl: "", model: "", modelVersion: "", adapterVersion: draft.adapterVersion, apiKey: { action: "clear" } }
   : {
       provider: draft.provider === "ollama" || draft.legacyLocal ? "ollama" : draft.provider,
       apiStyle: draft.provider === "ollama" || draft.legacyLocal ? "chat_completions" : draft.apiStyle,
+      reasoningEffort: draft.provider === "ollama" || draft.legacyLocal ? "" : draft.reasoningEffort,
+      reasoningEffortByFunction: draft.provider === "ollama" || draft.legacyLocal ? {} : { ...draft.reasoningEffortByFunction },
       baseUrl: draft.provider === "ollama" || draft.legacyLocal ? modelSettingsOllamaRelayUrl : draft.baseUrl.trim(),
       model: draft.model.trim(),
       modelVersion: draft.modelVersion.trim(),
@@ -330,10 +389,11 @@ const ActiveSummary = ({ kind, summary, differs }: { kind: ModelTestTarget; summ
     <SummaryValue label={managedLocalChat ? "运行位置" : "基础地址（Base URL）"} mono={!managedLocalChat}>{managedLocalChat ? "本机（系统管理）" : summary.baseUrl || "未设置"}</SummaryValue>
     <SummaryValue label="模型" mono>{summary.model || "未设置"}</SummaryValue>
     {kind === "chat"
-      ? <><SummaryValue label="调用接口">{chatAPIStyleLabel[(summary as ChatModelSettingsSummary).apiStyle]}</SummaryValue><SummaryValue label="模型版本" mono>{(summary as ChatModelSettingsSummary).modelVersion || "未设置"}</SummaryValue><SummaryValue label="适配器" mono>{(summary as ChatModelSettingsSummary).adapterVersion}</SummaryValue></>
+      ? <><SummaryValue label="调用接口">{chatAPIStyleLabel[(summary as ChatModelSettingsSummary).apiStyle]}</SummaryValue><SummaryValue label="全局默认思考强度">{chatReasoningEffortLabel((summary as ChatModelSettingsSummary).reasoningEffort)}</SummaryValue><SummaryValue label="模型版本" mono>{(summary as ChatModelSettingsSummary).modelVersion || "未设置"}</SummaryValue><SummaryValue label="适配器" mono>{(summary as ChatModelSettingsSummary).adapterVersion}</SummaryValue></>
       : <><SummaryValue label="维度">{String((summary as EmbeddingModelSettingsSummary).dimensions)}</SummaryValue><SummaryValue label="向量约定">{(summary as EmbeddingModelSettingsSummary).normalization} / {(summary as EmbeddingModelSettingsSummary).distanceMetric}</SummaryValue></>}
     <SummaryValue label="API Key">{managedLocalChat ? legacyLocalChat && summary.apiKeyConfigured ? "旧配置已保存，下次保存时清除" : "不使用" : summary.apiKeyConfigured ? "已安全保存" : "未配置"}</SummaryValue>
     </dl>
+    {kind === "chat" ? <details className="model-settings-active-functions"><summary>各功能生效强度</summary><dl>{chatReasoningFunctions.map((functionKey) => <SummaryValue key={functionKey} label={chatReasoningFunctionLabels[functionKey]}>{functionReasoningEffortLabel(summary as ChatModelSettingsSummary, functionKey)}</SummaryValue>)}</dl></details> : null}
   </aside>;
 };
 
@@ -696,6 +756,13 @@ export const ModelSettingsPanel = () => {
             {draft.chat.provider === "ollama" || draft.chat.legacyLocal ? <div className="model-settings-managed-location model-settings-field--wide"><span>运行位置</span><strong>本机（系统管理）</strong></div> : <label className="model-settings-field--wide">基础地址（Base URL）<input type="url" maxLength={2048} aria-label="对话模型基础地址（Base URL）" value={draft.chat.baseUrl} disabled={draft.chat.provider === "disabled" || controlsDisabled} placeholder="https://api.example.com/v1" onChange={(event) => changeDraft((current) => ({ ...current, chat: { ...current.chat, baseUrl: event.target.value } }))} /></label>}
             <label>模型<input maxLength={128} aria-label="对话模型名称" value={draft.chat.model} disabled={draft.chat.provider === "disabled" || controlsDisabled} onChange={(event) => changeDraft((current) => ({ ...current, chat: { ...current.chat, model: event.target.value } }))} /></label>
             <label>模型版本<input maxLength={64} aria-label="对话模型版本" value={draft.chat.modelVersion} disabled={draft.chat.provider === "disabled" || controlsDisabled} onChange={(event) => changeDraft((current) => ({ ...current, chat: { ...current.chat, modelVersion: event.target.value } }))} /></label>
+            <label className="model-settings-field--wide">全局默认思考强度<select aria-label="对话模型思考强度" aria-describedby="chat-reasoning-effort-help" value={draft.chat.reasoningEffort} disabled={draft.chat.provider !== "openai-compatible" || draft.chat.legacyLocal || controlsDisabled} onChange={(event) => changeDraft((current) => ({ ...current, chat: { ...current.chat, reasoningEffort: chatReasoningEffortValue(event.target.value) } }))}>{chatReasoningEffortOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+            <p id="chat-reasoning-effort-help" className="model-settings-disabled model-settings-field--wide">{draft.chat.provider === "disabled" ? "启用在线对话模型后可设置思考强度。" : draft.chat.provider === "ollama" || draft.chat.legacyLocal ? "本地 Ollama 暂不支持设置思考强度，保持模型默认。" : "模型默认由提供方决定，不代表关闭思考。较高强度通常需要更多时间和费用；可用档位取决于所选模型。"}</p>
+            <div className="model-settings-function-efforts model-settings-field--wide" role="group" aria-labelledby="chat-function-efforts-title" aria-describedby="chat-function-efforts-help">
+              <h4 id="chat-function-efforts-title">按功能设置</h4>
+              <p id="chat-function-efforts-help">未单独设置的功能继承全局默认。选择“模型默认”会让该功能直接使用模型的默认强度。</p>
+              <div className="model-settings-function-efforts__fields">{chatReasoningFunctions.map((functionKey) => <label key={functionKey}>{chatReasoningFunctionLabels[functionKey]}<select aria-label={`${chatReasoningFunctionLabels[functionKey]}思考强度`} value={draft.chat.reasoningEffortByFunction[functionKey] ?? "inherit"} disabled={draft.chat.provider !== "openai-compatible" || draft.chat.legacyLocal || controlsDisabled} onChange={(event) => changeDraft((current) => ({ ...current, chat: changeFunctionReasoningEffort(current.chat, functionKey, event.target.value) }))}><option value="inherit">继承全局（{chatReasoningEffortLabel(draft.chat.reasoningEffort)}）</option>{chatReasoningEffortOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>)}</div>
+            </div>
             {draft.chat.provider === "openai-compatible" && !draft.chat.legacyLocal ? <SecretControl id="chat-api-key" label="对话 API Key" secret={draft.chat.secret} configured={settings.desiredSettings.chat.apiKeyConfigured} canKeep={chatCanKeep} disabled={controlsDisabled} onChange={(secret) => changeDraft((current) => ({ ...current, chat: { ...current.chat, secret } }))} /> : <p className="model-settings-disabled model-settings-field--wide">{draft.chat.legacyLocal ? "这是旧式本地配置；运行位置由知序管理，不显示 API Key。下次保存设置时会转换为显式本地配置，并固定使用 Chat Completions。" : draft.chat.provider === "ollama" ? "本地 Ollama 由知序管理，不使用 API Key，固定使用 Chat Completions。" : "对话模型已关闭。"}{settings.desiredSettings.chat.apiKeyConfigured ? " 保存后会清除已保存的对话 API Key。" : ""}</p>}
 			<div className="model-settings-actions model-settings-field--wide"><Button type="button" variant="secondary" size="sm" disabled={controlsDisabled || draft.chat.provider === "disabled"} onClick={() => runTest("chat")}><TestTube2 size={15} />{testMutation.isPending && testMutation.variables.target === "chat" ? "测试中…" : "测试对话连接"}</Button><TestFeedback target="chat" mutation={testMutation} /></div>
           </fieldset>

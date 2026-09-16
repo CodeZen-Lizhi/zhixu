@@ -399,6 +399,7 @@ func TestRepositoryRevisionRolloutRuntimeAndEnqueueFence(t *testing.T) {
 	}
 
 	settings := configuredTestSettings()
+	settings.Chat.ReasoningEffort = "low"
 	chatAction, err := domain.ReplaceSecret("chat-secret-value")
 	if err != nil {
 		t.Fatal(err)
@@ -420,6 +421,7 @@ func TestRepositoryRevisionRolloutRuntimeAndEnqueueFence(t *testing.T) {
 	}
 
 	settings.Chat.ModelVersion = "2026-08"
+	settings.Chat.ReasoningEffort = "high"
 	settings.Chat.APIStyle = domain.ChatAPIStyleResponses
 	snapshot, err = repository.SaveDesired(ctx, application.SaveCommand{
 		ExpectedRevision: 1, Settings: settings, ChatSecret: domain.KeepSecret(),
@@ -440,6 +442,19 @@ func TestRepositoryRevisionRolloutRuntimeAndEnqueueFence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if resolved.Settings.Chat.ReasoningEffort != "high" {
+		t.Fatal("reloaded revision lost reasoning effort")
+	}
+	legacy, legacyErr := repository.LoadRevision(ctx, 1)
+	if legacyErr != nil {
+		t.Fatal(legacyErr)
+	}
+	defer legacy.ChatAPIKey.Destroy()
+	defer legacy.EmbeddingAPIKey.Destroy()
+	if legacy.Settings.Chat.ReasoningEffort != "low" {
+		t.Fatal("new save changed the historical reasoning effort")
+	}
+
 	if got := string(resolved.ChatAPIKey.Bytes()); got != "chat-secret-value" {
 		t.Fatalf("resolved chat secret=%q", got)
 	}

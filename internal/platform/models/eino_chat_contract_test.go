@@ -274,6 +274,7 @@ func TestEinoOpenAIChatModelRejectsMalformedOrInconsistentResponses(t *testing.T
 		body        string
 		maxBytes    int64
 		code        string
+		reason      models.ConnectionValidationReason
 	}{
 		{name: "wrong content type", contentType: "text/plain", body: validChatResponse("chat-v1", `{}`), code: models.ErrorCodeChatResponseInvalid},
 		{name: "malformed", contentType: "application/json", body: `{`, code: models.ErrorCodeChatResponseInvalid},
@@ -283,15 +284,21 @@ func TestEinoOpenAIChatModelRejectsMalformedOrInconsistentResponses(t *testing.T
 		{name: "unknown field", contentType: "application/json", body: `{"model":"chat-v1","choices":[],"usage":null,"secret_unknown":true}`, code: models.ErrorCodeChatResponseInvalid},
 		{name: "unknown message field", contentType: "application/json", body: `{"model":"chat-v1","choices":[{"index":0,"message":{"role":"assistant","content":"{}","secret_unknown":true},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}`, code: models.ErrorCodeChatResponseInvalid},
 		{name: "invalid reasoning type", contentType: "application/json", body: `{"model":"chat-v1","choices":[{"index":0,"message":{"role":"assistant","content":"{}","reasoning":{}},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}`, code: models.ErrorCodeChatResponseInvalid},
-		{name: "missing usage", contentType: "application/json", body: `{"model":"chat-v1","choices":[{"index":0,"message":{"role":"assistant","content":"{}"},"finish_reason":"stop"}]}`, code: models.ErrorCodeChatResponseInvalid},
-		{name: "empty usage", contentType: "application/json", body: `{"model":"chat-v1","choices":[{"index":0,"message":{"role":"assistant","content":"{}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}`, code: models.ErrorCodeChatResponseInvalid},
+		{name: "missing usage", contentType: "application/json", body: `{"model":"chat-v1","choices":[{"index":0,"message":{"role":"assistant","content":"{}"},"finish_reason":"stop"}]}`, code: models.ErrorCodeChatResponseInvalid, reason: models.ConnectionValidationMissingUsage},
+		{name: "missing usage field", contentType: "application/json", body: `{"model":"chat-v1","choices":[{"index":0,"message":{"role":"assistant","content":"{}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":3}}`, code: models.ErrorCodeChatResponseInvalid, reason: models.ConnectionValidationMissingUsage},
+		{name: "empty usage", contentType: "application/json", body: `{"model":"chat-v1","choices":[{"index":0,"message":{"role":"assistant","content":"{}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}`, code: models.ErrorCodeChatResponseInvalid, reason: models.ConnectionValidationInvalidUsage},
 		{name: "empty choices", contentType: "application/json", body: `{"model":"chat-v1","choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}`, code: models.ErrorCodeChatResponseInvalid},
 		{name: "multiple choices", contentType: "application/json", body: `{"model":"chat-v1","choices":[{"index":0,"message":{"role":"assistant","content":"{}"},"finish_reason":"stop"},{"index":1,"message":{"role":"assistant","content":"{}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}`, code: models.ErrorCodeChatResponseInvalid},
-		{name: "wrong model", contentType: "application/json", body: validChatResponse("other-model", `{}`), code: models.ErrorCodeChatResponseModelMismatch},
-		{name: "bad usage total", contentType: "application/json", body: `{"model":"chat-v1","choices":[{"index":0,"message":{"role":"assistant","content":"{}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":11}}`, code: models.ErrorCodeChatResponseInvalid},
-		{name: "finish length", contentType: "application/json", body: `{"model":"chat-v1","choices":[{"index":0,"message":{"role":"assistant","content":"{}"},"finish_reason":"length"}],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}`, code: models.ErrorCodeChatResponseInvalid},
-		{name: "refusal", contentType: "application/json", body: `{"model":"chat-v1","choices":[{"index":0,"message":{"role":"assistant","content":"{}","refusal":"no"},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}`, code: models.ErrorCodeChatResponseInvalid},
-		{name: "tool call", contentType: "application/json", body: `{"model":"chat-v1","choices":[{"index":0,"message":{"role":"assistant","content":"{}","tool_calls":[{"id":"call-1","type":"function","function":{"name":"SearchKnowledge","arguments":"{}"}}]},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}`, code: models.ErrorCodeChatResponseInvalid},
+		{name: "wrong model", contentType: "application/json", body: validChatResponse("other-model", `{}`), code: models.ErrorCodeChatResponseModelMismatch, reason: models.ConnectionValidationModelMismatch},
+		{name: "bad usage total", contentType: "application/json", body: `{"model":"chat-v1","choices":[{"index":0,"message":{"role":"assistant","content":"{}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":11}}`, code: models.ErrorCodeChatResponseInvalid, reason: models.ConnectionValidationInvalidUsage},
+		{name: "finish length", contentType: "application/json", body: `{"model":"chat-v1","choices":[{"index":0,"message":{"role":"assistant","content":"{}"},"finish_reason":"length"}],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}`, code: models.ErrorCodeChatResponseInvalid, reason: models.ConnectionValidationFinishReasonLength},
+		{name: "reasoning exhausted budget without content", contentType: "application/json", body: `{"model":"chat-v1","choices":[{"index":0,"message":{"role":"assistant","content":"","reasoning_content":"response-secret-canary"},"finish_reason":"length"}],"usage":{"prompt_tokens":46,"completion_tokens":64,"total_tokens":110}}`, code: models.ErrorCodeChatResponseInvalid, reason: models.ConnectionValidationFinishReasonLength},
+		{name: "empty content", contentType: "application/json", body: validChatResponse("chat-v1", ""), code: models.ErrorCodeChatResponseInvalid, reason: models.ConnectionValidationEmptyContent},
+		{name: "null content", contentType: "application/json", body: `{"model":"chat-v1","choices":[{"index":0,"message":{"role":"assistant","content":null},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}`, code: models.ErrorCodeChatResponseInvalid, reason: models.ConnectionValidationEmptyContent},
+		{name: "unknown finish reason", contentType: "application/json", body: `{"model":"chat-v1","choices":[{"index":0,"message":{"role":"assistant","content":"{}"},"finish_reason":"response-secret-canary"}],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}`, code: models.ErrorCodeChatResponseInvalid, reason: models.ConnectionValidationFinishReasonInvalid},
+		{name: "missing finish reason", contentType: "application/json", body: `{"model":"chat-v1","choices":[{"index":0,"message":{"role":"assistant","content":"{}"}}],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}`, code: models.ErrorCodeChatResponseInvalid, reason: models.ConnectionValidationFinishReasonInvalid},
+		{name: "refusal", contentType: "application/json", body: `{"model":"chat-v1","choices":[{"index":0,"message":{"role":"assistant","content":"{}","refusal":"response-secret-canary"},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}`, code: models.ErrorCodeChatResponseInvalid, reason: models.ConnectionValidationRefusal},
+		{name: "tool call", contentType: "application/json", body: `{"model":"chat-v1","choices":[{"index":0,"message":{"role":"assistant","content":"{}","tool_calls":[{"id":"call-1","type":"function","function":{"name":"SearchKnowledge","arguments":"{}"}}]},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}`, code: models.ErrorCodeChatResponseInvalid, reason: models.ConnectionValidationToolCalls},
 		{name: "oversized", contentType: "application/json", body: validChatResponse("chat-v1", strings.Repeat("x", 1000)), maxBytes: 128, code: models.ErrorCodeChatResponseInvalid},
 	}
 	for _, test := range tests {
@@ -313,6 +320,25 @@ func TestEinoOpenAIChatModelRejectsMalformedOrInconsistentResponses(t *testing.T
 			}
 			_, err = model.Chat(context.Background(), validChatRequest(model.Contract().Model))
 			assertChatError(t, err, foundation.ErrorConsistencyViolation, test.code, false)
+			reason := test.reason
+			if reason == "" {
+				reason = models.ConnectionValidationInvalidResponse
+			}
+			assertDiagnostic(t, err, models.ConnectionDiagnostic{Stage: models.ConnectionStageResponseValidation, ValidationReason: reason})
+			var diagnostic *models.ConnectionDiagnostic
+			if !errors.As(err, &diagnostic) {
+				t.Fatal("missing response validation diagnostic")
+			}
+			encoded, marshalErr := json.Marshal(diagnostic)
+			if marshalErr != nil {
+				t.Fatal(marshalErr)
+			}
+			formatted := fmt.Sprintf("%v %#v %s", err, err, encoded)
+			for _, forbidden := range []string{"response-secret-canary", "chat-secret-canary", "system-policy-canary", "untrusted-source-canary", server.URL} {
+				if strings.Contains(formatted, forbidden) {
+					t.Fatal("response diagnostic retained provider content or request secrets")
+				}
+			}
 		})
 	}
 }

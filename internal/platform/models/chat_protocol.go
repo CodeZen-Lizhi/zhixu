@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	agentapplication "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
@@ -23,15 +24,18 @@ type OpenAIChatOptions struct {
 	MaxRequestBytes  int64
 	MaxResponseBytes int64
 	APIStyle         ChatAPIStyle
+	ReasoningEffort  string
 	Provider         string
 }
 
-func buildOpenAIChatRequest(modelID string, request agentapplication.ChatRequest) openAIChatRequest {
+func buildOpenAIChatRequest(contract ChatContract, request agentapplication.ChatRequest) openAIChatRequest {
+	zero := float64(0)
 	payload := openAIChatRequest{
-		Model:       modelID,
-		Messages:    make([]openAIChatRequestMessage, len(request.Messages)),
-		MaxTokens:   request.MaxOutputTokens,
-		Temperature: 0,
+		Model:           contract.Model.ModelID,
+		ReasoningEffort: contract.ReasoningEffort,
+		Messages:        make([]openAIChatRequestMessage, len(request.Messages)),
+		MaxTokens:       request.MaxOutputTokens,
+		Temperature:     &zero,
 		ResponseFormat: openAIChatResponseFormat{
 			Type: "json_schema",
 			JSONSchema: openAIChatJSONSchema{
@@ -41,10 +45,21 @@ func buildOpenAIChatRequest(modelID string, request agentapplication.ChatRequest
 			},
 		},
 	}
+	if usesReasoningCompletionBudget(contract.Model.ModelID, contract.ReasoningEffort) {
+		payload.MaxCompletionTokens = payload.MaxTokens
+		payload.MaxTokens = 0
+		payload.Temperature = nil
+	}
 	for index, message := range request.Messages {
 		payload.Messages[index] = openAIChatRequestMessage{Role: string(message.Role), Content: message.Content}
 	}
 	return payload
+}
+
+// usesReasoningCompletionBudget 保留旧版协议默认值，除非显式
+// 选择思考强度，或配置的模型属于 GPT-6 系列。
+func usesReasoningCompletionBudget(modelID, effort string) bool {
+	return effort != "" || modelID == "gpt-6" || strings.HasPrefix(modelID, "gpt-6-")
 }
 
 func schemaRequestName(ref agentdomain.SchemaRef) string {
@@ -54,15 +69,32 @@ func schemaRequestName(ref agentdomain.SchemaRef) string {
 
 func validateOpenAIChatResponse(model agentdomain.ModelRef, response openAIChatResponse) (agentapplication.ChatResponse, error) {
 	if response.Model != model.ModelVersion {
-		return agentapplication.ChatResponse{}, chatResponseError(ErrorCodeChatResponseModelMismatch)
+		return agentapplication.ChatResponse{}, chatResponseError(ErrorCodeChatResponseModelMismatch, responseValidationDiagnosticWithReason(ConnectionValidationModelMismatch))
 	}
-	if len(response.Choices) != 1 || response.Choices[0].Index != 0 || response.Choices[0].Message.Role != "assistant" ||
-		response.Choices[0].Message.Content == nil || *response.Choices[0].Message.Content == "" ||
-		response.Choices[0].FinishReason == nil || *response.Choices[0].FinishReason != "stop" ||
-		(response.Choices[0].Message.Refusal != nil && *response.Choices[0].Message.Refusal != "") ||
-		len(response.Choices[0].Message.ToolCalls) != 0 || response.Usage == nil ||
-		response.Usage.PromptTokens == nil || response.Usage.CompletionTokens == nil || response.Usage.TotalTokens == nil {
+	if len(response.Choices) != 1 || response.Choices[0].Index != 0 || response.Choices[0].Message.Role != "assistant" {
 		return agentapplication.ChatResponse{}, chatResponseError(ErrorCodeChatResponseInvalid)
+	}
+	choice := response.Choices[0]
+	// 先判定截断再判定内容为空：思考可能耗尽全部
+	// 预算而没有生成最终内容。这两种响应均不接受。
+	if choice.FinishReason == nil || *choice.FinishReason != "stop" {
+		reason := ConnectionValidationFinishReasonInvalid
+		if choice.FinishReason != nil && *choice.FinishReason == "length" {
+			reason = ConnectionValidationFinishReasonLength
+		}
+		return agentapplication.ChatResponse{}, chatResponseError(ErrorCodeChatResponseInvalid, responseValidationDiagnosticWithReason(reason))
+	}
+	if choice.Message.Refusal != nil && *choice.Message.Refusal != "" {
+		return agentapplication.ChatResponse{}, chatResponseError(ErrorCodeChatResponseInvalid, responseValidationDiagnosticWithReason(ConnectionValidationRefusal))
+	}
+	if len(choice.Message.ToolCalls) != 0 {
+		return agentapplication.ChatResponse{}, chatResponseError(ErrorCodeChatResponseInvalid, responseValidationDiagnosticWithReason(ConnectionValidationToolCalls))
+	}
+	if choice.Message.Content == nil || *choice.Message.Content == "" {
+		return agentapplication.ChatResponse{}, chatResponseError(ErrorCodeChatResponseInvalid, responseValidationDiagnosticWithReason(ConnectionValidationEmptyContent))
+	}
+	if response.Usage == nil || response.Usage.PromptTokens == nil || response.Usage.CompletionTokens == nil || response.Usage.TotalTokens == nil {
+		return agentapplication.ChatResponse{}, chatResponseError(ErrorCodeChatResponseInvalid, responseValidationDiagnosticWithReason(ConnectionValidationMissingUsage))
 	}
 	usage := agentdomain.TokenUsage{
 		InputTokens:  *response.Usage.PromptTokens,
@@ -70,17 +102,19 @@ func validateOpenAIChatResponse(model agentdomain.ModelRef, response openAIChatR
 		TotalTokens:  *response.Usage.TotalTokens,
 	}
 	if err := usage.Validate(); err != nil || usage.TotalTokens == 0 {
-		return agentapplication.ChatResponse{}, chatResponseError(ErrorCodeChatResponseInvalid)
+		return agentapplication.ChatResponse{}, chatResponseError(ErrorCodeChatResponseInvalid, responseValidationDiagnosticWithReason(ConnectionValidationInvalidUsage))
 	}
 	return agentapplication.ChatResponse{Model: model, Content: []byte(*response.Choices[0].Message.Content), Usage: usage}, nil
 }
 
 type openAIChatRequest struct {
-	Model          string                     `json:"model"`
-	Messages       []openAIChatRequestMessage `json:"messages"`
-	MaxTokens      int                        `json:"max_tokens"`
-	Temperature    float64                    `json:"temperature"`
-	ResponseFormat openAIChatResponseFormat   `json:"response_format"`
+	Model               string                     `json:"model"`
+	Messages            []openAIChatRequestMessage `json:"messages"`
+	MaxTokens           int                        `json:"max_tokens,omitempty"`
+	MaxCompletionTokens int                        `json:"max_completion_tokens,omitempty"`
+	ReasoningEffort     string                     `json:"reasoning_effort,omitempty"`
+	Temperature         *float64                   `json:"temperature,omitempty"`
+	ResponseFormat      openAIChatResponseFormat   `json:"response_format"`
 }
 
 type openAIChatRequestMessage struct {

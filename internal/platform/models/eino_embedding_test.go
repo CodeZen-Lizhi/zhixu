@@ -72,6 +72,46 @@ func TestEinoOpenAIEmbeddingCallStateIsConcurrentRequestScoped(t *testing.T) {
 	}
 }
 
+func TestEinoBGEEmbeddingUsesFixedWidthContract(t *testing.T) {
+	t.Parallel()
+	for _, model := range []string{"BAAI/bge-m3", "Pro/BAAI/bge-m3"} {
+		for _, width := range []int{1024, 1023} {
+			t.Run(fmt.Sprintf("%s/%d", model, width), func(t *testing.T) {
+				server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+					var payload map[string]json.RawMessage
+					if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+						t.Error(err)
+					}
+					if _, present := payload["dimensions"]; present {
+						t.Error("fixed-width BGE request must omit dimensions")
+					}
+					vector := make([]float32, width)
+					vector[0] = 1
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"model": model, "data": []any{map[string]any{"index": 0, "embedding": vector}},
+					})
+				}))
+				defer server.Close()
+				options := openAIOptions(server.URL, server.Client(), time.Second, 0)
+				options.Model, options.Dimensions = model, 1024
+				embedder, err := models.NewEinoOpenAICompatibleEmbedder(options)
+				if err != nil {
+					t.Fatal(err)
+				}
+				result, err := embedder.Embed(context.Background(), application.EmbedRequest{Inputs: []string{"connection check"}})
+				if width != 1024 {
+					assertEmbeddingError(t, err, foundation.ErrorConsistencyViolation, domain.ErrorCodeEmbedResultInvalid, false)
+					return
+				}
+				if err != nil || len(result.Embeddings) != 1 || len(result.Embeddings[0]) != 1024 {
+					t.Fatalf("fixed-width result invalid: %v", err)
+				}
+			})
+		}
+	}
+}
+
 func TestEinoOllamaEmbedderRejectsSDKImplicitAuthentication(t *testing.T) {
 	t.Setenv("OLLAMA_AUTH", "true")
 	options := ollamaOptions("http://127.0.0.1:11434", nil, time.Second, 0)

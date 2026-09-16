@@ -18,7 +18,7 @@ func NewConfiguredChatModel(cfg config.Config, telemetry ...ModelTelemetry) (age
 			BaseURL: cfg.ChatBaseURL, APIKey: cfg.ChatAPIKey, Model: cfg.ChatModel, ModelVersion: cfg.ChatModelVersion,
 			AdapterVersion: cfg.ChatAdapterVersion, Timeout: cfg.ChatTimeout,
 			MaxRequestBytes: cfg.ChatMaxRequestBytes, MaxResponseBytes: cfg.ChatMaxResponseBytes,
-			APIStyle: ChatAPIStyle(cfg.ChatAPIStyle), Provider: string(cfg.ChatProvider),
+			APIStyle: ChatAPIStyle(cfg.ChatAPIStyle), Provider: string(cfg.ChatProvider), ReasoningEffort: cfg.ChatReasoningEffort,
 		}
 		model, err := NewEinoOpenAIChatModel(options, telemetry...)
 		if err != nil {

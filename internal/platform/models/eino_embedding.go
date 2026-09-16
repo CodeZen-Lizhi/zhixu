@@ -46,11 +46,17 @@ func NewEinoOpenAICompatibleEmbedder(options OpenAIEmbeddingOptions) (*EinoEmbed
 		base: config.client.client.Transport, provider: openAICompatibleProvider, maxResponseBytes: config.maxResponseBytes,
 	}
 	dimensions := int(config.contract.Dimensions)
+	requestedDimensions := &dimensions
+	// BGE-M3 的输出维度固定；其 OpenAI 兼容端点拒绝
+	// 覆盖 dimensions。响应契约仍保留预期维度。
+	if config.contract.Model == "BAAI/bge-m3" || config.contract.Model == "Pro/BAAI/bge-m3" {
+		requestedDimensions = nil
+	}
 	encodingFormat := einoopenai.EmbeddingEncodingFormatFloat
 	backend, err := einoopenai.NewEmbedder(context.Background(), &einoopenai.EmbeddingConfig{
 		HTTPClient: config.client.client, APIKey: options.APIKey,
 		BaseURL: strings.TrimSuffix(config.endpointURL, "/embeddings"), Model: config.contract.Model,
-		EncodingFormat: &encodingFormat, Dimensions: &dimensions,
+		EncodingFormat: &encodingFormat, Dimensions: requestedDimensions,
 	})
 	if err != nil {
 		_ = config.closeModelResource()

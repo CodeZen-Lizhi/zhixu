@@ -86,7 +86,7 @@ func NewEinoRuntimeChatModel(options OpenAIChatOptions) (*EinoRuntimeChatModel, 
 		client: options.Client, baseURL: options.BaseURL, apiKey: options.APIKey,
 		model: options.Model, modelVersion: options.ModelVersion, adapterVersion: options.AdapterVersion,
 		timeout: options.Timeout, maxRequestBytes: options.MaxRequestBytes, maxResponseBytes: options.MaxResponseBytes,
-		apiStyle: options.APIStyle, provider: options.Provider,
+		apiStyle: options.APIStyle, provider: options.Provider, reasoningEffort: options.ReasoningEffort,
 	})
 	if err != nil {
 		return nil, err
@@ -96,6 +96,7 @@ func NewEinoRuntimeChatModel(options OpenAIChatOptions) (*EinoRuntimeChatModel, 
 	}
 	config.client.client.Transport = &einoRuntimeRoundTripper{
 		base: config.client.client.Transport, model: config.contract.Model.ModelVersion,
+		modelID: config.contract.Model.ModelID, reasoningEffort: config.contract.ReasoningEffort,
 		maxRequestBytes: config.maxRequestBytes, maxResponseBytes: config.maxResponseBytes,
 	}
 	// Agent/tool and final-answer runs must be reproducible enough for the
@@ -451,6 +452,8 @@ func (validator *runtimeStreamToolCallValidator) validateFinal() error {
 type einoRuntimeRoundTripper struct {
 	base             http.RoundTripper
 	model            string
+	modelID          string
+	reasoningEffort  string
 	maxRequestBytes  int64
 	maxResponseBytes int64
 }
@@ -473,6 +476,22 @@ func (transport *einoRuntimeRoundTripper) RoundTrip(request *http.Request) (*htt
 		return nil, &einoRuntimeWireError{code: ErrorCodeChatRequestInvalid}
 	}
 	payload["model"], _ = json.Marshal(transport.model)
+	// 思考强度由不可变运行代次拥有。逐调用 SDK 选项不得偏离
+	// 结构化和运行时 Chat 共同使用的已保存版本。
+	delete(payload, "reasoning_effort")
+	if transport.reasoningEffort != "" {
+		payload["reasoning_effort"], _ = json.Marshal(transport.reasoningEffort)
+	}
+	if usesReasoningCompletionBudget(transport.modelID, transport.reasoningEffort) {
+		for _, key := range []string{"temperature", "top_p", "top_logprobs", "logprobs"} {
+			delete(payload, key)
+		}
+		if maximum, exists := payload["max_tokens"]; exists {
+			// 保留调用方的预算上限；思考消耗同一预算。
+			payload["max_completion_tokens"] = maximum
+			delete(payload, "max_tokens")
+		}
+	}
 	body, err = json.Marshal(payload)
 	if err != nil || int64(len(body)) > transport.maxRequestBytes {
 		return nil, &einoRuntimeWireError{code: ErrorCodeChatRequestInvalid}

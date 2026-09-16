@@ -74,6 +74,7 @@ var (
 type ChatContract struct {
 	Provider         string
 	APIStyle         ChatAPIStyle
+	ReasoningEffort  string
 	EndpointPath     string
 	Model            agentdomain.ModelRef
 	Timeout          time.Duration
@@ -107,6 +108,7 @@ type chatHTTPOptions struct {
 	maxRequestBytes  int64
 	maxResponseBytes int64
 	apiStyle         ChatAPIStyle
+	reasoningEffort  string
 	provider         string
 }
 
@@ -117,6 +119,14 @@ func newChatHTTPConfig(options chatHTTPOptions) (chatHTTPConfig, error) {
 	}
 	if provider != openAICompatibleProvider && provider != ollamaProvider {
 		return chatHTTPConfig{}, chatConfigErrorWithCause(errors.New("chat provider is invalid"))
+	}
+	switch options.reasoningEffort {
+	case "", "low", "medium", "high", "xhigh", "max":
+	default:
+		return chatHTTPConfig{}, chatConfigErrorWithCause(errors.New("chat reasoning effort is invalid"))
+	}
+	if provider != openAICompatibleProvider && options.reasoningEffort != "" {
+		return chatHTTPConfig{}, chatConfigErrorWithCause(errors.New("chat reasoning effort requires openai-compatible provider"))
 	}
 	apiStyle := options.apiStyle
 	if apiStyle == "" {
@@ -163,7 +173,7 @@ func newChatHTTPConfig(options chatHTTPOptions) (chatHTTPConfig, error) {
 	return chatHTTPConfig{
 		client:           client,
 		endpointURL:      appendChatPath(baseURL, endpointPath),
-		contract:         ChatContract{Provider: provider, APIStyle: apiStyle, EndpointPath: endpointPath, Model: model, Timeout: options.timeout, MaxRequestBytes: options.maxRequestBytes, MaxResponseBytes: options.maxResponseBytes},
+		contract:         ChatContract{Provider: provider, APIStyle: apiStyle, ReasoningEffort: options.reasoningEffort, EndpointPath: endpointPath, Model: model, Timeout: options.timeout, MaxRequestBytes: options.maxRequestBytes, MaxResponseBytes: options.maxResponseBytes},
 		timeout:          options.timeout,
 		maxRequestBytes:  options.maxRequestBytes,
 		maxResponseBytes: options.maxResponseBytes,

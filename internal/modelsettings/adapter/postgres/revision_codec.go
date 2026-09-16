@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -12,7 +13,7 @@ import (
 )
 
 const revisionColumns = `revision,
-chat_provider,chat_api_style,chat_base_url,chat_model,chat_model_version,chat_adapter_version,
+chat_provider,chat_api_style,chat_reasoning_effort,chat_reasoning_effort_by_function,chat_base_url,chat_model,chat_model_version,chat_adapter_version,
 chat_timeout_microseconds,chat_max_request_bytes,chat_max_response_bytes,
 chat_secret_key_id,chat_secret_nonce,chat_secret_ciphertext,
 embedding_provider,embedding_base_url,embedding_model,embedding_dimensions,
@@ -34,10 +35,11 @@ func scanRevision(row interface{ Scan(...any) error }) (persistedRevision, error
 	var persisted persistedRevision
 	var chatProvider, chatAPIStyle, embeddingProvider, normalization, distance string
 	var chatTimeout, embeddingTimeout int64
+	var reasoningOverrides []byte
 	var chatKeyID, embeddingKeyID sql.NullString
 	if err := row.Scan(
 		&persisted.revision,
-		&chatProvider, &chatAPIStyle, &persisted.settings.Chat.BaseURL, &persisted.settings.Chat.Model,
+		&chatProvider, &chatAPIStyle, &persisted.settings.Chat.ReasoningEffort, &reasoningOverrides, &persisted.settings.Chat.BaseURL, &persisted.settings.Chat.Model,
 		&persisted.settings.Chat.ModelVersion, &persisted.settings.Chat.AdapterVersion,
 		&chatTimeout, &persisted.settings.Chat.MaxRequestBytes, &persisted.settings.Chat.MaxResponseBytes,
 		&chatKeyID, &persisted.chatSecret.Nonce, &persisted.chatSecret.Ciphertext,
@@ -50,6 +52,11 @@ func scanRevision(row interface{ Scan(...any) error }) (persistedRevision, error
 		&persisted.createdAt, &persisted.createdBy,
 	); err != nil {
 		return persistedRevision{}, err
+	}
+	var overridesErr error
+	persisted.settings.Chat.ReasoningEffortByFunction, overridesErr = domain.ParseReasoningEffortOverrides(reasoningOverrides)
+	if overridesErr != nil {
+		return persistedRevision{}, corrupt(errors.New("model settings reasoning overrides are invalid"))
 	}
 	persisted.settings.Chat.Provider = domain.ChatProvider(chatProvider)
 	persisted.settings.Chat.APIStyle = domain.ChatAPIStyle(chatAPIStyle)
@@ -206,4 +213,10 @@ func nullBytes(value []byte) any {
 
 func foundationRevisionMissing() error {
 	return foundation.NewError(foundation.ErrorNotFound, domain.ErrorCodeActiveRevisionUnavailable, false, errors.New("model settings revision does not exist"))
+}
+
+func reasoningOverridesJSON(overrides domain.ReasoningEffortOverrides) string {
+	// 此限定键映射在存储编码前已经过校验。
+	encoded, _ := json.Marshal(overrides.Clone())
+	return string(encoded)
 }

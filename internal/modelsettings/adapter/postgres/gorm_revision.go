@@ -37,6 +37,7 @@ func (repository *GORMRepository) SaveDesired(ctx context.Context, command appli
 	if err = repository.ready(ctx); err != nil {
 		return domain.Snapshot{}, err
 	}
+	command.Settings.Chat.ReasoningEffortByFunction = command.Settings.Chat.ReasoningEffortByFunction.Clone()
 	if command.ExpectedRevision < 0 || command.Settings.ValidateStructural() != nil ||
 		command.ChatSecret.Validate() != nil || command.EmbeddingSecret.Validate() != nil || !canonicalActor(command.CreatedBy) {
 		return domain.Snapshot{}, invalid(errors.New("model settings save command is invalid"))
@@ -76,7 +77,7 @@ func (repository *GORMRepository) SaveDesired(ctx context.Context, command appli
 			return envelopeErr
 		}
 		row, rowErr = gormRawRow(callbackCtx, database, `INSERT INTO ops.model_settings_revisions(
-revision,chat_provider,chat_api_style,chat_base_url,chat_model,chat_model_version,chat_adapter_version,
+revision,chat_provider,chat_api_style,chat_reasoning_effort,chat_reasoning_effort_by_function,chat_base_url,chat_model,chat_model_version,chat_adapter_version,
 chat_timeout_microseconds,chat_max_request_bytes,chat_max_response_bytes,
 chat_secret_key_id,chat_secret_nonce,chat_secret_ciphertext,
 embedding_provider,embedding_base_url,embedding_model,embedding_dimensions,
@@ -84,10 +85,10 @@ embedding_normalization,embedding_distance_metric,embedding_max_batch_size,
 embedding_max_input_bytes,embedding_max_batch_input_bytes,embedding_timeout_microseconds,
 embedding_max_response_bytes,embedding_secret_key_id,embedding_secret_nonce,embedding_secret_ciphertext,
 created_at,created_by)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,clock_timestamp(),?)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,clock_timestamp(),?)
 RETURNING revision`,
 			revision,
-			string(command.Settings.Chat.Provider), string(command.Settings.Chat.APIStyle), command.Settings.Chat.BaseURL, command.Settings.Chat.Model,
+			string(command.Settings.Chat.Provider), string(command.Settings.Chat.APIStyle), command.Settings.Chat.ReasoningEffort, reasoningOverridesJSON(command.Settings.Chat.ReasoningEffortByFunction), command.Settings.Chat.BaseURL, command.Settings.Chat.Model,
 			command.Settings.Chat.ModelVersion, command.Settings.Chat.AdapterVersion, command.Settings.Chat.Timeout.Microseconds(),
 			command.Settings.Chat.MaxRequestBytes, command.Settings.Chat.MaxResponseBytes,
 			nullString(chatEnvelope.KeyID), nullBytes(chatEnvelope.Nonce), nullBytes(chatEnvelope.Ciphertext),
@@ -132,6 +133,7 @@ func (repository *GORMRepository) ResolveDraft(ctx context.Context, command appl
 	if err = repository.ready(ctx); err != nil {
 		return domain.ResolvedSettings{}, err
 	}
+	command.Settings.Chat.ReasoningEffortByFunction = command.Settings.Chat.ReasoningEffortByFunction.Clone()
 	if command.ExpectedRevision < 0 || command.Settings.ValidateStructural() != nil ||
 		command.ChatSecret.Validate() != nil || command.EmbeddingSecret.Validate() != nil {
 		return domain.ResolvedSettings{}, invalid(errors.New("model settings draft command is invalid"))

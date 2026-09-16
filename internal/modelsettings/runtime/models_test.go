@@ -24,6 +24,7 @@ func TestBuildReplacesAllStaticModelFieldsWithoutExposingConfig(t *testing.T) {
 	base.ChatAPIKey = "old-chat-secret"
 	base.ChatModel = "old-chat"
 	base.ChatModelVersion = "old-version"
+	base.ChatReasoningEffort = "max"
 	base.EmbeddingProvider = config.EmbeddingProviderOpenAICompatible
 	base.EmbeddingBaseURL = "https://old.example.test"
 	base.EmbeddingAPIKey = "old-embedding-secret"
@@ -197,9 +198,15 @@ func TestBuildUsesEinoChatForManagedRuntime(t *testing.T) {
 	settings.Chat.BaseURL = managedOllamaBaseURL
 	settings.Chat.Model = "chat-v1"
 	settings.Chat.ModelVersion = "chat-v1"
+	settings.Chat.ReasoningEffort = "high"
 	modelsRuntime, err := Build(base, domain.ResolvedSettings{Revision: 7, Settings: settings})
 	if err != nil {
 		t.Fatal(err)
+	}
+	structuredContract, _ := modelsRuntime.Chat().Contract()
+	runtimeContract, _ := modelsRuntime.RuntimeChat().Contract()
+	if structuredContract.ReasoningEffort != "high" || runtimeContract.ReasoningEffort != "high" {
+		t.Fatal("managed reasoning effort did not reach both runtime capabilities")
 	}
 	chat := modelsRuntime.Chat().Model()
 	if _, ok := chat.(*platformmodels.EinoOpenAIChatModel); !ok {

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	agentapplication "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
+	modelsettingsdomain "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
 	retrievalapplication "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/application"
 	retrievaldomain "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
@@ -127,11 +128,15 @@ func (capability EmbeddingCapability) GoString() string { return capability.Stri
 // ModelRuntime is one immutable process-wide Chat and Embedding factory result.
 // It intentionally stores neither config.Config nor raw endpoint or credential fields.
 type ModelRuntime struct {
-	chat        ChatCapability
-	runtimeChat RuntimeChatCapability
-	embedding   EmbeddingCapability
-	closeOnce   sync.Once
-	closeErr    error
+	chat                  ChatCapability
+	runtimeChat           RuntimeChatCapability
+	embedding             EmbeddingCapability
+	chatByFunction        map[modelsettingsdomain.ReasoningFunction]ChatCapability
+	runtimeChatByFunction map[modelsettingsdomain.ReasoningFunction]RuntimeChatCapability
+	extraChats            []ChatCapability
+	extraRuntimeChats     []RuntimeChatCapability
+	closeOnce             sync.Once
+	closeErr              error
 }
 
 type modelResourceCloser interface {
@@ -144,7 +149,7 @@ type modelRuntimeBuilders struct {
 	embedding   func(config.Config) (retrievalapplication.Embedder, error)
 }
 
-// NewConfiguredModelRuntime 校验模型配置，并使用可选项目 telemetry 各构造一次已启用 Adapter。
+// NewConfiguredModelRuntime 校验模型配置，每个有效强度共享一组 Chat Adapter，Embedding 构造一次。
 func NewConfiguredModelRuntime(cfg config.Config, telemetry ...ModelTelemetry) (*ModelRuntime, error) {
 	return newConfiguredModelRuntime(cfg, modelRuntimeBuilders{
 		chat: func(cfg config.Config) (agentapplication.ChatModel, error) {
@@ -190,6 +195,40 @@ func newConfiguredModelRuntime(cfg config.Config, builders modelRuntimeBuilders)
 			state: CapabilityConfigured, model: runtimeModel, contract: runtimeModel.http.contractCopy(),
 		}
 	}
+	if cfg.ChatProvider != config.ChatProviderDisabled {
+		runtime.chatByFunction = make(map[modelsettingsdomain.ReasoningFunction]ChatCapability)
+		runtime.runtimeChatByFunction = make(map[modelsettingsdomain.ReasoningFunction]RuntimeChatCapability)
+		chats := map[string]ChatCapability{cfg.ChatReasoningEffort: runtime.chat}
+		runtimeChats := map[string]RuntimeChatCapability{cfg.ChatReasoningEffort: runtime.runtimeChat}
+		for _, function := range modelsettingsdomain.ReasoningFunctions() {
+			effort := cfg.ChatReasoningEffortByFunction.Resolve(function, cfg.ChatReasoningEffort)
+			if _, exists := chats[effort]; !exists {
+				selected := cfg
+				selected.ChatReasoningEffort = effort
+				chat, err := builders.chat(selected)
+				if err != nil {
+					return nil, errors.Join(err, closeModelResource(chat), runtime.Close())
+				}
+				contractProvider, ok := chat.(interface{ Contract() ChatContract })
+				if !ok {
+					return nil, errors.Join(errors.New("function chat contract is unavailable"), closeModelResource(chat), runtime.Close())
+				}
+				capability := ChatCapability{state: CapabilityConfigured, model: chat, contract: contractProvider.Contract()}
+				runtime.extraChats = append(runtime.extraChats, capability)
+				runtimeModel, err := builders.runtimeChat(selected)
+				if err != nil {
+					return nil, errors.Join(err, closeModelResource(runtimeModel), runtime.Close())
+				}
+				if runtimeModel == nil {
+					return nil, errors.Join(errors.New("function runtime chat is unavailable"), runtime.Close())
+				}
+				runtimeCapability := RuntimeChatCapability{state: CapabilityConfigured, model: runtimeModel, contract: runtimeModel.http.contractCopy()}
+				runtime.extraRuntimeChats = append(runtime.extraRuntimeChats, runtimeCapability)
+				chats[effort], runtimeChats[effort] = capability, runtimeCapability
+			}
+			runtime.chatByFunction[function], runtime.runtimeChatByFunction[function] = chats[effort], runtimeChats[effort]
+		}
+	}
 	if cfg.EmbeddingProvider != config.EmbeddingProviderDisabled {
 		embedder, err := builders.embedding(cfg)
 		if err != nil {
@@ -215,7 +254,7 @@ func openAIChatOptionsFromConfig(cfg config.Config) OpenAIChatOptions {
 		BaseURL: cfg.ChatBaseURL, APIKey: cfg.ChatAPIKey, Model: cfg.ChatModel, ModelVersion: cfg.ChatModelVersion,
 		AdapterVersion: cfg.ChatAdapterVersion, Timeout: cfg.ChatTimeout,
 		MaxRequestBytes: cfg.ChatMaxRequestBytes, MaxResponseBytes: cfg.ChatMaxResponseBytes,
-		APIStyle: ChatAPIStyle(cfg.ChatAPIStyle), Provider: string(cfg.ChatProvider),
+		APIStyle: ChatAPIStyle(cfg.ChatAPIStyle), Provider: string(cfg.ChatProvider), ReasoningEffort: cfg.ChatReasoningEffort,
 	}
 }
 
@@ -226,7 +265,13 @@ func (runtime *ModelRuntime) Close() error {
 		return nil
 	}
 	runtime.closeOnce.Do(func() {
-		runtime.closeErr = errors.Join(
+		for _, chat := range runtime.extraChats {
+			runtime.closeErr = errors.Join(runtime.closeErr, closeModelResource(chat.model))
+		}
+		for _, chat := range runtime.extraRuntimeChats {
+			runtime.closeErr = errors.Join(runtime.closeErr, closeModelResource(chat.model))
+		}
+		runtime.closeErr = errors.Join(runtime.closeErr,
 			closeModelResource(runtime.chat.model),
 			closeModelResource(runtime.runtimeChat.model),
 			closeModelResource(runtime.embedding.embedder),
@@ -276,3 +321,26 @@ func (runtime *ModelRuntime) String() string {
 
 // GoString applies the endpoint- and credential-safe representation to %#v.
 func (runtime *ModelRuntime) GoString() string { return runtime.String() }
+
+// ChatFor 返回可信功能的不可变有效能力。未知
+// 功能直接拒绝，不静默使用全局默认值。
+func (runtime *ModelRuntime) ChatFor(function modelsettingsdomain.ReasoningFunction) ChatCapability {
+	if runtime == nil || !modelsettingsdomain.ValidReasoningFunction(function) {
+		return ChatCapability{state: CapabilityDisabled}
+	}
+	if chat, ok := runtime.chatByFunction[function]; ok {
+		return chat
+	}
+	return runtime.chat
+}
+
+// RuntimeChatFor 为普通和流式 Chat 选择相同的有效设置。
+func (runtime *ModelRuntime) RuntimeChatFor(function modelsettingsdomain.ReasoningFunction) RuntimeChatCapability {
+	if runtime == nil || !modelsettingsdomain.ValidReasoningFunction(function) {
+		return RuntimeChatCapability{state: CapabilityDisabled}
+	}
+	if chat, ok := runtime.runtimeChatByFunction[function]; ok {
+		return chat
+	}
+	return runtime.runtimeChat
+}

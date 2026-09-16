@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	agentapplication "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
+	modelsettingsdomain "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
 	retrievalapplication "github.com/CodeZen-Lizhi/zhixu/internal/retrieval/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/retrieval/domain"
@@ -121,7 +122,9 @@ func TestConfiguredModelRuntimeDisabledCapabilitiesAndSafeFormatting(t *testing.
 func TestConfiguredModelRuntimeCapabilitiesAreConcurrentReadSafe(t *testing.T) {
 	t.Parallel()
 
-	runtime, err := NewConfiguredModelRuntime(configuredRuntimeTestConfig())
+	cfg := configuredRuntimeTestConfig()
+	cfg.ChatReasoningEffortByFunction = modelsettingsdomain.ReasoningEffortOverrides{modelsettingsdomain.ReasoningFileProfile: "low"}
+	runtime, err := NewConfiguredModelRuntime(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,6 +132,8 @@ func TestConfiguredModelRuntimeCapabilitiesAreConcurrentReadSafe(t *testing.T) {
 	wantChat := runtime.Chat().Model()
 	wantRuntimeChat := runtime.RuntimeChat().Model()
 	wantEmbedding := runtime.Embedding().Embedder()
+	wantFileChat := runtime.ChatFor(modelsettingsdomain.ReasoningFileProfile).Model()
+	wantFileRuntimeChat := runtime.RuntimeChatFor(modelsettingsdomain.ReasoningFileProfile).Model()
 	var wait sync.WaitGroup
 	errors := make(chan string, 64)
 	for range 64 {
@@ -138,6 +143,7 @@ func TestConfiguredModelRuntimeCapabilitiesAreConcurrentReadSafe(t *testing.T) {
 			chatContract, chatOK := runtime.Chat().Contract()
 			embeddingContract, embeddingOK := runtime.Embedding().Contract()
 			if !chatOK || !embeddingOK || runtime.Chat().Model() != wantChat || runtime.RuntimeChat().Model() != wantRuntimeChat || runtime.Embedding().Embedder() != wantEmbedding ||
+				runtime.ChatFor(modelsettingsdomain.ReasoningFileProfile).Model() != wantFileChat || runtime.RuntimeChatFor(modelsettingsdomain.ReasoningFileProfile).Model() != wantFileRuntimeChat ||
 				chatContract.Model.ModelID == "" || embeddingContract.Binding().Model == "" {
 				errors <- "runtime capability changed during concurrent access"
 			}
@@ -206,21 +212,26 @@ func TestModelRuntimeCloseLeavesExternalTransportsOpen(t *testing.T) {
 func TestConfiguredModelRuntimeCompensatesChatWhenEmbeddingBuildFails(t *testing.T) {
 	t.Parallel()
 
-	chatTransport := &countingIdleTransport{}
-	runtimeChatTransport := &countingIdleTransport{}
-	chat := &EinoOpenAIChatModel{http: chatHTTPConfig{
-		client: &modelHTTPClient{client: &http.Client{Transport: chatTransport}, owned: chatTransport},
-	}}
-	runtimeChat := &EinoRuntimeChatModel{http: chatHTTPConfig{
-		client: &modelHTTPClient{client: &http.Client{Transport: runtimeChatTransport}, owned: runtimeChatTransport},
-	}}
+	var transports []*countingIdleTransport
+	cfg := configuredRuntimeTestConfig()
+	cfg.ChatReasoningEffortByFunction = modelsettingsdomain.ReasoningEffortOverrides{
+		modelsettingsdomain.ReasoningFileProfile: "low", modelsettingsdomain.ReasoningKnowledgeQNA: "low",
+	}
 	wantErr := errors.New("embedding build failed")
-	_, err := newConfiguredModelRuntime(configuredRuntimeTestConfig(), modelRuntimeBuilders{
+	_, err := newConfiguredModelRuntime(cfg, modelRuntimeBuilders{
 		chat: func(config.Config) (agentapplication.ChatModel, error) {
-			return chat, nil
+			transport := &countingIdleTransport{}
+			transports = append(transports, transport)
+			return &EinoOpenAIChatModel{http: chatHTTPConfig{
+				client: &modelHTTPClient{client: &http.Client{Transport: transport}, owned: transport},
+			}}, nil
 		},
 		runtimeChat: func(config.Config) (*EinoRuntimeChatModel, error) {
-			return runtimeChat, nil
+			transport := &countingIdleTransport{}
+			transports = append(transports, transport)
+			return &EinoRuntimeChatModel{http: chatHTTPConfig{
+				client: &modelHTTPClient{client: &http.Client{Transport: transport}, owned: transport},
+			}}, nil
 		},
 		embedding: func(config.Config) (retrievalapplication.Embedder, error) {
 			return nil, wantErr
@@ -229,11 +240,13 @@ func TestConfiguredModelRuntimeCompensatesChatWhenEmbeddingBuildFails(t *testing
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("construction error = %v, want embedding build error", err)
 	}
-	if got := chatTransport.closeCalls.Load(); got != 1 {
-		t.Fatalf("compensated chat transport close calls = %d, want 1", got)
+	if len(transports) != 4 {
+		t.Fatalf("constructed transports = %d, want two shared capability pairs", len(transports))
 	}
-	if got := runtimeChatTransport.closeCalls.Load(); got != 1 {
-		t.Fatalf("compensated runtime chat transport close calls = %d, want 1", got)
+	for _, transport := range transports {
+		if got := transport.closeCalls.Load(); got != 1 {
+			t.Fatalf("compensated transport close calls = %d, want 1", got)
+		}
 	}
 }
 
@@ -279,4 +292,41 @@ func configuredRuntimeTestConfig() config.Config {
 	cfg.EmbeddingNormalization = domain.NormalizationL2
 	cfg.EmbeddingDistanceMetric = domain.DistanceCosine
 	return cfg
+}
+
+func TestFunctionReasoningCapabilitiesFreezeAndShareEffectiveEffort(t *testing.T) {
+	cfg := configuredRuntimeTestConfig()
+	cfg.ChatReasoningEffort = "medium"
+	cfg.ChatReasoningEffortByFunction = modelsettingsdomain.ReasoningEffortOverrides{
+		modelsettingsdomain.ReasoningFileProfile:           "low",
+		modelsettingsdomain.ReasoningKnowledgeOrganization: "low",
+		modelsettingsdomain.ReasoningMainNoteSynthesis:     "high",
+		modelsettingsdomain.ReasoningNoteInterview:         "",
+	}
+	runtime, err := NewConfiguredModelRuntime(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	cfg.ChatReasoningEffortByFunction[modelsettingsdomain.ReasoningFileProfile] = "max"
+	for function, want := range map[modelsettingsdomain.ReasoningFunction]string{
+		modelsettingsdomain.ReasoningFileProfile: "low", modelsettingsdomain.ReasoningMainNoteSynthesis: "high",
+		modelsettingsdomain.ReasoningKnowledgeQNA: "medium", modelsettingsdomain.ReasoningNoteInterview: "",
+	} {
+		chat, _ := runtime.ChatFor(function).Contract()
+		ordinary, _ := runtime.RuntimeChatFor(function).Contract()
+		if chat.ReasoningEffort != want || ordinary.ReasoningEffort != want {
+			t.Fatalf("%s effective effort drifted", function)
+		}
+	}
+	if runtime.ChatFor(modelsettingsdomain.ReasoningFileProfile).Model() != runtime.ChatFor(modelsettingsdomain.ReasoningKnowledgeOrganization).Model() ||
+		runtime.RuntimeChatFor(modelsettingsdomain.ReasoningFileProfile).Model() != runtime.RuntimeChatFor(modelsettingsdomain.ReasoningKnowledgeOrganization).Model() {
+		t.Fatal("identical effective efforts did not share adapters")
+	}
+	if runtime.ChatFor("untrusted").Model() != nil || runtime.RuntimeChatFor("untrusted").Model() != nil {
+		t.Fatal("unknown function acquired a capability")
+	}
+	if len(runtime.extraChats) != 3 || len(runtime.extraRuntimeChats) != 3 {
+		t.Fatal("runtime constructed duplicate effective effort adapters")
+	}
 }

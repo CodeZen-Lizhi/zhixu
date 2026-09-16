@@ -64,15 +64,17 @@ const (
 
 // ChatSettings freezes every non-secret chat setting that affects runtime behavior.
 type ChatSettings struct {
-	Provider         ChatProvider
-	APIStyle         ChatAPIStyle
-	BaseURL          string
-	Model            string
-	ModelVersion     string
-	AdapterVersion   string
-	Timeout          time.Duration
-	MaxRequestBytes  int64
-	MaxResponseBytes int64
+	Provider                  ChatProvider
+	APIStyle                  ChatAPIStyle
+	ReasoningEffort           string
+	ReasoningEffortByFunction ReasoningEffortOverrides
+	BaseURL                   string
+	Model                     string
+	ModelVersion              string
+	AdapterVersion            string
+	Timeout                   time.Duration
+	MaxRequestBytes           int64
+	MaxResponseBytes          int64
 }
 
 // EmbeddingSettings freezes every non-secret embedding setting that affects an index contract.
@@ -213,6 +215,7 @@ func usesHTTPS(raw string) bool {
 
 // CanonicalizeSettings normalizes endpoint identity before validation, encryption, or persistence.
 func CanonicalizeSettings(settings Settings) (Settings, error) {
+	settings.Chat.ReasoningEffortByFunction = settings.Chat.ReasoningEffortByFunction.Clone()
 	if settings.Chat.Provider != ChatProviderDisabled {
 		normalized, err := NormalizeBaseURL(settings.Chat.BaseURL)
 		if err != nil {
@@ -241,6 +244,15 @@ func (settings ChatSettings) validate() error {
 	}
 	if settings.APIStyle != ChatAPIStyleChatCompletions && settings.APIStyle != ChatAPIStyleResponses {
 		return invalid("chat API style is invalid")
+	}
+	if !ValidReasoningEffort(settings.ReasoningEffort) {
+		return invalid("chat reasoning effort is invalid")
+	}
+	if err := settings.ReasoningEffortByFunction.Validate(); err != nil {
+		return err
+	}
+	if settings.Provider != ChatProviderOpenAICompatible && (settings.ReasoningEffort != "" || len(settings.ReasoningEffortByFunction) != 0) {
+		return invalid("chat reasoning effort requires openai-compatible provider")
 	}
 	switch settings.Provider {
 	case ChatProviderDisabled:

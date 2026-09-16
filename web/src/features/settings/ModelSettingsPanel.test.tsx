@@ -29,6 +29,8 @@ const disabledChat = {
   baseUrl: "",
   model: "",
   modelVersion: "",
+  reasoningEffortByFunction: {},
+  reasoningEffort: "",
   adapterVersion: "v1",
   apiKeyConfigured: false,
 } as const;
@@ -81,6 +83,8 @@ const configuredSettings = (): ModelSettingsResponse => ({
       baseUrl: "https://models.example.test/v1",
       model: "chat-v2",
       modelVersion: "2026-07",
+      reasoningEffortByFunction: {},
+      reasoningEffort: "",
       adapterVersion: "v1",
       apiKeyConfigured: true,
     },
@@ -168,6 +172,66 @@ afterEach(() => {
 });
 
 describe("ModelSettingsPanel", () => {
+  it("各功能可分别设档、显式默认或继承，保存重开和应用后显示真实生效值", async () => {
+    const initial = configuredSettings();
+    initial.desiredSettings.chat.reasoningEffort = "medium";
+    const saved: ModelSettingsResponse = {
+      ...initial,
+      desiredRevision: 3,
+      desiredSettings: { ...initial.desiredSettings, chat: { ...initial.desiredSettings.chat, reasoningEffortByFunction: { file_profile: "low", main_note_synthesis: "high", manuscript_source_review: "" } } },
+    };
+    const applied: ModelSettingsResponse = {
+      ...saved,
+      activeRevision: 3,
+      activeSettings: saved.desiredSettings,
+      runtime: { api: { appliedRevision: 3, phase: "active", fresh: true }, worker: { appliedRevision: 3, phase: "active", fresh: true } },
+      applyRequired: false,
+      capabilities: { chat: "configured", embedding: "configured" },
+    };
+    api.getModelSettings.mockResolvedValue(initial);
+    api.updateModelSettings.mockResolvedValue(saved);
+    api.testModelSettings.mockResolvedValue({ target: "chat", status: "ok", provider: "openai-compatible", model: "chat-v2", apiStyle: "chat_completions", endpointPath: "/v1/chat/completions", latencyMs: 12 });
+    const panel = renderPanel();
+    await expandModelSection("对话模型");
+    const functions = screen.getByRole("group", { name: "按功能设置" });
+    expect(within(functions).getAllByRole("combobox")).toHaveLength(8);
+    expect(screen.getByLabelText("知识问答思考强度")).toHaveValue("inherit");
+    expect(within(screen.getByLabelText("知识问答思考强度")).getByRole("option", { name: "继承全局（中）" })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("文件简介与标签思考强度"), { target: { value: "low" } });
+    fireEvent.change(screen.getByLabelText("主笔记融合思考强度"), { target: { value: "high" } });
+    fireEvent.change(screen.getByLabelText("当前主笔记来源复核思考强度"), { target: { value: "" } });
+    fireEvent.change(screen.getByLabelText("知识问答思考强度"), { target: { value: "max" } });
+    fireEvent.change(screen.getByLabelText("知识问答思考强度"), { target: { value: "inherit" } });
+    fireEvent.click(screen.getByRole("button", { name: "测试对话连接" }));
+    await screen.findByText(/当前草稿连接测试通过/);
+    expect(api.testModelSettings.mock.calls[0]?.[0]).toMatchObject({ chat: { reasoningEffort: "medium", reasoningEffortByFunction: saved.desiredSettings.chat.reasoningEffortByFunction } });
+    expect(initial.desiredSettings.chat.reasoningEffortByFunction).toEqual({});
+    fireEvent.click(screen.getByRole("button", { name: "仅保存" }));
+    await screen.findByText("版本 3已保存，尚未应用。");
+    expect(api.updateModelSettings.mock.calls[0]?.[0]).toMatchObject({ chat: { reasoningEffortByFunction: saved.desiredSettings.chat.reasoningEffortByFunction } });
+    expect(api.updateModelSettings.mock.calls[0]?.[0]).not.toHaveProperty("chat.reasoningEffortByFunction.knowledge_qna");
+    expect(screen.getByLabelText("Chat 当前生效配置")).not.toHaveTextContent("单独设置");
+    panel.unmount();
+    api.getModelSettings.mockResolvedValue(saved);
+    const reopened = renderPanel();
+    await expandModelSection("对话模型");
+    expect(screen.getByLabelText("文件简介与标签思考强度")).toHaveValue("low");
+    expect(screen.getByLabelText("主笔记融合思考强度")).toHaveValue("high");
+    expect(screen.getByLabelText("当前主笔记来源复核思考强度")).toHaveValue("");
+    expect(screen.getByLabelText("知识问答思考强度")).toHaveValue("inherit");
+    api.startModelSettingsActivation.mockResolvedValue(applied);
+    api.getModelSettings.mockResolvedValue(applied);
+    fireEvent.click(screen.getByRole("button", { name: "应用配置" }));
+    await screen.findByText("API 与工作进程已应用当前生效版本。");
+    expect(api.startModelSettingsActivation.mock.calls[0]?.[0]).toEqual({ expectedRevision: 3 });
+    const active = screen.getByLabelText("Chat 当前生效配置");
+    expect(active).toHaveTextContent("文件简介与标签低（单独设置）");
+    expect(active).toHaveTextContent("主笔记融合高（单独设置）");
+    expect(active).toHaveTextContent("当前主笔记来源复核模型默认（单独设置）");
+    expect(active).toHaveTextContent("知识问答继承全局 · 中");
+    reopened.unmount();
+  });
+
   it("展示 loading 和 canonical disabled 状态，Keyword 不被伪装成不可用", async () => {
     let resolveSettings: ((value: ModelSettingsResponse) => void) | undefined;
     api.getModelSettings.mockReturnValue(new Promise<ModelSettingsResponse>((resolve) => { resolveSettings = resolve; }));
@@ -182,11 +246,15 @@ describe("ModelSettingsPanel", () => {
     expect(screen.getByText("对话模型已关闭。")).toBeInTheDocument();
     expect(screen.getByText("向量模型已关闭；关键词检索保持可用。")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "测试对话连接" })).toBeDisabled();
+    expect(screen.getByRole("combobox", { name: "对话模型思考强度" })).toBeDisabled();
+    expect(screen.getByRole("combobox", { name: "对话模型思考强度" })).toHaveValue("");
     expect(screen.getByRole("button", { name: "测试向量连接" })).toBeDisabled();
   });
 
   it("同时展示 desired/active/applied 差异并测试已保存的 Chat Key", async () => {
-    api.getModelSettings.mockResolvedValue(configuredSettings());
+    const settings = configuredSettings();
+    settings.desiredSettings.chat.reasoningEffort = "high";
+    api.getModelSettings.mockResolvedValue(settings);
     api.testModelSettings.mockResolvedValue({ target: "chat", status: "ok", provider: "openai-compatible", model: "chat-v2", apiStyle: "chat_completions", endpointPath: "/v1/chat/completions", latencyMs: 12 });
 
     renderPanel();
@@ -200,6 +268,11 @@ describe("ModelSettingsPanel", () => {
     expect(screen.getByText("版本 2")).toBeInTheDocument();
     expect(screen.getAllByText("版本 1").length).toBeGreaterThanOrEqual(3);
     expect(screen.getByRole("option", { name: "Responses API（仅历史配置）" })).toBeDisabled();
+    const effort = screen.getByRole("combobox", { name: "对话模型思考强度" });
+    expect(effort).toHaveValue("high");
+    expect(within(effort).getAllByRole("option").map((option) => option.textContent)).toEqual(["模型默认", "低", "中", "高", "很高", "最高"]);
+    expect(screen.getByLabelText("Chat 当前生效配置")).toHaveTextContent("思考强度模型默认");
+    fireEvent.change(effort, { target: { value: "xhigh" } });
     fireEvent.click(screen.getByRole("button", { name: "测试对话连接" }));
 
     expect(await screen.findByText(/当前草稿连接测试通过，尚未保存或生效：openai-compatible \/ chat-v2 \/ Chat Completions/)).toHaveTextContent("/v1/chat/completions");
@@ -207,8 +280,11 @@ describe("ModelSettingsPanel", () => {
     const testInput: unknown = api.testModelSettings.mock.calls[0]?.[0];
     expect(testInput).toMatchObject({
       target: "chat",
-      chat: { apiStyle: "chat_completions", apiKey: { action: "keep" } },
+      chat: { apiStyle: "chat_completions", reasoningEffort: "xhigh", apiKey: { action: "keep" } },
     });
+    fireEvent.change(screen.getByLabelText("对话模型提供方"), { target: { value: "disabled" } });
+    expect(effort).toHaveValue("");
+    expect(effort).toBeDisabled();
   });
 
   it("显示历史 Responses 配置但只允许迁移到 Chat Completions", async () => {
@@ -227,24 +303,24 @@ describe("ModelSettingsPanel", () => {
     expect(selector).toHaveValue("chat_completions");
   });
 
-  it("按 dirty draft 切换保存按钮，并让仅保存不启动应用", async () => {
+  it("仅修改思考强度可保存，重开保留待应用强度且不提前修改生效配置", async () => {
     const initial = configuredSettings();
-    const saved = {
+    const saved: ModelSettingsResponse = {
       ...initial,
       desiredRevision: 3,
       desiredSettings: {
         ...initial.desiredSettings,
-        chat: { ...initial.desiredSettings.chat, model: "chat-v3" },
+        chat: { ...initial.desiredSettings.chat, reasoningEffort: "max" },
       },
     };
     api.getModelSettings.mockResolvedValue(initial);
     api.updateModelSettings.mockResolvedValue(saved);
 
-    renderPanel();
+    const panel = renderPanel();
     expect(await screen.findByRole("button", { name: "应用配置" })).toBeEnabled();
     expect(screen.queryByRole("button", { name: "仅保存" })).not.toBeInTheDocument();
     await expandModelSection("对话模型");
-    fireEvent.change(screen.getByLabelText("对话模型名称"), { target: { value: "chat-v3" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "对话模型思考强度" }), { target: { value: "max" } });
 
     expect(screen.getByRole("button", { name: "保存并应用" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "仅保存" })).toBeEnabled();
@@ -252,6 +328,15 @@ describe("ModelSettingsPanel", () => {
 
     expect(await screen.findByText("版本 3已保存，尚未应用。")).toBeInTheDocument();
     expect(api.updateModelSettings).toHaveBeenCalledOnce();
+    expect(api.updateModelSettings.mock.calls[0]?.[0]).toMatchObject({ expectedRevision: 2, chat: { reasoningEffort: "max" } });
+    expect(api.startModelSettingsActivation).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("Chat 当前生效配置")).toHaveTextContent("思考强度模型默认");
+    panel.unmount();
+    api.getModelSettings.mockResolvedValue(saved);
+    renderPanel();
+    await expandModelSection("对话模型");
+    expect(screen.getByRole("combobox", { name: "对话模型思考强度" })).toHaveValue("max");
+    expect(screen.getByLabelText("Chat 当前生效配置")).toHaveTextContent("思考强度模型默认");
     expect(api.startModelSettingsActivation).not.toHaveBeenCalled();
   });
 
@@ -373,6 +458,8 @@ describe("ModelSettingsPanel", () => {
 
   it("本地 Ollama Chat 隐藏内部地址和 Key，并强制 Chat Completions", async () => {
     const initial = configuredSettings();
+    initial.desiredSettings.chat.reasoningEffort = "high";
+    initial.desiredSettings.chat.reasoningEffortByFunction = { file_profile: "low", manuscript_source_review: "" };
     const saved: ModelSettingsResponse = {
       ...initial,
       desiredRevision: 3,
@@ -384,6 +471,8 @@ describe("ModelSettingsPanel", () => {
           baseUrl: "http://127.0.0.1:11434",
           model: "qwen2.5:3b",
           modelVersion: "qwen2.5:3b",
+          reasoningEffortByFunction: {},
+          reasoningEffort: "",
           adapterVersion: "v1",
           apiKeyConfigured: false,
         },
@@ -398,6 +487,12 @@ describe("ModelSettingsPanel", () => {
 
     expect(screen.getByLabelText("对话模型调用接口")).toHaveValue("chat_completions");
     expect(screen.getByLabelText("对话模型调用接口")).toBeDisabled();
+    expect(screen.getByRole("combobox", { name: "对话模型思考强度" })).toBeDisabled();
+    expect(screen.getByRole("combobox", { name: "对话模型思考强度" })).toHaveValue("");
+    for (const selector of within(screen.getByRole("group", { name: "按功能设置" })).getAllByRole("combobox")) {
+      expect(selector).toHaveValue("inherit");
+      expect(selector).toBeDisabled();
+    }
     expect(screen.queryByLabelText("对话模型基础地址（Base URL）")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("对话 API Key")).not.toBeInTheDocument();
     expect(screen.getByText("本机（系统管理）")).toBeInTheDocument();
@@ -414,6 +509,8 @@ describe("ModelSettingsPanel", () => {
       chat: {
         provider: "ollama",
         apiStyle: "chat_completions",
+        reasoningEffortByFunction: {},
+        reasoningEffort: "",
         baseUrl: "http://127.0.0.1:11434",
         apiKey: { action: "clear" },
       },
@@ -428,6 +525,8 @@ describe("ModelSettingsPanel", () => {
       baseUrl: "http://127.0.0.1:11434",
       model: "qwen2.5:3b",
       modelVersion: "qwen2.5:3b",
+      reasoningEffortByFunction: {},
+      reasoningEffort: "",
       adapterVersion: "v1",
       apiKeyConfigured: false,
     } as const;
@@ -457,6 +556,8 @@ describe("ModelSettingsPanel", () => {
       baseUrl: "http://127.0.0.1:11434",
       model: "qwen2.5:3b",
       modelVersion: "qwen2.5:3b",
+      reasoningEffortByFunction: {},
+      reasoningEffort: "",
       adapterVersion: "v1",
       apiKeyConfigured: false,
     };
@@ -480,6 +581,8 @@ describe("ModelSettingsPanel", () => {
       baseUrl: "http://127.0.0.1:11434",
       model: "legacy-chat",
       modelVersion: "legacy-chat",
+      reasoningEffortByFunction: {},
+      reasoningEffort: "",
       adapterVersion: "v1",
       apiKeyConfigured: true,
     };
@@ -647,6 +750,9 @@ describe("ModelSettingsPanel", () => {
     const initial = configuredSettings();
     const preparing = preparingSettings();
     const applied = appliedSettings();
+    initial.desiredSettings.chat.reasoningEffort = "high";
+    preparing.desiredSettings.chat.reasoningEffort = "high";
+    applied.desiredSettings.chat.reasoningEffort = "high";
     api.getModelSettings.mockResolvedValueOnce(initial).mockResolvedValueOnce(applied).mockResolvedValue(applied);
     api.startModelSettingsActivation.mockResolvedValue(preparing);
 
@@ -656,6 +762,9 @@ describe("ModelSettingsPanel", () => {
 
     await waitFor(() => expect(api.getModelSettings).toHaveBeenCalledTimes(3), { timeout: 4_500 });
     expect(await screen.findByText("API 与工作进程已应用当前生效版本。")).toBeInTheDocument();
+    await expandModelSection("对话模型");
+    expect(screen.getByRole("combobox", { name: "对话模型思考强度" })).toHaveValue("high");
+    expect(screen.getByLabelText("Chat 当前生效配置")).toHaveTextContent("思考强度高");
     const terminalCalls = api.getModelSettings.mock.calls.length;
     await new Promise((resolve) => window.setTimeout(resolve, 2_200));
     expect(api.getModelSettings).toHaveBeenCalledTimes(terminalCalls);

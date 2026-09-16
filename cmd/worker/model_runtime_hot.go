@@ -94,20 +94,8 @@ func (factory *workerRuntimeGenerationFactory) Probe(ctx context.Context, genera
 	if factory == nil || ctx == nil || generation == nil || generation.models == nil || generation.executors == nil {
 		return workerRuntimeNotReadyError(errors.New("worker runtime generation probe is unavailable"))
 	}
-	chat := generation.models.Chat()
-	if chat.State() == platformmodels.CapabilityConfigured {
-		prober, ok := chat.Model().(platformmodels.ChatConnectionProber)
-		if !ok || prober == nil {
-			return foundation.NewError(
-				foundation.ErrorConsistencyViolation,
-				modelsettingsdomain.ErrorCodeUnavailable,
-				false,
-				errors.New("worker chat generation probe is unavailable"),
-			)
-		}
-		if err := prober.ProbeConnection(ctx); err != nil {
-			return err
-		}
+	if err := generation.models.ProbeChatConnections(ctx); err != nil {
+		return err
 	}
 	embedding := generation.models.Embedding()
 	if embedding.State() == platformmodels.CapabilityConfigured {

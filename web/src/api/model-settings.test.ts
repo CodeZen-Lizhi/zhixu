@@ -19,6 +19,8 @@ const disabledChat = {
   base_url: "",
   model: "",
   model_version: "",
+  reasoning_effort_by_function: {},
+  reasoning_effort: "",
   adapter_version: "v1",
   api_key_configured: false,
 } as const;
@@ -66,6 +68,8 @@ const configuredChat = {
   base_url: "https://models.example.test/v1",
   model: "chat-v2",
   model_version: "2026-07",
+  reasoning_effort_by_function: {},
+  reasoning_effort: "",
   adapter_version: "v1",
   api_key_configured: true,
 } as const;
@@ -76,6 +80,8 @@ const configuredOllamaChat = {
   base_url: "http://127.0.0.1:11434",
   model: "qwen2.5:3b",
   model_version: "qwen2.5:3b",
+  reasoning_effort_by_function: {},
+  reasoning_effort: "",
   adapter_version: "v1",
   api_key_configured: false,
 } as const;
@@ -112,6 +118,8 @@ const updateInput: UpdateModelSettingsInput = {
     baseUrl: "https://models.example.test/v1",
     model: "chat-v2",
     modelVersion: "2026-07",
+    reasoningEffortByFunction: {},
+    reasoningEffort: "",
     adapterVersion: "v1",
     apiKey: { action: "replace", value: "secret-chat-key" },
   },
@@ -148,6 +156,83 @@ afterEach(() => {
 });
 
 describe("model settings API boundary", () => {
+  it("按功能强度在保存、测试和回读中保留覆盖、继承和显式模型默认", async () => {
+    const reasoningEffortByFunction = { file_profile: "low", main_note_synthesis: "high", manuscript_source_review: "" } as const;
+    const chat = { ...updateInput.chat, reasoningEffort: "medium", reasoningEffortByFunction } as const;
+    const response = {
+      ...configuredResponse,
+      desired_revision: 3,
+      desired_settings: { ...configuredResponse.desired_settings, chat: { ...configuredChat, reasoning_effort: "medium", reasoning_effort_by_function: reasoningEffortByFunction } },
+    };
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(jsonResponse(response))
+      .mockResolvedValueOnce(jsonResponse({ target: "chat", status: "ok", provider: "openai-compatible", model: "chat-v2", api_style: "chat_completions", endpoint_path: "/v1/chat/completions", latency_ms: 9 }))
+      .mockResolvedValueOnce(jsonResponse(response));
+    const saved = await updateModelSettings({ ...updateInput, chat });
+    await testModelSettings({ target: "chat", chat });
+    const refreshed = await getModelSettings();
+    expect(saved.desiredSettings.chat.reasoningEffortByFunction).toEqual(reasoningEffortByFunction);
+    expect(refreshed.desiredSettings.chat.reasoningEffortByFunction).toEqual(reasoningEffortByFunction);
+    expect(refreshed.activeSettings.chat.reasoningEffortByFunction).toEqual({});
+    for (const index of [0, 1]) {
+      expect(callJsonBody(index)).toMatchObject({ chat: { reasoning_effort_by_function: reasoningEffortByFunction } });
+      expect(callJsonBody(index)).not.toHaveProperty("chat.reasoning_effort_by_function.knowledge_qna");
+    }
+  });
+
+  it("按功能强度拒绝未知键、非法值和本地提供方覆盖", async () => {
+    const invalidMaps: unknown[] = [null, [], { future_feature: "low" }, { file_profile: "inherit" }, { file_profile: "provider_default" }, { file_profile: null }, { file_profile: undefined }];
+    for (const reasoningEffortByFunction of invalidMaps) {
+      expect(() => decodeModelSettingsResponse({ ...configuredResponse, desired_settings: { ...configuredResponse.desired_settings, chat: { ...configuredChat, reasoning_effort_by_function: reasoningEffortByFunction } } })).toThrow(ModelSettingsApiError);
+      await expect(updateModelSettings(Object.assign({}, updateInput, { chat: { ...updateInput.chat, reasoningEffortByFunction } }))).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+    }
+    for (const localChat of [disabledChat, configuredOllamaChat]) {
+      expect(() => decodeModelSettingsResponse({ ...configuredResponse, desired_settings: { ...configuredResponse.desired_settings, chat: { ...localChat, reasoning_effort_by_function: { file_profile: "" } } } })).toThrow(ModelSettingsApiError);
+    }
+    await expect(testModelSettings({ target: "chat", chat: { ...updateInput.chat, provider: "ollama", baseUrl: "http://127.0.0.1:11434", apiKey: { action: "clear" }, reasoningEffortByFunction: { file_profile: "" } } })).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("完整保留思考强度并拒绝未知值、缺失字段及不支持的提供方组合", () => {
+    for (const effort of ["", "low", "medium", "high", "xhigh", "max"]) {
+      expect(decodeModelSettingsResponse({
+        ...configuredResponse,
+        desired_settings: { ...configuredResponse.desired_settings, chat: { ...configuredChat, reasoning_effort: effort } },
+      }).desiredSettings.chat.reasoningEffort).toBe(effort);
+    }
+    for (const effort of [null, "none", "ultra", "HIGH"]) {
+      expect(() => decodeModelSettingsResponse({
+        ...configuredResponse,
+        desired_settings: { ...configuredResponse.desired_settings, chat: { ...configuredChat, reasoning_effort: effort } },
+      })).toThrow(ModelSettingsApiError);
+    }
+    const missingEffort = Object.fromEntries(Object.entries(configuredChat).filter(([key]) => key !== "reasoning_effort"));
+    expect(() => decodeModelSettingsResponse({ ...configuredResponse, desired_settings: { ...configuredResponse.desired_settings, chat: missingEffort } })).toThrow(ModelSettingsApiError);
+    for (const chat of [disabledChat, configuredOllamaChat]) {
+      expect(() => decodeModelSettingsResponse({
+        ...configuredResponse,
+        desired_settings: { ...configuredResponse.desired_settings, chat: { ...chat, reasoning_effort: "high" } },
+      })).toThrow(ModelSettingsApiError);
+    }
+  });
+
+  it("保存与测试连接向实际生成客户端传递相同强度，旧调用省略时使用模型默认", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(jsonResponse({ ...configuredResponse, desired_revision: 3 }))
+      .mockResolvedValueOnce(jsonResponse({ target: "chat", status: "ok", provider: "openai-compatible", model: "chat-v2", api_style: "chat_completions", endpoint_path: "/v1/chat/completions", latency_ms: 9 }))
+      .mockResolvedValueOnce(jsonResponse({ ...configuredResponse, desired_revision: 4 }));
+    const chat = { ...updateInput.chat, reasoningEffort: "high" } as const;
+    await updateModelSettings({ ...updateInput, chat });
+    await testModelSettings({ target: "chat", chat });
+    expect(callJsonBody(0)).toMatchObject({ chat: { reasoning_effort: "high" } });
+    expect(callJsonBody(1)).toMatchObject({ target: "chat", chat: { reasoning_effort: "high" } });
+    const legacyChat = { ...updateInput.chat };
+    delete legacyChat.reasoningEffort;
+    delete legacyChat.reasoningEffortByFunction;
+    await updateModelSettings({ ...updateInput, chat: legacyChat });
+    expect(callJsonBody(2)).toMatchObject({ chat: { reasoning_effort: "", reasoning_effort_by_function: {} } });
+  });
+
   it("严格解码 disabled bootstrap 与 desired/active/runtime 差异", () => {
     expect(decodeModelSettingsResponse(disabledResponse)).toMatchObject({
       desiredRevision: 0,
@@ -255,6 +340,10 @@ describe("model settings API boundary", () => {
   });
 
   it("编码请求时拒绝多余字段、非法 Endpoint 和不符合领域约束的 Secret", async () => {
+    for (const reasoningEffort of ["ultra", null, undefined]) {
+      await expect(updateModelSettings(Object.assign({}, updateInput, { chat: { ...updateInput.chat, reasoningEffort } }))).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+    }
+    await expect(testModelSettings({ target: "chat", chat: { ...updateInput.chat, provider: "ollama", baseUrl: "http://127.0.0.1:11434", apiKey: { action: "clear" }, reasoningEffort: "high" } })).rejects.toMatchObject({ code: "INVALID_REQUEST" });
     const withExtraField = { ...updateInput, unexpected: true };
     await expect(updateModelSettings(withExtraField)).rejects.toMatchObject({ code: "INVALID_REQUEST" });
     await expect(updateModelSettings({
@@ -369,6 +458,8 @@ describe("model settings API boundary", () => {
         base_url: "https://models.example.test/v1",
         model: "chat-v2",
         model_version: "2026-07",
+        reasoning_effort_by_function: {},
+        reasoning_effort: "",
         adapter_version: "v1",
         api_key: { action: "replace", value: "secret-chat-key" },
       },
@@ -401,6 +492,8 @@ describe("model settings API boundary", () => {
         baseUrl: "http://127.0.0.1:11434",
         model: "qwen2.5:3b",
         modelVersion: "qwen2.5:3b",
+        reasoningEffortByFunction: {},
+        reasoningEffort: "",
         adapterVersion: "v1",
         apiKey: { action: "clear" },
       },
@@ -702,6 +795,8 @@ describe("model settings API boundary", () => {
       baseUrl: "http://127.0.0.1:11434",
       model: "qwen2.5:3b",
       modelVersion: "qwen2.5:3b",
+      reasoningEffortByFunction: {},
+      reasoningEffort: "",
       adapterVersion: "v1",
       apiKey: { action: "clear" },
     } as const;
@@ -720,6 +815,8 @@ describe("model settings API boundary", () => {
         base_url: "http://127.0.0.1:11434",
         model: "qwen2.5:3b",
         model_version: "qwen2.5:3b",
+        reasoning_effort_by_function: {},
+        reasoning_effort: "",
         adapter_version: "v1",
         api_key: { action: "clear" },
       },
@@ -744,6 +841,8 @@ describe("model settings API boundary", () => {
         baseUrl: "",
         model: "",
         modelVersion: "",
+        reasoningEffortByFunction: {},
+        reasoningEffort: "",
         adapterVersion: "v1",
         apiKey: { action: "clear" },
       },

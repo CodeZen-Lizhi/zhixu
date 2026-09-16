@@ -243,6 +243,8 @@ func overlay(base config.Config, settings modelsettingsdomain.Settings, chatKey,
 	}
 	base.ChatProvider = config.ChatProvider(settings.Chat.Provider)
 	base.ChatAPIStyle = config.ChatAPIStyle(settings.Chat.APIStyle)
+	base.ChatReasoningEffort = settings.Chat.ReasoningEffort
+	base.ChatReasoningEffortByFunction = settings.Chat.ReasoningEffortByFunction.Clone()
 	base.ChatBaseURL = settings.Chat.BaseURL
 	base.ChatAPIKey = chatKey
 	base.ChatModel = settings.Chat.Model
@@ -337,11 +339,11 @@ func (tester *ConnectionTester) TestResolvedConnection(ctx context.Context, targ
 		if _, ok := chat.Contract(); !ok {
 			return foundation.NewError(foundation.ErrorConsistencyViolation, modelsettingsdomain.ErrorCodeUnavailable, false, errors.New("chat adapter contract is unavailable"))
 		}
-		prober, ok := chat.Model().(platformmodels.ChatConnectionProber)
+		_, ok := chat.Model().(platformmodels.ChatConnectionProber)
 		if !ok {
 			return foundation.NewError(foundation.ErrorConsistencyViolation, modelsettingsdomain.ErrorCodeUnavailable, false, errors.New("chat connection probe is unavailable"))
 		}
-		return prober.ProbeConnection(ctx)
+		return models.ProbeChatConnections(ctx)
 	case ConnectionTargetEmbedding:
 		embedding := models.Embedding()
 		if embedding.Embedder() == nil {
@@ -396,4 +398,51 @@ func forgetModelCredentials(cfg *config.Config) {
 
 func invalid(cause error) error {
 	return foundation.NewError(foundation.ErrorInvalidInput, modelsettingsdomain.ErrorCodeInvalid, false, cause)
+}
+
+// ChatFor 从此精确版本中选择不可变的产品功能。
+func (models *Models) ChatFor(function modelsettingsdomain.ReasoningFunction) platformmodels.ChatCapability {
+	if models == nil {
+		return (*platformmodels.ModelRuntime)(nil).ChatFor(function)
+	}
+	return models.runtime.ChatFor(function)
+}
+
+// RuntimeChatFor 对普通和流式调用使用相同产品功能。
+func (models *Models) RuntimeChatFor(function modelsettingsdomain.ReasoningFunction) platformmodels.RuntimeChatCapability {
+	if models == nil {
+		return (*platformmodels.ModelRuntime)(nil).RuntimeChatFor(function)
+	}
+	return models.runtime.RuntimeChatFor(function)
+}
+
+// ProbeChatConnections 对每种不同的有效强度仅验证一次，共用
+// 调用方已有的截止时间，并在首次 Provider 失败时停止。
+func (models *Models) ProbeChatConnections(ctx context.Context) error {
+	chats := []platformmodels.ChatCapability{models.Chat()}
+	for _, function := range modelsettingsdomain.ReasoningFunctions() {
+		chats = append(chats, models.ChatFor(function))
+	}
+	seen := map[string]bool{}
+	for _, chat := range chats {
+		if chat.State() != platformmodels.CapabilityConfigured {
+			continue
+		}
+		contract, ok := chat.Contract()
+		if !ok {
+			return invalid(errors.New("chat connection contract is unavailable"))
+		}
+		if seen[contract.ReasoningEffort] {
+			continue
+		}
+		seen[contract.ReasoningEffort] = true
+		prober, ok := chat.Model().(platformmodels.ChatConnectionProber)
+		if !ok || prober == nil {
+			return invalid(errors.New("chat connection probe is unavailable"))
+		}
+		if err := prober.ProbeConnection(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
 }

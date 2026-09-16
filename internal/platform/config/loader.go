@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	modelsettingsdomain "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/domain"
 	"github.com/go-viper/mapstructure/v2"
 	"github.com/spf13/viper"
 	yaml "go.yaml.in/yaml/v3"
@@ -51,12 +52,14 @@ func (m sourceMetadata) isPresent(key string) bool {
 }
 
 type configLoader struct {
-	v        *viper.Viper
-	validate *configValidator
-	lookup   func(string) (string, bool)
-	options  loadOptions
-	fields   map[string]reflect.Type
-	metadata sourceMetadata
+	v                     *viper.Viper
+	validate              *configValidator
+	lookup                func(string) (string, bool)
+	options               loadOptions
+	fields                map[string]reflect.Type
+	metadata              sourceMetadata
+	reasoningOverrides    modelsettingsdomain.ReasoningEffortOverrides
+	reasoningOverridesSet bool
 }
 
 // Selectors are applied first because dependent Secret lookup is itself part
@@ -105,6 +108,8 @@ var valueEnvSpecs = []envSpec{
 	{configKey: "chat_base_url", envKey: "ZHIXU_CHAT_BASE_URL", gate: envGateChat},
 	{configKey: "chat_api_key", envKey: "ZHIXU_CHAT_API_KEY", gate: envGateChat},
 	{configKey: "chat_model", envKey: "ZHIXU_CHAT_MODEL", gate: envGateChat},
+	{configKey: "chat_reasoning_effort", envKey: "ZHIXU_CHAT_REASONING_EFFORT", gate: envGateChat},
+	{configKey: "chat_reasoning_effort_by_function", envKey: "ZHIXU_CHAT_REASONING_EFFORT_BY_FUNCTION", gate: envGateChat},
 	{configKey: "chat_model_version", envKey: "ZHIXU_CHAT_MODEL_VERSION", gate: envGateChat},
 	{configKey: "chat_adapter_version", envKey: "ZHIXU_CHAT_ADAPTER_VERSION", gate: envGateChat},
 	{configKey: "chat_api_style", envKey: "ZHIXU_CHAT_API_STYLE"},
@@ -263,6 +268,9 @@ func (l *configLoader) registerDefaults(defaults Config) error {
 		if values, ok := defaultValue.([]string); ok {
 			defaultValue = append([]string(nil), values...)
 		}
+		if key == "chat_reasoning_effort_by_function" {
+			defaultValue = map[string]string{}
+		}
 		l.v.SetDefault(key, defaultValue)
 	}
 	return nil
@@ -289,6 +297,8 @@ func (l *configLoader) clearDisabledValues(current Config) {
 		l.v.Set("chat_api_key", "")
 		l.v.Set("chat_model", "")
 		l.v.Set("chat_model_version", "")
+		l.v.Set("chat_reasoning_effort", "")
+		l.v.Set("chat_reasoning_effort_by_function", map[string]string{})
 	}
 	if current.EmbeddingProvider == EmbeddingProviderDisabled {
 		l.v.Set("embedding_base_url", "")
@@ -318,6 +328,10 @@ func (l *configLoader) applyValues(current Config) error {
 			return err
 		}
 		l.v.Set(spec.configKey, parsed)
+		if spec.configKey == "chat_reasoning_effort_by_function" {
+			l.reasoningOverrides = parsed.(modelsettingsdomain.ReasoningEffortOverrides).Clone()
+			l.reasoningOverridesSet = true
+		}
 		if spec.configKey == "review_question_ref_key" {
 			l.metadata.markPresent(spec.configKey)
 		}
@@ -346,6 +360,12 @@ func (l *configLoader) parseEnvironmentValue(spec envSpec, raw string) (any, err
 		return nil, fmt.Errorf("config loader: unknown registry key %q", spec.configKey)
 	}
 	switch spec.configKey {
+	case "chat_reasoning_effort_by_function":
+		value, err := modelsettingsdomain.ParseReasoningEffortOverrides([]byte(raw))
+		if err != nil {
+			return nil, errors.New("parse ZHIXU_CHAT_REASONING_EFFORT_BY_FUNCTION: invalid function overrides")
+		}
+		return value, nil
 	case "auth_allowed_origins":
 		return parseAuthOrigins(raw)
 	case "web_fetch_allowed_content_types":
@@ -394,6 +414,9 @@ func (l *configLoader) decode() (Config, error) {
 	})
 	if err != nil {
 		return Config{}, fmt.Errorf("decode config: %w", err)
+	}
+	if l.reasoningOverridesSet {
+		cfg.ChatReasoningEffortByFunction = l.reasoningOverrides.Clone()
 	}
 	return cfg, nil
 }
@@ -537,6 +560,21 @@ func inspectYAMLValue(key string, node *yaml.Node, fieldType reflect.Type) error
 	if fieldType == reflect.TypeFor[time.Duration]() {
 		if node.Kind != yaml.ScalarNode || node.ShortTag() != "!!str" {
 			return fmt.Errorf("field %s must be a duration string", key)
+		}
+		return nil
+	}
+	if fieldType == reflect.TypeFor[modelsettingsdomain.ReasoningEffortOverrides]() {
+		if node.Kind != yaml.MappingNode {
+			return fmt.Errorf("field %s must be a function map", key)
+		}
+		seen := map[string]bool{}
+		for i := 0; i < len(node.Content); i += 2 {
+			k, v := dereferenceYAMLNode(node.Content[i]), dereferenceYAMLNode(node.Content[i+1])
+			if k.Kind != yaml.ScalarNode || k.ShortTag() != "!!str" || !modelsettingsdomain.ValidReasoningFunction(modelsettingsdomain.ReasoningFunction(k.Value)) || seen[k.Value] ||
+				v.Kind != yaml.ScalarNode || v.ShortTag() != "!!str" || !modelsettingsdomain.ValidReasoningEffort(v.Value) {
+				return fmt.Errorf("field %s contains an invalid function or effort", key)
+			}
+			seen[k.Value] = true
 		}
 		return nil
 	}
