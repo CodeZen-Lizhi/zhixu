@@ -128,6 +128,37 @@ type StructuredRunner struct {
 	scheduler StructuredPhaseScheduler
 }
 
+// InitialStructuredRequest 准备精确的 INITIAL ChatRequest，
+// 但不调用 Provider。持久消费者在领取任务前对其 JSON 编码求哈希；
+// RecordingChatModel 在调用时对同一编码求哈希。
+func InitialStructuredRequest(catalog *RuntimeCatalog, request StructuredRunRequest) (ChatRequest, error) {
+	snapshot, maxOutputTokens, err := prepareStructuredRuntime(catalog, request)
+	if err != nil {
+		return ChatRequest{}, err
+	}
+	initial := buildChatRequest(snapshot, snapshot.Schema, domain.ModelCallInitial, snapshot.Prompt.InitialInstruction, request.Input, "")
+	initial.MaxOutputTokens = maxOutputTokens
+	if _, err := encodedChatRequestBytes(initial); err != nil {
+		return ChatRequest{}, err
+	}
+	return initial, nil
+}
+
+func prepareStructuredRuntime(catalog *RuntimeCatalog, request StructuredRunRequest) (RuntimeSnapshot, int, error) {
+	if catalog == nil {
+		return RuntimeSnapshot{}, 0, applicationError(foundation.ErrorDependencyUnavailable, errorCodeCatalogMissing, false, errors.New("runtime catalog is nil"))
+	}
+	if len(request.Input) == 0 || len(request.Input) > MaxStructuredInputBytes || !utf8.Valid(request.Input) {
+		return RuntimeSnapshot{}, 0, applicationError(foundation.ErrorInvalidInput, errorCodeRunRequestInvalid, false, errors.New("structured input is empty, oversized, or invalid utf-8"))
+	}
+	snapshot, err := catalog.Snapshot(request.PromptRef, request.SchemaRef, request.ReducedSchemaRef, request.ProfileRef)
+	if err != nil {
+		return RuntimeSnapshot{}, 0, err
+	}
+	maxOutputTokens, err := effectiveStructuredOutputTokens(snapshot.Profile.MaxOutputTokens, request.MaxOutputTokens)
+	return snapshot, maxOutputTokens, err
+}
+
 // NewStructuredRunnerWithScheduler 使用项目自有调度 Port 创建 Runner。
 func NewStructuredRunnerWithScheduler(model ChatModel, catalog *RuntimeCatalog, budget RunBudget, scheduler StructuredPhaseScheduler) (*StructuredRunner, error) {
 	if isNilChatModel(model) {
@@ -153,14 +184,7 @@ func (r *StructuredRunner) Run(ctx context.Context, request StructuredRunRequest
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if len(request.Input) == 0 || len(request.Input) > MaxStructuredInputBytes || !utf8.Valid(request.Input) {
-		return StructuredRunResult{}, applicationError(foundation.ErrorInvalidInput, errorCodeRunRequestInvalid, false, errors.New("structured input is empty, oversized, or invalid utf-8"))
-	}
-	snapshot, err := r.catalog.Snapshot(request.PromptRef, request.SchemaRef, request.ReducedSchemaRef, request.ProfileRef)
-	if err != nil {
-		return StructuredRunResult{}, err
-	}
-	maxOutputTokens, err := effectiveStructuredOutputTokens(snapshot.Profile.MaxOutputTokens, request.MaxOutputTokens)
+	snapshot, maxOutputTokens, err := prepareStructuredRuntime(r.catalog, request)
 	if err != nil {
 		return StructuredRunResult{}, err
 	}

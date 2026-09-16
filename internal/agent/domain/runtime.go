@@ -142,7 +142,7 @@ func ValidateModelRun(run ModelRun) error {
 	}
 	if !retrievalBound && run.Schema.ID != RAGAnswerSchemaID && run.Schema.ID != OrganizingOutlineSchemaID && run.Schema.ID != OrganizingDocumentSchemaID &&
 		run.Schema.ID != SynthesisDeltaSchemaID && run.Schema.ID != SynthesisSemanticReviewSchemaID && run.Schema.ID != SynthesisNoteInterviewPlanSchemaID &&
-		run.Schema.ID != WorkspaceAnalysisDecisionSchemaID {
+		run.Schema.ID != WorkspaceAnalysisDecisionSchemaID && run.Schema.ID != AnchorRecommendationSchemaID && run.Schema.ID != GoalSelectionSchemaID && run.Schema.ID != SynthesisManuscriptSourceReviewSchemaID {
 		return invalid(ErrorCodeModelRunInvalid, "model run retrieval snapshot is required")
 	}
 	switch run.Status {
@@ -273,7 +273,8 @@ func validSuccessfulResultType(value string) bool {
 		value == ResultTypeDocumentKnowledgeProfile || value == ResultTypeOrganizingOutline ||
 		value == ResultTypeOrganizingDocument || value == ResultTypeWorkspaceAnalysisPlan ||
 		value == ResultTypeWorkspaceAnalysisAnswer || value == ResultTypeSynthesisDelta ||
-		value == ResultTypeSynthesisSemanticReview || value == ResultTypeSynthesisNoteInterviewPlan || value == ResultTypeWorkspaceAnalysisDecision
+		value == ResultTypeSynthesisSemanticReview || value == ResultTypeSynthesisNoteInterviewPlan || value == ResultTypeWorkspaceAnalysisDecision ||
+		value == ResultTypeAnchorRecommendation || value == ResultTypeGoalSelection || value == ResultTypeSynthesisManuscriptSourceReview
 }
 
 func canonicalErrorCode(value string) bool {

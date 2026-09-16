@@ -43,3 +43,26 @@ func (outbox *GORMSourceReadyOutbox) ClaimSourceReadyExcludingScoped(ctx context
 	fact, err := row.fact()
 	return fact, err == nil, err
 }
+
+// ClaimSourceReadyIDScoped 允许所有者选择符合条件的事件，同时
+// 保留 Workflow 的精确事实解码和事务领取边界。
+func (outbox *GORMSourceReadyOutbox) ClaimSourceReadyIDScoped(ctx context.Context, scope foundation.TransactionScope, id foundation.ID) (application.SourceReadyOutboxFact, bool, error) {
+	if !validGORMWorkflowID(id) {
+		return application.SourceReadyOutboxFact{}, false, foundation.NewError(foundation.ErrorInvalidInput, "SOURCE_READY_OUTBOX_INPUT_INVALID", false, errors.New("source-ready event identity is invalid"))
+	}
+	tx, err := outbox.sourceReadyTransaction(ctx, scope)
+	if err != nil {
+		return application.SourceReadyOutboxFact{}, false, err
+	}
+	var row sourceReadyOutboxGORMRecord
+	err = tx.Select(sourceReadyOutboxColumns).Where("id=? AND event_type=? AND published_at IS NULL", string(id), application.SourceReadyEventType).
+		Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).Take(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return application.SourceReadyOutboxFact{}, false, nil
+	}
+	if err != nil {
+		return application.SourceReadyOutboxFact{}, false, classifyGORMWorkflow(ctx, err, "SOURCE_READY_OUTBOX_CLAIM_FAILED")
+	}
+	fact, err := row.fact()
+	return fact, err == nil, err
+}

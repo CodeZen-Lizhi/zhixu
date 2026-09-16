@@ -14,6 +14,7 @@ import (
 // PublicationRepository 根据精确 proposal_commit 事实推进 Authoring 绑定。
 type PublicationRepository interface {
 	ReconcilePublications(context.Context, authoringapp.ReconcileQuery) (int, error)
+	ValidatePublicationWriteback(context.Context, foundation.ID, foundation.ID, foundation.ID) error
 	ValidateRestoreWriteback(context.Context, authoringapp.RestoreWritebackCheck) error
 	FinalizeRestorePublication(context.Context, authoringapp.RestorePublicationRecord) (bool, error)
 }
@@ -35,14 +36,14 @@ func NewPublicationFinalizer(repository PublicationRepository, clock foundation.
 	return &PublicationFinalizer{repository: repository, clock: clock}, nil
 }
 
-// ValidateWritebackPreparation re-checks the mutable Document owner facts for
-// restore proposals after the target lock is held and before file mutation.
+// ValidateWritebackPreparation 在持有目标锁后、修改文件前，
+// 为恢复和手稿提案重新检查可变的 Document 所有者事实。
 func (finalizer *PublicationFinalizer) ValidateWritebackPreparation(ctx context.Context, proposal changecontroldomain.Proposal) error {
 	if finalizer == nil || finalizer.repository == nil {
 		return foundation.NewError(foundation.ErrorDependencyUnavailable, "AUTHORING_PUBLICATION_FINALIZER_UNAVAILABLE", true, errors.New("authoring publication finalizer is unavailable"))
 	}
 	if changecontroldomain.NormalizeProposalType(proposal.Type) != changecontroldomain.ProposalTypeRestoreDocument {
-		return nil
+		return finalizer.repository.ValidatePublicationWriteback(ctx, proposal.WorkspaceID, proposal.ID, proposal.Revision.ID)
 	}
 	if ctx == nil || proposal.Revision.RestoreDocument == nil {
 		return foundation.NewError(foundation.ErrorInvalidInput, "RESTORE_DOCUMENT_OWNER_CHECK_INVALID", false, errors.New("restore proposal owner binding is missing"))
@@ -99,4 +100,16 @@ func (finalizer *PublicationFinalizer) FinalizePublication(ctx context.Context, 
 func validPublicationID(id foundation.ID) bool {
 	_, err := foundation.ParseID(string(id))
 	return err == nil
+}
+
+// HistoricalRepublishGitAuthority 是持久化 Authoring 所有者的
+// 可选窄范围能力。普通 Finalizer 无权授权空差异。
+func (finalizer *PublicationFinalizer) HistoricalRepublishGitAuthority(ctx context.Context, e changecontroldomain.WritebackExecution) (*changecontroldomain.HistoricalRepublishGitAuthority, error) {
+	reader, ok := finalizer.repository.(interface {
+		ReadHistoricalRepublishGitAuthority(context.Context, changecontroldomain.WritebackExecution) (*changecontroldomain.HistoricalRepublishGitAuthority, error)
+	})
+	if !ok {
+		return nil, nil
+	}
+	return reader.ReadHistoricalRepublishGitAuthority(ctx, e)
 }

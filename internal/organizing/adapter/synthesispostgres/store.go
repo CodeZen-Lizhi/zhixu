@@ -21,16 +21,18 @@ import (
 )
 
 type Dependencies struct {
+	Goals            organizingapp.SynthesisGoalBindingProofVerifier
 	ModelRuns        agentapp.ScopedModelRunFinalizer
 	WorkflowFence    workflowapp.ScopedWorkspaceAnalysisExecutionFence
 	WorkflowBindings workflowapp.ScopedRuntimeBindingReader
 }
 
 type Store struct {
-	database       *gorm.DB
-	unitOfWork     foundation.UnitOfWork
-	dependencies   Dependencies
-	definitionHash string
+	database                 *gorm.DB
+	unitOfWork               foundation.UnitOfWork
+	dependencies             Dependencies
+	definitionHash           string
+	manuscriptDefinitionHash string
 }
 
 func NewStore(pool *platformpostgres.Pool, dependencies Dependencies) (*Store, error) {
@@ -49,7 +51,11 @@ func NewStore(pool *platformpostgres.Pool, dependencies Dependencies) (*Store, e
 	if err != nil {
 		return nil, err
 	}
-	return &Store{database: database, unitOfWork: unitOfWork, dependencies: dependencies, definitionHash: definitionHash}, nil
+	manuscriptHash, err := workflowapp.ComputeCanonicalGraphHash(organizingworkflow.SynthesisRegisteredDefinitions()[1].Graph)
+	if err != nil {
+		return nil, err
+	}
+	return &Store{manuscriptDefinitionHash: manuscriptHash, database: database, unitOfWork: unitOfWork, dependencies: dependencies, definitionHash: definitionHash}, nil
 }
 
 func (store *Store) ready(ctx context.Context) error {
@@ -96,7 +102,7 @@ func (store *Store) lockLive(ctx context.Context, scope foundation.TransactionSc
 	if err != nil {
 		return err
 	}
-	if !found || snapshot.DefinitionKey != organizingworkflow.SynthesisDefinitionKey || snapshot.DefinitionVersion != organizingworkflow.SynthesisDefinitionVersion ||
+	if !found || snapshot.DefinitionKey != organizingworkflow.SynthesisDefinitionKey || (snapshot.DefinitionVersion != organizingworkflow.SynthesisDefinitionVersion && snapshot.DefinitionVersion != organizingworkflow.SynthesisManuscriptDefinitionVersion) ||
 		snapshot.NodeKey != kind || snapshot.WorkflowStatus != workflowdomain.RunStatusRunning || snapshot.PauseRequested || snapshot.CancelRequested ||
 		snapshot.NodeStatus != workflowdomain.NodeStatusRunning || snapshot.AttemptStatus != workflowdomain.AttemptStatusRunning ||
 		!snapshot.NodeLeaseOwnerSet || !snapshot.AttemptLeaseOwnerSet || !snapshot.NodeLeaseUntilSet || !snapshot.AttemptLeaseUntilSet ||
@@ -108,7 +114,11 @@ func (store *Store) lockLive(ctx context.Context, scope foundation.TransactionSc
 		return invalid("synthesis Workflow graph is invalid")
 	}
 	hash, err := workflowapp.ComputeCanonicalGraphHash(graph)
-	if err != nil || hash != store.definitionHash {
+	expectedHash := store.definitionHash
+	if snapshot.DefinitionVersion == organizingworkflow.SynthesisManuscriptDefinitionVersion {
+		expectedHash = store.manuscriptDefinitionHash
+	}
+	if err != nil || hash != expectedHash {
 		return invalid("synthesis Workflow graph differs from its registered definition")
 	}
 	tx, err := store.transaction(ctx, scope)
@@ -250,4 +260,9 @@ func classify(ctx context.Context, err error) error {
 	return unavailable(err)
 }
 
-func processingSourceHash(key string) string { return strings.TrimPrefix(key, "synthesis:") }
+func processingSourceHash(key string) string {
+	key = strings.TrimPrefix(key, "synthesis-body-refresh:")
+	key = strings.TrimPrefix(key, "synthesis-goal:")
+	key = strings.TrimPrefix(key, "synthesis-fusion:")
+	return strings.TrimPrefix(key, "synthesis:")
+}

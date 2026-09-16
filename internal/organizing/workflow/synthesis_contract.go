@@ -65,53 +65,75 @@ func SynthesisRegisteredDefinitions() []workflowdomain.RegisteredDefinition {
 	// Keep this fixed graph canonical even before registry construction. The
 	// transaction fence is assembled first to break the terminal-hook cycle.
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].Key < nodes[j].Key })
-	return []workflowdomain.RegisteredDefinition{{Key: SynthesisDefinitionKey, Version: SynthesisDefinitionVersion,
-		InputSchemaVersion: SynthesisInputSchemaVersion, Graph: workflowdomain.CanonicalGraph{Nodes: nodes}}}
+	legacy := workflowdomain.RegisteredDefinition{Key: SynthesisDefinitionKey, Version: SynthesisDefinitionVersion,
+		InputSchemaVersion: SynthesisInputSchemaVersion, Graph: workflowdomain.CanonicalGraph{Nodes: nodes}}
+	manuscriptNodes := append([]workflowdomain.NodeDefinition(nil), nodes...)
+	for i := range manuscriptNodes {
+		if manuscriptNodes[i].Kind == SynthesisApplyNodeKind {
+			manuscriptNodes[i].Dependencies = []string{SynthesisMergeReviewNodeKind}
+		}
+	}
+	manuscriptNodes = append(manuscriptNodes, node(SynthesisMergeReviewNodeKind, SynthesisValidateNodeKind, false, readRetry))
+	sort.Slice(manuscriptNodes, func(i, j int) bool { return manuscriptNodes[i].Key < manuscriptNodes[j].Key })
+	return []workflowdomain.RegisteredDefinition{legacy, {Key: SynthesisDefinitionKey, Version: SynthesisManuscriptDefinitionVersion, InputSchemaVersion: SynthesisInputSchemaVersion, Graph: workflowdomain.CanonicalGraph{Nodes: manuscriptNodes}}}
 }
 
 func SynthesisExecutorNodeKinds() []string {
-	return []string{SynthesisPrepareNodeKind, SynthesisGenerateNodeKind, SynthesisValidateNodeKind, SynthesisApplyNodeKind}
+	return []string{SynthesisPrepareNodeKind, SynthesisGenerateNodeKind, SynthesisValidateNodeKind, SynthesisMergeReviewNodeKind, SynthesisApplyNodeKind}
 }
 
 // SynthesisStartInput is the complete queue-safe input. Recovery only restores
 // an already committed application receipt; it does not generate from old text.
 type SynthesisStartInput struct {
-	ProcessingID  foundation.ID `json:"processing_id"`
-	ExecutionNo   int           `json:"execution_no"`
-	ApplyRecovery bool          `json:"apply_recovery"`
+	BodyRefreshRequestID foundation.ID `json:"body_refresh_request_id,omitempty"`
+	GoalRequestID        foundation.ID `json:"goal_request_id,omitempty"`
+	ProcessingID         foundation.ID `json:"processing_id"`
+	ExecutionNo          int           `json:"execution_no"`
+	ApplyRecovery        bool          `json:"apply_recovery"`
 }
 
 // SynthesisFrozenNote keeps only the candidate identity and frozen metadata.
 // Item text remains in the owner's immutable revision and is reopened by ID.
 type SynthesisFrozenNote struct {
-	Note         organizingdomain.SynthesisNote `json:"note"`
-	RevisionID   foundation.ID                  `json:"revision_id"`
-	RevisionHash string                         `json:"revision_hash"`
+	PublicationID foundation.ID                             `json:"publication_id,omitempty"`
+	Note          organizingdomain.SynthesisNote            `json:"note"`
+	RevisionID    foundation.ID                             `json:"revision_id"`
+	RevisionHash  string                                    `json:"revision_hash"`
+	Supplements   []organizingapp.SynthesisSourceSupplement `json:"supplements,omitempty"`
+	Anchor        *organizingapp.SynthesisAnchorBinding     `json:"anchor,omitempty"`
 }
 
 // SynthesisFrozenInput contains no source excerpts. Its hash binds the exact
 // source catalogue and immutable candidate revisions across Worker restarts.
 type SynthesisFrozenInput struct {
-	ProcessingID  foundation.ID                         `json:"processing_id"`
-	WorkflowRunID foundation.ID                         `json:"workflow_run_id"`
-	SourceEvent   organizingdomain.SynthesisSourceReady `json:"source_event"`
-	Notes         []SynthesisFrozenNote                 `json:"notes"`
-	Sources       []organizingdomain.SynthesisSourceRef `json:"sources"`
-	RequestHash   string                                `json:"request_hash"`
+	GenerationPromptVersion string                                     `json:"generation_prompt_version,omitempty"`
+	SemanticPromptVersion   string                                     `json:"semantic_prompt_version,omitempty"`
+	BodyRefresh             *organizingapp.SynthesisBodyRefreshBinding `json:"body_refresh,omitempty"`
+	Goal                    *organizingapp.SynthesisGoalBinding        `json:"goal,omitempty"`
+	ProcessingID            foundation.ID                              `json:"processing_id"`
+	WorkflowRunID           foundation.ID                              `json:"workflow_run_id"`
+	SourceEvent             organizingdomain.SynthesisSourceReady      `json:"source_event"`
+	Notes                   []SynthesisFrozenNote                      `json:"notes"`
+	Sources                 []organizingdomain.SynthesisSourceRef      `json:"sources"`
+	RequestHash             string                                     `json:"request_hash"`
 }
 
 // SynthesisExecution is reloaded for every delivered node. Model steps own the
 // exact accepted results; Workflow outputs carry only their receipt identifiers.
 type SynthesisExecution struct {
-	Processing    organizingapp.SynthesisProcessing
-	WorkflowRunID foundation.ID
-	ExecutionNo   int
-	ApplyRecovery bool
-	Input         *SynthesisFrozenInput
-	Generation    *organizingapp.SynthesisModelStepRecord
-	Semantic      *organizingapp.SynthesisModelStepRecord
-	Applied       *organizingapp.SynthesisApplyResult
-	CreatedAt     time.Time
+	// HumanWaitDuration 从真实已完成的合并 HumanTask 读取。
+	HumanWaitDuration    time.Duration
+	BodyRefreshRequestID foundation.ID
+	GoalRequestID        foundation.ID
+	Processing           organizingapp.SynthesisProcessing
+	WorkflowRunID        foundation.ID
+	ExecutionNo          int
+	ApplyRecovery        bool
+	Input                *SynthesisFrozenInput
+	Generation           *organizingapp.SynthesisModelStepRecord
+	Semantic             *organizingapp.SynthesisModelStepRecord
+	Applied              *organizingapp.SynthesisApplyResult
+	CreatedAt            time.Time
 }
 
 type SynthesisCreateProcessing struct {
@@ -189,17 +211,52 @@ func (input SynthesisFrozenInput) ComputeHash() (string, error) {
 }
 
 func (input SynthesisFrozenInput) Validate() error {
+	if !organizingapp.ValidSynthesisPromptVersions(input.OriginalPromptVersion(), input.GenerationPromptVersion, input.SemanticPromptVersion) {
+		return synthesisInvalid("synthesis frozen semantic prompt version is invalid")
+	}
+	if organizingapp.IsSynthesisFusionSemanticVersion(input.SemanticPromptVersion) && (len(input.Notes) != 1 || !organizingapp.ValidSynthesisFusionTarget(input.SourceEvent.Fusion, input.Notes[0].Note.ID, input.Notes[0].Anchor)) {
+		return synthesisInvalid("synthesis frozen fusion target differs from admission")
+	}
 	if !validID(input.ProcessingID) || !validID(input.WorkflowRunID) || input.SourceEvent.Validate() != nil ||
 		len(input.Notes) > organizingapp.MaxSynthesisCandidateNotes || len(input.Sources) < 1 || len(input.Sources) > organizingdomain.MaxSynthesisSources || !validHash(input.RequestHash) {
 		return synthesisInvalid("synthesis frozen input is invalid")
 	}
+	if input.BodyRefresh != nil {
+		if input.Goal != nil || input.SourceEvent.Fusion != nil || len(input.Notes) != 1 || input.Notes[0].Note.ID != input.BodyRefresh.Request.NoteID || input.BodyRefresh.Validate(input.SourceEvent.Source.WorkspaceID) != nil {
+			return synthesisInvalid("synthesis frozen body refresh binding is invalid")
+		}
+	}
+	if input.Goal != nil {
+		if input.SourceEvent.Fusion != nil || len(input.Notes) != 0 {
+			return synthesisInvalid("goal generation cannot mix fusion or existing candidates")
+		}
+		if err := input.Goal.Validate(input.SourceEvent.Source.WorkspaceID, input.Sources); err != nil {
+			return err
+		}
+	}
 	seen := make(map[foundation.ID]bool, len(input.Notes))
 	for _, note := range input.Notes {
+		if note.PublicationID != "" && !validID(note.PublicationID) {
+			return synthesisInvalid("synthesis frozen publication binding is invalid")
+		}
 		if note.Note.Validate() != nil || note.Note.WorkspaceID != input.SourceEvent.Source.WorkspaceID ||
 			!validID(note.RevisionID) || note.Note.CurrentRevisionID != note.RevisionID || !validHash(note.RevisionHash) || seen[note.Note.ID] {
 			return synthesisInvalid("synthesis frozen candidate binding is invalid")
 		}
+		if err := note.Anchor.Validate(input.SourceEvent.Source.WorkspaceID); err != nil {
+			return err
+		}
 		seen[note.Note.ID] = true
+		if len(note.Supplements) > organizingdomain.MaxSynthesisSources {
+			return synthesisInvalid("synthesis supplement budget exceeded")
+		}
+		ids := map[foundation.ID]bool{}
+		for _, supplement := range note.Supplements {
+			if supplement.Validate() != nil || ids[supplement.ID] || supplement.WorkspaceID != input.SourceEvent.Source.WorkspaceID || supplement.NoteID != note.Note.ID {
+				return synthesisInvalid("synthesis frozen supplement binding is invalid")
+			}
+			ids[supplement.ID] = true
+		}
 	}
 	available := false
 	refs := make(map[string]bool, len(input.Sources))
@@ -214,8 +271,36 @@ func (input SynthesisFrozenInput) Validate() error {
 		refs[key] = true
 		available = available || source.Source == input.SourceEvent.Source
 	}
+	for _, note := range input.Notes {
+		if note.Anchor == nil {
+			continue
+		}
+		if input.BodyRefresh != nil && len(note.Anchor.AllowedSources) != len(input.Sources) {
+			return synthesisInvalid("refresh frozen evidence must exactly match admission")
+		}
+		for _, allowed := range note.Anchor.AllowedSources {
+			if input.BodyRefresh == nil && allowed.Source != input.SourceEvent.Source {
+				return synthesisInvalid("synthesis frozen anchor source is not incoming")
+			}
+			key, _ := allowed.IdentityKey()
+			if !refs[key] {
+				return synthesisInvalid("synthesis frozen anchor source is missing")
+			}
+		}
+	}
+	if input.Goal != nil {
+		// PostgreSQL 存储的 JSONB 会在分隔符后加入空格。对仅含字符串和整数的此快照，
+		// 带缩进 JSON 是保守的大小上限，避免略低于 1 MiB 的紧凑编码随后因 JSONB 展开而失败。
+		encoded, err := json.MarshalIndent(input, "", " ")
+		if err != nil {
+			return synthesisInvalid("synthesis goal snapshot cannot be encoded")
+		}
+		if len(encoded) > 1<<20 {
+			return workflowError(foundation.ErrorNonRetryableFailure, organizingapp.ErrorCodeSynthesisModelInputTooLarge, false, "complete goal snapshot exceeds the persistence budget")
+		}
+	}
 	hash, err := input.ComputeHash()
-	if err != nil || hash != input.RequestHash || !available {
+	if err != nil || hash != input.RequestHash || !available && input.Goal == nil && input.BodyRefresh == nil {
 		return synthesisInvalid("synthesis frozen input hash is invalid")
 	}
 	return nil
@@ -228,4 +313,30 @@ func synthesisInvalid(message string) error {
 func SynthesisStartIdempotencyKey(processingID foundation.ID, executionNo int) string {
 	encoded, _ := json.Marshal(SynthesisStartInput{ProcessingID: processingID, ExecutionNo: executionNo})
 	return "synthesis-start:" + hashBytes(encoded)
+}
+
+// OriginalPromptVersion 取决于完整的冻结候选集合，
+// 不取决于最新注册的运行时版本或准入前考虑的集合。
+func (input SynthesisFrozenInput) OriginalPromptVersion() string {
+	if input.BodyRefresh != nil {
+		return organizingapp.SynthesisBodyRefreshPromptVersion
+	}
+	if input.Goal != nil {
+		return organizingapp.SynthesisGoalPromptVersion
+	}
+	for _, note := range input.Notes {
+		if note.PublicationID != "" {
+			return organizingapp.SynthesisBodyPromptVersion
+		}
+	}
+	for _, note := range input.Notes {
+		if note.Anchor != nil {
+			return organizingapp.SynthesisAnchoredPromptVersion
+		}
+	}
+	return organizingapp.SynthesisLegacyPromptVersion
+}
+
+func (input *SynthesisFrozenInput) freezeSourceIdentityPromptVersions() {
+	input.GenerationPromptVersion, input.SemanticPromptVersion = organizingapp.LatestSynthesisPromptVersions(input.OriginalPromptVersion(), input.SourceEvent.Fusion != nil)
 }

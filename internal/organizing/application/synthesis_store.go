@@ -27,10 +27,11 @@ type SynthesisCandidateIDs struct {
 }
 
 type SynthesisApplyRecord struct {
-	Input      SynthesisGenerationInput
-	Generation SynthesisGenerationResult
-	Candidates []SynthesisCandidateIDs
-	AppliedAt  time.Time
+	Manuscripts []SynthesisManuscriptCandidate
+	Input       SynthesisGenerationInput
+	Generation  SynthesisGenerationResult
+	Candidates  []SynthesisCandidateIDs
+	AppliedAt   time.Time
 }
 
 // SynthesisPublicationCommand is a durable Authoring reservation to complete
@@ -45,11 +46,12 @@ type SynthesisPublicationCommand struct {
 }
 
 type SynthesisApplyResult struct {
-	ProcessingID foundation.ID                 `json:"processing_id"`
-	RevisionIDs  []foundation.ID               `json:"revision_ids"`
-	Changed      bool                          `json:"changed"`
-	Publications []SynthesisPublicationCommand `json:"publications"`
-	Replayed     bool                          `json:"replayed"`
+	ProcessingID   foundation.ID                 `json:"processing_id"`
+	RevisionIDs    []foundation.ID               `json:"revision_ids"`
+	Changed        bool                          `json:"changed"`
+	SourcesChanged bool                          `json:"sources_changed,omitempty"`
+	Publications   []SynthesisPublicationCommand `json:"publications"`
+	Replayed       bool                          `json:"replayed"`
 }
 
 // SynthesisStore owns the atomic candidate/ArticleRevision/reservation receipt.

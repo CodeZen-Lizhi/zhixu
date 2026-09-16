@@ -9,12 +9,14 @@ import (
 // The real executors remain registered when no model is configured, allowing
 // durable work to report an unavailable capability and accept an explicit retry.
 func synthesisWorkflowReadiness(components workerComponents) bool {
-	if components.synthesisExecutor == nil || components.synthesisSources == nil ||
+	if components.goalGenerations == nil || components.goalSelectionExecutor == nil || components.goalSelections == nil || components.synthesisExecutor == nil || components.anchorRecommendationExecutor == nil || components.anchorRecommendations == nil || components.synthesisSources == nil ||
 		components.synthesisInterview.executor == nil || components.synthesisInterview.model == nil ||
 		components.executors == nil || components.definitions == nil {
 		return false
 	}
 	definitions := organizingworkflow.SynthesisRegisteredDefinitions()
+	definitions = append(definitions, organizingworkflow.AnchorRecommendationDefinitions()...)
+	definitions = append(definitions, organizingworkflow.GoalSelectionDefinitions()...)
 	interview, err := interviewworkflow.NotePreparationDefinition()
 	if err != nil {
 		return false

@@ -19,8 +19,8 @@ const (
 	// SafeWritebackSchemaVersion 是固定 Workflow Node 输入输出的当前契约版本。
 	SafeWritebackSchemaVersion = 1
 	// WritebackIndexStatusPending 表示发布事务已创建重索引 Outbox，但 Retrieval 尚未消费。
-	WritebackIndexStatusPending = "pending"
-	maxWritebackResumeSteps     = 16
+	WritebackIndexStatusPending    = "pending"
+	maxWritebackResumeSteps        = 16
 	writebackGitLockReleaseTimeout = 5 * time.Second
 )
 
@@ -199,6 +199,20 @@ func (s *WritebackService) Resume(ctx context.Context, executionID foundation.ID
 	}
 	if domain.NormalizeProposalType(proposal.Type) == domain.ProposalTypeDownstreamUpdate {
 		return resultFromExecution(initial), domain.NewDownstreamUpdateApplyUnavailableError()
+	}
+	if provider, ok := s.publication.(interface {
+		HistoricalRepublishGitAuthority(context.Context, domain.WritebackExecution) (*domain.HistoricalRepublishGitAuthority, error)
+	}); ok {
+		authority, proofErr := provider.HistoricalRepublishGitAuthority(ctx, initial)
+		if proofErr != nil {
+			return resultFromExecution(initial), proofErr
+		}
+		if authority != nil {
+			ctx, proofErr = domain.WithHistoricalRepublishGitAuthority(ctx, *authority)
+			if proofErr != nil {
+				return resultFromExecution(initial), proofErr
+			}
+		}
 	}
 	operationLease, err := s.gitOperations.Acquire(ctx, initial.WorkspaceID)
 	if err != nil {

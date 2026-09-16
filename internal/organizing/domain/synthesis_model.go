@@ -7,9 +7,11 @@ import (
 )
 
 const (
-	SynthesisProcessorVersion = "synthesis/v1"
-	SynthesisRevisionSchema   = "synthesis-revision/v1"
-	SynthesisRendererVersion  = "synthesis-markdown/v1"
+	SynthesisProcessorVersion  = "synthesis/v1"
+	SynthesisRevisionSchema    = "synthesis-revision/v1"
+	SynthesisRendererVersion   = "synthesis-markdown/v1"
+	SynthesisRevisionSchemaV2  = "synthesis-revision/v2"
+	SynthesisRendererVersionV2 = "synthesis-markdown/v2"
 
 	MaxSynthesisItems            = 128
 	MaxSynthesisOperations       = 64
@@ -89,11 +91,23 @@ type SynthesisSourceRef struct {
 // transaction. Its processing key ignores delivery/attempt IDs and binds the
 // source version, projection and processor version instead.
 type SynthesisSourceReady struct {
-	ID                 foundation.ID          `json:"id"`
-	Source             SynthesisSourceVersion `json:"source"`
-	IngestionAttemptID foundation.ID          `json:"ingestion_attempt_id"`
-	ProcessorVersion   string                 `json:"processor_version"`
-	CreatedAt          time.Time              `json:"created_at"`
+	ID                 foundation.ID           `json:"id"`
+	Source             SynthesisSourceVersion  `json:"source"`
+	IngestionAttemptID foundation.ID           `json:"ingestion_attempt_id"`
+	ProcessorVersion   string                  `json:"processor_version"`
+	CreatedAt          time.Time               `json:"created_at"`
+	Fusion             *SynthesisFusionTrigger `json:"fusion,omitempty"`
+}
+
+// SynthesisFusionTrigger 使审批驱动的重新评估与摄取投递保持独立。
+// 原 source-ready 事件保持不可变。
+type SynthesisFusionTrigger struct {
+	RequestID      foundation.ID        `json:"request_id"`
+	AnchorID       foundation.ID        `json:"anchor_id"`
+	NoteID         foundation.ID        `json:"note_id"`
+	ProposalID     foundation.ID        `json:"proposal_id"`
+	ScopeVersion   int64                `json:"scope_version"`
+	AllowedSources []SynthesisSourceRef `json:"allowed_sources"`
 }
 
 // SynthesisStatement is a source-supported assertion and its stated conditions.
@@ -132,11 +146,12 @@ const (
 // SynthesisItem is a strict tagged union. IDs are allocated by the server and
 // survive exact duplicates, additional support and gap resolution.
 type SynthesisItem struct {
-	ID       foundation.ID             `json:"id"`
-	Kind     SynthesisItemKind         `json:"kind"`
-	Fact     *SynthesisStatement       `json:"fact"`
-	Conflict *SynthesisConflictContent `json:"conflict"`
-	Gap      *SynthesisGapContent      `json:"gap"`
+	BodyReference *SynthesisBodyReference   `json:"body_reference,omitempty"`
+	ID            foundation.ID             `json:"id"`
+	Kind          SynthesisItemKind         `json:"kind"`
+	Fact          *SynthesisStatement       `json:"fact"`
+	Conflict      *SynthesisConflictContent `json:"conflict"`
+	Gap           *SynthesisGapContent      `json:"gap"`
 }
 
 type SynthesisOperationKind string
@@ -147,12 +162,14 @@ const (
 	SynthesisAddConflict SynthesisOperationKind = "ADD_CONFLICT"
 	SynthesisAddGap      SynthesisOperationKind = "ADD_GAP"
 	SynthesisResolveGap  SynthesisOperationKind = "RESOLVE_GAP"
+	SynthesisRefreshItem SynthesisOperationKind = "REFRESH_ITEM"
 )
 
-// SynthesisOperation has five closed shapes. ADD_* item operations contain
-// only Item. ADD_SUPPORT contains TargetItemID, Sources and (only for a conflict)
-// AlternativeIndex. RESOLVE_GAP contains TargetItemID and Resolution. There is
-// intentionally no arbitrary replace, delete, path, permission or version field.
+// SynthesisOperation 使用封闭结构。ADD_* 条目操作只包含 Item；ADD_SUPPORT
+// 包含 TargetItemID、Sources，以及仅在冲突时使用的 AlternativeIndex；
+// RESOLVE_GAP 包含 TargetItemID 和 Resolution。不提供任意删除、路径或权限字段。
+// REFRESH_ITEM 包含服务端复制的 Item 及其已有 TargetItemID；
+// 应用层门禁要求独立的正文刷新绑定及历史发布证明。
 type SynthesisOperation struct {
 	Kind             SynthesisOperationKind `json:"kind"`
 	Item             *SynthesisItem         `json:"item,omitempty"`
@@ -174,48 +191,69 @@ type SynthesisDelta struct {
 type SynthesisDeltaResult struct {
 	Items   []SynthesisItem `json:"items"`
 	Changed bool            `json:"changed"`
+	// SourcesChanged 表示语义投影本身未变化时新附加的证据。
+	// 调用方可以将其记录为来源回执，无需创建新文章或修订。
+	SourcesChanged bool `json:"sources_changed,omitempty"`
 }
 
-// SynthesisRevision is an immutable semantic projection of an exact AGENT
-// ArticleRevision. It stores no independently editable Markdown or publish flag.
-// Hash is the complete projection digest used by the Authoring origin binding.
+// SynthesisRevision 是一个精确 AGENT ArticleRevision 的不可变语义投影。
+// V2 绑定不可变的完整全文，不是独立可编辑草稿或发布标志。Items 只包含映射出的机器子集。
+// Hash 是 Authoring 来源绑定使用的完整投影摘要。
+type SynthesisCandidateRemergeProvenance struct {
+	AttemptID        foundation.ID `json:"attempt_id"`
+	SourceRevisionID foundation.ID `json:"source_revision_id"`
+}
+
+// SynthesisHistoricalRepublishProvenance 记录人工选择的精确不可变修订。
+// 其模型身份继承自原修订，不表示新执行了模型。
+type SynthesisHistoricalRepublishProvenance struct {
+	AttemptID                foundation.ID `json:"attempt_id"`
+	SelectedRevisionID       foundation.ID `json:"selected_revision_id"`
+	SelectedPublicationID    foundation.ID `json:"selected_publication_id,omitempty"`
+	SelectedProposalCommitID foundation.ID `json:"selected_proposal_commit_id,omitempty"`
+}
+
 type SynthesisRevision struct {
-	ID                foundation.ID   `json:"id"`
-	WorkspaceID       foundation.ID   `json:"workspace_id"`
-	NoteID            foundation.ID   `json:"note_id"`
-	DocumentID        foundation.ID   `json:"document_id"`
-	ArticleRevisionID foundation.ID   `json:"article_revision_id"`
-	RevisionNo        int64           `json:"revision_no"`
-	ArticleRevisionNo int64           `json:"article_revision_no"`
-	ParentRevisionID  foundation.ID   `json:"parent_revision_id,omitempty"`
-	Title             string          `json:"title"`
-	RendererVersion   string          `json:"renderer_version"`
-	ContentHash       string          `json:"content_hash"`
-	Hash              string          `json:"hash"`
-	Items             []SynthesisItem `json:"items"`
-	Delta             SynthesisDelta  `json:"delta"`
-	SourceEventID     foundation.ID   `json:"source_event_id"`
-	WorkflowRunID     foundation.ID   `json:"workflow_run_id"`
-	ModelRunID        foundation.ID   `json:"model_run_id"`
-	CreatedAt         time.Time       `json:"created_at"`
+	HistoricalRepublish *SynthesisHistoricalRepublishProvenance `json:"historical_republish,omitempty"`
+	Remerge             *SynthesisCandidateRemergeProvenance    `json:"remerge,omitempty"`
+	ID                  foundation.ID                           `json:"id"`
+	WorkspaceID         foundation.ID                           `json:"workspace_id"`
+	NoteID              foundation.ID                           `json:"note_id"`
+	DocumentID          foundation.ID                           `json:"document_id"`
+	ArticleRevisionID   foundation.ID                           `json:"article_revision_id"`
+	RevisionNo          int64                                   `json:"revision_no"`
+	ArticleRevisionNo   int64                                   `json:"article_revision_no"`
+	ParentRevisionID    foundation.ID                           `json:"parent_revision_id,omitempty"`
+	Title               string                                  `json:"title"`
+	RendererVersion     string                                  `json:"renderer_version"`
+	ContentHash         string                                  `json:"content_hash"`
+	Hash                string                                  `json:"hash"`
+	Items               []SynthesisItem                         `json:"items"`
+	Delta               SynthesisDelta                          `json:"delta"`
+	SourceEventID       foundation.ID                           `json:"source_event_id"`
+	WorkflowRunID       foundation.ID                           `json:"workflow_run_id"`
+	ModelRunID          foundation.ID                           `json:"model_run_id"`
+	CreatedAt           time.Time                               `json:"created_at"`
+	Manuscript          *SynthesisManuscript                    `json:"manuscript,omitempty"`
 }
 
 // SynthesisNoteSnapshot is the immutable material frozen by Interview or other
 // consumers. Its reader must first prove this exact revision was published via
 // Authoring. The snapshot has no dependency on Interview or formal Claim types.
 type SynthesisNoteSnapshot struct {
-	WorkspaceID       foundation.ID   `json:"workspace_id"`
-	NoteID            foundation.ID   `json:"note_id"`
-	RevisionID        foundation.ID   `json:"revision_id"`
-	RevisionNo        int64           `json:"revision_no"`
-	DocumentID        foundation.ID   `json:"document_id"`
-	ArticleRevisionID foundation.ID   `json:"article_revision_id"`
-	ArticleRevisionNo int64           `json:"article_revision_no"`
-	ContentHash       string          `json:"content_hash"`
-	ProjectionHash    string          `json:"projection_hash"`
-	Title             string          `json:"title"`
-	RendererVersion   string          `json:"renderer_version"`
-	Items             []SynthesisItem `json:"items"`
+	WorkspaceID       foundation.ID        `json:"workspace_id"`
+	NoteID            foundation.ID        `json:"note_id"`
+	RevisionID        foundation.ID        `json:"revision_id"`
+	RevisionNo        int64                `json:"revision_no"`
+	DocumentID        foundation.ID        `json:"document_id"`
+	ArticleRevisionID foundation.ID        `json:"article_revision_id"`
+	ArticleRevisionNo int64                `json:"article_revision_no"`
+	ContentHash       string               `json:"content_hash"`
+	ProjectionHash    string               `json:"projection_hash"`
+	Title             string               `json:"title"`
+	RendererVersion   string               `json:"renderer_version"`
+	Items             []SynthesisItem      `json:"items"`
+	Manuscript        *SynthesisManuscript `json:"manuscript,omitempty"`
 }
 
 // SynthesisLabelledSource is a request-local, owner-verified source binding.

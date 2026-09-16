@@ -30,28 +30,47 @@ type synthesisNoteResponse struct {
 }
 
 type synthesisRevisionSummaryResponse struct {
-	ID                foundation.ID `json:"id"`
-	RevisionNo        int64         `json:"revision_no"`
-	ArticleRevisionID foundation.ID `json:"article_revision_id"`
-	ArticleRevisionNo int64         `json:"article_revision_no"`
-	ContentHash       string        `json:"content_hash"`
-	CreatedAt         string        `json:"created_at"`
+	RemergeSourceRevisionID foundation.ID `json:"remerge_source_revision_id,omitempty"`
+	ID                      foundation.ID `json:"id"`
+	RevisionNo              int64         `json:"revision_no"`
+	ArticleRevisionID       foundation.ID `json:"article_revision_id"`
+	ArticleRevisionNo       int64         `json:"article_revision_no"`
+	ContentHash             string        `json:"content_hash"`
+	CreatedAt               string        `json:"created_at"`
+}
+
+type synthesisManuscriptDisplay struct {
+	RendererVersion   string                      `json:"renderer_version"`
+	FullContent       string                      `json:"full_content"`
+	ManualChanges     bool                        `json:"manual_changes"`
+	ReviewRequired    bool                        `json:"review_required"`
+	HistoricalSources []domain.SynthesisSourceRef `json:"historical_sources"`
+}
+
+type historicalProvenanceWire struct {
+	AttemptID                foundation.ID `json:"attempt_id"`
+	SelectedRevisionID       foundation.ID `json:"selected_revision_id"`
+	SelectedPublicationID    foundation.ID `json:"selected_publication_id,omitempty"`
+	SelectedProposalCommitID foundation.ID `json:"selected_proposal_commit_id,omitempty"`
 }
 
 type synthesisRevisionResponse struct {
-	ID                foundation.ID          `json:"id"`
-	WorkspaceID       foundation.ID          `json:"workspace_id"`
-	NoteID            foundation.ID          `json:"note_id"`
-	DocumentID        foundation.ID          `json:"document_id"`
-	ArticleRevisionID foundation.ID          `json:"article_revision_id"`
-	RevisionNo        int64                  `json:"revision_no"`
-	ArticleRevisionNo int64                  `json:"article_revision_no"`
-	ParentRevisionID  *string                `json:"parent_revision_id"`
-	Title             string                 `json:"title"`
-	ContentHash       string                 `json:"content_hash"`
-	ProjectionHash    string                 `json:"projection_hash"`
-	Items             []domain.SynthesisItem `json:"items"`
-	CreatedAt         string                 `json:"created_at"`
+	HistoricalRepublish *historicalProvenanceWire                   `json:"historical_republish,omitempty"`
+	Remerge             *domain.SynthesisCandidateRemergeProvenance `json:"remerge,omitempty"`
+	Display             *synthesisManuscriptDisplay                 `json:"display,omitempty"`
+	ID                  foundation.ID                               `json:"id"`
+	WorkspaceID         foundation.ID                               `json:"workspace_id"`
+	NoteID              foundation.ID                               `json:"note_id"`
+	DocumentID          foundation.ID                               `json:"document_id"`
+	ArticleRevisionID   foundation.ID                               `json:"article_revision_id"`
+	RevisionNo          int64                                       `json:"revision_no"`
+	ArticleRevisionNo   int64                                       `json:"article_revision_no"`
+	ParentRevisionID    *string                                     `json:"parent_revision_id"`
+	Title               string                                      `json:"title"`
+	ContentHash         string                                      `json:"content_hash"`
+	ProjectionHash      string                                      `json:"projection_hash"`
+	Items               []domain.SynthesisItem                      `json:"items"`
+	CreatedAt           string                                      `json:"created_at"`
 }
 
 type synthesisPublicationResponse struct {
@@ -119,7 +138,10 @@ func toSynthesisRevisionSummary(revision *app.SynthesisRevisionSummary) (*synthe
 		revision.RevisionNo > domain.MaxSynthesisRevisionNo || revision.ArticleRevisionNo < 1 || !synthesisValidHash(revision.ContentHash) || revision.CreatedAt.IsZero() {
 		return nil, synthesisInvalidResult()
 	}
-	return &synthesisRevisionSummaryResponse{ID: revision.ID, RevisionNo: revision.RevisionNo,
+	if revision.RemergeSourceRevisionID != "" && (!validResponseID(revision.RemergeSourceRevisionID) || revision.RemergeSourceRevisionID == revision.ID) {
+		return nil, synthesisInvalidResult()
+	}
+	return &synthesisRevisionSummaryResponse{RemergeSourceRevisionID: revision.RemergeSourceRevisionID, ID: revision.ID, RevisionNo: revision.RevisionNo,
 		ArticleRevisionID: revision.ArticleRevisionID, ArticleRevisionNo: revision.ArticleRevisionNo,
 		ContentHash: revision.ContentHash, CreatedAt: formatTime(revision.CreatedAt)}, nil
 }
@@ -133,7 +155,11 @@ func synthesisValidHash(value string) bool {
 }
 
 func synthesisSummary(revision domain.SynthesisRevision) app.SynthesisRevisionSummary {
-	return app.SynthesisRevisionSummary{ID: revision.ID, RevisionNo: revision.RevisionNo, ArticleRevisionID: revision.ArticleRevisionID,
+	var remergeSource foundation.ID
+	if revision.Remerge != nil {
+		remergeSource = revision.Remerge.SourceRevisionID
+	}
+	return app.SynthesisRevisionSummary{RemergeSourceRevisionID: remergeSource, ID: revision.ID, RevisionNo: revision.RevisionNo, ArticleRevisionID: revision.ArticleRevisionID,
 		ArticleRevisionNo: revision.ArticleRevisionNo, ContentHash: revision.ContentHash, CreatedAt: revision.CreatedAt}
 }
 
@@ -186,6 +212,16 @@ func toSynthesisRevision(value *domain.SynthesisRevision, workspaceID, noteID fo
 	if value.Validate() != nil || value.WorkspaceID != workspaceID || value.NoteID != noteID {
 		return nil, synthesisInvalidResult()
 	}
+	var display *synthesisManuscriptDisplay
+	if value.Manuscript != nil {
+		content, err := value.Content()
+		if err != nil {
+			return nil, synthesisInvalidResult()
+		}
+		display = &synthesisManuscriptDisplay{RendererVersion: value.RendererVersion, FullContent: content,
+			ManualChanges: value.Manuscript.ManualChanges, ReviewRequired: value.Manuscript.Assessment.ContextReviewRequired || len(value.Manuscript.Assessment.ReviewItems) > 0,
+			HistoricalSources: synthesisHistoricalSources(*value)}
+	}
 	items := make([]domain.SynthesisItem, len(value.Items))
 	for index, item := range value.Items {
 		items[index] = item
@@ -213,10 +249,10 @@ func toSynthesisRevision(value *domain.SynthesisRevision, workspaceID, noteID fo
 			items[index].Gap = &gap
 		}
 	}
-	return &synthesisRevisionResponse{ID: value.ID, WorkspaceID: value.WorkspaceID, NoteID: value.NoteID, DocumentID: value.DocumentID,
+	return &synthesisRevisionResponse{HistoricalRepublish: historicalProvenance(*value), Remerge: value.Remerge, ID: value.ID, WorkspaceID: value.WorkspaceID, NoteID: value.NoteID, DocumentID: value.DocumentID,
 		ArticleRevisionID: value.ArticleRevisionID, RevisionNo: value.RevisionNo, ArticleRevisionNo: value.ArticleRevisionNo,
 		ParentRevisionID: optionalID(value.ParentRevisionID), Title: value.Title, ContentHash: value.ContentHash,
-		ProjectionHash: value.Hash, Items: items, CreatedAt: formatTime(value.CreatedAt)}, nil
+		ProjectionHash: value.Hash, Items: items, Display: display, CreatedAt: formatTime(value.CreatedAt)}, nil
 }
 
 func toSynthesisProcessing(value app.SynthesisProcessing, workspaceID foundation.ID) (synthesisProcessingResponse, error) {
@@ -298,4 +334,35 @@ func toSynthesisDetail(value app.SynthesisNoteDetail, workspaceID, noteID founda
 	}
 	return synthesisNoteDetailResponse{WorkspaceID: workspaceID, Note: note, CurrentRevision: current, PublishedRevision: published,
 		Publication: publication, LatestProcessing: processing}, nil
+}
+
+// 审计引用与修订中的可信条目保持分离。
+func synthesisHistoricalSources(revision domain.SynthesisRevision) []domain.SynthesisSourceRef {
+	out := []domain.SynthesisSourceRef{}
+	if revision.Manuscript == nil {
+		return out
+	}
+	seen := map[domain.SynthesisSourceRef]bool{}
+	for _, item := range revision.Items {
+		for _, ref := range item.SourceReferences() {
+			seen[ref] = true
+		}
+	}
+	for _, item := range revision.Manuscript.Machine.MachineItems {
+		for _, ref := range item.SourceReferences() {
+			if !seen[ref] {
+				out = append(out, ref)
+				seen[ref] = true
+			}
+		}
+	}
+	return out
+}
+
+func historicalProvenance(r domain.SynthesisRevision) *historicalProvenanceWire {
+	if r.HistoricalRepublish == nil {
+		return nil
+	}
+	h := r.HistoricalRepublish
+	return &historicalProvenanceWire{h.AttemptID, h.SelectedRevisionID, h.SelectedPublicationID, h.SelectedProposalCommitID}
 }

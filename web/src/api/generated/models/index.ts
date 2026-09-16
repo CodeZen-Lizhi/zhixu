@@ -171,6 +171,551 @@ export type ActiveWorkspaceAvailabilityEnum = typeof ActiveWorkspaceAvailability
 /**
  *
  * @export
+ * @interface AnchorDecisionItem
+ */
+export interface AnchorDecisionItem {
+    /**
+     *
+     * @type {string}
+     * @memberof AnchorDecisionItem
+     */
+    proposal_id: string;
+    /**
+     *
+     * @type {number}
+     * @memberof AnchorDecisionItem
+     */
+    expected_version: number;
+}
+/**
+ *
+ * @export
+ * @interface AnchorDecisionResult
+ */
+export interface AnchorDecisionResult {
+    /**
+     *
+     * @type {KnowledgeAnchor}
+     * @memberof AnchorDecisionResult
+     */
+    anchor: KnowledgeAnchor;
+    /**
+     *
+     * @type {Array<AnchorProposal>}
+     * @memberof AnchorDecisionResult
+     */
+    items: Array<AnchorProposal>;
+    /**
+     *
+     * @type {boolean}
+     * @memberof AnchorDecisionResult
+     */
+    replayed: boolean;
+}
+/**
+ *
+ * @export
+ * @interface AnchorFusionRecent
+ */
+export interface AnchorFusionRecent {
+    /**
+     *
+     * @type {string}
+     * @memberof AnchorFusionRecent
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof AnchorFusionRecent
+     */
+    anchor_id: string;
+    /**
+     *
+     * @type {Array<AnchorFusionRequest>}
+     * @memberof AnchorFusionRecent
+     */
+    items: Array<AnchorFusionRequest>;
+}
+/**
+ *
+ * @export
+ * @interface AnchorFusionRequest
+ */
+export interface AnchorFusionRequest {
+    /**
+     *
+     * @type {string}
+     * @memberof AnchorFusionRequest
+     */
+    id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof AnchorFusionRequest
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof AnchorFusionRequest
+     */
+    anchor_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof AnchorFusionRequest
+     */
+    note_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof AnchorFusionRequest
+     */
+    proposal_id: string;
+    /**
+     *
+     * @type {number}
+     * @memberof AnchorFusionRequest
+     */
+    scope_version: number;
+    /**
+     *
+     * @type {Array<SynthesisSourceRef>}
+     * @memberof AnchorFusionRequest
+     */
+    sources: Array<SynthesisSourceRef>;
+    /**
+     *
+     * @type {AnchorFusionRequestStatusEnum}
+     * @memberof AnchorFusionRequest
+     */
+    status: AnchorFusionRequestStatusEnum;
+    /**
+     *
+     * @type {string}
+     * @memberof AnchorFusionRequest
+     */
+    processing_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof AnchorFusionRequest
+     */
+    created_at: string;
+    /**
+     *
+     * @type {string}
+     * @memberof AnchorFusionRequest
+     */
+    updated_at: string;
+}
+
+
+/**
+ * @export
+ */
+export const AnchorFusionRequestStatusEnum = {
+    Pending: 'PENDING',
+    Dispatched: 'DISPATCHED',
+    Stale: 'STALE'
+} as const;
+export type AnchorFusionRequestStatusEnum = typeof AnchorFusionRequestStatusEnum[keyof typeof AnchorFusionRequestStatusEnum];
+
+/**
+ *
+ * @export
+ * @interface AnchorMutationResult
+ */
+export interface AnchorMutationResult {
+    /**
+     *
+     * @type {KnowledgeAnchor}
+     * @memberof AnchorMutationResult
+     */
+    anchor: KnowledgeAnchor;
+    /**
+     *
+     * @type {boolean}
+     * @memberof AnchorMutationResult
+     */
+    replayed: boolean;
+}
+/**
+ *
+ * @export
+ * @interface AnchorPage
+ */
+export interface AnchorPage {
+    /**
+     *
+     * @type {Array<KnowledgeAnchor>}
+     * @memberof AnchorPage
+     */
+    items: Array<KnowledgeAnchor>;
+    /**
+     *
+     * @type {string}
+     * @memberof AnchorPage
+     */
+    next_after_id: string | null;
+}
+/**
+ *
+ * @export
+ * @interface AnchorProposal
+ */
+export interface AnchorProposal {
+    /**
+     *
+     * @type {string}
+     * @memberof AnchorProposal
+     */
+    id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof AnchorProposal
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof AnchorProposal
+     */
+    anchor_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof AnchorProposal
+     */
+    model_run_id: string;
+    /**
+     *
+     * @type {AnchorProposalKindEnum}
+     * @memberof AnchorProposal
+     */
+    kind: AnchorProposalKindEnum;
+    /**
+     *
+     * @type {number}
+     * @memberof AnchorProposal
+     */
+    scope_version: number;
+    /**
+     *
+     * @type {AnchorScope}
+     * @memberof AnchorProposal
+     */
+    before: AnchorScope | null;
+    /**
+     *
+     * @type {AnchorScope}
+     * @memberof AnchorProposal
+     */
+    suggested: AnchorScope | null;
+    /**
+     *
+     * @type {string}
+     * @memberof AnchorProposal
+     */
+    reason: string;
+    /**
+     *
+     * @type {Array<SynthesisSourceRef>}
+     * @memberof AnchorProposal
+     */
+    evidence: Array<SynthesisSourceRef>;
+    /**
+     *
+     * @type {AnchorProposalStatusEnum}
+     * @memberof AnchorProposal
+     */
+    status: AnchorProposalStatusEnum;
+    /**
+     *
+     * @type {number}
+     * @memberof AnchorProposal
+     */
+    version: number;
+    /**
+     *
+     * @type {string}
+     * @memberof AnchorProposal
+     */
+    created_at: string;
+}
+
+
+/**
+ * @export
+ */
+export const AnchorProposalKindEnum = {
+    ScopeAdjustment: 'SCOPE_ADJUSTMENT',
+    SourceAssociation: 'SOURCE_ASSOCIATION'
+} as const;
+export type AnchorProposalKindEnum = typeof AnchorProposalKindEnum[keyof typeof AnchorProposalKindEnum];
+
+/**
+ * @export
+ */
+export const AnchorProposalStatusEnum = {
+    Pending: 'PENDING',
+    Accepted: 'ACCEPTED',
+    Rejected: 'REJECTED'
+} as const;
+export type AnchorProposalStatusEnum = typeof AnchorProposalStatusEnum[keyof typeof AnchorProposalStatusEnum];
+
+/**
+ *
+ * @export
+ * @interface AnchorProposalPage
+ */
+export interface AnchorProposalPage {
+    /**
+     *
+     * @type {Array<AnchorProposal>}
+     * @memberof AnchorProposalPage
+     */
+    items: Array<AnchorProposal>;
+    /**
+     *
+     * @type {string}
+     * @memberof AnchorProposalPage
+     */
+    next_after_id: string | null;
+}
+/**
+ *
+ * @export
+ * @interface AnchorRecommendation
+ */
+export interface AnchorRecommendation {
+    /**
+     *
+     * @type {string}
+     * @memberof AnchorRecommendation
+     */
+    id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof AnchorRecommendation
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof AnchorRecommendation
+     */
+    note_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof AnchorRecommendation
+     */
+    anchor_id: string | null;
+    /**
+     *
+     * @type {string}
+     * @memberof AnchorRecommendation
+     */
+    basis_revision_id: string;
+    /**
+     *
+     * @type {number}
+     * @memberof AnchorRecommendation
+     */
+    expected_scope_version: number | null;
+    /**
+     *
+     * @type {AnchorRecommendationKindEnum}
+     * @memberof AnchorRecommendation
+     */
+    kind: AnchorRecommendationKindEnum;
+    /**
+     *
+     * @type {AnchorRecommendationStatusEnum}
+     * @memberof AnchorRecommendation
+     */
+    status: AnchorRecommendationStatusEnum;
+    /**
+     *
+     * @type {AnchorRecommendationSuggestion}
+     * @memberof AnchorRecommendation
+     */
+    recommendation: AnchorRecommendationSuggestion | null;
+    /**
+     *
+     * @type {string}
+     * @memberof AnchorRecommendation
+     */
+    proposal_id: string | null;
+    /**
+     *
+     * @type {string}
+     * @memberof AnchorRecommendation
+     */
+    error_code: string | null;
+    /**
+     *
+     * @type {boolean}
+     * @memberof AnchorRecommendation
+     */
+    retryable: boolean;
+    /**
+     *
+     * @type {number}
+     * @memberof AnchorRecommendation
+     */
+    version: number;
+    /**
+     *
+     * @type {string}
+     * @memberof AnchorRecommendation
+     */
+    created_at: string;
+    /**
+     *
+     * @type {string}
+     * @memberof AnchorRecommendation
+     */
+    updated_at: string;
+}
+
+
+/**
+ * @export
+ */
+export const AnchorRecommendationKindEnum = {
+    InitialScope: 'INITIAL_SCOPE',
+    SourceAssociation: 'SOURCE_ASSOCIATION',
+    ScopeAdjustment: 'SCOPE_ADJUSTMENT'
+} as const;
+export type AnchorRecommendationKindEnum = typeof AnchorRecommendationKindEnum[keyof typeof AnchorRecommendationKindEnum];
+
+/**
+ * @export
+ */
+export const AnchorRecommendationStatusEnum = {
+    Pending: 'PENDING',
+    Running: 'RUNNING',
+    Succeeded: 'SUCCEEDED',
+    NoRecommendation: 'NO_RECOMMENDATION',
+    Failed: 'FAILED',
+    RecoveryRequired: 'RECOVERY_REQUIRED'
+} as const;
+export type AnchorRecommendationStatusEnum = typeof AnchorRecommendationStatusEnum[keyof typeof AnchorRecommendationStatusEnum];
+
+/**
+ *
+ * @export
+ * @interface AnchorRecommendationPage
+ */
+export interface AnchorRecommendationPage {
+    /**
+     *
+     * @type {Array<AnchorRecommendation>}
+     * @memberof AnchorRecommendationPage
+     */
+    items: Array<AnchorRecommendation>;
+    /**
+     *
+     * @type {string}
+     * @memberof AnchorRecommendationPage
+     */
+    next_after_id: string | null;
+}
+/**
+ *
+ * @export
+ * @interface AnchorRecommendationSuggestion
+ */
+export interface AnchorRecommendationSuggestion {
+    /**
+     *
+     * @type {string}
+     * @memberof AnchorRecommendationSuggestion
+     */
+    title: string;
+    /**
+     *
+     * @type {AnchorRecommendationSuggestionKindEnum}
+     * @memberof AnchorRecommendationSuggestion
+     */
+    kind: AnchorRecommendationSuggestionKindEnum;
+    /**
+     *
+     * @type {AnchorScope}
+     * @memberof AnchorRecommendationSuggestion
+     */
+    scope: AnchorScope | null;
+    /**
+     *
+     * @type {string}
+     * @memberof AnchorRecommendationSuggestion
+     */
+    reason: string;
+    /**
+     *
+     * @type {Array<SynthesisSourceRef>}
+     * @memberof AnchorRecommendationSuggestion
+     */
+    evidence: Array<SynthesisSourceRef>;
+}
+
+
+/**
+ * @export
+ */
+export const AnchorRecommendationSuggestionKindEnum = {
+    InitialScope: 'INITIAL_SCOPE',
+    SourceAssociation: 'SOURCE_ASSOCIATION',
+    ScopeAdjustment: 'SCOPE_ADJUSTMENT'
+} as const;
+export type AnchorRecommendationSuggestionKindEnum = typeof AnchorRecommendationSuggestionKindEnum[keyof typeof AnchorRecommendationSuggestionKindEnum];
+
+/**
+ *
+ * @export
+ * @interface AnchorScope
+ */
+export interface AnchorScope {
+    /**
+     *
+     * @type {Array<string>}
+     * @memberof AnchorScope
+     */
+    topics: Array<string>;
+    /**
+     *
+     * @type {Array<string>}
+     * @memberof AnchorScope
+     */
+    audiences: Array<string>;
+    /**
+     *
+     * @type {string}
+     * @memberof AnchorScope
+     */
+    description: string;
+}
+/**
+ *
+ * @export
+ * @interface AnchorView
+ */
+export interface AnchorView {
+    /**
+     *
+     * @type {KnowledgeAnchor}
+     * @memberof AnchorView
+     */
+    anchor: KnowledgeAnchor;
+}
+/**
+ *
+ * @export
  * @interface Answer
  */
 export interface Answer {
@@ -4193,6 +4738,43 @@ export interface CreateAPITokenRequest {
 /**
  *
  * @export
+ * @interface CreateAnchorRequest
+ */
+export interface CreateAnchorRequest {
+    /**
+     *
+     * @type {string}
+     * @memberof CreateAnchorRequest
+     */
+    note_id: string;
+    /**
+     *
+     * @type {number}
+     * @memberof CreateAnchorRequest
+     */
+    expected_note_version: number;
+    /**
+     *
+     * @type {string}
+     * @memberof CreateAnchorRequest
+     */
+    basis_revision_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof CreateAnchorRequest
+     */
+    title: string;
+    /**
+     *
+     * @type {AnchorScope}
+     * @memberof CreateAnchorRequest
+     */
+    scope: AnchorScope;
+}
+/**
+ *
+ * @export
  * @interface CreateAttachmentExport200Response
  */
 export interface CreateAttachmentExport200Response {
@@ -4786,6 +5368,19 @@ export interface CreateReviewLearningPathRequest {
 /**
  *
  * @export
+ * @interface CreateSynthesisGoal
+ */
+export interface CreateSynthesisGoal {
+    /**
+     * Desired main note content, trimmed and at most 2048 UTF-8 bytes. The AI determines knowledge scope from available material.
+     * @type {string}
+     * @memberof CreateSynthesisGoal
+     */
+    goal: string;
+}
+/**
+ *
+ * @export
  * @interface CreateWorkspaceRequest
  */
 export interface CreateWorkspaceRequest {
@@ -4841,6 +5436,42 @@ export type DatabaseStatusStatusEnum = typeof DatabaseStatusStatusEnum[keyof typ
 /**
  *
  * @export
+ * @interface DecideAnchorRequest
+ */
+export interface DecideAnchorRequest {
+    /**
+     *
+     * @type {number}
+     * @memberof DecideAnchorRequest
+     */
+    expected_anchor_version: number;
+    /**
+     *
+     * @type {DecideAnchorRequestDecisionEnum}
+     * @memberof DecideAnchorRequest
+     */
+    decision: DecideAnchorRequestDecisionEnum;
+    /**
+     *
+     * @type {Array<AnchorDecisionItem>}
+     * @memberof DecideAnchorRequest
+     */
+    items: Array<AnchorDecisionItem>;
+}
+
+
+/**
+ * @export
+ */
+export const DecideAnchorRequestDecisionEnum = {
+    Accepted: 'ACCEPTED',
+    Rejected: 'REJECTED'
+} as const;
+export type DecideAnchorRequestDecisionEnum = typeof DecideAnchorRequestDecisionEnum[keyof typeof DecideAnchorRequestDecisionEnum];
+
+/**
+ *
+ * @export
  * @interface DisabledChatDraft
  */
 export interface DisabledChatDraft {
@@ -4868,6 +5499,18 @@ export interface DisabledChatDraft {
      * @memberof DisabledChatDraft
      */
     model_version?: DisabledChatDraftModelVersionEnum;
+    /**
+     *
+     * @type {DisabledChatDraftReasoningEffortEnum}
+     * @memberof DisabledChatDraft
+     */
+    reasoning_effort?: DisabledChatDraftReasoningEffortEnum;
+    /**
+     *
+     * @type {object}
+     * @memberof DisabledChatDraft
+     */
+    reasoning_effort_by_function?: object;
 }
 
 
@@ -4902,6 +5545,14 @@ export const DisabledChatDraftModelVersionEnum = {
     Empty: ''
 } as const;
 export type DisabledChatDraftModelVersionEnum = typeof DisabledChatDraftModelVersionEnum[keyof typeof DisabledChatDraftModelVersionEnum];
+
+/**
+ * @export
+ */
+export const DisabledChatDraftReasoningEffortEnum = {
+    Empty: ''
+} as const;
+export type DisabledChatDraftReasoningEffortEnum = typeof DisabledChatDraftReasoningEffortEnum[keyof typeof DisabledChatDraftReasoningEffortEnum];
 
 /**
  *
@@ -4939,6 +5590,18 @@ export interface DisabledChatSettings {
      * @memberof DisabledChatSettings
      */
     api_key_configured?: DisabledChatSettingsApiKeyConfiguredEnum;
+    /**
+     *
+     * @type {DisabledChatSettingsReasoningEffortEnum}
+     * @memberof DisabledChatSettings
+     */
+    reasoning_effort?: DisabledChatSettingsReasoningEffortEnum;
+    /**
+     *
+     * @type {object}
+     * @memberof DisabledChatSettings
+     */
+    reasoning_effort_by_function?: object;
 }
 
 
@@ -4981,6 +5644,14 @@ export const DisabledChatSettingsApiKeyConfiguredEnum = {
     False: false
 } as const;
 export type DisabledChatSettingsApiKeyConfiguredEnum = typeof DisabledChatSettingsApiKeyConfiguredEnum[keyof typeof DisabledChatSettingsApiKeyConfiguredEnum];
+
+/**
+ * @export
+ */
+export const DisabledChatSettingsReasoningEffortEnum = {
+    Empty: ''
+} as const;
+export type DisabledChatSettingsReasoningEffortEnum = typeof DisabledChatSettingsReasoningEffortEnum[keyof typeof DisabledChatSettingsReasoningEffortEnum];
 
 /**
  *
@@ -7417,6 +8088,81 @@ export interface FreezeWorkingDraftResult {
      * @memberof FreezeWorkingDraftResult
      */
     replayed: boolean;
+}
+/**
+ *
+ * @export
+ * @interface GetSynthesisUpdateSummaries200Response
+ */
+export interface GetSynthesisUpdateSummaries200Response {
+    /**
+     *
+     * @type {string}
+     * @memberof GetSynthesisUpdateSummaries200Response
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {Array<GetSynthesisUpdateSummaries200ResponseItemsInner>}
+     * @memberof GetSynthesisUpdateSummaries200Response
+     */
+    items: Array<GetSynthesisUpdateSummaries200ResponseItemsInner>;
+}
+/**
+ *
+ * @export
+ * @interface GetSynthesisUpdateSummaries200ResponseItemsInner
+ */
+export interface GetSynthesisUpdateSummaries200ResponseItemsInner {
+    /**
+     *
+     * @type {string}
+     * @memberof GetSynthesisUpdateSummaries200ResponseItemsInner
+     */
+    note_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof GetSynthesisUpdateSummaries200ResponseItemsInner
+     */
+    current_revision_id: string;
+    /**
+     * Current proven published synthesis revision UUID, or empty when unpublished.
+     * @type {string}
+     * @memberof GetSynthesisUpdateSummaries200ResponseItemsInner
+     */
+    published_revision_id: string;
+    /**
+     *
+     * @type {Array<GetSynthesisUpdateSummaries200ResponseItemsInnerItemsInner>}
+     * @memberof GetSynthesisUpdateSummaries200ResponseItemsInner
+     */
+    items: Array<GetSynthesisUpdateSummaries200ResponseItemsInnerItemsInner>;
+}
+/**
+ *
+ * @export
+ * @interface GetSynthesisUpdateSummaries200ResponseItemsInnerItemsInner
+ */
+export interface GetSynthesisUpdateSummaries200ResponseItemsInnerItemsInner {
+    /**
+     *
+     * @type {string}
+     * @memberof GetSynthesisUpdateSummaries200ResponseItemsInnerItemsInner
+     */
+    revision_id: string;
+    /**
+     *
+     * @type {number}
+     * @memberof GetSynthesisUpdateSummaries200ResponseItemsInnerItemsInner
+     */
+    source_review_count: number;
+    /**
+     *
+     * @type {number}
+     * @memberof GetSynthesisUpdateSummaries200ResponseItemsInnerItemsInner
+     */
+    body_review_count: number;
 }
 /**
  *
@@ -14007,6 +14753,73 @@ export type JSONValue = Array<JSONValue> | boolean | number | string | { [key: s
 /**
  *
  * @export
+ * @interface KnowledgeAnchor
+ */
+export interface KnowledgeAnchor {
+    /**
+     *
+     * @type {string}
+     * @memberof KnowledgeAnchor
+     */
+    id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof KnowledgeAnchor
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof KnowledgeAnchor
+     */
+    note_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof KnowledgeAnchor
+     */
+    basis_revision_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof KnowledgeAnchor
+     */
+    title: string;
+    /**
+     *
+     * @type {AnchorScope}
+     * @memberof KnowledgeAnchor
+     */
+    scope: AnchorScope;
+    /**
+     *
+     * @type {number}
+     * @memberof KnowledgeAnchor
+     */
+    scope_version: number;
+    /**
+     *
+     * @type {number}
+     * @memberof KnowledgeAnchor
+     */
+    version: number;
+    /**
+     *
+     * @type {string}
+     * @memberof KnowledgeAnchor
+     */
+    created_at: string;
+    /**
+     *
+     * @type {string}
+     * @memberof KnowledgeAnchor
+     */
+    updated_at: string;
+}
+/**
+ *
+ * @export
  * @interface KnowledgeChangeBaseVersion
  */
 export interface KnowledgeChangeBaseVersion {
@@ -15928,6 +16741,167 @@ export const ModelLocalRuntimeModeEnum = {
 export type ModelLocalRuntimeModeEnum = typeof ModelLocalRuntimeModeEnum[keyof typeof ModelLocalRuntimeModeEnum];
 
 /**
+ * Missing function inherits the global reasoning effort. A present empty string requests provider default. Values are frozen with the model settings revision.
+ * @export
+ * @interface ModelReasoningEffortOverrides
+ */
+export interface ModelReasoningEffortOverrides {
+    /**
+     *
+     * @type {ModelReasoningEffortOverridesFileProfileEnum}
+     * @memberof ModelReasoningEffortOverrides
+     */
+    file_profile?: ModelReasoningEffortOverridesFileProfileEnum;
+    /**
+     *
+     * @type {ModelReasoningEffortOverridesKnowledgeOrganizationEnum}
+     * @memberof ModelReasoningEffortOverrides
+     */
+    knowledge_organization?: ModelReasoningEffortOverridesKnowledgeOrganizationEnum;
+    /**
+     *
+     * @type {ModelReasoningEffortOverridesAnchorScopeEnum}
+     * @memberof ModelReasoningEffortOverrides
+     */
+    anchor_scope?: ModelReasoningEffortOverridesAnchorScopeEnum;
+    /**
+     *
+     * @type {ModelReasoningEffortOverridesMainNoteSynthesisEnum}
+     * @memberof ModelReasoningEffortOverrides
+     */
+    main_note_synthesis?: ModelReasoningEffortOverridesMainNoteSynthesisEnum;
+    /**
+     *
+     * @type {ModelReasoningEffortOverridesManuscriptSourceReviewEnum}
+     * @memberof ModelReasoningEffortOverrides
+     */
+    manuscript_source_review?: ModelReasoningEffortOverridesManuscriptSourceReviewEnum;
+    /**
+     *
+     * @type {ModelReasoningEffortOverridesKnowledgeQnaEnum}
+     * @memberof ModelReasoningEffortOverrides
+     */
+    knowledge_qna?: ModelReasoningEffortOverridesKnowledgeQnaEnum;
+    /**
+     *
+     * @type {ModelReasoningEffortOverridesWorkspaceAnalysisEnum}
+     * @memberof ModelReasoningEffortOverrides
+     */
+    workspace_analysis?: ModelReasoningEffortOverridesWorkspaceAnalysisEnum;
+    /**
+     *
+     * @type {ModelReasoningEffortOverridesNoteInterviewEnum}
+     * @memberof ModelReasoningEffortOverrides
+     */
+    note_interview?: ModelReasoningEffortOverridesNoteInterviewEnum;
+}
+
+
+/**
+ * @export
+ */
+export const ModelReasoningEffortOverridesFileProfileEnum = {
+    Empty: '',
+    Low: 'low',
+    Medium: 'medium',
+    High: 'high',
+    Xhigh: 'xhigh',
+    Max: 'max'
+} as const;
+export type ModelReasoningEffortOverridesFileProfileEnum = typeof ModelReasoningEffortOverridesFileProfileEnum[keyof typeof ModelReasoningEffortOverridesFileProfileEnum];
+
+/**
+ * @export
+ */
+export const ModelReasoningEffortOverridesKnowledgeOrganizationEnum = {
+    Empty: '',
+    Low: 'low',
+    Medium: 'medium',
+    High: 'high',
+    Xhigh: 'xhigh',
+    Max: 'max'
+} as const;
+export type ModelReasoningEffortOverridesKnowledgeOrganizationEnum = typeof ModelReasoningEffortOverridesKnowledgeOrganizationEnum[keyof typeof ModelReasoningEffortOverridesKnowledgeOrganizationEnum];
+
+/**
+ * @export
+ */
+export const ModelReasoningEffortOverridesAnchorScopeEnum = {
+    Empty: '',
+    Low: 'low',
+    Medium: 'medium',
+    High: 'high',
+    Xhigh: 'xhigh',
+    Max: 'max'
+} as const;
+export type ModelReasoningEffortOverridesAnchorScopeEnum = typeof ModelReasoningEffortOverridesAnchorScopeEnum[keyof typeof ModelReasoningEffortOverridesAnchorScopeEnum];
+
+/**
+ * @export
+ */
+export const ModelReasoningEffortOverridesMainNoteSynthesisEnum = {
+    Empty: '',
+    Low: 'low',
+    Medium: 'medium',
+    High: 'high',
+    Xhigh: 'xhigh',
+    Max: 'max'
+} as const;
+export type ModelReasoningEffortOverridesMainNoteSynthesisEnum = typeof ModelReasoningEffortOverridesMainNoteSynthesisEnum[keyof typeof ModelReasoningEffortOverridesMainNoteSynthesisEnum];
+
+/**
+ * @export
+ */
+export const ModelReasoningEffortOverridesManuscriptSourceReviewEnum = {
+    Empty: '',
+    Low: 'low',
+    Medium: 'medium',
+    High: 'high',
+    Xhigh: 'xhigh',
+    Max: 'max'
+} as const;
+export type ModelReasoningEffortOverridesManuscriptSourceReviewEnum = typeof ModelReasoningEffortOverridesManuscriptSourceReviewEnum[keyof typeof ModelReasoningEffortOverridesManuscriptSourceReviewEnum];
+
+/**
+ * @export
+ */
+export const ModelReasoningEffortOverridesKnowledgeQnaEnum = {
+    Empty: '',
+    Low: 'low',
+    Medium: 'medium',
+    High: 'high',
+    Xhigh: 'xhigh',
+    Max: 'max'
+} as const;
+export type ModelReasoningEffortOverridesKnowledgeQnaEnum = typeof ModelReasoningEffortOverridesKnowledgeQnaEnum[keyof typeof ModelReasoningEffortOverridesKnowledgeQnaEnum];
+
+/**
+ * @export
+ */
+export const ModelReasoningEffortOverridesWorkspaceAnalysisEnum = {
+    Empty: '',
+    Low: 'low',
+    Medium: 'medium',
+    High: 'high',
+    Xhigh: 'xhigh',
+    Max: 'max'
+} as const;
+export type ModelReasoningEffortOverridesWorkspaceAnalysisEnum = typeof ModelReasoningEffortOverridesWorkspaceAnalysisEnum[keyof typeof ModelReasoningEffortOverridesWorkspaceAnalysisEnum];
+
+/**
+ * @export
+ */
+export const ModelReasoningEffortOverridesNoteInterviewEnum = {
+    Empty: '',
+    Low: 'low',
+    Medium: 'medium',
+    High: 'high',
+    Xhigh: 'xhigh',
+    Max: 'max'
+} as const;
+export type ModelReasoningEffortOverridesNoteInterviewEnum = typeof ModelReasoningEffortOverridesNoteInterviewEnum[keyof typeof ModelReasoningEffortOverridesNoteInterviewEnum];
+
+/**
  *
  * @export
  * @interface ModelSettingsCapabilities
@@ -16820,6 +17794,18 @@ export interface OllamaChatDraft {
      * @memberof OllamaChatDraft
      */
     api_key?: ModelAPIKeyClear;
+    /**
+     *
+     * @type {OllamaChatDraftReasoningEffortEnum}
+     * @memberof OllamaChatDraft
+     */
+    reasoning_effort?: OllamaChatDraftReasoningEffortEnum;
+    /**
+     *
+     * @type {object}
+     * @memberof OllamaChatDraft
+     */
+    reasoning_effort_by_function?: object;
 }
 
 
@@ -16846,6 +17832,14 @@ export const OllamaChatDraftBaseUrlEnum = {
     Http12700111434: 'http://127.0.0.1:11434'
 } as const;
 export type OllamaChatDraftBaseUrlEnum = typeof OllamaChatDraftBaseUrlEnum[keyof typeof OllamaChatDraftBaseUrlEnum];
+
+/**
+ * @export
+ */
+export const OllamaChatDraftReasoningEffortEnum = {
+    Empty: ''
+} as const;
+export type OllamaChatDraftReasoningEffortEnum = typeof OllamaChatDraftReasoningEffortEnum[keyof typeof OllamaChatDraftReasoningEffortEnum];
 
 /**
  *
@@ -16889,6 +17883,18 @@ export interface OllamaChatSettings {
      * @memberof OllamaChatSettings
      */
     api_key_configured?: OllamaChatSettingsApiKeyConfiguredEnum;
+    /**
+     *
+     * @type {OllamaChatSettingsReasoningEffortEnum}
+     * @memberof OllamaChatSettings
+     */
+    reasoning_effort?: OllamaChatSettingsReasoningEffortEnum;
+    /**
+     *
+     * @type {object}
+     * @memberof OllamaChatSettings
+     */
+    reasoning_effort_by_function?: object;
 }
 
 
@@ -16923,6 +17929,14 @@ export const OllamaChatSettingsApiKeyConfiguredEnum = {
     False: false
 } as const;
 export type OllamaChatSettingsApiKeyConfiguredEnum = typeof OllamaChatSettingsApiKeyConfiguredEnum[keyof typeof OllamaChatSettingsApiKeyConfiguredEnum];
+
+/**
+ * @export
+ */
+export const OllamaChatSettingsReasoningEffortEnum = {
+    Empty: ''
+} as const;
+export type OllamaChatSettingsReasoningEffortEnum = typeof OllamaChatSettingsReasoningEffortEnum[keyof typeof OllamaChatSettingsReasoningEffortEnum];
 
 /**
  *
@@ -21421,6 +22435,31 @@ export interface RemoveGitRemoteConfigRequest {
 /**
  *
  * @export
+ * @interface RequestAnchorRecommendation
+ */
+export interface RequestAnchorRecommendation {
+    /**
+     *
+     * @type {string}
+     * @memberof RequestAnchorRecommendation
+     */
+    note_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof RequestAnchorRecommendation
+     */
+    basis_revision_id: string;
+    /**
+     *
+     * @type {number}
+     * @memberof RequestAnchorRecommendation
+     */
+    expected_note_version: number;
+}
+/**
+ *
+ * @export
  * @interface RerankScore
  */
 export interface RerankScore {
@@ -21890,6 +22929,19 @@ export const RetrievalSummaryEffectiveModeEnum = {
 } as const;
 export type RetrievalSummaryEffectiveModeEnum = typeof RetrievalSummaryEffectiveModeEnum[keyof typeof RetrievalSummaryEffectiveModeEnum];
 
+/**
+ *
+ * @export
+ * @interface RetryAnchorRecommendation
+ */
+export interface RetryAnchorRecommendation {
+    /**
+     *
+     * @type {number}
+     * @memberof RetryAnchorRecommendation
+     */
+    expected_version: number;
+}
 /**
  *
  * @export
@@ -25285,6 +26337,147 @@ export interface SessionInfo {
 /**
  *
  * @export
+ * @interface SourceKnowledgeDirectory
+ */
+export interface SourceKnowledgeDirectory {
+    /**
+     *
+     * @type {string}
+     * @memberof SourceKnowledgeDirectory
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SourceKnowledgeDirectory
+     */
+    source_version_id: string;
+    /**
+     *
+     * @type {SourceKnowledgeDirectoryStatusEnum}
+     * @memberof SourceKnowledgeDirectory
+     */
+    status: SourceKnowledgeDirectoryStatusEnum;
+    /**
+     *
+     * @type {KnowledgeProfileStatus}
+     * @memberof SourceKnowledgeDirectory
+     */
+    profile_status?: KnowledgeProfileStatus;
+    /**
+     *
+     * @type {string}
+     * @memberof SourceKnowledgeDirectory
+     */
+    profile_revision_id?: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SourceKnowledgeDirectory
+     */
+    parse_projection_id?: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SourceKnowledgeDirectory
+     */
+    summary?: string;
+    /**
+     *
+     * @type {Array<KnowledgeProfileCandidate>}
+     * @memberof SourceKnowledgeDirectory
+     */
+    topics?: Array<KnowledgeProfileCandidate>;
+    /**
+     *
+     * @type {Array<KnowledgeProfileCandidate>}
+     * @memberof SourceKnowledgeDirectory
+     */
+    terms?: Array<KnowledgeProfileCandidate>;
+    /**
+     *
+     * @type {Array<SourceKnowledgeDirectoryPoint>}
+     * @memberof SourceKnowledgeDirectory
+     */
+    points?: Array<SourceKnowledgeDirectoryPoint>;
+}
+
+
+/**
+ * @export
+ */
+export const SourceKnowledgeDirectoryStatusEnum = {
+    Analyzed: 'ANALYZED',
+    Unanalyzed: 'UNANALYZED',
+    Unavailable: 'UNAVAILABLE',
+    Unrecorded: 'UNRECORDED'
+} as const;
+export type SourceKnowledgeDirectoryStatusEnum = typeof SourceKnowledgeDirectoryStatusEnum[keyof typeof SourceKnowledgeDirectoryStatusEnum];
+
+/**
+ *
+ * @export
+ * @interface SourceKnowledgeDirectoryPoint
+ */
+export interface SourceKnowledgeDirectoryPoint {
+    /**
+     *
+     * @type {SourceKnowledgeDirectoryPointLocator}
+     * @memberof SourceKnowledgeDirectoryPoint
+     */
+    locator: SourceKnowledgeDirectoryPointLocator;
+    /**
+     *
+     * @type {string}
+     * @memberof SourceKnowledgeDirectoryPoint
+     */
+    text: string;
+    /**
+     *
+     * @type {Array<string>}
+     * @memberof SourceKnowledgeDirectoryPoint
+     */
+    source_span_ids: Array<string>;
+}
+/**
+ *
+ * @export
+ * @interface SourceKnowledgeDirectoryPointLocator
+ */
+export interface SourceKnowledgeDirectoryPointLocator {
+    /**
+     *
+     * @type {string}
+     * @memberof SourceKnowledgeDirectoryPointLocator
+     */
+    profile_revision_id: string;
+    /**
+     *
+     * @type {SourceKnowledgeDirectoryPointLocatorKindEnum}
+     * @memberof SourceKnowledgeDirectoryPointLocator
+     */
+    kind: SourceKnowledgeDirectoryPointLocatorKindEnum;
+    /**
+     *
+     * @type {number}
+     * @memberof SourceKnowledgeDirectoryPointLocator
+     */
+    index: number;
+}
+
+
+/**
+ * @export
+ */
+export const SourceKnowledgeDirectoryPointLocatorKindEnum = {
+    KnowledgePoint: 'KNOWLEDGE_POINT',
+    Example: 'EXAMPLE'
+} as const;
+export type SourceKnowledgeDirectoryPointLocatorKindEnum = typeof SourceKnowledgeDirectoryPointLocatorKindEnum[keyof typeof SourceKnowledgeDirectoryPointLocatorKindEnum];
+
+/**
+ *
+ * @export
  * @interface SourceVersionPage
  */
 export interface SourceVersionPage {
@@ -25844,6 +27037,470 @@ export type SuccessfulEmbeddingConnectionTestEndpointPathEnum = typeof Successfu
 /**
  *
  * @export
+ * @interface SynthesisBodyImpact
+ */
+export interface SynthesisBodyImpact {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisBodyImpact
+     */
+    id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisBodyImpact
+     */
+    item_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisBodyImpact
+     */
+    upstream_note_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisBodyImpact
+     */
+    upstream_revision_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisBodyImpact
+     */
+    upstream_item_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisBodyImpact
+     */
+    upstream_publication_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisBodyImpact
+     */
+    publication_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisBodyImpact
+     */
+    published_revision_id: string;
+    /**
+     *
+     * @type {SynthesisBodyImpactReasonEnum}
+     * @memberof SynthesisBodyImpact
+     */
+    reason: SynthesisBodyImpactReasonEnum;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisBodyImpact
+     */
+    detected_at: string;
+}
+
+
+/**
+ * @export
+ */
+export const SynthesisBodyImpactReasonEnum = {
+    ContentChanged: 'CONTENT_CHANGED',
+    ItemMissing: 'ITEM_MISSING'
+} as const;
+export type SynthesisBodyImpactReasonEnum = typeof SynthesisBodyImpactReasonEnum[keyof typeof SynthesisBodyImpactReasonEnum];
+
+/**
+ *
+ * @export
+ * @interface SynthesisBodyImpacts
+ */
+export interface SynthesisBodyImpacts {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisBodyImpacts
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisBodyImpacts
+     */
+    note_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisBodyImpacts
+     */
+    revision_id: string;
+    /**
+     *
+     * @type {Array<SynthesisBodyImpact>}
+     * @memberof SynthesisBodyImpacts
+     */
+    items: Array<SynthesisBodyImpact>;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisBodyImpacts
+     */
+    next_after_id: string | null;
+}
+/**
+ * Exact included fragment of an immutable, proven published main-note revision. Shared sources alone do not create this reference.
+ * @export
+ * @interface SynthesisBodyReference
+ */
+export interface SynthesisBodyReference {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisBodyReference
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisBodyReference
+     */
+    note_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisBodyReference
+     */
+    revision_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisBodyReference
+     */
+    publication_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisBodyReference
+     */
+    item_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisBodyReference
+     */
+    projection_hash: string;
+}
+/**
+ *
+ * @export
+ * @interface SynthesisCandidateRemergeApply
+ */
+export interface SynthesisCandidateRemergeApply {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisCandidateRemergeApply
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisCandidateRemergeApply
+     */
+    note_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisCandidateRemergeApply
+     */
+    attempt_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisCandidateRemergeApply
+     */
+    idempotency_key: string;
+    /**
+     *
+     * @type {SynthesisManuscriptResolution}
+     * @memberof SynthesisCandidateRemergeApply
+     */
+    resolution?: SynthesisManuscriptResolution;
+}
+/**
+ *
+ * @export
+ * @interface SynthesisCandidateRemergeBegin
+ */
+export interface SynthesisCandidateRemergeBegin {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisCandidateRemergeBegin
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisCandidateRemergeBegin
+     */
+    note_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisCandidateRemergeBegin
+     */
+    expected_revision_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisCandidateRemergeBegin
+     */
+    expected_document_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisCandidateRemergeBegin
+     */
+    expected_publication_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisCandidateRemergeBegin
+     */
+    expected_proposal_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisCandidateRemergeBegin
+     */
+    expected_proposal_revision_id: string;
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisCandidateRemergeBegin
+     */
+    expected_note_version: number;
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisCandidateRemergeBegin
+     */
+    expected_document_version: number;
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisCandidateRemergeBegin
+     */
+    expected_proposal_version: number;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisCandidateRemergeBegin
+     */
+    idempotency_key: string;
+}
+/**
+ *
+ * @export
+ * @interface SynthesisCandidateRemergeProvenance
+ */
+export interface SynthesisCandidateRemergeProvenance {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisCandidateRemergeProvenance
+     */
+    attempt_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisCandidateRemergeProvenance
+     */
+    source_revision_id: string;
+}
+/**
+ *
+ * @export
+ * @interface SynthesisCandidateRemergeResult
+ */
+export interface SynthesisCandidateRemergeResult {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisCandidateRemergeResult
+     */
+    revision_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisCandidateRemergeResult
+     */
+    article_revision_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisCandidateRemergeResult
+     */
+    publication_id?: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisCandidateRemergeResult
+     */
+    proposal_id?: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisCandidateRemergeResult
+     */
+    proposal_revision_id?: string;
+}
+/**
+ *
+ * @export
+ * @interface SynthesisCandidateRemergeReview
+ */
+export interface SynthesisCandidateRemergeReview {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisCandidateRemergeReview
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisCandidateRemergeReview
+     */
+    note_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisCandidateRemergeReview
+     */
+    attempt_id: string;
+    /**
+     *
+     * @type {SynthesisCandidateRemergeReviewStateEnum}
+     * @memberof SynthesisCandidateRemergeReview
+     */
+    state: SynthesisCandidateRemergeReviewStateEnum;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisCandidateRemergeReview
+     */
+    preview_fingerprint: string;
+    /**
+     *
+     * @type {SynthesisManuscriptReview}
+     * @memberof SynthesisCandidateRemergeReview
+     */
+    review?: SynthesisManuscriptReview;
+    /**
+     *
+     * @type {SynthesisCandidateRemergeResult}
+     * @memberof SynthesisCandidateRemergeReview
+     */
+    result?: SynthesisCandidateRemergeResult;
+    /**
+     *
+     * @type {boolean}
+     * @memberof SynthesisCandidateRemergeReview
+     */
+    replayed: boolean;
+    /**
+     * Exact complete merged manuscript, present for READY only, including an empty manuscript. UTF-8 without NUL, at most 1 MiB. Never reconstructed from the old candidate by the client.
+     * @type {string}
+     * @memberof SynthesisCandidateRemergeReview
+     */
+    candidate?: string;
+}
+
+
+/**
+ * @export
+ */
+export const SynthesisCandidateRemergeReviewStateEnum = {
+    Ready: 'READY',
+    Conflicts: 'CONFLICTS',
+    Applied: 'APPLIED'
+} as const;
+export type SynthesisCandidateRemergeReviewStateEnum = typeof SynthesisCandidateRemergeReviewStateEnum[keyof typeof SynthesisCandidateRemergeReviewStateEnum];
+
+/**
+ *
+ * @export
+ * @interface SynthesisCandidateRemergeTarget
+ */
+export interface SynthesisCandidateRemergeTarget {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisCandidateRemergeTarget
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisCandidateRemergeTarget
+     */
+    note_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisCandidateRemergeTarget
+     */
+    expected_revision_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisCandidateRemergeTarget
+     */
+    expected_document_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisCandidateRemergeTarget
+     */
+    expected_publication_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisCandidateRemergeTarget
+     */
+    expected_proposal_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisCandidateRemergeTarget
+     */
+    expected_proposal_revision_id: string;
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisCandidateRemergeTarget
+     */
+    expected_note_version: number;
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisCandidateRemergeTarget
+     */
+    expected_document_version: number;
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisCandidateRemergeTarget
+     */
+    expected_proposal_version: number;
+}
+/**
+ *
+ * @export
  * @interface SynthesisConflictContent
  */
 export interface SynthesisConflictContent {
@@ -25896,6 +27553,12 @@ export interface SynthesisConflictItem {
      * @memberof SynthesisConflictItem
      */
     gap: null;
+    /**
+     *
+     * @type {SynthesisBodyReference}
+     * @memberof SynthesisConflictItem
+     */
+    body_reference?: SynthesisBodyReference;
 }
 
 
@@ -25943,6 +27606,12 @@ export interface SynthesisFactItem {
      * @memberof SynthesisFactItem
      */
     gap: null;
+    /**
+     *
+     * @type {SynthesisBodyReference}
+     * @memberof SynthesisFactItem
+     */
+    body_reference?: SynthesisBodyReference;
 }
 
 
@@ -26040,6 +27709,12 @@ export interface SynthesisGapItem {
      * @memberof SynthesisGapItem
      */
     gap: SynthesisGapContent;
+    /**
+     *
+     * @type {SynthesisBodyReference}
+     * @memberof SynthesisGapItem
+     */
+    body_reference?: SynthesisBodyReference;
 }
 
 
@@ -26052,12 +27727,1231 @@ export const SynthesisGapItemKindEnum = {
 export type SynthesisGapItemKindEnum = typeof SynthesisGapItemKindEnum[keyof typeof SynthesisGapItemKindEnum];
 
 /**
+ *
+ * @export
+ * @interface SynthesisGoalCandidate
+ */
+export interface SynthesisGoalCandidate {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisGoalCandidate
+     */
+    note_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisGoalCandidate
+     */
+    revision_id: string;
+}
+/**
+ *
+ * @export
+ * @interface SynthesisGoalCreated
+ */
+export interface SynthesisGoalCreated {
+    /**
+     *
+     * @type {SynthesisGoalRequest}
+     * @memberof SynthesisGoalCreated
+     */
+    request: SynthesisGoalRequest;
+    /**
+     *
+     * @type {boolean}
+     * @memberof SynthesisGoalCreated
+     */
+    replayed: boolean;
+}
+/**
+ *
+ * @export
+ * @interface SynthesisGoalPage
+ */
+export interface SynthesisGoalPage {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisGoalPage
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {Array<SynthesisGoalView>}
+     * @memberof SynthesisGoalPage
+     */
+    items: Array<SynthesisGoalView>;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisGoalPage
+     */
+    next_cursor: string;
+}
+/**
+ *
+ * @export
+ * @interface SynthesisGoalProgress
+ */
+export interface SynthesisGoalProgress {
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisGoalProgress
+     */
+    catalog_batches: number;
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisGoalProgress
+     */
+    prepared_batches: number;
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisGoalProgress
+     */
+    selections: number;
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisGoalProgress
+     */
+    pending: number;
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisGoalProgress
+     */
+    running: number;
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisGoalProgress
+     */
+    succeeded: number;
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisGoalProgress
+     */
+    failed: number;
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisGoalProgress
+     */
+    recovery_required: number;
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisGoalProgress
+     */
+    selected_points: number;
+    /**
+     * Every catalog batch and selection completed; this alone does not mean a note exists.
+     * @type {boolean}
+     * @memberof SynthesisGoalProgress
+     */
+    ready: boolean;
+    /**
+     * Unprepared catalog batches with a recorded retry deferral.
+     * @type {number}
+     * @memberof SynthesisGoalProgress
+     */
+    preparation_failures: number;
+    /**
+     * One representative preparation failure code; null after all failed batches recover.
+     * @type {string}
+     * @memberof SynthesisGoalProgress
+     */
+    preparation_error_code: string;
+}
+/**
+ *
+ * @export
+ * @interface SynthesisGoalRequest
+ */
+export interface SynthesisGoalRequest {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisGoalRequest
+     */
+    id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisGoalRequest
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisGoalRequest
+     */
+    goal: string;
+    /**
+     *
+     * @type {SynthesisGoalRequestStatusEnum}
+     * @memberof SynthesisGoalRequest
+     */
+    status: SynthesisGoalRequestStatusEnum;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisGoalRequest
+     */
+    error_code: string;
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisGoalRequest
+     */
+    version: number;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisGoalRequest
+     */
+    created_at: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisGoalRequest
+     */
+    updated_at: string;
+}
+
+
+/**
+ * @export
+ */
+export const SynthesisGoalRequestStatusEnum = {
+    Discovering: 'DISCOVERING',
+    CatalogReady: 'CATALOG_READY'
+} as const;
+export type SynthesisGoalRequestStatusEnum = typeof SynthesisGoalRequestStatusEnum[keyof typeof SynthesisGoalRequestStatusEnum];
+
+/**
+ *
+ * @export
+ * @interface SynthesisGoalSelection
+ */
+export interface SynthesisGoalSelection {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisGoalSelection
+     */
+    id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisGoalSelection
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisGoalSelection
+     */
+    request_id: string;
+    /**
+     *
+     * @type {SynthesisGoalSelectionStatusEnum}
+     * @memberof SynthesisGoalSelection
+     */
+    status: SynthesisGoalSelectionStatusEnum;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisGoalSelection
+     */
+    error_code: string;
+    /**
+     *
+     * @type {boolean}
+     * @memberof SynthesisGoalSelection
+     */
+    retryable: boolean;
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisGoalSelection
+     */
+    version: number;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisGoalSelection
+     */
+    created_at: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisGoalSelection
+     */
+    updated_at: string;
+}
+
+
+/**
+ * @export
+ */
+export const SynthesisGoalSelectionStatusEnum = {
+    Pending: 'PENDING',
+    Running: 'RUNNING',
+    Succeeded: 'SUCCEEDED',
+    Failed: 'FAILED',
+    RecoveryRequired: 'RECOVERY_REQUIRED'
+} as const;
+export type SynthesisGoalSelectionStatusEnum = typeof SynthesisGoalSelectionStatusEnum[keyof typeof SynthesisGoalSelectionStatusEnum];
+
+/**
+ *
+ * @export
+ * @interface SynthesisGoalSelectionPage
+ */
+export interface SynthesisGoalSelectionPage {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisGoalSelectionPage
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisGoalSelectionPage
+     */
+    request_id: string;
+    /**
+     *
+     * @type {Array<SynthesisGoalSelection>}
+     * @memberof SynthesisGoalSelectionPage
+     */
+    items: Array<SynthesisGoalSelection>;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisGoalSelectionPage
+     */
+    next_after_id: string;
+}
+/**
+ *
+ * @export
+ * @interface SynthesisGoalView
+ */
+export interface SynthesisGoalView {
+    /**
+     *
+     * @type {SynthesisGoalRequest}
+     * @memberof SynthesisGoalView
+     */
+    request: SynthesisGoalRequest;
+    /**
+     *
+     * @type {SynthesisGoalProgress}
+     * @memberof SynthesisGoalView
+     */
+    progress: SynthesisGoalProgress;
+    /**
+     *
+     * @type {SynthesisProcessing}
+     * @memberof SynthesisGoalView
+     */
+    processing: SynthesisProcessing;
+    /**
+     *
+     * @type {SynthesisGoalCandidate}
+     * @memberof SynthesisGoalView
+     */
+    candidate: SynthesisGoalCandidate;
+}
+/**
+ *
+ * @export
+ * @interface SynthesisHistoricalRepublishApply
+ */
+export interface SynthesisHistoricalRepublishApply {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishApply
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishApply
+     */
+    note_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishApply
+     */
+    attempt_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishApply
+     */
+    idempotency_key: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishApply
+     */
+    preview_fingerprint: string;
+    /**
+     *
+     * @type {SynthesisHistoricalRepublishApplyConfirmExactRestoreEnum}
+     * @memberof SynthesisHistoricalRepublishApply
+     */
+    confirm_exact_restore: SynthesisHistoricalRepublishApplyConfirmExactRestoreEnum;
+    /**
+     *
+     * @type {boolean}
+     * @memberof SynthesisHistoricalRepublishApply
+     */
+    retire_current_candidate: boolean;
+}
+
+
+/**
+ * @export
+ */
+export const SynthesisHistoricalRepublishApplyConfirmExactRestoreEnum = {
+    True: true
+} as const;
+export type SynthesisHistoricalRepublishApplyConfirmExactRestoreEnum = typeof SynthesisHistoricalRepublishApplyConfirmExactRestoreEnum[keyof typeof SynthesisHistoricalRepublishApplyConfirmExactRestoreEnum];
+
+/**
+ *
+ * @export
+ * @interface SynthesisHistoricalRepublishBegin
+ */
+export interface SynthesisHistoricalRepublishBegin {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishBegin
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishBegin
+     */
+    note_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishBegin
+     */
+    expected_revision_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishBegin
+     */
+    expected_document_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishBegin
+     */
+    expected_publication_id?: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishBegin
+     */
+    expected_proposal_id?: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishBegin
+     */
+    expected_proposal_revision_id?: string;
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisHistoricalRepublishBegin
+     */
+    expected_note_version: number;
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisHistoricalRepublishBegin
+     */
+    expected_document_version: number;
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisHistoricalRepublishBegin
+     */
+    expected_proposal_version?: number;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishBegin
+     */
+    selected_revision_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishBegin
+     */
+    selected_projection_hash: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishBegin
+     */
+    selected_publication_id?: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishBegin
+     */
+    selected_proposal_commit_id?: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishBegin
+     */
+    expected_published_revision_id?: string;
+    /**
+     *
+     * @type {boolean}
+     * @memberof SynthesisHistoricalRepublishBegin
+     */
+    requires_retirement: boolean;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishBegin
+     */
+    idempotency_key: string;
+}
+/**
+ * Exact selected historical content and source proof, copied by human confirmation. No new AI invocation.
+ * @export
+ * @interface SynthesisHistoricalRepublishProvenance
+ */
+export interface SynthesisHistoricalRepublishProvenance {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishProvenance
+     */
+    attempt_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishProvenance
+     */
+    selected_revision_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishProvenance
+     */
+    selected_publication_id?: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishProvenance
+     */
+    selected_proposal_commit_id?: string;
+}
+/**
+ *
+ * @export
+ * @interface SynthesisHistoricalRepublishReview
+ */
+export interface SynthesisHistoricalRepublishReview {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishReview
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishReview
+     */
+    note_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishReview
+     */
+    attempt_id: string;
+    /**
+     *
+     * @type {SynthesisHistoricalRepublishReviewStateEnum}
+     * @memberof SynthesisHistoricalRepublishReview
+     */
+    state: SynthesisHistoricalRepublishReviewStateEnum;
+    /**
+     *
+     * @type {SynthesisHistoricalRepublishTarget}
+     * @memberof SynthesisHistoricalRepublishReview
+     */
+    target: SynthesisHistoricalRepublishTarget;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishReview
+     */
+    candidate: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishReview
+     */
+    current_content: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishReview
+     */
+    published_content: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishReview
+     */
+    preview_fingerprint: string;
+    /**
+     *
+     * @type {Array<SynthesisHistoricalRepublishWarning>}
+     * @memberof SynthesisHistoricalRepublishReview
+     */
+    warnings: Array<SynthesisHistoricalRepublishWarning>;
+    /**
+     *
+     * @type {SynthesisCandidateRemergeResult}
+     * @memberof SynthesisHistoricalRepublishReview
+     */
+    result?: SynthesisCandidateRemergeResult;
+    /**
+     *
+     * @type {boolean}
+     * @memberof SynthesisHistoricalRepublishReview
+     */
+    replayed: boolean;
+    /**
+     *
+     * @type {SynthesisHistoricalRepublishScope}
+     * @memberof SynthesisHistoricalRepublishReview
+     */
+    current_scope: SynthesisHistoricalRepublishScope | null;
+}
+
+
+/**
+ * @export
+ */
+export const SynthesisHistoricalRepublishReviewStateEnum = {
+    Ready: 'READY',
+    Applied: 'APPLIED'
+} as const;
+export type SynthesisHistoricalRepublishReviewStateEnum = typeof SynthesisHistoricalRepublishReviewStateEnum[keyof typeof SynthesisHistoricalRepublishReviewStateEnum];
+
+/**
+ *
+ * @export
+ * @interface SynthesisHistoricalRepublishScope
+ */
+export interface SynthesisHistoricalRepublishScope {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishScope
+     */
+    id: string;
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisHistoricalRepublishScope
+     */
+    scope_version: number;
+    /**
+     *
+     * @type {AnchorScope}
+     * @memberof SynthesisHistoricalRepublishScope
+     */
+    scope: AnchorScope;
+}
+/**
+ *
+ * @export
+ * @interface SynthesisHistoricalRepublishTarget
+ */
+export interface SynthesisHistoricalRepublishTarget {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishTarget
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishTarget
+     */
+    note_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishTarget
+     */
+    expected_revision_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishTarget
+     */
+    expected_document_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishTarget
+     */
+    expected_publication_id?: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishTarget
+     */
+    expected_proposal_id?: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishTarget
+     */
+    expected_proposal_revision_id?: string;
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisHistoricalRepublishTarget
+     */
+    expected_note_version: number;
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisHistoricalRepublishTarget
+     */
+    expected_document_version: number;
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisHistoricalRepublishTarget
+     */
+    expected_proposal_version?: number;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishTarget
+     */
+    selected_revision_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishTarget
+     */
+    selected_projection_hash: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishTarget
+     */
+    selected_publication_id?: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishTarget
+     */
+    selected_proposal_commit_id?: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishTarget
+     */
+    expected_published_revision_id?: string;
+    /**
+     *
+     * @type {boolean}
+     * @memberof SynthesisHistoricalRepublishTarget
+     */
+    requires_retirement: boolean;
+}
+/**
+ *
+ * @export
+ * @interface SynthesisHistoricalRepublishWarning
+ */
+export interface SynthesisHistoricalRepublishWarning {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishWarning
+     */
+    code: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishWarning
+     */
+    source_id?: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisHistoricalRepublishWarning
+     */
+    source_version_id?: string;
+}
+/**
  * @type SynthesisItem
  *
  * @export
  */
 // OpenAPI Generator 7.24.0 override: preserve the null branch of nullable oneOf aliases.
 export type SynthesisItem = SynthesisConflictItem | SynthesisFactItem | SynthesisGapItem;
+
+/**
+ *
+ * @export
+ * @interface SynthesisKnowledgePointProjection
+ */
+export interface SynthesisKnowledgePointProjection {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisKnowledgePointProjection
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisKnowledgePointProjection
+     */
+    note_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisKnowledgePointProjection
+     */
+    revision_id: string;
+    /**
+     *
+     * @type {SynthesisSourceRef}
+     * @memberof SynthesisKnowledgePointProjection
+     */
+    reference: SynthesisSourceRef;
+    /**
+     *
+     * @type {SourceKnowledgeDirectory}
+     * @memberof SynthesisKnowledgePointProjection
+     */
+    directory: SourceKnowledgeDirectory;
+    /**
+     *
+     * @type {Array<SourceKnowledgeDirectoryPoint>}
+     * @memberof SynthesisKnowledgePointProjection
+     */
+    points: Array<SourceKnowledgeDirectoryPoint>;
+}
+/**
+ *
+ * @export
+ * @interface SynthesisManuscriptBinding
+ */
+export interface SynthesisManuscriptBinding {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisManuscriptBinding
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisManuscriptBinding
+     */
+    processing_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisManuscriptBinding
+     */
+    human_task_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisManuscriptBinding
+     */
+    run_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisManuscriptBinding
+     */
+    node_run_id: string;
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisManuscriptBinding
+     */
+    target_version: number;
+}
+/**
+ *
+ * @export
+ * @interface SynthesisManuscriptConflict
+ */
+export interface SynthesisManuscriptConflict {
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisManuscriptConflict
+     */
+    ordinal: number;
+    /**
+     * UTF-8 text, at most 1 MiB; NUL and invalid Unicode are rejected.
+     * @type {string}
+     * @memberof SynthesisManuscriptConflict
+     */
+    base: string;
+    /**
+     * UTF-8 text, at most 1 MiB; NUL and invalid Unicode are rejected.
+     * @type {string}
+     * @memberof SynthesisManuscriptConflict
+     */
+    current: string;
+    /**
+     * UTF-8 text, at most 1 MiB; NUL and invalid Unicode are rejected.
+     * @type {string}
+     * @memberof SynthesisManuscriptConflict
+     */
+    proposed: string;
+}
+/**
+ *
+ * @export
+ * @interface SynthesisManuscriptDecision
+ */
+export interface SynthesisManuscriptDecision {
+    /**
+     *
+     * @type {SynthesisManuscriptBinding}
+     * @memberof SynthesisManuscriptDecision
+     */
+    binding: SynthesisManuscriptBinding;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisManuscriptDecision
+     */
+    note_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisManuscriptDecision
+     */
+    attempt_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisManuscriptDecision
+     */
+    capture_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisManuscriptDecision
+     */
+    idempotency_key: string;
+    /**
+     *
+     * @type {SynthesisManuscriptResolution}
+     * @memberof SynthesisManuscriptDecision
+     */
+    resolution: SynthesisManuscriptResolution;
+}
+/**
+ *
+ * @export
+ * @interface SynthesisManuscriptDetail
+ */
+export interface SynthesisManuscriptDetail {
+    /**
+     *
+     * @type {SynthesisManuscriptBinding}
+     * @memberof SynthesisManuscriptDetail
+     */
+    binding: SynthesisManuscriptBinding;
+    /**
+     *
+     * @type {SynthesisManuscriptTarget}
+     * @memberof SynthesisManuscriptDetail
+     */
+    target: SynthesisManuscriptTarget;
+    /**
+     *
+     * @type {SynthesisManuscriptReview}
+     * @memberof SynthesisManuscriptDetail
+     */
+    review?: SynthesisManuscriptReview;
+}
+/**
+ *
+ * @export
+ * @interface SynthesisManuscriptDisplay
+ */
+export interface SynthesisManuscriptDisplay {
+    /**
+     *
+     * @type {SynthesisManuscriptDisplayRendererVersionEnum}
+     * @memberof SynthesisManuscriptDisplay
+     */
+    renderer_version: SynthesisManuscriptDisplayRendererVersionEnum;
+    /**
+     * Exact immutable manuscript, bounded to 1 MiB UTF-8 bytes; NUL and malformed Unicode are rejected.
+     * @type {string}
+     * @memberof SynthesisManuscriptDisplay
+     */
+    full_content: string;
+    /**
+     *
+     * @type {boolean}
+     * @memberof SynthesisManuscriptDisplay
+     */
+    manual_changes: boolean;
+    /**
+     *
+     * @type {boolean}
+     * @memberof SynthesisManuscriptDisplay
+     */
+    review_required: boolean;
+    /**
+     * Audit-only references for review, never trusted current content or generation input.
+     * @type {Array<SynthesisSourceRef>}
+     * @memberof SynthesisManuscriptDisplay
+     */
+    historical_sources: Array<SynthesisSourceRef>;
+}
+
+
+/**
+ * @export
+ */
+export const SynthesisManuscriptDisplayRendererVersionEnum = {
+    SynthesisMarkdownV2: 'synthesis-markdown/v2'
+} as const;
+export type SynthesisManuscriptDisplayRendererVersionEnum = typeof SynthesisManuscriptDisplayRendererVersionEnum[keyof typeof SynthesisManuscriptDisplayRendererVersionEnum];
+
+/**
+ *
+ * @export
+ * @interface SynthesisManuscriptResolution
+ */
+export interface SynthesisManuscriptResolution {
+    /**
+     *
+     * @type {SynthesisManuscriptResolutionStageEnum}
+     * @memberof SynthesisManuscriptResolution
+     */
+    stage: SynthesisManuscriptResolutionStageEnum;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisManuscriptResolution
+     */
+    preview_fingerprint: string;
+    /**
+     *
+     * @type {Array<number>}
+     * @memberof SynthesisManuscriptResolution
+     */
+    acknowledged_ordinals: Array<number>;
+    /**
+     * UTF-8 text, at most 1 MiB; NUL and invalid Unicode are rejected.
+     * @type {string}
+     * @memberof SynthesisManuscriptResolution
+     */
+    final_content: string;
+}
+
+
+/**
+ * @export
+ */
+export const SynthesisManuscriptResolutionStageEnum = {
+    CandidateManualContent: 'CANDIDATE_MANUAL_CONTENT',
+    WorkspaceManualContent: 'WORKSPACE_MANUAL_CONTENT'
+} as const;
+export type SynthesisManuscriptResolutionStageEnum = typeof SynthesisManuscriptResolutionStageEnum[keyof typeof SynthesisManuscriptResolutionStageEnum];
+
+/**
+ *
+ * @export
+ * @interface SynthesisManuscriptResume
+ */
+export interface SynthesisManuscriptResume {
+    /**
+     *
+     * @type {SynthesisManuscriptBinding}
+     * @memberof SynthesisManuscriptResume
+     */
+    binding: SynthesisManuscriptBinding;
+}
+/**
+ *
+ * @export
+ * @interface SynthesisManuscriptReview
+ */
+export interface SynthesisManuscriptReview {
+    /**
+     *
+     * @type {SynthesisManuscriptReviewStageEnum}
+     * @memberof SynthesisManuscriptReview
+     */
+    stage: SynthesisManuscriptReviewStageEnum;
+    /**
+     * UTF-8 text, at most 1 MiB; NUL and invalid Unicode are rejected.
+     * @type {string}
+     * @memberof SynthesisManuscriptReview
+     */
+    base: string;
+    /**
+     * UTF-8 text, at most 1 MiB; NUL and invalid Unicode are rejected.
+     * @type {string}
+     * @memberof SynthesisManuscriptReview
+     */
+    current: string;
+    /**
+     * UTF-8 text, at most 1 MiB; NUL and invalid Unicode are rejected.
+     * @type {string}
+     * @memberof SynthesisManuscriptReview
+     */
+    proposed: string;
+    /**
+     * UTF-8 text, at most 1 MiB; NUL and invalid Unicode are rejected.
+     * @type {string}
+     * @memberof SynthesisManuscriptReview
+     */
+    candidate: string;
+    /**
+     *
+     * @type {Array<SynthesisManuscriptConflict>}
+     * @memberof SynthesisManuscriptReview
+     */
+    conflicts: Array<SynthesisManuscriptConflict>;
+}
+
+
+/**
+ * @export
+ */
+export const SynthesisManuscriptReviewStageEnum = {
+    CandidateManualContent: 'CANDIDATE_MANUAL_CONTENT',
+    WorkspaceManualContent: 'WORKSPACE_MANUAL_CONTENT'
+} as const;
+export type SynthesisManuscriptReviewStageEnum = typeof SynthesisManuscriptReviewStageEnum[keyof typeof SynthesisManuscriptReviewStageEnum];
+
+/**
+ *
+ * @export
+ * @interface SynthesisManuscriptSummary
+ */
+export interface SynthesisManuscriptSummary {
+    /**
+     *
+     * @type {SynthesisManuscriptBinding}
+     * @memberof SynthesisManuscriptSummary
+     */
+    binding: SynthesisManuscriptBinding;
+    /**
+     *
+     * @type {boolean}
+     * @memberof SynthesisManuscriptSummary
+     */
+    ready: boolean;
+    /**
+     *
+     * @type {boolean}
+     * @memberof SynthesisManuscriptSummary
+     */
+    submitted: boolean;
+    /**
+     *
+     * @type {Array<SynthesisManuscriptTarget>}
+     * @memberof SynthesisManuscriptSummary
+     */
+    targets: Array<SynthesisManuscriptTarget>;
+}
+/**
+ *
+ * @export
+ * @interface SynthesisManuscriptTarget
+ */
+export interface SynthesisManuscriptTarget {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisManuscriptTarget
+     */
+    note_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisManuscriptTarget
+     */
+    attempt_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisManuscriptTarget
+     */
+    capture_id: string;
+    /**
+     *
+     * @type {SynthesisManuscriptTargetStageEnum}
+     * @memberof SynthesisManuscriptTarget
+     */
+    stage?: SynthesisManuscriptTargetStageEnum;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisManuscriptTarget
+     */
+    preview_fingerprint: string;
+    /**
+     *
+     * @type {boolean}
+     * @memberof SynthesisManuscriptTarget
+     */
+    ready: boolean;
+}
+
+
+/**
+ * @export
+ */
+export const SynthesisManuscriptTargetStageEnum = {
+    CandidateManualContent: 'CANDIDATE_MANUAL_CONTENT',
+    WorkspaceManualContent: 'WORKSPACE_MANUAL_CONTENT'
+} as const;
+export type SynthesisManuscriptTargetStageEnum = typeof SynthesisManuscriptTargetStageEnum[keyof typeof SynthesisManuscriptTargetStageEnum];
 
 /**
  *
@@ -26421,6 +29315,37 @@ export interface SynthesisProcessingResult {
      */
     processing: SynthesisProcessing;
 }
+/**
+ *
+ * @export
+ * @interface SynthesisProcessingSourceReviews
+ */
+export interface SynthesisProcessingSourceReviews {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisProcessingSourceReviews
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisProcessingSourceReviews
+     */
+    processing_id: string;
+    /**
+     *
+     * @type {Array<SynthesisSourceReview>}
+     * @memberof SynthesisProcessingSourceReviews
+     */
+    items: Array<SynthesisSourceReview>;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisProcessingSourceReviews
+     */
+    next_after_id?: string;
+}
 
 /**
  *
@@ -26562,10 +29487,10 @@ export interface SynthesisRevision {
     article_revision_no: number;
     /**
      *
-     * @type {string}
+     * @type {DocumentDraftCurrentPublishedRevisionId}
      * @memberof SynthesisRevision
      */
-    parent_revision_id: string | null;
+    parent_revision_id: DocumentDraftCurrentPublishedRevisionId;
     /**
      *
      * @type {string}
@@ -26596,6 +29521,24 @@ export interface SynthesisRevision {
      * @memberof SynthesisRevision
      */
     created_at: string;
+    /**
+     *
+     * @type {SynthesisManuscriptDisplay}
+     * @memberof SynthesisRevision
+     */
+    display?: SynthesisManuscriptDisplay;
+    /**
+     *
+     * @type {SynthesisCandidateRemergeProvenance}
+     * @memberof SynthesisRevision
+     */
+    remerge?: SynthesisCandidateRemergeProvenance;
+    /**
+     *
+     * @type {SynthesisHistoricalRepublishProvenance}
+     * @memberof SynthesisRevision
+     */
+    historical_republish?: SynthesisHistoricalRepublishProvenance;
 }
 /**
  *
@@ -26656,6 +29599,43 @@ export interface SynthesisRevisionResult {
 /**
  *
  * @export
+ * @interface SynthesisRevisionSourceReviews
+ */
+export interface SynthesisRevisionSourceReviews {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisRevisionSourceReviews
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisRevisionSourceReviews
+     */
+    note_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisRevisionSourceReviews
+     */
+    revision_id: string;
+    /**
+     *
+     * @type {Array<SynthesisSourceReview>}
+     * @memberof SynthesisRevisionSourceReviews
+     */
+    items: Array<SynthesisSourceReview>;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisRevisionSourceReviews
+     */
+    next_after_id?: string;
+}
+/**
+ *
+ * @export
  * @interface SynthesisRevisionSummary
  */
 export interface SynthesisRevisionSummary {
@@ -26695,6 +29675,202 @@ export interface SynthesisRevisionSummary {
      * @memberof SynthesisRevisionSummary
      */
     created_at: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisRevisionSummary
+     */
+    remerge_source_revision_id?: string;
+}
+/**
+ *
+ * @export
+ * @interface SynthesisSharedSourceNote
+ */
+export interface SynthesisSharedSourceNote {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSharedSourceNote
+     */
+    note_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSharedSourceNote
+     */
+    revision_id: string;
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisSharedSourceNote
+     */
+    revision_no: number;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSharedSourceNote
+     */
+    title: string;
+    /**
+     *
+     * @type {Array<SynthesisSourceRef>}
+     * @memberof SynthesisSharedSourceNote
+     */
+    sources: Array<SynthesisSourceRef>;
+}
+/**
+ *
+ * @export
+ * @interface SynthesisSourceGraph
+ */
+export interface SynthesisSourceGraph {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceGraph
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceGraph
+     */
+    note_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceGraph
+     */
+    revision_id: string;
+    /**
+     *
+     * @type {Array<SynthesisSourceRef>}
+     * @memberof SynthesisSourceGraph
+     */
+    sources: Array<SynthesisSourceRef>;
+    /**
+     *
+     * @type {Array<SynthesisSharedSourceNote>}
+     * @memberof SynthesisSourceGraph
+     */
+    shared_notes: Array<SynthesisSharedSourceNote>;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceGraph
+     */
+    next_after_note_id: string;
+}
+/**
+ *
+ * @export
+ * @interface SynthesisSourceImpact
+ */
+export interface SynthesisSourceImpact {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceImpact
+     */
+    id: string;
+    /**
+     *
+     * @type {SynthesisSourceImpactReasonEnum}
+     * @memberof SynthesisSourceImpact
+     */
+    reason: SynthesisSourceImpactReasonEnum;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceImpact
+     */
+    detected_at: string;
+    /**
+     *
+     * @type {boolean}
+     * @memberof SynthesisSourceImpact
+     */
+    currently_unavailable: boolean;
+    /**
+     *
+     * @type {SynthesisSourceRef}
+     * @memberof SynthesisSourceImpact
+     */
+    reference: SynthesisSourceRef;
+    /**
+     *
+     * @type {Array<string>}
+     * @memberof SynthesisSourceImpact
+     */
+    item_ids: Array<string>;
+}
+
+
+/**
+ * @export
+ */
+export const SynthesisSourceImpactReasonEnum = {
+    SourceRemoved: 'SOURCE_REMOVED',
+    SourceQuarantined: 'SOURCE_QUARANTINED'
+} as const;
+export type SynthesisSourceImpactReasonEnum = typeof SynthesisSourceImpactReasonEnum[keyof typeof SynthesisSourceImpactReasonEnum];
+
+/**
+ *
+ * @export
+ * @interface SynthesisSourceImpacts
+ */
+export interface SynthesisSourceImpacts {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceImpacts
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceImpacts
+     */
+    note_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceImpacts
+     */
+    revision_id: string;
+    /**
+     *
+     * @type {Array<SynthesisSourceImpact>}
+     * @memberof SynthesisSourceImpacts
+     */
+    items: Array<SynthesisSourceImpact>;
+}
+/**
+ *
+ * @export
+ * @interface SynthesisSourcePromotion
+ */
+export interface SynthesisSourcePromotion {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourcePromotion
+     */
+    source_version_id: string;
+    /**
+     *
+     * @type {SynthesisGoalRequest}
+     * @memberof SynthesisSourcePromotion
+     */
+    request: SynthesisGoalRequest;
+    /**
+     *
+     * @type {boolean}
+     * @memberof SynthesisSourcePromotion
+     */
+    replayed: boolean;
 }
 /**
  *
@@ -26727,6 +29903,478 @@ export interface SynthesisSourceRef {
      */
     title: string;
 }
+/**
+ *
+ * @export
+ * @interface SynthesisSourceReview
+ */
+export interface SynthesisSourceReview {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceReview
+     */
+    id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceReview
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceReview
+     */
+    origin_processing_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceReview
+     */
+    origin_workflow_run_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceReview
+     */
+    workflow_run_id: string;
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisSourceReview
+     */
+    attempt_no: number;
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisSourceReview
+     */
+    version: number;
+    /**
+     *
+     * @type {SynthesisSourceReviewStatusEnum}
+     * @memberof SynthesisSourceReview
+     */
+    status: SynthesisSourceReviewStatusEnum;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceReview
+     */
+    effective_status: string;
+    /**
+     * Only true when every obligation and the current full manuscript/source/scope/Root remain valid. Completion requires either the original successful review receipt or the independent receipt_hash, recovery_completed_at and recovery_workflow_run_id. Recovery workflow finalization may still be pending after its receipt commits; original historical status remains unchanged.
+     * @type {boolean}
+     * @memberof SynthesisSourceReview
+     */
+    completed: boolean;
+    /**
+     *
+     * @type {boolean}
+     * @memberof SynthesisSourceReview
+     */
+    retryable: boolean;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceReview
+     */
+    failure?: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceReview
+     */
+    created_at: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceReview
+     */
+    completed_at?: string;
+    /**
+     *
+     * @type {Array<SynthesisSourceReviewTarget>}
+     * @memberof SynthesisSourceReview
+     */
+    targets: Array<SynthesisSourceReviewTarget>;
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisSourceReview
+     */
+    obligation_count: number;
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisSourceReview
+     */
+    supported_count: number;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceReview
+     */
+    receipt_hash?: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceReview
+     */
+    supersedes_id?: string;
+    /**
+     *
+     * @type {boolean}
+     * @memberof SynthesisSourceReview
+     */
+    latest: boolean;
+    /**
+     *
+     * @type {boolean}
+     * @memberof SynthesisSourceReview
+     */
+    can_recheck: boolean;
+    /**
+     *
+     * @type {boolean}
+     * @memberof SynthesisSourceReview
+     */
+    can_recover: boolean;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceReview
+     */
+    recovery_workflow_run_id?: string;
+    /**
+     *
+     * @type {SynthesisSourceReviewRecoveryStatusEnum}
+     * @memberof SynthesisSourceReview
+     */
+    recovery_status?: SynthesisSourceReviewRecoveryStatusEnum;
+    /**
+     * Immutable successful recovery receipt timestamp; distinct from the original review completed_at and independent of workflow finalization.
+     * @type {string}
+     * @memberof SynthesisSourceReview
+     */
+    recovery_completed_at?: string;
+}
+
+
+/**
+ * @export
+ */
+export const SynthesisSourceReviewStatusEnum = {
+    Pending: 'PENDING',
+    Prepared: 'PREPARED',
+    Running: 'RUNNING',
+    Reviewed: 'REVIEWED',
+    Succeeded: 'SUCCEEDED',
+    Rejected: 'REJECTED',
+    Stale: 'STALE',
+    Failed: 'FAILED',
+    RecoveryRequired: 'RECOVERY_REQUIRED'
+} as const;
+export type SynthesisSourceReviewStatusEnum = typeof SynthesisSourceReviewStatusEnum[keyof typeof SynthesisSourceReviewStatusEnum];
+
+/**
+ * @export
+ */
+export const SynthesisSourceReviewRecoveryStatusEnum = {
+    Pending: 'pending',
+    Running: 'running',
+    WaitingForHuman: 'waiting_for_human',
+    RetryWait: 'retry_wait',
+    Paused: 'paused',
+    Succeeded: 'succeeded',
+    Failed: 'failed',
+    Cancelled: 'cancelled'
+} as const;
+export type SynthesisSourceReviewRecoveryStatusEnum = typeof SynthesisSourceReviewRecoveryStatusEnum[keyof typeof SynthesisSourceReviewRecoveryStatusEnum];
+
+/**
+ *
+ * @export
+ * @interface SynthesisSourceReviewCommand
+ */
+export interface SynthesisSourceReviewCommand {
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisSourceReviewCommand
+     */
+    expected_version: number;
+    /**
+     * Stable key for the same logical command; bounded to 128 UTF-8 bytes.
+     * @type {string}
+     * @memberof SynthesisSourceReviewCommand
+     */
+    idempotency_key: string;
+}
+/**
+ *
+ * @export
+ * @interface SynthesisSourceReviewEvidence
+ */
+export interface SynthesisSourceReviewEvidence {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceReviewEvidence
+     */
+    id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceReviewEvidence
+     */
+    paragraph: string;
+    /**
+     *
+     * @type {SynthesisSourceRef}
+     * @memberof SynthesisSourceReviewEvidence
+     */
+    source: SynthesisSourceRef;
+    /**
+     * Complete distinct current-review obligation labels supported by this physical evidence; the evidence ID appears once per target.
+     * @type {Array<string>}
+     * @memberof SynthesisSourceReviewEvidence
+     */
+    obligations: Array<string>;
+}
+/**
+ *
+ * @export
+ * @interface SynthesisSourceReviewEvidenceView
+ */
+export interface SynthesisSourceReviewEvidenceView {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceReviewEvidenceView
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceReviewEvidenceView
+     */
+    review_id: string;
+    /**
+     *
+     * @type {SynthesisSourceReviewEvidence}
+     * @memberof SynthesisSourceReviewEvidenceView
+     */
+    evidence: SynthesisSourceReviewEvidence;
+    /**
+     *
+     * @type {SynthesisSourceReviewEvidenceViewAvailabilityEnum}
+     * @memberof SynthesisSourceReviewEvidenceView
+     */
+    availability: SynthesisSourceReviewEvidenceViewAvailabilityEnum;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceReviewEvidenceView
+     */
+    text: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceReviewEvidenceView
+     */
+    snapshot_text?: string;
+}
+
+
+/**
+ * @export
+ */
+export const SynthesisSourceReviewEvidenceViewAvailabilityEnum = {
+    Available: 'AVAILABLE',
+    Stale: 'STALE',
+    Unavailable: 'UNAVAILABLE'
+} as const;
+export type SynthesisSourceReviewEvidenceViewAvailabilityEnum = typeof SynthesisSourceReviewEvidenceViewAvailabilityEnum[keyof typeof SynthesisSourceReviewEvidenceViewAvailabilityEnum];
+
+/**
+ *
+ * @export
+ * @interface SynthesisSourceReviewParagraph
+ */
+export interface SynthesisSourceReviewParagraph {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceReviewParagraph
+     */
+    label: string;
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisSourceReviewParagraph
+     */
+    ordinal: number;
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisSourceReviewParagraph
+     */
+    start_byte: number;
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisSourceReviewParagraph
+     */
+    end_byte: number;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceReviewParagraph
+     */
+    hash: string;
+}
+/**
+ *
+ * @export
+ * @interface SynthesisSourceReviewTarget
+ */
+export interface SynthesisSourceReviewTarget {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceReviewTarget
+     */
+    note_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceReviewTarget
+     */
+    base_revision_id: string;
+    /**
+     *
+     * @type {SynthesisSourceReviewTargetTargetKindEnum}
+     * @memberof SynthesisSourceReviewTarget
+     */
+    target_kind: SynthesisSourceReviewTargetTargetKindEnum;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceReviewTarget
+     */
+    full_content_hash: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceReviewTarget
+     */
+    full_content: string;
+    /**
+     *
+     * @type {Array<SynthesisSourceReviewParagraph>}
+     * @memberof SynthesisSourceReviewTarget
+     */
+    paragraphs: Array<SynthesisSourceReviewParagraph>;
+    /**
+     *
+     * @type {Array<SynthesisSourceReviewEvidence>}
+     * @memberof SynthesisSourceReviewTarget
+     */
+    evidence: Array<SynthesisSourceReviewEvidence>;
+}
+
+
+/**
+ * @export
+ */
+export const SynthesisSourceReviewTargetTargetKindEnum = {
+    Revision: 'REVISION',
+    LocalFile: 'LOCAL_FILE'
+} as const;
+export type SynthesisSourceReviewTargetTargetKindEnum = typeof SynthesisSourceReviewTargetTargetKindEnum[keyof typeof SynthesisSourceReviewTargetTargetKindEnum];
+
+/**
+ *
+ * @export
+ * @interface SynthesisSourceSupplement
+ */
+export interface SynthesisSourceSupplement {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceSupplement
+     */
+    id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceSupplement
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceSupplement
+     */
+    note_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceSupplement
+     */
+    base_revision_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceSupplement
+     */
+    item_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceSupplement
+     */
+    processing_id: string;
+    /**
+     *
+     * @type {SynthesisSourceSupplementSlotEnum}
+     * @memberof SynthesisSourceSupplement
+     */
+    slot: SynthesisSourceSupplementSlotEnum;
+    /**
+     *
+     * @type {number}
+     * @memberof SynthesisSourceSupplement
+     */
+    alternative_index: number;
+    /**
+     *
+     * @type {SynthesisSourceRef}
+     * @memberof SynthesisSourceSupplement
+     */
+    reference: SynthesisSourceRef;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSourceSupplement
+     */
+    created_at: string;
+}
+
+
+/**
+ * @export
+ */
+export const SynthesisSourceSupplementSlotEnum = {
+    Fact: 'FACT',
+    Conflict: 'CONFLICT',
+    GapContext: 'GAP_CONTEXT',
+    GapResolution: 'GAP_RESOLUTION'
+} as const;
+export type SynthesisSourceSupplementSlotEnum = typeof SynthesisSourceSupplementSlotEnum[keyof typeof SynthesisSourceSupplementSlotEnum];
+
 /**
  *
  * @export
@@ -26808,10 +30456,22 @@ export interface SynthesisSourceView {
     availability: SynthesisSourceViewAvailabilityEnum;
     /**
      *
-     * @type {SynthesisSourceViewText}
+     * @type {SynthesisSupplementViewText}
      * @memberof SynthesisSourceView
      */
-    text: SynthesisSourceViewText;
+    text: SynthesisSupplementViewText;
+    /**
+     * Verified original excerpt from the saved immutable artifact. Present only when current availability is STALE or UNAVAILABLE; never replacement content. Quarantined sources do not return snapshot bytes.
+     * @type {string}
+     * @memberof SynthesisSourceView
+     */
+    snapshot_text?: string;
+    /**
+     * Present only for an exact audit reference authorized from this immutable manuscript, pending current-content review.
+     * @type {SynthesisSourceViewRoleEnum}
+     * @memberof SynthesisSourceView
+     */
+    role?: SynthesisSourceViewRoleEnum;
 }
 
 
@@ -26826,12 +30486,12 @@ export const SynthesisSourceViewAvailabilityEnum = {
 export type SynthesisSourceViewAvailabilityEnum = typeof SynthesisSourceViewAvailabilityEnum[keyof typeof SynthesisSourceViewAvailabilityEnum];
 
 /**
- * @type SynthesisSourceViewText
- *
  * @export
  */
-// OpenAPI Generator 7.24.0 override: preserve the null branch of nullable oneOf aliases.
-export type SynthesisSourceViewText = null | string;
+export const SynthesisSourceViewRoleEnum = {
+    HistoricalReview: 'HISTORICAL_REVIEW'
+} as const;
+export type SynthesisSourceViewRoleEnum = typeof SynthesisSourceViewRoleEnum[keyof typeof SynthesisSourceViewRoleEnum];
 
 /**
  *
@@ -26858,6 +30518,100 @@ export interface SynthesisStatement {
      */
     sources: Array<SynthesisSourceRef>;
 }
+/**
+ *
+ * @export
+ * @interface SynthesisSupplementPage
+ */
+export interface SynthesisSupplementPage {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSupplementPage
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {Array<SynthesisSourceSupplement>}
+     * @memberof SynthesisSupplementPage
+     */
+    items: Array<SynthesisSourceSupplement>;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSupplementPage
+     */
+    next_cursor: string | null;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSupplementPage
+     */
+    note_id: string;
+}
+/**
+ *
+ * @export
+ * @interface SynthesisSupplementView
+ */
+export interface SynthesisSupplementView {
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSupplementView
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {string}
+     * @memberof SynthesisSupplementView
+     */
+    note_id: string;
+    /**
+     *
+     * @type {SynthesisSupplementViewAvailabilityEnum}
+     * @memberof SynthesisSupplementView
+     */
+    availability: SynthesisSupplementViewAvailabilityEnum;
+    /**
+     *
+     * @type {SynthesisSupplementViewText}
+     * @memberof SynthesisSupplementView
+     */
+    text: SynthesisSupplementViewText;
+    /**
+     *
+     * @type {SynthesisSourceSupplement}
+     * @memberof SynthesisSupplementView
+     */
+    supplement: SynthesisSourceSupplement;
+    /**
+     * Verified original excerpt from the saved immutable artifact. Present only when current availability is STALE or UNAVAILABLE; never replacement content. Quarantined sources do not return snapshot bytes.
+     * @type {string}
+     * @memberof SynthesisSupplementView
+     */
+    snapshot_text?: string;
+}
+
+
+/**
+ * @export
+ */
+export const SynthesisSupplementViewAvailabilityEnum = {
+    Available: 'AVAILABLE',
+    Stale: 'STALE',
+    Unavailable: 'UNAVAILABLE'
+} as const;
+export type SynthesisSupplementViewAvailabilityEnum = typeof SynthesisSupplementViewAvailabilityEnum[keyof typeof SynthesisSupplementViewAvailabilityEnum];
+
+/**
+ * @type SynthesisSupplementViewText
+ *
+ * @export
+ */
+// OpenAPI Generator 7.24.0 override: preserve the null branch of nullable oneOf aliases.
+export type SynthesisSupplementViewText = null | string;
+
 /**
  *
  * @export
@@ -30670,6 +34424,129 @@ export const WorkspaceAnalysisTimelineV2TerminationReasonEnum = {
 } as const;
 export type WorkspaceAnalysisTimelineV2TerminationReasonEnum = typeof WorkspaceAnalysisTimelineV2TerminationReasonEnum[keyof typeof WorkspaceAnalysisTimelineV2TerminationReasonEnum];
 
+/**
+ *
+ * @export
+ * @interface WorkspaceDiscoveryFailure
+ */
+export interface WorkspaceDiscoveryFailure {
+    /**
+     *
+     * @type {string}
+     * @memberof WorkspaceDiscoveryFailure
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {number}
+     * @memberof WorkspaceDiscoveryFailure
+     */
+    binding_version: number;
+    /**
+     *
+     * @type {string}
+     * @memberof WorkspaceDiscoveryFailure
+     */
+    path: string;
+    /**
+     *
+     * @type {WorkspaceDiscoveryFailureStageEnum}
+     * @memberof WorkspaceDiscoveryFailure
+     */
+    stage: WorkspaceDiscoveryFailureStageEnum;
+    /**
+     *
+     * @type {WorkspaceDiscoveryFailureCodeEnum}
+     * @memberof WorkspaceDiscoveryFailure
+     */
+    code: WorkspaceDiscoveryFailureCodeEnum;
+    /**
+     *
+     * @type {WorkspaceDiscoveryFailureStatusEnum}
+     * @memberof WorkspaceDiscoveryFailure
+     */
+    status: WorkspaceDiscoveryFailureStatusEnum;
+    /**
+     *
+     * @type {number}
+     * @memberof WorkspaceDiscoveryFailure
+     */
+    failure_count: number;
+    /**
+     *
+     * @type {string}
+     * @memberof WorkspaceDiscoveryFailure
+     */
+    last_failed_at: string;
+    /**
+     *
+     * @type {string}
+     * @memberof WorkspaceDiscoveryFailure
+     */
+    recovered_at: string;
+}
+
+
+/**
+ * @export
+ */
+export const WorkspaceDiscoveryFailureStageEnum = {
+    Walk: 'WALK',
+    Observe: 'OBSERVE',
+    Register: 'REGISTER'
+} as const;
+export type WorkspaceDiscoveryFailureStageEnum = typeof WorkspaceDiscoveryFailureStageEnum[keyof typeof WorkspaceDiscoveryFailureStageEnum];
+
+/**
+ * @export
+ */
+export const WorkspaceDiscoveryFailureCodeEnum = {
+    DirectoryReadFailed: 'DIRECTORY_READ_FAILED',
+    FileObservationFailed: 'FILE_OBSERVATION_FAILED',
+    SourceRegistrationFailed: 'SOURCE_REGISTRATION_FAILED'
+} as const;
+export type WorkspaceDiscoveryFailureCodeEnum = typeof WorkspaceDiscoveryFailureCodeEnum[keyof typeof WorkspaceDiscoveryFailureCodeEnum];
+
+/**
+ * @export
+ */
+export const WorkspaceDiscoveryFailureStatusEnum = {
+    Failed: 'FAILED',
+    Recovered: 'RECOVERED'
+} as const;
+export type WorkspaceDiscoveryFailureStatusEnum = typeof WorkspaceDiscoveryFailureStatusEnum[keyof typeof WorkspaceDiscoveryFailureStatusEnum];
+
+/**
+ *
+ * @export
+ * @interface WorkspaceDiscoveryFailurePage
+ */
+export interface WorkspaceDiscoveryFailurePage {
+    /**
+     *
+     * @type {string}
+     * @memberof WorkspaceDiscoveryFailurePage
+     */
+    workspace_id: string;
+    /**
+     *
+     * @type {number}
+     * @memberof WorkspaceDiscoveryFailurePage
+     */
+    binding_version: number;
+    /**
+     *
+     * @type {Array<WorkspaceDiscoveryFailure>}
+     * @memberof WorkspaceDiscoveryFailurePage
+     */
+    items: Array<WorkspaceDiscoveryFailure>;
+    /**
+     *
+     * @type {string}
+     * @memberof WorkspaceDiscoveryFailurePage
+     */
+    next_cursor: string;
+}
 /**
  *
  * @export

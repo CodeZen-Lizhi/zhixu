@@ -39,10 +39,26 @@ type SynthesisProcessingService interface {
 }
 
 type SynthesisHandler struct {
-	notes      SynthesisService
-	processing SynthesisProcessingService
-	timeout    time.Duration
-	cursorKey  []byte
+	sourceReviews        app.SynthesisSourceReviewReader
+	sourceReviewCommands app.SynthesisManuscriptSourceReviewCommandStore
+	manuscriptReviews    *manuscriptReviewDependencies
+	candidateRemerge     SynthesisCandidateRemergeFactory
+	historicalRepublish  SynthesisHistoricalRepublishFactory
+	notes                SynthesisService
+	processing           SynthesisProcessingService
+	directory            app.KnowledgeDirectoryReader
+	goals                SynthesisGoalCreator
+	goalViews            app.SynthesisGoalViewReader
+	goalSelections       app.SynthesisGoalSelectionCommands
+	sourcePromoter       SynthesisSourcePromoter
+	timeout              time.Duration
+	cursorKey            []byte
+}
+
+func NewSynthesisHandlerWithDirectory(notes SynthesisService, processing SynthesisProcessingService, directory app.KnowledgeDirectoryReader, timeout time.Duration) *SynthesisHandler {
+	handler := NewSynthesisHandler(notes, processing, timeout)
+	handler.directory = directory
+	return handler
 }
 
 // NewSynthesisHandler does not start any background work. Cursor signatures are
@@ -64,13 +80,44 @@ func (handler *SynthesisHandler) Available() bool {
 
 func (handler *SynthesisHandler) Routes(router gin.IRouter) {
 	base := "/workspaces/:workspace_id/synthesis"
+	RegisterSynthesisSourceReviewRoutes(router, handler.sourceReviews, handler.timeout)
+	router.POST(base+"/source-reviews/:review_id/recheck", httpapi.GinHandler(handler.recheckSourceReview))
+	router.POST(base+"/source-reviews/:review_id/recover", httpapi.GinHandler(handler.recoverSourceReview))
+	router.POST(base+"/goals", httpapi.GinHandler(handler.createGoal))
+	router.GET(base+"/goals", httpapi.GinHandler(handler.listGoals))
+	router.GET(base+"/goals/:goal_id", httpapi.GinHandler(handler.getGoal))
+	router.GET(base+"/goals/:goal_id/selections", httpapi.GinHandler(handler.listGoalSelections))
+	router.POST(base+"/goals/:goal_id/selections/:selection_id/retry", httpapi.GinHandler(handler.retryGoalSelection))
+	router.GET(base+"/update-summaries", httpapi.GinHandler(handler.updateSummaries))
+	router.GET(base+"/notes/:note_id/candidate-remerge/target", httpapi.GinHandler(handler.candidateRemergeTarget))
+	router.POST(base+"/notes/:note_id/candidate-remerge", httpapi.GinHandler(handler.beginCandidateRemerge))
+	router.GET(base+"/notes/:note_id/candidate-remerge", httpapi.GinHandler(handler.readCandidateRemerge))
+	router.POST(base+"/notes/:note_id/candidate-remerge/:attempt_id/apply", httpapi.GinHandler(handler.applyCandidateRemerge))
+	router.POST(base+"/notes/:note_id/candidate-remerge/:attempt_id/resume", httpapi.GinHandler(handler.resumeCandidateRemerge))
+	router.GET(base+"/notes/:note_id/historical-republish/target", httpapi.GinHandler(handler.historicalRepublishTarget))
+	router.POST(base+"/notes/:note_id/historical-republish", httpapi.GinHandler(handler.beginHistoricalRepublish))
+	router.GET(base+"/notes/:note_id/historical-republish", httpapi.GinHandler(handler.readHistoricalRepublish))
+	router.POST(base+"/notes/:note_id/historical-republish/:attempt_id/apply", httpapi.GinHandler(handler.applyHistoricalRepublish))
+	router.POST(base+"/notes/:note_id/historical-republish/:attempt_id/resume", httpapi.GinHandler(handler.resumeHistoricalRepublish))
 	router.GET(base+"/notes", httpapi.GinHandler(handler.listNotes))
 	router.GET(base+"/notes/:note_id", httpapi.GinHandler(handler.getNote))
 	router.GET(base+"/notes/:note_id/revisions", httpapi.GinHandler(handler.listRevisions))
 	router.GET(base+"/notes/:note_id/revisions/:revision_id", httpapi.GinHandler(handler.getRevision))
+	router.GET(base+"/notes/:note_id/revisions/:revision_id/source-graph", httpapi.GinHandler(handler.sourceGraph))
+	router.GET(base+"/notes/:note_id/revisions/:revision_id/source-impacts", httpapi.GinHandler(handler.sourceImpacts))
+	router.GET(base+"/notes/:note_id/revisions/:revision_id/body-impacts", httpapi.GinHandler(handler.bodyImpacts))
 	router.GET(base+"/notes/:note_id/revisions/:revision_id/sources/:source_span_id", httpapi.GinHandler(handler.openSource))
+	router.GET(base+"/notes/:note_id/revisions/:revision_id/sources/:source_span_id/knowledge-points", httpapi.GinHandler(handler.sourceKnowledgePoints))
+	router.POST(base+"/sources/:source_version_id/promote", httpapi.GinHandler(handler.promoteSource))
+	router.GET(base+"/sources/:source_version_id/knowledge-directory", httpapi.GinHandler(handler.sourceKnowledgeDirectory))
+	router.GET(base+"/notes/:note_id/supplements", httpapi.GinHandler(handler.listSupplements))
+	router.GET(base+"/notes/:note_id/supplements/:supplement_id/source", httpapi.GinHandler(handler.openSupplement))
 	router.GET(base+"/processing", httpapi.GinHandler(handler.listProcessing))
 	router.GET(base+"/processing/:processing_id", httpapi.GinHandler(handler.getProcessing))
+	router.GET(base+"/processing/:processing_id/manuscript-review", httpapi.GinHandler(handler.manuscriptSummary))
+	router.GET(base+"/processing/:processing_id/manuscript-review/:note_id", httpapi.GinHandler(handler.manuscriptDetail))
+	router.POST(base+"/processing/:processing_id/manuscript-review/resume", httpapi.GinHandler(handler.manuscriptResume))
+	router.POST(base+"/processing/:processing_id/manuscript-review/:note_id/decisions", httpapi.GinHandler(handler.manuscriptDecide))
 	router.POST(base+"/processing/:processing_id/retry", httpapi.GinHandler(handler.retryProcessing))
 }
 
@@ -120,7 +167,7 @@ func (handler *SynthesisHandler) parseList(request *http.Request, kind string) (
 		}
 	}
 	position := synthesisCursor{WorkspaceID: workspaceID, Kind: kind, Limit: limit}
-	if kind == "revisions" {
+	if kind == "revisions" || kind == "supplements" {
 		position.NoteID, err = parseID(request.PathValue("note_id"))
 		if err != nil {
 			return synthesisCursor{}, err
@@ -179,7 +226,7 @@ func validSynthesisPosition(position synthesisCursor) bool {
 	if position.Kind == "revisions" {
 		return validResponseID(position.NoteID) && position.RevisionNo > 0 && position.RevisionNo <= domain.MaxSynthesisRevisionNo && position.BeforeTime == nil && position.BeforeID == ""
 	}
-	return position.BeforeTime != nil && !position.BeforeTime.IsZero() && validResponseID(position.BeforeID) && position.RevisionNo == 0 && position.NoteID == ""
+	return position.BeforeTime != nil && !position.BeforeTime.IsZero() && validResponseID(position.BeforeID) && position.RevisionNo == 0 && (position.Kind == "supplements" && validResponseID(position.NoteID) || position.Kind != "supplements" && position.NoteID == "")
 }
 
 func (handler *SynthesisHandler) listNotes(writer http.ResponseWriter, request *http.Request) {
@@ -381,6 +428,20 @@ func (handler *SynthesisHandler) openSource(writer http.ResponseWriter, request 
 			}
 		}
 	}
+	role := ""
+	if reference == nil {
+		for _, source := range synthesisHistoricalSources(revision) {
+			if source.SourceSpanID == spanID {
+				if reference != nil && *reference != source {
+					writeError(writer, synthesisInvalidResult())
+					return
+				}
+				copy := source
+				reference = &copy
+				role = "HISTORICAL_REVIEW"
+			}
+		}
+	}
 	if reference == nil {
 		writeProblem(writer, http.StatusNotFound, "SYNTHESIS_SOURCE_NOT_FOUND", "请求的笔记来源不存在", false)
 		return
@@ -405,7 +466,9 @@ func (handler *SynthesisHandler) openSource(writer http.ResponseWriter, request 
 		Reference    domain.SynthesisSourceRef   `json:"reference"`
 		Availability domain.MaterialAvailability `json:"availability"`
 		Text         *string                     `json:"text"`
-	}{revision.WorkspaceID, revision.NoteID, revision.ID, *reference, view.Availability, text})
+		SnapshotText string                      `json:"snapshot_text,omitempty"`
+		Role         string                      `json:"role,omitempty"`
+	}{revision.WorkspaceID, revision.NoteID, revision.ID, *reference, view.Availability, text, view.SnapshotText, role})
 }
 
 func sameSynthesisSource(left, right domain.SynthesisSourceRef) bool {

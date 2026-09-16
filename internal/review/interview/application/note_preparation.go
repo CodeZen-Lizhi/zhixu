@@ -269,6 +269,9 @@ func (service *NotePreparationService) create(ctx context.Context, snapshot orga
 	if err != nil {
 		return NotePreparationResult{}, err
 	}
+	if len(snapshot.Items) == 0 {
+		return NotePreparationResult{}, domain.InvalidError(domain.ErrorCodeEvidenceInvalid, "published note has no trusted interview material available")
+	}
 	kinds := make(map[organizingdomain.SynthesisItemKind]bool)
 	for _, item := range snapshot.Items {
 		kinds[item.Kind] = true

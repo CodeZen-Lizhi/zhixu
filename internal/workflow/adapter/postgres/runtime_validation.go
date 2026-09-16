@@ -5,6 +5,9 @@ import (
 	encodinghex "encoding/hex"
 	"encoding/json"
 	"errors"
+	"math/big"
+	"reflect"
+	"regexp"
 	"strings"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
@@ -84,8 +87,58 @@ func validateDecisionSchema(schema, decision json.RawMessage) error {
 	if json.Unmarshal(schema, &schemaObject) != nil || json.Unmarshal(decision, &decisionObject) != nil {
 		return foundation.NewError(foundation.ErrorInvalidInput, "HUMAN_DECISION_SCHEMA_INVALID", false, errors.New("human decision schema or value is invalid"))
 	}
-	if schemaType, ok := schemaObject["type"].(string); ok && schemaType != "object" {
+	if schemaType, exists := schemaObject["type"]; exists && schemaType != "object" {
 		return foundation.NewError(foundation.ErrorConsistencyViolation, "HUMAN_TASK_SCHEMA_UNSUPPORTED", false, errors.New("human task schema root must be object"))
+	}
+	// 这只是有限的属性级子集，并非通用 JSON Schema 校验器。
+	// 先校验约束再校验值，包括缺省属性的 Schema。
+	var exactSchema map[string]any
+	var exactDecision map[string]any
+	schemaDecoder := json.NewDecoder(bytes.NewReader(schema))
+	schemaDecoder.UseNumber()
+	decisionDecoder := json.NewDecoder(bytes.NewReader(decision))
+	decisionDecoder.UseNumber()
+	if err := schemaDecoder.Decode(&exactSchema); err != nil {
+		return err
+	}
+	if err := decisionDecoder.Decode(&exactDecision); err != nil {
+		return err
+	}
+	properties, _ := exactSchema["properties"].(map[string]any)
+	patterns := make(map[string]*regexp.Regexp)
+	for name, rawProperty := range properties {
+		property, valid := rawProperty.(map[string]any)
+		if !valid {
+			return humanSchemaUnsupported("human task property schema is invalid")
+		}
+		if rawType, exists := property["type"]; exists {
+			expected, valid := rawType.(string)
+			if !valid {
+				return humanSchemaUnsupported("human task property type must be a string")
+			}
+			switch expected {
+			case "string", "number", "integer", "boolean", "object", "array", "null":
+			default:
+				return humanSchemaUnsupported("human task property type is invalid or unsupported")
+			}
+		}
+		if rawEnum, exists := property["enum"]; exists {
+			values, valid := rawEnum.([]any)
+			if !valid || len(values) == 0 {
+				return humanSchemaUnsupported("human task enum must be a nonempty array")
+			}
+		}
+		if rawPattern, exists := property["pattern"]; exists {
+			pattern, valid := rawPattern.(string)
+			if !valid {
+				return humanSchemaUnsupported("human task pattern must be a string")
+			}
+			compiled, err := regexp.Compile(pattern)
+			if err != nil {
+				return humanSchemaUnsupported("human task pattern is invalid")
+			}
+			patterns[name] = compiled
+		}
 	}
 	if required, ok := schemaObject["required"].([]any); ok {
 		for _, rawName := range required {
@@ -98,7 +151,6 @@ func validateDecisionSchema(schema, decision json.RawMessage) error {
 			}
 		}
 	}
-	properties, _ := schemaObject["properties"].(map[string]any)
 	for name, rawProperty := range properties {
 		value, exists := decisionObject[name]
 		if !exists {
@@ -107,6 +159,23 @@ func validateDecisionSchema(schema, decision json.RawMessage) error {
 		property, valid := rawProperty.(map[string]any)
 		if !valid {
 			return foundation.NewError(foundation.ErrorConsistencyViolation, "HUMAN_TASK_SCHEMA_UNSUPPORTED", false, errors.New("human task property schema is invalid"))
+		}
+		if values, exists := property["enum"].([]any); exists {
+			matched := false
+			for _, candidate := range values {
+				if reflect.DeepEqual(humanEnumValue(exactDecision[name]), humanEnumValue(candidate)) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				return foundation.NewError(foundation.ErrorInvalidInput, "HUMAN_DECISION_SCHEMA_INVALID", false, errors.New("human decision field is outside enum"))
+			}
+		}
+		if pattern := patterns[name]; pattern != nil {
+			if text, isString := value.(string); isString && !pattern.MatchString(text) {
+				return foundation.NewError(foundation.ErrorInvalidInput, "HUMAN_DECISION_SCHEMA_INVALID", false, errors.New("human decision field does not match pattern"))
+			}
 		}
 		expected, _ := property["type"].(string)
 		if expected != "" && !matchesJSONType(value, expected) {
@@ -121,6 +190,37 @@ func validateDecisionSchema(schema, decision json.RawMessage) error {
 		}
 	}
 	return nil
+}
+
+func humanSchemaUnsupported(message string) error {
+	return foundation.NewError(foundation.ErrorConsistencyViolation, "HUMAN_TASK_SCHEMA_UNSUPPORTED", false, errors.New(message))
+}
+
+// 保留 enum 中 JSON 数字的精确相等性（包括嵌套值），同时
+// 保持旧版基于 float64 的 number/integer 类型检查不变。
+func humanEnumValue(value any) any {
+	switch value := value.(type) {
+	case json.Number:
+		number, ok := new(big.Rat).SetString(string(value))
+		if ok {
+			return number
+		}
+		return value
+	case []any:
+		result := make([]any, len(value))
+		for i, item := range value {
+			result[i] = humanEnumValue(item)
+		}
+		return result
+	case map[string]any:
+		result := make(map[string]any, len(value))
+		for key, item := range value {
+			result[key] = humanEnumValue(item)
+		}
+		return result
+	default:
+		return value
+	}
 }
 
 func matchesJSONType(value any, expected string) bool {

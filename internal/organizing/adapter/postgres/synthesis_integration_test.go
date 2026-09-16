@@ -73,7 +73,7 @@ func TestSynthesisPostgreSQLCandidateLifecycle(t *testing.T) {
 	oldRevision := *detail.CurrentRevision
 	oldPublication := *detail.Publication
 	second := f.generation(t, 42000, []organizingapp.SynthesisGenerationNote{{Note: detail.Note, Revision: oldRevision}}, "Additional scheduler support.")
-	second.Generation.Notes = []organizingapp.SynthesisGeneratedNote{{NoteID: noteID, BaseRevisionID: oldRevision.ID, TopicKey: detail.Note.TopicKey, Title: detail.Note.Title, Aliases: detail.Note.Aliases, Delta: domain.SynthesisDelta{Operations: []domain.SynthesisOperation{{Kind: domain.SynthesisAddSupport, TargetItemID: oldRevision.Items[0].ID, Sources: []domain.SynthesisSourceRef{second.Input.Sources[0].Reference}}}}}}
+	second.Generation.Notes = []organizingapp.SynthesisGeneratedNote{extendedSynthesisNote(detail, second.Input.Sources[0].Reference)}
 	secondResult, err := f.service.ApplyGeneration(ctx, second.Input, second.Generation)
 	if err != nil || !secondResult.Changed || len(secondResult.RevisionIDs) != 1 {
 		t.Fatalf("continuous pending candidate: %+v %v", secondResult, err)
@@ -97,7 +97,7 @@ func TestSynthesisPostgreSQLCandidateLifecycle(t *testing.T) {
 		t.Fatalf("source append-only: %v", err)
 	}
 	page, err := f.service.ListNotes(ctx, organizingapp.SynthesisListQuery{WorkspaceID: f.workspace, Limit: 1})
-	if err != nil || len(page.Items) != 1 || page.Items[0].ItemCount != 1 || page.Items[0].CurrentRevision.RevisionNo != 2 {
+	if err != nil || len(page.Items) != 1 || page.Items[0].ItemCount != 2 || page.Items[0].CurrentRevision.RevisionNo != 2 {
 		t.Fatalf("summary page: %+v %v", page, err)
 	}
 	revisions, err := f.service.ListRevisions(ctx, organizingapp.SynthesisRevisionListQuery{WorkspaceID: f.workspace, NoteID: noteID, Limit: 1})
@@ -205,7 +205,7 @@ func TestSynthesisPostgreSQLCandidateLifecycle(t *testing.T) {
 			t.Fatal(err)
 		}
 		next := f.generation(t, 48000, []organizingapp.SynthesisGenerationNote{{Note: detail.Note, Revision: *detail.CurrentRevision}}, "More concurrent evidence.")
-		next.Generation.Notes = []organizingapp.SynthesisGeneratedNote{{NoteID: detail.Note.ID, BaseRevisionID: detail.CurrentRevision.ID, TopicKey: detail.Note.TopicKey, Title: detail.Note.Title, Aliases: detail.Note.Aliases, Delta: domain.SynthesisDelta{Operations: []domain.SynthesisOperation{{Kind: domain.SynthesisAddSupport, TargetItemID: detail.CurrentRevision.Items[0].ID, Sources: []domain.SynthesisSourceRef{next.Input.Sources[0].Reference}}}}}}
+		next.Generation.Notes = []organizingapp.SynthesisGeneratedNote{extendedSynthesisNote(detail, next.Input.Sources[0].Reference)}
 		var approvalErr, applyErr error
 		start := make(chan struct{})
 		var wg sync.WaitGroup
@@ -357,11 +357,15 @@ type synthesisDBFixture struct {
 
 func newSynthesisDBFixture(t *testing.T) *synthesisDBFixture {
 	t.Helper()
-	return newSynthesisDBFixtureAtVersion(t, 95)
+	return newSynthesisDBFixtureAtVersion(t, 121)
 }
 
 func newSynthesisDBFixtureAtVersion(t *testing.T, version int64) *synthesisDBFixture {
 	t.Helper()
+	// 这是运行时测试数据。当前仓储即使读取旧调用方的 v1 版本，也会读取手稿和重合并来源列；专门的历史迁移测试自行维护版本化测试数据。
+	if version < 128 {
+		version = 128
+	}
 	database := testdb.Require(t, testdb.Config{MaxConns: 12, Availability: testdb.FailWhenUnavailable, Migrate: func(ctx context.Context, pool *pgxpool.Pool) error {
 		return platformmigration.MigrateAtlasToVersion(ctx, pool, version)
 	}})
@@ -408,7 +412,7 @@ func newSynthesisDBFixtureAtVersion(t *testing.T, version int64) *synthesisDBFix
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.store, err = NewGORMSynthesisStore(platform, SynthesisStoreDependencies{Authoring: f.authoring, Retirer: retirer, Sources: f.sources, Validated: f.validation})
+	f.store, err = NewGORMSynthesisStore(platform, SynthesisStoreDependencies{Authoring: f.authoring, Retirer: retirer, Sources: f.sources, Validated: f.validation, Anchors: synthesisNoAnchorFence{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -522,6 +526,12 @@ func (f *synthesisValidationFixture) VerifyValidatedSynthesisGenerationScoped(ct
 		return f.err
 	}
 	return result.Validate(input)
+}
+
+type synthesisNoAnchorFence struct{}
+
+func (synthesisNoAnchorFence) VerifySynthesisAnchorAdmissionScoped(context.Context, foundation.TransactionScope, foundation.ID, foundation.ID, domain.SynthesisSourceVersion, *organizingapp.SynthesisAnchorBinding) error {
+	return nil
 }
 
 type synthesisTargetFixture struct{}

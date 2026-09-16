@@ -24,9 +24,14 @@ type synthesisSemanticCheck struct {
 }
 
 type synthesisSemanticInput struct {
-	Checks         []synthesisSemanticCheck `json:"checks"`
-	Sources        []synthesisInputSource   `json:"sources"`
-	UnchangedNotes []synthesisInputNote     `json:"unchanged_notes"`
+	ExistingSources *[]string                `json:"existing_sources,omitempty"`
+	FusionTarget    string                   `json:"fusion_target,omitempty"`
+	Scope           *synthesisInputAnchor    `json:"scope,omitempty"`
+	RefreshUpdates  []synthesisInputItem     `json:"refresh_updates,omitempty"`
+	Goal            string                   `json:"user_goal,omitempty"`
+	Checks          []synthesisSemanticCheck `json:"checks"`
+	Sources         []synthesisInputSource   `json:"sources"`
+	UnchangedNotes  []synthesisInputNote     `json:"unchanged_notes"`
 }
 
 type synthesisSourceVerdict struct {
@@ -47,7 +52,19 @@ func synthesisSemanticPlan(input organizingapp.SynthesisGenerationInput, result 
 		return synthesisSemanticInput{}, err
 	}
 	projection := synthesisInput(input)
-	value := synthesisSemanticInput{Checks: make([]synthesisSemanticCheck, 0), Sources: projection.Sources, UnchangedNotes: []synthesisInputNote{}}
+	value := synthesisSemanticInput{FusionTarget: projection.FusionTarget, Goal: projection.Goal, Checks: make([]synthesisSemanticCheck, 0), Sources: projection.Sources, UnchangedNotes: []synthesisInputNote{}}
+	if projection.FusionTarget != "" {
+		for _, note := range projection.Notes {
+			if note.Label == projection.FusionTarget {
+				value.Scope = note.Anchor
+				if input.SemanticPromptVersion == organizingapp.SynthesisFusionExistingSemanticPromptVersion {
+					existing := synthesisExistingSourceLabels(note)
+					value.ExistingSources = &existing
+				}
+				break
+			}
+		}
+	}
 	labels := make(map[domain.SynthesisSourceRef]string, len(input.Sources))
 	for index, source := range input.Sources {
 		labels[source.Reference] = projection.Sources[index].Label
@@ -84,7 +101,11 @@ func synthesisSemanticPlan(input organizingapp.SynthesisGenerationInput, result 
 			}
 		}
 		for _, operation := range generated.Delta.Operations {
-			switch operation.Kind {
+			kind := operation.Kind
+			if kind == domain.SynthesisRefreshItem {
+				kind = map[domain.SynthesisItemKind]domain.SynthesisOperationKind{domain.SynthesisFactItem: domain.SynthesisAddFact, domain.SynthesisGapItem: domain.SynthesisAddGap, domain.SynthesisConflictItem: domain.SynthesisAddConflict}[operation.Item.Kind]
+			}
+			switch kind {
 			case domain.SynthesisAddFact:
 				if err := statementCheck("ASSERTION", generated.Title, "", "", *operation.Item.Fact); err != nil {
 					return value, err
@@ -113,6 +134,12 @@ func synthesisSemanticPlan(input organizingapp.SynthesisGenerationInput, result 
 				}
 				if err := appendCheck(synthesisSemanticCheck{Kind: "GAP_CONTEXT", Topic: generated.Title, Question: gap.Question, Context: gap.Context, Sources: sources}); err != nil {
 					return value, err
+				}
+				// 纳入已发布正文时可能复制已解决的 GAP；其解决结论仍是一项断言，不能因来源笔记已发布就绕过评审。
+				if gap.Resolution != nil {
+					if err := statementCheck("GAP_RESOLUTION", generated.Title, gap.Question, gap.Context, *gap.Resolution); err != nil {
+						return value, err
+					}
 				}
 			case domain.SynthesisAddSupport:
 				target, found := current[string(operation.TargetItemID)]
@@ -147,6 +174,13 @@ func synthesisSemanticPlan(input organizingapp.SynthesisGenerationInput, result 
 	if len(value.Checks) == 0 {
 		value.UnchangedNotes = projection.Notes
 		if err := appendCheck(synthesisSemanticCheck{Kind: "NO_CHANGE"}); err != nil {
+			return value, err
+		}
+	}
+	if input.BodyRefresh != nil {
+		value.Scope = projection.Notes[0].Anchor
+		value.RefreshUpdates = projection.RefreshUpdates
+		if err := appendCheck(synthesisSemanticCheck{Kind: "REFRESH_SCOPE"}); err != nil {
 			return value, err
 		}
 	}
@@ -240,4 +274,33 @@ func bindSynthesisSemanticOutput(raw []byte, plan synthesisSemanticInput, input 
 
 func validSynthesisVerdict(value string) bool {
 	return value == "SUPPORTED" || value == "UNSUPPORTED" || value == "UNCERTAIN"
+}
+
+// 提供方笔记仅从当前 Revision.Items 及有效槽位补充来源投影，并按精确来源引用与本次请求中的来源取交集。
+func synthesisExistingSourceLabels(note synthesisInputNote) []string {
+	labels := []string{}
+	appendSources := func(sources []string) {
+		for _, source := range sources {
+			if !slices.Contains(labels, source) {
+				labels = append(labels, source)
+			}
+		}
+	}
+	for _, item := range note.Items {
+		if item.Fact != nil {
+			appendSources(item.Fact.Sources)
+		}
+		if item.Conflict != nil {
+			for _, alternative := range item.Conflict.Alternatives {
+				appendSources(alternative.Sources)
+			}
+		}
+		if item.Gap != nil {
+			appendSources(item.Gap.Sources)
+			if item.Gap.Resolution != nil {
+				appendSources(item.Gap.Resolution.Sources)
+			}
+		}
+	}
+	return labels
 }

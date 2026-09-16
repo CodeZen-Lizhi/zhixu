@@ -25,13 +25,6 @@ CREATE SCHEMA agent;
 
 
 --
--- Name: atlas_schema_revisions; Type: SCHEMA; Schema: -; Owner: -
---
-
-CREATE SCHEMA atlas_schema_revisions;
-
-
---
 -- Name: auth; Type: SCHEMA; Schema: -; Owner: -
 --
 
@@ -816,7 +809,7 @@ BEGIN
         IF NEW.retrieval_index_version_id IS NULL
            AND NEW.output_schema_id NOT IN (
                'agent.rag-answer','organizing.outline-generation','organizing.document-generation',
-               'agent.synthesis-delta','agent.synthesis-semantic-review','agent.synthesis-note-interview-plan','agent.workspace-analysis-decision'
+               'agent.synthesis-delta','agent.synthesis-semantic-review','agent.synthesis-note-interview-plan','agent.workspace-analysis-decision','organizing.anchor-recommendation','organizing.goal-point-selection','agent.synthesis-manuscript-source-review'
            ) THEN
             RAISE EXCEPTION 'only rag or organizing model run may defer retrieval binding' USING ERRCODE = '23514';
         END IF;
@@ -841,7 +834,7 @@ BEGIN
                 USING ERRCODE = '55000';
         END IF;
         IF NEW.output_schema_id IN ('agent.synthesis-delta','agent.synthesis-semantic-review')
-           AND (NEW.output_schema_version<>'v1' OR NEW.retrieval_index_version_id IS NOT NULL
+           AND (NOT organizing.synthesis_model_contract_matches(NEW.workspace_id,NEW.workflow_run_id,CASE NEW.output_schema_id WHEN 'agent.synthesis-delta' THEN 'GENERATE' ELSE 'VALIDATE' END,NEW.prompt_template_id,NEW.prompt_template_version,NEW.output_schema_id,NEW.output_schema_version) OR NEW.retrieval_index_version_id IS NOT NULL
                 OR NOT EXISTS (
                     SELECT 1 FROM organizing.synthesis_model_step step
                     WHERE step.workspace_id=NEW.workspace_id AND step.workflow_run_id=NEW.workflow_run_id
@@ -851,6 +844,36 @@ BEGIN
                         OR (NEW.output_schema_id='agent.synthesis-semantic-review' AND step.stage='VALIDATE'))
                 )) THEN
             RAISE EXCEPTION 'synthesis model run requires an exact running step' USING ERRCODE='23514';
+        END IF;
+        IF NEW.output_schema_id='agent.synthesis-manuscript-source-review' AND (
+           NEW.output_schema_version<>'v1' OR NEW.reduced_schema_id<>NEW.output_schema_id OR NEW.reduced_schema_version<>NEW.output_schema_version
+           OR NEW.retrieval_index_version_id IS NOT NULL OR NEW.memory_snapshot_id IS NOT NULL
+           OR NEW.prompt_template_id<>NEW.output_schema_id OR NEW.prompt_template_version<>'v1'
+           OR NOT EXISTS(SELECT 1 FROM organizing.synthesis_manuscript_source_review review
+             WHERE review.workspace_id=NEW.workspace_id AND review.workflow_run_id=NEW.workflow_run_id AND review.model_run_id=NEW.id
+             AND review.node_run_id=NEW.node_run_id AND review.node_attempt_id=NEW.node_attempt_id AND review.status='RUNNING' AND review.request_hash IS NOT NULL
+             AND organizing.source_review_live(NEW.workspace_id,NEW.workflow_run_id,NEW.node_run_id,NEW.node_attempt_id,'organizing.synthesis-manuscript-source-review.review'))) THEN
+           RAISE EXCEPTION 'source review model requires exact running review claim' USING ERRCODE='23514';
+        END IF;
+        IF NEW.output_schema_id='organizing.goal-point-selection' AND (
+           NEW.output_schema_version<>'v1' OR NEW.reduced_schema_id<>NEW.output_schema_id OR NEW.reduced_schema_version<>NEW.output_schema_version
+           OR NEW.retrieval_index_version_id IS NOT NULL OR NEW.memory_snapshot_id IS NOT NULL
+           OR NEW.prompt_template_id<>'organizing.goal-point-selection' OR NEW.prompt_template_version<>'v1'
+           OR NOT EXISTS (SELECT 1 FROM organizing.synthesis_goal_selection selection
+              WHERE selection.workspace_id=NEW.workspace_id AND selection.workflow_run_id=NEW.workflow_run_id
+                AND selection.node_run_id=NEW.node_run_id AND selection.node_attempt_id=NEW.node_attempt_id
+                AND selection.status='RUNNING' AND selection.model_input_hash IS NOT NULL)) THEN
+           RAISE EXCEPTION 'goal selection model requires an exact claimed selection' USING ERRCODE='23514';
+        END IF;
+        IF NEW.output_schema_id='organizing.anchor-recommendation' AND (
+           NEW.output_schema_version<>'v1' OR NEW.reduced_schema_id<>NEW.output_schema_id OR NEW.reduced_schema_version<>NEW.output_schema_version
+           OR NEW.retrieval_index_version_id IS NOT NULL OR NEW.memory_snapshot_id IS NOT NULL
+           OR NEW.prompt_template_id<>'organizing.anchor-recommendation' OR NEW.prompt_template_version<>'v1'
+           OR NOT EXISTS (SELECT 1 FROM organizing.anchor_recommendation_request request
+              WHERE request.workspace_id=NEW.workspace_id AND request.workflow_run_id=NEW.workflow_run_id
+                AND request.node_run_id=NEW.node_run_id AND request.node_attempt_id=NEW.node_attempt_id
+                AND request.status='RUNNING' AND request.model_input_hash IS NOT NULL)) THEN
+           RAISE EXCEPTION 'anchor recommendation model requires an exact claimed request' USING ERRCODE='23514';
         END IF;
         IF NEW.output_schema_id='agent.synthesis-note-interview-plan' AND (
            NEW.output_schema_version<>'1' OR NEW.reduced_schema_id<>NEW.output_schema_id OR NEW.reduced_schema_version<>NEW.output_schema_version
@@ -6045,6 +6068,21 @@ $$;
 
 
 --
+-- Name: publication_replaces_revision(uuid, uuid, uuid, uuid, text); Type: FUNCTION; Schema: authoring; Owner: -
+--
+
+CREATE FUNCTION authoring.publication_replaces_revision(checked_reservation_id uuid, checked_workspace_id uuid, checked_document_id uuid, checked_revision_id uuid, checked_content_hash text) RETURNS boolean
+    LANGUAGE sql STABLE
+    AS $$
+ SELECT EXISTS(SELECT 1 FROM authoring.document_publication_reservation r
+ WHERE r.id=checked_reservation_id AND r.workspace_id=checked_workspace_id AND r.document_id=checked_document_id
+ AND r.target_mode='REPLACE' AND
+ ((r.merge_receipt_id IS NULL AND r.historical_republish_id IS NULL AND r.base_version=checked_content_hash)
+  OR ((r.merge_receipt_id IS NOT NULL OR r.historical_republish_id IS NOT NULL) AND r.merge_published_revision_id=checked_revision_id AND r.merge_published_content_hash=checked_content_hash)));
+$$;
+
+
+--
 -- Name: reject_immutable_mutation(); Type: FUNCTION; Schema: authoring; Owner: -
 --
 
@@ -6186,7 +6224,7 @@ BEGIN
                AND binding.target_mode='REPLACE'
                AND binding.status IN ('PENDING','RECOVERY_REQUIRED')
                AND reservation.status='CLOSED'
-               AND reservation.base_version=OLD.content_hash
+               AND authoring.publication_replaces_revision(reservation.id,OLD.workspace_id,OLD.document_id,OLD.id,OLD.content_hash)
                AND commit_mapping.workspace_id=binding.workspace_id
                AND commit_mapping.target_path=binding.target_path
                AND commit_mapping.target_mode='REPLACE'
@@ -6322,6 +6360,38 @@ BEGIN
     SELECT id INTO latest_revision FROM core.article_revision
      WHERE document_id=NEW.document_id AND workspace_id=NEW.workspace_id
      ORDER BY revision_no DESC LIMIT 1;
+    IF proposal_record.version=NEW.expected_proposal_version AND EXISTS (
+      SELECT 1 FROM (SELECT workspace_id,note_id,attempt_id,kind FROM organizing.synthesis_candidate_remerge_event UNION ALL SELECT workspace_id,note_id,attempt_id,kind FROM organizing.synthesis_historical_republish_event) e
+      JOIN (SELECT id,workspace_id,note_id,kind,payload FROM organizing.synthesis_candidate_remerge_event UNION ALL SELECT id,workspace_id,note_id,kind,payload FROM organizing.synthesis_historical_republish_event) attempt ON attempt.id=e.attempt_id AND attempt.workspace_id=e.workspace_id AND attempt.note_id=e.note_id AND attempt.kind='BEGIN'
+      CROSS JOIN LATERAL(SELECT convert_from(attempt.payload,'UTF8')::jsonb a) payload
+      WHERE e.kind='APPLY' AND e.workspace_id=NEW.workspace_id AND e.note_id=NEW.origin_id
+       AND NEW.origin_kind='SYNTHESIS_NOTE' AND a->'command'->>'expected_publication_id'=NEW.publication_id::text
+       AND a->'command'->>'expected_revision_id'=NEW.origin_revision_id::text
+       AND a->'command'->>'expected_document_id'=NEW.document_id::text
+       AND (a->'command'->>'expected_document_version')::bigint=NEW.expected_document_version
+       AND (a->'command'->>'expected_proposal_version')::bigint=NEW.expected_proposal_version
+       AND COALESCE(a->'original',a->'latest')->>'article_revision_id'=NEW.article_revision_id::text
+       AND COALESCE(a->'original',a->'latest')->>'hash'=NEW.projection_hash
+    ) THEN
+    IF binding_record.id IS NULL OR proposal_record.id IS NULL
+       OR binding_record.document_id<>NEW.document_id OR binding_record.article_revision_id<>NEW.article_revision_id
+       OR latest_revision IS DISTINCT FROM NEW.article_revision_id
+       OR document_version IS DISTINCT FROM NEW.expected_document_version
+       OR binding_record.status<>'CLOSED' OR binding_record.error_code<>'AUTHORING_PUBLICATION_PROPOSAL_NEEDS_REVISION'
+       OR binding_record.git_commit IS NOT NULL OR binding_record.published_at IS NOT NULL
+       OR proposal_record.proposal_type<>'file_patch' OR proposal_record.status<>'needs_revision'
+       OR proposal_record.current_revision_id IS DISTINCT FROM binding_record.proposal_revision_id
+       OR proposal_record.version<>NEW.expected_proposal_version OR proposal_record.workflow_run_id IS NOT NULL
+       OR NEW.created_at<binding_record.updated_at OR NEW.created_at<proposal_record.updated_at
+       OR EXISTS (SELECT 1 FROM change_control.approval WHERE proposal_id=proposal_record.id)
+       OR EXISTS (SELECT 1 FROM change_control.proposal_revision_dispatch WHERE proposal_id=proposal_record.id)
+       OR EXISTS (SELECT 1 FROM change_control.tool_authorization WHERE proposal_id=proposal_record.id)
+       OR EXISTS (SELECT 1 FROM change_control.writeback_execution WHERE proposal_id=proposal_record.id)
+       OR EXISTS (SELECT 1 FROM change_control.proposal_commit WHERE proposal_id=proposal_record.id) THEN
+        RAISE EXCEPTION 'generated publication retirement lacks an exact unapproved terminal binding' USING ERRCODE='23514';
+    END IF;
+      RETURN NEW;
+    END IF;
     IF binding_record.id IS NULL OR proposal_record.id IS NULL
        OR binding_record.document_id<>NEW.document_id OR binding_record.article_revision_id<>NEW.article_revision_id
        OR latest_revision IS DISTINCT FROM NEW.article_revision_id
@@ -6596,6 +6666,51 @@ $_$;
 
 
 --
+-- Name: validate_publication_merge_baseline(); Type: FUNCTION; Schema: authoring; Owner: -
+--
+
+CREATE FUNCTION authoring.validate_publication_merge_baseline() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE proof record; document_record core.document%ROWTYPE;
+BEGIN
+ IF TG_OP='UPDATE' THEN
+  IF NEW.historical_republish_id IS DISTINCT FROM OLD.historical_republish_id OR NEW.merge_receipt_id IS DISTINCT FROM OLD.merge_receipt_id
+     OR NEW.merge_capture_id IS DISTINCT FROM OLD.merge_capture_id
+     OR NEW.merge_published_revision_id IS DISTINCT FROM OLD.merge_published_revision_id
+     OR NEW.merge_published_content_hash IS DISTINCT FROM OLD.merge_published_content_hash THEN
+   RAISE EXCEPTION 'publication merge baseline is immutable' USING ERRCODE='55000';
+  END IF;
+  RETURN NEW;
+ END IF;
+ SELECT * INTO proof FROM organizing.synthesis_publication_merge_baseline
+  WHERE workspace_id=NEW.workspace_id AND document_id=NEW.document_id AND article_revision_id=NEW.article_revision_id;
+ IF NOT FOUND THEN
+  IF NEW.historical_republish_id IS NOT NULL OR NEW.merge_receipt_id IS NOT NULL OR EXISTS(SELECT 1 FROM organizing.synthesis_revision
+       WHERE workspace_id=NEW.workspace_id AND article_revision_id=NEW.article_revision_id AND renderer_version='synthesis-markdown/v2') THEN
+   RAISE EXCEPTION 'publication merge proof is missing' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+ END IF;
+ SELECT * INTO document_record FROM core.document WHERE id=NEW.document_id AND workspace_id=NEW.workspace_id FOR UPDATE;
+ IF (proof.valid AND NEW.merge_receipt_id IS NOT DISTINCT FROM proof.receipt_id AND NEW.historical_republish_id IS NOT DISTINCT FROM proof.historical_republish_id AND NEW.merge_capture_id=proof.capture_id
+     AND NEW.merge_published_revision_id IS NOT DISTINCT FROM proof.published_revision_id
+     AND NEW.merge_published_content_hash IS NOT DISTINCT FROM proof.published_content_hash
+     AND NEW.base_version=proof.file_base AND NEW.target_path=proof.target_path AND NEW.content_hash=proof.content_hash
+     AND document_record.canonical_path=proof.target_path AND document_record.version=proof.document_version
+     AND document_record.current_published_revision_id IS NOT DISTINCT FROM proof.published_revision_id
+     AND NOT EXISTS(SELECT 1 FROM core.article_revision newer JOIN core.article_revision candidate ON candidate.id=NEW.article_revision_id
+         WHERE newer.document_id=NEW.document_id AND newer.workspace_id=NEW.workspace_id AND newer.revision_no>candidate.revision_no)
+     AND ((NEW.target_mode='CREATE_ONLY' AND proof.published_revision_id IS NULL AND document_record.lifecycle_status='DRAFT')
+          OR (NEW.target_mode='REPLACE' AND proof.published_revision_id IS NOT NULL AND document_record.lifecycle_status='PUBLISHED'
+              AND authoring.publication_is_exact_current(NEW.workspace_id,NEW.document_id,proof.published_revision_id)))) IS NOT TRUE THEN
+  RAISE EXCEPTION 'publication merge baseline differs from proven owner facts' USING ERRCODE='23514';
+ END IF;
+ RETURN NEW;
+END; $$;
+
+
+--
 -- Name: validate_publication_reservation_write(); Type: FUNCTION; Schema: authoring; Owner: -
 --
 
@@ -6766,7 +6881,7 @@ BEGIN
                    AND replacement.target_mode='REPLACE'
                    AND replacement.status='PUBLISHED'
                    AND replacement_reservation.status='CLOSED'
-                   AND replacement_reservation.base_version=NEW.content_hash
+                   AND authoring.publication_replaces_revision(replacement_reservation.id,NEW.workspace_id,NEW.document_id,NEW.id,NEW.content_hash)
                    AND authoring.publication_is_exact_current(
                        replacement.workspace_id,replacement.document_id,
                        replacement.article_revision_id)
@@ -9100,6 +9215,37 @@ $$;
 
 
 --
+-- Name: validate_source_content_reappearance(); Type: FUNCTION; Schema: core; Owner: -
+--
+
+CREATE FUNCTION core.validate_source_content_reappearance() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE previous core.source_version%ROWTYPE;
+BEGIN
+    IF NEW.observation_predecessor_id IS NULL THEN RETURN NEW; END IF;
+    PERFORM 1 FROM core.source WHERE id=NEW.source_id AND workspace_id=NEW.workspace_id FOR UPDATE;
+    SELECT * INTO previous FROM core.source_version
+        WHERE source_id=NEW.source_id AND workspace_id=NEW.workspace_id
+        ORDER BY captured_at DESC,id DESC LIMIT 1;
+    IF previous.id IS DISTINCT FROM NEW.observation_predecessor_id
+        OR previous.content_hash=NEW.content_hash
+        OR NEW.captured_at<=previous.captured_at
+        OR NOT EXISTS (SELECT 1 FROM core.source_version original
+            WHERE original.source_id=NEW.source_id AND original.workspace_id=NEW.workspace_id
+              AND original.content_hash=NEW.content_hash AND original.observation_predecessor_id IS NULL
+              AND original.byte_size=NEW.byte_size AND original.mime_type=NEW.mime_type
+              AND original.content_artifact_id=NEW.content_artifact_id
+              AND original.original_content_location=NEW.original_content_location)
+    THEN
+        RAISE EXCEPTION 'invalid source content reappearance' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+
+--
 -- Name: validate_workspace_git_capture_checkpoint_update(); Type: FUNCTION; Schema: core; Owner: -
 --
 
@@ -10632,8 +10778,12 @@ BEGIN
   SELECT jsonb_build_object('workspace_id',r.workspace_id,'note_id',r.note_id,'revision_id',r.id,'revision_no',r.revision_no,
    'document_id',r.document_id,'article_revision_id',r.article_revision_id,'article_revision_no',r.article_revision_no,
    'content_hash',r.content_hash,'projection_hash',r.projection_hash,'title',r.title,'renderer_version',r.renderer_version,'items',r.items)
+   || CASE WHEN r.renderer_version='synthesis-markdown/v2' THEN jsonb_build_object('manuscript',r.manuscript) ELSE '{}'::jsonb END
    INTO expected FROM organizing.synthesis_revision r WHERE r.id=NEW.revision_id AND r.workspace_id=NEW.workspace_id;
   IF expected IS NULL OR NEW.snapshot IS DISTINCT FROM expected THEN RAISE EXCEPTION 'note interview snapshot differs from immutable revision' USING ERRCODE='23514'; END IF;
+  IF jsonb_array_length(expected->'items')=0 THEN
+   RAISE EXCEPTION 'note interview has no trusted material available' USING ERRCODE='23514';
+  END IF;
   IF NEW.retry_of IS NULL THEN
    IF NOT EXISTS (
     SELECT 1 FROM core.document d JOIN core.article_revision ar ON ar.id=d.current_published_revision_id AND ar.workspace_id=d.workspace_id AND ar.document_id=d.id
@@ -10697,7 +10847,16 @@ BEGIN
  END IF;
  SELECT * INTO p FROM learning.note_interview_preparation WHERE session_id=NEW.session_id AND workspace_id=NEW.workspace_id AND status='READY';
  IF p.id IS NULL THEN RAISE EXCEPTION 'note question has no ready preparation' USING ERRCODE='23514'; END IF;
- ref:=p.snapshot-'items'-'renderer_version';
+ ref:=jsonb_build_object('workspace_id',p.snapshot->'workspace_id',
+   'note_id',p.snapshot->'note_id',
+   'revision_id',p.snapshot->'revision_id',
+   'revision_no',p.snapshot->'revision_no',
+   'document_id',p.snapshot->'document_id',
+   'article_revision_id',p.snapshot->'article_revision_id',
+   'article_revision_no',p.snapshot->'article_revision_no',
+   'content_hash',p.snapshot->'content_hash',
+   'projection_hash',p.snapshot->'projection_hash',
+   'title',p.snapshot->'title');
  IF NOT EXISTS(SELECT 1 FROM learning.review_session s WHERE s.id=NEW.session_id AND s.workspace_id=NEW.workspace_id AND s.config->'scope'=jsonb_build_object('note_revision',ref)
   AND s.config-'scope'-'schema_version'=p.options) THEN RAISE EXCEPTION 'note question scope differs from preparation' USING ERRCODE='23514'; END IF;
  SELECT value,ordinality::integer INTO item,item_no FROM jsonb_array_elements(p.snapshot->'items') WITH ORDINALITY WHERE value->>'id'=NEW.note_source->>'item_id';
@@ -14815,6 +14974,23 @@ $_$;
 
 
 --
+-- Name: valid_model_reasoning_overrides(jsonb); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.valid_model_reasoning_overrides(value jsonb) RETURNS boolean
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $$
+ SELECT CASE WHEN jsonb_typeof(value) = 'object' THEN NOT EXISTS (
+  SELECT 1 FROM jsonb_each(value) entry
+  WHERE entry.key NOT IN ('file_profile','knowledge_organization','anchor_scope','main_note_synthesis',
+   'manuscript_source_review','knowledge_qna','workspace_analysis','note_interview')
+   OR jsonb_typeof(entry.value) <> 'string'
+   OR entry.value #>> '{}' NOT IN ('','low','medium','high','xhigh','max')
+ ) ELSE false END
+$$;
+
+
+--
 -- Name: valid_timeline_owner_binding(text, text, uuid, jsonb); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -15527,6 +15703,543 @@ $$;
 
 
 --
+-- Name: check_anchor_creation(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.check_anchor_creation() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+ IF NEW.version<>1 OR NEW.scope_version<>1 OR NOT EXISTS(SELECT 1 FROM organizing.synthesis_note WHERE id=NEW.note_id AND workspace_id=NEW.workspace_id AND current_revision_id=NEW.basis_revision_id) THEN
+ RAISE EXCEPTION 'anchor must start from current note revision at version one' USING ERRCODE='23514'; END IF;
+ RETURN NEW;
+END; $$;
+
+
+--
+-- Name: check_anchor_decision(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.check_anchor_decision() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE p organizing.anchor_proposal%ROWTYPE; a organizing.knowledge_anchor%ROWTYPE; r organizing.anchor_receipt%ROWTYPE;
+BEGIN
+ SELECT * INTO p FROM organizing.anchor_proposal WHERE id=NEW.proposal_id AND workspace_id=NEW.workspace_id AND anchor_id=NEW.anchor_id;
+ SELECT * INTO a FROM organizing.knowledge_anchor WHERE id=NEW.anchor_id AND workspace_id=NEW.workspace_id;
+ SELECT * INTO r FROM organizing.anchor_receipt WHERE workspace_id=NEW.workspace_id AND idempotency_key=NEW.receipt_key;
+ IF p.id IS NULL OR a.id IS NULL OR r.operation IS DISTINCT FROM 'DECIDE' OR r.anchor_id IS DISTINCT FROM NEW.anchor_id OR a.version<>NEW.anchor_version
+ OR (r.result->'anchor'->>'version')::bigint IS DISTINCT FROM a.version
+ OR NOT EXISTS(SELECT 1 FROM jsonb_array_elements(r.result->'items') i WHERE i->>'id'=NEW.proposal_id::text AND i->>'status'=NEW.decision)
+ OR (p.kind='SOURCE_ASSOCIATION' AND a.scope_version<>p.scope_version)
+ OR (p.kind='SCOPE_ADJUSTMENT' AND NEW.decision='REJECTED' AND a.scope_version<>p.scope_version)
+ OR (p.kind='SCOPE_ADJUSTMENT' AND NEW.decision='ACCEPTED' AND NOT EXISTS(SELECT 1 FROM organizing.anchor_scope_revision s WHERE s.anchor_id=a.id AND s.workspace_id=a.workspace_id AND s.version=a.scope_version AND s.version=p.scope_version+1 AND s.proposal_id=p.id AND s.scope=p.suggested)) THEN
+ RAISE EXCEPTION 'anchor decision requires matching current scope and receipt' USING ERRCODE='23514'; END IF;
+ RETURN NEW;
+END; $$;
+
+
+--
+-- Name: check_anchor_proposal(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.check_anchor_proposal() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+ IF NOT EXISTS(SELECT 1 FROM agent.model_run WHERE id=NEW.model_run_id AND workspace_id=NEW.workspace_id AND status='SUCCEEDED')
+ OR (SELECT count(*) FROM organizing.anchor_proposal_evidence WHERE proposal_id=NEW.id) NOT BETWEEN 1 AND 32 THEN
+ RAISE EXCEPTION 'recommendation needs successful model and exact evidence' USING ERRCODE='23514'; END IF;
+ RETURN NEW;
+END; $$;
+
+
+--
+-- Name: check_anchor_scope_acceptance(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.check_anchor_scope_acceptance() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+ IF NEW.version>1 AND NOT EXISTS(SELECT 1 FROM organizing.anchor_proposal p JOIN organizing.anchor_decision d ON d.proposal_id=p.id AND d.workspace_id=p.workspace_id AND d.anchor_id=p.anchor_id
+ WHERE p.id=NEW.proposal_id AND p.workspace_id=NEW.workspace_id AND p.anchor_id=NEW.anchor_id AND p.kind='SCOPE_ADJUSTMENT'
+ AND p.scope_version=NEW.version-1 AND p.suggested=NEW.scope AND d.decision='ACCEPTED') THEN
+ RAISE EXCEPTION 'scope expansion requires an accepted matching proposal' USING ERRCODE='23514'; END IF;
+ RETURN NEW;
+END; $$;
+
+
+--
+-- Name: check_goal_selection_manifest(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.check_goal_selection_manifest() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE manifest organizing.synthesis_goal_selection_manifest%ROWTYPE;
+BEGIN
+ SELECT * INTO STRICT manifest FROM organizing.synthesis_goal_selection_manifest WHERE batch_id=NEW.batch_id;
+ IF NOT manifest.sealed OR (SELECT count(*) FROM organizing.synthesis_goal_selection WHERE catalog_batch_id=manifest.batch_id)<>manifest.selection_count
+ OR EXISTS (
+  SELECT 1 FROM organizing.synthesis_goal_catalog_item item
+  JOIN learning.document_knowledge_profile_revision revision ON revision.id=item.profile_revision_id AND revision.workspace_id=item.workspace_id
+  WHERE item.batch_id=manifest.batch_id AND (
+   COALESCE((SELECT sum(point_count) FROM organizing.synthesis_goal_selection s WHERE s.catalog_batch_id=item.batch_id AND s.source_ordinal=item.ordinal-1),0)
+    <> jsonb_array_length(COALESCE(NULLIF(revision.content->'knowledge_points','null'::jsonb),'[]'::jsonb))+jsonb_array_length(COALESCE(NULLIF(revision.content->'examples','null'::jsonb),'[]'::jsonb))
+   OR EXISTS(SELECT 1 FROM (
+     SELECT point_offset,COALESCE(sum(point_count) OVER(ORDER BY point_offset ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING),0) expected
+     FROM organizing.synthesis_goal_selection s WHERE s.catalog_batch_id=item.batch_id AND s.source_ordinal=item.ordinal-1
+    ) coverage WHERE point_offset<>expected))) THEN
+  RAISE EXCEPTION 'selection manifest must cover every catalog point exactly once' USING ERRCODE='23514';
+ END IF;
+ RETURN NEW;
+END $$;
+
+
+--
+-- Name: check_synthesis_goal_catalog_commit(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.check_synthesis_goal_catalog_commit() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+ IF NOT EXISTS(SELECT 1 FROM organizing.synthesis_goal_request r WHERE r.id=NEW.request_id AND r.workspace_id=NEW.workspace_id AND r.catalog_batches>=NEW.batch_no)
+  OR (SELECT count(*) FROM organizing.synthesis_goal_catalog_item WHERE batch_id=NEW.id)<>NEW.item_count THEN
+  RAISE EXCEPTION 'goal catalog batch cannot commit without its request progress' USING ERRCODE='23514';
+ END IF;
+ RETURN NULL;
+END;
+$$;
+
+
+--
+-- Name: close_synthesis_source_review_abandoned_calls(uuid, uuid); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.close_synthesis_source_review_abandoned_calls(w uuid, v uuid) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+DECLARE review organizing.synthesis_manuscript_source_review%ROWTYPE;ended timestamptz;
+BEGIN
+ SELECT * INTO review FROM organizing.synthesis_manuscript_source_review WHERE workspace_id=w AND id=v FOR UPDATE;
+ IF review.id IS NULL OR review.model_run_id IS NULL OR NOT EXISTS(SELECT 1 FROM workflow.run r JOIN workflow.node_attempt a ON a.id=review.node_attempt_id JOIN workflow.node_run n ON n.id=a.node_run_id AND n.run_id=r.id WHERE r.id=review.workflow_run_id AND r.workspace_id=w AND (r.status IN ('failed','cancelled','succeeded') OR r.cancel_requested_at IS NOT NULL OR a.status<>'running' OR a.lease_until<=clock_timestamp() OR review.created_at<clock_timestamp()-interval '30 minutes')) THEN RETURN; END IF;
+ PERFORM 1 FROM agent.model_run m WHERE m.id=review.model_run_id AND m.workspace_id=w AND m.workflow_run_id=review.workflow_run_id AND m.node_attempt_id=review.node_attempt_id AND m.status='RUNNING' FOR UPDATE;
+ IF NOT FOUND THEN RETURN; END IF;
+ ended:=clock_timestamp();
+ UPDATE agent.model_call SET status='UNKNOWN',error_code='SYNTHESIS_SOURCE_REVIEW_RECOVERY_REQUIRED',version=version+1,completed_at=GREATEST(ended,started_at),latency_ms=LEAST(600000,GREATEST(0,(extract(epoch FROM ended-started_at)*1000)::bigint))
+ WHERE model_run_id=review.model_run_id AND status='STARTED';
+END; $$;
+
+
+--
+-- Name: freeze_synthesis_source_profile(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.freeze_synthesis_source_profile() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    frozen_profile uuid;
+BEGIN
+    IF EXISTS(SELECT 1 FROM organizing.synthesis_revision WHERE id=NEW.revision_id AND workspace_id=NEW.workspace_id AND historical_republish_id IS NOT NULL) THEN
+      SELECT prior.profile_revision_id INTO frozen_profile FROM organizing.synthesis_revision r
+      JOIN organizing.synthesis_revision_source prior ON prior.revision_id=(r.historical_republish->>'selected_revision_id')::uuid AND prior.workspace_id=r.workspace_id AND prior.note_id=r.note_id
+      WHERE r.id=NEW.revision_id AND r.workspace_id=NEW.workspace_id AND r.note_id=NEW.note_id
+       AND prior.source_id=NEW.source_id AND prior.source_version_id=NEW.source_version_id AND prior.content_artifact_id=NEW.content_artifact_id
+       AND prior.parse_projection_id=NEW.parse_projection_id AND prior.source_span_id=NEW.source_span_id AND prior.content_hash=NEW.content_hash AND prior.excerpt_hash=NEW.excerpt_hash AND prior.title=NEW.title;
+      IF NOT FOUND OR NEW.profile_revision_id IS DISTINCT FROM frozen_profile THEN RAISE EXCEPTION 'historical source profile must equal selected snapshot including NULL' USING ERRCODE='23514'; END IF;
+      RETURN NEW;
+    END IF;
+    -- An inherited exact source keeps its prior knowledge-point identities.
+    SELECT prior.profile_revision_id INTO frozen_profile
+    FROM organizing.synthesis_revision revision
+    JOIN organizing.synthesis_revision_source prior
+      ON prior.revision_id=revision.parent_revision_id
+     AND prior.workspace_id=revision.workspace_id AND prior.note_id=revision.note_id
+    WHERE revision.id=NEW.revision_id AND revision.workspace_id=NEW.workspace_id
+      AND revision.note_id=NEW.note_id AND prior.source_id=NEW.source_id
+      AND prior.source_version_id=NEW.source_version_id
+      AND prior.parse_projection_id=NEW.parse_projection_id
+      AND prior.source_span_id=NEW.source_span_id
+      AND prior.content_artifact_id=NEW.content_artifact_id
+      AND prior.content_hash=NEW.content_hash AND prior.excerpt_hash=NEW.excerpt_hash;
+
+    IF frozen_profile IS NULL THEN
+        -- Any committed immutable revision remains valid for its exact source
+        -- and parser projection, even while the mutable profile is rebuilding.
+        SELECT revision.id INTO frozen_profile
+        FROM learning.document_knowledge_profile_revision revision
+        WHERE revision.workspace_id=NEW.workspace_id
+          AND revision.source_version_id=NEW.source_version_id
+          AND revision.parse_projection_id=NEW.parse_projection_id
+        ORDER BY revision.created_at DESC,revision.id DESC LIMIT 1;
+    END IF;
+    IF NEW.profile_revision_id IS NOT NULL
+       AND NEW.profile_revision_id IS DISTINCT FROM frozen_profile THEN
+        RAISE EXCEPTION 'synthesis knowledge snapshot differs from owner profile'
+            USING ERRCODE='23514';
+    END IF;
+    NEW.profile_revision_id := frozen_profile;
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: guard_anchor_fusion_request(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.guard_anchor_fusion_request() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF TG_OP='INSERT' THEN
+        IF NEW.status<>'PENDING' OR NEW.processing_id IS NOT NULL OR NOT EXISTS (
+            SELECT 1 FROM organizing.anchor_proposal p JOIN organizing.anchor_decision d ON d.proposal_id=p.id AND d.workspace_id=p.workspace_id
+            JOIN organizing.knowledge_anchor a ON a.id=p.anchor_id AND a.workspace_id=p.workspace_id
+            JOIN workflow.outbox_event e ON e.id=NEW.source_event_id AND e.workspace_id=NEW.workspace_id
+            WHERE p.id=NEW.proposal_id AND p.workspace_id=NEW.workspace_id AND p.anchor_id=NEW.anchor_id AND p.kind='SOURCE_ASSOCIATION'
+              AND p.scope_version=NEW.scope_version AND d.decision='ACCEPTED' AND a.note_id=NEW.note_id
+              AND e.event_type='ingestion.source.ready' AND e.payload->>'source_id'=NEW.source_id::text
+              AND e.payload->>'source_version_id'=NEW.source_version_id::text AND e.payload->>'content_artifact_id'=NEW.content_artifact_id::text
+              AND e.payload->>'parse_projection_id'=NEW.parse_projection_id::text AND e.payload->>'content_hash'=NEW.source_content_hash
+              AND e.payload->>'ingestion_attempt_id'=NEW.ingestion_attempt_id::text AND e.occurred_at=NEW.source_occurred_at
+        ) THEN RAISE EXCEPTION 'anchor fusion request binding is invalid' USING ERRCODE='23514'; END IF;
+        RETURN NEW;
+    END IF;
+    IF TG_OP='UPDATE' AND NEW.status='DISPATCHED' AND NOT EXISTS (SELECT 1 FROM organizing.synthesis_processing p WHERE p.id=NEW.processing_id AND p.workspace_id=NEW.workspace_id AND p.fusion_request_id=NEW.id) THEN RAISE EXCEPTION 'anchor fusion processing is missing' USING ERRCODE='23514'; END IF;
+    IF TG_OP='DELETE' OR NEW.id<>OLD.id OR NEW.workspace_id<>OLD.workspace_id OR NEW.anchor_id<>OLD.anchor_id OR NEW.note_id<>OLD.note_id
+       OR NEW.proposal_id<>OLD.proposal_id OR NEW.scope_version<>OLD.scope_version OR NEW.source_event_id<>OLD.source_event_id
+       OR NEW.source_id<>OLD.source_id OR NEW.source_version_id<>OLD.source_version_id OR NEW.content_artifact_id<>OLD.content_artifact_id
+       OR NEW.parse_projection_id<>OLD.parse_projection_id OR NEW.source_content_hash<>OLD.source_content_hash OR NEW.ingestion_attempt_id<>OLD.ingestion_attempt_id
+       OR NEW.source_occurred_at<>OLD.source_occurred_at OR NEW.allowed_sources<>OLD.allowed_sources OR NEW.created_at<>OLD.created_at OR NEW.updated_at<OLD.updated_at
+       OR (OLD.status<>'PENDING') THEN RAISE EXCEPTION 'anchor fusion request is immutable' USING ERRCODE='55000'; END IF;
+    RETURN NEW;
+END; $$;
+
+
+--
+-- Name: guard_anchor_history(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.guard_anchor_history() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN RAISE EXCEPTION 'anchor history is immutable' USING ERRCODE='55000'; END; $$;
+
+
+--
+-- Name: guard_anchor_recommendation_schedule(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.guard_anchor_recommendation_schedule() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF TG_OP='UPDATE' AND NEW.status='PENDING' AND OLD.status IN ('FAILED','RECOVERY_REQUIRED') THEN
+    NEW.scheduled_workflow_run_id := NULL;
+  END IF;
+  IF TG_OP='UPDATE' AND OLD.scheduled_workflow_run_id IS NOT NULL
+     AND NEW.scheduled_workflow_run_id IS DISTINCT FROM OLD.scheduled_workflow_run_id
+     AND NOT (NEW.scheduled_workflow_run_id IS NULL AND NEW.status='PENDING') THEN
+    RAISE EXCEPTION 'anchor recommendation schedule is immutable' USING ERRCODE='55000';
+  END IF;
+  IF NEW.scheduled_workflow_run_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM workflow.run r WHERE r.id=NEW.scheduled_workflow_run_id AND r.workspace_id=NEW.workspace_id
+      AND r.input->>'request_id'=NEW.id::text AND r.idempotency_key='anchor-recommendation-start:'||NEW.id::text||':'||(r.input->>'expected_version')
+      AND (r.input->>'expected_version')::bigint>0
+  ) THEN RAISE EXCEPTION 'anchor recommendation schedule binding is invalid' USING ERRCODE='23514'; END IF;
+  RETURN NEW;
+END; $$;
+
+
+--
+-- Name: guard_anchor_source_discovery(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.guard_anchor_source_discovery() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $_$
+BEGIN
+    IF TG_OP='INSERT' THEN
+        IF NEW.version<>1 OR NEW.status<>'WAITING_PROFILE' OR NEW.profile_revision_id IS NOT NULL
+           OR NEW.evidence<>'[]'::jsonb OR NEW.request_ids<>'[]'::jsonb OR NEW.error_code IS NOT NULL THEN
+            RAISE EXCEPTION 'anchor source discovery must begin waiting for a profile' USING ERRCODE='23514';
+        END IF;
+        IF NOT EXISTS (
+            SELECT 1 FROM organizing.synthesis_processing p
+            WHERE p.id=NEW.processing_id AND p.workspace_id=NEW.workspace_id
+              AND p.status<>'SKIPPED' AND p.fusion_request_id IS NULL
+              AND p.source_id=NEW.source_id AND p.source_version_id=NEW.source_version_id
+              AND p.content_artifact_id=NEW.content_artifact_id AND p.parse_projection_id=NEW.parse_projection_id
+              AND p.source_content_hash=NEW.source_content_hash
+        ) THEN
+            RAISE EXCEPTION 'anchor source discovery processing snapshot is invalid' USING ERRCODE='23514';
+        END IF;
+        RETURN NEW;
+    END IF;
+
+    IF TG_OP='DELETE' OR NEW.id<>OLD.id OR NEW.workspace_id<>OLD.workspace_id
+       OR NEW.processing_id<>OLD.processing_id OR NEW.anchor_id<>OLD.anchor_id OR NEW.scope_version<>OLD.scope_version
+       OR NEW.source_id<>OLD.source_id OR NEW.source_version_id<>OLD.source_version_id
+       OR NEW.content_artifact_id<>OLD.content_artifact_id OR NEW.parse_projection_id<>OLD.parse_projection_id
+       OR NEW.source_content_hash<>OLD.source_content_hash OR NEW.created_at<>OLD.created_at
+       OR NEW.version<>OLD.version+1 OR NEW.updated_at<OLD.updated_at THEN
+        RAISE EXCEPTION 'anchor source discovery transition is invalid' USING ERRCODE='55000';
+    END IF;
+    IF OLD.status IN ('REQUESTED','STALE') OR (OLD.profile_revision_id IS NOT NULL AND
+       (NEW.profile_revision_id IS DISTINCT FROM OLD.profile_revision_id OR NEW.evidence IS DISTINCT FROM OLD.evidence))
+       OR (OLD.request_ids<>'[]'::jsonb AND NEW.request_ids IS DISTINCT FROM OLD.request_ids) THEN
+        RAISE EXCEPTION 'anchor source discovery snapshot is immutable' USING ERRCODE='55000';
+    END IF;
+    IF OLD.status='WAITING_PROFILE' AND NEW.status NOT IN ('WAITING_PROFILE','PREPARED','STALE') THEN
+        RAISE EXCEPTION 'anchor source discovery transition is invalid' USING ERRCODE='55000';
+    END IF;
+    IF OLD.status='PREPARED' AND NEW.status NOT IN ('PREPARED','REQUESTED','STALE') THEN
+        RAISE EXCEPTION 'anchor source discovery transition is invalid' USING ERRCODE='55000';
+    END IF;
+    IF NEW.profile_revision_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM learning.document_knowledge_profile_revision r
+        WHERE r.id=NEW.profile_revision_id AND r.workspace_id=NEW.workspace_id
+          AND r.source_version_id=NEW.source_version_id AND r.parse_projection_id=NEW.parse_projection_id
+    ) THEN
+        RAISE EXCEPTION 'anchor source discovery profile snapshot is invalid' USING ERRCODE='23514';
+    END IF;
+    IF jsonb_array_length(NEW.evidence)>0 AND EXISTS (
+        SELECT 1 FROM jsonb_array_elements(NEW.evidence) AS item(value)
+        LEFT JOIN ingestion.source_span span ON span.id=(item.value->>'source_span_id')::uuid
+            AND span.workspace_id=NEW.workspace_id AND span.content_artifact_id=NEW.content_artifact_id
+            AND span.parse_projection_id=NEW.parse_projection_id
+        WHERE jsonb_typeof(item.value)<>'object' OR jsonb_typeof(item.value->'source')<>'object'
+           OR (item.value->'source'->>'workspace_id') IS DISTINCT FROM NEW.workspace_id::text
+           OR (item.value->'source'->>'source_id') IS DISTINCT FROM NEW.source_id::text
+           OR (item.value->'source'->>'source_version_id') IS DISTINCT FROM NEW.source_version_id::text
+           OR (item.value->'source'->>'content_artifact_id') IS DISTINCT FROM NEW.content_artifact_id::text
+           OR (item.value->'source'->>'parse_projection_id') IS DISTINCT FROM NEW.parse_projection_id::text
+           OR (item.value->'source'->>'content_hash') IS DISTINCT FROM NEW.source_content_hash
+           OR span.id IS NULL OR (item.value->>'excerpt_hash') IS DISTINCT FROM span.excerpt_hash
+           OR item.value->>'title' IS NULL OR (item.value->>'title') IS DISTINCT FROM btrim(item.value->>'title')
+           OR octet_length(item.value->>'title') NOT BETWEEN 1 AND 512 OR item.value->>'title' ~ E'[\\r\\n]'
+    ) THEN
+        RAISE EXCEPTION 'anchor source discovery evidence snapshot is invalid' USING ERRCODE='23514';
+    END IF;
+    IF NEW.status='REQUESTED' THEN
+        IF EXISTS (SELECT 1 FROM jsonb_array_elements(NEW.request_ids) AS item(value)
+            WHERE jsonb_typeof(item.value)<>'string' OR (item.value#>>'{}') !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$') THEN
+            RAISE EXCEPTION 'anchor source discovery request identities are invalid' USING ERRCODE='23514';
+        END IF;
+        IF (SELECT count(*) FROM jsonb_array_elements_text(NEW.request_ids)) <>
+           (SELECT count(DISTINCT value) FROM jsonb_array_elements_text(NEW.request_ids)) THEN
+            RAISE EXCEPTION 'anchor source discovery request identities are duplicated' USING ERRCODE='23514';
+        END IF;
+        DECLARE request_item record; expected jsonb; position integer := 0; evidence_count integer;
+        BEGIN
+            FOR request_item IN SELECT value,ord FROM jsonb_array_elements_text(NEW.request_ids) WITH ORDINALITY AS item(value,ord) ORDER BY ord LOOP
+                SELECT r.evidence INTO expected FROM organizing.anchor_recommendation_request r
+                WHERE r.id=request_item.value::uuid AND r.workspace_id=NEW.workspace_id
+                  AND r.kind='SOURCE_ASSOCIATION' AND r.anchor_id=NEW.anchor_id AND r.expected_scope_version=NEW.scope_version
+                  AND r.source=jsonb_build_object('workspace_id',NEW.workspace_id::text,'source_id',NEW.source_id::text,
+                       'source_version_id',NEW.source_version_id::text,'content_artifact_id',NEW.content_artifact_id::text,
+                       'parse_projection_id',NEW.parse_projection_id::text,'content_hash',NEW.source_content_hash);
+                IF expected IS NULL OR jsonb_array_length(expected) NOT BETWEEN 1 AND 32 THEN
+                    RAISE EXCEPTION 'anchor source discovery request binding is invalid' USING ERRCODE='23514';
+                END IF;
+                evidence_count := jsonb_array_length(expected);
+                SELECT jsonb_agg(value ORDER BY ord) INTO expected FROM jsonb_array_elements(NEW.evidence) WITH ORDINALITY AS item(value,ord)
+                    WHERE ord>position AND ord<=position+evidence_count;
+                IF expected IS NULL OR expected IS DISTINCT FROM (SELECT r.evidence FROM organizing.anchor_recommendation_request r WHERE r.id=request_item.value::uuid) THEN
+                    RAISE EXCEPTION 'anchor source discovery request evidence is not consecutive' USING ERRCODE='23514';
+                END IF;
+                position := position+evidence_count;
+            END LOOP;
+            IF position<>jsonb_array_length(NEW.evidence) THEN
+                RAISE EXCEPTION 'anchor source discovery request evidence is incomplete' USING ERRCODE='23514';
+            END IF;
+        END;
+    END IF;
+    RETURN NEW;
+END;
+$_$;
+
+
+--
+-- Name: guard_anchor_transition(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.guard_anchor_transition() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+ IF TG_OP='DELETE' THEN RAISE EXCEPTION 'anchor cannot be deleted' USING ERRCODE='55000'; END IF;
+ IF NEW.id<>OLD.id OR NEW.workspace_id<>OLD.workspace_id OR NEW.note_id<>OLD.note_id OR NEW.basis_revision_id<>OLD.basis_revision_id
+ OR NEW.title<>OLD.title OR NEW.created_at<>OLD.created_at OR NEW.version<>OLD.version+1 OR NEW.updated_at<OLD.updated_at
+ OR NEW.scope_version NOT IN (OLD.scope_version,OLD.scope_version+1) THEN RAISE EXCEPTION 'anchor transition is invalid' USING ERRCODE='55000'; END IF;
+ RETURN NEW;
+END; $$;
+
+
+--
+-- Name: guard_goal_selection(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.guard_goal_selection() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE is_sealed boolean;
+BEGIN
+ IF TG_OP='INSERT' THEN
+  SELECT sealed INTO STRICT is_sealed FROM organizing.synthesis_goal_selection_manifest WHERE batch_id=NEW.catalog_batch_id AND workspace_id=NEW.workspace_id FOR UPDATE;
+  IF is_sealed OR NEW.status<>'PENDING' OR NEW.version<>1 OR NEW.scheduled_workflow_id IS NOT NULL OR NOT EXISTS(
+   SELECT 1 FROM organizing.synthesis_goal_catalog_batch b JOIN organizing.synthesis_goal_catalog_item i ON i.batch_id=b.id
+   WHERE b.id=NEW.catalog_batch_id AND b.workspace_id=NEW.workspace_id AND b.request_id=NEW.request_id AND i.ordinal=NEW.source_ordinal+1) THEN
+   RAISE EXCEPTION 'selection must originate in an open exact catalog manifest' USING ERRCODE='23514'; END IF;
+  RETURN NEW;
+ END IF;
+ IF TG_OP='DELETE' THEN RAISE EXCEPTION 'selection is persistent' USING ERRCODE='55000'; END IF;
+ IF ROW(NEW.id,NEW.workspace_id,NEW.request_id,NEW.catalog_batch_id,NEW.source_ordinal,NEW.point_offset,NEW.point_count,NEW.payload_hash,NEW.created_at)
+ IS DISTINCT FROM ROW(OLD.id,OLD.workspace_id,OLD.request_id,OLD.catalog_batch_id,OLD.source_ordinal,OLD.point_offset,OLD.point_count,OLD.payload_hash,OLD.created_at)
+ OR NEW.updated_at<OLD.updated_at THEN RAISE EXCEPTION 'selection identity is immutable' USING ERRCODE='55000'; END IF;
+ -- Scheduling is atomic with Workflow creation and preserves the input version.
+ IF OLD.status='PENDING' AND NEW.status='PENDING' AND OLD.scheduled_workflow_id IS NULL AND NEW.scheduled_workflow_id IS NOT NULL AND NEW.version=OLD.version THEN
+  IF NOT EXISTS(SELECT 1 FROM workflow.run r JOIN workflow.definition d ON d.id=r.definition_id AND d.workspace_id=r.workspace_id WHERE r.id=NEW.scheduled_workflow_id AND r.workspace_id=NEW.workspace_id
+   AND d.key='organizing.goal-point-selection' AND d.version=1
+   AND r.input->>'selection_id'=NEW.id::text AND r.input->>'expected_version'=NEW.version::text) THEN
+   RAISE EXCEPTION 'selection workflow must bind exact request' USING ERRCODE='23514'; END IF;
+  RETURN NEW;
+ END IF;
+ -- Explicit retry only after a known failed attempt; uncertain execution
+ -- never replays a provider automatically. A receipt makes retries idempotent.
+ IF OLD.status='FAILED' AND OLD.retryable AND NEW.status='PENDING' AND NEW.version=OLD.version+1
+ AND NEW.scheduled_workflow_id IS NULL AND NEW.workflow_run_id IS NULL AND NEW.node_run_id IS NULL
+ AND NEW.node_attempt_id IS NULL AND NEW.model_input_hash IS NULL THEN
+  IF OLD.scheduled_workflow_id IS NOT NULL AND NOT EXISTS(
+   SELECT 1 FROM workflow.run WHERE id=OLD.scheduled_workflow_id AND workspace_id=OLD.workspace_id AND status IN ('succeeded','failed','cancelled')) THEN
+   RAISE EXCEPTION 'selection retry waits for its old workflow to terminate' USING ERRCODE='55000'; END IF;
+  IF NOT EXISTS(SELECT 1 FROM organizing.synthesis_goal_selection_retry receipt
+   WHERE receipt.workspace_id=OLD.workspace_id AND receipt.selection_id=OLD.id AND receipt.expected_version=OLD.version AND receipt.result_version=NEW.version) THEN
+   RAISE EXCEPTION 'selection retry requires an exact receipt' USING ERRCODE='23514'; END IF;
+  RETURN NEW;
+ END IF;
+ IF NEW.version<>OLD.version+1 OR NEW.scheduled_workflow_id IS DISTINCT FROM OLD.scheduled_workflow_id THEN
+  RAISE EXCEPTION 'selection version or workflow differs' USING ERRCODE='55000'; END IF;
+ IF OLD.status='PENDING' AND NEW.status='RUNNING' THEN
+  IF NOT EXISTS(SELECT 1 FROM organizing.synthesis_goal_selection_manifest m WHERE m.batch_id=NEW.catalog_batch_id AND m.sealed) THEN
+   RAISE EXCEPTION 'selection manifest is not complete' USING ERRCODE='23514'; END IF;
+ ELSIF OLD.status='RUNNING' AND NEW.status IN ('SUCCEEDED','FAILED','RECOVERY_REQUIRED') THEN
+  IF ROW(NEW.workflow_run_id,NEW.node_run_id,NEW.node_attempt_id,NEW.model_input_hash)
+   IS DISTINCT FROM ROW(OLD.workflow_run_id,OLD.node_run_id,OLD.node_attempt_id,OLD.model_input_hash) THEN
+   RAISE EXCEPTION 'selection attempt is immutable' USING ERRCODE='55000'; END IF;
+ ELSIF OLD.status='PENDING' AND NEW.status='FAILED' THEN NULL;
+ ELSE RAISE EXCEPTION 'selection transition is invalid' USING ERRCODE='55000'; END IF;
+ RETURN NEW;
+END $$;
+
+
+--
+-- Name: guard_goal_selection_manifest(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.guard_goal_selection_manifest() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+ IF TG_OP='INSERT' THEN
+  IF NEW.sealed THEN RAISE EXCEPTION 'selection manifest must start open' USING ERRCODE='23514'; END IF;
+ ELSIF TG_OP='UPDATE' THEN
+  IF OLD.sealed OR NOT NEW.sealed OR (to_jsonb(NEW)-'sealed') IS DISTINCT FROM (to_jsonb(OLD)-'sealed') THEN
+   RAISE EXCEPTION 'selection manifest is immutable after sealing' USING ERRCODE='55000'; END IF;
+ ELSE RAISE EXCEPTION 'selection manifest is immutable' USING ERRCODE='55000';
+ END IF;
+ RETURN NEW;
+END $$;
+
+
+--
+-- Name: guard_synthesis_body_refresh_execution(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.guard_synthesis_body_refresh_execution() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE request_id uuid; queued jsonb;
+BEGIN
+ SELECT p.body_refresh_request_id,r.input INTO STRICT request_id,queued
+ FROM organizing.synthesis_processing p JOIN workflow.run r ON r.id=NEW.workflow_run_id AND r.workspace_id=p.workspace_id
+ WHERE p.id=NEW.processing_id AND p.workspace_id=NEW.workspace_id;
+ IF request_id IS NULL THEN
+  IF queued ? 'body_refresh_request_id' OR (NEW.input_document IS NOT NULL AND NEW.input_document ? 'body_refresh') THEN
+   RAISE EXCEPTION 'ordinary synthesis cannot acquire refresh identity' USING ERRCODE='23514'; END IF;
+ ELSE
+  IF (queued->>'body_refresh_request_id'=request_id::text) IS NOT TRUE
+   OR (NEW.input_document IS NOT NULL AND (NEW.input_document->'body_refresh'->'request'->>'id'=request_id::text) IS NOT TRUE)
+  THEN RAISE EXCEPTION 'synthesis refresh execution identity changed' USING ERRCODE='23514'; END IF;
+ END IF;
+ RETURN NEW;
+END $$;
+
+
+--
+-- Name: guard_synthesis_body_refresh_frozen(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.guard_synthesis_body_refresh_frozen() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+ IF NEW.input_document IS NOT NULL THEN PERFORM organizing.verify_synthesis_body_refresh_input(NEW.input_document); END IF;
+ RETURN NEW;
+END $$;
+
+
+--
+-- Name: guard_synthesis_body_refresh_processing(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.guard_synthesis_body_refresh_processing() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+ IF TG_OP='UPDATE' AND NEW.body_refresh_request_id IS DISTINCT FROM OLD.body_refresh_request_id THEN
+  RAISE EXCEPTION 'synthesis body refresh identity is immutable' USING ERRCODE='55000';
+ END IF;
+ IF NEW.body_refresh_request_id IS NULL THEN RETURN NEW; END IF;
+ IF NOT EXISTS (
+  SELECT 1 FROM organizing.synthesis_body_refresh_request r
+  JOIN organizing.synthesis_body_impact i ON i.id=r.impact_id AND i.workspace_id=r.workspace_id
+  JOIN organizing.synthesis_revision upstream ON upstream.id=i.published_revision_id AND upstream.workspace_id=i.workspace_id
+  WHERE r.id=NEW.body_refresh_request_id AND r.workspace_id=NEW.workspace_id
+    AND upstream.source_event_id=NEW.source_event_id
+ ) THEN RAISE EXCEPTION 'synthesis refresh provenance is not the requested upstream revision' USING ERRCODE='23514'; END IF;
+ RETURN NEW;
+END $$;
+
+
+--
+-- Name: guard_synthesis_body_refresh_receipt(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.guard_synthesis_body_refresh_receipt() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+ IF NEW.processing_key ~ '^synthesis-body-refresh:' OR EXISTS(
+ SELECT 1 FROM organizing.synthesis_processing WHERE id=NEW.processing_id AND workspace_id=NEW.workspace_id AND body_refresh_request_id IS NOT NULL) THEN
+ IF NOT EXISTS(SELECT 1 FROM organizing.synthesis_processing p
+ JOIN organizing.synthesis_body_refresh_request r ON r.id=p.body_refresh_request_id AND r.workspace_id=p.workspace_id
+ JOIN organizing.synthesis_execution e ON e.processing_id=p.id AND e.workspace_id=p.workspace_id AND e.workflow_run_id=NEW.workflow_run_id
+ WHERE p.id=NEW.processing_id AND p.workspace_id=NEW.workspace_id AND p.processing_key=NEW.processing_key AND p.source_event_id=NEW.source_event_id
+ AND e.input_document->'body_refresh'->'request'->>'id'=r.id::text
+ AND jsonb_array_length(NEW.result->'revision_ids')<=1
+ AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements(NEW.result->'publications') publication WHERE publication->>'note_id'<>r.note_id::text))
+ THEN RAISE EXCEPTION 'refresh receipt is outside its frozen processing' USING ERRCODE='23514'; END IF;
+ END IF;
+ RETURN NEW;
+END $$;
+
+
+--
 -- Name: guard_synthesis_execution(); Type: FUNCTION; Schema: organizing; Owner: -
 --
 
@@ -15539,7 +16252,7 @@ BEGIN
             RAISE EXCEPTION 'synthesis execution must start without results' USING ERRCODE='23514';
         END IF;
         IF NOT EXISTS (SELECT 1 FROM workflow.run r JOIN workflow.definition d ON d.id=r.definition_id AND d.workspace_id=r.workspace_id
-            WHERE r.id=NEW.workflow_run_id AND r.workspace_id=NEW.workspace_id AND d.key='organizing.synthesis-note' AND d.version=1
+            WHERE r.id=NEW.workflow_run_id AND r.workspace_id=NEW.workspace_id AND d.key='organizing.synthesis-note' AND d.version IN (1,2)
               AND r.input->>'processing_id'=NEW.processing_id::text AND (r.input->>'execution_no')::integer=NEW.execution_no
               AND (r.input->>'apply_recovery')::boolean=NEW.apply_recovery) THEN
             RAISE EXCEPTION 'synthesis execution workflow binding is invalid' USING ERRCODE='23514';
@@ -15562,6 +16275,242 @@ BEGIN
         RAISE EXCEPTION 'synthesis execution result requires its immutable application receipt' USING ERRCODE='23514';
     END IF;
     RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: guard_synthesis_fusion_processing(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.guard_synthesis_fusion_processing() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $_$
+BEGIN
+    IF NEW.fusion_request_id IS NULL AND NEW.fusion_trigger IS NULL THEN RETURN NEW; END IF;
+    IF TG_OP='UPDATE' AND (NEW.fusion_request_id IS DISTINCT FROM OLD.fusion_request_id OR NEW.fusion_trigger IS DISTINCT FROM OLD.fusion_trigger) THEN
+        RAISE EXCEPTION 'synthesis fusion binding is immutable' USING ERRCODE='55000';
+    END IF;
+    IF NOT (
+        NEW.fusion_request_id IS NOT NULL AND NEW.fusion_trigger IS NOT NULL
+        AND (NEW.processing_key ~ '^synthesis-fusion:[0-9a-f]{64}$') IS TRUE
+        AND (jsonb_typeof(NEW.fusion_trigger)='object') IS TRUE
+        AND (jsonb_typeof(NEW.fusion_trigger->'allowed_sources')='array') IS TRUE
+        AND (NEW.fusion_trigger->>'request_id'=NEW.fusion_request_id::text) IS TRUE
+        AND EXISTS (
+        SELECT 1 FROM organizing.anchor_fusion_request r
+        WHERE r.id=NEW.fusion_request_id AND r.workspace_id=NEW.workspace_id
+          AND ((TG_OP='INSERT' AND r.status='PENDING' AND r.processing_id IS NULL) OR (TG_OP='UPDATE' AND r.status='DISPATCHED' AND r.processing_id=NEW.id))
+          AND (r.anchor_id=(NEW.fusion_trigger->>'anchor_id')::uuid) IS TRUE AND (r.note_id=(NEW.fusion_trigger->>'note_id')::uuid) IS TRUE
+          AND (r.proposal_id=(NEW.fusion_trigger->>'proposal_id')::uuid) IS TRUE AND (r.scope_version=(NEW.fusion_trigger->>'scope_version')::bigint) IS TRUE
+          AND r.source_event_id=NEW.source_event_id AND r.source_id=NEW.source_id AND r.source_version_id=NEW.source_version_id
+          AND r.content_artifact_id=NEW.content_artifact_id AND r.parse_projection_id=NEW.parse_projection_id
+          AND r.source_content_hash=NEW.source_content_hash AND r.ingestion_attempt_id=NEW.ingestion_attempt_id AND r.source_occurred_at=NEW.source_occurred_at
+          AND r.allowed_sources=NEW.fusion_trigger->'allowed_sources'
+        )
+    ) THEN RAISE EXCEPTION 'synthesis fusion processing binding is invalid' USING ERRCODE='23514'; END IF;
+    RETURN NEW;
+END; $_$;
+
+
+--
+-- Name: guard_synthesis_goal_catalog_batch(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.guard_synthesis_goal_catalog_batch() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE request organizing.synthesis_goal_request; parent organizing.synthesis_goal_catalog_batch;
+BEGIN
+ IF TG_TABLE_NAME='synthesis_goal_catalog_batch' THEN
+  SELECT * INTO request FROM organizing.synthesis_goal_request WHERE id=NEW.request_id AND workspace_id=NEW.workspace_id FOR UPDATE;
+  IF request.status IS DISTINCT FROM 'DISCOVERING' OR NEW.batch_no<>request.catalog_batches+1 OR NEW.after_source_id IS DISTINCT FROM request.after_source_id THEN
+   RAISE EXCEPTION 'goal catalog does not continue the current request' USING ERRCODE='23514';
+  END IF;
+ ELSE
+  SELECT * INTO parent FROM organizing.synthesis_goal_catalog_batch WHERE id=NEW.batch_id AND workspace_id=NEW.workspace_id;
+  SELECT * INTO request FROM organizing.synthesis_goal_request WHERE id=parent.request_id AND workspace_id=NEW.workspace_id FOR UPDATE;
+  IF request.status IS DISTINCT FROM 'DISCOVERING' OR parent.batch_no<>request.catalog_batches+1 OR NEW.ordinal>parent.item_count
+   OR (parent.after_source_id IS NOT NULL AND NEW.source_id<=parent.after_source_id)
+   OR (parent.next_after_source_id IS NOT NULL AND NEW.source_id>parent.next_after_source_id)
+   OR NOT EXISTS(SELECT 1 FROM core.source s JOIN core.source_version v ON v.source_id=s.id AND v.workspace_id=s.workspace_id
+    JOIN learning.document_knowledge_profile_revision r ON r.id=NEW.profile_revision_id AND r.workspace_id=s.workspace_id AND r.source_version_id=v.id
+    WHERE s.id=NEW.source_id AND s.workspace_id=NEW.workspace_id AND s.removed_at IS NULL AND s.logical_name=NEW.title
+      AND v.id=NEW.source_version_id AND v.content_artifact_id=NEW.content_artifact_id AND v.content_hash=NEW.content_hash
+      AND r.parse_projection_id=NEW.parse_projection_id AND v.security_status<>'quarantined'
+      AND NOT EXISTS(SELECT 1 FROM core.source_version later WHERE later.source_id=s.id AND later.workspace_id=s.workspace_id AND (later.captured_at,later.id)>(v.captured_at,v.id))
+      AND NOT EXISTS(SELECT 1 FROM ingestion.attempt ia WHERE ia.workspace_id=s.workspace_id AND ia.source_version_id=v.id AND ia.security_status='quarantined')) THEN
+   RAISE EXCEPTION 'goal catalog item binding is invalid' USING ERRCODE='23514';
+  END IF;
+ END IF;
+ RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: guard_synthesis_goal_execution(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.guard_synthesis_goal_execution() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE goal_id uuid; queued jsonb; goal_text text;
+BEGIN
+ SELECT p.goal_request_id,r.input,g.goal_text INTO STRICT goal_id,queued,goal_text
+ FROM organizing.synthesis_processing p JOIN workflow.run r ON r.id=NEW.workflow_run_id AND r.workspace_id=p.workspace_id
+ LEFT JOIN organizing.synthesis_goal_request g ON g.id=p.goal_request_id AND g.workspace_id=p.workspace_id
+ WHERE p.id=NEW.processing_id AND p.workspace_id=NEW.workspace_id;
+ IF goal_id IS NULL THEN
+  IF queued ? 'goal_request_id' OR (NEW.input_document IS NOT NULL AND NEW.input_document ? 'goal') THEN
+   RAISE EXCEPTION 'ordinary synthesis cannot acquire a goal binding' USING ERRCODE='23514'; END IF;
+ ELSE
+  IF (queued->>'goal_request_id'=goal_id::text) IS NOT TRUE
+   OR (NEW.input_document IS NOT NULL AND (
+    (NEW.input_document->'goal'->>'request_id'=goal_id::text) IS NOT TRUE
+    OR (NEW.input_document->'goal'->>'text'=goal_text) IS NOT TRUE
+    OR (jsonb_typeof(NEW.input_document->'goal'->'materials')='array') IS NOT TRUE
+    OR (jsonb_array_length(NEW.input_document->'goal'->'materials') BETWEEN 1 AND 256) IS NOT TRUE
+    OR (jsonb_array_length(NEW.input_document->'notes')=0) IS NOT TRUE))
+  THEN RAISE EXCEPTION 'synthesis goal execution binding changed' USING ERRCODE='23514'; END IF;
+ END IF;
+ RETURN NEW;
+END $$;
+
+
+--
+-- Name: guard_synthesis_goal_processing(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.guard_synthesis_goal_processing() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+ IF TG_OP='UPDATE' AND NEW.goal_request_id IS DISTINCT FROM OLD.goal_request_id THEN
+  RAISE EXCEPTION 'synthesis goal identity is immutable' USING ERRCODE='55000';
+ END IF;
+ IF NEW.goal_request_id IS NULL THEN RETURN NEW; END IF;
+ IF NOT EXISTS(SELECT 1 FROM organizing.synthesis_goal_request r
+   WHERE r.id=NEW.goal_request_id AND r.workspace_id=NEW.workspace_id AND r.status='CATALOG_READY'
+     AND r.catalog_batches=(SELECT count(*) FROM organizing.synthesis_goal_catalog_batch b
+       JOIN organizing.synthesis_goal_selection_manifest m ON m.batch_id=b.id AND m.workspace_id=b.workspace_id AND m.sealed
+       WHERE b.request_id=r.id AND b.workspace_id=r.workspace_id))
+ OR EXISTS(SELECT 1 FROM organizing.synthesis_goal_selection s
+   WHERE s.request_id=NEW.goal_request_id AND s.workspace_id=NEW.workspace_id AND s.status<>'SUCCEEDED')
+ OR NOT EXISTS(SELECT 1 FROM organizing.synthesis_goal_selection s
+   JOIN organizing.synthesis_goal_catalog_item i ON i.batch_id=s.catalog_batch_id AND i.workspace_id=s.workspace_id AND i.ordinal=s.source_ordinal+1
+   WHERE s.request_id=NEW.goal_request_id AND s.workspace_id=NEW.workspace_id AND s.status='SUCCEEDED'
+    AND i.source_id=NEW.source_id AND i.source_version_id=NEW.source_version_id
+    AND i.content_artifact_id=NEW.content_artifact_id AND i.parse_projection_id=NEW.parse_projection_id AND i.content_hash=NEW.source_content_hash
+    AND jsonb_array_length(convert_from(s.model_output,'UTF8')::jsonb->'selections')>0)
+ THEN RAISE EXCEPTION 'synthesis goal requires complete selections and a selected real seed' USING ERRCODE='23514'; END IF;
+ RETURN NEW;
+END $$;
+
+
+--
+-- Name: guard_synthesis_goal_receipt(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.guard_synthesis_goal_receipt() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+ IF EXISTS(SELECT 1 FROM organizing.synthesis_processing p WHERE p.id=NEW.processing_id AND p.workspace_id=NEW.workspace_id AND p.goal_request_id IS NOT NULL)
+ OR NEW.processing_key ~ '^synthesis-goal:' THEN
+  IF NOT EXISTS(SELECT 1 FROM organizing.synthesis_processing p
+    JOIN organizing.synthesis_execution e ON e.processing_id=p.id AND e.workspace_id=p.workspace_id AND e.workflow_run_id=NEW.workflow_run_id
+    WHERE p.id=NEW.processing_id AND p.workspace_id=NEW.workspace_id AND p.goal_request_id IS NOT NULL
+      AND p.processing_key=NEW.processing_key AND p.source_event_id=NEW.source_event_id
+      AND e.input_document->'goal'->>'request_id'=p.goal_request_id::text
+      AND NEW.changed AND jsonb_array_length(NEW.result->'revision_ids')=1)
+  THEN RAISE EXCEPTION 'synthesis goal receipt requires its exact generation identity' USING ERRCODE='23514'; END IF;
+ END IF;
+ RETURN NEW;
+END $$;
+
+
+--
+-- Name: guard_synthesis_goal_request(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.guard_synthesis_goal_request() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE batch organizing.synthesis_goal_catalog_batch;
+BEGIN
+ IF TG_OP='INSERT' THEN
+  IF NEW.status<>'DISCOVERING' OR NEW.version<>1 OR NEW.catalog_batches<>0 OR NEW.after_source_id IS NOT NULL OR NEW.error_code IS NOT NULL THEN
+   RAISE EXCEPTION 'goal request must begin discovery' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+ END IF;
+ IF TG_OP='DELETE' OR NEW.id<>OLD.id OR NEW.workspace_id<>OLD.workspace_id OR NEW.goal_text<>OLD.goal_text
+  OR NEW.idempotency_key<>OLD.idempotency_key OR NEW.request_hash<>OLD.request_hash OR NEW.created_at<>OLD.created_at
+  OR NEW.version<>OLD.version+1 OR NEW.updated_at<OLD.updated_at OR OLD.status<>'DISCOVERING' THEN
+  RAISE EXCEPTION 'goal request transition is invalid' USING ERRCODE='55000';
+ END IF;
+ IF NEW.catalog_batches=OLD.catalog_batches THEN
+  IF NEW.status<>OLD.status OR NEW.after_source_id IS DISTINCT FROM OLD.after_source_id OR NEW.error_code IS NULL OR NEW.next_check_at<=OLD.next_check_at THEN
+   RAISE EXCEPTION 'goal discovery deferral is invalid' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+ END IF;
+ IF NEW.catalog_batches<>OLD.catalog_batches+1 OR NEW.error_code IS NOT NULL THEN
+  RAISE EXCEPTION 'goal catalog progress is invalid' USING ERRCODE='23514';
+ END IF;
+ SELECT * INTO batch FROM organizing.synthesis_goal_catalog_batch WHERE request_id=OLD.id AND batch_no=NEW.catalog_batches;
+ IF batch.id IS NULL OR batch.after_source_id IS DISTINCT FROM OLD.after_source_id
+  OR NEW.after_source_id IS DISTINCT FROM batch.next_after_source_id
+  OR (batch.next_after_source_id IS NULL AND NEW.status<>'CATALOG_READY')
+  OR (batch.next_after_source_id IS NOT NULL AND NEW.status<>'DISCOVERING')
+  OR (SELECT count(*) FROM organizing.synthesis_goal_catalog_item WHERE batch_id=batch.id)<>batch.item_count
+  OR EXISTS(SELECT 1 FROM (SELECT ordinal,source_id,lag(source_id) OVER(ORDER BY ordinal) AS previous FROM organizing.synthesis_goal_catalog_item WHERE batch_id=batch.id) i WHERE previous IS NOT NULL AND source_id<=previous) THEN
+  RAISE EXCEPTION 'goal request lacks its complete catalog batch' USING ERRCODE='23514';
+ END IF;
+ RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: guard_synthesis_manuscript_application(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.guard_synthesis_manuscript_application() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE p jsonb; a jsonb; c jsonb;
+BEGIN
+ IF TG_OP<>'INSERT' THEN RAISE EXCEPTION 'manuscript application is immutable' USING ERRCODE='55000'; END IF;
+ SELECT convert_from(receipt.payload,'UTF8')::jsonb,convert_from(attempt.payload,'UTF8')::jsonb,convert_from(capture.payload,'UTF8')::jsonb INTO p,a,c
+ FROM organizing.synthesis_manuscript_receipt receipt JOIN organizing.synthesis_manuscript_attempt attempt ON attempt.workspace_id=receipt.workspace_id AND attempt.id=receipt.attempt_id
+ JOIN organizing.synthesis_manuscript_capture capture ON capture.workspace_id=attempt.workspace_id AND capture.id=attempt.capture_id
+ WHERE receipt.workspace_id=NEW.workspace_id AND receipt.id=NEW.receipt_id;
+ IF (p->>'hash'=NEW.receipt_hash AND a->'command'->>'processing_id'=NEW.processing_id::text AND a->'command'->>'note_id'=NEW.note_id::text) IS NOT TRUE
+ OR NOT EXISTS(SELECT 1 FROM organizing.synthesis_apply_receipt applied JOIN organizing.synthesis_revision revision ON revision.workspace_id=applied.workspace_id AND revision.note_id=NEW.note_id AND revision.manuscript_receipt_id=NEW.receipt_id
+ WHERE applied.workspace_id=NEW.workspace_id AND applied.processing_id=NEW.processing_id AND applied.binding_hash=NEW.binding_hash AND applied.result->'revision_ids' @> jsonb_build_array(revision.id::text))
+ OR NOT EXISTS(SELECT 1 FROM organizing.synthesis_manuscript_root_identity root WHERE root.workspace_id=NEW.workspace_id AND root.id::text=c->>'root_grant_id' AND root.root_fingerprint=c->>'root_fingerprint' AND root.binding_version=(c->>'workspace_binding_version')::bigint) THEN
+  RAISE EXCEPTION 'manuscript application differs from exact candidate/root receipt' USING ERRCODE='23514';
+ END IF;
+ RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: guard_synthesis_manuscript_root_identity(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.guard_synthesis_manuscript_root_identity() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+ IF TG_OP<>'INSERT' THEN RAISE EXCEPTION 'manuscript root identity is immutable' USING ERRCODE='55000'; END IF;
+ IF NOT EXISTS(SELECT 1 FROM core.workspace WHERE id=NEW.workspace_id AND status='active' AND availability='available' AND removed_at IS NULL AND root_fingerprint=NEW.root_fingerprint AND binding_version=NEW.binding_version) THEN
+  RAISE EXCEPTION 'manuscript root identity has no current workspace binding' USING ERRCODE='23514';
+ END IF;
+ RETURN NEW;
 END;
 $$;
 
@@ -15600,7 +16549,7 @@ BEGIN
           AND r.workflow_run_id=NEW.workflow_run_id AND r.node_run_id=NEW.node_run_id AND r.node_attempt_id=NEW.node_attempt_id
           AND r.model_settings_revision IS NOT DISTINCT FROM NEW.model_settings_revision
           AND ((NEW.stage='GENERATE' AND r.output_schema_id='agent.synthesis-delta') OR (NEW.stage='VALIDATE' AND r.output_schema_id='agent.synthesis-semantic-review'))
-          AND r.output_schema_version='v1'
+          AND organizing.synthesis_model_contract_matches(r.workspace_id,r.workflow_run_id,NEW.stage,r.prompt_template_id,r.prompt_template_version,r.output_schema_id,r.output_schema_version)
           AND ((NEW.status='RUNNING' AND r.status='RUNNING')
             OR (NEW.status='FAILED' AND r.status='FAILED')
             OR (NEW.status='RECOVERY_REQUIRED' AND r.status='UNKNOWN')
@@ -15670,6 +16619,135 @@ $$;
 
 
 --
+-- Name: guard_synthesis_source_promotion(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.guard_synthesis_source_promotion() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+ IF NOT EXISTS(SELECT 1 FROM organizing.synthesis_goal_request g
+  JOIN organizing.synthesis_goal_catalog_batch b ON b.request_id=g.id AND b.workspace_id=g.workspace_id
+  JOIN organizing.synthesis_goal_catalog_item i ON i.batch_id=b.id AND i.workspace_id=b.workspace_id
+  WHERE g.id=NEW.request_id AND g.workspace_id=NEW.workspace_id AND g.status='CATALOG_READY' AND g.catalog_batches=1
+   AND b.batch_no=1 AND b.item_count=1 AND b.after_source_id IS NULL AND b.next_after_source_id IS NULL
+   AND i.ordinal=1 AND i.source_id=NEW.source_id AND i.source_version_id=NEW.source_version_id AND i.profile_revision_id=NEW.profile_revision_id)
+ THEN RAISE EXCEPTION 'source promotion must bind its complete single-source catalog' USING ERRCODE='23514'; END IF;
+ RETURN NEW;
+END $$;
+
+
+--
+-- Name: guard_synthesis_source_review(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.guard_synthesis_source_review() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE document jsonb;target jsonb;
+BEGIN
+ IF TG_OP='DELETE' THEN RAISE EXCEPTION 'source review history is immutable' USING ERRCODE='55000'; END IF;
+ IF TG_OP='INSERT' THEN
+  PERFORM 1 FROM organizing.synthesis_processing WHERE id=NEW.origin_processing_id AND workspace_id=NEW.workspace_id FOR UPDATE;
+  IF NEW.status<>'PENDING' OR NEW.version<>1 OR NEW.workflow_run_id IS NOT NULL OR NEW.snapshot IS NOT NULL OR NEW.model_run_id IS NOT NULL OR NEW.output IS NOT NULL OR NEW.receipt_hash IS NOT NULL OR NEW.completed_at IS NOT NULL
+  OR NOT EXISTS(SELECT 1 FROM organizing.synthesis_processing p JOIN workflow.run r ON r.id=p.workflow_run_id
+    WHERE p.workspace_id=NEW.workspace_id AND p.id=NEW.origin_processing_id AND p.workflow_run_id=NEW.origin_workflow_run_id AND p.status='RECOVERY_REQUIRED' AND p.error_code='SYNTHESIS_MANUSCRIPT_SOURCE_REVIEW_REQUIRED' AND r.status='failed') THEN
+   RAISE EXCEPTION 'source review requires exact failed source-only origin' USING ERRCODE='23514'; END IF;
+  IF EXISTS(SELECT 1 FROM organizing.synthesis_manuscript_source_review_recovery x JOIN workflow.run r ON r.id=x.workflow_run_id WHERE x.review_id=NEW.supersedes_id AND r.status NOT IN ('succeeded','failed','cancelled')) THEN RAISE EXCEPTION 'successor cannot race active recovery' USING ERRCODE='23514'; END IF;
+  IF NEW.attempt_no=1 AND NEW.supersedes_id IS NOT NULL THEN RAISE EXCEPTION 'initial review predecessor invalid' USING ERRCODE='23514'; END IF;
+  IF NEW.attempt_no>1 AND NOT EXISTS(SELECT 1 FROM organizing.synthesis_manuscript_source_review p WHERE p.id=NEW.supersedes_id AND p.workspace_id=NEW.workspace_id AND p.origin_processing_id=NEW.origin_processing_id AND p.origin_workflow_run_id=NEW.origin_workflow_run_id AND p.attempt_no=NEW.attempt_no-1 AND (p.status IN ('STALE','REJECTED','SUCCEEDED') OR (p.status='FAILED' AND p.retryable))) THEN RAISE EXCEPTION 'successor predecessor invalid' USING ERRCODE='23514'; END IF;
+  RETURN NEW;
+ END IF;
+ IF NEW.id IS DISTINCT FROM OLD.id OR NEW.workspace_id IS DISTINCT FROM OLD.workspace_id OR NEW.origin_processing_id IS DISTINCT FROM OLD.origin_processing_id OR NEW.origin_workflow_run_id IS DISTINCT FROM OLD.origin_workflow_run_id OR NEW.attempt_no IS DISTINCT FROM OLD.attempt_no OR NEW.supersedes_id IS DISTINCT FROM OLD.supersedes_id OR NEW.created_at IS DISTINCT FROM OLD.created_at OR NEW.version<>OLD.version+1 OR NEW.updated_at<OLD.updated_at
+ OR (OLD.workflow_run_id IS NOT NULL AND NEW.workflow_run_id IS DISTINCT FROM OLD.workflow_run_id)
+ OR (OLD.snapshot IS NOT NULL AND (NEW.snapshot IS DISTINCT FROM OLD.snapshot OR NEW.snapshot_hash IS DISTINCT FROM OLD.snapshot_hash))
+ OR (OLD.model_run_id IS NOT NULL AND (NEW.model_run_id IS DISTINCT FROM OLD.model_run_id OR NEW.node_run_id IS DISTINCT FROM OLD.node_run_id OR NEW.node_attempt_id IS DISTINCT FROM OLD.node_attempt_id OR NEW.request_hash IS DISTINCT FROM OLD.request_hash))
+ OR (OLD.output IS NOT NULL AND NEW.output IS DISTINCT FROM OLD.output)
+ OR OLD.status IN ('SUCCEEDED','REJECTED','STALE','FAILED')
+ OR NOT ((OLD.status='PENDING' AND NEW.status IN ('PENDING','PREPARED','FAILED','STALE')) OR (OLD.status='PREPARED' AND NEW.status IN ('RUNNING','FAILED','STALE')) OR (OLD.status='RUNNING' AND NEW.status IN ('REVIEWED','REJECTED','RECOVERY_REQUIRED','STALE','FAILED')) OR (OLD.status='REVIEWED' AND NEW.status IN ('SUCCEEDED','STALE')) OR (OLD.status='RECOVERY_REQUIRED' AND NEW.status='FAILED')) THEN
+  RAISE EXCEPTION 'source review transition or immutable binding invalid' USING ERRCODE='55000'; END IF;
+ IF NEW.workflow_run_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM workflow.run r JOIN workflow.definition d ON d.id=r.definition_id AND d.workspace_id=r.workspace_id WHERE r.id=NEW.workflow_run_id AND r.workspace_id=NEW.workspace_id AND d.key='organizing.synthesis-manuscript-source-review' AND d.version=1 AND r.input->>'review_id'=NEW.id::text) THEN RAISE EXCEPTION 'source review scheduled workflow mismatch' USING ERRCODE='23514'; END IF;
+ IF NEW.status IN ('PREPARED','RUNNING','REVIEWED','REJECTED','SUCCEEDED') THEN
+  document:=convert_from(NEW.snapshot,'UTF8')::jsonb;
+  IF (jsonb_typeof(document->'targets')='array' AND jsonb_array_length(document->'targets') BETWEEN 1 AND 8 AND jsonb_typeof(document->'obligations')='array' AND jsonb_array_length(document->'obligations') BETWEEN 1 AND 1024) IS NOT TRUE THEN RAISE EXCEPTION 'source review manifest incomplete' USING ERRCODE='23514'; END IF;
+  FOR target IN SELECT value FROM jsonb_array_elements(document->'targets') LOOP
+   IF (target->>'full_content_hash'=encode(sha256(convert_to(target->>'full_content','UTF8')),'hex') AND target->>'target_kind' IN ('REVISION','LOCAL_FILE') AND EXISTS(SELECT 1 FROM organizing.synthesis_revision r WHERE r.workspace_id=NEW.workspace_id AND r.note_id=(target->>'note_id')::uuid AND r.id=(target->>'base_revision_id')::uuid AND r.projection_hash=target->>'projection_hash')) IS NOT TRUE THEN RAISE EXCEPTION 'source review target invalid' USING ERRCODE='23514'; END IF;
+  END LOOP;
+ END IF;
+ IF NEW.status='RUNNING' AND (NEW.model_run_id IS NULL OR NEW.request_hash IS NULL OR NOT organizing.source_review_live(NEW.workspace_id,NEW.workflow_run_id,NEW.node_run_id,NEW.node_attempt_id,'organizing.synthesis-manuscript-source-review.review')) THEN RAISE EXCEPTION 'source review requires real running model claim' USING ERRCODE='23514'; END IF;
+ IF NEW.status='PREPARED' AND OLD.status='PENDING' AND NEW.supersedes_id IS NOT NULL AND EXISTS(SELECT 1 FROM organizing.synthesis_manuscript_source_review p WHERE p.id=NEW.supersedes_id AND p.status<>'FAILED' AND p.snapshot=NEW.snapshot) THEN RAISE EXCEPTION 'unchanged baseline cannot draw another answer' USING ERRCODE='23514'; END IF;
+ IF NEW.status='SUCCEEDED' AND NOT EXISTS(SELECT 1 FROM workflow.node_run n JOIN workflow.node_attempt a ON a.node_run_id=n.id WHERE n.run_id=NEW.workflow_run_id AND organizing.source_review_live(NEW.workspace_id,NEW.workflow_run_id,n.id,a.id,'organizing.synthesis-manuscript-source-review.apply')) AND NOT EXISTS(SELECT 1 FROM organizing.synthesis_manuscript_source_review_recovery x JOIN workflow.run r ON r.id=x.workflow_run_id JOIN workflow.node_run n ON n.run_id=r.id JOIN workflow.node_attempt a ON a.node_run_id=n.id WHERE x.workspace_id=NEW.workspace_id AND x.review_id=NEW.id AND r.status='running' AND r.cancel_requested_at IS NULL AND r.pause_requested_at IS NULL AND n.node_key='organizing.synthesis-manuscript-source-review-recovery.apply' AND n.status='running' AND a.status='running' AND a.attempt_no=n.attempt AND a.lease_owner=n.lease_owner AND a.lease_until=n.lease_until AND a.lease_until>clock_timestamp() AND x.created_at>clock_timestamp()-interval '30 minutes') THEN RAISE EXCEPTION 'source review apply requires real execution' USING ERRCODE='23514'; END IF;
+ IF NEW.status='FAILED' AND OLD.model_run_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM agent.model_run m WHERE m.id=OLD.model_run_id AND m.workspace_id=OLD.workspace_id AND m.workflow_run_id=OLD.workflow_run_id AND m.node_attempt_id=OLD.node_attempt_id AND m.status='FAILED') THEN RAISE EXCEPTION 'failed review requires failed model ledger' USING ERRCODE='23514'; END IF;
+ RETURN NEW;
+END; $$;
+
+
+--
+-- Name: guard_synthesis_source_review_command(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.guard_synthesis_source_review_command() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+ IF NOT EXISTS(SELECT 1 FROM organizing.synthesis_manuscript_source_review prior_review JOIN organizing.synthesis_manuscript_source_review result ON result.id=NEW.result_review_id AND result.workspace_id=prior_review.workspace_id AND result.origin_processing_id=prior_review.origin_processing_id AND result.origin_workflow_run_id=prior_review.origin_workflow_run_id WHERE prior_review.id=NEW.review_id AND prior_review.workspace_id=NEW.workspace_id AND prior_review.version=NEW.expected_version AND (result.id=prior_review.id OR (NEW.operation='RECHECK' AND result.supersedes_id=prior_review.id))) THEN RAISE EXCEPTION 'command winner binding invalid' USING ERRCODE='23514'; END IF;
+ RETURN NEW;
+END; $$;
+
+
+--
+-- Name: guard_synthesis_source_review_recovery(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.guard_synthesis_source_review_recovery() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+ -- Serialize all attempts and successor commands on their shared origin.
+ PERFORM 1 FROM organizing.synthesis_processing p JOIN organizing.synthesis_manuscript_source_review v ON v.origin_processing_id=p.id WHERE v.id=NEW.review_id FOR UPDATE OF p;
+ IF EXISTS(SELECT 1 FROM organizing.synthesis_manuscript_source_review_recovery x JOIN workflow.run r ON r.id=x.workflow_run_id WHERE x.review_id=NEW.review_id AND r.status NOT IN ('succeeded','failed','cancelled'))
+ OR EXISTS(SELECT 1 FROM organizing.synthesis_manuscript_source_review_recovery_receipt x WHERE x.review_id=NEW.review_id)
+ OR EXISTS(SELECT 1 FROM organizing.synthesis_manuscript_source_review v WHERE v.supersedes_id=NEW.review_id) THEN RAISE EXCEPTION 'recovery already active, completed or superseded' USING ERRCODE='23514'; END IF;
+
+ IF NOT EXISTS(SELECT 1 FROM organizing.synthesis_manuscript_source_review v JOIN workflow.run prior_run ON prior_run.id=v.workflow_run_id JOIN workflow.run r ON r.id=NEW.workflow_run_id JOIN workflow.definition d ON d.id=r.definition_id WHERE v.id=NEW.review_id AND v.workspace_id=NEW.workspace_id AND v.status IN ('REVIEWED','STALE') AND v.output IS NOT NULL AND prior_run.status IN ('succeeded','failed','cancelled') AND r.workspace_id=v.workspace_id AND r.input->>'review_id'=v.id::text AND d.key='organizing.synthesis-manuscript-source-review-recovery' AND d.version=1 AND r.status IN ('pending','running')) THEN RAISE EXCEPTION 'recovery requires accepted proof and independent execution' USING ERRCODE='23514'; END IF;
+ RETURN NEW;
+END; $$;
+
+
+--
+-- Name: guard_synthesis_source_review_recovery_receipt(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.guard_synthesis_source_review_recovery_receipt() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+ IF NOT organizing.source_review_recovery_live(NEW.workspace_id,NEW.review_id,NEW.workflow_run_id) THEN RAISE EXCEPTION 'recovery receipt requires current execution' USING ERRCODE='23514'; END IF;
+ RETURN NEW;
+END; $$;
+
+
+--
+-- Name: project_synthesis_revision_body_references(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.project_synthesis_revision_body_references() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    INSERT INTO organizing.synthesis_revision_body_reference(workspace_id,note_id,revision_id,item_id,
+        upstream_note_id,upstream_revision_id,upstream_item_id,publication_id,upstream_projection_hash)
+    SELECT NEW.workspace_id,NEW.note_id,NEW.id,(item->>'id')::uuid,
+        (item->'body_reference'->>'note_id')::uuid,(item->'body_reference'->>'revision_id')::uuid,
+        (item->'body_reference'->>'item_id')::uuid,(item->'body_reference'->>'publication_id')::uuid,
+        item->'body_reference'->>'projection_hash'
+    FROM jsonb_array_elements(NEW.items) item WHERE item ? 'body_reference';
+    RETURN NEW;
+END;
+$$;
+
+
+--
 -- Name: reject_immutable_mutation(); Type: FUNCTION; Schema: organizing; Owner: -
 --
 
@@ -15680,6 +16758,76 @@ BEGIN
     RAISE EXCEPTION 'organizing immutable fact cannot be mutated' USING ERRCODE='55000';
 END;
 $$;
+
+
+--
+-- Name: source_review_frozen_target_hash(bytea, uuid); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.source_review_frozen_target_hash(snapshot bytea, note uuid) RETURNS text
+    LANGUAGE sql IMMUTABLE STRICT
+    AS $$
+ SELECT encode(sha256(convert_to(t::text,'UTF8')),'hex')
+ FROM json_array_elements(convert_from(snapshot,'UTF8')::json->'targets') t
+ WHERE t->>'note_id'=note::text
+$$;
+
+
+--
+-- Name: source_review_live(uuid, uuid, uuid, uuid, text); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.source_review_live(w uuid, r uuid, n uuid, a uuid, k text) RETURNS boolean
+    LANGUAGE sql STABLE
+    AS $$
+ SELECT EXISTS(SELECT 1 FROM workflow.run run JOIN workflow.definition d ON d.id=run.definition_id AND d.workspace_id=run.workspace_id
+ JOIN workflow.node_run node ON node.run_id=run.id JOIN workflow.node_attempt attempt ON attempt.node_run_id=node.id
+ WHERE run.workspace_id=w AND run.id=r AND d.key='organizing.synthesis-manuscript-source-review' AND d.version=1
+ AND run.status='running' AND run.cancel_requested_at IS NULL AND run.pause_requested_at IS NULL
+ AND node.id=n AND node.node_key=k AND node.node_type=k AND node.status='running'
+ AND attempt.id=a AND attempt.status='running' AND attempt.attempt_no=node.attempt
+ AND attempt.lease_owner=node.lease_owner AND attempt.lease_until=node.lease_until AND attempt.lease_until>clock_timestamp())
+$$;
+
+
+--
+-- Name: source_review_recovery_live(uuid, uuid, uuid); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.source_review_recovery_live(w uuid, v uuid, r uuid) RETURNS boolean
+    LANGUAGE sql STABLE
+    AS $$
+ SELECT EXISTS(SELECT 1 FROM organizing.synthesis_manuscript_source_review_recovery x JOIN workflow.run run ON run.id=x.workflow_run_id JOIN workflow.node_run n ON n.run_id=run.id JOIN workflow.node_attempt a ON a.node_run_id=n.id WHERE x.workspace_id=w AND x.review_id=v AND x.workflow_run_id=r AND run.status='running' AND run.cancel_requested_at IS NULL AND run.pause_requested_at IS NULL AND n.node_key='organizing.synthesis-manuscript-source-review-recovery.apply' AND n.status='running' AND a.status='running' AND a.attempt_no=n.attempt AND a.lease_owner=n.lease_owner AND a.lease_until=n.lease_until AND a.lease_until>clock_timestamp() AND x.created_at>clock_timestamp()-interval '30 minutes')
+$$;
+
+
+--
+-- Name: synthesis_historical_revision_proven(uuid, uuid, uuid); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.synthesis_historical_revision_proven(w uuid, n uuid, rid uuid) RETURNS boolean
+    LANGUAGE plpgsql STABLE
+    AS $$
+DECLARE r organizing.synthesis_revision%ROWTYPE; selected organizing.synthesis_revision%ROWTYPE; e jsonb;
+BEGIN
+ SELECT * INTO r FROM organizing.synthesis_revision WHERE id=rid AND workspace_id=w AND note_id=n;
+ IF NOT FOUND THEN RETURN false; END IF;
+ IF NOT EXISTS(SELECT 1 FROM authoring.generated_article_revision g JOIN core.article_revision ar ON ar.id=g.article_revision_id AND ar.workspace_id=g.workspace_id
+ WHERE g.workspace_id=w AND g.document_id=r.document_id AND g.article_revision_id=r.article_revision_id AND g.origin_kind='SYNTHESIS_NOTE' AND g.origin_id=n AND g.origin_revision_id=r.id
+ AND g.projection_hash=r.projection_hash AND g.content_hash=r.content_hash AND ar.created_by_type='AGENT' AND ar.content_hash=r.content_hash
+ AND encode(sha256(convert_to(ar.content,'UTF8')),'hex')=r.content_hash) THEN RETURN false; END IF;
+ IF r.historical_republish_id IS NOT NULL THEN
+  SELECT convert_from(payload,'UTF8')::jsonb INTO e FROM organizing.synthesis_historical_republish_event WHERE id=r.historical_republish_id AND workspace_id=w AND note_id=n AND kind='APPLY';
+  SELECT * INTO selected FROM organizing.synthesis_revision WHERE id=(r.historical_republish->>'selected_revision_id')::uuid AND workspace_id=w AND note_id=n;
+  RETURN COALESCE(e->'revision'->>'id'=r.id::text AND selected.revision_no<r.revision_no AND selected.items=r.items AND selected.manuscript IS NOT DISTINCT FROM r.manuscript
+   AND selected.content_hash=r.content_hash AND organizing.synthesis_historical_revision_proven(w,n,selected.id),false);
+ END IF;
+ IF r.candidate_remerge_id IS NOT NULL THEN
+  RETURN EXISTS(SELECT 1 FROM organizing.synthesis_candidate_remerge_event e WHERE e.id=r.candidate_remerge_id AND e.workspace_id=w AND e.note_id=n AND e.kind='APPLY'
+   AND convert_from(e.payload,'UTF8')::jsonb->'revision'->>'id'=r.id::text AND convert_from(e.payload,'UTF8')::jsonb->'revision'->>'hash'=r.projection_hash);
+ END IF;
+ RETURN EXISTS(SELECT 1 FROM organizing.synthesis_apply_receipt a WHERE a.workspace_id=w AND a.workflow_run_id=r.workflow_run_id AND a.model_run_id=r.model_run_id AND a.source_event_id=r.source_event_id AND a.result->'revision_ids' @> jsonb_build_array(r.id::text));
+END; $$;
 
 
 --
@@ -15701,6 +16849,57 @@ CREATE FUNCTION organizing.synthesis_item_sources(items jsonb) RETURNS SETOF jso
         UNION ALL
         SELECT value FROM jsonb_array_elements(COALESCE(item->'gap'->'resolution'->'sources','[]'::jsonb))
     ) refs;
+$$;
+
+
+--
+-- Name: synthesis_model_contract_matches(uuid, uuid, text, text, text, text, text); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.synthesis_model_contract_matches(
+ workspace uuid, run uuid, stage text, prompt text, prompt_version text, schema_id text, schema_version text)
+RETURNS boolean LANGUAGE sql STABLE AS $$
+ WITH original AS (
+ SELECT CASE
+ WHEN jsonb_typeof(e.input_document->'body_refresh')='object' AND p.body_refresh_request_id IS NOT NULL THEN 'v5'
+ WHEN jsonb_typeof(e.input_document->'goal')='object' THEN 'v3'
+ WHEN EXISTS(SELECT 1 FROM jsonb_array_elements(e.input_document->'notes') note WHERE NULLIF(note->>'publication_id','') IS NOT NULL) THEN 'v4'
+ WHEN EXISTS(SELECT 1 FROM jsonb_array_elements(e.input_document->'notes') note WHERE jsonb_typeof(note->'anchor')='object') THEN 'v2'
+ ELSE 'v1' END AS version,
+ COALESCE(e.input_document->>'generation_prompt_version','') AS generation,
+ COALESCE(e.input_document->>'semantic_prompt_version','') AS semantic,
+ (p.fusion_request_id IS NOT NULL
+ AND (e.input_document#>>'{source_event,fusion,request_id}')=p.fusion_request_id::text
+ AND jsonb_array_length(e.input_document->'notes')=1
+ AND (e.input_document#>>'{source_event,fusion,note_id}')=(e.input_document#>>'{notes,0,note,id}')
+ AND (e.input_document#>>'{source_event,fusion,anchor_id}')=(e.input_document#>>'{notes,0,anchor,anchor_id}')
+ AND (e.input_document#>'{source_event,fusion,scope_version}')=(e.input_document#>'{notes,0,anchor,scope_version}')
+ AND jsonb_typeof((e.input_document#>'{source_event,fusion,allowed_sources}'))='array'
+ AND jsonb_typeof((e.input_document#>'{notes,0,anchor,allowed_sources}'))='array'
+ AND jsonb_array_length((e.input_document#>'{source_event,fusion,allowed_sources}'))=jsonb_array_length((e.input_document#>'{notes,0,anchor,allowed_sources}'))
+ AND (e.input_document#>'{source_event,fusion,allowed_sources}') @> (e.input_document#>'{notes,0,anchor,allowed_sources}')
+ AND (e.input_document#>'{notes,0,anchor,allowed_sources}') @> (e.input_document#>'{source_event,fusion,allowed_sources}')) IS TRUE AS fusion_bound
+ FROM organizing.synthesis_execution e JOIN organizing.synthesis_processing p ON p.id=e.processing_id AND p.workspace_id=e.workspace_id
+ WHERE e.workspace_id=workspace AND e.workflow_run_id=run AND e.input_document IS NOT NULL
+ AND (NOT (e.input_document ? 'generation_prompt_version') OR jsonb_typeof(e.input_document->'generation_prompt_version')='string')
+ AND (NOT (e.input_document ? 'semantic_prompt_version') OR jsonb_typeof(e.input_document->'semantic_prompt_version')='string')
+ ), paired AS (
+ SELECT * FROM original WHERE
+ (generation='' AND semantic IN ('','v6')) OR
+ (semantic='v7' AND generation=CASE version WHEN 'v1' THEN 'v7' WHEN 'v2' THEN 'v8' WHEN 'v3' THEN 'v9' WHEN 'v4' THEN 'v10' WHEN 'v5' THEN '' END) OR
+ (semantic='v7' AND generation=CASE version WHEN 'v1' THEN 'v13' WHEN 'v2' THEN 'v14' WHEN 'v3' THEN 'v15' WHEN 'v4' THEN 'v16' WHEN 'v5' THEN '' END) OR
+ (semantic='v8' AND fusion_bound AND generation=CASE version WHEN 'v2' THEN 'v11' WHEN 'v4' THEN 'v12' END) OR
+ (semantic='v8' AND fusion_bound AND generation=CASE version WHEN 'v2' THEN 'v17' WHEN 'v4' THEN 'v18' END) OR
+ (semantic='v9' AND fusion_bound AND generation=CASE version WHEN 'v2' THEN 'v17' WHEN 'v4' THEN 'v18' END)
+ ), expected AS (
+ SELECT version AS original_version,
+ CASE WHEN stage='GENERATE' AND generation<>'' THEN generation
+      WHEN stage='VALIDATE' AND semantic<>'' THEN semantic ELSE version END AS version
+ FROM paired
+ ) SELECT EXISTS(SELECT 1 FROM expected WHERE prompt_version=version AND (
+ (stage='GENERATE' AND prompt='synthesis-delta' AND schema_id='agent.synthesis-delta'
+ AND schema_version=CASE original_version WHEN 'v5' THEN 'v3' WHEN 'v4' THEN 'v2' ELSE 'v1' END)
+ OR (stage='VALIDATE' AND prompt='synthesis-semantic-review' AND schema_id='agent.synthesis-semantic-review' AND schema_version='v1')))
 $$;
 
 
@@ -16244,6 +17443,366 @@ $$;
 
 
 --
+-- Name: validate_synthesis_body_impact(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.validate_synthesis_body_impact() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    downstream_document_id uuid;
+BEGIN
+    -- Follow candidate append's note -> document lock order. The note lock
+    -- protects the editable base; Authoring finalization does not lock the
+    -- note, so its document's published pointer needs a lock before recheck.
+    SELECT document_id INTO downstream_document_id FROM organizing.synthesis_note
+    WHERE id=NEW.note_id AND workspace_id=NEW.workspace_id FOR SHARE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'synthesis body impact lacks downstream note' USING ERRCODE='23514';
+    END IF;
+    PERFORM 1 FROM core.document
+    WHERE id=downstream_document_id AND workspace_id=NEW.workspace_id FOR SHARE;
+    IF NOT FOUND OR NOT EXISTS (
+        SELECT 1 FROM organizing.synthesis_pending_body_impact p
+        WHERE p.workspace_id=NEW.workspace_id AND p.note_id=NEW.note_id
+          AND p.base_revision_id=NEW.base_revision_id AND p.item_id=NEW.item_id
+          AND p.upstream_note_id=NEW.upstream_note_id AND p.upstream_revision_id=NEW.upstream_revision_id
+          AND p.upstream_item_id=NEW.upstream_item_id AND p.upstream_publication_id=NEW.upstream_publication_id
+          AND p.publication_id=NEW.publication_id AND p.published_revision_id=NEW.published_revision_id
+          AND p.event_id=NEW.event_id AND p.reason=NEW.reason AND NEW.detected_at>=p.published_at) THEN
+        RAISE EXCEPTION 'synthesis body impact lacks current reference and changed published owner evidence' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: validate_synthesis_body_refresh_request(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.validate_synthesis_body_refresh_request() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM organizing.synthesis_body_impact i
+        WHERE i.id=NEW.impact_id AND i.workspace_id=NEW.workspace_id
+          AND i.note_id=NEW.note_id AND i.publication_id=NEW.publication_id
+          AND NEW.created_at>=i.detected_at
+    ) THEN
+        RAISE EXCEPTION 'synthesis body refresh request lacks saved impact binding' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: validate_synthesis_candidate_remerge_event(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.validate_synthesis_candidate_remerge_event() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE v jsonb; a jsonb; oldr organizing.synthesis_revision%ROWTYPE; doc core.document%ROWTYPE; binding authoring.document_publication_binding%ROWTYPE; proposal change_control.proposal%ROWTYPE; cp jsonb; original_capture jsonb; original_attempt jsonb; original_receipt jsonb; trusted jsonb;
+BEGIN
+ v:=convert_from(NEW.payload,'UTF8')::jsonb;
+ IF (v->'command'->>'workspace_id'=NEW.workspace_id::text AND v->'command'->>'note_id'=NEW.note_id::text AND v->'command'->>'idempotency_key'=NEW.idempotency_key) IS NOT TRUE THEN
+  RAISE EXCEPTION 'remerge event scope mismatch' USING ERRCODE='23514';
+ END IF;
+ IF NEW.kind='BEGIN' THEN
+  a:=v;
+  IF (NEW.id=NEW.attempt_id AND a->>'id'=NEW.id::text) IS NOT TRUE THEN RAISE EXCEPTION 'invalid remerge begin' USING ERRCODE='23514'; END IF;
+ ELSE
+  SELECT convert_from(payload,'UTF8')::jsonb INTO a FROM organizing.synthesis_candidate_remerge_event WHERE id=NEW.attempt_id AND workspace_id=NEW.workspace_id AND note_id=NEW.note_id AND kind='BEGIN';
+  IF (v->'command'->>'attempt_id'=NEW.attempt_id::text) IS NOT TRUE OR a IS NULL THEN RAISE EXCEPTION 'invalid remerge application' USING ERRCODE='23514'; END IF;
+ END IF;
+ SELECT * INTO oldr FROM organizing.synthesis_revision WHERE workspace_id=NEW.workspace_id AND note_id=NEW.note_id AND id=(a->'command'->>'expected_revision_id')::uuid;
+ SELECT * INTO doc FROM core.document WHERE workspace_id=NEW.workspace_id AND id=oldr.document_id FOR UPDATE;
+ SELECT * INTO binding FROM authoring.document_publication_binding WHERE workspace_id=NEW.workspace_id AND id=(a->'command'->>'expected_publication_id')::uuid FOR UPDATE;
+ SELECT * INTO proposal FROM change_control.proposal WHERE workspace_id=NEW.workspace_id AND id=binding.proposal_id FOR UPDATE;
+ SELECT convert_from(mr.payload,'UTF8')::jsonb,convert_from(ma.payload,'UTF8')::jsonb,convert_from(mc.payload,'UTF8')::jsonb INTO original_receipt,original_attempt,original_capture
+ FROM organizing.synthesis_manuscript_receipt mr JOIN organizing.synthesis_manuscript_attempt ma ON ma.id=mr.attempt_id AND ma.workspace_id=mr.workspace_id JOIN organizing.synthesis_manuscript_capture mc ON mc.id=ma.capture_id AND mc.workspace_id=mr.workspace_id WHERE mr.id=oldr.manuscript_receipt_id AND mr.workspace_id=NEW.workspace_id;
+ IF oldr.remerge IS NOT NULL THEN
+  SELECT convert_from(payload,'UTF8')::jsonb->'capture' INTO original_capture FROM organizing.synthesis_candidate_remerge_event WHERE id=(oldr.remerge->>'attempt_id')::uuid AND workspace_id=NEW.workspace_id AND note_id=NEW.note_id AND kind='BEGIN';
+ END IF;
+ SELECT convert_from(payload,'UTF8')::jsonb INTO cp FROM organizing.synthesis_manuscript_capture WHERE id=(a->'capture'->>'id')::uuid AND workspace_id=NEW.workspace_id;
+ IF (oldr.renderer_version='synthesis-markdown/v2' AND oldr.document_id::text=a->'command'->>'expected_document_id'
+  AND oldr.projection_hash=a->'original'->>'hash' AND oldr.manuscript=a->'original'->'manuscript'
+  AND oldr.manuscript_receipt_id::text=a->>'receipt_id'
+  AND original_capture=a->'base_capture' AND cp=a->'capture' AND (cp->>'exists')::boolean
+  AND cp->>'target_path'=doc.canonical_path AND cp->>'workspace_id'=NEW.workspace_id::text
+  AND EXISTS(SELECT 1 FROM organizing.synthesis_manuscript_root_identity root_identity JOIN core.workspace w ON w.id=root_identity.workspace_id
+    WHERE root_identity.id::text=cp->>'root_grant_id' AND root_identity.workspace_id=NEW.workspace_id
+    AND root_identity.root_fingerprint=cp->>'root_fingerprint' AND root_identity.binding_version=(cp->>'workspace_binding_version')::bigint
+    AND w.root_fingerprint=root_identity.root_fingerprint AND w.binding_version=root_identity.binding_version AND w.status='active' AND w.availability='available' AND w.removed_at IS NULL)
+  AND doc.version=(a->'command'->>'expected_document_version')::bigint
+  AND doc.current_published_revision_id::text=a->>'published_revision_id'
+  AND authoring.publication_is_exact_current(NEW.workspace_id,doc.id,doc.current_published_revision_id)
+  AND EXISTS(SELECT 1 FROM core.article_revision pub WHERE pub.workspace_id=NEW.workspace_id AND pub.document_id=doc.id AND pub.id=doc.current_published_revision_id AND pub.content_hash=a->>'published_content_hash')
+  AND EXISTS(SELECT 1 FROM organizing.synthesis_note n WHERE n.workspace_id=NEW.workspace_id AND n.id=NEW.note_id AND n.document_id=doc.id AND n.current_revision_id=oldr.id AND n.version=(a->'command'->>'expected_note_version')::bigint)
+  AND EXISTS(SELECT 1 FROM organizing.synthesis_processing p WHERE p.workspace_id=NEW.workspace_id AND p.id=(original_attempt->'command'->>'processing_id')::uuid AND p.status='SUCCEEDED')
+  AND binding.document_id=doc.id AND binding.article_revision_id=oldr.article_revision_id AND (binding.status='PENDING' OR (binding.status='CLOSED' AND binding.error_code='AUTHORING_PUBLICATION_PROPOSAL_NEEDS_REVISION' AND proposal.status='needs_revision'))
+  AND binding.proposal_id::text=a->'command'->>'expected_proposal_id' AND binding.proposal_revision_id::text=a->'command'->>'expected_proposal_revision_id'
+  AND proposal.current_revision_id=binding.proposal_revision_id AND proposal.version=(a->'command'->>'expected_proposal_version')::bigint AND proposal.status IN ('ready_for_review','needs_revision') AND proposal.workflow_run_id IS NULL
+  AND NOT EXISTS(SELECT 1 FROM change_control.approval WHERE proposal_id=proposal.id)
+  AND NOT EXISTS(SELECT 1 FROM change_control.proposal_revision_dispatch WHERE proposal_id=proposal.id)
+  AND NOT EXISTS(SELECT 1 FROM change_control.tool_authorization WHERE proposal_id=proposal.id)
+  AND NOT EXISTS(SELECT 1 FROM change_control.writeback_execution WHERE proposal_id=proposal.id)
+  AND NOT EXISTS(SELECT 1 FROM change_control.proposal_commit WHERE proposal_id=proposal.id)) IS NOT TRUE THEN
+  RAISE EXCEPTION 'remerge owner baseline changed' USING ERRCODE='23514';
+ END IF;
+ IF NEW.kind='APPLY' THEN
+  SELECT COALESCE(jsonb_agg(item ORDER BY ord),'[]'::jsonb) INTO trusted FROM jsonb_array_elements(v->'revision'->'manuscript'->'machine'->'machine_items') WITH ORDINALITY AS machine(item,ord) WHERE EXISTS(SELECT 1 FROM jsonb_array_elements(v->'revision'->'manuscript'->'assessment'->'mappings') m WHERE m->>'item_id'=item->>'id');
+  IF (v->'revision'->>'workspace_id'=NEW.workspace_id::text AND v->'revision'->>'note_id'=NEW.note_id::text
+   AND v->'revision'->>'document_id'=doc.id::text AND v->'revision'->>'parent_revision_id'=oldr.id::text
+   AND v->'revision'->'remerge'=jsonb_build_object('attempt_id',NEW.attempt_id::text,'source_revision_id',oldr.id::text)
+   AND v->'revision'->>'source_event_id'=oldr.source_event_id::text AND v->'revision'->>'workflow_run_id'=oldr.workflow_run_id::text AND v->'revision'->>'model_run_id'=oldr.model_run_id::text
+   AND v->'revision'->'delta'=oldr.delta AND v->'revision'->>'title'=oldr.title
+   AND (v->'revision'->>'revision_no')::bigint=oldr.revision_no+1 AND (v->'revision'->>'article_revision_no')::bigint=oldr.article_revision_no+1
+   AND v->'revision'->'manuscript'->'machine'->'machine_items'=oldr.manuscript->'machine'->'machine_items'
+   AND v->'revision'->'manuscript'->'machine'->>'machine_title'=oldr.manuscript->'machine'->>'machine_title'
+   AND v->'revision'->'manuscript'->'machine'->'ineligible_item_ids'=(SELECT COALESCE(jsonb_agg(id ORDER BY id),'[]'::jsonb) FROM (
+    SELECT jsonb_array_elements_text(oldr.manuscript->'machine'->'ineligible_item_ids') AS id
+    UNION SELECT item->>'item_id' FROM jsonb_array_elements(oldr.manuscript->'assessment'->'review_items') item) excluded)
+   AND v->'revision'->'manuscript'->'machine'->>'workspace_id'=NEW.workspace_id::text AND v->'revision'->'manuscript'->'machine'->>'note_id'=NEW.note_id::text
+   AND v->'revision'->'items'=trusted
+   AND v->'revision'->>'content_hash'=v->'revision'->'manuscript'->>'content_hash'
+   AND v->'revision'->>'content_hash'=encode(sha256(convert_to(v->'revision'->'manuscript'->>'full_content','UTF8')),'hex')
+   AND ((a->'preview'->'review' IS NULL AND v->'command'->'resolution' IS NULL AND v->'revision'->'manuscript'=a->'preview'->'manuscript')
+    OR (a->'preview'->'review' IS NOT NULL AND v->'command'->'resolution'->>'stage'=a->'preview'->'review'->>'stage'
+     AND v->'command'->'resolution'->>'preview_fingerprint'=a->'preview'->>'fingerprint'
+     AND v->'command'->'resolution'->>'final_content'=v->'revision'->'manuscript'->>'full_content'
+     AND v->'command'->'resolution'->'acknowledged_ordinals'=(SELECT jsonb_agg(c->'Ordinal' ORDER BY ord) FROM jsonb_array_elements(a->'preview'->'review'->'conflicts') WITH ORDINALITY AS conflicts(c,ord))))) IS NOT TRUE THEN
+   RAISE EXCEPTION 'remerge resolution or provenance mismatch' USING ERRCODE='23514';
+  END IF;
+ END IF;
+ RETURN NEW;
+END; $$;
+
+
+--
+-- Name: validate_synthesis_historical_republish_event(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.validate_synthesis_historical_republish_event() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE v jsonb; a jsonb; selected organizing.synthesis_revision%ROWTYPE; latest organizing.synthesis_revision%ROWTYPE; doc core.document%ROWTYPE; cp jsonb; actual_scope jsonb; binding authoring.document_publication_binding%ROWTYPE; proposal change_control.proposal%ROWTYPE;
+BEGIN
+ v:=convert_from(NEW.payload,'UTF8')::jsonb;
+ IF (v->'command'->>'workspace_id'=NEW.workspace_id::text AND v->'command'->>'note_id'=NEW.note_id::text AND v->'command'->>'idempotency_key'=NEW.idempotency_key) IS NOT TRUE THEN RAISE EXCEPTION 'historical command scope differs' USING ERRCODE='23514'; END IF;
+ IF NEW.kind='BEGIN' THEN
+  a:=v;
+  IF (NEW.id=NEW.attempt_id AND a->>'id'=NEW.id::text) IS NOT TRUE THEN RAISE EXCEPTION 'invalid historical begin' USING ERRCODE='23514'; END IF;
+ ELSE
+  SELECT convert_from(payload,'UTF8')::jsonb INTO a FROM organizing.synthesis_historical_republish_event WHERE id=NEW.attempt_id AND workspace_id=NEW.workspace_id AND note_id=NEW.note_id AND kind='BEGIN';
+  IF a IS NULL OR (v->'command'->>'attempt_id'=NEW.attempt_id::text AND v->>'apply_id'=NEW.id::text AND (v->'command'->>'confirm_exact_restore')::boolean
+   AND v->'command'->>'preview_fingerprint'=a->>'fingerprint' AND v->'command'->'retire_current_candidate'=a->'command'->'requires_retirement') IS NOT TRUE THEN RAISE EXCEPTION 'historical confirmation differs' USING ERRCODE='23514'; END IF;
+ END IF;
+ SELECT * INTO selected FROM organizing.synthesis_revision WHERE workspace_id=NEW.workspace_id AND note_id=NEW.note_id AND id=(a->'command'->>'selected_revision_id')::uuid;
+ SELECT * INTO latest FROM organizing.synthesis_revision WHERE workspace_id=NEW.workspace_id AND note_id=NEW.note_id AND id=(a->'command'->>'expected_revision_id')::uuid;
+ SELECT * INTO doc FROM core.document WHERE workspace_id=NEW.workspace_id AND id=latest.document_id FOR UPDATE;
+ SELECT convert_from(payload,'UTF8')::jsonb INTO cp FROM organizing.synthesis_manuscript_capture WHERE id=(a->'capture'->>'id')::uuid AND workspace_id=NEW.workspace_id;
+ SELECT COALESCE((SELECT jsonb_build_object('id',k.id,'scope_version',k.scope_version,'scope',s.scope) FROM organizing.knowledge_anchor k JOIN organizing.anchor_scope_revision s ON s.anchor_id=k.id AND s.workspace_id=k.workspace_id AND s.version=k.scope_version WHERE k.workspace_id=NEW.workspace_id AND k.note_id=NEW.note_id),'null'::jsonb) INTO actual_scope;
+ IF (selected.id IS NOT NULL AND selected.document_id=latest.document_id AND selected.revision_no<=latest.revision_no
+ AND organizing.synthesis_historical_revision_proven(NEW.workspace_id,NEW.note_id,selected.id)
+ AND selected.projection_hash=a->'command'->>'selected_projection_hash' AND selected.projection_hash=a->'selected'->>'hash'
+ AND selected.id::text=a->'selected'->>'id' AND latest.id::text=a->'latest'->>'id' AND latest.projection_hash=a->'latest'->>'hash'
+ AND doc.id::text=a->'command'->>'expected_document_id' AND doc.version=(a->'command'->>'expected_document_version')::bigint
+ AND doc.current_published_revision_id IS NOT DISTINCT FROM NULLIF(a->'command'->>'expected_published_revision_id','')::uuid
+ AND NOT EXISTS(SELECT 1 FROM authoring.document_publication_reservation pending WHERE pending.workspace_id=NEW.workspace_id AND pending.document_id=doc.id AND pending.status='PENDING')
+ AND NOT EXISTS(SELECT 1 FROM authoring.document_publication_binding busy WHERE busy.workspace_id=NEW.workspace_id AND busy.document_id=doc.id AND busy.status='RECOVERY_REQUIRED')
+ AND actual_scope=a->'scope' AND cp=a->'capture' AND ((doc.current_published_revision_id IS NULL AND NOT (cp->>'exists')::boolean) OR (doc.current_published_revision_id IS NOT NULL AND (cp->>'exists')::boolean))
+ AND cp->>'target_path'=doc.canonical_path AND cp->>'workspace_id'=NEW.workspace_id::text
+ AND EXISTS(SELECT 1 FROM organizing.synthesis_manuscript_root_identity ri JOIN core.workspace w ON w.id=ri.workspace_id WHERE ri.id::text=cp->>'root_grant_id' AND ri.workspace_id=NEW.workspace_id AND ri.root_fingerprint=cp->>'root_fingerprint' AND ri.binding_version=(cp->>'workspace_binding_version')::bigint AND w.root_fingerprint=ri.root_fingerprint AND w.binding_version=ri.binding_version AND w.status='active' AND w.availability='available' AND w.removed_at IS NULL)
+ AND EXISTS(SELECT 1 FROM organizing.synthesis_note n WHERE n.id=NEW.note_id AND n.workspace_id=NEW.workspace_id AND n.current_revision_id=latest.id AND n.status NOT IN ('GENERATING','QUEUED','RECOVERY_REQUIRED') AND n.version=(a->'command'->>'expected_note_version')::bigint)
+ AND EXISTS(SELECT 1 FROM core.article_revision ar WHERE ar.id=selected.article_revision_id AND ar.workspace_id=NEW.workspace_id AND ar.content=a->>'candidate' AND ar.content_hash=selected.content_hash)
+ AND (doc.current_published_revision_id IS NULL OR EXISTS(SELECT 1 FROM core.article_revision pub WHERE pub.id=doc.current_published_revision_id AND pub.workspace_id=NEW.workspace_id AND pub.content=a->>'published_content' AND pub.content_hash=a->>'published_content_hash' AND authoring.publication_is_exact_current(NEW.workspace_id,doc.id,pub.id)))
+ AND ((NOT (a->'command' ? 'selected_publication_id') AND NOT EXISTS(SELECT 1 FROM organizing.synthesis_proven_publication pp WHERE pp.workspace_id=NEW.workspace_id AND pp.note_id=NEW.note_id AND pp.revision_id=selected.id))
+ OR EXISTS(SELECT 1 FROM organizing.synthesis_proven_publication pp WHERE pp.workspace_id=NEW.workspace_id AND pp.note_id=NEW.note_id AND pp.revision_id=selected.id AND pp.publication_id::text=a->'command'->>'selected_publication_id' AND pp.proposal_commit_id::text=a->'command'->>'selected_proposal_commit_id'))) IS NOT TRUE THEN RAISE EXCEPTION 'historical selected or current owner differs' USING ERRCODE='23514'; END IF;
+ IF latest.article_revision_id IS DISTINCT FROM doc.current_published_revision_id THEN
+  SELECT * INTO binding FROM authoring.document_publication_binding WHERE workspace_id=NEW.workspace_id AND id=(a->'command'->>'expected_publication_id')::uuid FOR UPDATE;
+  SELECT * INTO proposal FROM change_control.proposal WHERE workspace_id=NEW.workspace_id AND id=binding.proposal_id FOR UPDATE;
+  IF ((a->'command'->>'requires_retirement')::boolean AND binding.document_id=doc.id AND binding.article_revision_id=latest.article_revision_id
+   AND (binding.status='PENDING' OR (binding.status='CLOSED' AND binding.error_code='AUTHORING_PUBLICATION_PROPOSAL_NEEDS_REVISION'))
+   AND binding.proposal_id::text=a->'command'->>'expected_proposal_id' AND binding.proposal_revision_id::text=a->'command'->>'expected_proposal_revision_id'
+   AND proposal.current_revision_id=binding.proposal_revision_id AND proposal.version=(a->'command'->>'expected_proposal_version')::bigint AND proposal.status IN ('ready_for_review','needs_revision') AND proposal.workflow_run_id IS NULL
+   AND NOT EXISTS(SELECT 1 FROM change_control.approval WHERE proposal_id=proposal.id)
+   AND NOT EXISTS(SELECT 1 FROM change_control.proposal_revision_dispatch WHERE proposal_id=proposal.id)
+   AND NOT EXISTS(SELECT 1 FROM change_control.tool_authorization WHERE proposal_id=proposal.id)
+   AND NOT EXISTS(SELECT 1 FROM change_control.writeback_execution WHERE proposal_id=proposal.id)
+   AND NOT EXISTS(SELECT 1 FROM change_control.proposal_commit WHERE proposal_id=proposal.id)) IS NOT TRUE THEN RAISE EXCEPTION 'historical pending candidate cannot be retired' USING ERRCODE='23514'; END IF;
+ ELSIF (a->'command'->>'requires_retirement')::boolean IS DISTINCT FROM false THEN RAISE EXCEPTION 'historical retirement does not match current owner' USING ERRCODE='23514'; END IF;
+ IF NEW.kind='APPLY' AND (v->'revision'->>'workspace_id'=NEW.workspace_id::text AND v->'revision'->>'note_id'=NEW.note_id::text
+ AND v->'revision'->>'document_id'=doc.id::text AND v->'revision'->>'parent_revision_id'=latest.id::text
+ AND (v->'revision'->>'revision_no')::bigint=latest.revision_no+1 AND (v->'revision'->>'article_revision_no')::bigint=latest.article_revision_no+1
+ AND v->'revision'->>'title'=selected.title AND v->'revision'->>'renderer_version'=selected.renderer_version
+ AND v->'revision'->>'content_hash'=selected.content_hash AND v->'revision'->'items'=selected.items AND v->'revision'->'delta'=selected.delta
+ AND v->'revision'->'manuscript' IS NOT DISTINCT FROM selected.manuscript AND NOT (v->'revision' ? 'remerge')
+ AND v->'revision'->>'source_event_id'=selected.source_event_id::text AND v->'revision'->>'workflow_run_id'=selected.workflow_run_id::text AND v->'revision'->>'model_run_id'=selected.model_run_id::text
+ AND v->'revision'->'historical_republish'=jsonb_strip_nulls(jsonb_build_object('attempt_id',NEW.attempt_id::text,'selected_revision_id',selected.id::text,'selected_publication_id',a->'command'->>'selected_publication_id','selected_proposal_commit_id',a->'command'->>'selected_proposal_commit_id'))) IS NOT TRUE THEN RAISE EXCEPTION 'historical copy differs from selected revision' USING ERRCODE='23514'; END IF;
+ RETURN NEW;
+END; $$;
+
+
+--
+-- Name: validate_synthesis_manuscript_attempt(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.validate_synthesis_manuscript_attempt() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $_$
+DECLARE v jsonb; c jsonb; p jsonb; i jsonb; l jsonb;
+BEGIN
+ v:=convert_from(NEW.payload,'UTF8')::jsonb;
+ SELECT convert_from(payload,'UTF8')::jsonb INTO c FROM organizing.synthesis_manuscript_capture WHERE id=NEW.capture_id AND workspace_id=NEW.workspace_id;
+ p:=v->'prepared'; i:=p->'merge_input'; l:=i->'latest';
+ IF (v->>'id'=NEW.id::text AND v->'command'->>'workspace_id'=NEW.workspace_id::text
+     AND v->'command'->>'idempotency_key'=NEW.idempotency_key AND v->>'capture_id'=NEW.capture_id::text
+     AND v->'command'->>'note_id'=l->>'note_id' AND l->>'workspace_id'=NEW.workspace_id::text
+     AND v->'command'->>'processing_id'=p->'generation_input'->>'ProcessingID'
+     AND i->>'file_content'=convert_from(decode(c->>'bytes','base64'),'UTF8') AND i->'file_exists'=c->'exists'
+     AND p->'authority'->>'target_path'=c->>'target_path'
+     AND p->'authority'->>'root_grant_id'=c->>'root_grant_id'
+     AND p->'authority'->>'root_fingerprint'=c->>'root_fingerprint'
+     AND p->'authority'->'workspace_binding_version'=c->'workspace_binding_version'
+     AND p->'authority'->>'document_id'=l->>'document_id'
+     AND p->'authority'->>'latest_article_id'=l->>'article_revision_id'
+     AND v->'preview'->>'version'='synthesis-manuscript-merge/v1'
+     AND v->'preview'->>'fingerprint' ~ '^[0-9a-f]{64}$' AND v->>'hash' ~ '^[0-9a-f]{64}$') IS NOT TRUE THEN
+  RAISE EXCEPTION 'invalid manuscript attempt binding' USING ERRCODE='23514';
+ END IF;
+ -- Existing immutable L must match the stored identities. Currentness and
+ -- publication/model/source/grant fences are rechecked by the scoped owner.
+ IF NOT EXISTS(SELECT 1 FROM organizing.synthesis_revision r WHERE r.id=(l->>'id')::uuid
+  AND r.workspace_id=NEW.workspace_id AND r.note_id=(l->>'note_id')::uuid
+  AND r.document_id=(l->>'document_id')::uuid AND r.article_revision_id=(l->>'article_revision_id')::uuid
+  AND r.projection_hash=l->>'hash' AND r.content_hash=l->>'content_hash') THEN
+  RAISE EXCEPTION 'manuscript latest revision is not stored' USING ERRCODE='23514';
+ END IF;
+ RETURN NEW;
+END; $_$;
+
+
+--
+-- Name: validate_synthesis_manuscript_capture(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.validate_synthesis_manuscript_capture() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $_$
+DECLARE v jsonb; content bytea; absent text;
+BEGIN
+ v:=convert_from(NEW.payload,'UTF8')::jsonb;
+ content:=decode(v->>'bytes','base64');
+ IF (v->>'id'=NEW.id::text AND v->>'workspace_id'=NEW.workspace_id::text
+     AND jsonb_typeof(v->'exists')='boolean' AND octet_length(content)<=1048576
+     AND v->>'root_grant_id' ~ '^[0-9a-f-]{36}$' AND v->>'root_fingerprint' ~ '^[0-9a-f]{64}$'
+     AND (v->>'workspace_binding_version')::bigint>0
+     AND v->>'target_path'<>'' AND v->>'target_path' !~ '(^/|(^|/)\.\.(/|$))'
+     AND (v->>'created_at')::timestamptz IS NOT NULL) IS NOT TRUE THEN
+  RAISE EXCEPTION 'invalid manuscript capture identity' USING ERRCODE='23514';
+ END IF;
+ -- convert_from also rejects invalid UTF-8 and zero bytes, including base64 data.
+ PERFORM convert_from(content,'UTF8');
+ IF (v->>'exists')::boolean THEN
+  IF (v->>'content_hash'=encode(sha256(content),'hex') AND v->>'absence_token'='') IS NOT TRUE THEN
+   RAISE EXCEPTION 'invalid manuscript capture hash' USING ERRCODE='23514';
+  END IF;
+ ELSE
+  IF (octet_length(content)=0 AND v->>'content_hash'='' AND v->>'absence_token' ~ '^workspace-target-absent/v1:[0-9a-f]{64}$') IS NOT TRUE THEN
+   RAISE EXCEPTION 'invalid manuscript absence capture' USING ERRCODE='23514';
+  END IF;
+ END IF;
+ RETURN NEW;
+END; $_$;
+
+
+--
+-- Name: validate_synthesis_manuscript_receipt(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.validate_synthesis_manuscript_receipt() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $_$
+DECLARE v jsonb; a jsonb; preview jsonb; decision jsonb; ledger jsonb; last_decision jsonb; total integer;
+BEGIN
+ v:=convert_from(NEW.payload,'UTF8')::jsonb;
+ SELECT convert_from(payload,'UTF8')::jsonb INTO a FROM organizing.synthesis_manuscript_attempt WHERE id=NEW.attempt_id AND workspace_id=NEW.workspace_id;
+ preview:=a->'preview';
+ IF v ? 'review' THEN
+  ledger:=v->'review'->'decisions';
+  IF (v->'review'->>'version'='synthesis-manuscript-review/v1' AND jsonb_typeof(ledger)='array' AND jsonb_array_length(ledger) BETWEEN 1 AND 2) IS NOT TRUE THEN RAISE EXCEPTION 'invalid receipt review identity' USING ERRCODE='23514'; END IF;
+  SELECT count(*) INTO total FROM organizing.synthesis_manuscript_review_decision WHERE attempt_id=NEW.attempt_id AND workspace_id=NEW.workspace_id;
+  IF total<>jsonb_array_length(ledger) THEN RAISE EXCEPTION 'receipt omits stage ledger' USING ERRCODE='23514'; END IF;
+  IF ledger IS DISTINCT FROM (SELECT jsonb_agg(convert_from(d.payload,'UTF8')::jsonb ORDER BY sequence) FROM organizing.synthesis_manuscript_review_decision d WHERE d.workspace_id=NEW.workspace_id AND d.attempt_id=NEW.attempt_id) THEN
+   RAISE EXCEPTION 'receipt differs from ordered immutable ledger' USING ERRCODE='23514';
+  END IF;
+  last_decision:=ledger->(jsonb_array_length(ledger)-1); preview:=last_decision->'result'->'preview';
+ END IF;
+ IF (v->>'id'=NEW.id::text AND v->>'workspace_id'=NEW.workspace_id::text AND v->>'attempt_id'=NEW.attempt_id::text
+     AND v->>'attempt_hash'=a->>'hash' AND NOT (preview ? 'review')
+     AND jsonb_typeof(preview->'manuscript')='object'
+     AND v->'manuscript'=preview->'manuscript'
+     AND v->'manuscript'->>'version'='synthesis-manuscript/v2'
+     AND v->'manuscript'->>'content_hash'=encode(sha256(convert_to(v->'manuscript'->>'full_content','UTF8')),'hex')
+     AND v->>'hash' ~ '^[0-9a-f]{64}$') IS NOT TRUE THEN
+  RAISE EXCEPTION 'receipt lacks exact completed manuscript attempt' USING ERRCODE='23514';
+ END IF;
+ RETURN NEW;
+END; $_$;
+
+
+--
+-- Name: validate_synthesis_manuscript_review_decision(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.validate_synthesis_manuscript_review_decision() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $_$
+DECLARE v jsonb; c jsonb; b jsonb; a jsonb; previous jsonb; preview jsonb; decisions jsonb;
+BEGIN
+ v:=convert_from(NEW.payload,'UTF8')::jsonb; c:=v->'command'; b:=c->'binding';
+ SELECT convert_from(payload,'UTF8')::jsonb INTO a FROM organizing.synthesis_manuscript_attempt WHERE id=NEW.attempt_id AND workspace_id=NEW.workspace_id FOR UPDATE;
+ IF NEW.sequence=1 THEN previous:=NULL; preview:=a->'preview'; decisions:='[]'::jsonb;
+ ELSE
+  SELECT convert_from(payload,'UTF8')::jsonb INTO previous FROM organizing.synthesis_manuscript_review_decision WHERE attempt_id=NEW.attempt_id AND workspace_id=NEW.workspace_id AND sequence=1;
+  preview:=previous->'result'->'preview'; decisions:=previous->'result'->'resolutions';
+ END IF;
+ IF (v->>'id'=NEW.id::text AND (v->>'sequence')::integer=NEW.sequence
+  AND c->>'attempt_id'=NEW.attempt_id::text AND c->>'capture_id'=a->>'capture_id'
+  AND c->>'note_id'=a->'command'->>'note_id' AND c->>'idempotency_key'=NEW.idempotency_key
+  AND b->>'workspace_id'=NEW.workspace_id::text AND b->>'processing_id'=a->'command'->>'processing_id'
+  AND b->>'run_id'=a->'prepared'->'generation_input'->>'WorkflowRunID'
+  AND v->>'previous_hash'=coalesce(previous->>'hash','')
+  AND (NEW.sequence=1 OR b=previous->'command'->'binding')
+  AND jsonb_typeof(preview->'review')='object'
+  AND c->'resolution'->>'stage'=preview->'review'->>'stage'
+  AND c->'resolution'->>'preview_fingerprint'=preview->>'fingerprint'
+  AND c->'resolution'->'acknowledged_ordinals'=(SELECT jsonb_agg(x->'Ordinal' ORDER BY ord) FROM jsonb_array_elements(preview->'review'->'conflicts') WITH ORDINALITY e(x,ord))
+  AND jsonb_array_length(c->'resolution'->'acknowledged_ordinals') BETWEEN 1 AND 1024
+  AND octet_length(c->'resolution'->>'final_content')<=1048576
+  AND v->'result'->'resolutions'=decisions||jsonb_build_array(c->'resolution')
+  AND v->>'hash' ~ '^[0-9a-f]{64}$' AND v->'result'->>'hash' ~ '^[0-9a-f]{64}$'
+  AND ((jsonb_typeof(v->'result'->'preview'->'manuscript')='object' AND NOT (v->'result'->'preview' ? 'review')) OR (jsonb_typeof(v->'result'->'preview'->'review')='object' AND NOT (v->'result'->'preview' ? 'manuscript')))
+ ) IS NOT TRUE THEN RAISE EXCEPTION 'invalid manuscript stage decision binding' USING ERRCODE='23514'; END IF;
+ -- A reserved UUID alone never authorizes a decision. The application additionally
+ -- composes current CallerCapabilities/Root/source/model owner authority.
+ PERFORM 1 FROM workflow.human_task h JOIN workflow.run r ON r.id=h.run_id
+ JOIN workflow.node_run n ON n.id=h.node_run_id AND n.run_id=r.id
+ WHERE h.id=(b->>'human_task_id')::uuid AND h.run_id=(b->>'run_id')::uuid
+ AND h.node_run_id=(b->>'node_run_id')::uuid AND r.workspace_id=NEW.workspace_id
+ AND h.target_version=(b->>'target_version')::bigint AND h.status='pending'
+ AND (h.expires_at IS NULL OR h.expires_at>CURRENT_TIMESTAMP)
+ AND n.status='waiting_for_human' FOR SHARE OF h;
+ IF NOT FOUND THEN RAISE EXCEPTION 'manuscript review lacks actual pending human task' USING ERRCODE='23514'; END IF;
+ RETURN NEW;
+END; $_$;
+
+
+--
 -- Name: validate_synthesis_membership(); Type: FUNCTION; Schema: organizing; Owner: -
 --
 
@@ -16294,6 +17853,60 @@ $$;
 
 
 --
+-- Name: validate_synthesis_publication_event(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.validate_synthesis_publication_event() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE proof record;
+BEGIN
+    IF TG_OP='TRUNCATE' THEN
+        IF EXISTS (SELECT 1 FROM workflow.outbox_event WHERE event_type='organizing.synthesis.published') THEN
+            RAISE EXCEPTION 'synthesis publication events are immutable' USING ERRCODE='55000';
+        END IF;
+        RETURN NULL;
+    END IF;
+    IF TG_OP<>'INSERT' AND OLD.event_type='organizing.synthesis.published' THEN
+        IF TG_OP='DELETE' THEN
+            RAISE EXCEPTION 'synthesis publication events are immutable' USING ERRCODE='55000';
+        END IF;
+        IF (to_jsonb(NEW)-'published_at') IS DISTINCT FROM (to_jsonb(OLD)-'published_at')
+           OR OLD.published_at IS NOT NULL AND NEW.published_at IS DISTINCT FROM OLD.published_at
+           OR NEW.published_at < OLD.occurred_at THEN
+            RAISE EXCEPTION 'synthesis publication event binding is immutable' USING ERRCODE='55000';
+        END IF;
+        RETURN NEW;
+    END IF;
+    IF TG_OP='DELETE' THEN RETURN OLD; END IF;
+    IF NEW.event_type<>'organizing.synthesis.published' THEN RETURN NEW; END IF;
+    IF TG_OP<>'INSERT' THEN
+        RAISE EXCEPTION 'cannot convert an event to a synthesis publication' USING ERRCODE='55000';
+    END IF;
+    SELECT * INTO proof FROM organizing.synthesis_proven_publication
+     WHERE workspace_id=NEW.workspace_id AND revision_id=(NEW.payload->>'revision_id')::uuid;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'synthesis publication lacks committed owner evidence' USING ERRCODE='23514';
+    END IF;
+    IF (NEW.payload=jsonb_build_object(
+            'workspace_id',proof.workspace_id,'note_id',proof.note_id,'revision_id',proof.revision_id,
+            'document_id',proof.document_id,'article_revision_id',proof.article_revision_id,
+            'projection_hash',proof.projection_hash,'content_hash',proof.content_hash,
+            'publication_id',proof.publication_id,'proposal_commit_id',proof.proposal_commit_id,
+            'git_commit',proof.git_commit)
+        AND NEW.run_id IS NULL AND NEW.published_at IS NULL
+        AND NEW.schema_version=1 AND NEW.event_version=1
+        AND NEW.occurred_at=proof.published_at
+        AND NEW.event_key='synthesis.note-published:v1:'||proof.revision_id::text
+        AND NEW.idempotency_key=NEW.event_key) IS NOT TRUE THEN
+        RAISE EXCEPTION 'synthesis publication event binding is invalid' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+
+--
 -- Name: validate_synthesis_revision(); Type: FUNCTION; Schema: organizing; Owner: -
 --
 
@@ -16324,6 +17937,101 @@ $$;
 
 
 --
+-- Name: validate_synthesis_revision_body_reference(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.validate_synthesis_revision_body_reference() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE current_item jsonb; upstream_item jsonb; expected_ref jsonb; parent_id uuid;
+BEGIN
+    SELECT item,COALESCE((r.historical_republish->>'selected_revision_id')::uuid,r.parent_revision_id) INTO current_item,parent_id
+      FROM organizing.synthesis_revision r CROSS JOIN LATERAL jsonb_array_elements(r.items) item
+     WHERE r.id=NEW.revision_id AND r.workspace_id=NEW.workspace_id AND r.note_id=NEW.note_id
+       AND item->>'id'=NEW.item_id::text;
+    expected_ref := jsonb_build_object('workspace_id',NEW.workspace_id,'note_id',NEW.upstream_note_id,
+      'revision_id',NEW.upstream_revision_id,'item_id',NEW.upstream_item_id,
+      'publication_id',NEW.publication_id,'projection_hash',NEW.upstream_projection_hash);
+    IF (current_item->'body_reference'=expected_ref) IS NOT TRUE THEN
+        RAISE EXCEPTION 'body reference must be saved in its exact revision item' USING ERRCODE='23514';
+    END IF;
+    PERFORM organizing.verify_synthesis_published_bindings(jsonb_build_array(expected_ref-'item_id'));
+    SELECT item INTO upstream_item
+      FROM organizing.synthesis_revision r CROSS JOIN LATERAL jsonb_array_elements(r.items) item
+     WHERE r.id=NEW.upstream_revision_id AND r.workspace_id=NEW.workspace_id AND r.note_id=NEW.upstream_note_id
+       AND item->>'id'=NEW.upstream_item_id::text;
+    IF upstream_item IS NULL THEN
+        RAISE EXCEPTION 'referenced published item is missing' USING ERRCODE='23514';
+    END IF;
+    -- A local resolution or additional evidence may extend an already-cited
+    -- item. The original published reference remains an immutable snapshot.
+    IF NOT EXISTS (SELECT 1 FROM organizing.synthesis_revision_body_reference prior
+      WHERE prior.revision_id=parent_id AND prior.workspace_id=NEW.workspace_id AND prior.note_id=NEW.note_id
+        AND prior.item_id=NEW.item_id AND prior.upstream_revision_id=NEW.upstream_revision_id
+        AND prior.upstream_note_id=NEW.upstream_note_id AND prior.upstream_item_id=NEW.upstream_item_id
+        AND prior.publication_id=NEW.publication_id AND prior.upstream_projection_hash=NEW.upstream_projection_hash)
+      AND (current_item-ARRAY['id','body_reference']) IS DISTINCT FROM (upstream_item-ARRAY['id','body_reference']) THEN
+        RAISE EXCEPTION 'new body inclusion must retain the complete published item' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: validate_synthesis_revision_manuscript(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.validate_synthesis_revision_manuscript() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE r jsonb; a jsonb; p jsonb; l jsonb; trusted jsonb; generated jsonb;
+BEGIN
+ IF NEW.historical_republish_id IS NOT NULL THEN
+ PERFORM organizing.verify_historical_synthesis_revision(NEW); RETURN NEW; END IF;
+
+ IF NEW.candidate_remerge_id IS NOT NULL THEN
+  IF NOT EXISTS(SELECT 1 FROM organizing.synthesis_candidate_remerge_event e
+    JOIN organizing.synthesis_candidate_remerge_event b ON b.id=e.attempt_id AND b.workspace_id=e.workspace_id AND b.note_id=e.note_id AND b.kind='BEGIN'
+    CROSS JOIN LATERAL(SELECT convert_from(e.payload,'UTF8')::jsonb v,convert_from(b.payload,'UTF8')::jsonb a) x
+    WHERE e.id=NEW.candidate_remerge_id AND e.workspace_id=NEW.workspace_id AND e.note_id=NEW.note_id AND e.kind='APPLY'
+    AND v->'revision'->>'id'=NEW.id::text AND v->'revision'->>'article_revision_id'=NEW.article_revision_id::text
+    AND v->'revision'->>'document_id'=NEW.document_id::text AND v->'revision'->>'parent_revision_id'=NEW.parent_revision_id::text
+    AND (v->'revision'->>'revision_no')::bigint=NEW.revision_no AND (v->'revision'->>'article_revision_no')::bigint=NEW.article_revision_no
+    AND v->'revision'->>'title'=NEW.title AND v->'revision'->>'renderer_version'=NEW.renderer_version
+    AND v->'revision'->>'hash'=NEW.projection_hash AND v->'revision'->>'content_hash'=NEW.content_hash
+    AND v->'revision'->'manuscript'=NEW.manuscript AND v->'revision'->'items'=NEW.items AND v->'revision'->'delta'=NEW.delta AND v->'revision'->'remerge'=NEW.remerge
+    AND v->'revision'->>'source_event_id'=NEW.source_event_id::text AND v->'revision'->>'workflow_run_id'=NEW.workflow_run_id::text AND v->'revision'->>'model_run_id'=NEW.model_run_id::text
+    AND (v->'revision'->>'created_at')::timestamptz=NEW.created_at AND x.a->>'receipt_id'=NEW.manuscript_receipt_id::text) THEN
+   RAISE EXCEPTION 'remerge revision lacks exact application' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+ END IF;
+ IF NEW.renderer_version='synthesis-markdown/v1' THEN RETURN NEW; END IF;
+ SELECT convert_from(receipt.payload,'UTF8')::jsonb,convert_from(attempt.payload,'UTF8')::jsonb INTO r,a
+ FROM organizing.synthesis_manuscript_receipt receipt JOIN organizing.synthesis_manuscript_attempt attempt ON attempt.id=receipt.attempt_id AND attempt.workspace_id=receipt.workspace_id
+ WHERE receipt.id=NEW.manuscript_receipt_id AND receipt.workspace_id=NEW.workspace_id;
+ p:=a->'prepared'; l:=p->'merge_input'->'latest';
+ SELECT COALESCE(jsonb_agg(item ORDER BY ord),'[]'::jsonb) INTO trusted
+ FROM jsonb_array_elements(NEW.manuscript->'machine'->'machine_items') WITH ORDINALITY AS machine(item,ord)
+ WHERE EXISTS (SELECT 1 FROM jsonb_array_elements(NEW.manuscript->'assessment'->'mappings') m WHERE m->>'item_id'=item->>'id');
+ SELECT note INTO generated FROM jsonb_array_elements(p->'generation'->'Notes') note WHERE note->>'NoteID'=NEW.note_id::text;
+ IF (NEW.manuscript=r->'manuscript' AND NEW.items=trusted
+     AND NEW.content_hash=r->'manuscript'->>'content_hash'
+     AND NEW.content_hash=encode(sha256(convert_to(NEW.manuscript->>'full_content','UTF8')),'hex')
+     AND NEW.parent_revision_id::text=l->>'id' AND NEW.note_id::text=l->>'note_id' AND NEW.document_id::text=l->>'document_id'
+     AND NEW.revision_no=(l->>'revision_no')::integer+1 AND NEW.article_revision_no=(l->>'article_revision_no')::integer+1
+     AND NEW.source_event_id::text=p->'generation_input'->'SourceEvent'->>'id'
+     AND NEW.workflow_run_id::text=p->'generation_input'->>'WorkflowRunID'
+     AND NEW.model_run_id::text=p->'generation'->>'ModelRunID'
+     AND NEW.delta=generated->'Delta') IS NOT TRUE THEN
+  RAISE EXCEPTION 'v2 revision lacks exact verified manuscript receipt' USING ERRCODE='23514';
+ END IF;
+ RETURN NEW;
+END; $$;
+
+
+--
 -- Name: validate_synthesis_source(); Type: FUNCTION; Schema: organizing; Owner: -
 --
 
@@ -16340,6 +18048,85 @@ BEGIN
         WHERE v.id=NEW.source_version_id AND v.source_id=NEW.source_id AND v.workspace_id=NEW.workspace_id
           AND a.id=NEW.content_artifact_id AND v.content_hash=NEW.content_hash AND sp.excerpt_hash=NEW.excerpt_hash
     ) THEN RAISE EXCEPTION 'synthesis source tuple changed' USING ERRCODE='23514'; END IF;
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: validate_synthesis_source_impact(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.validate_synthesis_source_impact() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM organizing.synthesis_revision_source ref
+        WHERE ref.workspace_id=NEW.workspace_id AND ref.note_id=NEW.note_id
+          AND ref.source_id=NEW.source_id AND ref.source_version_id=NEW.source_version_id) THEN
+        RAISE EXCEPTION 'source impact must refer to saved note evidence' USING ERRCODE='23514';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM core.source s JOIN core.source_version v ON v.source_id=s.id
+        WHERE s.workspace_id=NEW.workspace_id AND s.id=NEW.source_id AND v.id=NEW.source_version_id
+        AND CASE NEW.reason
+            WHEN 'SOURCE_REMOVED' THEN s.removed_at IS NOT NULL
+            WHEN 'SOURCE_QUARANTINED' THEN v.security_status='quarantined' OR EXISTS (
+                SELECT 1 FROM ingestion.attempt a WHERE a.workspace_id=s.workspace_id
+                  AND a.source_version_id=v.id AND a.security_status='quarantined')
+            ELSE false END) THEN
+        RAISE EXCEPTION 'source impact lacks owner evidence' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: validate_synthesis_source_review_evidence(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.validate_synthesis_source_review_evidence() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE review organizing.synthesis_manuscript_source_review%ROWTYPE; document jsonb;target jsonb;part jsonb;review_obligation jsonb;check_result jsonb;ref jsonb;
+BEGIN
+ SELECT * INTO review FROM organizing.synthesis_manuscript_source_review WHERE workspace_id=NEW.workspace_id AND id=NEW.review_id FOR UPDATE;
+ document:=convert_from(review.snapshot,'UTF8')::jsonb;
+ SELECT t INTO target FROM jsonb_array_elements(document->'targets') t WHERE t->>'note_id'=NEW.note_id::text AND t->>'base_revision_id'=NEW.base_revision_id::text;
+ SELECT p INTO part FROM jsonb_array_elements(target->'paragraphs') p WHERE p->>'label'=NEW.paragraph;
+ SELECT o INTO review_obligation FROM jsonb_array_elements(document->'obligations') o WHERE o->>'label'=NEW.obligation AND o->>'note'=target->>'label';ref:=review_obligation->'reference';
+ SELECT c INTO check_result FROM jsonb_array_elements(convert_from(review.output,'UTF8')::jsonb->'checks') c WHERE c->>'obligation'=NEW.obligation;
+ IF ((review.status='REVIEWED' OR (review.status='STALE' AND EXISTS(SELECT 1 FROM organizing.synthesis_manuscript_source_review_recovery x WHERE x.review_id=review.id AND organizing.source_review_recovery_live(review.workspace_id,review.id,x.workflow_run_id)))) AND check_result->>'verdict'='SUPPORTED' AND check_result->>'source'=review_obligation->>'source' AND check_result->'targets' ? NEW.paragraph
+ AND NEW.target_hash=organizing.source_review_frozen_target_hash(review.snapshot,NEW.note_id)
+ AND NEW.full_content_hash=target->>'full_content_hash' AND NEW.start_byte=(part->>'start_byte')::integer AND NEW.end_byte=(part->>'end_byte')::integer
+ AND NEW.paragraph_hash=part->>'hash' AND NEW.paragraph_hash=encode(sha256(substring(convert_to(target->>'full_content','UTF8') FROM NEW.start_byte+1 FOR NEW.end_byte-NEW.start_byte)),'hex')
+ AND ref->'source'->>'workspace_id'=NEW.workspace_id::text AND ref->'source'->>'source_id'=NEW.source_id::text
+ AND ref->'source'->>'source_version_id'=NEW.source_version_id::text AND ref->'source'->>'content_artifact_id'=NEW.content_artifact_id::text AND ref->'source'->>'parse_projection_id'=NEW.parse_projection_id::text
+ AND ref->'source'->>'content_hash'=NEW.content_hash AND ref->>'source_span_id'=NEW.source_span_id::text AND ref->>'excerpt_hash'=NEW.excerpt_hash AND ref->>'title'=NEW.title
+ ) IS NOT TRUE THEN RAISE EXCEPTION 'source evidence lacks exact accepted current-text obligation' USING ERRCODE='23514'; END IF;
+ RETURN NEW;
+END; $$;
+
+
+--
+-- Name: validate_synthesis_supplement_item(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.validate_synthesis_supplement_item() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE item jsonb;
+BEGIN
+    SELECT element INTO item FROM organizing.synthesis_revision r, jsonb_array_elements(r.items) element
+      WHERE r.id=NEW.base_revision_id AND r.note_id=NEW.note_id AND r.workspace_id=NEW.workspace_id AND element->>'id'=NEW.item_id::text;
+    IF item IS NULL OR NOT (CASE NEW.slot
+        WHEN 'FACT' THEN item->>'kind'='FACT'
+        WHEN 'CONFLICT' THEN item->>'kind'='CONFLICT' AND jsonb_array_length(item->'conflict'->'alternatives')>NEW.alternative_index
+        WHEN 'GAP_CONTEXT' THEN item->>'kind'='GAP'
+        WHEN 'GAP_RESOLUTION' THEN item->>'kind'='GAP' AND jsonb_typeof(item->'gap'->'resolution')='object'
+        ELSE false END) IS TRUE THEN
+        RAISE EXCEPTION 'synthesis supplement item binding changed' USING ERRCODE='23514';
+    END IF;
     RETURN NEW;
 END;
 $$;
@@ -16415,6 +18202,152 @@ $$;
 
 
 --
+-- Name: synthesis_revision; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.synthesis_revision (
+    id uuid NOT NULL,
+    workspace_id uuid NOT NULL,
+    note_id uuid NOT NULL,
+    document_id uuid NOT NULL,
+    article_revision_id uuid NOT NULL,
+    revision_no integer NOT NULL,
+    article_revision_no integer NOT NULL,
+    parent_revision_id uuid,
+    title text NOT NULL,
+    renderer_version text NOT NULL,
+    content_hash text NOT NULL,
+    projection_hash text NOT NULL,
+    items jsonb NOT NULL,
+    delta jsonb NOT NULL,
+    item_count integer NOT NULL,
+    conflict_count integer NOT NULL,
+    gap_count integer NOT NULL,
+    open_gap_count integer NOT NULL,
+    source_event_id uuid NOT NULL,
+    workflow_run_id uuid NOT NULL,
+    model_run_id uuid NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    manuscript jsonb,
+    manuscript_receipt_id uuid,
+    remerge jsonb,
+    candidate_remerge_id uuid,
+    historical_republish jsonb,
+    historical_republish_id uuid,
+    CONSTRAINT synthesis_historical_republish_shape CHECK (((((historical_republish IS NULL) AND (historical_republish_id IS NULL)) OR ((historical_republish_id IS NOT NULL) AND (jsonb_typeof(historical_republish) = 'object'::text) AND (candidate_remerge_id IS NULL) AND (remerge IS NULL) AND (revision_no > 1) AND ((historical_republish ->> 'attempt_id'::text) ~ '^[0-9a-f-]{36}$'::text) AND ((historical_republish ->> 'selected_revision_id'::text) ~ '^[0-9a-f-]{36}$'::text))) IS TRUE)),
+    CONSTRAINT synthesis_revision_article_revision_no_check CHECK ((article_revision_no > 0)),
+    CONSTRAINT synthesis_revision_check CHECK (((open_gap_count >= 0) AND (open_gap_count <= gap_count))),
+    CONSTRAINT synthesis_revision_conflict_count_check CHECK (((conflict_count >= 0) AND (conflict_count <= 128))),
+    CONSTRAINT synthesis_revision_content_hash_check CHECK ((content_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT synthesis_revision_counts CHECK (((item_count = jsonb_array_length(items)) AND ((conflict_count + gap_count) <= item_count))),
+    CONSTRAINT synthesis_revision_delta_check CHECK ((((jsonb_typeof(delta) = 'object'::text) AND (jsonb_typeof((delta -> 'operations'::text)) = 'array'::text) AND ((jsonb_array_length((delta -> 'operations'::text)) >= 1) AND (jsonb_array_length((delta -> 'operations'::text)) <= 64)) AND ((delta - 'operations'::text) = '{}'::jsonb)) IS TRUE)),
+    CONSTRAINT synthesis_revision_gap_count_check CHECK (((gap_count >= 0) AND (gap_count <= 128))),
+    CONSTRAINT synthesis_revision_item_count_check CHECK (((item_count >= 0) AND (item_count <= 128))),
+    CONSTRAINT synthesis_revision_items_check CHECK (((jsonb_typeof(items) = 'array'::text) AND ((jsonb_array_length(items) >= 0) AND (jsonb_array_length(items) <= 128)))),
+    CONSTRAINT synthesis_revision_manuscript_shape CHECK ((((renderer_version = 'synthesis-markdown/v1'::text) AND (manuscript IS NULL) AND (manuscript_receipt_id IS NULL) AND (item_count >= 1)) OR ((renderer_version = 'synthesis-markdown/v2'::text) AND (jsonb_typeof(manuscript) = 'object'::text) AND (manuscript_receipt_id IS NOT NULL) AND (octet_length((manuscript)::text) <= 16777216)))),
+    CONSTRAINT synthesis_revision_parent_shape CHECK ((((revision_no = 1) AND (parent_revision_id IS NULL)) OR ((revision_no > 1) AND (parent_revision_id IS NOT NULL) AND (parent_revision_id <> id)))),
+    CONSTRAINT synthesis_revision_projection_hash_check CHECK ((projection_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT synthesis_revision_remerge_shape CHECK (((((remerge IS NULL) AND (candidate_remerge_id IS NULL)) OR ((candidate_remerge_id IS NOT NULL) AND (renderer_version = 'synthesis-markdown/v2'::text) AND (jsonb_typeof(remerge) = 'object'::text) AND ((remerge ->> 'source_revision_id'::text) = (parent_revision_id)::text) AND ((remerge ->> 'attempt_id'::text) ~ '^[0-9a-f-]{36}$'::text))) IS TRUE)),
+    CONSTRAINT synthesis_revision_renderer_version_check CHECK ((renderer_version = ANY (ARRAY['synthesis-markdown/v1'::text, 'synthesis-markdown/v2'::text]))),
+    CONSTRAINT synthesis_revision_revision_no_check CHECK ((revision_no > 0)),
+    CONSTRAINT synthesis_revision_title_check CHECK (((title = btrim(title)) AND (title <> ''::text) AND (octet_length(title) <= 512)))
+);
+
+
+--
+-- Name: verify_historical_synthesis_revision(organizing.synthesis_revision); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.verify_historical_synthesis_revision(r organizing.synthesis_revision) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+DECLARE e jsonb; a jsonb; selected organizing.synthesis_revision%ROWTYPE;
+BEGIN
+ SELECT convert_from(applied.payload,'UTF8')::jsonb,convert_from(b.payload,'UTF8')::jsonb INTO e,a
+ FROM organizing.synthesis_historical_republish_event applied JOIN organizing.synthesis_historical_republish_event b ON b.id=applied.attempt_id AND b.workspace_id=applied.workspace_id AND b.note_id=applied.note_id AND b.kind='BEGIN'
+ WHERE applied.id=r.historical_republish_id AND applied.workspace_id=r.workspace_id AND applied.note_id=r.note_id AND applied.kind='APPLY';
+ SELECT * INTO selected FROM organizing.synthesis_revision WHERE id=(a->'command'->>'selected_revision_id')::uuid AND workspace_id=r.workspace_id AND note_id=r.note_id;
+ IF (r.id::text=e->'revision'->>'id' AND r.article_revision_id::text=e->'revision'->>'article_revision_id' AND r.document_id=selected.document_id
+ AND r.parent_revision_id::text=a->'command'->>'expected_revision_id' AND r.revision_no=(e->'revision'->>'revision_no')::bigint AND r.article_revision_no=(e->'revision'->>'article_revision_no')::bigint
+ AND r.projection_hash=e->'revision'->>'hash' AND r.content_hash=selected.content_hash AND r.title=selected.title AND r.renderer_version=selected.renderer_version
+ AND r.items=selected.items AND r.delta=selected.delta AND r.manuscript IS NOT DISTINCT FROM selected.manuscript
+ AND r.manuscript_receipt_id IS NOT DISTINCT FROM selected.manuscript_receipt_id AND r.source_event_id=selected.source_event_id AND r.workflow_run_id=selected.workflow_run_id AND r.model_run_id=selected.model_run_id
+ AND r.historical_republish=e->'revision'->'historical_republish' AND r.created_at=(e->'revision'->>'created_at')::timestamptz
+ AND r.remerge IS NULL AND r.candidate_remerge_id IS NULL) IS NOT TRUE THEN RAISE EXCEPTION 'historical revision lacks exact selected copy and application' USING ERRCODE='23514'; END IF;
+END; $$;
+
+
+--
+-- Name: verify_synthesis_body_refresh_input(jsonb); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.verify_synthesis_body_refresh_input(input jsonb) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+DECLARE binding jsonb; requested record; item jsonb; base_id uuid; expected_count bigint;
+BEGIN
+ binding:=input->'body_refresh';
+ IF binding IS NULL THEN RETURN; END IF;
+ SELECT * INTO STRICT requested FROM organizing.synthesis_body_refresh_request
+ WHERE id=(binding->'request'->>'id')::uuid AND workspace_id=(input->'source_event'->'source'->>'workspace_id')::uuid;
+ IF (binding->'request'->>'workspace_id'=requested.workspace_id::text) IS NOT TRUE
+ OR (binding->'request'->>'note_id'=requested.note_id::text) IS NOT TRUE
+ OR (binding->'request'->>'publication_id'=requested.publication_id::text) IS NOT TRUE
+ OR (binding->'request'->>'impact_id'=requested.impact_id::text) IS NOT TRUE
+ OR (jsonb_array_length(input->'notes')=1) IS NOT TRUE
+ OR (input->'notes'->0->'note'->>'id'=requested.note_id::text) IS NOT TRUE
+ OR (jsonb_typeof(binding->'items')='array') IS NOT TRUE
+ OR (jsonb_array_length(binding->'items') BETWEEN 1 AND 256) IS NOT TRUE
+ THEN RAISE EXCEPTION 'refresh frozen request changed' USING ERRCODE='23514'; END IF;
+ base_id:=(input->'notes'->0->>'revision_id')::uuid;
+ SELECT count(*) INTO expected_count FROM organizing.synthesis_body_impact i
+ WHERE i.workspace_id=requested.workspace_id AND i.note_id=requested.note_id AND i.base_revision_id=base_id AND i.publication_id=requested.publication_id;
+ IF expected_count<>jsonb_array_length(binding->'items') OR expected_count<>(SELECT count(DISTINCT value->>'impact_id') FROM jsonb_array_elements(binding->'items'))
+ THEN RAISE EXCEPTION 'refresh frozen impact group changed' USING ERRCODE='23514'; END IF;
+ FOR item IN SELECT value FROM jsonb_array_elements(binding->'items') LOOP
+ IF NOT EXISTS(SELECT 1 FROM organizing.synthesis_body_impact i
+ JOIN organizing.synthesis_revision old ON old.id=i.upstream_revision_id AND old.workspace_id=i.workspace_id
+ JOIN organizing.synthesis_revision updated ON updated.id=i.published_revision_id AND updated.workspace_id=i.workspace_id
+ WHERE i.id=(item->>'impact_id')::uuid AND i.workspace_id=requested.workspace_id AND i.note_id=requested.note_id
+ AND i.base_revision_id=base_id AND i.item_id=(item->>'item_id')::uuid AND i.publication_id=requested.publication_id
+ AND item->'original'=jsonb_build_object('workspace_id',i.workspace_id,'note_id',i.upstream_note_id,'revision_id',i.upstream_revision_id,'publication_id',i.upstream_publication_id,'item_id',i.upstream_item_id,'projection_hash',old.projection_hash)
+ AND item->'updated'=jsonb_build_object('workspace_id',i.workspace_id,'note_id',i.upstream_note_id,'revision_id',i.published_revision_id,'publication_id',i.publication_id,'item_id',i.upstream_item_id,'projection_hash',updated.projection_hash))
+ THEN RAISE EXCEPTION 'refresh frozen historical impact binding changed' USING ERRCODE='23514'; END IF;
+ END LOOP;
+END $$;
+
+
+--
+-- Name: verify_synthesis_candidate_remerge_closure(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.verify_synthesis_candidate_remerge_closure() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE v jsonb; a jsonb;
+BEGIN
+ IF NEW.kind<>'APPLY' THEN RETURN NULL; END IF;
+ v:=convert_from(NEW.payload,'UTF8')::jsonb;
+ SELECT convert_from(payload,'UTF8')::jsonb INTO a FROM organizing.synthesis_candidate_remerge_event WHERE id=NEW.attempt_id AND workspace_id=NEW.workspace_id;
+ IF NOT EXISTS(SELECT 1 FROM organizing.synthesis_revision r
+ JOIN organizing.synthesis_note n ON n.id=r.note_id AND n.workspace_id=r.workspace_id AND n.current_revision_id=r.id
+ JOIN authoring.generated_article_revision g ON g.workspace_id=r.workspace_id AND g.document_id=r.document_id AND g.article_revision_id=r.article_revision_id AND g.origin_kind='SYNTHESIS_NOTE' AND g.origin_id=r.note_id AND g.origin_revision_id=r.id AND g.projection_hash=r.projection_hash AND g.content_hash=r.content_hash
+ JOIN core.article_revision ar ON ar.id=r.article_revision_id AND ar.workspace_id=r.workspace_id AND ar.document_id=r.document_id AND ar.content=r.manuscript->>'full_content' AND ar.content_hash=r.content_hash
+ JOIN authoring.document_publication_reservation p ON p.workspace_id=r.workspace_id AND p.document_id=r.document_id AND p.article_revision_id=r.article_revision_id AND p.content_hash=r.content_hash AND p.id=(v->>'reservation_id')::uuid AND p.idempotency_key=v->'publication'->>'idempotency_key'
+ JOIN authoring.document_publication_binding oldb ON oldb.id=(a->'command'->>'expected_publication_id')::uuid AND oldb.workspace_id=r.workspace_id AND oldb.status='CLOSED'
+ JOIN change_control.proposal oldp ON oldp.id=oldb.proposal_id AND oldp.workspace_id=r.workspace_id AND oldp.status='needs_revision'
+ WHERE r.candidate_remerge_id=NEW.id AND r.id::text=v->'revision'->>'id'
+ AND n.version=(a->'command'->>'expected_note_version')::bigint+1
+ AND p.base_version=a->'capture'->>'content_hash' AND p.merge_capture_id::text=a->'capture'->>'id' AND p.merge_receipt_id::text=a->>'receipt_id'
+ AND v->'publication'->>'note_id'=r.note_id::text AND v->'publication'->>'revision_id'=r.id::text
+ AND v->'publication'->>'document_id'=r.document_id::text AND v->'publication'->>'article_revision_id'=r.article_revision_id::text AND v->'publication'->>'content_hash'=r.content_hash) THEN
+ RAISE EXCEPTION 'remerge candidate transaction is not closed' USING ERRCODE='23514';
+ END IF;
+ RETURN NULL;
+END; $$;
+
+
+--
 -- Name: verify_synthesis_closure(); Type: FUNCTION; Schema: organizing; Owner: -
 --
 
@@ -16439,6 +18372,17 @@ BEGIN
                 'source_span_id',s.source_span_id,'excerpt_hash',s.excerpt_hash,'title',s.title) AS reference
             FROM organizing.synthesis_revision_source s WHERE s.revision_id=NEW.id AND s.workspace_id=NEW.workspace_id AND s.note_id=NEW.note_id
         ) source;
+        IF NEW.historical_republish_id IS NOT NULL THEN
+            PERFORM organizing.verify_historical_synthesis_revision(NEW);
+            IF actual_sources<>expected_sources OR jsonb_array_length(actual_sources)>256 THEN RAISE EXCEPTION 'historical sources differ' USING ERRCODE='23514'; END IF;
+            RETURN NULL;
+        END IF;
+        IF NEW.candidate_remerge_id IS NOT NULL THEN
+            IF actual_sources<>expected_sources OR jsonb_array_length(actual_sources)>256 OR NOT EXISTS (
+                SELECT 1 FROM organizing.synthesis_candidate_remerge_event e WHERE e.id=NEW.candidate_remerge_id AND e.workspace_id=NEW.workspace_id AND e.note_id=NEW.note_id AND e.kind='APPLY' AND convert_from(e.payload,'UTF8')::jsonb->'revision'->>'id'=NEW.id::text
+            ) THEN RAISE EXCEPTION 'remerge projection lacks exact sources and application' USING ERRCODE='23514'; END IF;
+            RETURN NULL;
+        END IF;
         IF actual_sources<>expected_sources OR jsonb_array_length(actual_sources)>256 OR NOT EXISTS (
             SELECT 1 FROM organizing.synthesis_apply_receipt receipt
              WHERE receipt.workspace_id=NEW.workspace_id AND receipt.workflow_run_id=NEW.workflow_run_id
@@ -16447,6 +18391,148 @@ BEGIN
         ) THEN RAISE EXCEPTION 'synthesis projection lacks its exact sources and receipt' USING ERRCODE='23514'; END IF;
     END IF;
     RETURN NULL;
+END;
+$$;
+
+
+--
+-- Name: verify_synthesis_historical_republish_closure(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.verify_synthesis_historical_republish_closure() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE v jsonb; a jsonb; r organizing.synthesis_revision%ROWTYPE; expected_sources jsonb; actual_sources jsonb;
+BEGIN
+ IF NEW.kind<>'APPLY' THEN RETURN NULL; END IF;
+ v:=convert_from(NEW.payload,'UTF8')::jsonb;
+ SELECT convert_from(payload,'UTF8')::jsonb INTO a FROM organizing.synthesis_historical_republish_event WHERE id=NEW.attempt_id AND workspace_id=NEW.workspace_id;
+ SELECT * INTO r FROM organizing.synthesis_revision WHERE historical_republish_id=NEW.id AND workspace_id=NEW.workspace_id AND note_id=NEW.note_id;
+ PERFORM organizing.verify_historical_synthesis_revision(r);
+ SELECT COALESCE(jsonb_agg(to_jsonb(s)-'revision_id' ORDER BY (to_jsonb(s)-'revision_id')::text),'[]'::jsonb) INTO expected_sources FROM organizing.synthesis_revision_source s WHERE s.workspace_id=NEW.workspace_id AND s.revision_id=(a->'command'->>'selected_revision_id')::uuid;
+ SELECT COALESCE(jsonb_agg(to_jsonb(s)-'revision_id' ORDER BY (to_jsonb(s)-'revision_id')::text),'[]'::jsonb) INTO actual_sources FROM organizing.synthesis_revision_source s WHERE s.workspace_id=NEW.workspace_id AND s.revision_id=r.id;
+ IF actual_sources<>expected_sources OR NOT EXISTS(SELECT 1 FROM organizing.synthesis_note n
+ JOIN authoring.generated_article_revision g ON g.workspace_id=n.workspace_id AND g.document_id=n.document_id AND g.article_revision_id=r.article_revision_id AND g.origin_kind='SYNTHESIS_NOTE' AND g.origin_id=n.id AND g.origin_revision_id=r.id AND g.projection_hash=r.projection_hash AND g.content_hash=r.content_hash
+ JOIN core.article_revision ar ON ar.id=r.article_revision_id AND ar.workspace_id=r.workspace_id AND ar.document_id=r.document_id AND ar.content=a->>'candidate' AND ar.content_hash=r.content_hash
+ JOIN authoring.document_publication_reservation p ON p.workspace_id=r.workspace_id AND p.document_id=r.document_id AND p.article_revision_id=r.article_revision_id AND p.content_hash=r.content_hash AND p.id=(v->>'reservation_id')::uuid AND p.idempotency_key=v->'publication'->>'idempotency_key'
+ WHERE n.workspace_id=r.workspace_id AND n.id=r.note_id AND n.current_revision_id=r.id AND n.version=(a->'command'->>'expected_note_version')::bigint+1
+ AND p.historical_republish_id=NEW.id AND p.merge_receipt_id IS NULL AND p.merge_capture_id::text=a->'capture'->>'id' AND p.base_version=CASE WHEN (a->'capture'->>'exists')::boolean THEN a->'capture'->>'content_hash' ELSE a->'capture'->>'absence_token' END
+ AND p.merge_published_revision_id IS NOT DISTINCT FROM NULLIF(a->'command'->>'expected_published_revision_id','')::uuid
+ AND p.merge_published_content_hash IS NOT DISTINCT FROM NULLIF(a->>'published_content_hash','')
+ AND v->'publication'->>'note_id'=r.note_id::text AND v->'publication'->>'revision_id'=r.id::text AND v->'publication'->>'document_id'=r.document_id::text AND v->'publication'->>'article_revision_id'=r.article_revision_id::text AND v->'publication'->>'content_hash'=r.content_hash
+ AND v->'publication'->>'idempotency_key'='synthesis-publish:'||r.id::text
+ AND (NOT (a->'command'->>'requires_retirement')::boolean OR EXISTS(SELECT 1 FROM authoring.document_publication_binding oldb JOIN change_control.proposal oldp ON oldp.id=oldb.proposal_id AND oldp.workspace_id=oldb.workspace_id
+ JOIN authoring.generated_publication_retirement retire ON retire.publication_id=oldb.id AND retire.workspace_id=oldb.workspace_id
+ WHERE oldb.id=(a->'command'->>'expected_publication_id')::uuid AND oldb.workspace_id=r.workspace_id AND oldb.status='CLOSED' AND oldp.status='needs_revision' AND retire.origin_revision_id::text=a->'latest'->>'id')))
+ THEN RAISE EXCEPTION 'historical republish candidate transaction is incomplete' USING ERRCODE='23514'; END IF;
+ RETURN NULL;
+END; $$;
+
+
+--
+-- Name: verify_synthesis_manuscript_closure(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.verify_synthesis_manuscript_closure() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE a jsonb; p jsonb;
+BEGIN
+ IF NEW.historical_republish_id IS NOT NULL THEN
+ PERFORM organizing.verify_historical_synthesis_revision(NEW); RETURN NEW; END IF;
+
+ IF NEW.candidate_remerge_id IS NOT NULL THEN
+  IF NOT EXISTS(SELECT 1 FROM organizing.synthesis_candidate_remerge_event e
+    JOIN organizing.synthesis_candidate_remerge_event b ON b.id=e.attempt_id AND b.workspace_id=e.workspace_id AND b.note_id=e.note_id AND b.kind='BEGIN'
+    CROSS JOIN LATERAL(SELECT convert_from(e.payload,'UTF8')::jsonb v,convert_from(b.payload,'UTF8')::jsonb a) x
+    WHERE e.id=NEW.candidate_remerge_id AND e.workspace_id=NEW.workspace_id AND e.note_id=NEW.note_id AND e.kind='APPLY'
+    AND v->'revision'->>'id'=NEW.id::text AND v->'revision'->>'article_revision_id'=NEW.article_revision_id::text
+    AND v->'revision'->>'document_id'=NEW.document_id::text AND v->'revision'->>'parent_revision_id'=NEW.parent_revision_id::text
+    AND (v->'revision'->>'revision_no')::bigint=NEW.revision_no AND (v->'revision'->>'article_revision_no')::bigint=NEW.article_revision_no
+    AND v->'revision'->>'title'=NEW.title AND v->'revision'->>'renderer_version'=NEW.renderer_version
+    AND v->'revision'->>'hash'=NEW.projection_hash AND v->'revision'->>'content_hash'=NEW.content_hash
+    AND v->'revision'->'manuscript'=NEW.manuscript AND v->'revision'->'items'=NEW.items AND v->'revision'->'delta'=NEW.delta AND v->'revision'->'remerge'=NEW.remerge
+    AND v->'revision'->>'source_event_id'=NEW.source_event_id::text AND v->'revision'->>'workflow_run_id'=NEW.workflow_run_id::text AND v->'revision'->>'model_run_id'=NEW.model_run_id::text
+    AND (v->'revision'->>'created_at')::timestamptz=NEW.created_at AND x.a->>'receipt_id'=NEW.manuscript_receipt_id::text) THEN
+   RAISE EXCEPTION 'remerge revision lacks exact application' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+ END IF;
+ IF NEW.renderer_version='synthesis-markdown/v1' THEN RETURN NULL; END IF;
+ SELECT convert_from(attempt.payload,'UTF8')::jsonb INTO a
+ FROM organizing.synthesis_manuscript_receipt receipt
+ JOIN organizing.synthesis_manuscript_attempt attempt ON attempt.id=receipt.attempt_id AND attempt.workspace_id=receipt.workspace_id
+ WHERE receipt.id=NEW.manuscript_receipt_id AND receipt.workspace_id=NEW.workspace_id;
+ p:=a->'prepared';
+ IF NOT EXISTS(SELECT 1 FROM organizing.synthesis_apply_receipt applied
+  JOIN authoring.generated_article_revision generated ON generated.workspace_id=applied.workspace_id
+  AND generated.article_revision_id=NEW.article_revision_id AND generated.content_hash=NEW.content_hash
+  AND generated.projection_hash=NEW.projection_hash
+  WHERE applied.workspace_id=NEW.workspace_id AND applied.processing_id::text=a->'command'->>'processing_id'
+  AND applied.model_run_id=NEW.model_run_id AND applied.workflow_run_id=NEW.workflow_run_id
+  AND applied.source_event_id=NEW.source_event_id
+  AND applied.request_hash=p->'generation_input'->>'RequestHash'
+  AND applied.output_hash=p->'generation'->>'OutputHash'
+  AND applied.result->'revision_ids' @> jsonb_build_array(NEW.id::text)) THEN
+  RAISE EXCEPTION 'manuscript candidate lacks exact model and generated receipt closure' USING ERRCODE='23514';
+ END IF;
+ RETURN NULL;
+END; $$;
+
+
+--
+-- Name: verify_synthesis_manuscript_review_closure(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.verify_synthesis_manuscript_review_closure() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE v jsonb;
+BEGIN
+ v:=convert_from(NEW.payload,'UTF8')::jsonb;
+ IF jsonb_typeof(v->'result'->'preview'->'manuscript')='object' AND NOT EXISTS(
+  SELECT 1 FROM organizing.synthesis_manuscript_receipt r WHERE r.workspace_id=NEW.workspace_id AND r.attempt_id=NEW.attempt_id
+  AND convert_from(r.payload,'UTF8')::jsonb->'review'->'decisions'->(NEW.sequence-1)=v
+ ) THEN RAISE EXCEPTION 'completed review lacks atomic receipt' USING ERRCODE='23514'; END IF;
+ RETURN NULL;
+END; $$;
+
+
+--
+-- Name: verify_synthesis_manuscript_runtime_closure(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.verify_synthesis_manuscript_runtime_closure() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+ IF NEW.parent_revision_id IS NOT NULL AND EXISTS(SELECT 1 FROM workflow.run r JOIN workflow.definition d ON d.id=r.definition_id AND d.workspace_id=r.workspace_id WHERE r.id=NEW.workflow_run_id AND r.workspace_id=NEW.workspace_id AND d.key='organizing.synthesis-note' AND d.version=2)
+ AND (NEW.renderer_version<>'synthesis-markdown/v2' OR NOT EXISTS(SELECT 1 FROM organizing.synthesis_manuscript_application a WHERE a.workspace_id=NEW.workspace_id AND a.note_id=NEW.note_id AND a.receipt_id=NEW.manuscript_receipt_id)) THEN
+  RAISE EXCEPTION 'v2 runtime candidate lacks manuscript application binding' USING ERRCODE='23514';
+ END IF;
+ RETURN NULL;
+END;
+$$;
+
+
+--
+-- Name: verify_synthesis_published_bindings(jsonb); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.verify_synthesis_published_bindings(bindings jsonb) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF (jsonb_typeof(bindings)='array' AND jsonb_array_length(bindings) <= 24) IS NOT TRUE THEN
+        RAISE EXCEPTION 'invalid synthesis publication bindings' USING ERRCODE='23514';
+    END IF;
+    IF EXISTS (SELECT 1 FROM jsonb_array_elements(bindings) e WHERE NOT EXISTS (
+        SELECT 1 FROM organizing.synthesis_proven_publication p
+        WHERE p.publication_id=(e->>'publication_id')::uuid
+          AND e=jsonb_build_object('workspace_id',p.workspace_id,'note_id',p.note_id,
+            'revision_id',p.revision_id,'publication_id',p.publication_id,'projection_hash',p.projection_hash))) THEN
+        RAISE EXCEPTION 'synthesis input lacks published revision evidence' USING ERRCODE='23514';
+    END IF;
 END;
 $$;
 
@@ -16483,6 +18569,95 @@ BEGIN
     RETURN NULL;
 END;
 $$;
+
+
+--
+-- Name: verify_synthesis_source_evidence_closure(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.verify_synthesis_source_evidence_closure() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+ IF NOT EXISTS(SELECT 1 FROM organizing.synthesis_manuscript_source_review r WHERE r.id=NEW.review_id AND r.workspace_id=NEW.workspace_id AND ((r.status='SUCCEEDED' AND r.receipt_hash IS NOT NULL) OR EXISTS(SELECT 1 FROM organizing.synthesis_manuscript_source_review_recovery_receipt x WHERE x.review_id=r.id AND x.workspace_id=r.workspace_id))) THEN
+  RAISE EXCEPTION 'source evidence requires atomic completed review receipt' USING ERRCODE='23514';
+ END IF;
+ RETURN NULL;
+END; $$;
+
+
+--
+-- Name: verify_synthesis_source_review_closure(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.verify_synthesis_source_review_closure() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE review organizing.synthesis_manuscript_source_review%ROWTYPE;model agent.model_run%ROWTYPE;document jsonb;checks jsonb;review_obligation jsonb;check_result jsonb;idx integer;total integer;last_call agent.model_call%ROWTYPE;
+BEGIN
+ IF TG_TABLE_NAME='synthesis_manuscript_source_review_recovery_receipt' THEN
+  SELECT * INTO review FROM organizing.synthesis_manuscript_source_review WHERE id=NEW.review_id;
+ ELSE
+  SELECT * INTO review FROM organizing.synthesis_manuscript_source_review WHERE id=NEW.id;
+ END IF;
+ IF EXISTS(SELECT 1 FROM organizing.synthesis_manuscript_source_review_recovery_receipt x WHERE x.review_id=review.id AND x.workspace_id=review.workspace_id) THEN
+  review.status:='SUCCEEDED';SELECT receipt_hash INTO review.receipt_hash FROM organizing.synthesis_manuscript_source_review_recovery_receipt WHERE review_id=review.id;
+ END IF;
+ IF review.status NOT IN ('REVIEWED','REJECTED','SUCCEEDED') THEN RETURN NULL; END IF;
+ SELECT * INTO model FROM agent.model_run WHERE id=review.model_run_id;
+ SELECT count(*) INTO total FROM agent.model_call WHERE model_run_id=model.id;
+ SELECT * INTO last_call FROM agent.model_call WHERE model_run_id=model.id ORDER BY call_no DESC LIMIT 1;
+ IF (model.workspace_id=review.workspace_id AND model.workflow_run_id=review.workflow_run_id AND model.node_run_id=review.node_run_id AND model.node_attempt_id=review.node_attempt_id AND model.status='SUCCEEDED' AND model.final_result_type='synthesis_manuscript_source_review' AND model.output_schema_id='agent.synthesis-manuscript-source-review' AND total BETWEEN 1 AND 3
+ AND NOT EXISTS(SELECT 1 FROM agent.model_call c WHERE c.model_run_id=model.id AND (c.status<>'SUCCEEDED' OR c.phase IS DISTINCT FROM (ARRAY['INITIAL','REPAIR','REDUCED'])[c.call_no] OR c.output_schema_id<>model.output_schema_id OR c.output_schema_version<>model.output_schema_version OR c.prompt_template_id<>model.prompt_template_id OR c.prompt_template_version<>model.prompt_template_version))
+ AND EXISTS(SELECT 1 FROM agent.model_call c WHERE c.model_run_id=model.id AND c.call_no=1 AND c.request_hash=review.request_hash)
+ AND last_call.response_hash=encode(sha256(review.output),'hex') AND last_call.response_bytes=octet_length(review.output)) IS NOT TRUE THEN RAISE EXCEPTION 'source review model proof incomplete' USING ERRCODE='23514'; END IF;
+ document:=convert_from(review.snapshot,'UTF8')::jsonb;checks:=convert_from(review.output,'UTF8')::jsonb->'checks';
+ IF jsonb_array_length(checks) IS DISTINCT FROM jsonb_array_length(document->'obligations') THEN RAISE EXCEPTION 'source review omitted obligation' USING ERRCODE='23514'; END IF;
+ FOR idx IN 0..jsonb_array_length(checks)-1 LOOP
+  review_obligation:=document->'obligations'->idx;check_result:=checks->idx;
+  IF (check_result->>'obligation'=review_obligation->>'label' AND check_result->>'source'=review_obligation->>'source' AND check_result->>'verdict' IN ('SUPPORTED','UNSUPPORTED','UNCERTAIN') AND jsonb_typeof(check_result->'targets')='array') IS NOT TRUE THEN RAISE EXCEPTION 'source review output binding invalid' USING ERRCODE='23514'; END IF;
+  IF review.status IN ('REVIEWED','SUCCEEDED') AND (check_result->>'verdict'<>'SUPPORTED' OR check_result->>'reason_code'<>'CURRENT_TEXT_SUPPORTED' OR jsonb_array_length(check_result->'targets')<1) THEN RAISE EXCEPTION 'source review is not supported' USING ERRCODE='23514'; END IF;
+  IF review.status='SUCCEEDED' AND (SELECT count(*) FROM organizing.synthesis_manuscript_source_review_result e WHERE e.review_id=review.id AND e.obligation=review_obligation->>'label')<>jsonb_array_length(check_result->'targets') THEN RAISE EXCEPTION 'source review evidence closure incomplete' USING ERRCODE='23514'; END IF;
+ END LOOP;
+ IF review.status='SUCCEEDED' AND review.receipt_hash IS NULL THEN RAISE EXCEPTION 'source review missing receipt' USING ERRCODE='23514'; END IF;
+ IF review.status<>'SUCCEEDED' AND EXISTS(SELECT 1 FROM organizing.synthesis_manuscript_source_evidence e WHERE e.review_id=review.id) THEN RAISE EXCEPTION 'uncompleted review cannot retain evidence' USING ERRCODE='23514'; END IF;
+ RETURN NULL;
+END; $$;
+
+
+--
+-- Name: verify_synthesis_source_review_result(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.verify_synthesis_source_review_result() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE review organizing.synthesis_manuscript_source_review%ROWTYPE;proof organizing.synthesis_manuscript_source_review%ROWTYPE;e organizing.synthesis_manuscript_source_evidence%ROWTYPE;target jsonb;obligation jsonb;part jsonb;check_result jsonb;proof_target jsonb;
+BEGIN
+ SELECT * INTO review FROM organizing.synthesis_manuscript_source_review WHERE id=NEW.review_id;
+ SELECT * INTO proof FROM organizing.synthesis_manuscript_source_review WHERE id=NEW.proof_review_id;
+ SELECT * INTO e FROM organizing.synthesis_manuscript_source_evidence WHERE id=NEW.evidence_id;
+ SELECT o INTO obligation FROM jsonb_array_elements(convert_from(review.snapshot,'UTF8')::jsonb->'obligations') o WHERE o->>'label'=NEW.obligation;
+ SELECT t INTO target FROM jsonb_array_elements(convert_from(review.snapshot,'UTF8')::jsonb->'targets') t WHERE t->>'label'=obligation->>'note';
+ SELECT t INTO proof_target FROM jsonb_array_elements(convert_from(proof.snapshot,'UTF8')::jsonb->'targets') t WHERE t->>'note_id'=e.note_id::text;
+ SELECT p INTO part FROM jsonb_array_elements(target->'paragraphs') p WHERE p->>'label'=NEW.paragraph;
+ SELECT c INTO check_result FROM jsonb_array_elements(convert_from(review.output,'UTF8')::jsonb->'checks') c WHERE c->>'obligation'=NEW.obligation;
+ IF (review.workspace_id=NEW.workspace_id AND proof.workspace_id=NEW.workspace_id AND e.workspace_id=NEW.workspace_id AND e.review_id=proof.id AND (review.status='SUCCEEDED' OR EXISTS(SELECT 1 FROM organizing.synthesis_manuscript_source_review_recovery_receipt x WHERE x.review_id=review.id AND x.workspace_id=review.workspace_id)) AND (proof.status='SUCCEEDED' OR EXISTS(SELECT 1 FROM organizing.synthesis_manuscript_source_review_recovery_receipt x WHERE x.review_id=proof.id AND x.workspace_id=proof.workspace_id)) AND target=proof_target AND e.target_hash=organizing.source_review_frozen_target_hash(proof.snapshot,e.note_id) AND e.paragraph=NEW.paragraph AND check_result->>'verdict'='SUPPORTED' AND check_result->'targets' ? NEW.paragraph AND e.full_content_hash=target->>'full_content_hash' AND e.start_byte=(part->>'start_byte')::integer AND e.end_byte=(part->>'end_byte')::integer AND e.paragraph_hash=part->>'hash' AND EXISTS(SELECT 1 FROM jsonb_array_elements(convert_from(proof.snapshot,'UTF8')::jsonb->'obligations') o WHERE o->>'label'=e.obligation AND o->'reference'=obligation->'reference')) IS NOT TRUE THEN RAISE EXCEPTION 'result does not close exact current and original proof' USING ERRCODE='23514'; END IF;
+ RETURN NULL;
+END; $$;
+
+
+--
+-- Name: verify_synthesis_source_review_successor_command(); Type: FUNCTION; Schema: organizing; Owner: -
+--
+
+CREATE FUNCTION organizing.verify_synthesis_source_review_successor_command() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+ IF NEW.supersedes_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM organizing.synthesis_manuscript_source_review_command c WHERE c.workspace_id=NEW.workspace_id AND c.review_id=NEW.supersedes_id AND c.result_review_id=NEW.id AND c.operation='RECHECK') THEN RAISE EXCEPTION 'successor requires atomic explicit command' USING ERRCODE='23514'; END IF;
+ RETURN NULL;
+END; $$;
 
 
 --
@@ -19040,11 +21215,11 @@ CREATE TABLE agent.model_run (
     memory_context_item_count integer,
     memory_context_bytes bigint,
     model_settings_revision bigint,
-    CONSTRAINT agent_model_run_final_result_type_check CHECK (((final_result_type IS NULL) OR (final_result_type = ANY (ARRAY['relation_assessment'::text, 'rag_answer'::text, 'refusal'::text, 'faithfulness_review'::text, 'tool_request'::text, 'clarification'::text, 'artifact_section'::text, 'document_knowledge_profile'::text, 'organizing_outline'::text, 'organizing_document'::text, 'workspace_analysis_plan'::text, 'workspace_analysis_answer'::text, 'synthesis_delta'::text, 'synthesis_semantic_review'::text, 'synthesis_note_interview_plan'::text, 'workspace_analysis_decision'::text])))),
+    CONSTRAINT agent_model_run_final_result_type_check CHECK (((final_result_type IS NULL) OR (final_result_type = ANY (ARRAY['relation_assessment'::text, 'rag_answer'::text, 'refusal'::text, 'faithfulness_review'::text, 'tool_request'::text, 'clarification'::text, 'artifact_section'::text, 'document_knowledge_profile'::text, 'organizing_outline'::text, 'organizing_document'::text, 'workspace_analysis_plan'::text, 'workspace_analysis_answer'::text, 'synthesis_delta'::text, 'synthesis_semantic_review'::text, 'synthesis_note_interview_plan'::text, 'workspace_analysis_decision'::text, 'anchor_recommendation'::text, 'goal_point_selection'::text, 'synthesis_manuscript_source_review'::text])))),
     CONSTRAINT agent_model_run_lifecycle CHECK (((updated_at >= started_at) AND ((completed_at IS NULL) OR ((completed_at >= started_at) AND (completed_at = updated_at))) AND (((status = 'RUNNING'::text) AND (completed_at IS NULL) AND (final_result_type IS NULL) AND (error_code IS NULL)) OR ((status = 'SUCCEEDED'::text) AND (completed_at IS NOT NULL) AND (final_result_type IS NOT NULL) AND (error_code IS NULL)) OR ((status = 'REFUSED'::text) AND (completed_at IS NOT NULL) AND (final_result_type = 'refusal'::text) AND (error_code IS NOT NULL)) OR ((status = ANY (ARRAY['FAILED'::text, 'UNKNOWN'::text])) AND (completed_at IS NOT NULL) AND (final_result_type IS NULL) AND (error_code IS NOT NULL))))),
     CONSTRAINT agent_model_run_memory_context_binding CHECK ((((memory_snapshot_id IS NULL) AND (memory_context_schema_version IS NULL) AND (memory_context_digest IS NULL) AND (memory_context_item_count IS NULL) AND (memory_context_bytes IS NULL)) OR ((memory_snapshot_id IS NOT NULL) AND (memory_context_schema_version IS NOT NULL) AND (memory_context_digest IS NOT NULL) AND (memory_context_item_count IS NOT NULL) AND (memory_context_bytes IS NOT NULL) AND (memory_context_schema_version = 'agent-rag-memory-context/v1'::text) AND (memory_context_digest ~ '^[0-9a-f]{64}$'::text) AND ((memory_context_item_count >= 0) AND (memory_context_item_count <= 32)) AND ((memory_context_bytes >= 1) AND (memory_context_bytes <= 65536))))),
     CONSTRAINT agent_model_run_model_settings_revision CHECK (((model_settings_revision IS NULL) OR (model_settings_revision >= 0))),
-    CONSTRAINT agent_model_run_retrieval_binding CHECK (((retrieval_index_version_id IS NOT NULL) OR ((embedding_version_id IS NULL) AND (rerank_model_version IS NULL) AND (((output_schema_id = 'agent.rag-answer'::text) AND (NOT ((status = 'SUCCEEDED'::text) AND (final_result_type = 'rag_answer'::text)))) OR (output_schema_id = ANY (ARRAY['organizing.outline-generation'::text, 'organizing.document-generation'::text, 'agent.synthesis-delta'::text, 'agent.synthesis-semantic-review'::text, 'agent.synthesis-note-interview-plan'::text, 'agent.workspace-analysis-decision'::text])))))),
+    CONSTRAINT agent_model_run_retrieval_binding CHECK (((retrieval_index_version_id IS NOT NULL) OR ((embedding_version_id IS NULL) AND (rerank_model_version IS NULL) AND (((output_schema_id = 'agent.rag-answer'::text) AND (NOT ((status = 'SUCCEEDED'::text) AND (final_result_type = 'rag_answer'::text)))) OR (output_schema_id = ANY (ARRAY['organizing.outline-generation'::text, 'organizing.document-generation'::text, 'agent.synthesis-delta'::text, 'agent.synthesis-semantic-review'::text, 'agent.synthesis-note-interview-plan'::text, 'agent.workspace-analysis-decision'::text, 'organizing.anchor-recommendation'::text, 'organizing.goal-point-selection'::text, 'agent.synthesis-manuscript-source-review'::text])))))),
     CONSTRAINT model_run_adapter_name_check CHECK (((btrim(adapter_name) <> ''::text) AND (octet_length(adapter_name) <= 128))),
     CONSTRAINT model_run_adapter_version_check CHECK (((btrim(adapter_version) <> ''::text) AND (octet_length(adapter_version) <= 64))),
     CONSTRAINT model_run_error_code_check CHECK (((error_code IS NULL) OR ((btrim(error_code) <> ''::text) AND (error_code ~ '^[A-Z0-9_]+$'::text) AND (octet_length(error_code) <= 128)))),
@@ -19400,26 +21575,6 @@ CREATE TABLE agent.workspace_analysis_worker_capability (
 
 
 --
--- Name: atlas_schema_revisions; Type: TABLE; Schema: atlas_schema_revisions; Owner: -
---
-
-CREATE TABLE atlas_schema_revisions.atlas_schema_revisions (
-    version character varying NOT NULL,
-    description character varying NOT NULL,
-    type bigint DEFAULT 2 NOT NULL,
-    applied bigint DEFAULT 0 NOT NULL,
-    total bigint DEFAULT 0 NOT NULL,
-    executed_at timestamp with time zone NOT NULL,
-    execution_time bigint NOT NULL,
-    error text,
-    error_stmt text,
-    hash character varying DEFAULT ''::character varying NOT NULL,
-    partial_hashes jsonb,
-    operator_version character varying DEFAULT ''::character varying NOT NULL
-);
-
-
---
 -- Name: api_token; Type: TABLE; Schema: auth; Owner: -
 --
 
@@ -19491,7 +21646,8 @@ CREATE TABLE authoring.document_publication_binding (
     published_at timestamp with time zone,
     CONSTRAINT authoring_publication_mode_shape CHECK ((((target_mode = 'CREATE_ONLY'::text) AND (absence_token ~ '^workspace-target-absent/v1:[0-9a-f]{64}$'::text) AND (absence_token !~ '^workspace-target-absent/v1:0{64}$'::text)) OR ((target_mode = 'REPLACE'::text) AND (absence_token = ''::text)))),
     CONSTRAINT authoring_publication_state_shape CHECK (((updated_at >= created_at) AND (((status = 'PENDING'::text) AND (git_commit IS NULL) AND (error_code = ''::text) AND (published_at IS NULL)) OR ((status = 'PUBLISHED'::text) AND (git_commit IS NOT NULL) AND (error_code = ''::text) AND (published_at IS NOT NULL) AND (published_at >= created_at)) OR ((status = 'RECOVERY_REQUIRED'::text) AND (git_commit IS NULL) AND (error_code <> ''::text) AND (published_at IS NULL)) OR ((status = 'CLOSED'::text) AND (git_commit IS NULL) AND (error_code <> ''::text) AND (published_at IS NULL))))),
-    CONSTRAINT document_publication_binding_absence_token_check CHECK (((octet_length(absence_token) <= 192) AND (absence_token !~ E'[\r\n]'::text))),
+    CONSTRAINT document_publication_binding_absence_token_check CHECK (((octet_length(absence_token) <= 192) AND (absence_token !~ '[
+]'::text))),
     CONSTRAINT document_publication_binding_content_hash_check CHECK ((content_hash ~ '^[0-9a-f]{64}$'::text)),
     CONSTRAINT document_publication_binding_error_code_check CHECK (((error_code = ''::text) OR (error_code ~ '^[A-Z][A-Z0-9_]{0,127}$'::text))),
     CONSTRAINT document_publication_binding_git_commit_check CHECK (((git_commit IS NULL) OR (git_commit ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'::text))),
@@ -19525,18 +21681,28 @@ CREATE TABLE authoring.document_publication_reservation (
     closed_at timestamp with time zone,
     error_code text DEFAULT ''::text NOT NULL,
     abandoned_at timestamp with time zone,
+    merge_receipt_id uuid,
+    merge_capture_id uuid,
+    merge_published_revision_id uuid,
+    merge_published_content_hash text,
+    historical_republish_id uuid,
     CONSTRAINT authoring_reservation_mode_shape CHECK ((((target_mode = 'CREATE_ONLY'::text) AND (absence_token ~ '^workspace-target-absent/v1:[0-9a-f]{64}$'::text) AND (absence_token !~ '^workspace-target-absent/v1:0{64}$'::text) AND (base_version = absence_token)) OR ((target_mode = 'REPLACE'::text) AND (absence_token = ''::text) AND (base_version ~ '^[0-9a-f]{64}$'::text)))),
     CONSTRAINT authoring_reservation_state_shape CHECK (((updated_at >= created_at) AND (((status = 'PENDING'::text) AND (closed_at IS NULL) AND (abandoned_at IS NULL) AND (error_code = ''::text)) OR ((status = 'CLOSED'::text) AND (closed_at IS NOT NULL) AND (closed_at >= created_at) AND (abandoned_at IS NULL) AND (error_code = ''::text)) OR ((status = 'ABANDONED'::text) AND (closed_at IS NULL) AND (abandoned_at IS NOT NULL) AND (abandoned_at >= created_at) AND (error_code <> ''::text))))),
     CONSTRAINT authoring_reservation_status_allowed CHECK ((status = ANY (ARRAY['PENDING'::text, 'CLOSED'::text, 'ABANDONED'::text]))),
-    CONSTRAINT document_publication_reservation_absence_token_check CHECK (((octet_length(absence_token) <= 192) AND (absence_token !~ E'[\r\n]'::text))),
-    CONSTRAINT document_publication_reservation_base_version_check CHECK (((octet_length(base_version) <= 192) AND (base_version !~ E'[\r\n]'::text))),
+    CONSTRAINT document_publication_reservation_absence_token_check CHECK (((octet_length(absence_token) <= 192) AND (absence_token !~ '[
+]'::text))),
+    CONSTRAINT document_publication_reservation_base_version_check CHECK (((octet_length(base_version) <= 192) AND (base_version !~ '[
+]'::text))),
     CONSTRAINT document_publication_reservation_content_hash_check CHECK ((content_hash ~ '^[0-9a-f]{64}$'::text)),
     CONSTRAINT document_publication_reservation_error_code_check CHECK (((error_code = ''::text) OR (error_code ~ '^[A-Z][A-Z0-9_]{0,127}$'::text))),
-    CONSTRAINT document_publication_reservation_idempotency_key_check CHECK (((idempotency_key = btrim(idempotency_key)) AND (btrim(idempotency_key) <> ''::text) AND (octet_length(idempotency_key) <= 128) AND (idempotency_key !~ E'[\r\n]'::text))),
-    CONSTRAINT document_publication_reservation_proposal_idempotency_key_check CHECK (((proposal_idempotency_key = btrim(proposal_idempotency_key)) AND (btrim(proposal_idempotency_key) <> ''::text) AND (octet_length(proposal_idempotency_key) <= 128) AND (proposal_idempotency_key !~ E'[\r\n]'::text))),
+    CONSTRAINT document_publication_reservation_idempotency_key_check CHECK (((idempotency_key = btrim(idempotency_key)) AND (btrim(idempotency_key) <> ''::text) AND (octet_length(idempotency_key) <= 128) AND (idempotency_key !~ '[
+]'::text))),
+    CONSTRAINT document_publication_reservation_proposal_idempotency_key_check CHECK (((proposal_idempotency_key = btrim(proposal_idempotency_key)) AND (btrim(proposal_idempotency_key) <> ''::text) AND (octet_length(proposal_idempotency_key) <= 128) AND (proposal_idempotency_key !~ '[
+]'::text))),
     CONSTRAINT document_publication_reservation_request_hash_check CHECK ((request_hash ~ '^[0-9a-f]{64}$'::text)),
     CONSTRAINT document_publication_reservation_target_mode_check CHECK ((target_mode = ANY (ARRAY['CREATE_ONLY'::text, 'REPLACE'::text]))),
-    CONSTRAINT document_publication_reservation_target_path_check CHECK (((btrim(target_path) <> ''::text) AND ("left"(target_path, 1) <> '/'::text) AND (target_path !~ '(^|/)\.\.(/|$)'::text) AND (POSITION(('\'::text) IN (target_path)) = 0)))
+    CONSTRAINT document_publication_reservation_target_path_check CHECK (((btrim(target_path) <> ''::text) AND ("left"(target_path, 1) <> '/'::text) AND (target_path !~ '(^|/)\.\.(/|$)'::text) AND (POSITION(('\'::text) IN (target_path)) = 0))),
+    CONSTRAINT publication_merge_shape CHECK ((((merge_receipt_id IS NULL) AND (historical_republish_id IS NULL) AND (merge_capture_id IS NULL) AND (merge_published_revision_id IS NULL) AND (merge_published_content_hash IS NULL)) OR ((((merge_receipt_id IS NOT NULL) AND (historical_republish_id IS NULL)) OR ((merge_receipt_id IS NULL) AND (historical_republish_id IS NOT NULL))) AND (merge_capture_id IS NOT NULL) AND (((target_mode = 'CREATE_ONLY'::text) AND (merge_published_revision_id IS NULL) AND (merge_published_content_hash IS NULL)) OR ((target_mode = 'REPLACE'::text) AND (merge_published_revision_id IS NOT NULL) AND (merge_published_content_hash ~ '^[0-9a-f]{64}$'::text))))))
 );
 
 
@@ -19849,7 +22015,8 @@ CASE
     ELSE ((jsonb_typeof(change_set) = 'object'::text) AND (octet_length((change_set)::text) <= 32768))
 END),
     CONSTRAINT ck_proposal_revision_downstream_base_version CHECK (((downstream_base_version IS NULL) OR (downstream_base_version > 0))),
-    CONSTRAINT ck_proposal_revision_downstream_reason CHECK (((downstream_reason IS NULL) OR ((btrim(downstream_reason) <> ''::text) AND (downstream_reason = btrim(downstream_reason)) AND (octet_length(downstream_reason) <= 4096) AND (downstream_reason !~ E'[\r\n]'::text)))),
+    CONSTRAINT ck_proposal_revision_downstream_reason CHECK (((downstream_reason IS NULL) OR ((btrim(downstream_reason) <> ''::text) AND (downstream_reason = btrim(downstream_reason)) AND (octet_length(downstream_reason) <= 4096) AND (downstream_reason !~ '[
+]'::text)))),
     CONSTRAINT ck_proposal_revision_downstream_report_fingerprint CHECK (((downstream_report_fingerprint IS NULL) OR (downstream_report_fingerprint ~ '^[0-9a-f]{64}$'::text))),
     CONSTRAINT ck_proposal_revision_downstream_source_version CHECK (((downstream_source_event_version IS NULL) OR (downstream_source_event_version > 0))),
     CONSTRAINT ck_proposal_revision_evidence_refs CHECK (
@@ -20451,6 +22618,7 @@ CREATE TABLE core.source_version (
     captured_at timestamp with time zone NOT NULL,
     content_artifact_id uuid,
     workspace_id uuid NOT NULL,
+    observation_predecessor_id uuid,
     CONSTRAINT ck_source_version_workspace_required CHECK ((workspace_id IS NOT NULL)),
     CONSTRAINT source_version_byte_size_check CHECK ((byte_size >= 0)),
     CONSTRAINT source_version_content_hash_check CHECK ((content_hash ~ '^[0-9a-f]{64}$'::text)),
@@ -20537,6 +22705,30 @@ CREATE TABLE core.workspace (
     CONSTRAINT workspace_status_lifecycle CHECK ((status = ANY (ARRAY['active'::text, 'inactive'::text]))),
     CONSTRAINT workspace_updated_after_created CHECK ((updated_at >= created_at)),
     CONSTRAINT workspace_version_check CHECK ((version > 0))
+);
+
+
+--
+-- Name: workspace_discovery_failure; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.workspace_discovery_failure (
+    workspace_id uuid NOT NULL,
+    binding_version bigint NOT NULL,
+    relative_path text NOT NULL,
+    stage text NOT NULL,
+    error_code text NOT NULL,
+    status text NOT NULL,
+    failure_count bigint NOT NULL,
+    last_failed_at timestamp with time zone NOT NULL,
+    recovered_at timestamp with time zone,
+    CONSTRAINT workspace_discovery_failure_binding_version_check CHECK ((binding_version >= 0)),
+    CONSTRAINT workspace_discovery_failure_check CHECK ((((stage = 'WALK'::text) AND (error_code = 'DIRECTORY_READ_FAILED'::text)) OR ((stage = 'OBSERVE'::text) AND (error_code = 'FILE_OBSERVATION_FAILED'::text)) OR ((stage = 'REGISTER'::text) AND (error_code = 'SOURCE_REGISTRATION_FAILED'::text)))),
+    CONSTRAINT workspace_discovery_failure_check1 CHECK ((((status = 'FAILED'::text) AND (recovered_at IS NULL)) OR ((status = 'RECOVERED'::text) AND (recovered_at IS NOT NULL) AND (recovered_at >= last_failed_at)))),
+    CONSTRAINT workspace_discovery_failure_failure_count_check CHECK ((failure_count > 0)),
+    CONSTRAINT workspace_discovery_failure_relative_path_check CHECK ((((octet_length(relative_path) >= 1) AND (octet_length(relative_path) <= 1024)) AND (relative_path !~ '(^/|/$|//|(^|/)\.{1,2}(/|$)|[[:cntrl:]]|\\|:)'::text) AND (relative_path !~ '(^|/)(\.git|\.knowledge|tmp|\.tmp)(/|$)'::text))),
+    CONSTRAINT workspace_discovery_failure_stage_check CHECK ((stage = ANY (ARRAY['WALK'::text, 'OBSERVE'::text, 'REGISTER'::text]))),
+    CONSTRAINT workspace_discovery_failure_status_check CHECK ((status = ANY (ARRAY['FAILED'::text, 'RECOVERED'::text])))
 );
 
 
@@ -20974,7 +23166,8 @@ CREATE TABLE learning.artifact_citation_selector_backfill (
     CONSTRAINT artifact_citation_selector_backfi_expected_revision_count_check CHECK ((expected_revision_count >= 0)),
     CONSTRAINT artifact_citation_selector_backfi_expected_selector_count_check CHECK ((expected_selector_count >= 0)),
     CONSTRAINT artifact_citation_selector_backfill_contract_version_check CHECK ((contract_version = 'artifact-citation-selector-backfill/v1'::text)),
-    CONSTRAINT artifact_citation_selector_backfill_error_code_check CHECK (((error_code IS NULL) OR ((btrim(error_code) <> ''::text) AND (error_code = btrim(error_code)) AND (octet_length(error_code) <= 256) AND (error_code !~ E'[\r\n]'::text)))),
+    CONSTRAINT artifact_citation_selector_backfill_error_code_check CHECK (((error_code IS NULL) OR ((btrim(error_code) <> ''::text) AND (error_code = btrim(error_code)) AND (octet_length(error_code) <= 256) AND (error_code !~ '[
+]'::text)))),
     CONSTRAINT artifact_citation_selector_backfill_status_check CHECK ((status = ANY (ARRAY['PENDING'::text, 'RUNNING'::text, 'FAILED'::text, 'COMPLETED'::text]))),
     CONSTRAINT artifact_citation_selector_backfill_version_check CHECK ((version > 0)),
     CONSTRAINT learning_artifact_citation_selector_backfill_shape CHECK (((expected_revision_count >= processed_revision_count) AND (expected_selector_count >= processed_selector_count) AND (expected_revision_count >= validated_revision_count) AND (expected_selector_count >= validated_selector_count) AND (((expected_revision_count = 0) AND (high_water_created_at IS NULL) AND (high_water_revision_id IS NULL)) OR ((expected_revision_count > 0) AND (high_water_created_at IS NOT NULL) AND (high_water_revision_id IS NOT NULL))) AND (((processed_revision_count = 0) AND (cursor_created_at IS NULL) AND (cursor_revision_id IS NULL)) OR ((processed_revision_count > 0) AND (cursor_created_at IS NOT NULL) AND (cursor_revision_id IS NOT NULL))) AND (((validated_revision_count = 0) AND (validation_cursor_created_at IS NULL) AND (validation_cursor_revision_id IS NULL)) OR ((validated_revision_count > 0) AND (validation_cursor_created_at IS NOT NULL) AND (validation_cursor_revision_id IS NOT NULL))) AND (((status = ANY (ARRAY['PENDING'::text, 'RUNNING'::text])) AND (error_code IS NULL) AND (completed_at IS NULL)) OR ((status = 'FAILED'::text) AND (error_code IS NOT NULL) AND (completed_at IS NULL)) OR ((status = 'COMPLETED'::text) AND (error_code IS NULL) AND (completed_at IS NOT NULL) AND (expected_revision_count = processed_revision_count) AND (expected_selector_count = processed_selector_count) AND (expected_revision_count = validated_revision_count) AND (expected_selector_count = validated_selector_count))) AND (updated_at >= created_at) AND ((completed_at IS NULL) OR (completed_at >= created_at))))
@@ -21170,7 +23363,9 @@ CREATE TABLE learning.artifact_section_generation (
     CONSTRAINT artifact_section_generation_status_check CHECK ((status = ANY (ARRAY['PENDING'::text, 'COMPLETED'::text, 'FAILED'::text, 'CANCELLED'::text, 'RECOVERY_REQUIRED'::text]))),
     CONSTRAINT artifact_section_generation_version_check CHECK ((version > 0)),
     CONSTRAINT learning_artifact_section_generation_error_code_check CHECK (((error_code IS NULL) OR (((octet_length(error_code) >= 1) AND (octet_length(error_code) <= 128)) AND (error_code ~ '^[A-Z0-9_]+$'::text)))),
-    CONSTRAINT learning_artifact_section_generation_error_summary_check CHECK (((error_summary IS NULL) OR (((char_length(error_summary) >= 1) AND (char_length(error_summary) <= 256)) AND (error_summary !~ '^[[:space:]]|[[:space:]]$'::text) AND ("left"(error_summary, 1) <> ALL (ARRAY[''::text, ' '::text, ' '::text, ' '::text])) AND ("right"(error_summary, 1) <> ALL (ARRAY[''::text, ' '::text, ' '::text, ' '::text]))))),
+    CONSTRAINT learning_artifact_section_generation_error_summary_check CHECK (((error_summary IS NULL) OR (((char_length(error_summary) >= 1) AND (char_length(error_summary) <= 256)) AND (error_summary !~ '^[[:space:]]|[[:space:]]$'::text) AND ("left"(error_summary, 1) <> ALL (ARRAY['
+'::text, ' '::text, ' '::text, ' '::text])) AND ("right"(error_summary, 1) <> ALL (ARRAY['
+'::text, ' '::text, ' '::text, ' '::text]))))),
     CONSTRAINT learning_artifact_section_generation_failure_class_check CHECK (((failure_class IS NULL) OR (failure_class = ANY (ARRAY['retryable'::text, 'non_retryable'::text, 'manual_recovery'::text, 'lease_lost'::text, 'cancelled'::text])))),
     CONSTRAINT learning_artifact_section_generation_terminal_check CHECK ((((status = 'PENDING'::text) AND (version = 1) AND (model_run_id IS NULL) AND (recorded_base_revision_id IS NULL) AND (recorded_revision_id IS NULL) AND (recorded_artifact_version IS NULL) AND (content_hash IS NULL) AND (failure_class IS NULL) AND (error_code IS NULL) AND (error_summary IS NULL) AND (completed_at IS NULL) AND (terminal_at IS NULL)) OR ((status = 'COMPLETED'::text) AND (version = 2) AND (model_run_id IS NOT NULL) AND (recorded_base_revision_id IS NOT NULL) AND (recorded_revision_id IS NOT NULL) AND (recorded_artifact_version IS NOT NULL) AND (recorded_artifact_version > source_artifact_version) AND (content_hash IS NOT NULL) AND (failure_class IS NULL) AND (error_code IS NULL) AND (error_summary IS NULL) AND (completed_at IS NOT NULL) AND (terminal_at IS NOT NULL) AND (completed_at = updated_at) AND (terminal_at = updated_at)) OR ((status = 'FAILED'::text) AND (version = 2) AND (recorded_base_revision_id IS NULL) AND (recorded_revision_id IS NULL) AND (recorded_artifact_version IS NULL) AND (content_hash IS NULL) AND (failure_class IS NOT NULL) AND (failure_class = 'non_retryable'::text) AND (error_code IS NOT NULL) AND (error_summary IS NOT NULL) AND (completed_at IS NULL) AND (terminal_at IS NOT NULL) AND (terminal_at = updated_at)) OR ((status = 'CANCELLED'::text) AND (version = 2) AND (recorded_base_revision_id IS NULL) AND (recorded_revision_id IS NULL) AND (recorded_artifact_version IS NULL) AND (content_hash IS NULL) AND (failure_class IS NOT NULL) AND (failure_class = 'cancelled'::text) AND (error_code IS NOT NULL) AND (error_summary IS NOT NULL) AND (completed_at IS NULL) AND (terminal_at IS NOT NULL) AND (terminal_at = updated_at)) OR ((status = 'RECOVERY_REQUIRED'::text) AND (version = 2) AND (recorded_base_revision_id IS NULL) AND (recorded_revision_id IS NULL) AND (recorded_artifact_version IS NULL) AND (content_hash IS NULL) AND (failure_class IS NOT NULL) AND (failure_class = 'manual_recovery'::text) AND (error_code IS NOT NULL) AND (error_summary IS NOT NULL) AND (completed_at IS NULL) AND (terminal_at IS NOT NULL) AND (terminal_at = updated_at)))),
     CONSTRAINT learning_artifact_section_generation_text_check CHECK (((section_key = btrim(section_key)) AND (btrim(section_key) <> ''::text) AND (octet_length(section_key) <= 128) AND (idempotency_key = btrim(idempotency_key)) AND (btrim(idempotency_key) <> ''::text) AND (octet_length(idempotency_key) <= 128))),
@@ -22806,7 +25001,8 @@ CREATE TABLE ops.impact_report (
     CONSTRAINT impact_report_objects_check CHECK ((jsonb_typeof(objects) = 'array'::text)),
     CONSTRAINT impact_report_status_check CHECK ((status = ANY (ARRAY['READY'::text, 'STALE'::text, 'FAILED'::text]))),
     CONSTRAINT impact_report_summary_check CHECK ((jsonb_typeof(summary) = 'object'::text)),
-    CONSTRAINT ops_impact_report_failure CHECK ((((status = 'FAILED'::text) AND (error_code IS NOT NULL) AND (error_code = btrim(error_code)) AND (error_code !~ E'[\r\n]'::text) AND (octet_length(error_code) <= 256)) OR ((status <> 'FAILED'::text) AND (error_code IS NULL)))),
+    CONSTRAINT ops_impact_report_failure CHECK ((((status = 'FAILED'::text) AND (error_code IS NOT NULL) AND (error_code = btrim(error_code)) AND (error_code !~ '[
+]'::text) AND (octet_length(error_code) <= 256)) OR ((status <> 'FAILED'::text) AND (error_code IS NULL)))),
     CONSTRAINT ops_impact_report_fingerprint CHECK ((fingerprint ~ '^[0-9a-f]{64}$'::text)),
     CONSTRAINT ops_impact_report_not_self_superseding CHECK (((supersedes_report_id IS NULL) OR (supersedes_report_id <> id))),
     CONSTRAINT ops_impact_report_objects CHECK (((jsonb_typeof(objects) = 'array'::text) AND (jsonb_array_length(objects) <= 500) AND (octet_length((objects)::text) <= 262144))),
@@ -22844,13 +25040,17 @@ CREATE TABLE ops.knowledge_event (
     CONSTRAINT knowledge_event_aggregate_type_check CHECK (((btrim(aggregate_type) <> ''::text) AND (octet_length(aggregate_type) <= 128))),
     CONSTRAINT knowledge_event_event_type_check CHECK (((btrim(event_type) <> ''::text) AND (octet_length(event_type) <= 128))),
     CONSTRAINT knowledge_event_payload_check CHECK ((jsonb_typeof(payload) = 'object'::text)),
-    CONSTRAINT ops_knowledge_event_aggregate_type CHECK (((aggregate_type = btrim(aggregate_type)) AND (aggregate_type !~ E'[\r\n]'::text))),
+    CONSTRAINT ops_knowledge_event_aggregate_type CHECK (((aggregate_type = btrim(aggregate_type)) AND (aggregate_type !~ '[
+]'::text))),
     CONSTRAINT ops_knowledge_event_correlation CHECK (((jsonb_typeof(correlation) = 'object'::text) AND (octet_length((correlation)::text) <= 8192))),
-    CONSTRAINT ops_knowledge_event_event_type CHECK (((event_type = btrim(event_type)) AND (event_type !~ E'[\r\n]'::text))),
-    CONSTRAINT ops_knowledge_event_object_ref CHECK (((btrim(source_ref) <> ''::text) AND (source_ref = btrim(source_ref)) AND (octet_length(source_ref) <= 512) AND (source_ref !~ E'[\r\n]'::text))),
+    CONSTRAINT ops_knowledge_event_event_type CHECK (((event_type = btrim(event_type)) AND (event_type !~ '[
+]'::text))),
+    CONSTRAINT ops_knowledge_event_object_ref CHECK (((btrim(source_ref) <> ''::text) AND (source_ref = btrim(source_ref)) AND (octet_length(source_ref) <= 512) AND (source_ref !~ '[
+]'::text))),
     CONSTRAINT ops_knowledge_event_payload_size CHECK ((octet_length((payload)::text) <= 32768)),
     CONSTRAINT ops_knowledge_event_schema CHECK ((schema_version = ANY (ARRAY['knowledge-event/v1'::text, 'knowledge-event/v2'::text]))),
-    CONSTRAINT ops_knowledge_event_source_ref CHECK (((btrim(source_event_ref) <> ''::text) AND (source_event_ref = btrim(source_event_ref)) AND (octet_length(source_event_ref) <= 512) AND (source_event_ref !~ E'[\r\n]'::text))),
+    CONSTRAINT ops_knowledge_event_source_ref CHECK (((btrim(source_event_ref) <> ''::text) AND (source_event_ref = btrim(source_event_ref)) AND (octet_length(source_event_ref) <= 512) AND (source_event_ref !~ '[
+]'::text))),
     CONSTRAINT ops_knowledge_event_summary CHECK ((octet_length(summary) <= 4096)),
     CONSTRAINT ops_knowledge_event_time_order CHECK ((created_at >= occurred_at)),
     CONSTRAINT ops_knowledge_event_v2_wire CHECK ((((schema_version = 'knowledge-event/v1'::text) AND (operator_type IS NULL) AND (operator_id IS NULL) AND (owner_binding IS NULL) AND (event_type <> ALL (ARRAY['ARTIFACT_GENERATED'::text, 'REVIEW_CARD_INVALIDATED'::text]))) OR ((schema_version = 'knowledge-event/v2'::text) AND (operator_type IS NOT NULL) AND (operator_type = ANY (ARRAY['USER'::text, 'API_TOKEN'::text, 'SYSTEM'::text, 'UNKNOWN'::text])) AND ((operator_type <> ALL (ARRAY['SYSTEM'::text, 'UNKNOWN'::text])) OR (operator_id IS NULL)) AND ops.valid_timeline_owner_binding(event_type, aggregate_type, aggregate_id, owner_binding)))),
@@ -22924,6 +25124,12 @@ CREATE TABLE ops.model_settings_revisions (
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     created_by text NOT NULL,
     chat_api_style text DEFAULT 'chat_completions'::text NOT NULL,
+    chat_reasoning_effort text DEFAULT ''::text NOT NULL,
+    chat_reasoning_effort_by_function jsonb DEFAULT '{}'::jsonb NOT NULL,
+    CONSTRAINT model_settings_chat_reasoning_effort_check CHECK ((chat_reasoning_effort = ANY (ARRAY[''::text, 'low'::text, 'medium'::text, 'high'::text, 'xhigh'::text, 'max'::text]))),
+    CONSTRAINT model_settings_chat_reasoning_provider_check CHECK (((chat_provider = 'openai-compatible'::text) OR (chat_reasoning_effort = ''::text))),
+    CONSTRAINT model_settings_reasoning_functions_check CHECK (ops.valid_model_reasoning_overrides(chat_reasoning_effort_by_function)),
+    CONSTRAINT model_settings_reasoning_functions_provider_check CHECK (((chat_provider = 'openai-compatible'::text) OR (chat_reasoning_effort_by_function = '{}'::jsonb))),
     CONSTRAINT ops_model_settings_chat_api_style CHECK ((chat_api_style = ANY (ARRAY['chat_completions'::text, 'responses'::text]))),
     CONSTRAINT ops_model_settings_chat_provider CHECK ((chat_provider = ANY (ARRAY['disabled'::text, 'openai-compatible'::text, 'ollama'::text]))),
     CONSTRAINT ops_model_settings_chat_secret_envelope CHECK (((((chat_secret_key_id IS NULL) AND (chat_secret_nonce IS NULL) AND (chat_secret_ciphertext IS NULL)) OR ((chat_secret_key_id ~ '^[0-9a-f]{64}$'::text) AND (octet_length(chat_secret_nonce) = 12) AND ((octet_length(chat_secret_ciphertext) >= 17) AND (octet_length(chat_secret_ciphertext) <= 20480)))) IS TRUE)),
@@ -23139,13 +25345,18 @@ CREATE TABLE ops.timeline_projection_outbox (
     CONSTRAINT ops_timeline_projection_status_binding CHECK ((((status = 'PENDING'::text) AND (error_code IS NULL) AND (projected_at IS NULL)) OR ((status = 'PROJECTED'::text) AND (error_code IS NULL) AND (projected_at IS NOT NULL)) OR ((status = 'POISONED'::text) AND (error_code IS NOT NULL) AND (projected_at IS NULL)))),
     CONSTRAINT ops_timeline_projection_time_order CHECK (((created_at >= occurred_at) AND (updated_at >= created_at) AND ((projected_at IS NULL) OR (projected_at >= created_at)))),
     CONSTRAINT ops_timeline_projection_v2_wire CHECK ((((schema_version = 'knowledge-event/v1'::text) AND (operator_type IS NULL) AND (operator_id IS NULL) AND (owner_binding IS NULL) AND (event_type <> ALL (ARRAY['ARTIFACT_GENERATED'::text, 'REVIEW_CARD_INVALIDATED'::text]))) OR ((schema_version = 'knowledge-event/v2'::text) AND (operator_type IS NOT NULL) AND (operator_type = ANY (ARRAY['USER'::text, 'API_TOKEN'::text, 'SYSTEM'::text, 'UNKNOWN'::text])) AND ((operator_type <> ALL (ARRAY['SYSTEM'::text, 'UNKNOWN'::text])) OR (operator_id IS NULL)) AND ops.valid_timeline_owner_binding(event_type, aggregate_type, aggregate_id, owner_binding)))),
-    CONSTRAINT timeline_projection_outbox_aggregate_type_check CHECK (((btrim(aggregate_type) <> ''::text) AND (aggregate_type = btrim(aggregate_type)) AND (octet_length(aggregate_type) <= 128) AND (aggregate_type !~ E'[\r\n]'::text))),
+    CONSTRAINT timeline_projection_outbox_aggregate_type_check CHECK (((btrim(aggregate_type) <> ''::text) AND (aggregate_type = btrim(aggregate_type)) AND (octet_length(aggregate_type) <= 128) AND (aggregate_type !~ '[
+]'::text))),
     CONSTRAINT timeline_projection_outbox_correlation_check CHECK (((jsonb_typeof(correlation) = 'object'::text) AND (octet_length((correlation)::text) <= 8192))),
-    CONSTRAINT timeline_projection_outbox_error_code_check CHECK (((error_code IS NULL) OR ((btrim(error_code) <> ''::text) AND (error_code = btrim(error_code)) AND (octet_length(error_code) <= 256) AND (error_code !~ E'[\r\n]'::text)))),
-    CONSTRAINT timeline_projection_outbox_event_type_check CHECK (((btrim(event_type) <> ''::text) AND (event_type = btrim(event_type)) AND (octet_length(event_type) <= 128) AND (event_type !~ E'[\r\n]'::text))),
+    CONSTRAINT timeline_projection_outbox_error_code_check CHECK (((error_code IS NULL) OR ((btrim(error_code) <> ''::text) AND (error_code = btrim(error_code)) AND (octet_length(error_code) <= 256) AND (error_code !~ '[
+]'::text)))),
+    CONSTRAINT timeline_projection_outbox_event_type_check CHECK (((btrim(event_type) <> ''::text) AND (event_type = btrim(event_type)) AND (octet_length(event_type) <= 128) AND (event_type !~ '[
+]'::text))),
     CONSTRAINT timeline_projection_outbox_event_version_check CHECK ((event_version > 0)),
-    CONSTRAINT timeline_projection_outbox_source_event_ref_check CHECK (((btrim(source_event_ref) <> ''::text) AND (source_event_ref = btrim(source_event_ref)) AND (octet_length(source_event_ref) <= 512) AND (source_event_ref !~ E'[\r\n]'::text))),
-    CONSTRAINT timeline_projection_outbox_source_ref_check CHECK (((btrim(source_ref) <> ''::text) AND (source_ref = btrim(source_ref)) AND (octet_length(source_ref) <= 512) AND (source_ref !~ E'[\r\n]'::text))),
+    CONSTRAINT timeline_projection_outbox_source_event_ref_check CHECK (((btrim(source_event_ref) <> ''::text) AND (source_event_ref = btrim(source_event_ref)) AND (octet_length(source_event_ref) <= 512) AND (source_event_ref !~ '[
+]'::text))),
+    CONSTRAINT timeline_projection_outbox_source_ref_check CHECK (((btrim(source_ref) <> ''::text) AND (source_ref = btrim(source_ref)) AND (octet_length(source_ref) <= 512) AND (source_ref !~ '[
+]'::text))),
     CONSTRAINT timeline_projection_outbox_status_check CHECK ((status = ANY (ARRAY['PENDING'::text, 'PROJECTED'::text, 'POISONED'::text]))),
     CONSTRAINT timeline_projection_outbox_summary_check CHECK ((octet_length(summary) <= 4096)),
     CONSTRAINT timeline_projection_outbox_version_check CHECK ((version > 0))
@@ -23272,6 +25483,213 @@ CREATE TABLE ops.workspace_switch (
     CONSTRAINT workspace_switch_terminal_shape CHECK (((((result IS NULL) AND (lease_owner_id IS NOT NULL) AND (lease_expires_at IS NOT NULL) AND (completed_at IS NULL) AND (error_code IS NULL)) OR ((result = ANY (ARRAY['succeeded'::text, 'cancelled'::text])) AND (lease_owner_id IS NULL) AND (lease_expires_at IS NULL) AND (completed_at IS NOT NULL) AND (error_code IS NULL)) OR ((result = ANY (ARRAY['rejected'::text, 'rolled_back'::text, 'failed'::text])) AND (lease_owner_id IS NULL) AND (lease_expires_at IS NULL) AND (completed_at IS NOT NULL) AND (error_code ~ '^[A-Z0-9_]{1,128}$'::text))) IS TRUE)),
     CONSTRAINT workspace_switch_times CHECK (((heartbeat_at >= created_at) AND (deadline_at > created_at) AND (updated_at >= created_at) AND ((lease_expires_at IS NULL) OR (lease_expires_at > heartbeat_at)) AND ((completed_at IS NULL) OR (completed_at >= created_at)))),
     CONSTRAINT workspace_switch_version CHECK ((version > 0))
+);
+
+
+--
+-- Name: anchor_decision; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.anchor_decision (
+    proposal_id uuid NOT NULL,
+    workspace_id uuid NOT NULL,
+    anchor_id uuid NOT NULL,
+    decision text NOT NULL,
+    anchor_version bigint NOT NULL,
+    receipt_key text NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    CONSTRAINT anchor_decision_anchor_version_check CHECK ((anchor_version > 1)),
+    CONSTRAINT anchor_decision_decision_check CHECK ((decision = ANY (ARRAY['ACCEPTED'::text, 'REJECTED'::text])))
+);
+
+
+--
+-- Name: anchor_fusion_request; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.anchor_fusion_request (
+    id uuid NOT NULL,
+    workspace_id uuid NOT NULL,
+    anchor_id uuid NOT NULL,
+    note_id uuid NOT NULL,
+    proposal_id uuid NOT NULL,
+    scope_version bigint NOT NULL,
+    source_event_id uuid NOT NULL,
+    source_id uuid NOT NULL,
+    source_version_id uuid NOT NULL,
+    content_artifact_id uuid NOT NULL,
+    parse_projection_id uuid NOT NULL,
+    source_content_hash text NOT NULL,
+    ingestion_attempt_id uuid NOT NULL,
+    source_occurred_at timestamp with time zone NOT NULL,
+    allowed_sources jsonb NOT NULL,
+    processing_id uuid,
+    status text NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    updated_at timestamp with time zone NOT NULL,
+    CONSTRAINT anchor_fusion_lifecycle CHECK ((((status = 'PENDING'::text) AND (processing_id IS NULL)) OR ((status = 'DISPATCHED'::text) AND (processing_id IS NOT NULL)) OR ((status = 'STALE'::text) AND (processing_id IS NULL)))),
+    CONSTRAINT anchor_fusion_request_allowed_sources_check CHECK (((jsonb_typeof(allowed_sources) = 'array'::text) AND ((jsonb_array_length(allowed_sources) >= 1) AND (jsonb_array_length(allowed_sources) <= 256)))),
+    CONSTRAINT anchor_fusion_request_check CHECK ((updated_at >= created_at)),
+    CONSTRAINT anchor_fusion_request_scope_version_check CHECK ((scope_version > 0)),
+    CONSTRAINT anchor_fusion_request_source_content_hash_check CHECK ((source_content_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT anchor_fusion_request_status_check CHECK ((status = ANY (ARRAY['PENDING'::text, 'DISPATCHED'::text, 'STALE'::text])))
+);
+
+
+--
+-- Name: anchor_proposal; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.anchor_proposal (
+    id uuid NOT NULL,
+    workspace_id uuid NOT NULL,
+    anchor_id uuid NOT NULL,
+    kind text NOT NULL,
+    scope_version bigint NOT NULL,
+    suggested jsonb,
+    reason text NOT NULL,
+    model_run_id uuid NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    CONSTRAINT anchor_proposal_check CHECK ((((kind = 'SCOPE_ADJUSTMENT'::text) AND (suggested IS NOT NULL) AND (jsonb_typeof(suggested) = 'object'::text)) OR ((kind = 'SOURCE_ASSOCIATION'::text) AND (suggested IS NULL)))),
+    CONSTRAINT anchor_proposal_kind_check CHECK ((kind = ANY (ARRAY['SCOPE_ADJUSTMENT'::text, 'SOURCE_ASSOCIATION'::text]))),
+    CONSTRAINT anchor_proposal_reason_check CHECK (((reason = btrim(reason)) AND ((octet_length(reason) >= 1) AND (octet_length(reason) <= 2048))))
+);
+
+
+--
+-- Name: anchor_proposal_evidence; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.anchor_proposal_evidence (
+    workspace_id uuid NOT NULL,
+    anchor_id uuid NOT NULL,
+    proposal_id uuid NOT NULL,
+    source_id uuid NOT NULL,
+    source_version_id uuid NOT NULL,
+    content_artifact_id uuid NOT NULL,
+    parse_projection_id uuid NOT NULL,
+    source_span_id uuid NOT NULL,
+    content_hash text NOT NULL,
+    excerpt_hash text NOT NULL,
+    title text NOT NULL,
+    CONSTRAINT anchor_proposal_evidence_content_hash_check CHECK ((content_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT anchor_proposal_evidence_excerpt_hash_check CHECK ((excerpt_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT anchor_proposal_evidence_title_check CHECK (((octet_length(title) >= 1) AND (octet_length(title) <= 512)))
+);
+
+
+--
+-- Name: anchor_receipt; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.anchor_receipt (
+    workspace_id uuid NOT NULL,
+    idempotency_key text NOT NULL,
+    request_hash text NOT NULL,
+    operation text NOT NULL,
+    anchor_id uuid NOT NULL,
+    result jsonb NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    CONSTRAINT anchor_receipt_idempotency_key_check CHECK (((octet_length(idempotency_key) >= 1) AND (octet_length(idempotency_key) <= 128))),
+    CONSTRAINT anchor_receipt_operation_check CHECK ((operation = ANY (ARRAY['CREATE'::text, 'RECOMMEND'::text, 'DECIDE'::text]))),
+    CONSTRAINT anchor_receipt_request_hash_check CHECK ((request_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT anchor_receipt_result_check CHECK ((jsonb_typeof(result) = 'object'::text))
+);
+
+
+--
+-- Name: anchor_recommendation_request; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.anchor_recommendation_request (
+    id uuid NOT NULL,
+    workspace_id uuid NOT NULL,
+    note_id uuid NOT NULL,
+    anchor_id uuid,
+    basis_revision_id uuid NOT NULL,
+    expected_scope_version bigint,
+    kind text NOT NULL,
+    source jsonb,
+    evidence jsonb NOT NULL,
+    request_hash text NOT NULL,
+    workflow_run_id uuid,
+    node_run_id uuid,
+    node_attempt_id uuid,
+    idempotency_key text NOT NULL,
+    status text NOT NULL,
+    model_run_id uuid,
+    model_input_hash text,
+    model_output bytea,
+    proposal_id uuid,
+    error_code text,
+    retryable boolean DEFAULT false NOT NULL,
+    retry_idempotency_key text,
+    retry_request_hash text,
+    version bigint NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    updated_at timestamp with time zone NOT NULL,
+    scheduled_workflow_run_id uuid,
+    CONSTRAINT anchor_recommendation_request_check CHECK ((updated_at >= created_at)),
+    CONSTRAINT anchor_recommendation_request_check1 CHECK ((((kind = 'INITIAL_SCOPE'::text) AND (anchor_id IS NULL) AND (expected_scope_version IS NULL) AND (source IS NULL)) OR ((kind <> 'INITIAL_SCOPE'::text) AND (anchor_id IS NOT NULL) AND (expected_scope_version IS NOT NULL) AND (source IS NOT NULL)))),
+    CONSTRAINT anchor_recommendation_request_check2 CHECK (((((status = 'PENDING'::text) AND (workflow_run_id IS NULL) AND (node_run_id IS NULL) AND (node_attempt_id IS NULL) AND (model_input_hash IS NULL) AND (model_output IS NULL) AND (model_run_id IS NULL) AND (proposal_id IS NULL) AND (error_code IS NULL) AND (((retry_idempotency_key IS NULL) AND (retry_request_hash IS NULL)) OR ((retry_idempotency_key IS NOT NULL) AND (retry_request_hash ~ '^[0-9a-f]{64}$'::text)))) IS TRUE) OR (((status = 'RUNNING'::text) AND (workflow_run_id IS NOT NULL) AND (node_run_id IS NOT NULL) AND (node_attempt_id IS NOT NULL) AND ((model_input_hash ~ '^[0-9a-f]{64}$'::text) IS TRUE) AND (model_output IS NULL) AND (model_run_id IS NULL) AND (proposal_id IS NULL) AND (error_code IS NULL)) IS TRUE) OR (((status = 'SUCCEEDED'::text) AND ((model_input_hash ~ '^[0-9a-f]{64}$'::text) IS TRUE) AND (model_output IS NOT NULL) AND (model_run_id IS NOT NULL) AND (error_code IS NULL) AND (((kind = 'INITIAL_SCOPE'::text) AND (proposal_id IS NULL)) OR ((kind <> 'INITIAL_SCOPE'::text) AND (proposal_id IS NOT NULL)))) IS TRUE) OR (((status = 'NO_RECOMMENDATION'::text) AND ((model_input_hash ~ '^[0-9a-f]{64}$'::text) IS TRUE) AND (model_output IS NOT NULL) AND (model_run_id IS NOT NULL) AND (proposal_id IS NULL) AND (error_code IS NULL)) IS TRUE) OR ((status = ANY (ARRAY['FAILED'::text, 'RECOVERY_REQUIRED'::text])) AND (proposal_id IS NULL) AND (error_code IS NOT NULL)))),
+    CONSTRAINT anchor_recommendation_request_evidence_check CHECK (((jsonb_typeof(evidence) = 'array'::text) AND ((jsonb_array_length(evidence) >= 1) AND (jsonb_array_length(evidence) <= 32)))),
+    CONSTRAINT anchor_recommendation_request_idempotency_key_check CHECK (((octet_length(idempotency_key) >= 1) AND (octet_length(idempotency_key) <= 128))),
+    CONSTRAINT anchor_recommendation_request_kind_check CHECK ((kind = ANY (ARRAY['INITIAL_SCOPE'::text, 'SOURCE_ASSOCIATION'::text, 'SCOPE_ADJUSTMENT'::text]))),
+    CONSTRAINT anchor_recommendation_request_request_hash_check CHECK ((request_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT anchor_recommendation_request_status_check CHECK ((status = ANY (ARRAY['PENDING'::text, 'RUNNING'::text, 'SUCCEEDED'::text, 'NO_RECOMMENDATION'::text, 'FAILED'::text, 'RECOVERY_REQUIRED'::text]))),
+    CONSTRAINT anchor_recommendation_request_version_check CHECK ((version > 0))
+);
+
+
+--
+-- Name: anchor_scope_revision; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.anchor_scope_revision (
+    anchor_id uuid NOT NULL,
+    workspace_id uuid NOT NULL,
+    version bigint NOT NULL,
+    scope jsonb NOT NULL,
+    proposal_id uuid,
+    created_at timestamp with time zone NOT NULL,
+    CONSTRAINT anchor_scope_revision_check CHECK ((((version = 1) AND (proposal_id IS NULL)) OR ((version > 1) AND (proposal_id IS NOT NULL)))),
+    CONSTRAINT anchor_scope_revision_scope_check CHECK ((((jsonb_typeof(scope) = 'object'::text) AND (jsonb_typeof((scope -> 'topics'::text)) = 'array'::text) AND ((jsonb_array_length((scope -> 'topics'::text)) >= 1) AND (jsonb_array_length((scope -> 'topics'::text)) <= 64)) AND (jsonb_typeof((scope -> 'audiences'::text)) = 'array'::text) AND ((jsonb_array_length((scope -> 'audiences'::text)) >= 1) AND (jsonb_array_length((scope -> 'audiences'::text)) <= 32)) AND (jsonb_typeof((scope -> 'description'::text)) = 'string'::text) AND ((octet_length((scope ->> 'description'::text)) >= 1) AND (octet_length((scope ->> 'description'::text)) <= 2048)) AND ((((scope - 'topics'::text) - 'audiences'::text) - 'description'::text) = '{}'::jsonb)) IS TRUE)),
+    CONSTRAINT anchor_scope_revision_version_check CHECK ((version > 0))
+);
+
+
+--
+-- Name: anchor_source_discovery; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.anchor_source_discovery (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    workspace_id uuid NOT NULL,
+    processing_id uuid NOT NULL,
+    anchor_id uuid NOT NULL,
+    scope_version bigint NOT NULL,
+    source_id uuid NOT NULL,
+    source_version_id uuid NOT NULL,
+    content_artifact_id uuid NOT NULL,
+    parse_projection_id uuid NOT NULL,
+    source_content_hash text NOT NULL,
+    status text NOT NULL,
+    profile_revision_id uuid,
+    evidence jsonb DEFAULT '[]'::jsonb NOT NULL,
+    request_ids jsonb DEFAULT '[]'::jsonb NOT NULL,
+    next_check_at timestamp with time zone NOT NULL,
+    error_code text,
+    version bigint NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    updated_at timestamp with time zone NOT NULL,
+    CONSTRAINT anchor_source_discovery_error_code_check CHECK (((error_code IS NULL) OR (error_code ~ '^[A-Z][A-Z0-9_]{0,127}$'::text))),
+    CONSTRAINT anchor_source_discovery_evidence_check CHECK (((jsonb_typeof(evidence) = 'array'::text) AND (jsonb_array_length(evidence) <= 256))),
+    CONSTRAINT anchor_source_discovery_lifecycle CHECK (((updated_at >= created_at) AND (((status = 'WAITING_PROFILE'::text) AND (profile_revision_id IS NULL) AND (evidence = '[]'::jsonb) AND (request_ids = '[]'::jsonb)) OR ((status = 'PREPARED'::text) AND (profile_revision_id IS NOT NULL) AND ((jsonb_array_length(evidence) >= 1) AND (jsonb_array_length(evidence) <= 256)) AND (request_ids = '[]'::jsonb)) OR ((status = 'REQUESTED'::text) AND (profile_revision_id IS NOT NULL) AND ((jsonb_array_length(evidence) >= 1) AND (jsonb_array_length(evidence) <= 256)) AND ((jsonb_array_length(request_ids) >= 1) AND (jsonb_array_length(request_ids) <= 8))) OR ((status = 'STALE'::text) AND (request_ids = '[]'::jsonb))))),
+    CONSTRAINT anchor_source_discovery_request_ids_check CHECK (((jsonb_typeof(request_ids) = 'array'::text) AND (jsonb_array_length(request_ids) <= 8))),
+    CONSTRAINT anchor_source_discovery_scope_version_check CHECK ((scope_version > 0)),
+    CONSTRAINT anchor_source_discovery_source_content_hash_check CHECK ((source_content_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT anchor_source_discovery_status_check CHECK ((status = ANY (ARRAY['WAITING_PROFILE'::text, 'PREPARED'::text, 'REQUESTED'::text, 'STALE'::text]))),
+    CONSTRAINT anchor_source_discovery_version_check CHECK ((version > 0))
 );
 
 
@@ -23454,6 +25872,27 @@ END),
 
 
 --
+-- Name: knowledge_anchor; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.knowledge_anchor (
+    id uuid NOT NULL,
+    workspace_id uuid NOT NULL,
+    note_id uuid NOT NULL,
+    basis_revision_id uuid NOT NULL,
+    title text NOT NULL,
+    scope_version bigint NOT NULL,
+    version bigint NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    updated_at timestamp with time zone NOT NULL,
+    CONSTRAINT knowledge_anchor_check CHECK ((updated_at >= created_at)),
+    CONSTRAINT knowledge_anchor_scope_version_check CHECK ((scope_version > 0)),
+    CONSTRAINT knowledge_anchor_title_check CHECK (((title = btrim(title)) AND ((octet_length(title) >= 1) AND (octet_length(title) <= 512)))),
+    CONSTRAINT knowledge_anchor_version_check CHECK ((version > 0))
+);
+
+
+--
 -- Name: run_binding; Type: TABLE; Schema: organizing; Owner: -
 --
 
@@ -23526,6 +25965,63 @@ CREATE TABLE organizing.synthesis_apply_receipt (
 
 
 --
+-- Name: synthesis_body_impact; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.synthesis_body_impact (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    workspace_id uuid NOT NULL,
+    note_id uuid NOT NULL,
+    base_revision_id uuid NOT NULL,
+    item_id uuid NOT NULL,
+    upstream_note_id uuid NOT NULL,
+    upstream_revision_id uuid NOT NULL,
+    upstream_item_id uuid NOT NULL,
+    upstream_publication_id uuid NOT NULL,
+    publication_id uuid NOT NULL,
+    published_revision_id uuid NOT NULL,
+    event_id uuid NOT NULL,
+    reason text NOT NULL,
+    detected_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT synthesis_body_impact_reason_check CHECK ((reason = ANY (ARRAY['CONTENT_CHANGED'::text, 'ITEM_MISSING'::text])))
+);
+
+
+--
+-- Name: synthesis_body_refresh_request; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.synthesis_body_refresh_request (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    workspace_id uuid NOT NULL,
+    note_id uuid NOT NULL,
+    publication_id uuid NOT NULL,
+    impact_id uuid NOT NULL,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL
+);
+
+
+--
+-- Name: synthesis_candidate_remerge_event; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.synthesis_candidate_remerge_event (
+    id uuid NOT NULL,
+    workspace_id uuid NOT NULL,
+    note_id uuid NOT NULL,
+    attempt_id uuid NOT NULL,
+    kind text NOT NULL,
+    idempotency_key text NOT NULL,
+    payload bytea NOT NULL,
+    payload_hash text NOT NULL,
+    CONSTRAINT synthesis_candidate_remerge_event_check CHECK ((payload_hash = encode(sha256(payload), 'hex'::text))),
+    CONSTRAINT synthesis_candidate_remerge_event_idempotency_key_check CHECK (((idempotency_key = btrim(idempotency_key)) AND ((octet_length(idempotency_key) >= 1) AND (octet_length(idempotency_key) <= 200)))),
+    CONSTRAINT synthesis_candidate_remerge_event_kind_check CHECK ((kind = ANY (ARRAY['BEGIN'::text, 'APPLY'::text]))),
+    CONSTRAINT synthesis_candidate_remerge_event_payload_check CHECK (((octet_length(payload) >= 1) AND (octet_length(payload) <= 16777216)))
+);
+
+
+--
 -- Name: synthesis_execution; Type: TABLE; Schema: organizing; Owner: -
 --
 
@@ -23549,6 +26045,410 @@ CREATE TABLE organizing.synthesis_execution (
     CONSTRAINT synthesis_execution_input_hash_check CHECK (((input_hash IS NULL) OR (input_hash ~ '^[0-9a-f]{64}$'::text))),
     CONSTRAINT synthesis_execution_input_shape CHECK (((((input_document IS NULL) AND (input_hash IS NULL)) OR ((NOT apply_recovery) AND (input_document IS NOT NULL) AND (jsonb_typeof(input_document) = 'object'::text) AND (input_hash IS NOT NULL) AND (input_document ?& ARRAY['processing_id'::text, 'workflow_run_id'::text, 'source_event'::text, 'notes'::text, 'sources'::text, 'request_hash'::text]) AND ((input_document ->> 'processing_id'::text) = (processing_id)::text) AND ((input_document ->> 'workflow_run_id'::text) = (workflow_run_id)::text) AND ((input_document ->> 'request_hash'::text) = input_hash) AND (jsonb_typeof((input_document -> 'notes'::text)) = 'array'::text) AND (jsonb_array_length((input_document -> 'notes'::text)) <= 24) AND (jsonb_typeof((input_document -> 'sources'::text)) = 'array'::text) AND ((jsonb_array_length((input_document -> 'sources'::text)) >= 1) AND (jsonb_array_length((input_document -> 'sources'::text)) <= 256)) AND (octet_length((input_document)::text) <= 1048576))) IS TRUE)),
     CONSTRAINT synthesis_execution_version_check CHECK ((version > 0))
+);
+
+
+--
+-- Name: synthesis_goal_catalog_batch; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.synthesis_goal_catalog_batch (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    workspace_id uuid NOT NULL,
+    request_id uuid NOT NULL,
+    batch_no bigint NOT NULL,
+    after_source_id uuid,
+    next_after_source_id uuid,
+    item_count integer NOT NULL,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT synthesis_goal_catalog_batch_batch_no_check CHECK ((batch_no > 0)),
+    CONSTRAINT synthesis_goal_catalog_batch_check CHECK (((next_after_source_id IS NULL) OR (after_source_id IS NULL) OR (next_after_source_id > after_source_id))),
+    CONSTRAINT synthesis_goal_catalog_batch_item_count_check CHECK (((item_count >= 0) AND (item_count <= 32)))
+);
+
+
+--
+-- Name: synthesis_goal_catalog_item; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.synthesis_goal_catalog_item (
+    batch_id uuid NOT NULL,
+    workspace_id uuid NOT NULL,
+    ordinal integer NOT NULL,
+    source_id uuid NOT NULL,
+    source_version_id uuid NOT NULL,
+    content_artifact_id uuid NOT NULL,
+    parse_projection_id uuid NOT NULL,
+    content_hash text NOT NULL,
+    profile_revision_id uuid NOT NULL,
+    title text NOT NULL,
+    CONSTRAINT synthesis_goal_catalog_item_content_hash_check CHECK ((content_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT synthesis_goal_catalog_item_ordinal_check CHECK (((ordinal >= 1) AND (ordinal <= 32))),
+    CONSTRAINT synthesis_goal_catalog_item_title_check CHECK ((((octet_length(title) >= 1) AND (octet_length(title) <= 512)) AND (title = btrim(title))))
+);
+
+
+--
+-- Name: synthesis_goal_request; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.synthesis_goal_request (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    workspace_id uuid NOT NULL,
+    idempotency_key text NOT NULL,
+    request_hash text NOT NULL,
+    goal_text text NOT NULL,
+    status text DEFAULT 'DISCOVERING'::text NOT NULL,
+    after_source_id uuid,
+    catalog_batches bigint DEFAULT 0 NOT NULL,
+    next_check_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    error_code text,
+    version bigint DEFAULT 1 NOT NULL,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    updated_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT synthesis_goal_request_catalog_batches_check CHECK ((catalog_batches >= 0)),
+    CONSTRAINT synthesis_goal_request_check CHECK ((updated_at >= created_at)),
+    CONSTRAINT synthesis_goal_request_error_code_check CHECK (((error_code IS NULL) OR (error_code ~ '^[A-Z][A-Z0-9_]{0,127}$'::text))),
+    CONSTRAINT synthesis_goal_request_goal_text_check CHECK ((((octet_length(goal_text) >= 1) AND (octet_length(goal_text) <= 2048)) AND (goal_text = btrim(goal_text)))),
+    CONSTRAINT synthesis_goal_request_idempotency_key_check CHECK ((((octet_length(idempotency_key) >= 1) AND (octet_length(idempotency_key) <= 128)) AND (idempotency_key = btrim(idempotency_key)))),
+    CONSTRAINT synthesis_goal_request_request_hash_check CHECK ((request_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT synthesis_goal_request_status_check CHECK ((status = ANY (ARRAY['DISCOVERING'::text, 'CATALOG_READY'::text]))),
+    CONSTRAINT synthesis_goal_request_version_check CHECK ((version > 0))
+);
+
+
+--
+-- Name: synthesis_goal_selection; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.synthesis_goal_selection (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    workspace_id uuid NOT NULL,
+    request_id uuid NOT NULL,
+    catalog_batch_id uuid NOT NULL,
+    source_ordinal integer NOT NULL,
+    point_offset integer NOT NULL,
+    point_count integer NOT NULL,
+    payload_hash text NOT NULL,
+    status text DEFAULT 'PENDING'::text NOT NULL,
+    scheduled_workflow_id uuid,
+    workflow_run_id uuid,
+    node_run_id uuid,
+    node_attempt_id uuid,
+    model_input_hash text,
+    model_run_id uuid,
+    model_output bytea,
+    error_code text,
+    retryable boolean DEFAULT false NOT NULL,
+    version bigint DEFAULT 1 NOT NULL,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    updated_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT synthesis_goal_selection_check CHECK ((((point_count >= 1) AND (point_count <= 32)) AND ((point_offset + point_count) <= 512))),
+    CONSTRAINT synthesis_goal_selection_check1 CHECK ((updated_at >= created_at)),
+    CONSTRAINT synthesis_goal_selection_check2 CHECK ((((workflow_run_id IS NULL) AND (node_run_id IS NULL) AND (node_attempt_id IS NULL) AND (model_input_hash IS NULL)) OR ((workflow_run_id IS NOT NULL) AND (workflow_run_id = scheduled_workflow_id) AND (node_run_id IS NOT NULL) AND (node_attempt_id IS NOT NULL) AND ((model_input_hash ~ '^[0-9a-f]{64}$'::text) IS TRUE)))),
+    CONSTRAINT synthesis_goal_selection_check3 CHECK ((((status = 'PENDING'::text) AND (workflow_run_id IS NULL) AND (model_run_id IS NULL) AND (model_output IS NULL) AND (error_code IS NULL) AND (NOT retryable)) OR ((status = 'RUNNING'::text) AND (workflow_run_id IS NOT NULL) AND (model_run_id IS NULL) AND (model_output IS NULL) AND (error_code IS NULL) AND (NOT retryable)) OR ((status = 'SUCCEEDED'::text) AND (workflow_run_id IS NOT NULL) AND (model_run_id IS NOT NULL) AND (model_output IS NOT NULL) AND ((octet_length(model_output) >= 1) AND (octet_length(model_output) <= 131072)) AND (error_code IS NULL) AND (NOT retryable)) OR ((status = ANY (ARRAY['FAILED'::text, 'RECOVERY_REQUIRED'::text])) AND (model_run_id IS NULL) AND (model_output IS NULL) AND (error_code IS NOT NULL) AND ((status <> 'RECOVERY_REQUIRED'::text) OR (NOT retryable))))),
+    CONSTRAINT synthesis_goal_selection_error_code_check CHECK (((error_code IS NULL) OR (error_code ~ '^[A-Z][A-Z0-9_]{0,127}$'::text))),
+    CONSTRAINT synthesis_goal_selection_payload_hash_check CHECK ((payload_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT synthesis_goal_selection_point_offset_check CHECK (((point_offset >= 0) AND (point_offset <= 511))),
+    CONSTRAINT synthesis_goal_selection_source_ordinal_check CHECK (((source_ordinal >= 0) AND (source_ordinal <= 31))),
+    CONSTRAINT synthesis_goal_selection_status_check CHECK ((status = ANY (ARRAY['PENDING'::text, 'RUNNING'::text, 'SUCCEEDED'::text, 'FAILED'::text, 'RECOVERY_REQUIRED'::text]))),
+    CONSTRAINT synthesis_goal_selection_version_check CHECK ((version > 0))
+);
+
+
+--
+-- Name: synthesis_goal_selection_manifest; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.synthesis_goal_selection_manifest (
+    batch_id uuid NOT NULL,
+    workspace_id uuid NOT NULL,
+    selection_count integer NOT NULL,
+    sealed boolean DEFAULT false NOT NULL,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT synthesis_goal_selection_manifest_selection_count_check CHECK (((selection_count >= 0) AND (selection_count <= 16384)))
+);
+
+
+--
+-- Name: synthesis_goal_selection_preparation; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.synthesis_goal_selection_preparation (
+    batch_id uuid NOT NULL,
+    workspace_id uuid NOT NULL,
+    next_check_at timestamp with time zone NOT NULL,
+    error_code text NOT NULL,
+    version bigint DEFAULT 1 NOT NULL,
+    CONSTRAINT synthesis_goal_selection_preparation_error_code_check CHECK ((error_code ~ '^[A-Z][A-Z0-9_]{0,127}$'::text)),
+    CONSTRAINT synthesis_goal_selection_preparation_version_check CHECK ((version > 0))
+);
+
+
+--
+-- Name: synthesis_goal_selection_retry; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.synthesis_goal_selection_retry (
+    workspace_id uuid NOT NULL,
+    idempotency_key text NOT NULL,
+    selection_id uuid NOT NULL,
+    expected_version bigint NOT NULL,
+    result_version bigint NOT NULL,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT synthesis_goal_selection_retry_check CHECK ((result_version = (expected_version + 1))),
+    CONSTRAINT synthesis_goal_selection_retry_expected_version_check CHECK ((expected_version > 0)),
+    CONSTRAINT synthesis_goal_selection_retry_idempotency_key_check CHECK (((octet_length(idempotency_key) >= 1) AND (octet_length(idempotency_key) <= 128)))
+);
+
+
+--
+-- Name: synthesis_historical_republish_event; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.synthesis_historical_republish_event (
+    id uuid NOT NULL,
+    workspace_id uuid NOT NULL,
+    note_id uuid NOT NULL,
+    attempt_id uuid NOT NULL,
+    kind text NOT NULL,
+    idempotency_key text NOT NULL,
+    payload bytea NOT NULL,
+    payload_hash text NOT NULL,
+    CONSTRAINT synthesis_historical_republish_event_check CHECK ((payload_hash = encode(sha256(payload), 'hex'::text))),
+    CONSTRAINT synthesis_historical_republish_event_idempotency_key_check CHECK (((idempotency_key = btrim(idempotency_key)) AND ((octet_length(idempotency_key) >= 1) AND (octet_length(idempotency_key) <= 200)))),
+    CONSTRAINT synthesis_historical_republish_event_kind_check CHECK ((kind = ANY (ARRAY['BEGIN'::text, 'APPLY'::text]))),
+    CONSTRAINT synthesis_historical_republish_event_payload_check CHECK (((octet_length(payload) >= 1) AND (octet_length(payload) <= 16777216)))
+);
+
+
+--
+-- Name: synthesis_manuscript_application; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.synthesis_manuscript_application (
+    workspace_id uuid NOT NULL,
+    processing_id uuid NOT NULL,
+    note_id uuid NOT NULL,
+    receipt_id uuid NOT NULL,
+    receipt_hash text NOT NULL,
+    binding_hash text NOT NULL,
+    CONSTRAINT synthesis_manuscript_application_binding_hash_check CHECK ((binding_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT synthesis_manuscript_application_receipt_hash_check CHECK ((receipt_hash ~ '^[0-9a-f]{64}$'::text))
+);
+
+
+--
+-- Name: synthesis_manuscript_attempt; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.synthesis_manuscript_attempt (
+    id uuid NOT NULL,
+    workspace_id uuid NOT NULL,
+    capture_id uuid NOT NULL,
+    idempotency_key text NOT NULL,
+    payload bytea NOT NULL,
+    payload_hash text NOT NULL,
+    CONSTRAINT synthesis_manuscript_attempt_check CHECK ((payload_hash = encode(sha256(payload), 'hex'::text))),
+    CONSTRAINT synthesis_manuscript_attempt_idempotency_key_check CHECK (((idempotency_key = btrim(idempotency_key)) AND ((octet_length(idempotency_key) >= 1) AND (octet_length(idempotency_key) <= 200)))),
+    CONSTRAINT synthesis_manuscript_attempt_payload_check CHECK (((octet_length(payload) >= 1) AND (octet_length(payload) <= 16777216)))
+);
+
+
+--
+-- Name: synthesis_manuscript_capture; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.synthesis_manuscript_capture (
+    id uuid NOT NULL,
+    workspace_id uuid NOT NULL,
+    payload bytea NOT NULL,
+    payload_hash text NOT NULL,
+    CONSTRAINT synthesis_manuscript_capture_check CHECK ((payload_hash = encode(sha256(payload), 'hex'::text))),
+    CONSTRAINT synthesis_manuscript_capture_payload_check CHECK (((octet_length(payload) >= 1) AND (octet_length(payload) <= 1500000)))
+);
+
+
+--
+-- Name: synthesis_manuscript_receipt; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.synthesis_manuscript_receipt (
+    id uuid NOT NULL,
+    workspace_id uuid NOT NULL,
+    attempt_id uuid NOT NULL,
+    payload bytea NOT NULL,
+    payload_hash text NOT NULL,
+    CONSTRAINT synthesis_manuscript_receipt_check CHECK ((payload_hash = encode(sha256(payload), 'hex'::text))),
+    CONSTRAINT synthesis_manuscript_receipt_payload_check CHECK (((octet_length(payload) >= 1) AND (octet_length(payload) <= 16777216)))
+);
+
+
+--
+-- Name: synthesis_manuscript_review_decision; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.synthesis_manuscript_review_decision (
+    id uuid NOT NULL,
+    workspace_id uuid NOT NULL,
+    attempt_id uuid NOT NULL,
+    sequence integer NOT NULL,
+    idempotency_key text NOT NULL,
+    payload bytea NOT NULL,
+    payload_hash text NOT NULL,
+    CONSTRAINT synthesis_manuscript_review_decision_check CHECK ((payload_hash = encode(sha256(payload), 'hex'::text))),
+    CONSTRAINT synthesis_manuscript_review_decision_idempotency_key_check CHECK (((idempotency_key = btrim(idempotency_key)) AND ((octet_length(idempotency_key) >= 1) AND (octet_length(idempotency_key) <= 200)))),
+    CONSTRAINT synthesis_manuscript_review_decision_payload_check CHECK (((octet_length(payload) >= 1) AND (octet_length(payload) <= 16777216))),
+    CONSTRAINT synthesis_manuscript_review_decision_sequence_check CHECK (((sequence >= 1) AND (sequence <= 2)))
+);
+
+
+--
+-- Name: synthesis_manuscript_root_identity; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.synthesis_manuscript_root_identity (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    workspace_id uuid NOT NULL,
+    grant_generation bigint NOT NULL,
+    root_fingerprint text NOT NULL,
+    binding_version bigint NOT NULL,
+    CONSTRAINT synthesis_manuscript_root_identity_binding_version_check CHECK ((binding_version > 0)),
+    CONSTRAINT synthesis_manuscript_root_identity_grant_generation_check CHECK ((grant_generation > 0)),
+    CONSTRAINT synthesis_manuscript_root_identity_root_fingerprint_check CHECK ((root_fingerprint ~ '^[0-9a-f]{64}$'::text))
+);
+
+
+--
+-- Name: synthesis_manuscript_source_evidence; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.synthesis_manuscript_source_evidence (
+    id uuid NOT NULL,
+    workspace_id uuid NOT NULL,
+    review_id uuid NOT NULL,
+    note_id uuid NOT NULL,
+    base_revision_id uuid NOT NULL,
+    target_hash text NOT NULL,
+    full_content_hash text NOT NULL,
+    obligation text NOT NULL,
+    paragraph text NOT NULL,
+    start_byte integer NOT NULL,
+    end_byte integer NOT NULL,
+    paragraph_hash text NOT NULL,
+    source_id uuid NOT NULL,
+    source_version_id uuid NOT NULL,
+    content_artifact_id uuid NOT NULL,
+    parse_projection_id uuid NOT NULL,
+    source_span_id uuid NOT NULL,
+    content_hash text NOT NULL,
+    excerpt_hash text NOT NULL,
+    title text NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    CONSTRAINT synthesis_manuscript_source_evidence_check CHECK ((end_byte > start_byte)),
+    CONSTRAINT synthesis_manuscript_source_evidence_full_content_hash_check CHECK ((full_content_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT synthesis_manuscript_source_evidence_start_byte_check CHECK ((start_byte >= 0)),
+    CONSTRAINT synthesis_manuscript_source_evidence_target_hash_check CHECK ((target_hash ~ '^[0-9a-f]{64}$'::text))
+);
+
+
+--
+-- Name: synthesis_manuscript_source_review; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.synthesis_manuscript_source_review (
+    id uuid NOT NULL,
+    workspace_id uuid NOT NULL,
+    origin_processing_id uuid NOT NULL,
+    origin_workflow_run_id uuid NOT NULL,
+    workflow_run_id uuid,
+    status text NOT NULL,
+    version bigint NOT NULL,
+    snapshot bytea,
+    snapshot_hash text,
+    node_run_id uuid,
+    node_attempt_id uuid,
+    model_run_id uuid,
+    request_hash text,
+    output bytea,
+    receipt_hash text,
+    error_code text,
+    retryable boolean DEFAULT false NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    updated_at timestamp with time zone NOT NULL,
+    completed_at timestamp with time zone,
+    attempt_no integer DEFAULT 1 NOT NULL,
+    supersedes_id uuid,
+    CONSTRAINT synthesis_manuscript_source_review_attempt_no_check CHECK (((attempt_no >= 1) AND (attempt_no <= 10))),
+    CONSTRAINT synthesis_manuscript_source_review_check CHECK ((((snapshot IS NULL) AND (snapshot_hash IS NULL)) OR (((octet_length(snapshot) >= 1) AND (octet_length(snapshot) <= 16777216)) AND (snapshot_hash = encode(sha256(snapshot), 'hex'::text))))),
+    CONSTRAINT synthesis_manuscript_source_review_check1 CHECK (((updated_at >= created_at) AND ((completed_at IS NULL) OR (completed_at = updated_at)))),
+    CONSTRAINT synthesis_manuscript_source_review_output_check CHECK (((output IS NULL) OR ((octet_length(output) >= 1) AND (octet_length(output) <= 262144)))),
+    CONSTRAINT synthesis_manuscript_source_review_receipt_hash_check CHECK (((receipt_hash IS NULL) OR (receipt_hash ~ '^[0-9a-f]{64}$'::text))),
+    CONSTRAINT synthesis_manuscript_source_review_request_hash_check CHECK (((request_hash IS NULL) OR (request_hash ~ '^[0-9a-f]{64}$'::text))),
+    CONSTRAINT synthesis_manuscript_source_review_status_check CHECK ((status = ANY (ARRAY['PENDING'::text, 'PREPARED'::text, 'RUNNING'::text, 'REVIEWED'::text, 'SUCCEEDED'::text, 'REJECTED'::text, 'STALE'::text, 'FAILED'::text, 'RECOVERY_REQUIRED'::text]))),
+    CONSTRAINT synthesis_manuscript_source_review_version_check CHECK ((version > 0))
+);
+
+
+--
+-- Name: synthesis_manuscript_source_review_command; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.synthesis_manuscript_source_review_command (
+    workspace_id uuid NOT NULL,
+    idempotency_key text NOT NULL,
+    operation text NOT NULL,
+    request_hash text NOT NULL,
+    review_id uuid NOT NULL,
+    result_review_id uuid NOT NULL,
+    expected_version bigint NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    CONSTRAINT synthesis_manuscript_source_review_comma_expected_version_check CHECK ((expected_version > 0)),
+    CONSTRAINT synthesis_manuscript_source_review_comman_idempotency_key_check CHECK (((length(idempotency_key) >= 1) AND (length(idempotency_key) <= 128))),
+    CONSTRAINT synthesis_manuscript_source_review_command_operation_check CHECK ((operation = ANY (ARRAY['RECHECK'::text, 'RECOVER'::text]))),
+    CONSTRAINT synthesis_manuscript_source_review_command_request_hash_check CHECK ((request_hash ~ '^[0-9a-f]{64}$'::text))
+);
+
+
+--
+-- Name: synthesis_manuscript_source_review_recovery; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.synthesis_manuscript_source_review_recovery (
+    id uuid NOT NULL,
+    workspace_id uuid NOT NULL,
+    review_id uuid NOT NULL,
+    command_key text NOT NULL,
+    workflow_run_id uuid NOT NULL,
+    created_at timestamp with time zone NOT NULL
+);
+
+
+--
+-- Name: synthesis_manuscript_source_review_recovery_receipt; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.synthesis_manuscript_source_review_recovery_receipt (
+    review_id uuid NOT NULL,
+    workspace_id uuid NOT NULL,
+    workflow_run_id uuid NOT NULL,
+    receipt_hash text NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    CONSTRAINT synthesis_manuscript_source_review_recovery__receipt_hash_check CHECK ((receipt_hash ~ '^[0-9a-f]{64}$'::text))
+);
+
+
+--
+-- Name: synthesis_manuscript_source_review_result; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.synthesis_manuscript_source_review_result (
+    workspace_id uuid NOT NULL,
+    review_id uuid NOT NULL,
+    obligation text NOT NULL,
+    paragraph text NOT NULL,
+    evidence_id uuid NOT NULL,
+    proof_review_id uuid NOT NULL
 );
 
 
@@ -23624,6 +26524,120 @@ CREATE TABLE organizing.synthesis_note (
 
 
 --
+-- Name: synthesis_proven_publication; Type: VIEW; Schema: organizing; Owner: -
+--
+
+CREATE VIEW organizing.synthesis_proven_publication AS
+ SELECT r.workspace_id,
+    r.note_id,
+    r.id AS revision_id,
+    r.document_id,
+    r.article_revision_id,
+    r.projection_hash,
+    r.content_hash,
+    b.id AS publication_id,
+    pc.id AS proposal_commit_id,
+    b.git_commit,
+    b.published_at
+   FROM ((((organizing.synthesis_revision r
+     JOIN authoring.generated_article_revision gr ON (((gr.workspace_id = r.workspace_id) AND (gr.document_id = r.document_id) AND (gr.article_revision_id = r.article_revision_id) AND (gr.origin_id = r.note_id) AND (gr.origin_revision_id = r.id) AND (gr.projection_hash = r.projection_hash) AND (gr.content_hash = r.content_hash))))
+     JOIN core.article_revision ar ON (((ar.id = r.article_revision_id) AND (ar.workspace_id = r.workspace_id) AND (ar.document_id = r.document_id) AND (ar.content_hash = r.content_hash) AND (ar.created_by_type = 'AGENT'::text) AND (ar.status = ANY (ARRAY['PUBLISHED'::text, 'SUPERSEDED'::text])))))
+     JOIN authoring.document_publication_binding b ON (((b.article_revision_id = r.article_revision_id) AND (b.workspace_id = r.workspace_id) AND (b.document_id = r.document_id) AND (b.content_hash = r.content_hash) AND (b.status = 'PUBLISHED'::text) AND (b.git_commit = ar.git_commit))))
+     JOIN change_control.proposal_commit pc ON (((pc.workspace_id = b.workspace_id) AND (pc.proposal_id = b.proposal_id) AND (pc.revision_id = b.proposal_revision_id) AND (pc.target_path = b.target_path) AND (pc.target_mode = b.target_mode) AND (pc.result_hash = b.content_hash) AND (pc.git_commit = b.git_commit))));
+
+
+--
+-- Name: synthesis_revision_body_reference; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.synthesis_revision_body_reference (
+    workspace_id uuid NOT NULL,
+    note_id uuid NOT NULL,
+    revision_id uuid NOT NULL,
+    item_id uuid NOT NULL,
+    upstream_note_id uuid NOT NULL,
+    upstream_revision_id uuid NOT NULL,
+    upstream_item_id uuid NOT NULL,
+    publication_id uuid NOT NULL,
+    upstream_projection_hash text NOT NULL,
+    CONSTRAINT synthesis_revision_body_referenc_upstream_projection_hash_check CHECK ((upstream_projection_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT synthesis_revision_body_reference_check CHECK ((note_id <> upstream_note_id))
+);
+
+
+--
+-- Name: outbox_event; Type: TABLE; Schema: workflow; Owner: -
+--
+
+CREATE TABLE workflow.outbox_event (
+    id uuid NOT NULL,
+    workspace_id uuid NOT NULL,
+    run_id uuid,
+    event_type text NOT NULL,
+    idempotency_key text NOT NULL,
+    payload jsonb NOT NULL,
+    occurred_at timestamp with time zone NOT NULL,
+    published_at timestamp with time zone,
+    event_key text,
+    schema_version integer,
+    event_version bigint,
+    CONSTRAINT outbox_event_event_type_check CHECK ((btrim(event_type) <> ''::text)),
+    CONSTRAINT outbox_event_idempotency_key_check CHECK ((btrim(idempotency_key) <> ''::text)),
+    CONSTRAINT outbox_event_payload_check CHECK ((jsonb_typeof(payload) = 'object'::text)),
+    CONSTRAINT workflow_outbox_runtime_identity_complete CHECK ((((event_key IS NULL) AND (schema_version IS NULL) AND (event_version IS NULL)) OR ((event_key IS NOT NULL) AND (btrim(event_key) <> ''::text) AND (char_length(event_key) <= 128) AND (schema_version IS NOT NULL) AND (schema_version > 0) AND (event_version IS NOT NULL) AND (event_version > 0))))
+);
+
+
+--
+-- Name: synthesis_pending_body_impact; Type: VIEW; Schema: organizing; Owner: -
+--
+
+CREATE VIEW organizing.synthesis_pending_body_impact AS
+ WITH visible_base AS (
+         SELECT n.workspace_id,
+            n.id AS note_id,
+            n.current_revision_id AS revision_id
+           FROM organizing.synthesis_note n
+        UNION
+         SELECT p_1.workspace_id,
+            p_1.note_id,
+            p_1.revision_id
+           FROM ((organizing.synthesis_proven_publication p_1
+             JOIN core.document d ON (((d.id = p_1.document_id) AND (d.workspace_id = p_1.workspace_id) AND (d.current_published_revision_id = p_1.article_revision_id) AND (d.lifecycle_status = 'PUBLISHED'::text))))
+             JOIN organizing.synthesis_note n ON (((n.id = p_1.note_id) AND (n.workspace_id = p_1.workspace_id) AND (n.document_id = p_1.document_id))))
+        )
+ SELECT ref.workspace_id,
+    ref.note_id,
+    ref.revision_id AS base_revision_id,
+    ref.item_id,
+    ref.upstream_note_id,
+    ref.upstream_revision_id,
+    ref.upstream_item_id,
+    ref.publication_id AS upstream_publication_id,
+    p.publication_id,
+    p.revision_id AS published_revision_id,
+    e.id AS event_id,
+    p.published_at,
+        CASE
+            WHEN (changed.item IS NULL) THEN 'ITEM_MISSING'::text
+            ELSE 'CONTENT_CHANGED'::text
+        END AS reason
+   FROM (((((((organizing.synthesis_revision_body_reference ref
+     JOIN visible_base base ON (((base.workspace_id = ref.workspace_id) AND (base.note_id = ref.note_id) AND (base.revision_id = ref.revision_id))))
+     JOIN organizing.synthesis_revision original ON (((original.id = ref.upstream_revision_id) AND (original.workspace_id = ref.workspace_id) AND (original.note_id = ref.upstream_note_id))))
+     JOIN organizing.synthesis_proven_publication p ON (((p.workspace_id = ref.workspace_id) AND (p.note_id = ref.upstream_note_id))))
+     JOIN organizing.synthesis_revision updated ON (((updated.id = p.revision_id) AND (updated.workspace_id = p.workspace_id) AND (updated.note_id = p.note_id) AND (updated.revision_no > original.revision_no))))
+     JOIN workflow.outbox_event e ON (((e.workspace_id = p.workspace_id) AND (e.event_type = 'organizing.synthesis.published'::text) AND (e.idempotency_key = ('synthesis.note-published:v1:'::text || (p.revision_id)::text)))))
+     CROSS JOIN LATERAL ( SELECT source_item.value AS item
+           FROM jsonb_array_elements(original.items) source_item(value)
+          WHERE ((source_item.value ->> 'id'::text) = (ref.upstream_item_id)::text)) prior)
+     LEFT JOIN LATERAL ( SELECT source_item.value AS item
+           FROM jsonb_array_elements(updated.items) source_item(value)
+          WHERE ((source_item.value ->> 'id'::text) = (ref.upstream_item_id)::text)) changed ON (true))
+  WHERE ((prior.item - ARRAY['id'::text, 'body_reference'::text]) IS DISTINCT FROM (changed.item - ARRAY['id'::text, 'body_reference'::text]));
+
+
+--
 -- Name: synthesis_processing; Type: TABLE; Schema: organizing; Owner: -
 --
 
@@ -23651,9 +26665,16 @@ CREATE TABLE organizing.synthesis_processing (
     created_at timestamp with time zone NOT NULL,
     updated_at timestamp with time zone NOT NULL,
     completed_at timestamp with time zone,
+    fusion_request_id uuid,
+    fusion_trigger jsonb,
+    goal_request_id uuid,
+    body_refresh_request_id uuid,
+    CONSTRAINT synthesis_processing_body_refresh_shape CHECK ((((body_refresh_request_id IS NULL) AND (processing_key !~ '^synthesis-body-refresh:'::text)) OR ((body_refresh_request_id IS NOT NULL) AND (goal_request_id IS NULL) AND (fusion_request_id IS NULL) AND (fusion_trigger IS NULL) AND (processing_key = ('synthesis-body-refresh:'::text || encode(sha256(convert_to((((workspace_id)::text || ':'::text) || (body_refresh_request_id)::text), 'UTF8'::name)), 'hex'::text))) AND (request_hash = SUBSTRING(processing_key FROM 24)) AND (status <> 'SKIPPED'::text) AND (jsonb_array_length(revision_ids) <= 1)))),
     CONSTRAINT synthesis_processing_error_code_check CHECK (((error_code IS NULL) OR (error_code ~ '^[A-Z][A-Z0-9_]{0,127}$'::text))),
+    CONSTRAINT synthesis_processing_fusion_shape CHECK ((((fusion_request_id IS NULL) AND (fusion_trigger IS NULL)) OR ((fusion_request_id IS NOT NULL) AND (jsonb_typeof(fusion_trigger) = 'object'::text) AND ((fusion_trigger ->> 'request_id'::text) = (fusion_request_id)::text)))),
+    CONSTRAINT synthesis_processing_goal_shape CHECK ((((goal_request_id IS NULL) AND (processing_key !~ '^synthesis-goal:'::text)) OR ((goal_request_id IS NOT NULL) AND (fusion_request_id IS NULL) AND (fusion_trigger IS NULL) AND (processing_key = ('synthesis-goal:'::text || encode(sha256(convert_to((((workspace_id)::text || ':'::text) || (goal_request_id)::text), 'UTF8'::name)), 'hex'::text))) AND (request_hash = SUBSTRING(processing_key FROM 16)) AND (status <> ALL (ARRAY['SKIPPED'::text, 'NO_CHANGE'::text])) AND (jsonb_array_length(revision_ids) <= 1)))),
     CONSTRAINT synthesis_processing_lifecycle CHECK (((updated_at >= created_at) AND ((completed_at IS NULL) OR (completed_at = updated_at)) AND (((status = ANY (ARRAY['PENDING'::text, 'RUNNING'::text])) AND (workflow_run_id IS NOT NULL) AND (completed_at IS NULL) AND (error_code IS NULL) AND (NOT retryable) AND (revision_ids = '[]'::jsonb)) OR ((status = 'SKIPPED'::text) AND (workflow_run_id IS NULL) AND (model_run_id IS NULL) AND (completed_at IS NOT NULL) AND (error_code IS NULL) AND (NOT retryable) AND (revision_ids = '[]'::jsonb)) OR ((status = 'SUCCEEDED'::text) AND (workflow_run_id IS NOT NULL) AND (completed_at IS NOT NULL) AND (error_code IS NULL) AND (NOT retryable) AND (jsonb_array_length(revision_ids) > 0)) OR ((status = 'NO_CHANGE'::text) AND (workflow_run_id IS NOT NULL) AND (completed_at IS NOT NULL) AND (error_code IS NULL) AND (NOT retryable) AND (revision_ids = '[]'::jsonb)) OR ((status = ANY (ARRAY['FAILED'::text, 'RECOVERY_REQUIRED'::text])) AND (workflow_run_id IS NOT NULL) AND (completed_at IS NOT NULL) AND (error_code IS NOT NULL) AND (revision_ids = '[]'::jsonb) AND ((status <> 'RECOVERY_REQUIRED'::text) OR (NOT retryable)))))),
-    CONSTRAINT synthesis_processing_processing_key_check CHECK ((processing_key ~ '^synthesis:[0-9a-f]{64}$'::text)),
+    CONSTRAINT synthesis_processing_processing_key_check CHECK ((processing_key ~ '^synthesis(-(fusion|goal|body-refresh))?:[0-9a-f]{64}$'::text)),
     CONSTRAINT synthesis_processing_processor_version_check CHECK ((processor_version = 'synthesis/v1'::text)),
     CONSTRAINT synthesis_processing_request_hash_check CHECK ((request_hash ~ '^[0-9a-f]{64}$'::text)),
     CONSTRAINT synthesis_processing_revision_ids_check CHECK (((jsonb_typeof(revision_ids) = 'array'::text) AND (jsonb_array_length(revision_ids) <= 8))),
@@ -23661,6 +26682,90 @@ CREATE TABLE organizing.synthesis_processing (
     CONSTRAINT synthesis_processing_status_check CHECK ((status = ANY (ARRAY['PENDING'::text, 'RUNNING'::text, 'SUCCEEDED'::text, 'NO_CHANGE'::text, 'SKIPPED'::text, 'FAILED'::text, 'RECOVERY_REQUIRED'::text]))),
     CONSTRAINT synthesis_processing_version_check CHECK ((version > 0))
 );
+
+
+--
+-- Name: synthesis_publication_merge_baseline; Type: VIEW; Schema: organizing; Owner: -
+--
+
+CREATE VIEW organizing.synthesis_publication_merge_baseline AS
+ SELECT r.workspace_id,
+    r.document_id,
+    r.article_revision_id,
+    r.content_hash,
+    r.projection_hash,
+    receipt.id AS receipt_id,
+    capture.id AS capture_id,
+    (payloads.cp ->> 'target_path'::text) AS target_path,
+        CASE
+            WHEN ((payloads.cp ->> 'exists'::text))::boolean THEN (payloads.cp ->> 'content_hash'::text)
+            ELSE (payloads.cp ->> 'absence_token'::text)
+        END AS file_base,
+    pub.article_revision_id AS published_revision_id,
+    pub.content_hash AS published_content_hash,
+    generated.document_version,
+    COALESCE(((r.manuscript = (payloads.rp -> 'manuscript'::text)) AND (r.content_hash = ((payloads.rp -> 'manuscript'::text) ->> 'content_hash'::text)) AND (ar.content = ((payloads.rp -> 'manuscript'::text) ->> 'full_content'::text)) AND (generated.expected_document_version = ((((payloads.ap -> 'prepared'::text) -> 'authority'::text) ->> 'document_version'::text))::bigint) AND ((generated.parent_revision_id)::text = (((payloads.ap -> 'prepared'::text) -> 'authority'::text) ->> 'latest_article_id'::text)) AND ((payloads.cp ->> 'target_path'::text) = (((payloads.ap -> 'prepared'::text) -> 'authority'::text) ->> 'target_path'::text)) AND ((((((payloads.ap -> 'prepared'::text) -> 'merge_input'::text) -> 'published'::text) IS NULL) AND (NOT ((payloads.cp ->> 'exists'::text))::boolean) AND (NOT (((payloads.ap -> 'prepared'::text) -> 'authority'::text) ? 'published_publication_id'::text)) AND (NOT (((payloads.ap -> 'prepared'::text) -> 'authority'::text) ? 'published_proposal_commit_id'::text)) AND (NOT (((payloads.ap -> 'prepared'::text) -> 'authority'::text) ? 'published_git_commit'::text))) OR (((payloads.cp ->> 'exists'::text))::boolean AND ((pub.revision_id)::text = ((((payloads.ap -> 'prepared'::text) -> 'merge_input'::text) -> 'published'::text) ->> 'id'::text)) AND (pub.note_id = r.note_id) AND (pub.document_id = r.document_id) AND ((pub.article_revision_id)::text = ((((payloads.ap -> 'prepared'::text) -> 'merge_input'::text) -> 'published'::text) ->> 'article_revision_id'::text)) AND (pub.content_hash = ((((payloads.ap -> 'prepared'::text) -> 'merge_input'::text) -> 'published'::text) ->> 'content_hash'::text)) AND (pub.projection_hash = ((((payloads.ap -> 'prepared'::text) -> 'merge_input'::text) -> 'published'::text) ->> 'hash'::text)) AND ((pub.publication_id)::text = (((payloads.ap -> 'prepared'::text) -> 'authority'::text) ->> 'published_publication_id'::text)) AND ((pub.proposal_commit_id)::text = (((payloads.ap -> 'prepared'::text) -> 'authority'::text) ->> 'published_proposal_commit_id'::text)) AND (pub.git_commit = (((payloads.ap -> 'prepared'::text) -> 'authority'::text) ->> 'published_git_commit'::text))))), false) AS valid,
+    NULL::uuid AS historical_republish_id
+   FROM (((((((organizing.synthesis_revision r
+     JOIN organizing.synthesis_manuscript_receipt receipt ON (((receipt.id = r.manuscript_receipt_id) AND (receipt.workspace_id = r.workspace_id))))
+     JOIN organizing.synthesis_manuscript_attempt attempt ON (((attempt.id = receipt.attempt_id) AND (attempt.workspace_id = r.workspace_id))))
+     JOIN organizing.synthesis_manuscript_capture capture ON (((capture.id = attempt.capture_id) AND (capture.workspace_id = r.workspace_id))))
+     CROSS JOIN LATERAL ( SELECT (convert_from(receipt.payload, 'UTF8'::name))::jsonb AS rp,
+            (convert_from(attempt.payload, 'UTF8'::name))::jsonb AS ap,
+            (convert_from(capture.payload, 'UTF8'::name))::jsonb AS cp) payloads)
+     JOIN authoring.generated_article_revision generated ON (((generated.article_revision_id = r.article_revision_id) AND (generated.workspace_id = r.workspace_id) AND (generated.document_id = r.document_id) AND (generated.origin_id = r.note_id) AND (generated.origin_revision_id = r.id) AND (generated.projection_hash = r.projection_hash) AND (generated.content_hash = r.content_hash))))
+     JOIN core.article_revision ar ON (((ar.id = r.article_revision_id) AND (ar.workspace_id = r.workspace_id) AND (ar.document_id = r.document_id) AND (ar.content_hash = r.content_hash) AND (ar.created_by_type = 'AGENT'::text))))
+     LEFT JOIN organizing.synthesis_proven_publication pub ON (((pub.workspace_id = r.workspace_id) AND ((pub.revision_id)::text = ((((payloads.ap -> 'prepared'::text) -> 'merge_input'::text) -> 'published'::text) ->> 'id'::text)))))
+  WHERE ((r.renderer_version = 'synthesis-markdown/v2'::text) AND (r.candidate_remerge_id IS NULL) AND (r.historical_republish_id IS NULL))
+UNION ALL
+ SELECT r.workspace_id,
+    r.document_id,
+    r.article_revision_id,
+    r.content_hash,
+    r.projection_hash,
+    ((x.a ->> 'receipt_id'::text))::uuid AS receipt_id,
+    (((x.a -> 'capture'::text) ->> 'id'::text))::uuid AS capture_id,
+    ((x.a -> 'capture'::text) ->> 'target_path'::text) AS target_path,
+    ((x.a -> 'capture'::text) ->> 'content_hash'::text) AS file_base,
+    ((x.a ->> 'published_revision_id'::text))::uuid AS published_revision_id,
+    (x.a ->> 'published_content_hash'::text) AS published_content_hash,
+    generated.document_version,
+    COALESCE(((r.manuscript = ((x.v -> 'revision'::text) -> 'manuscript'::text)) AND (r.content_hash = ((x.v -> 'revision'::text) ->> 'content_hash'::text)) AND (r.projection_hash = ((x.v -> 'revision'::text) ->> 'hash'::text)) AND (r.remerge = ((x.v -> 'revision'::text) -> 'remerge'::text)) AND (ar.content = (r.manuscript ->> 'full_content'::text)) AND (generated.expected_document_version = (((x.a -> 'command'::text) ->> 'expected_document_version'::text))::bigint) AND ((generated.parent_revision_id)::text = ((x.a -> 'original'::text) ->> 'article_revision_id'::text)) AND (pub.content_hash = (x.a ->> 'published_content_hash'::text))), false) AS valid,
+    NULL::uuid AS historical_republish_id
+   FROM ((((((organizing.synthesis_revision r
+     JOIN organizing.synthesis_candidate_remerge_event e ON (((e.id = r.candidate_remerge_id) AND (e.workspace_id = r.workspace_id) AND (e.note_id = r.note_id) AND (e.kind = 'APPLY'::text))))
+     JOIN organizing.synthesis_candidate_remerge_event b ON (((b.id = e.attempt_id) AND (b.workspace_id = e.workspace_id) AND (b.note_id = e.note_id) AND (b.kind = 'BEGIN'::text))))
+     CROSS JOIN LATERAL ( SELECT (convert_from(e.payload, 'UTF8'::name))::jsonb AS v,
+            (convert_from(b.payload, 'UTF8'::name))::jsonb AS a) x)
+     JOIN authoring.generated_article_revision generated ON (((generated.article_revision_id = r.article_revision_id) AND (generated.workspace_id = r.workspace_id) AND (generated.document_id = r.document_id) AND (generated.origin_id = r.note_id) AND (generated.origin_revision_id = r.id) AND (generated.projection_hash = r.projection_hash) AND (generated.content_hash = r.content_hash))))
+     JOIN core.article_revision ar ON (((ar.id = r.article_revision_id) AND (ar.workspace_id = r.workspace_id) AND (ar.document_id = r.document_id) AND (ar.content_hash = r.content_hash) AND (ar.created_by_type = 'AGENT'::text))))
+     JOIN core.article_revision pub ON (((pub.workspace_id = r.workspace_id) AND (pub.document_id = r.document_id) AND (pub.id = ((x.a ->> 'published_revision_id'::text))::uuid))))
+  WHERE (r.renderer_version = 'synthesis-markdown/v2'::text)
+UNION ALL
+ SELECT r.workspace_id,
+    r.document_id,
+    r.article_revision_id,
+    r.content_hash,
+    r.projection_hash,
+    NULL::uuid AS receipt_id,
+    (((x.a -> 'capture'::text) ->> 'id'::text))::uuid AS capture_id,
+    ((x.a -> 'capture'::text) ->> 'target_path'::text) AS target_path,
+        CASE
+            WHEN (((x.a -> 'capture'::text) ->> 'exists'::text))::boolean THEN ((x.a -> 'capture'::text) ->> 'content_hash'::text)
+            ELSE ((x.a -> 'capture'::text) ->> 'absence_token'::text)
+        END AS file_base,
+    (NULLIF(((x.a -> 'command'::text) ->> 'expected_published_revision_id'::text), ''::text))::uuid AS published_revision_id,
+    NULLIF((x.a ->> 'published_content_hash'::text), ''::text) AS published_content_hash,
+    g.document_version,
+    COALESCE(((r.projection_hash = ((x.v -> 'revision'::text) ->> 'hash'::text)) AND (r.content_hash = ((x.v -> 'revision'::text) ->> 'content_hash'::text)) AND (ar.content = (x.a ->> 'candidate'::text)) AND (g.expected_document_version = (((x.a -> 'command'::text) ->> 'expected_document_version'::text))::bigint) AND ((g.parent_revision_id)::text = ((x.a -> 'latest'::text) ->> 'article_revision_id'::text)) AND (r.historical_republish = ((x.v -> 'revision'::text) -> 'historical_republish'::text))), false) AS valid,
+    e.id AS historical_republish_id
+   FROM (((((organizing.synthesis_revision r
+     JOIN organizing.synthesis_historical_republish_event e ON (((e.id = r.historical_republish_id) AND (e.workspace_id = r.workspace_id) AND (e.note_id = r.note_id) AND (e.kind = 'APPLY'::text))))
+     JOIN organizing.synthesis_historical_republish_event b ON (((b.id = e.attempt_id) AND (b.workspace_id = e.workspace_id) AND (b.note_id = e.note_id) AND (b.kind = 'BEGIN'::text))))
+     CROSS JOIN LATERAL ( SELECT (convert_from(e.payload, 'UTF8'::name))::jsonb AS v,
+            (convert_from(b.payload, 'UTF8'::name))::jsonb AS a) x)
+     JOIN authoring.generated_article_revision g ON (((g.workspace_id = r.workspace_id) AND (g.document_id = r.document_id) AND (g.article_revision_id = r.article_revision_id) AND (g.origin_id = r.note_id) AND (g.origin_revision_id = r.id) AND (g.projection_hash = r.projection_hash) AND (g.content_hash = r.content_hash))))
+     JOIN core.article_revision ar ON (((ar.workspace_id = r.workspace_id) AND (ar.id = r.article_revision_id) AND (ar.created_by_type = 'AGENT'::text))));
 
 
 --
@@ -23682,50 +26787,6 @@ CREATE TABLE organizing.synthesis_retry_receipt (
 
 
 --
--- Name: synthesis_revision; Type: TABLE; Schema: organizing; Owner: -
---
-
-CREATE TABLE organizing.synthesis_revision (
-    id uuid NOT NULL,
-    workspace_id uuid NOT NULL,
-    note_id uuid NOT NULL,
-    document_id uuid NOT NULL,
-    article_revision_id uuid NOT NULL,
-    revision_no integer NOT NULL,
-    article_revision_no integer NOT NULL,
-    parent_revision_id uuid,
-    title text NOT NULL,
-    renderer_version text NOT NULL,
-    content_hash text NOT NULL,
-    projection_hash text NOT NULL,
-    items jsonb NOT NULL,
-    delta jsonb NOT NULL,
-    item_count integer NOT NULL,
-    conflict_count integer NOT NULL,
-    gap_count integer NOT NULL,
-    open_gap_count integer NOT NULL,
-    source_event_id uuid NOT NULL,
-    workflow_run_id uuid NOT NULL,
-    model_run_id uuid NOT NULL,
-    created_at timestamp with time zone NOT NULL,
-    CONSTRAINT synthesis_revision_article_revision_no_check CHECK ((article_revision_no > 0)),
-    CONSTRAINT synthesis_revision_check CHECK (((open_gap_count >= 0) AND (open_gap_count <= gap_count))),
-    CONSTRAINT synthesis_revision_conflict_count_check CHECK (((conflict_count >= 0) AND (conflict_count <= 128))),
-    CONSTRAINT synthesis_revision_content_hash_check CHECK ((content_hash ~ '^[0-9a-f]{64}$'::text)),
-    CONSTRAINT synthesis_revision_counts CHECK (((item_count = jsonb_array_length(items)) AND ((conflict_count + gap_count) <= item_count))),
-    CONSTRAINT synthesis_revision_delta_check CHECK ((((jsonb_typeof(delta) = 'object'::text) AND (jsonb_typeof((delta -> 'operations'::text)) = 'array'::text) AND ((jsonb_array_length((delta -> 'operations'::text)) >= 1) AND (jsonb_array_length((delta -> 'operations'::text)) <= 64)) AND ((delta - 'operations'::text) = '{}'::jsonb)) IS TRUE)),
-    CONSTRAINT synthesis_revision_gap_count_check CHECK (((gap_count >= 0) AND (gap_count <= 128))),
-    CONSTRAINT synthesis_revision_item_count_check CHECK (((item_count >= 1) AND (item_count <= 128))),
-    CONSTRAINT synthesis_revision_items_check CHECK (((jsonb_typeof(items) = 'array'::text) AND ((jsonb_array_length(items) >= 1) AND (jsonb_array_length(items) <= 128)))),
-    CONSTRAINT synthesis_revision_parent_shape CHECK ((((revision_no = 1) AND (parent_revision_id IS NULL)) OR ((revision_no > 1) AND (parent_revision_id IS NOT NULL) AND (parent_revision_id <> id)))),
-    CONSTRAINT synthesis_revision_projection_hash_check CHECK ((projection_hash ~ '^[0-9a-f]{64}$'::text)),
-    CONSTRAINT synthesis_revision_renderer_version_check CHECK ((renderer_version = 'synthesis-markdown/v1'::text)),
-    CONSTRAINT synthesis_revision_revision_no_check CHECK ((revision_no > 0)),
-    CONSTRAINT synthesis_revision_title_check CHECK (((title = btrim(title)) AND (title <> ''::text) AND (octet_length(title) <= 512)))
-);
-
-
---
 -- Name: synthesis_revision_source; Type: TABLE; Schema: organizing; Owner: -
 --
 
@@ -23741,9 +26802,72 @@ CREATE TABLE organizing.synthesis_revision_source (
     content_hash text NOT NULL,
     excerpt_hash text NOT NULL,
     title text NOT NULL,
+    profile_revision_id uuid,
     CONSTRAINT synthesis_revision_source_content_hash_check CHECK ((content_hash ~ '^[0-9a-f]{64}$'::text)),
     CONSTRAINT synthesis_revision_source_excerpt_hash_check CHECK ((excerpt_hash ~ '^[0-9a-f]{64}$'::text)),
     CONSTRAINT synthesis_revision_source_title_check CHECK (((title <> ''::text) AND (octet_length(title) <= 512)))
+);
+
+
+--
+-- Name: synthesis_source_impact; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.synthesis_source_impact (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    workspace_id uuid NOT NULL,
+    note_id uuid NOT NULL,
+    source_id uuid NOT NULL,
+    source_version_id uuid NOT NULL,
+    reason text NOT NULL,
+    detected_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT synthesis_source_impact_reason_check CHECK ((reason = ANY (ARRAY['SOURCE_REMOVED'::text, 'SOURCE_QUARANTINED'::text])))
+);
+
+
+--
+-- Name: synthesis_source_promotion; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.synthesis_source_promotion (
+    workspace_id uuid NOT NULL,
+    idempotency_key text NOT NULL,
+    request_id uuid NOT NULL,
+    source_id uuid NOT NULL,
+    source_version_id uuid NOT NULL,
+    profile_revision_id uuid NOT NULL,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT synthesis_source_promotion_idempotency_key_check CHECK ((((octet_length(idempotency_key) >= 1) AND (octet_length(idempotency_key) <= 128)) AND (idempotency_key = btrim(idempotency_key))))
+);
+
+
+--
+-- Name: synthesis_source_supplement; Type: TABLE; Schema: organizing; Owner: -
+--
+
+CREATE TABLE organizing.synthesis_source_supplement (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    workspace_id uuid NOT NULL,
+    note_id uuid NOT NULL,
+    base_revision_id uuid NOT NULL,
+    item_id uuid NOT NULL,
+    slot text NOT NULL,
+    alternative_index integer NOT NULL,
+    processing_id uuid NOT NULL,
+    source_id uuid NOT NULL,
+    source_version_id uuid NOT NULL,
+    content_artifact_id uuid NOT NULL,
+    parse_projection_id uuid NOT NULL,
+    source_span_id uuid NOT NULL,
+    content_hash text NOT NULL,
+    excerpt_hash text NOT NULL,
+    title text NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    CONSTRAINT synthesis_source_supplement_check CHECK ((((slot = 'CONFLICT'::text) AND ((alternative_index >= 0) AND (alternative_index <= 3))) OR ((slot <> 'CONFLICT'::text) AND (alternative_index = '-1'::integer)))),
+    CONSTRAINT synthesis_source_supplement_content_hash_check CHECK ((content_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT synthesis_source_supplement_excerpt_hash_check CHECK ((excerpt_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT synthesis_source_supplement_slot_check CHECK ((slot = ANY (ARRAY['FACT'::text, 'CONFLICT'::text, 'GAP_CONTEXT'::text, 'GAP_RESOLUTION'::text]))),
+    CONSTRAINT synthesis_source_supplement_title_check CHECK (((title <> ''::text) AND (octet_length(title) <= 512)))
 );
 
 
@@ -24336,29 +27460,6 @@ CREATE TABLE workflow.node_run (
     CONSTRAINT workflow_node_runtime_identity_complete CHECK ((((idempotency_key IS NULL) AND (input_schema_version IS NULL) AND (output_schema_version IS NULL) AND (dispatch_no IS NULL)) OR ((idempotency_key IS NOT NULL) AND (btrim(idempotency_key) <> ''::text) AND (char_length(idempotency_key) <= 128) AND (input_schema_version IS NOT NULL) AND (input_schema_version > 0) AND (output_schema_version IS NOT NULL) AND (output_schema_version > 0) AND (dispatch_no IS NOT NULL) AND (dispatch_no > 0)))),
     CONSTRAINT workflow_node_runtime_running_has_lease CHECK (((status <> 'running'::text) OR (lease_until IS NOT NULL))),
     CONSTRAINT workflow_node_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'running'::text, 'waiting_for_human'::text, 'retry_wait'::text, 'paused'::text, 'succeeded'::text, 'failed'::text, 'cancelled'::text])))
-);
-
-
---
--- Name: outbox_event; Type: TABLE; Schema: workflow; Owner: -
---
-
-CREATE TABLE workflow.outbox_event (
-    id uuid NOT NULL,
-    workspace_id uuid NOT NULL,
-    run_id uuid,
-    event_type text NOT NULL,
-    idempotency_key text NOT NULL,
-    payload jsonb NOT NULL,
-    occurred_at timestamp with time zone NOT NULL,
-    published_at timestamp with time zone,
-    event_key text,
-    schema_version integer,
-    event_version bigint,
-    CONSTRAINT outbox_event_event_type_check CHECK ((btrim(event_type) <> ''::text)),
-    CONSTRAINT outbox_event_idempotency_key_check CHECK ((btrim(idempotency_key) <> ''::text)),
-    CONSTRAINT outbox_event_payload_check CHECK ((jsonb_typeof(payload) = 'object'::text)),
-    CONSTRAINT workflow_outbox_runtime_identity_complete CHECK ((((event_key IS NULL) AND (schema_version IS NULL) AND (event_version IS NULL)) OR ((event_key IS NOT NULL) AND (btrim(event_key) <> ''::text) AND (char_length(event_key) <= 128) AND (schema_version IS NOT NULL) AND (schema_version > 0) AND (event_version IS NOT NULL) AND (event_version > 0))))
 );
 
 
@@ -25341,14 +28442,6 @@ ALTER TABLE ONLY agent.workspace_analysis_worker_capability
 
 
 --
--- Name: atlas_schema_revisions atlas_schema_revisions_pkey; Type: CONSTRAINT; Schema: atlas_schema_revisions; Owner: -
---
-
-ALTER TABLE ONLY atlas_schema_revisions.atlas_schema_revisions
-    ADD CONSTRAINT atlas_schema_revisions_pkey PRIMARY KEY (version);
-
-
---
 -- Name: api_token api_token_pkey; Type: CONSTRAINT; Schema: auth; Owner: -
 --
 
@@ -26165,19 +29258,19 @@ ALTER TABLE ONLY core.source_version
 
 
 --
--- Name: source_version uq_source_version_source_hash; Type: CONSTRAINT; Schema: core; Owner: -
---
-
-ALTER TABLE ONLY core.source_version
-    ADD CONSTRAINT uq_source_version_source_hash UNIQUE (source_id, content_hash);
-
-
---
 -- Name: source uq_source_workspace_location; Type: CONSTRAINT; Schema: core; Owner: -
 --
 
 ALTER TABLE ONLY core.source
     ADD CONSTRAINT uq_source_workspace_location UNIQUE (workspace_id, original_location);
+
+
+--
+-- Name: workspace_discovery_failure workspace_discovery_failure_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.workspace_discovery_failure
+    ADD CONSTRAINT workspace_discovery_failure_pkey PRIMARY KEY (workspace_id, binding_version, relative_path);
 
 
 --
@@ -27885,6 +30978,110 @@ ALTER TABLE ONLY ops.workspace_switch
 
 
 --
+-- Name: anchor_decision anchor_decision_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_decision
+    ADD CONSTRAINT anchor_decision_pkey PRIMARY KEY (proposal_id);
+
+
+--
+-- Name: anchor_fusion_request anchor_fusion_request_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_fusion_request
+    ADD CONSTRAINT anchor_fusion_request_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: anchor_proposal_evidence anchor_proposal_evidence_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_proposal_evidence
+    ADD CONSTRAINT anchor_proposal_evidence_pkey PRIMARY KEY (proposal_id, source_span_id);
+
+
+--
+-- Name: anchor_proposal anchor_proposal_id_workspace_id_anchor_id_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_proposal
+    ADD CONSTRAINT anchor_proposal_id_workspace_id_anchor_id_key UNIQUE (id, workspace_id, anchor_id);
+
+
+--
+-- Name: anchor_proposal anchor_proposal_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_proposal
+    ADD CONSTRAINT anchor_proposal_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: anchor_receipt anchor_receipt_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_receipt
+    ADD CONSTRAINT anchor_receipt_pkey PRIMARY KEY (workspace_id, idempotency_key);
+
+
+--
+-- Name: anchor_recommendation_request anchor_recommendation_request_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_recommendation_request
+    ADD CONSTRAINT anchor_recommendation_request_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: anchor_recommendation_request anchor_recommendation_request_workspace_id_idempotency_key_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_recommendation_request
+    ADD CONSTRAINT anchor_recommendation_request_workspace_id_idempotency_key_key UNIQUE (workspace_id, idempotency_key);
+
+
+--
+-- Name: anchor_recommendation_request anchor_recommendation_request_workspace_id_node_attempt_id_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_recommendation_request
+    ADD CONSTRAINT anchor_recommendation_request_workspace_id_node_attempt_id_key UNIQUE (workspace_id, node_attempt_id);
+
+
+--
+-- Name: anchor_recommendation_request anchor_recommendation_request_workspace_id_retry_idempotenc_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_recommendation_request
+    ADD CONSTRAINT anchor_recommendation_request_workspace_id_retry_idempotenc_key UNIQUE (workspace_id, retry_idempotency_key);
+
+
+--
+-- Name: anchor_scope_revision anchor_scope_revision_anchor_id_workspace_id_version_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_scope_revision
+    ADD CONSTRAINT anchor_scope_revision_anchor_id_workspace_id_version_key UNIQUE (anchor_id, workspace_id, version);
+
+
+--
+-- Name: anchor_scope_revision anchor_scope_revision_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_scope_revision
+    ADD CONSTRAINT anchor_scope_revision_pkey PRIMARY KEY (anchor_id, version);
+
+
+--
+-- Name: anchor_source_discovery anchor_source_discovery_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_source_discovery
+    ADD CONSTRAINT anchor_source_discovery_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: command_receipt command_receipt_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
 --
 
@@ -27925,6 +31122,30 @@ ALTER TABLE ONLY organizing.generation
 
 
 --
+-- Name: knowledge_anchor knowledge_anchor_id_workspace_id_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.knowledge_anchor
+    ADD CONSTRAINT knowledge_anchor_id_workspace_id_key UNIQUE (id, workspace_id);
+
+
+--
+-- Name: knowledge_anchor knowledge_anchor_note_id_workspace_id_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.knowledge_anchor
+    ADD CONSTRAINT knowledge_anchor_note_id_workspace_id_key UNIQUE (note_id, workspace_id);
+
+
+--
+-- Name: knowledge_anchor knowledge_anchor_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.knowledge_anchor
+    ADD CONSTRAINT knowledge_anchor_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: run_binding run_binding_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
 --
 
@@ -27949,11 +31170,515 @@ ALTER TABLE ONLY organizing.synthesis_apply_receipt
 
 
 --
+-- Name: synthesis_body_impact synthesis_body_impact_base_revision_id_item_id_publication__key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_body_impact
+    ADD CONSTRAINT synthesis_body_impact_base_revision_id_item_id_publication__key UNIQUE (base_revision_id, item_id, publication_id);
+
+
+--
+-- Name: synthesis_body_impact synthesis_body_impact_id_workspace_id_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_body_impact
+    ADD CONSTRAINT synthesis_body_impact_id_workspace_id_key UNIQUE (id, workspace_id);
+
+
+--
+-- Name: synthesis_body_impact synthesis_body_impact_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_body_impact
+    ADD CONSTRAINT synthesis_body_impact_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: synthesis_body_refresh_request synthesis_body_refresh_reques_workspace_id_note_id_publicat_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_body_refresh_request
+    ADD CONSTRAINT synthesis_body_refresh_reques_workspace_id_note_id_publicat_key UNIQUE (workspace_id, note_id, publication_id);
+
+
+--
+-- Name: synthesis_body_refresh_request synthesis_body_refresh_request_id_workspace_id_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_body_refresh_request
+    ADD CONSTRAINT synthesis_body_refresh_request_id_workspace_id_key UNIQUE (id, workspace_id);
+
+
+--
+-- Name: synthesis_body_refresh_request synthesis_body_refresh_request_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_body_refresh_request
+    ADD CONSTRAINT synthesis_body_refresh_request_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: synthesis_candidate_remerge_event synthesis_candidate_remerge_e_workspace_id_note_id_kind_ide_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_candidate_remerge_event
+    ADD CONSTRAINT synthesis_candidate_remerge_e_workspace_id_note_id_kind_ide_key UNIQUE (workspace_id, note_id, kind, idempotency_key);
+
+
+--
+-- Name: synthesis_candidate_remerge_event synthesis_candidate_remerge_event_attempt_id_kind_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_candidate_remerge_event
+    ADD CONSTRAINT synthesis_candidate_remerge_event_attempt_id_kind_key UNIQUE (attempt_id, kind);
+
+
+--
+-- Name: synthesis_candidate_remerge_event synthesis_candidate_remerge_event_id_workspace_id_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_candidate_remerge_event
+    ADD CONSTRAINT synthesis_candidate_remerge_event_id_workspace_id_key UNIQUE (id, workspace_id);
+
+
+--
+-- Name: synthesis_candidate_remerge_event synthesis_candidate_remerge_event_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_candidate_remerge_event
+    ADD CONSTRAINT synthesis_candidate_remerge_event_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: synthesis_execution synthesis_execution_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
 --
 
 ALTER TABLE ONLY organizing.synthesis_execution
     ADD CONSTRAINT synthesis_execution_pkey PRIMARY KEY (workflow_run_id);
+
+
+--
+-- Name: synthesis_goal_catalog_batch synthesis_goal_catalog_batch_id_workspace_id_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_goal_catalog_batch
+    ADD CONSTRAINT synthesis_goal_catalog_batch_id_workspace_id_key UNIQUE (id, workspace_id);
+
+
+--
+-- Name: synthesis_goal_catalog_batch synthesis_goal_catalog_batch_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_goal_catalog_batch
+    ADD CONSTRAINT synthesis_goal_catalog_batch_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: synthesis_goal_catalog_batch synthesis_goal_catalog_batch_request_id_batch_no_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_goal_catalog_batch
+    ADD CONSTRAINT synthesis_goal_catalog_batch_request_id_batch_no_key UNIQUE (request_id, batch_no);
+
+
+--
+-- Name: synthesis_goal_catalog_item synthesis_goal_catalog_item_batch_id_source_id_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_goal_catalog_item
+    ADD CONSTRAINT synthesis_goal_catalog_item_batch_id_source_id_key UNIQUE (batch_id, source_id);
+
+
+--
+-- Name: synthesis_goal_catalog_item synthesis_goal_catalog_item_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_goal_catalog_item
+    ADD CONSTRAINT synthesis_goal_catalog_item_pkey PRIMARY KEY (batch_id, ordinal);
+
+
+--
+-- Name: synthesis_goal_request synthesis_goal_request_id_workspace_id_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_goal_request
+    ADD CONSTRAINT synthesis_goal_request_id_workspace_id_key UNIQUE (id, workspace_id);
+
+
+--
+-- Name: synthesis_goal_request synthesis_goal_request_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_goal_request
+    ADD CONSTRAINT synthesis_goal_request_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: synthesis_goal_request synthesis_goal_request_workspace_id_idempotency_key_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_goal_request
+    ADD CONSTRAINT synthesis_goal_request_workspace_id_idempotency_key_key UNIQUE (workspace_id, idempotency_key);
+
+
+--
+-- Name: synthesis_goal_selection synthesis_goal_selection_catalog_batch_id_source_ordinal_po_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_goal_selection
+    ADD CONSTRAINT synthesis_goal_selection_catalog_batch_id_source_ordinal_po_key UNIQUE (catalog_batch_id, source_ordinal, point_offset);
+
+
+--
+-- Name: synthesis_goal_selection_manifest synthesis_goal_selection_manifest_batch_id_workspace_id_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_goal_selection_manifest
+    ADD CONSTRAINT synthesis_goal_selection_manifest_batch_id_workspace_id_key UNIQUE (batch_id, workspace_id);
+
+
+--
+-- Name: synthesis_goal_selection_manifest synthesis_goal_selection_manifest_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_goal_selection_manifest
+    ADD CONSTRAINT synthesis_goal_selection_manifest_pkey PRIMARY KEY (batch_id);
+
+
+--
+-- Name: synthesis_goal_selection synthesis_goal_selection_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_goal_selection
+    ADD CONSTRAINT synthesis_goal_selection_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: synthesis_goal_selection_preparation synthesis_goal_selection_preparation_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_goal_selection_preparation
+    ADD CONSTRAINT synthesis_goal_selection_preparation_pkey PRIMARY KEY (batch_id);
+
+
+--
+-- Name: synthesis_goal_selection_retry synthesis_goal_selection_retry_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_goal_selection_retry
+    ADD CONSTRAINT synthesis_goal_selection_retry_pkey PRIMARY KEY (workspace_id, idempotency_key);
+
+
+--
+-- Name: synthesis_goal_selection synthesis_goal_selection_workspace_id_id_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_goal_selection
+    ADD CONSTRAINT synthesis_goal_selection_workspace_id_id_key UNIQUE (workspace_id, id);
+
+
+--
+-- Name: synthesis_goal_selection synthesis_goal_selection_workspace_id_node_attempt_id_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_goal_selection
+    ADD CONSTRAINT synthesis_goal_selection_workspace_id_node_attempt_id_key UNIQUE (workspace_id, node_attempt_id);
+
+
+--
+-- Name: synthesis_goal_selection synthesis_goal_selection_workspace_id_scheduled_workflow_id_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_goal_selection
+    ADD CONSTRAINT synthesis_goal_selection_workspace_id_scheduled_workflow_id_key UNIQUE (workspace_id, scheduled_workflow_id);
+
+
+--
+-- Name: synthesis_historical_republish_event synthesis_historical_republis_workspace_id_note_id_kind_ide_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_historical_republish_event
+    ADD CONSTRAINT synthesis_historical_republis_workspace_id_note_id_kind_ide_key UNIQUE (workspace_id, note_id, kind, idempotency_key);
+
+
+--
+-- Name: synthesis_revision synthesis_historical_republish_apply_unique; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_revision
+    ADD CONSTRAINT synthesis_historical_republish_apply_unique UNIQUE (historical_republish_id);
+
+
+--
+-- Name: synthesis_historical_republish_event synthesis_historical_republish_event_attempt_id_kind_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_historical_republish_event
+    ADD CONSTRAINT synthesis_historical_republish_event_attempt_id_kind_key UNIQUE (attempt_id, kind);
+
+
+--
+-- Name: synthesis_historical_republish_event synthesis_historical_republish_event_id_workspace_id_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_historical_republish_event
+    ADD CONSTRAINT synthesis_historical_republish_event_id_workspace_id_key UNIQUE (id, workspace_id);
+
+
+--
+-- Name: synthesis_historical_republish_event synthesis_historical_republish_event_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_historical_republish_event
+    ADD CONSTRAINT synthesis_historical_republish_event_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: synthesis_manuscript_application synthesis_manuscript_application_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_application
+    ADD CONSTRAINT synthesis_manuscript_application_pkey PRIMARY KEY (workspace_id, processing_id, note_id);
+
+
+--
+-- Name: synthesis_manuscript_attempt synthesis_manuscript_attempt_id_workspace_id_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_attempt
+    ADD CONSTRAINT synthesis_manuscript_attempt_id_workspace_id_key UNIQUE (id, workspace_id);
+
+
+--
+-- Name: synthesis_manuscript_attempt synthesis_manuscript_attempt_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_attempt
+    ADD CONSTRAINT synthesis_manuscript_attempt_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: synthesis_manuscript_attempt synthesis_manuscript_attempt_workspace_id_idempotency_key_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_attempt
+    ADD CONSTRAINT synthesis_manuscript_attempt_workspace_id_idempotency_key_key UNIQUE (workspace_id, idempotency_key);
+
+
+--
+-- Name: synthesis_manuscript_capture synthesis_manuscript_capture_id_workspace_id_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_capture
+    ADD CONSTRAINT synthesis_manuscript_capture_id_workspace_id_key UNIQUE (id, workspace_id);
+
+
+--
+-- Name: synthesis_manuscript_capture synthesis_manuscript_capture_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_capture
+    ADD CONSTRAINT synthesis_manuscript_capture_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: synthesis_manuscript_receipt synthesis_manuscript_receipt_attempt_id_workspace_id_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_receipt
+    ADD CONSTRAINT synthesis_manuscript_receipt_attempt_id_workspace_id_key UNIQUE (attempt_id, workspace_id);
+
+
+--
+-- Name: synthesis_manuscript_receipt synthesis_manuscript_receipt_id_workspace_id_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_receipt
+    ADD CONSTRAINT synthesis_manuscript_receipt_id_workspace_id_key UNIQUE (id, workspace_id);
+
+
+--
+-- Name: synthesis_manuscript_receipt synthesis_manuscript_receipt_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_receipt
+    ADD CONSTRAINT synthesis_manuscript_receipt_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: synthesis_manuscript_review_decision synthesis_manuscript_review_de_workspace_id_idempotency_key_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_review_decision
+    ADD CONSTRAINT synthesis_manuscript_review_de_workspace_id_idempotency_key_key UNIQUE (workspace_id, idempotency_key);
+
+
+--
+-- Name: synthesis_manuscript_review_decision synthesis_manuscript_review_decision_attempt_id_sequence_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_review_decision
+    ADD CONSTRAINT synthesis_manuscript_review_decision_attempt_id_sequence_key UNIQUE (attempt_id, sequence);
+
+
+--
+-- Name: synthesis_manuscript_review_decision synthesis_manuscript_review_decision_id_workspace_id_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_review_decision
+    ADD CONSTRAINT synthesis_manuscript_review_decision_id_workspace_id_key UNIQUE (id, workspace_id);
+
+
+--
+-- Name: synthesis_manuscript_review_decision synthesis_manuscript_review_decision_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_review_decision
+    ADD CONSTRAINT synthesis_manuscript_review_decision_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: synthesis_manuscript_root_identity synthesis_manuscript_root_ide_workspace_id_grant_generation_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_root_identity
+    ADD CONSTRAINT synthesis_manuscript_root_ide_workspace_id_grant_generation_key UNIQUE (workspace_id, grant_generation, root_fingerprint, binding_version);
+
+
+--
+-- Name: synthesis_manuscript_root_identity synthesis_manuscript_root_identity_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_root_identity
+    ADD CONSTRAINT synthesis_manuscript_root_identity_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: synthesis_manuscript_root_identity synthesis_manuscript_root_identity_workspace_id_id_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_root_identity
+    ADD CONSTRAINT synthesis_manuscript_root_identity_workspace_id_id_key UNIQUE (workspace_id, id);
+
+
+--
+-- Name: synthesis_manuscript_source_evidence synthesis_manuscript_source_e_review_id_obligation_paragrap_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_source_evidence
+    ADD CONSTRAINT synthesis_manuscript_source_e_review_id_obligation_paragrap_key UNIQUE (review_id, obligation, paragraph);
+
+
+--
+-- Name: synthesis_manuscript_source_evidence synthesis_manuscript_source_e_workspace_id_note_id_target_h_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_source_evidence
+    ADD CONSTRAINT synthesis_manuscript_source_e_workspace_id_note_id_target_h_key UNIQUE (workspace_id, note_id, target_hash, paragraph, source_version_id, parse_projection_id, source_span_id);
+
+
+--
+-- Name: synthesis_manuscript_source_evidence synthesis_manuscript_source_evidence_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_source_evidence
+    ADD CONSTRAINT synthesis_manuscript_source_evidence_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: synthesis_manuscript_source_review synthesis_manuscript_source_r_workspace_id_origin_processin_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_source_review
+    ADD CONSTRAINT synthesis_manuscript_source_r_workspace_id_origin_processin_key UNIQUE (workspace_id, origin_processing_id, origin_workflow_run_id, attempt_no);
+
+
+--
+-- Name: synthesis_manuscript_source_review_command synthesis_manuscript_source_review_command_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_source_review_command
+    ADD CONSTRAINT synthesis_manuscript_source_review_command_pkey PRIMARY KEY (workspace_id, idempotency_key);
+
+
+--
+-- Name: synthesis_manuscript_source_review synthesis_manuscript_source_review_id_workspace_id_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_source_review
+    ADD CONSTRAINT synthesis_manuscript_source_review_id_workspace_id_key UNIQUE (id, workspace_id);
+
+
+--
+-- Name: synthesis_manuscript_source_review synthesis_manuscript_source_review_model_run_id_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_source_review
+    ADD CONSTRAINT synthesis_manuscript_source_review_model_run_id_key UNIQUE (model_run_id);
+
+
+--
+-- Name: synthesis_manuscript_source_review synthesis_manuscript_source_review_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_source_review
+    ADD CONSTRAINT synthesis_manuscript_source_review_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: synthesis_manuscript_source_review_recovery_receipt synthesis_manuscript_source_review_recover_workflow_run_id_key1; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_source_review_recovery_receipt
+    ADD CONSTRAINT synthesis_manuscript_source_review_recover_workflow_run_id_key1 UNIQUE (workflow_run_id);
+
+
+--
+-- Name: synthesis_manuscript_source_review_recovery synthesis_manuscript_source_review_recovery_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_source_review_recovery
+    ADD CONSTRAINT synthesis_manuscript_source_review_recovery_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: synthesis_manuscript_source_review_recovery_receipt synthesis_manuscript_source_review_recovery_receipt_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_source_review_recovery_receipt
+    ADD CONSTRAINT synthesis_manuscript_source_review_recovery_receipt_pkey PRIMARY KEY (review_id);
+
+
+--
+-- Name: synthesis_manuscript_source_review_recovery synthesis_manuscript_source_review_recovery_workflow_run_id_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_source_review_recovery
+    ADD CONSTRAINT synthesis_manuscript_source_review_recovery_workflow_run_id_key UNIQUE (workflow_run_id);
+
+
+--
+-- Name: synthesis_manuscript_source_review_result synthesis_manuscript_source_review_result_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_source_review_result
+    ADD CONSTRAINT synthesis_manuscript_source_review_result_pkey PRIMARY KEY (review_id, obligation, paragraph);
+
+
+--
+-- Name: synthesis_manuscript_source_review synthesis_manuscript_source_review_supersedes_id_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_source_review
+    ADD CONSTRAINT synthesis_manuscript_source_review_supersedes_id_key UNIQUE (supersedes_id);
+
+
+--
+-- Name: synthesis_manuscript_source_review synthesis_manuscript_source_review_workflow_run_id_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_source_review
+    ADD CONSTRAINT synthesis_manuscript_source_review_workflow_run_id_key UNIQUE (workflow_run_id);
 
 
 --
@@ -28005,6 +31730,14 @@ ALTER TABLE ONLY organizing.synthesis_revision
 
 
 --
+-- Name: synthesis_revision_body_reference synthesis_revision_body_reference_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_revision_body_reference
+    ADD CONSTRAINT synthesis_revision_body_reference_pkey PRIMARY KEY (revision_id, item_id);
+
+
+--
 -- Name: synthesis_revision synthesis_revision_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
 --
 
@@ -28018,6 +31751,46 @@ ALTER TABLE ONLY organizing.synthesis_revision
 
 ALTER TABLE ONLY organizing.synthesis_revision_source
     ADD CONSTRAINT synthesis_revision_source_pkey PRIMARY KEY (revision_id, source_version_id, parse_projection_id, source_span_id);
+
+
+--
+-- Name: synthesis_source_impact synthesis_source_impact_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_source_impact
+    ADD CONSTRAINT synthesis_source_impact_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: synthesis_source_impact synthesis_source_impact_workspace_id_note_id_source_version_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_source_impact
+    ADD CONSTRAINT synthesis_source_impact_workspace_id_note_id_source_version_key UNIQUE (workspace_id, note_id, source_version_id, reason);
+
+
+--
+-- Name: synthesis_source_promotion synthesis_source_promotion_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_source_promotion
+    ADD CONSTRAINT synthesis_source_promotion_pkey PRIMARY KEY (workspace_id, idempotency_key);
+
+
+--
+-- Name: synthesis_source_promotion synthesis_source_promotion_request_id_key; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_source_promotion
+    ADD CONSTRAINT synthesis_source_promotion_request_id_key UNIQUE (request_id);
+
+
+--
+-- Name: synthesis_source_supplement synthesis_source_supplement_pkey; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_source_supplement
+    ADD CONSTRAINT synthesis_source_supplement_pkey PRIMARY KEY (id);
 
 
 --
@@ -28042,6 +31815,54 @@ ALTER TABLE ONLY organizing.template
 
 ALTER TABLE ONLY organizing.template_revision
     ADD CONSTRAINT template_revision_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: anchor_fusion_request uq_anchor_fusion_request_processing; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_fusion_request
+    ADD CONSTRAINT uq_anchor_fusion_request_processing UNIQUE (processing_id);
+
+
+--
+-- Name: anchor_fusion_request uq_anchor_fusion_request_proposal_source; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_fusion_request
+    ADD CONSTRAINT uq_anchor_fusion_request_proposal_source UNIQUE (workspace_id, proposal_id, source_version_id, parse_projection_id);
+
+
+--
+-- Name: anchor_fusion_request uq_anchor_fusion_request_workspace; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_fusion_request
+    ADD CONSTRAINT uq_anchor_fusion_request_workspace UNIQUE (id, workspace_id);
+
+
+--
+-- Name: anchor_recommendation_request uq_anchor_recommendation_scheduled_run; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_recommendation_request
+    ADD CONSTRAINT uq_anchor_recommendation_scheduled_run UNIQUE (scheduled_workflow_run_id);
+
+
+--
+-- Name: anchor_source_discovery uq_anchor_source_discovery_subscription; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_source_discovery
+    ADD CONSTRAINT uq_anchor_source_discovery_subscription UNIQUE (workspace_id, source_version_id, parse_projection_id, anchor_id, scope_version);
+
+
+--
+-- Name: anchor_source_discovery uq_anchor_source_discovery_workspace; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_source_discovery
+    ADD CONSTRAINT uq_anchor_source_discovery_workspace UNIQUE (id, workspace_id);
 
 
 --
@@ -28293,11 +32114,27 @@ ALTER TABLE ONLY organizing.synthesis_note
 
 
 --
--- Name: synthesis_processing uq_synthesis_processing_event; Type: CONSTRAINT; Schema: organizing; Owner: -
+-- Name: synthesis_processing uq_synthesis_processing_body_refresh; Type: CONSTRAINT; Schema: organizing; Owner: -
 --
 
 ALTER TABLE ONLY organizing.synthesis_processing
-    ADD CONSTRAINT uq_synthesis_processing_event UNIQUE (source_event_id, processor_version);
+    ADD CONSTRAINT uq_synthesis_processing_body_refresh UNIQUE (body_refresh_request_id);
+
+
+--
+-- Name: synthesis_processing uq_synthesis_processing_fusion_request; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_processing
+    ADD CONSTRAINT uq_synthesis_processing_fusion_request UNIQUE (fusion_request_id);
+
+
+--
+-- Name: synthesis_processing uq_synthesis_processing_goal; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_processing
+    ADD CONSTRAINT uq_synthesis_processing_goal UNIQUE (goal_request_id);
 
 
 --
@@ -28346,6 +32183,14 @@ ALTER TABLE ONLY organizing.synthesis_revision
 
 ALTER TABLE ONLY organizing.synthesis_revision
     ADD CONSTRAINT uq_synthesis_revision_scope UNIQUE (id, workspace_id, note_id, document_id);
+
+
+--
+-- Name: synthesis_source_supplement uq_synthesis_supplement_support; Type: CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_source_supplement
+    ADD CONSTRAINT uq_synthesis_supplement_support UNIQUE (workspace_id, note_id, item_id, slot, alternative_index, source_version_id, parse_projection_id, source_span_id);
 
 
 --
@@ -28999,6 +32844,13 @@ CREATE INDEX idx_authoring_command_revision ON authoring.working_draft_command U
 
 
 --
+-- Name: idx_authoring_publication_completed_history; Type: INDEX; Schema: authoring; Owner: -
+--
+
+CREATE INDEX idx_authoring_publication_completed_history ON authoring.document_publication_binding USING btree (published_at, id) WHERE (status = 'PUBLISHED'::text);
+
+
+--
 -- Name: idx_authoring_publication_history_git; Type: INDEX; Schema: authoring; Owner: -
 --
 
@@ -29367,6 +33219,20 @@ CREATE UNIQUE INDEX uq_core_document_published_revision ON core.article_revision
 --
 
 CREATE UNIQUE INDEX uq_knowledge_conflict_open_fingerprint ON core.conflict USING btree (workspace_id, fingerprint) WHERE (status <> ALL (ARRAY['RESOLVED'::text, 'ACCEPTED_DIVERGENCE'::text]));
+
+
+--
+-- Name: uq_source_version_observation_predecessor; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_source_version_observation_predecessor ON core.source_version USING btree (observation_predecessor_id) WHERE (observation_predecessor_id IS NOT NULL);
+
+
+--
+-- Name: uq_source_version_source_hash; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_source_version_source_hash ON core.source_version USING btree (source_id, content_hash) WHERE (observation_predecessor_id IS NULL);
 
 
 --
@@ -30161,6 +34027,48 @@ CREATE UNIQUE INDEX uq_workspace_switch_inflight ON ops.workspace_switch USING b
 
 
 --
+-- Name: anchor_proposal_page; Type: INDEX; Schema: organizing; Owner: -
+--
+
+CREATE INDEX anchor_proposal_page ON organizing.anchor_proposal USING btree (workspace_id, anchor_id, kind, id);
+
+
+--
+-- Name: anchor_recommendation_request_anchor_page; Type: INDEX; Schema: organizing; Owner: -
+--
+
+CREATE INDEX anchor_recommendation_request_anchor_page ON organizing.anchor_recommendation_request USING btree (workspace_id, anchor_id, id) WHERE (anchor_id IS NOT NULL);
+
+
+--
+-- Name: anchor_recommendation_request_page; Type: INDEX; Schema: organizing; Owner: -
+--
+
+CREATE INDEX anchor_recommendation_request_page ON organizing.anchor_recommendation_request USING btree (workspace_id, note_id, id);
+
+
+--
+-- Name: anchor_source_discovery_anchor; Type: INDEX; Schema: organizing; Owner: -
+--
+
+CREATE INDEX anchor_source_discovery_anchor ON organizing.anchor_source_discovery USING btree (workspace_id, anchor_id, scope_version, status);
+
+
+--
+-- Name: anchor_source_discovery_due; Type: INDEX; Schema: organizing; Owner: -
+--
+
+CREATE INDEX anchor_source_discovery_due ON organizing.anchor_source_discovery USING btree (status, next_check_at, created_at, id) WHERE (status = ANY (ARRAY['WAITING_PROFILE'::text, 'PREPARED'::text]));
+
+
+--
+-- Name: idx_anchor_fusion_request_pending; Type: INDEX; Schema: organizing; Owner: -
+--
+
+CREATE INDEX idx_anchor_fusion_request_pending ON organizing.anchor_fusion_request USING btree (created_at, id) WHERE (status = 'PENDING'::text);
+
+
+--
 -- Name: idx_organizing_draft_material_version; Type: INDEX; Schema: organizing; Owner: -
 --
 
@@ -30217,6 +34125,20 @@ CREATE INDEX idx_organizing_template_visible ON organizing.template USING btree 
 
 
 --
+-- Name: idx_synthesis_body_impact_base; Type: INDEX; Schema: organizing; Owner: -
+--
+
+CREATE INDEX idx_synthesis_body_impact_base ON organizing.synthesis_body_impact USING btree (workspace_id, note_id, base_revision_id, id);
+
+
+--
+-- Name: idx_synthesis_body_reference_upstream; Type: INDEX; Schema: organizing; Owner: -
+--
+
+CREATE INDEX idx_synthesis_body_reference_upstream ON organizing.synthesis_revision_body_reference USING btree (workspace_id, upstream_note_id, upstream_revision_id);
+
+
+--
 -- Name: idx_synthesis_note_workspace_updated; Type: INDEX; Schema: organizing; Owner: -
 --
 
@@ -30235,6 +34157,55 @@ CREATE INDEX idx_synthesis_processing_list ON organizing.synthesis_processing US
 --
 
 CREATE INDEX idx_synthesis_revision_source_version ON organizing.synthesis_revision_source USING btree (workspace_id, source_version_id, note_id);
+
+
+--
+-- Name: idx_synthesis_source_impact_note; Type: INDEX; Schema: organizing; Owner: -
+--
+
+CREATE INDEX idx_synthesis_source_impact_note ON organizing.synthesis_source_impact USING btree (workspace_id, note_id);
+
+
+--
+-- Name: idx_synthesis_supplement_page; Type: INDEX; Schema: organizing; Owner: -
+--
+
+CREATE INDEX idx_synthesis_supplement_page ON organizing.synthesis_source_supplement USING btree (workspace_id, note_id, created_at DESC, id DESC);
+
+
+--
+-- Name: knowledge_anchor_workspace_page; Type: INDEX; Schema: organizing; Owner: -
+--
+
+CREATE INDEX knowledge_anchor_workspace_page ON organizing.knowledge_anchor USING btree (workspace_id, id);
+
+
+--
+-- Name: synthesis_goal_discovering; Type: INDEX; Schema: organizing; Owner: -
+--
+
+CREATE INDEX synthesis_goal_discovering ON organizing.synthesis_goal_request USING btree (workspace_id, next_check_at, created_at, id) WHERE (status = 'DISCOVERING'::text);
+
+
+--
+-- Name: synthesis_goal_selection_pending; Type: INDEX; Schema: organizing; Owner: -
+--
+
+CREATE INDEX synthesis_goal_selection_pending ON organizing.synthesis_goal_selection USING btree (workspace_id, created_at, id) WHERE ((status = 'PENDING'::text) AND (scheduled_workflow_id IS NULL));
+
+
+--
+-- Name: synthesis_source_review_one_active; Type: INDEX; Schema: organizing; Owner: -
+--
+
+CREATE UNIQUE INDEX synthesis_source_review_one_active ON organizing.synthesis_manuscript_source_review USING btree (workspace_id, origin_processing_id, origin_workflow_run_id) WHERE (status = ANY (ARRAY['PENDING'::text, 'PREPARED'::text, 'RUNNING'::text, 'REVIEWED'::text, 'RECOVERY_REQUIRED'::text]));
+
+
+--
+-- Name: synthesis_source_review_origin; Type: INDEX; Schema: organizing; Owner: -
+--
+
+CREATE INDEX synthesis_source_review_origin ON organizing.synthesis_manuscript_source_review USING btree (workspace_id, origin_processing_id, created_at, id);
 
 
 --
@@ -31155,6 +35126,13 @@ CREATE TRIGGER authoring_generated_revision_validate_insert BEFORE INSERT ON aut
 
 
 --
+-- Name: document_publication_reservation authoring_publication_merge_validate; Type: TRIGGER; Schema: authoring; Owner: -
+--
+
+CREATE TRIGGER authoring_publication_merge_validate BEFORE INSERT OR UPDATE ON authoring.document_publication_reservation FOR EACH ROW EXECUTE FUNCTION authoring.validate_publication_merge_baseline();
+
+
+--
 -- Name: document_publication_binding authoring_publication_reject_truncate; Type: TRIGGER; Schema: authoring; Owner: -
 --
 
@@ -31852,6 +35830,13 @@ CREATE TRIGGER source_version_bind_workspace BEFORE INSERT ON core.source_versio
 --
 
 CREATE TRIGGER source_version_reject_update_delete BEFORE DELETE OR UPDATE ON core.source_version FOR EACH ROW EXECUTE FUNCTION core.reject_source_version_mutation();
+
+
+--
+-- Name: source_version source_version_validate_reappearance; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER source_version_validate_reappearance BEFORE INSERT ON core.source_version FOR EACH ROW EXECUTE FUNCTION core.validate_source_content_reappearance();
 
 
 --
@@ -32912,6 +36897,209 @@ CREATE TRIGGER workspace_switch_reject_truncate BEFORE TRUNCATE ON ops.workspace
 
 
 --
+-- Name: knowledge_anchor anchor_creation; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER anchor_creation BEFORE INSERT ON organizing.knowledge_anchor FOR EACH ROW EXECUTE FUNCTION organizing.check_anchor_creation();
+
+
+--
+-- Name: anchor_decision anchor_decision_immutable; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER anchor_decision_immutable BEFORE DELETE OR UPDATE ON organizing.anchor_decision FOR EACH ROW EXECUTE FUNCTION organizing.guard_anchor_history();
+
+
+--
+-- Name: anchor_decision anchor_decision_valid; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER anchor_decision_valid AFTER INSERT ON organizing.anchor_decision DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION organizing.check_anchor_decision();
+
+
+--
+-- Name: anchor_proposal_evidence anchor_evidence_immutable; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER anchor_evidence_immutable BEFORE DELETE OR UPDATE ON organizing.anchor_proposal_evidence FOR EACH ROW EXECUTE FUNCTION organizing.guard_anchor_history();
+
+
+--
+-- Name: anchor_proposal_evidence anchor_evidence_tuple; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER anchor_evidence_tuple BEFORE INSERT ON organizing.anchor_proposal_evidence FOR EACH ROW EXECUTE FUNCTION organizing.validate_synthesis_source();
+
+
+--
+-- Name: anchor_fusion_request anchor_fusion_request_guard; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER anchor_fusion_request_guard BEFORE INSERT OR DELETE OR UPDATE ON organizing.anchor_fusion_request FOR EACH ROW EXECUTE FUNCTION organizing.guard_anchor_fusion_request();
+
+
+--
+-- Name: anchor_proposal anchor_proposal_immutable; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER anchor_proposal_immutable BEFORE DELETE OR UPDATE ON organizing.anchor_proposal FOR EACH ROW EXECUTE FUNCTION organizing.guard_anchor_history();
+
+
+--
+-- Name: anchor_proposal anchor_proposal_valid; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER anchor_proposal_valid AFTER INSERT ON organizing.anchor_proposal DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION organizing.check_anchor_proposal();
+
+
+--
+-- Name: anchor_receipt anchor_receipt_immutable; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER anchor_receipt_immutable BEFORE DELETE OR UPDATE ON organizing.anchor_receipt FOR EACH ROW EXECUTE FUNCTION organizing.guard_anchor_history();
+
+
+--
+-- Name: anchor_recommendation_request anchor_recommendation_schedule_guard; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER anchor_recommendation_schedule_guard BEFORE INSERT OR UPDATE ON organizing.anchor_recommendation_request FOR EACH ROW EXECUTE FUNCTION organizing.guard_anchor_recommendation_schedule();
+
+
+--
+-- Name: anchor_scope_revision anchor_scope_accepted; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER anchor_scope_accepted AFTER INSERT ON organizing.anchor_scope_revision DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION organizing.check_anchor_scope_acceptance();
+
+
+--
+-- Name: anchor_scope_revision anchor_scope_immutable; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER anchor_scope_immutable BEFORE DELETE OR UPDATE ON organizing.anchor_scope_revision FOR EACH ROW EXECUTE FUNCTION organizing.guard_anchor_history();
+
+
+--
+-- Name: anchor_source_discovery anchor_source_discovery_guard; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER anchor_source_discovery_guard BEFORE INSERT OR DELETE OR UPDATE ON organizing.anchor_source_discovery FOR EACH ROW EXECUTE FUNCTION organizing.guard_anchor_source_discovery();
+
+
+--
+-- Name: knowledge_anchor anchor_transition; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER anchor_transition BEFORE DELETE OR UPDATE ON organizing.knowledge_anchor FOR EACH ROW EXECUTE FUNCTION organizing.guard_anchor_transition();
+
+
+--
+-- Name: synthesis_goal_selection goal_selection_guard; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER goal_selection_guard BEFORE INSERT OR DELETE OR UPDATE ON organizing.synthesis_goal_selection FOR EACH ROW EXECUTE FUNCTION organizing.guard_goal_selection();
+
+
+--
+-- Name: synthesis_goal_selection_manifest goal_selection_manifest_complete; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER goal_selection_manifest_complete AFTER INSERT ON organizing.synthesis_goal_selection_manifest DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION organizing.check_goal_selection_manifest();
+
+
+--
+-- Name: synthesis_goal_selection_manifest goal_selection_manifest_guard; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER goal_selection_manifest_guard BEFORE INSERT OR DELETE OR UPDATE ON organizing.synthesis_goal_selection_manifest FOR EACH ROW EXECUTE FUNCTION organizing.guard_goal_selection_manifest();
+
+
+--
+-- Name: synthesis_goal_selection_manifest goal_selection_manifest_truncate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER goal_selection_manifest_truncate BEFORE TRUNCATE ON organizing.synthesis_goal_selection_manifest FOR EACH STATEMENT EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_goal_selection_retry goal_selection_retry_immutable; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER goal_selection_retry_immutable BEFORE DELETE OR UPDATE ON organizing.synthesis_goal_selection_retry FOR EACH ROW EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_goal_selection_retry goal_selection_retry_truncate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER goal_selection_retry_truncate BEFORE TRUNCATE ON organizing.synthesis_goal_selection_retry FOR EACH STATEMENT EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_goal_selection goal_selection_truncate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER goal_selection_truncate BEFORE TRUNCATE ON organizing.synthesis_goal_selection FOR EACH STATEMENT EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_manuscript_source_review_command immutable; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER immutable BEFORE DELETE OR UPDATE ON organizing.synthesis_manuscript_source_review_command FOR EACH ROW EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_manuscript_source_review_recovery immutable; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER immutable BEFORE DELETE OR UPDATE ON organizing.synthesis_manuscript_source_review_recovery FOR EACH ROW EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_manuscript_source_review_recovery_receipt immutable; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER immutable BEFORE DELETE OR UPDATE ON organizing.synthesis_manuscript_source_review_recovery_receipt FOR EACH ROW EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_manuscript_source_review_result immutable; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER immutable BEFORE DELETE OR UPDATE ON organizing.synthesis_manuscript_source_review_result FOR EACH ROW EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_manuscript_source_review_command no_truncate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER no_truncate BEFORE TRUNCATE ON organizing.synthesis_manuscript_source_review_command FOR EACH STATEMENT EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_manuscript_source_review_recovery no_truncate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER no_truncate BEFORE TRUNCATE ON organizing.synthesis_manuscript_source_review_recovery FOR EACH STATEMENT EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_manuscript_source_review_recovery_receipt no_truncate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER no_truncate BEFORE TRUNCATE ON organizing.synthesis_manuscript_source_review_recovery_receipt FOR EACH STATEMENT EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_manuscript_source_review_result no_truncate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER no_truncate BEFORE TRUNCATE ON organizing.synthesis_manuscript_source_review_result FOR EACH STATEMENT EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
 -- Name: draft organizing_draft_current_version_validate; Type: TRIGGER; Schema: organizing; Owner: -
 --
 
@@ -33136,6 +37324,125 @@ CREATE TRIGGER synthesis_apply_reject_truncate BEFORE TRUNCATE ON organizing.syn
 
 
 --
+-- Name: synthesis_body_impact synthesis_body_impact_append_only; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_body_impact_append_only BEFORE DELETE OR UPDATE ON organizing.synthesis_body_impact FOR EACH ROW EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_body_impact synthesis_body_impact_reject_truncate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_body_impact_reject_truncate BEFORE TRUNCATE ON organizing.synthesis_body_impact FOR EACH STATEMENT EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_body_impact synthesis_body_impact_validate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_body_impact_validate BEFORE INSERT ON organizing.synthesis_body_impact FOR EACH ROW EXECUTE FUNCTION organizing.validate_synthesis_body_impact();
+
+
+--
+-- Name: synthesis_revision_body_reference synthesis_body_reference_append_only; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_body_reference_append_only BEFORE DELETE OR UPDATE ON organizing.synthesis_revision_body_reference FOR EACH ROW EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_revision_body_reference synthesis_body_reference_reject_truncate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_body_reference_reject_truncate BEFORE TRUNCATE ON organizing.synthesis_revision_body_reference FOR EACH STATEMENT EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_revision_body_reference synthesis_body_reference_validate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_body_reference_validate BEFORE INSERT ON organizing.synthesis_revision_body_reference FOR EACH ROW EXECUTE FUNCTION organizing.validate_synthesis_revision_body_reference();
+
+
+--
+-- Name: synthesis_execution synthesis_body_refresh_execution_guard; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_body_refresh_execution_guard BEFORE INSERT OR UPDATE ON organizing.synthesis_execution FOR EACH ROW EXECUTE FUNCTION organizing.guard_synthesis_body_refresh_execution();
+
+
+--
+-- Name: synthesis_execution synthesis_body_refresh_frozen_guard; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_body_refresh_frozen_guard BEFORE INSERT OR UPDATE ON organizing.synthesis_execution FOR EACH ROW EXECUTE FUNCTION organizing.guard_synthesis_body_refresh_frozen();
+
+
+--
+-- Name: synthesis_processing synthesis_body_refresh_processing_guard; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_body_refresh_processing_guard BEFORE INSERT OR UPDATE ON organizing.synthesis_processing FOR EACH ROW EXECUTE FUNCTION organizing.guard_synthesis_body_refresh_processing();
+
+
+--
+-- Name: synthesis_apply_receipt synthesis_body_refresh_receipt_guard; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_body_refresh_receipt_guard BEFORE INSERT ON organizing.synthesis_apply_receipt FOR EACH ROW EXECUTE FUNCTION organizing.guard_synthesis_body_refresh_receipt();
+
+
+--
+-- Name: synthesis_body_refresh_request synthesis_body_refresh_request_append_only; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_body_refresh_request_append_only BEFORE DELETE OR UPDATE ON organizing.synthesis_body_refresh_request FOR EACH ROW EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_body_refresh_request synthesis_body_refresh_request_reject_truncate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_body_refresh_request_reject_truncate BEFORE TRUNCATE ON organizing.synthesis_body_refresh_request FOR EACH STATEMENT EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_body_refresh_request synthesis_body_refresh_request_validate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_body_refresh_request_validate BEFORE INSERT ON organizing.synthesis_body_refresh_request FOR EACH ROW EXECUTE FUNCTION organizing.validate_synthesis_body_refresh_request();
+
+
+--
+-- Name: synthesis_candidate_remerge_event synthesis_candidate_remerge_closure; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER synthesis_candidate_remerge_closure AFTER INSERT ON organizing.synthesis_candidate_remerge_event DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION organizing.verify_synthesis_candidate_remerge_closure();
+
+
+--
+-- Name: synthesis_candidate_remerge_event synthesis_candidate_remerge_immutable; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_candidate_remerge_immutable BEFORE DELETE OR UPDATE ON organizing.synthesis_candidate_remerge_event FOR EACH ROW EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_candidate_remerge_event synthesis_candidate_remerge_no_truncate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_candidate_remerge_no_truncate BEFORE TRUNCATE ON organizing.synthesis_candidate_remerge_event FOR EACH STATEMENT EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_candidate_remerge_event synthesis_candidate_remerge_validate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_candidate_remerge_validate BEFORE INSERT ON organizing.synthesis_candidate_remerge_event FOR EACH ROW EXECUTE FUNCTION organizing.validate_synthesis_candidate_remerge_event();
+
+
+--
 -- Name: synthesis_execution synthesis_execution_guard; Type: TRIGGER; Schema: organizing; Owner: -
 --
 
@@ -33147,6 +37454,258 @@ CREATE TRIGGER synthesis_execution_guard BEFORE INSERT OR DELETE OR UPDATE ON or
 --
 
 CREATE TRIGGER synthesis_execution_no_truncate BEFORE TRUNCATE ON organizing.synthesis_execution FOR EACH STATEMENT EXECUTE FUNCTION organizing.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_processing synthesis_fusion_processing_guard; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_fusion_processing_guard BEFORE INSERT OR UPDATE ON organizing.synthesis_processing FOR EACH ROW EXECUTE FUNCTION organizing.guard_synthesis_fusion_processing();
+
+
+--
+-- Name: synthesis_goal_catalog_batch synthesis_goal_catalog_batch_append_only; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_goal_catalog_batch_append_only BEFORE DELETE OR UPDATE ON organizing.synthesis_goal_catalog_batch FOR EACH ROW EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_goal_catalog_batch synthesis_goal_catalog_batch_guard; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_goal_catalog_batch_guard BEFORE INSERT ON organizing.synthesis_goal_catalog_batch FOR EACH ROW EXECUTE FUNCTION organizing.guard_synthesis_goal_catalog_batch();
+
+
+--
+-- Name: synthesis_goal_catalog_batch synthesis_goal_catalog_batch_reject_truncate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_goal_catalog_batch_reject_truncate BEFORE TRUNCATE ON organizing.synthesis_goal_catalog_batch FOR EACH STATEMENT EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_goal_catalog_batch synthesis_goal_catalog_commit; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER synthesis_goal_catalog_commit AFTER INSERT ON organizing.synthesis_goal_catalog_batch DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION organizing.check_synthesis_goal_catalog_commit();
+
+
+--
+-- Name: synthesis_goal_catalog_item synthesis_goal_catalog_item_append_only; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_goal_catalog_item_append_only BEFORE DELETE OR UPDATE ON organizing.synthesis_goal_catalog_item FOR EACH ROW EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_goal_catalog_item synthesis_goal_catalog_item_guard; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_goal_catalog_item_guard BEFORE INSERT ON organizing.synthesis_goal_catalog_item FOR EACH ROW EXECUTE FUNCTION organizing.guard_synthesis_goal_catalog_batch();
+
+
+--
+-- Name: synthesis_goal_catalog_item synthesis_goal_catalog_item_reject_truncate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_goal_catalog_item_reject_truncate BEFORE TRUNCATE ON organizing.synthesis_goal_catalog_item FOR EACH STATEMENT EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_execution synthesis_goal_execution_guard; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_goal_execution_guard BEFORE INSERT OR UPDATE ON organizing.synthesis_execution FOR EACH ROW EXECUTE FUNCTION organizing.guard_synthesis_goal_execution();
+
+
+--
+-- Name: synthesis_processing synthesis_goal_processing_guard; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_goal_processing_guard BEFORE INSERT OR UPDATE ON organizing.synthesis_processing FOR EACH ROW EXECUTE FUNCTION organizing.guard_synthesis_goal_processing();
+
+
+--
+-- Name: synthesis_apply_receipt synthesis_goal_receipt_guard; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_goal_receipt_guard BEFORE INSERT ON organizing.synthesis_apply_receipt FOR EACH ROW EXECUTE FUNCTION organizing.guard_synthesis_goal_receipt();
+
+
+--
+-- Name: synthesis_goal_request synthesis_goal_request_guard; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_goal_request_guard BEFORE INSERT OR DELETE OR UPDATE ON organizing.synthesis_goal_request FOR EACH ROW EXECUTE FUNCTION organizing.guard_synthesis_goal_request();
+
+
+--
+-- Name: synthesis_goal_request synthesis_goal_request_reject_truncate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_goal_request_reject_truncate BEFORE TRUNCATE ON organizing.synthesis_goal_request FOR EACH STATEMENT EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_historical_republish_event synthesis_historical_republish_closure; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER synthesis_historical_republish_closure AFTER INSERT ON organizing.synthesis_historical_republish_event DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION organizing.verify_synthesis_historical_republish_closure();
+
+
+--
+-- Name: synthesis_historical_republish_event synthesis_historical_republish_immutable; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_historical_republish_immutable BEFORE DELETE OR UPDATE ON organizing.synthesis_historical_republish_event FOR EACH ROW EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_historical_republish_event synthesis_historical_republish_no_truncate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_historical_republish_no_truncate BEFORE TRUNCATE ON organizing.synthesis_historical_republish_event FOR EACH STATEMENT EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_historical_republish_event synthesis_historical_republish_validate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_historical_republish_validate BEFORE INSERT ON organizing.synthesis_historical_republish_event FOR EACH ROW EXECUTE FUNCTION organizing.validate_synthesis_historical_republish_event();
+
+
+--
+-- Name: synthesis_manuscript_application synthesis_manuscript_application_guard; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_manuscript_application_guard BEFORE INSERT OR DELETE OR UPDATE ON organizing.synthesis_manuscript_application FOR EACH ROW EXECUTE FUNCTION organizing.guard_synthesis_manuscript_application();
+
+
+--
+-- Name: synthesis_manuscript_application synthesis_manuscript_application_truncate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_manuscript_application_truncate BEFORE TRUNCATE ON organizing.synthesis_manuscript_application FOR EACH STATEMENT EXECUTE FUNCTION organizing.guard_synthesis_manuscript_application();
+
+
+--
+-- Name: synthesis_manuscript_attempt synthesis_manuscript_attempt_immutable; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_manuscript_attempt_immutable BEFORE DELETE OR UPDATE ON organizing.synthesis_manuscript_attempt FOR EACH ROW EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_manuscript_attempt synthesis_manuscript_attempt_no_truncate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_manuscript_attempt_no_truncate BEFORE TRUNCATE ON organizing.synthesis_manuscript_attempt FOR EACH STATEMENT EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_manuscript_attempt synthesis_manuscript_attempt_validate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_manuscript_attempt_validate BEFORE INSERT ON organizing.synthesis_manuscript_attempt FOR EACH ROW EXECUTE FUNCTION organizing.validate_synthesis_manuscript_attempt();
+
+
+--
+-- Name: synthesis_manuscript_capture synthesis_manuscript_capture_immutable; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_manuscript_capture_immutable BEFORE DELETE OR UPDATE ON organizing.synthesis_manuscript_capture FOR EACH ROW EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_manuscript_capture synthesis_manuscript_capture_no_truncate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_manuscript_capture_no_truncate BEFORE TRUNCATE ON organizing.synthesis_manuscript_capture FOR EACH STATEMENT EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_manuscript_capture synthesis_manuscript_capture_validate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_manuscript_capture_validate BEFORE INSERT ON organizing.synthesis_manuscript_capture FOR EACH ROW EXECUTE FUNCTION organizing.validate_synthesis_manuscript_capture();
+
+
+--
+-- Name: synthesis_manuscript_receipt synthesis_manuscript_receipt_immutable; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_manuscript_receipt_immutable BEFORE DELETE OR UPDATE ON organizing.synthesis_manuscript_receipt FOR EACH ROW EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_manuscript_receipt synthesis_manuscript_receipt_no_truncate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_manuscript_receipt_no_truncate BEFORE TRUNCATE ON organizing.synthesis_manuscript_receipt FOR EACH STATEMENT EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_manuscript_receipt synthesis_manuscript_receipt_validate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_manuscript_receipt_validate BEFORE INSERT ON organizing.synthesis_manuscript_receipt FOR EACH ROW EXECUTE FUNCTION organizing.validate_synthesis_manuscript_receipt();
+
+
+--
+-- Name: synthesis_manuscript_review_decision synthesis_manuscript_review_closure; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER synthesis_manuscript_review_closure AFTER INSERT ON organizing.synthesis_manuscript_review_decision DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION organizing.verify_synthesis_manuscript_review_closure();
+
+
+--
+-- Name: synthesis_manuscript_review_decision synthesis_manuscript_review_decision_immutable; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_manuscript_review_decision_immutable BEFORE DELETE OR UPDATE ON organizing.synthesis_manuscript_review_decision FOR EACH ROW EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_manuscript_review_decision synthesis_manuscript_review_decision_no_truncate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_manuscript_review_decision_no_truncate BEFORE TRUNCATE ON organizing.synthesis_manuscript_review_decision FOR EACH STATEMENT EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_manuscript_review_decision synthesis_manuscript_review_decision_validate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_manuscript_review_decision_validate BEFORE INSERT ON organizing.synthesis_manuscript_review_decision FOR EACH ROW EXECUTE FUNCTION organizing.validate_synthesis_manuscript_review_decision();
+
+
+--
+-- Name: synthesis_manuscript_root_identity synthesis_manuscript_root_identity_guard; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_manuscript_root_identity_guard BEFORE INSERT OR DELETE OR UPDATE ON organizing.synthesis_manuscript_root_identity FOR EACH ROW EXECUTE FUNCTION organizing.guard_synthesis_manuscript_root_identity();
+
+
+--
+-- Name: synthesis_manuscript_root_identity synthesis_manuscript_root_identity_truncate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_manuscript_root_identity_truncate BEFORE TRUNCATE ON organizing.synthesis_manuscript_root_identity FOR EACH STATEMENT EXECUTE FUNCTION organizing.guard_synthesis_manuscript_root_identity();
+
+
+--
+-- Name: synthesis_revision synthesis_manuscript_runtime_closure; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER synthesis_manuscript_runtime_closure AFTER INSERT ON organizing.synthesis_revision DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION organizing.verify_synthesis_manuscript_runtime_closure();
+
+
+--
+-- Name: synthesis_revision synthesis_manuscript_verify_closure; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER synthesis_manuscript_verify_closure AFTER INSERT ON organizing.synthesis_revision DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION organizing.verify_synthesis_manuscript_closure();
 
 
 --
@@ -33227,6 +37786,20 @@ CREATE TRIGGER synthesis_revision_append_only BEFORE DELETE OR UPDATE ON organiz
 
 
 --
+-- Name: synthesis_revision synthesis_revision_manuscript_validate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_revision_manuscript_validate BEFORE INSERT ON organizing.synthesis_revision FOR EACH ROW EXECUTE FUNCTION organizing.validate_synthesis_revision_manuscript();
+
+
+--
+-- Name: synthesis_revision synthesis_revision_project_body_references; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_revision_project_body_references AFTER INSERT ON organizing.synthesis_revision FOR EACH ROW EXECUTE FUNCTION organizing.project_synthesis_revision_body_references();
+
+
+--
 -- Name: synthesis_revision synthesis_revision_reject_truncate; Type: TRIGGER; Schema: organizing; Owner: -
 --
 
@@ -33255,10 +37828,66 @@ CREATE TRIGGER synthesis_source_append_only BEFORE DELETE OR UPDATE ON organizin
 
 
 --
+-- Name: synthesis_manuscript_source_evidence synthesis_source_evidence_closure; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER synthesis_source_evidence_closure AFTER INSERT ON organizing.synthesis_manuscript_source_evidence DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION organizing.verify_synthesis_source_evidence_closure();
+
+
+--
+-- Name: synthesis_source_impact synthesis_source_impact_append_only; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_source_impact_append_only BEFORE DELETE OR UPDATE ON organizing.synthesis_source_impact FOR EACH ROW EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_source_impact synthesis_source_impact_reject_truncate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_source_impact_reject_truncate BEFORE TRUNCATE ON organizing.synthesis_source_impact FOR EACH STATEMENT EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_source_impact synthesis_source_impact_validate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_source_impact_validate BEFORE INSERT ON organizing.synthesis_source_impact FOR EACH ROW EXECUTE FUNCTION organizing.validate_synthesis_source_impact();
+
+
+--
 -- Name: synthesis_revision_source synthesis_source_membership; Type: TRIGGER; Schema: organizing; Owner: -
 --
 
 CREATE TRIGGER synthesis_source_membership BEFORE INSERT ON organizing.synthesis_revision_source FOR EACH ROW EXECUTE FUNCTION organizing.validate_synthesis_membership();
+
+
+--
+-- Name: synthesis_revision_source synthesis_source_profile_snapshot; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_source_profile_snapshot BEFORE INSERT ON organizing.synthesis_revision_source FOR EACH ROW EXECUTE FUNCTION organizing.freeze_synthesis_source_profile();
+
+
+--
+-- Name: synthesis_source_promotion synthesis_source_promotion_append_only; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_source_promotion_append_only BEFORE DELETE OR UPDATE ON organizing.synthesis_source_promotion FOR EACH ROW EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_source_promotion synthesis_source_promotion_guard; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_source_promotion_guard BEFORE INSERT ON organizing.synthesis_source_promotion FOR EACH ROW EXECUTE FUNCTION organizing.guard_synthesis_source_promotion();
+
+
+--
+-- Name: synthesis_source_promotion synthesis_source_promotion_reject_truncate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_source_promotion_reject_truncate BEFORE TRUNCATE ON organizing.synthesis_source_promotion FOR EACH STATEMENT EXECUTE FUNCTION authoring.reject_immutable_mutation();
 
 
 --
@@ -33269,10 +37898,129 @@ CREATE TRIGGER synthesis_source_reject_truncate BEFORE TRUNCATE ON organizing.sy
 
 
 --
+-- Name: synthesis_manuscript_source_review synthesis_source_review_closure; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER synthesis_source_review_closure AFTER INSERT OR UPDATE ON organizing.synthesis_manuscript_source_review DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION organizing.verify_synthesis_source_review_closure();
+
+
+--
+-- Name: synthesis_manuscript_source_review_command synthesis_source_review_command_guard; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_source_review_command_guard BEFORE INSERT ON organizing.synthesis_manuscript_source_review_command FOR EACH ROW EXECUTE FUNCTION organizing.guard_synthesis_source_review_command();
+
+
+--
+-- Name: synthesis_manuscript_source_evidence synthesis_source_review_evidence_immutable; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_source_review_evidence_immutable BEFORE DELETE OR UPDATE ON organizing.synthesis_manuscript_source_evidence FOR EACH ROW EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_manuscript_source_evidence synthesis_source_review_evidence_no_truncate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_source_review_evidence_no_truncate BEFORE TRUNCATE ON organizing.synthesis_manuscript_source_evidence FOR EACH STATEMENT EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_manuscript_source_evidence synthesis_source_review_evidence_source; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_source_review_evidence_source BEFORE INSERT ON organizing.synthesis_manuscript_source_evidence FOR EACH ROW EXECUTE FUNCTION organizing.validate_synthesis_source();
+
+
+--
+-- Name: synthesis_manuscript_source_evidence synthesis_source_review_evidence_validate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_source_review_evidence_validate BEFORE INSERT ON organizing.synthesis_manuscript_source_evidence FOR EACH ROW EXECUTE FUNCTION organizing.validate_synthesis_source_review_evidence();
+
+
+--
+-- Name: synthesis_manuscript_source_review synthesis_source_review_guard; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_source_review_guard BEFORE INSERT OR DELETE OR UPDATE ON organizing.synthesis_manuscript_source_review FOR EACH ROW EXECUTE FUNCTION organizing.guard_synthesis_source_review();
+
+
+--
+-- Name: synthesis_manuscript_source_review synthesis_source_review_no_truncate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_source_review_no_truncate BEFORE TRUNCATE ON organizing.synthesis_manuscript_source_review FOR EACH STATEMENT EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_manuscript_source_review_recovery synthesis_source_review_recovery_guard; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_source_review_recovery_guard BEFORE INSERT ON organizing.synthesis_manuscript_source_review_recovery FOR EACH ROW EXECUTE FUNCTION organizing.guard_synthesis_source_review_recovery();
+
+
+--
+-- Name: synthesis_manuscript_source_review_recovery_receipt synthesis_source_review_recovery_receipt_closure; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER synthesis_source_review_recovery_receipt_closure AFTER INSERT ON organizing.synthesis_manuscript_source_review_recovery_receipt DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION organizing.verify_synthesis_source_review_closure();
+
+
+--
+-- Name: synthesis_manuscript_source_review_recovery_receipt synthesis_source_review_recovery_receipt_guard; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_source_review_recovery_receipt_guard BEFORE INSERT ON organizing.synthesis_manuscript_source_review_recovery_receipt FOR EACH ROW EXECUTE FUNCTION organizing.guard_synthesis_source_review_recovery_receipt();
+
+
+--
+-- Name: synthesis_manuscript_source_review_result synthesis_source_review_result_verify; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER synthesis_source_review_result_verify AFTER INSERT ON organizing.synthesis_manuscript_source_review_result DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION organizing.verify_synthesis_source_review_result();
+
+
+--
+-- Name: synthesis_manuscript_source_review synthesis_source_review_successor_command; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER synthesis_source_review_successor_command AFTER INSERT ON organizing.synthesis_manuscript_source_review DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION organizing.verify_synthesis_source_review_successor_command();
+
+
+--
 -- Name: synthesis_revision_source synthesis_source_validate; Type: TRIGGER; Schema: organizing; Owner: -
 --
 
 CREATE TRIGGER synthesis_source_validate BEFORE INSERT ON organizing.synthesis_revision_source FOR EACH ROW EXECUTE FUNCTION organizing.validate_synthesis_source();
+
+
+--
+-- Name: synthesis_source_supplement synthesis_supplement_append_only; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_supplement_append_only BEFORE DELETE OR UPDATE ON organizing.synthesis_source_supplement FOR EACH ROW EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_source_supplement synthesis_supplement_item_validate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_supplement_item_validate BEFORE INSERT ON organizing.synthesis_source_supplement FOR EACH ROW EXECUTE FUNCTION organizing.validate_synthesis_supplement_item();
+
+
+--
+-- Name: synthesis_source_supplement synthesis_supplement_reject_truncate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_supplement_reject_truncate BEFORE TRUNCATE ON organizing.synthesis_source_supplement FOR EACH STATEMENT EXECUTE FUNCTION authoring.reject_immutable_mutation();
+
+
+--
+-- Name: synthesis_source_supplement synthesis_supplement_source_validate; Type: TRIGGER; Schema: organizing; Owner: -
+--
+
+CREATE TRIGGER synthesis_supplement_source_validate BEFORE INSERT ON organizing.synthesis_source_supplement FOR EACH ROW EXECUTE FUNCTION organizing.validate_synthesis_source();
 
 
 --
@@ -33462,6 +38210,20 @@ CREATE TRIGGER retrieval_source_manifest_reject_mutation BEFORE DELETE OR UPDATE
 --
 
 CREATE TRIGGER retrieval_source_manifest_validate_insert AFTER INSERT ON retrieval.index_manifest_source REFERENCING NEW TABLE AS new_source_rows FOR EACH STATEMENT EXECUTE FUNCTION retrieval.validate_manifest_source_statement();
+
+
+--
+-- Name: outbox_event synthesis_publication_event_reject_truncate; Type: TRIGGER; Schema: workflow; Owner: -
+--
+
+CREATE TRIGGER synthesis_publication_event_reject_truncate BEFORE TRUNCATE ON workflow.outbox_event FOR EACH STATEMENT EXECUTE FUNCTION organizing.validate_synthesis_publication_event();
+
+
+--
+-- Name: outbox_event synthesis_publication_event_validate; Type: TRIGGER; Schema: workflow; Owner: -
+--
+
+CREATE TRIGGER synthesis_publication_event_validate BEFORE INSERT OR DELETE OR UPDATE ON workflow.outbox_event FOR EACH ROW EXECUTE FUNCTION organizing.validate_synthesis_publication_event();
 
 
 --
@@ -34595,6 +39357,38 @@ ALTER TABLE ONLY authoring.generated_publication_retirement
 
 
 --
+-- Name: document_publication_reservation publication_historical_republish_fk; Type: FK CONSTRAINT; Schema: authoring; Owner: -
+--
+
+ALTER TABLE ONLY authoring.document_publication_reservation
+    ADD CONSTRAINT publication_historical_republish_fk FOREIGN KEY (historical_republish_id, workspace_id) REFERENCES organizing.synthesis_historical_republish_event(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: document_publication_reservation publication_merge_capture_fk; Type: FK CONSTRAINT; Schema: authoring; Owner: -
+--
+
+ALTER TABLE ONLY authoring.document_publication_reservation
+    ADD CONSTRAINT publication_merge_capture_fk FOREIGN KEY (merge_capture_id, workspace_id) REFERENCES organizing.synthesis_manuscript_capture(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: document_publication_reservation publication_merge_published_fk; Type: FK CONSTRAINT; Schema: authoring; Owner: -
+--
+
+ALTER TABLE ONLY authoring.document_publication_reservation
+    ADD CONSTRAINT publication_merge_published_fk FOREIGN KEY (merge_published_revision_id) REFERENCES core.article_revision(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: document_publication_reservation publication_merge_receipt_fk; Type: FK CONSTRAINT; Schema: authoring; Owner: -
+--
+
+ALTER TABLE ONLY authoring.document_publication_reservation
+    ADD CONSTRAINT publication_merge_receipt_fk FOREIGN KEY (merge_receipt_id, workspace_id) REFERENCES organizing.synthesis_manuscript_receipt(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
 -- Name: working_draft_command working_draft_command_workspace_id_fkey; Type: FK CONSTRAINT; Schema: authoring; Owner: -
 --
 
@@ -35227,6 +40021,14 @@ ALTER TABLE ONLY core.source_version
 
 
 --
+-- Name: source_version source_version_observation_predecessor_fk; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.source_version
+    ADD CONSTRAINT source_version_observation_predecessor_fk FOREIGN KEY (observation_predecessor_id, source_id) REFERENCES core.source_version(id, source_id) ON DELETE RESTRICT;
+
+
+--
 -- Name: source_version source_version_source_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
 --
 
@@ -35256,6 +40058,14 @@ ALTER TABLE ONLY core.topic_alias
 
 ALTER TABLE ONLY core.topic
     ADD CONSTRAINT topic_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES core.workspace(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: workspace_discovery_failure workspace_discovery_failure_workspace_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.workspace_discovery_failure
+    ADD CONSTRAINT workspace_discovery_failure_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES core.workspace(id);
 
 
 --
@@ -37027,6 +41837,190 @@ ALTER TABLE ONLY ops.workspace_switch
 
 
 --
+-- Name: anchor_decision anchor_decision_proposal_id_workspace_id_anchor_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_decision
+    ADD CONSTRAINT anchor_decision_proposal_id_workspace_id_anchor_id_fkey FOREIGN KEY (proposal_id, workspace_id, anchor_id) REFERENCES organizing.anchor_proposal(id, workspace_id, anchor_id);
+
+
+--
+-- Name: anchor_decision anchor_decision_workspace_id_receipt_key_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_decision
+    ADD CONSTRAINT anchor_decision_workspace_id_receipt_key_fkey FOREIGN KEY (workspace_id, receipt_key) REFERENCES organizing.anchor_receipt(workspace_id, idempotency_key) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: anchor_fusion_request anchor_fusion_request_ingestion_attempt_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_fusion_request
+    ADD CONSTRAINT anchor_fusion_request_ingestion_attempt_id_fkey FOREIGN KEY (ingestion_attempt_id) REFERENCES ingestion.attempt(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: anchor_fusion_request anchor_fusion_request_source_event_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_fusion_request
+    ADD CONSTRAINT anchor_fusion_request_source_event_id_fkey FOREIGN KEY (source_event_id) REFERENCES workflow.outbox_event(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: anchor_fusion_request anchor_fusion_request_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_fusion_request
+    ADD CONSTRAINT anchor_fusion_request_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES core.workspace(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: anchor_proposal anchor_proposal_anchor_id_workspace_id_scope_version_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_proposal
+    ADD CONSTRAINT anchor_proposal_anchor_id_workspace_id_scope_version_fkey FOREIGN KEY (anchor_id, workspace_id, scope_version) REFERENCES organizing.anchor_scope_revision(anchor_id, workspace_id, version);
+
+
+--
+-- Name: anchor_proposal_evidence anchor_proposal_evidence_proposal_id_workspace_id_anchor_i_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_proposal_evidence
+    ADD CONSTRAINT anchor_proposal_evidence_proposal_id_workspace_id_anchor_i_fkey FOREIGN KEY (proposal_id, workspace_id, anchor_id) REFERENCES organizing.anchor_proposal(id, workspace_id, anchor_id);
+
+
+--
+-- Name: anchor_proposal_evidence anchor_proposal_evidence_source_id_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_proposal_evidence
+    ADD CONSTRAINT anchor_proposal_evidence_source_id_workspace_id_fkey FOREIGN KEY (source_id, workspace_id) REFERENCES core.source(id, workspace_id);
+
+
+--
+-- Name: anchor_proposal_evidence anchor_proposal_evidence_source_span_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_proposal_evidence
+    ADD CONSTRAINT anchor_proposal_evidence_source_span_id_fkey FOREIGN KEY (source_span_id) REFERENCES ingestion.source_span(id);
+
+
+--
+-- Name: anchor_proposal_evidence anchor_proposal_evidence_source_version_id_parse_projectio_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_proposal_evidence
+    ADD CONSTRAINT anchor_proposal_evidence_source_version_id_parse_projectio_fkey FOREIGN KEY (source_version_id, parse_projection_id, workspace_id) REFERENCES ingestion.source_version_projection(source_version_id, parse_projection_id, workspace_id);
+
+
+--
+-- Name: anchor_proposal_evidence anchor_proposal_evidence_source_version_id_source_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_proposal_evidence
+    ADD CONSTRAINT anchor_proposal_evidence_source_version_id_source_id_fkey FOREIGN KEY (source_version_id, source_id) REFERENCES core.source_version(id, source_id);
+
+
+--
+-- Name: anchor_proposal anchor_proposal_model_run_id_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_proposal
+    ADD CONSTRAINT anchor_proposal_model_run_id_workspace_id_fkey FOREIGN KEY (model_run_id, workspace_id) REFERENCES agent.model_run(id, workspace_id);
+
+
+--
+-- Name: anchor_receipt anchor_receipt_anchor_id_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_receipt
+    ADD CONSTRAINT anchor_receipt_anchor_id_workspace_id_fkey FOREIGN KEY (anchor_id, workspace_id) REFERENCES organizing.knowledge_anchor(id, workspace_id);
+
+
+--
+-- Name: anchor_receipt anchor_receipt_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_receipt
+    ADD CONSTRAINT anchor_receipt_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES core.workspace(id);
+
+
+--
+-- Name: anchor_recommendation_request anchor_recommendation_request_anchor_id_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_recommendation_request
+    ADD CONSTRAINT anchor_recommendation_request_anchor_id_workspace_id_fkey FOREIGN KEY (anchor_id, workspace_id) REFERENCES organizing.knowledge_anchor(id, workspace_id);
+
+
+--
+-- Name: anchor_recommendation_request anchor_recommendation_request_basis_revision_id_workspace__fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_recommendation_request
+    ADD CONSTRAINT anchor_recommendation_request_basis_revision_id_workspace__fkey FOREIGN KEY (basis_revision_id, workspace_id, note_id) REFERENCES organizing.synthesis_revision(id, workspace_id, note_id);
+
+
+--
+-- Name: anchor_recommendation_request anchor_recommendation_request_model_run_id_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_recommendation_request
+    ADD CONSTRAINT anchor_recommendation_request_model_run_id_workspace_id_fkey FOREIGN KEY (model_run_id, workspace_id) REFERENCES agent.model_run(id, workspace_id);
+
+
+--
+-- Name: anchor_recommendation_request anchor_recommendation_request_note_id_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_recommendation_request
+    ADD CONSTRAINT anchor_recommendation_request_note_id_workspace_id_fkey FOREIGN KEY (note_id, workspace_id) REFERENCES organizing.synthesis_note(id, workspace_id);
+
+
+--
+-- Name: anchor_recommendation_request anchor_recommendation_request_proposal_id_workspace_id_anc_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_recommendation_request
+    ADD CONSTRAINT anchor_recommendation_request_proposal_id_workspace_id_anc_fkey FOREIGN KEY (proposal_id, workspace_id, anchor_id) REFERENCES organizing.anchor_proposal(id, workspace_id, anchor_id);
+
+
+--
+-- Name: anchor_recommendation_request anchor_recommendation_request_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_recommendation_request
+    ADD CONSTRAINT anchor_recommendation_request_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES core.workspace(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: anchor_scope_revision anchor_scope_revision_anchor_id_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_scope_revision
+    ADD CONSTRAINT anchor_scope_revision_anchor_id_workspace_id_fkey FOREIGN KEY (anchor_id, workspace_id) REFERENCES organizing.knowledge_anchor(id, workspace_id);
+
+
+--
+-- Name: anchor_scope_revision anchor_scope_revision_proposal_id_workspace_id_anchor_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_scope_revision
+    ADD CONSTRAINT anchor_scope_revision_proposal_id_workspace_id_anchor_id_fkey FOREIGN KEY (proposal_id, workspace_id, anchor_id) REFERENCES organizing.anchor_proposal(id, workspace_id, anchor_id);
+
+
+--
+-- Name: anchor_source_discovery anchor_source_discovery_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_source_discovery
+    ADD CONSTRAINT anchor_source_discovery_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES core.workspace(id) ON DELETE RESTRICT;
+
+
+--
 -- Name: command_receipt command_receipt_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
 --
 
@@ -37056,6 +42050,118 @@ ALTER TABLE ONLY organizing.draft_version
 
 ALTER TABLE ONLY organizing.draft
     ADD CONSTRAINT draft_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES core.workspace(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: anchor_fusion_request fk_anchor_fusion_anchor; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_fusion_request
+    ADD CONSTRAINT fk_anchor_fusion_anchor FOREIGN KEY (anchor_id, workspace_id) REFERENCES organizing.knowledge_anchor(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: anchor_fusion_request fk_anchor_fusion_note; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_fusion_request
+    ADD CONSTRAINT fk_anchor_fusion_note FOREIGN KEY (note_id, workspace_id) REFERENCES organizing.synthesis_note(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: anchor_fusion_request fk_anchor_fusion_processing; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_fusion_request
+    ADD CONSTRAINT fk_anchor_fusion_processing FOREIGN KEY (processing_id, workspace_id) REFERENCES organizing.synthesis_processing(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: anchor_fusion_request fk_anchor_fusion_projection; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_fusion_request
+    ADD CONSTRAINT fk_anchor_fusion_projection FOREIGN KEY (source_version_id, parse_projection_id, workspace_id) REFERENCES ingestion.source_version_projection(source_version_id, parse_projection_id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: anchor_fusion_request fk_anchor_fusion_proposal; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_fusion_request
+    ADD CONSTRAINT fk_anchor_fusion_proposal FOREIGN KEY (proposal_id, workspace_id, anchor_id) REFERENCES organizing.anchor_proposal(id, workspace_id, anchor_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: anchor_fusion_request fk_anchor_fusion_source; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_fusion_request
+    ADD CONSTRAINT fk_anchor_fusion_source FOREIGN KEY (source_version_id, source_id) REFERENCES core.source_version(id, source_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: anchor_recommendation_request fk_anchor_recommendation_scheduled_run; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_recommendation_request
+    ADD CONSTRAINT fk_anchor_recommendation_scheduled_run FOREIGN KEY (scheduled_workflow_run_id, workspace_id) REFERENCES workflow.run(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: anchor_source_discovery fk_anchor_source_discovery_anchor_scope; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_source_discovery
+    ADD CONSTRAINT fk_anchor_source_discovery_anchor_scope FOREIGN KEY (anchor_id, workspace_id, scope_version) REFERENCES organizing.anchor_scope_revision(anchor_id, workspace_id, version) ON DELETE RESTRICT;
+
+
+--
+-- Name: anchor_source_discovery fk_anchor_source_discovery_artifact; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_source_discovery
+    ADD CONSTRAINT fk_anchor_source_discovery_artifact FOREIGN KEY (content_artifact_id, workspace_id) REFERENCES core.content_artifact(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: anchor_source_discovery fk_anchor_source_discovery_processing; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_source_discovery
+    ADD CONSTRAINT fk_anchor_source_discovery_processing FOREIGN KEY (processing_id, workspace_id) REFERENCES organizing.synthesis_processing(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: anchor_source_discovery fk_anchor_source_discovery_profile; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_source_discovery
+    ADD CONSTRAINT fk_anchor_source_discovery_profile FOREIGN KEY (profile_revision_id, workspace_id, source_version_id) REFERENCES learning.document_knowledge_profile_revision(id, workspace_id, source_version_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: anchor_source_discovery fk_anchor_source_discovery_projection; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_source_discovery
+    ADD CONSTRAINT fk_anchor_source_discovery_projection FOREIGN KEY (source_version_id, parse_projection_id, workspace_id) REFERENCES ingestion.source_version_projection(source_version_id, parse_projection_id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: anchor_source_discovery fk_anchor_source_discovery_source; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_source_discovery
+    ADD CONSTRAINT fk_anchor_source_discovery_source FOREIGN KEY (source_id, workspace_id) REFERENCES core.source(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: anchor_source_discovery fk_anchor_source_discovery_source_version; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.anchor_source_discovery
+    ADD CONSTRAINT fk_anchor_source_discovery_source_version FOREIGN KEY (source_version_id, source_id) REFERENCES core.source_version(id, source_id) ON DELETE RESTRICT;
 
 
 --
@@ -37435,6 +42541,30 @@ ALTER TABLE ONLY organizing.synthesis_processing
 
 
 --
+-- Name: synthesis_processing fk_synthesis_processing_body_refresh; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_processing
+    ADD CONSTRAINT fk_synthesis_processing_body_refresh FOREIGN KEY (body_refresh_request_id, workspace_id) REFERENCES organizing.synthesis_body_refresh_request(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_processing fk_synthesis_processing_fusion_request; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_processing
+    ADD CONSTRAINT fk_synthesis_processing_fusion_request FOREIGN KEY (fusion_request_id, workspace_id) REFERENCES organizing.anchor_fusion_request(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_processing fk_synthesis_processing_goal; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_processing
+    ADD CONSTRAINT fk_synthesis_processing_goal FOREIGN KEY (goal_request_id, workspace_id) REFERENCES organizing.synthesis_goal_request(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
 -- Name: synthesis_processing fk_synthesis_processing_model; Type: FK CONSTRAINT; Schema: organizing; Owner: -
 --
 
@@ -37531,6 +42661,14 @@ ALTER TABLE ONLY organizing.synthesis_revision
 
 
 --
+-- Name: synthesis_revision_source fk_synthesis_source_profile_revision; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_revision_source
+    ADD CONSTRAINT fk_synthesis_source_profile_revision FOREIGN KEY (profile_revision_id, workspace_id, source_version_id) REFERENCES learning.document_knowledge_profile_revision(id, workspace_id, source_version_id) ON DELETE RESTRICT;
+
+
+--
 -- Name: synthesis_revision_source fk_synthesis_source_projection; Type: FK CONSTRAINT; Schema: organizing; Owner: -
 --
 
@@ -37563,6 +42701,46 @@ ALTER TABLE ONLY organizing.synthesis_revision_source
 
 
 --
+-- Name: synthesis_source_supplement fk_synthesis_supplement_projection; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_source_supplement
+    ADD CONSTRAINT fk_synthesis_supplement_projection FOREIGN KEY (source_version_id, parse_projection_id, workspace_id) REFERENCES ingestion.source_version_projection(source_version_id, parse_projection_id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_source_supplement fk_synthesis_supplement_receipt; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_source_supplement
+    ADD CONSTRAINT fk_synthesis_supplement_receipt FOREIGN KEY (workspace_id, processing_id) REFERENCES organizing.synthesis_apply_receipt(workspace_id, processing_id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: synthesis_source_supplement fk_synthesis_supplement_revision; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_source_supplement
+    ADD CONSTRAINT fk_synthesis_supplement_revision FOREIGN KEY (base_revision_id, workspace_id, note_id) REFERENCES organizing.synthesis_revision(id, workspace_id, note_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_source_supplement fk_synthesis_supplement_source; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_source_supplement
+    ADD CONSTRAINT fk_synthesis_supplement_source FOREIGN KEY (source_id, workspace_id) REFERENCES core.source(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_source_supplement fk_synthesis_supplement_version; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_source_supplement
+    ADD CONSTRAINT fk_synthesis_supplement_version FOREIGN KEY (source_version_id, source_id) REFERENCES core.source_version(id, source_id) ON DELETE RESTRICT;
+
+
+--
 -- Name: synthesis_topic_key fk_synthesis_topic_note; Type: FK CONSTRAINT; Schema: organizing; Owner: -
 --
 
@@ -37576,6 +42754,38 @@ ALTER TABLE ONLY organizing.synthesis_topic_key
 
 ALTER TABLE ONLY organizing.generation
     ADD CONSTRAINT generation_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES core.workspace(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: knowledge_anchor knowledge_anchor_basis_revision_id_workspace_id_note_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.knowledge_anchor
+    ADD CONSTRAINT knowledge_anchor_basis_revision_id_workspace_id_note_id_fkey FOREIGN KEY (basis_revision_id, workspace_id, note_id) REFERENCES organizing.synthesis_revision(id, workspace_id, note_id);
+
+
+--
+-- Name: knowledge_anchor knowledge_anchor_current_scope; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.knowledge_anchor
+    ADD CONSTRAINT knowledge_anchor_current_scope FOREIGN KEY (id, workspace_id, scope_version) REFERENCES organizing.anchor_scope_revision(anchor_id, workspace_id, version) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: knowledge_anchor knowledge_anchor_note_id_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.knowledge_anchor
+    ADD CONSTRAINT knowledge_anchor_note_id_workspace_id_fkey FOREIGN KEY (note_id, workspace_id) REFERENCES organizing.synthesis_note(id, workspace_id);
+
+
+--
+-- Name: knowledge_anchor knowledge_anchor_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.knowledge_anchor
+    ADD CONSTRAINT knowledge_anchor_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES core.workspace(id) ON DELETE RESTRICT;
 
 
 --
@@ -37608,6 +42818,526 @@ ALTER TABLE ONLY organizing.run_result
 
 ALTER TABLE ONLY organizing.synthesis_apply_receipt
     ADD CONSTRAINT synthesis_apply_receipt_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES core.workspace(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_body_impact synthesis_body_impact_base_revision_id_item_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_body_impact
+    ADD CONSTRAINT synthesis_body_impact_base_revision_id_item_id_fkey FOREIGN KEY (base_revision_id, item_id) REFERENCES organizing.synthesis_revision_body_reference(revision_id, item_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_body_impact synthesis_body_impact_base_revision_id_workspace_id_note_i_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_body_impact
+    ADD CONSTRAINT synthesis_body_impact_base_revision_id_workspace_id_note_i_fkey FOREIGN KEY (base_revision_id, workspace_id, note_id) REFERENCES organizing.synthesis_revision(id, workspace_id, note_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_body_impact synthesis_body_impact_event_id_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_body_impact
+    ADD CONSTRAINT synthesis_body_impact_event_id_workspace_id_fkey FOREIGN KEY (event_id, workspace_id) REFERENCES workflow.outbox_event(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_body_impact synthesis_body_impact_publication_id_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_body_impact
+    ADD CONSTRAINT synthesis_body_impact_publication_id_workspace_id_fkey FOREIGN KEY (publication_id, workspace_id) REFERENCES authoring.document_publication_binding(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_body_impact synthesis_body_impact_published_revision_id_workspace_id_u_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_body_impact
+    ADD CONSTRAINT synthesis_body_impact_published_revision_id_workspace_id_u_fkey FOREIGN KEY (published_revision_id, workspace_id, upstream_note_id) REFERENCES organizing.synthesis_revision(id, workspace_id, note_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_body_impact synthesis_body_impact_upstream_publication_id_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_body_impact
+    ADD CONSTRAINT synthesis_body_impact_upstream_publication_id_workspace_id_fkey FOREIGN KEY (upstream_publication_id, workspace_id) REFERENCES authoring.document_publication_binding(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_body_impact synthesis_body_impact_upstream_revision_id_workspace_id_up_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_body_impact
+    ADD CONSTRAINT synthesis_body_impact_upstream_revision_id_workspace_id_up_fkey FOREIGN KEY (upstream_revision_id, workspace_id, upstream_note_id) REFERENCES organizing.synthesis_revision(id, workspace_id, note_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_body_refresh_request synthesis_body_refresh_request_impact_id_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_body_refresh_request
+    ADD CONSTRAINT synthesis_body_refresh_request_impact_id_workspace_id_fkey FOREIGN KEY (impact_id, workspace_id) REFERENCES organizing.synthesis_body_impact(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_body_refresh_request synthesis_body_refresh_request_note_id_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_body_refresh_request
+    ADD CONSTRAINT synthesis_body_refresh_request_note_id_workspace_id_fkey FOREIGN KEY (note_id, workspace_id) REFERENCES organizing.synthesis_note(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_body_refresh_request synthesis_body_refresh_request_publication_id_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_body_refresh_request
+    ADD CONSTRAINT synthesis_body_refresh_request_publication_id_workspace_id_fkey FOREIGN KEY (publication_id, workspace_id) REFERENCES authoring.document_publication_binding(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_candidate_remerge_event synthesis_candidate_remerge_event_attempt_id_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_candidate_remerge_event
+    ADD CONSTRAINT synthesis_candidate_remerge_event_attempt_id_workspace_id_fkey FOREIGN KEY (attempt_id, workspace_id) REFERENCES organizing.synthesis_candidate_remerge_event(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_candidate_remerge_event synthesis_candidate_remerge_event_note_id_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_candidate_remerge_event
+    ADD CONSTRAINT synthesis_candidate_remerge_event_note_id_workspace_id_fkey FOREIGN KEY (note_id, workspace_id) REFERENCES organizing.synthesis_note(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_candidate_remerge_event synthesis_candidate_remerge_event_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_candidate_remerge_event
+    ADD CONSTRAINT synthesis_candidate_remerge_event_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES core.workspace(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_goal_catalog_batch synthesis_goal_catalog_batch_request_id_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_goal_catalog_batch
+    ADD CONSTRAINT synthesis_goal_catalog_batch_request_id_workspace_id_fkey FOREIGN KEY (request_id, workspace_id) REFERENCES organizing.synthesis_goal_request(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_goal_catalog_item synthesis_goal_catalog_item_batch_id_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_goal_catalog_item
+    ADD CONSTRAINT synthesis_goal_catalog_item_batch_id_workspace_id_fkey FOREIGN KEY (batch_id, workspace_id) REFERENCES organizing.synthesis_goal_catalog_batch(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_goal_catalog_item synthesis_goal_catalog_item_content_artifact_id_workspace__fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_goal_catalog_item
+    ADD CONSTRAINT synthesis_goal_catalog_item_content_artifact_id_workspace__fkey FOREIGN KEY (content_artifact_id, workspace_id) REFERENCES core.content_artifact(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_goal_catalog_item synthesis_goal_catalog_item_profile_revision_id_workspace__fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_goal_catalog_item
+    ADD CONSTRAINT synthesis_goal_catalog_item_profile_revision_id_workspace__fkey FOREIGN KEY (profile_revision_id, workspace_id, source_version_id) REFERENCES learning.document_knowledge_profile_revision(id, workspace_id, source_version_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_goal_catalog_item synthesis_goal_catalog_item_source_id_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_goal_catalog_item
+    ADD CONSTRAINT synthesis_goal_catalog_item_source_id_workspace_id_fkey FOREIGN KEY (source_id, workspace_id) REFERENCES core.source(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_goal_catalog_item synthesis_goal_catalog_item_source_version_id_parse_projec_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_goal_catalog_item
+    ADD CONSTRAINT synthesis_goal_catalog_item_source_version_id_parse_projec_fkey FOREIGN KEY (source_version_id, parse_projection_id, workspace_id) REFERENCES ingestion.source_version_projection(source_version_id, parse_projection_id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_goal_catalog_item synthesis_goal_catalog_item_source_version_id_source_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_goal_catalog_item
+    ADD CONSTRAINT synthesis_goal_catalog_item_source_version_id_source_id_fkey FOREIGN KEY (source_version_id, source_id) REFERENCES core.source_version(id, source_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_goal_request synthesis_goal_request_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_goal_request
+    ADD CONSTRAINT synthesis_goal_request_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES core.workspace(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_goal_selection synthesis_goal_selection_catalog_batch_id_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_goal_selection
+    ADD CONSTRAINT synthesis_goal_selection_catalog_batch_id_workspace_id_fkey FOREIGN KEY (catalog_batch_id, workspace_id) REFERENCES organizing.synthesis_goal_selection_manifest(batch_id, workspace_id);
+
+
+--
+-- Name: synthesis_goal_selection_manifest synthesis_goal_selection_manifest_batch_id_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_goal_selection_manifest
+    ADD CONSTRAINT synthesis_goal_selection_manifest_batch_id_workspace_id_fkey FOREIGN KEY (batch_id, workspace_id) REFERENCES organizing.synthesis_goal_catalog_batch(id, workspace_id);
+
+
+--
+-- Name: synthesis_goal_selection synthesis_goal_selection_model_run_id_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_goal_selection
+    ADD CONSTRAINT synthesis_goal_selection_model_run_id_workspace_id_fkey FOREIGN KEY (model_run_id, workspace_id) REFERENCES agent.model_run(id, workspace_id);
+
+
+--
+-- Name: synthesis_goal_selection_preparation synthesis_goal_selection_preparation_batch_id_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_goal_selection_preparation
+    ADD CONSTRAINT synthesis_goal_selection_preparation_batch_id_workspace_id_fkey FOREIGN KEY (batch_id, workspace_id) REFERENCES organizing.synthesis_goal_catalog_batch(id, workspace_id);
+
+
+--
+-- Name: synthesis_goal_selection synthesis_goal_selection_request_id_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_goal_selection
+    ADD CONSTRAINT synthesis_goal_selection_request_id_workspace_id_fkey FOREIGN KEY (request_id, workspace_id) REFERENCES organizing.synthesis_goal_request(id, workspace_id);
+
+
+--
+-- Name: synthesis_goal_selection_retry synthesis_goal_selection_retry_selection_id_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_goal_selection_retry
+    ADD CONSTRAINT synthesis_goal_selection_retry_selection_id_workspace_id_fkey FOREIGN KEY (selection_id, workspace_id) REFERENCES organizing.synthesis_goal_selection(id, workspace_id);
+
+
+--
+-- Name: synthesis_goal_selection synthesis_goal_selection_scheduled_workflow_id_workspace_i_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_goal_selection
+    ADD CONSTRAINT synthesis_goal_selection_scheduled_workflow_id_workspace_i_fkey FOREIGN KEY (scheduled_workflow_id, workspace_id) REFERENCES workflow.run(id, workspace_id);
+
+
+--
+-- Name: synthesis_historical_republish_event synthesis_historical_republish_eve_attempt_id_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_historical_republish_event
+    ADD CONSTRAINT synthesis_historical_republish_eve_attempt_id_workspace_id_fkey FOREIGN KEY (attempt_id, workspace_id) REFERENCES organizing.synthesis_historical_republish_event(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_historical_republish_event synthesis_historical_republish_event_note_id_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_historical_republish_event
+    ADD CONSTRAINT synthesis_historical_republish_event_note_id_workspace_id_fkey FOREIGN KEY (note_id, workspace_id) REFERENCES organizing.synthesis_note(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_historical_republish_event synthesis_historical_republish_event_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_historical_republish_event
+    ADD CONSTRAINT synthesis_historical_republish_event_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES core.workspace(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_revision synthesis_historical_republish_fk; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_revision
+    ADD CONSTRAINT synthesis_historical_republish_fk FOREIGN KEY (historical_republish_id, workspace_id) REFERENCES organizing.synthesis_historical_republish_event(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_manuscript_application synthesis_manuscript_applicatio_workspace_id_processing_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_application
+    ADD CONSTRAINT synthesis_manuscript_applicatio_workspace_id_processing_id_fkey FOREIGN KEY (workspace_id, processing_id) REFERENCES organizing.synthesis_apply_receipt(workspace_id, processing_id);
+
+
+--
+-- Name: synthesis_manuscript_application synthesis_manuscript_application_receipt_id_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_application
+    ADD CONSTRAINT synthesis_manuscript_application_receipt_id_workspace_id_fkey FOREIGN KEY (receipt_id, workspace_id) REFERENCES organizing.synthesis_manuscript_receipt(id, workspace_id);
+
+
+--
+-- Name: synthesis_manuscript_attempt synthesis_manuscript_attempt_capture_id_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_attempt
+    ADD CONSTRAINT synthesis_manuscript_attempt_capture_id_workspace_id_fkey FOREIGN KEY (capture_id, workspace_id) REFERENCES organizing.synthesis_manuscript_capture(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_manuscript_attempt synthesis_manuscript_attempt_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_attempt
+    ADD CONSTRAINT synthesis_manuscript_attempt_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES core.workspace(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_manuscript_capture synthesis_manuscript_capture_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_capture
+    ADD CONSTRAINT synthesis_manuscript_capture_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES core.workspace(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_manuscript_receipt synthesis_manuscript_receipt_attempt_id_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_receipt
+    ADD CONSTRAINT synthesis_manuscript_receipt_attempt_id_workspace_id_fkey FOREIGN KEY (attempt_id, workspace_id) REFERENCES organizing.synthesis_manuscript_attempt(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_manuscript_receipt synthesis_manuscript_receipt_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_receipt
+    ADD CONSTRAINT synthesis_manuscript_receipt_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES core.workspace(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_manuscript_review_decision synthesis_manuscript_review_decisi_attempt_id_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_review_decision
+    ADD CONSTRAINT synthesis_manuscript_review_decisi_attempt_id_workspace_id_fkey FOREIGN KEY (attempt_id, workspace_id) REFERENCES organizing.synthesis_manuscript_attempt(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_manuscript_review_decision synthesis_manuscript_review_decision_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_review_decision
+    ADD CONSTRAINT synthesis_manuscript_review_decision_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES core.workspace(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_manuscript_root_identity synthesis_manuscript_root_identity_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_root_identity
+    ADD CONSTRAINT synthesis_manuscript_root_identity_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES core.workspace(id);
+
+
+--
+-- Name: synthesis_manuscript_source_evidence synthesis_manuscript_source_e_base_revision_id_workspace_i_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_source_evidence
+    ADD CONSTRAINT synthesis_manuscript_source_e_base_revision_id_workspace_i_fkey FOREIGN KEY (base_revision_id, workspace_id, note_id) REFERENCES organizing.synthesis_revision(id, workspace_id, note_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_manuscript_source_evidence synthesis_manuscript_source_e_source_version_id_parse_proj_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_source_evidence
+    ADD CONSTRAINT synthesis_manuscript_source_e_source_version_id_parse_proj_fkey FOREIGN KEY (source_version_id, parse_projection_id, workspace_id) REFERENCES ingestion.source_version_projection(source_version_id, parse_projection_id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_manuscript_source_evidence synthesis_manuscript_source_ev_source_version_id_source_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_source_evidence
+    ADD CONSTRAINT synthesis_manuscript_source_ev_source_version_id_source_id_fkey FOREIGN KEY (source_version_id, source_id) REFERENCES core.source_version(id, source_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_manuscript_source_evidence synthesis_manuscript_source_evidenc_review_id_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_source_evidence
+    ADD CONSTRAINT synthesis_manuscript_source_evidenc_review_id_workspace_id_fkey FOREIGN KEY (review_id, workspace_id) REFERENCES organizing.synthesis_manuscript_source_review(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_manuscript_source_evidence synthesis_manuscript_source_evidenc_source_id_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_source_evidence
+    ADD CONSTRAINT synthesis_manuscript_source_evidenc_source_id_workspace_id_fkey FOREIGN KEY (source_id, workspace_id) REFERENCES core.source(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_manuscript_source_evidence synthesis_manuscript_source_evidence_source_span_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_source_evidence
+    ADD CONSTRAINT synthesis_manuscript_source_evidence_source_span_id_fkey FOREIGN KEY (source_span_id) REFERENCES ingestion.source_span(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_manuscript_source_review synthesis_manuscript_source_r_origin_processing_id_workspa_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_source_review
+    ADD CONSTRAINT synthesis_manuscript_source_r_origin_processing_id_workspa_fkey FOREIGN KEY (origin_processing_id, workspace_id) REFERENCES organizing.synthesis_processing(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_manuscript_source_review_result synthesis_manuscript_source_r_proof_review_id_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_source_review_result
+    ADD CONSTRAINT synthesis_manuscript_source_r_proof_review_id_workspace_id_fkey FOREIGN KEY (proof_review_id, workspace_id) REFERENCES organizing.synthesis_manuscript_source_review(id, workspace_id);
+
+
+--
+-- Name: synthesis_manuscript_source_review_command synthesis_manuscript_source_r_result_review_id_workspace_i_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_source_review_command
+    ADD CONSTRAINT synthesis_manuscript_source_r_result_review_id_workspace_i_fkey FOREIGN KEY (result_review_id, workspace_id) REFERENCES organizing.synthesis_manuscript_source_review(id, workspace_id);
+
+
+--
+-- Name: synthesis_manuscript_source_review synthesis_manuscript_source_rev_supersedes_id_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_source_review
+    ADD CONSTRAINT synthesis_manuscript_source_rev_supersedes_id_workspace_id_fkey FOREIGN KEY (supersedes_id, workspace_id) REFERENCES organizing.synthesis_manuscript_source_review(id, workspace_id);
+
+
+--
+-- Name: synthesis_manuscript_source_review_recovery synthesis_manuscript_source_revie_workspace_id_command_key_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_source_review_recovery
+    ADD CONSTRAINT synthesis_manuscript_source_revie_workspace_id_command_key_fkey FOREIGN KEY (workspace_id, command_key) REFERENCES organizing.synthesis_manuscript_source_review_command(workspace_id, idempotency_key) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: synthesis_manuscript_source_review_command synthesis_manuscript_source_review__review_id_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_source_review_command
+    ADD CONSTRAINT synthesis_manuscript_source_review__review_id_workspace_id_fkey FOREIGN KEY (review_id, workspace_id) REFERENCES organizing.synthesis_manuscript_source_review(id, workspace_id);
+
+
+--
+-- Name: synthesis_manuscript_source_review synthesis_manuscript_source_review_node_attempt_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_source_review
+    ADD CONSTRAINT synthesis_manuscript_source_review_node_attempt_id_fkey FOREIGN KEY (node_attempt_id) REFERENCES workflow.node_attempt(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_manuscript_source_review synthesis_manuscript_source_review_node_run_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_source_review
+    ADD CONSTRAINT synthesis_manuscript_source_review_node_run_id_fkey FOREIGN KEY (node_run_id) REFERENCES workflow.node_run(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_manuscript_source_review synthesis_manuscript_source_review_origin_workflow_run_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_source_review
+    ADD CONSTRAINT synthesis_manuscript_source_review_origin_workflow_run_id_fkey FOREIGN KEY (origin_workflow_run_id) REFERENCES workflow.run(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_manuscript_source_review_recovery_receipt synthesis_manuscript_source_review_recove_workflow_run_id_fkey1; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_source_review_recovery_receipt
+    ADD CONSTRAINT synthesis_manuscript_source_review_recove_workflow_run_id_fkey1 FOREIGN KEY (workflow_run_id) REFERENCES organizing.synthesis_manuscript_source_review_recovery(workflow_run_id);
+
+
+--
+-- Name: synthesis_manuscript_source_review_recovery synthesis_manuscript_source_review_recover_workflow_run_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_source_review_recovery
+    ADD CONSTRAINT synthesis_manuscript_source_review_recover_workflow_run_id_fkey FOREIGN KEY (workflow_run_id) REFERENCES workflow.run(id);
+
+
+--
+-- Name: synthesis_manuscript_source_review_result synthesis_manuscript_source_review_result_evidence_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_source_review_result
+    ADD CONSTRAINT synthesis_manuscript_source_review_result_evidence_id_fkey FOREIGN KEY (evidence_id) REFERENCES organizing.synthesis_manuscript_source_evidence(id);
+
+
+--
+-- Name: synthesis_manuscript_source_review_recovery synthesis_manuscript_source_review_review_id_workspace_id_fkey1; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_source_review_recovery
+    ADD CONSTRAINT synthesis_manuscript_source_review_review_id_workspace_id_fkey1 FOREIGN KEY (review_id, workspace_id) REFERENCES organizing.synthesis_manuscript_source_review(id, workspace_id);
+
+
+--
+-- Name: synthesis_manuscript_source_review_recovery_receipt synthesis_manuscript_source_review_review_id_workspace_id_fkey2; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_source_review_recovery_receipt
+    ADD CONSTRAINT synthesis_manuscript_source_review_review_id_workspace_id_fkey2 FOREIGN KEY (review_id, workspace_id) REFERENCES organizing.synthesis_manuscript_source_review(id, workspace_id);
+
+
+--
+-- Name: synthesis_manuscript_source_review_result synthesis_manuscript_source_review_review_id_workspace_id_fkey3; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_source_review_result
+    ADD CONSTRAINT synthesis_manuscript_source_review_review_id_workspace_id_fkey3 FOREIGN KEY (review_id, workspace_id) REFERENCES organizing.synthesis_manuscript_source_review(id, workspace_id);
+
+
+--
+-- Name: synthesis_manuscript_source_review synthesis_manuscript_source_review_workflow_run_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_source_review
+    ADD CONSTRAINT synthesis_manuscript_source_review_workflow_run_id_fkey FOREIGN KEY (workflow_run_id) REFERENCES workflow.run(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_manuscript_source_review synthesis_manuscript_source_review_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_manuscript_source_review
+    ADD CONSTRAINT synthesis_manuscript_source_review_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES core.workspace(id) ON DELETE RESTRICT;
 
 
 --
@@ -37659,6 +43389,46 @@ ALTER TABLE ONLY organizing.synthesis_retry_receipt
 
 
 --
+-- Name: synthesis_revision_body_reference synthesis_revision_body_refer_revision_id_workspace_id_not_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_revision_body_reference
+    ADD CONSTRAINT synthesis_revision_body_refer_revision_id_workspace_id_not_fkey FOREIGN KEY (revision_id, workspace_id, note_id) REFERENCES organizing.synthesis_revision(id, workspace_id, note_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_revision_body_reference synthesis_revision_body_refer_upstream_revision_id_workspa_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_revision_body_reference
+    ADD CONSTRAINT synthesis_revision_body_refer_upstream_revision_id_workspa_fkey FOREIGN KEY (upstream_revision_id, workspace_id, upstream_note_id) REFERENCES organizing.synthesis_revision(id, workspace_id, note_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_revision_body_reference synthesis_revision_body_refere_publication_id_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_revision_body_reference
+    ADD CONSTRAINT synthesis_revision_body_refere_publication_id_workspace_id_fkey FOREIGN KEY (publication_id, workspace_id) REFERENCES authoring.document_publication_binding(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_revision synthesis_revision_manuscript_receipt_fk; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_revision
+    ADD CONSTRAINT synthesis_revision_manuscript_receipt_fk FOREIGN KEY (manuscript_receipt_id, workspace_id) REFERENCES organizing.synthesis_manuscript_receipt(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_revision synthesis_revision_remerge_fk; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_revision
+    ADD CONSTRAINT synthesis_revision_remerge_fk FOREIGN KEY (candidate_remerge_id, workspace_id) REFERENCES organizing.synthesis_candidate_remerge_event(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
 -- Name: synthesis_revision_source synthesis_revision_source_source_span_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
 --
 
@@ -37672,6 +43442,70 @@ ALTER TABLE ONLY organizing.synthesis_revision_source
 
 ALTER TABLE ONLY organizing.synthesis_revision
     ADD CONSTRAINT synthesis_revision_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES core.workspace(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_source_impact synthesis_source_impact_note_id_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_source_impact
+    ADD CONSTRAINT synthesis_source_impact_note_id_workspace_id_fkey FOREIGN KEY (note_id, workspace_id) REFERENCES organizing.synthesis_note(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_source_impact synthesis_source_impact_source_id_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_source_impact
+    ADD CONSTRAINT synthesis_source_impact_source_id_workspace_id_fkey FOREIGN KEY (source_id, workspace_id) REFERENCES core.source(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_source_impact synthesis_source_impact_source_version_id_source_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_source_impact
+    ADD CONSTRAINT synthesis_source_impact_source_version_id_source_id_fkey FOREIGN KEY (source_version_id, source_id) REFERENCES core.source_version(id, source_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_source_promotion synthesis_source_promotion_profile_revision_id_workspace_i_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_source_promotion
+    ADD CONSTRAINT synthesis_source_promotion_profile_revision_id_workspace_i_fkey FOREIGN KEY (profile_revision_id, workspace_id, source_version_id) REFERENCES learning.document_knowledge_profile_revision(id, workspace_id, source_version_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_source_promotion synthesis_source_promotion_request_id_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_source_promotion
+    ADD CONSTRAINT synthesis_source_promotion_request_id_workspace_id_fkey FOREIGN KEY (request_id, workspace_id) REFERENCES organizing.synthesis_goal_request(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_source_promotion synthesis_source_promotion_source_id_workspace_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_source_promotion
+    ADD CONSTRAINT synthesis_source_promotion_source_id_workspace_id_fkey FOREIGN KEY (source_id, workspace_id) REFERENCES core.source(id, workspace_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_source_promotion synthesis_source_promotion_source_version_id_source_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_source_promotion
+    ADD CONSTRAINT synthesis_source_promotion_source_version_id_source_id_fkey FOREIGN KEY (source_version_id, source_id) REFERENCES core.source_version(id, source_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: synthesis_source_supplement synthesis_source_supplement_source_span_id_fkey; Type: FK CONSTRAINT; Schema: organizing; Owner: -
+--
+
+ALTER TABLE ONLY organizing.synthesis_source_supplement
+    ADD CONSTRAINT synthesis_source_supplement_source_span_id_fkey FOREIGN KEY (source_span_id) REFERENCES ingestion.source_span(id) ON DELETE RESTRICT;
 
 
 --
@@ -38115,6 +43949,9 @@ ALTER TABLE ONLY workflow.tool_call
 
 
 --
+-- PostgreSQL database dump complete
+--
+
 -- Database-local privileges for the cluster role created by migration 00080.
 -- The role's LOGIN state is managed separately by credential initialization.
 --
@@ -38154,8 +43991,3 @@ GRANT EXECUTE ON FUNCTION
     ops.managed_ollama_expire_operations(uuid,bigint),
     ops.managed_ollama_compare_runtime_phase(uuid,bigint,bigint,text,text,text,text,bigint,text,boolean,bigint)
 TO zhixu_local_model_runtime;
-
-
---
--- PostgreSQL database dump complete
---

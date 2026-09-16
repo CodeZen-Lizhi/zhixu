@@ -100,7 +100,8 @@ func (repository *GORMRepository) RetireGeneratedPublicationScoped(ctx context.C
 	if !found || binding.DocumentID != request.DocumentID || binding.ArticleRevisionID != request.ArticleRevisionID {
 		return authoringapp.RetireGeneratedPublicationResult{}, notFound(errors.New("generated publication binding was not found"))
 	}
-	if binding.Status != domain.PublicationPending || revision.Status != domain.RevisionDraft || binding.ContentHash != revision.ContentHash || binding.TargetPath != document.CanonicalPath {
+	alreadyClosed := binding.Status == domain.PublicationClosed && binding.ErrorCode == publicationNeedsRevision
+	if (binding.Status != domain.PublicationPending && !alreadyClosed) || revision.Status != domain.RevisionDraft || binding.ContentHash != revision.ContentHash || binding.TargetPath != document.CanonicalPath {
 		return authoringapp.RetireGeneratedPublicationResult{}, generatedPublicationBusy("generated publication no longer has a pending candidate binding")
 	}
 	reservation, found, err := gormLoadReservation(ctx, tx, request.WorkspaceID, binding.ReservationID, false)
@@ -122,13 +123,16 @@ func (repository *GORMRepository) RetireGeneratedPublicationScoped(ctx context.C
 	}); err != nil {
 		return authoringapp.RetireGeneratedPublicationResult{}, err
 	}
-	changed := false
-	if err := gormMarkPublication(ctx, tx, binding, domain.PublicationClosed, publicationNeedsRevision, "", nil, at, &changed); err != nil {
-		return authoringapp.RetireGeneratedPublicationResult{}, err
+	if !alreadyClosed {
+		changed := false
+		if err := gormMarkPublication(ctx, tx, binding, domain.PublicationClosed, publicationNeedsRevision, "", nil, at, &changed); err != nil {
+			return authoringapp.RetireGeneratedPublicationResult{}, err
+		}
+		if !changed {
+			return authoringapp.RetireGeneratedPublicationResult{}, inconsistent("generated retirement did not close the pending binding")
+		}
 	}
-	if !changed {
-		return authoringapp.RetireGeneratedPublicationResult{}, inconsistent("generated retirement did not close the pending binding")
-	}
+
 	receipt = gormGeneratedRetirementRecord{
 		WorkspaceID: string(request.WorkspaceID), IdempotencyKey: record.IdempotencyKey, RequestHash: record.RequestHash,
 		PublicationID: string(request.PublicationID), DocumentID: string(request.DocumentID), ArticleRevisionID: string(request.ArticleRevisionID),
@@ -139,8 +143,10 @@ func (repository *GORMRepository) RetireGeneratedPublicationScoped(ctx context.C
 		return authoringapp.RetireGeneratedPublicationResult{}, classifyGenerated(ctx, err, "AUTHORING_GENERATED_RETIREMENT_CREATE_FAILED")
 	}
 	binding.Status, binding.ErrorCode = domain.PublicationClosed, publicationNeedsRevision
-	binding.Version++
-	binding.UpdatedAt = at
+	if !alreadyClosed {
+		binding.Version++
+		binding.UpdatedAt = at
+	}
 	return authoringapp.RetireGeneratedPublicationResult{Publication: binding}, nil
 }
 

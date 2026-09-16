@@ -18,18 +18,19 @@ import (
 )
 
 const (
-	synthesisFixtureGenerateStage = "synthesis_generate"
-	synthesisFixtureValidateStage = "synthesis_validate"
-	synthesisFixtureProfileStage  = "capture_profile"
-	synthesisFixtureTitle         = "Cache expiration"
-	synthesisFixtureTopic         = "cache expiration"
-	synthesisFixtureFact          = "Cache entries expire after five minutes."
-	synthesisFixtureApplicability = "For the default configuration."
-	synthesisFixtureGap           = "How is expiration handled during an outage?"
-	synthesisFixtureGapContext    = "The supplied material does not describe outage behavior."
-	synthesisFixtureRefresh       = "Refreshing invalidates the cache key."
-	synthesisFixtureFirstSource   = "Cache source alpha. Cache entries expire after five minutes in the default configuration. The material does not explain expiration during an outage."
-	synthesisFixtureSecondSource  = "Cache source beta. Cache entries expire after five minutes in the default configuration. In the high-traffic configuration, cache entries expire after ten minutes. Refreshing invalidates the cache key. The material does not explain expiration during an outage."
+	synthesisFixtureGenerateStage     = "synthesis_generate"
+	synthesisFixtureBodyGenerateStage = "synthesis_generate_published"
+	synthesisFixtureValidateStage     = "synthesis_validate"
+	synthesisFixtureProfileStage      = "capture_profile"
+	synthesisFixtureTitle             = "Cache expiration"
+	synthesisFixtureTopic             = "cache expiration"
+	synthesisFixtureFact              = "Cache entries expire after five minutes."
+	synthesisFixtureApplicability     = "For the default configuration."
+	synthesisFixtureGap               = "How is expiration handled during an outage?"
+	synthesisFixtureGapContext        = "The supplied material does not describe outage behavior."
+	synthesisFixtureRefresh           = "Refreshing invalidates the cache key."
+	synthesisFixtureFirstSource       = "Cache source alpha. Cache entries expire after five minutes in the default configuration. The material does not explain expiration during an outage."
+	synthesisFixtureSecondSource      = "Cache source beta. Cache entries expire after five minutes in the default configuration. In the high-traffic configuration, cache entries expire after ten minutes. Refreshing invalidates the cache key. The material does not explain expiration during an outage."
 )
 
 // Only the explicit smoke fixture synthesizes these marked sources. Other
@@ -60,6 +61,7 @@ func loadSynthesisFixtureSnapshots() (map[string]agentapplication.RuntimeSnapsho
 		schema agentdomain.SchemaRef
 	}{
 		{synthesisFixtureGenerateStage, agentdomain.PromptRef{ID: organizingapplication.SynthesisDeltaPromptID, Version: organizingapplication.SynthesisRuntimeVersion}, agentdomain.SchemaRef{ID: agentdomain.SynthesisDeltaSchemaID, Version: organizingapplication.SynthesisRuntimeVersion}},
+		{synthesisFixtureBodyGenerateStage, agentdomain.PromptRef{ID: organizingapplication.SynthesisDeltaPromptID, Version: organizingapplication.SynthesisBodyPromptVersion}, agentdomain.SchemaRef{ID: agentdomain.SynthesisDeltaSchemaID, Version: organizingapplication.SynthesisBodySchemaVersion}},
 		{synthesisFixtureValidateStage, agentdomain.PromptRef{ID: organizingapplication.SynthesisSemanticPromptID, Version: organizingapplication.SynthesisRuntimeVersion}, agentdomain.SchemaRef{ID: agentdomain.SynthesisSemanticReviewSchemaID, Version: organizingapplication.SynthesisRuntimeVersion}},
 		{synthesisFixtureProfileStage, captureprofile.PromptRef(), captureprofile.SchemaRef()},
 	}
@@ -104,7 +106,7 @@ func synthesisNotesFixtureResponse(stage string, input map[string]any) (string, 
 	var output any
 	var err error
 	switch stage {
-	case synthesisFixtureGenerateStage:
+	case synthesisFixtureGenerateStage, synthesisFixtureBodyGenerateStage:
 		output, err = synthesisFixtureGenerate(input)
 	case synthesisFixtureValidateStage:
 		output, err = synthesisFixtureValidate(input)
@@ -146,11 +148,12 @@ type synthesisFixtureStatement struct {
 }
 
 type synthesisFixtureNote struct {
-	Label    string   `json:"label"`
-	TopicKey string   `json:"topic_key"`
-	Title    string   `json:"title"`
-	Aliases  []string `json:"aliases"`
-	Items    []struct {
+	Published bool     `json:"published,omitempty"`
+	Label     string   `json:"label"`
+	TopicKey  string   `json:"topic_key"`
+	Title     string   `json:"title"`
+	Aliases   []string `json:"aliases"`
+	Items     []struct {
 		Label    string                     `json:"label"`
 		Kind     string                     `json:"kind"`
 		Fact     *synthesisFixtureStatement `json:"fact,omitempty"`

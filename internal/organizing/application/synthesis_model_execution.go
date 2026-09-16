@@ -10,18 +10,42 @@ import (
 )
 
 const (
-	MaxSynthesisSemanticChecks                 = 512
-	ErrorCodeSynthesisModelStepInvalid         = "SYNTHESIS_MODEL_STEP_INVALID"
-	SynthesisRuntimeVersion                    = "v1"
-	SynthesisDeltaPromptID                     = "synthesis-delta"
-	SynthesisSemanticPromptID                  = "synthesis-semantic-review"
-	ErrorCodeSynthesisCapabilityUnavailable    = "SYNTHESIS_MODEL_CAPABILITY_UNAVAILABLE"
-	ErrorCodeSynthesisModelContextInvalid      = "SYNTHESIS_MODEL_CONTEXT_INVALID"
-	ErrorCodeSynthesisModelOutputInvalid       = "SYNTHESIS_MODEL_OUTPUT_INVALID"
-	ErrorCodeSynthesisModelInputTooLarge       = "SYNTHESIS_MODEL_INPUT_TOO_LARGE"
-	ErrorCodeSynthesisModelReplayUnsafe        = "SYNTHESIS_MODEL_REPLAY_UNSAFE"
-	ErrorCodeSynthesisModelFinalizationUnknown = "SYNTHESIS_MODEL_FINALIZATION_UNKNOWN"
-	ErrorCodeSynthesisSemanticRejected         = "SYNTHESIS_SEMANTIC_REJECTED"
+	MaxSynthesisSemanticChecks         = 512
+	ErrorCodeSynthesisModelStepInvalid = "SYNTHESIS_MODEL_STEP_INVALID"
+	// SynthesisRuntimeVersion 保留历史与当前模型运行所使用的稳定结构化输出 Schema。
+	SynthesisRuntimeVersion                              = "v1"
+	SynthesisLegacyPromptVersion                         = SynthesisRuntimeVersion
+	SynthesisAnchoredPromptVersion                       = "v2"
+	SynthesisGoalPromptVersion                           = "v3"
+	SynthesisBodyPromptVersion                           = "v4"
+	SynthesisBodyRefreshPromptVersion                    = "v5"
+	SynthesisSemanticFormatPromptVersion                 = "v6"
+	SynthesisSourceIdentitySemanticPromptVersion         = "v7"
+	SynthesisSourceIdentityLegacyPromptVersion           = "v7"
+	SynthesisSourceIdentityAnchoredPromptVersion         = "v8"
+	SynthesisSourceIdentityGoalPromptVersion             = "v9"
+	SynthesisSourceIdentityBodyPromptVersion             = "v10"
+	SynthesisFusionAnchoredPromptVersion                 = "v11"
+	SynthesisFusionBodyPromptVersion                     = "v12"
+	SynthesisGenerationFormatLegacyPromptVersion         = "v13"
+	SynthesisGenerationFormatAnchoredPromptVersion       = "v14"
+	SynthesisGenerationFormatGoalPromptVersion           = "v15"
+	SynthesisGenerationFormatBodyPromptVersion           = "v16"
+	SynthesisGenerationFormatFusionAnchoredPromptVersion = "v17"
+	SynthesisGenerationFormatFusionBodyPromptVersion     = "v18"
+	SynthesisFusionSemanticPromptVersion                 = "v8"
+	SynthesisFusionExistingSemanticPromptVersion         = "v9"
+	SynthesisBodyRefreshSchemaVersion                    = "v3"
+	SynthesisBodySchemaVersion                           = "v2"
+	SynthesisDeltaPromptID                               = "synthesis-delta"
+	SynthesisSemanticPromptID                            = "synthesis-semantic-review"
+	ErrorCodeSynthesisCapabilityUnavailable              = "SYNTHESIS_MODEL_CAPABILITY_UNAVAILABLE"
+	ErrorCodeSynthesisModelContextInvalid                = "SYNTHESIS_MODEL_CONTEXT_INVALID"
+	ErrorCodeSynthesisModelOutputInvalid                 = "SYNTHESIS_MODEL_OUTPUT_INVALID"
+	ErrorCodeSynthesisModelInputTooLarge                 = "SYNTHESIS_MODEL_INPUT_TOO_LARGE"
+	ErrorCodeSynthesisModelReplayUnsafe                  = "SYNTHESIS_MODEL_REPLAY_UNSAFE"
+	ErrorCodeSynthesisModelFinalizationUnknown           = "SYNTHESIS_MODEL_FINALIZATION_UNKNOWN"
+	ErrorCodeSynthesisSemanticRejected                   = "SYNTHESIS_SEMANTIC_REJECTED"
 )
 
 type SynthesisModelStage string

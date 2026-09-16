@@ -12,8 +12,8 @@ import (
 
 var _ domain.GeneratedPublicationRetirementRepository = (*GORMRepository)(nil)
 
-// RetireGeneratedPublicationScoped fences approval with the same Proposal/Revision
-// locks and retires only an untouched ready candidate. It neither commits nor cancels work.
+// RetireGeneratedPublicationScoped 使用相同的 Proposal/Revision 锁隔离审批，
+// 仅退役尚未审核的 ready 或 needs_revision 候选，不提交或取消工作。
 func (repository *GORMRepository) RetireGeneratedPublicationScoped(ctx context.Context, scope foundation.TransactionScope, request domain.GeneratedPublicationRetirement) error {
 	if err := repository.ready(ctx); err != nil {
 		return err
@@ -52,7 +52,7 @@ func (repository *GORMRepository) RetireGeneratedPublicationScoped(ctx context.C
 		base != request.BaseVersion || domain.ComputeContentHash([]byte(content)) != request.ContentHash || hashErr != nil || expectedHash != changeHash {
 		return foundation.NewError(foundation.ErrorVersionConflict, domain.ErrorCodeGeneratedPublicationConflict, false, errors.New("generated publication proposal binding changed"))
 	}
-	if status != string(domain.StatusReady) || workflowID != nil || version != request.ExpectedProposalVersion {
+	if (status != string(domain.StatusReady) && status != string(domain.StatusNeedsRevision)) || workflowID != nil || version != request.ExpectedProposalVersion {
 		return generatedRetirementBusy("generated publication is no longer an unapproved ready candidate")
 	}
 	// Read side facts only after the Proposal/Revision lock has been acquired.
@@ -78,6 +78,12 @@ func (repository *GORMRepository) RetireGeneratedPublicationScoped(ctx context.C
 	at := request.RetiredAt.UTC().Truncate(time.Microsecond)
 	if at.Before(updatedAt) {
 		return foundation.NewError(foundation.ErrorInvalidInput, domain.ErrorCodeGeneratedPublicationInvalid, false, errors.New("generated retirement time precedes its proposal"))
+	}
+	// 基线冲突拒绝已进入 needs_revision。保留该
+	// 不可变决策历史；Authoring 的 SQL 防护要求存在精确的
+	// 重新合并应用记录，才接受无状态转换的退役。
+	if status == string(domain.StatusNeedsRevision) {
+		return nil
 	}
 	changed, err := gormChangeExec(ctx, tx, `UPDATE change_control.proposal
 		SET status=?,version=version+1,updated_at=?

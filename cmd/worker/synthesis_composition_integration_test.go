@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	captureapplication "github.com/CodeZen-Lizhi/zhixu/internal/capture/application"
 	capturedomain "github.com/CodeZen-Lizhi/zhixu/internal/capture/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	modelsettingsdomain "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/domain"
 	organizingworkflow "github.com/CodeZen-Lizhi/zhixu/internal/organizing/workflow"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/filesystem"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/gitcli"
@@ -32,6 +34,29 @@ func TestWorkerSynthesisCompositionImportsContinuouslyAndReplaysWithoutNewResult
 	pool := newMigratedWorkerTestPool(t, os.Getenv("ZHIXU_TEST_DATABASE_URL"))
 	root := t.TempDir()
 	provider, cfg := newSynthesisCompositionProvider(t)
+	cfg.ChatReasoningEffort = "medium"
+	cfg.ChatReasoningEffortByFunction = modelsettingsdomain.ReasoningEffortOverrides{
+		modelsettingsdomain.ReasoningFileProfile:       "low",
+		modelsettingsdomain.ReasoningMainNoteSynthesis: "high",
+	}
+	provider.expectedProfileEffort = "low"
+	provider.expectedSynthesisEffort = "high"
+	profileStarted, releaseProfile := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseProfile) }) }
+	t.Cleanup(release)
+	provider.beforeProfile = func(ctx context.Context, number int) error {
+		if number != 1 {
+			return nil
+		}
+		close(profileStarted)
+		select {
+		case <-releaseProfile:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	models, err := modelRuntimeForComposition(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -124,12 +149,35 @@ func TestWorkerSynthesisCompositionImportsContinuouslyAndReplaysWithoutNewResult
 			t.Fatalf("import %d: capture=%s replayed=%t err=%v", index+1, result.Capture.ID, result.Replayed, err)
 		}
 		created[index] = result
+		if index == 0 {
+			if _, err := dispatchCaptureOutbox(ctx, logger, components.captureOutbox, captureDispatchPeriodicPhase); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-profileStarted:
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+			batch, err := dispatchSynthesisSources(ctx, logger, components.synthesisSources, organizingDispatchPeriodicPhase)
+			if err != nil || batch.Started != 0 {
+				t.Fatalf("generated before profile: %+v %v", batch, err)
+			}
+			var processingCount int
+			if err := pool.DB().QueryRow(ctx, `SELECT count(*) FROM organizing.synthesis_processing WHERE workspace_id=$1`, string(workspaceID)).Scan(&processingCount); err != nil || processingCount != 0 {
+				t.Fatalf("unprofiled processing count=%d error=%v", processingCount, err)
+			}
+			release()
+		}
 		wantStatus := "SUCCEEDED"
 		if index == 2 {
 			wantStatus = "NO_CHANGE"
 		}
 		waitForSynthesisComposition(t, ctx, pool, components, captureService, provider, logger, result.Capture, wantStatus)
 		assertSynthesisCompositionCounts(t, ctx, pool, workspaceID, index+1, min(index+1, 2))
+		var missingSnapshots int
+		if err := pool.DB().QueryRow(ctx, `SELECT count(*) FROM organizing.synthesis_revision_source WHERE workspace_id=$1 AND profile_revision_id IS NULL`, string(workspaceID)).Scan(&missingSnapshots); err != nil || missingSnapshots != 0 {
+			t.Fatalf("missing historical knowledge bindings=%d error=%v", missingSnapshots, err)
+		}
 		if calls, failure := provider.snapshot(); failure != "" || calls != (synthesisCompositionCalls{Profile: index + 1, Generate: index + 1, Validate: index + 1, NoChange: max(index-1, 0)}) {
 			t.Fatalf("import %d provider calls=%+v failure=%s", index+1, calls, failure)
 		}

@@ -25,8 +25,9 @@ type GORMSynthesisSourceReader struct {
 }
 
 var (
-	_ organizingapp.SynthesisSourceReader = (*GORMSynthesisSourceReader)(nil)
-	_ organizingapp.SynthesisSourceFence  = (*GORMSynthesisSourceReader)(nil)
+	_ organizingapp.SynthesisSourceReader               = (*GORMSynthesisSourceReader)(nil)
+	_ organizingapp.SynthesisSourceFence                = (*GORMSynthesisSourceReader)(nil)
+	_ organizingapp.SynthesisGoalCatalogReadinessReader = (*GORMSynthesisSourceReader)(nil)
 )
 
 func NewGORMSynthesisSourceReader(pool *platformpostgres.Pool, artifacts retrievalapp.EvidenceArtifactReader) (*GORMSynthesisSourceReader, error) {
@@ -66,27 +67,30 @@ const synthesisSourceJoins = ` FROM core.source s
 	JOIN ingestion.source_version_projection vp ON vp.source_version_id=v.id AND vp.workspace_id=s.workspace_id
 	JOIN ingestion.parse_projection pp ON pp.id=vp.parse_projection_id AND pp.workspace_id=s.workspace_id AND pp.content_artifact_id=a.id`
 
+// 当前资格检查与历史读取共用精确的解析和安全证明；历史读取不要求原始路径仍存在或版本为最新。
+const synthesisSourceVerifiedSQL = `(v.security_status<>'quarantined'
+ AND EXISTS (SELECT 1 FROM ingestion.attempt ia
+ WHERE ia.workspace_id=s.workspace_id AND ia.source_version_id=v.id AND ia.parse_projection_id=pp.id
+ AND ia.status='chunked' AND ia.security_status='passed'
+ AND ia.parser_id=pp.parser_id AND ia.parser_version=pp.parser_version
+ AND ia.parser_config_hash=pp.parser_config_hash AND ia.schema_version=pp.schema_version)
+ AND NOT EXISTS (SELECT 1 FROM ingestion.attempt ia
+ WHERE ia.workspace_id=s.workspace_id AND ia.source_version_id=v.id AND ia.security_status='quarantined'))`
 const synthesisSourceCurrentSQL = `(s.removed_at IS NULL
-	AND NOT EXISTS (SELECT 1 FROM core.source_version newer WHERE newer.source_id=s.id
-	 AND (newer.captured_at,newer.id)>(v.captured_at,v.id))
-	AND EXISTS (SELECT 1 FROM ingestion.attempt ia
-	 WHERE ia.workspace_id=s.workspace_id AND ia.source_version_id=v.id AND ia.parse_projection_id=pp.id
-	 AND ia.status='chunked' AND ia.security_status='passed'
-	 AND ia.parser_id=pp.parser_id AND ia.parser_version=pp.parser_version
-	 AND ia.parser_config_hash=pp.parser_config_hash AND ia.schema_version=pp.schema_version)
-	AND NOT EXISTS (SELECT 1 FROM ingestion.attempt ia
-	 WHERE ia.workspace_id=s.workspace_id AND ia.source_version_id=v.id AND ia.security_status='quarantined'))`
+ AND NOT EXISTS (SELECT 1 FROM core.source_version newer WHERE newer.source_id=s.id
+ AND (newer.captured_at,newer.id)>(v.captured_at,v.id)) AND ` + synthesisSourceVerifiedSQL + `)`
 
 type synthesisSourceState struct {
-	Title     string     `gorm:"column:title"`
-	RemovedAt *time.Time `gorm:"column:removed_at"`
-	Current   bool       `gorm:"column:current"`
-	Derived   bool       `gorm:"column:derived"`
+	HistoricalReadable bool       `gorm:"column:historical_readable"`
+	Title              string     `gorm:"column:title"`
+	RemovedAt          *time.Time `gorm:"column:removed_at"`
+	Current            bool       `gorm:"column:current"`
+	Derived            bool       `gorm:"column:derived"`
 }
 
 func (reader *GORMSynthesisSourceReader) state(ctx context.Context, tx *gorm.DB, source domain.SynthesisSourceVersion) (synthesisSourceState, bool, error) {
 	var state synthesisSourceState
-	query := tx.WithContext(ctx).Raw(`SELECT s.logical_name AS title,s.removed_at,`+synthesisSourceCurrentSQL+` AS current,`+synthesisDerivedSQL+` AS derived`+synthesisSourceJoins+`
+	query := tx.WithContext(ctx).Raw(`SELECT s.logical_name AS title,s.removed_at,`+synthesisSourceCurrentSQL+` AS current,`+synthesisSourceVerifiedSQL+` AS historical_readable,`+synthesisDerivedSQL+` AS derived`+synthesisSourceJoins+`
 	 WHERE s.workspace_id=? AND s.id=? AND v.id=? AND a.id=? AND pp.id=? AND v.content_hash=?`,
 		string(source.WorkspaceID), string(source.SourceID), string(source.SourceVersionID), string(source.ContentArtifactID), string(source.ParseProjectionID), source.ContentHash).Scan(&state)
 	if query.Error != nil {
@@ -106,6 +110,118 @@ func (reader *GORMSynthesisSourceReader) ready(ctx context.Context) error {
 		return synthesisSourceDBError(ctx, err)
 	}
 	return nil
+}
+
+const (
+	synthesisGoalSourcePending                = "SYNTHESIS_GOAL_SOURCE_PENDING"
+	synthesisGoalProfileFailed                = "SYNTHESIS_GOAL_PROFILE_FAILED"
+	synthesisGoalProfileCapabilityUnavailable = "SYNTHESIS_GOAL_PROFILE_CAPABILITY_UNAVAILABLE"
+	synthesisGoalSourceProcessingFailed       = "SYNTHESIS_GOAL_SOURCE_PROCESSING_FAILED"
+)
+
+type synthesisGoalCatalogReadinessRow struct {
+	CaptureStatus          string  `gorm:"column:capture_status"`
+	CaptureIngestionStatus string  `gorm:"column:capture_ingestion_status"`
+	CaptureProfileStatus   string  `gorm:"column:capture_profile_status"`
+	ProfileStatus          *string `gorm:"column:profile_status"`
+	CurrentRevisionID      *string `gorm:"column:current_revision_id"`
+}
+
+// ReadSynthesisGoalCatalogReadiness 仅扫描尚未冻结的后续部分，与打开证据共用来源所属模块的条件，避免已移除、隔离或生成的来源让目标请求持续等待。
+func (reader *GORMSynthesisSourceReader) ReadSynthesisGoalCatalogReadiness(ctx context.Context, query organizingapp.SynthesisGoalCatalogQuery) (organizingapp.SynthesisGoalCatalogReadiness, error) {
+	result := organizingapp.SynthesisGoalCatalogReadiness{}
+	if err := reader.ready(ctx); err != nil {
+		return result, err
+	}
+	if !validID(query.WorkspaceID) || (query.AfterSourceID != "" && !validID(query.AfterSourceID)) || query.SourceVersionID != "" && !validID(query.SourceVersionID) || query.Limit < 1 || query.Limit > 32 {
+		return result, synthesisSourceError(foundation.ErrorInvalidInput, "SYNTHESIS_GOAL_CATALOG_INVALID", false)
+	}
+	var rows []synthesisGoalCatalogReadinessRow
+	err := reader.database.WithContext(ctx).Raw(`SELECT COALESCE(c.status,'SOURCE_SAVED') AS capture_status,COALESCE(c.ingestion_status,'PENDING') AS capture_ingestion_status,
+ COALESCE(c.profile_status,'PENDING') AS capture_profile_status,p.status AS profile_status,p.current_revision_id::text
+ FROM core.source s
+ JOIN core.source_version v ON v.source_id=s.id AND v.workspace_id=s.workspace_id
+ LEFT JOIN LATERAL (
+  SELECT capture.status,capture.ingestion_status,capture.profile_status
+  FROM core.capture capture
+  WHERE capture.workspace_id=s.workspace_id AND capture.source_id=s.id AND capture.latest_source_version_id=v.id
+  ORDER BY capture.captured_at DESC,capture.id DESC LIMIT 1
+ ) c ON true
+ LEFT JOIN learning.document_knowledge_profile p ON p.workspace_id=s.workspace_id AND p.source_version_id=v.id
+ WHERE s.workspace_id=? AND s.removed_at IS NULL
+  AND (?='' OR s.id>NULLIF(?,'')::uuid)
+  AND (?='' OR v.id=NULLIF(?,'')::uuid)
+  AND v.id=(SELECT latest.id FROM core.source_version latest WHERE latest.workspace_id=s.workspace_id AND latest.source_id=s.id ORDER BY latest.captured_at DESC,latest.id DESC LIMIT 1)
+  AND v.security_status<>'quarantined'
+  AND NOT EXISTS(SELECT 1 FROM ingestion.attempt ia WHERE ia.workspace_id=s.workspace_id AND ia.source_version_id=v.id AND ia.security_status='quarantined')
+  AND NOT `+synthesisDerivedSQL+`
+  AND (
+   p.status IN ('FAILED','CAPABILITY_UNAVAILABLE')
+   OR (p.id IS NOT NULL AND p.current_revision_id IS NULL)
+   OR (p.id IS NULL AND COALESCE(c.profile_status,'PENDING') IN ('PENDING','RUNNING','FAILED','CAPABILITY_UNAVAILABLE','READY','STALE'))
+  )
+ ORDER BY s.id LIMIT 1`, string(query.WorkspaceID), string(query.AfterSourceID), string(query.AfterSourceID), string(query.SourceVersionID), string(query.SourceVersionID)).Scan(&rows).Error
+	if err != nil {
+		return result, synthesisSourceDBError(ctx, err)
+	}
+	for _, row := range rows {
+		// 入库失败后，若没有干预就无法继续生成首个 Profile；Capture 可能仍保留初始 PENDING 标记。
+		if row.CurrentRevisionID == nil && (row.CaptureIngestionStatus == "FAILED" || row.CaptureIngestionStatus == "CAPABILITY_UNAVAILABLE" || row.CaptureStatus == "FETCH_FAILED") {
+			result.DeferredCode = synthesisGoalSourceProcessingFailed
+			return result, nil
+		}
+		if row.ProfileStatus != nil {
+			switch *row.ProfileStatus {
+			case "FAILED":
+				result.DeferredCode = synthesisGoalProfileFailed
+				return result, nil
+			case "CAPABILITY_UNAVAILABLE":
+				result.DeferredCode = synthesisGoalProfileCapabilityUnavailable
+				return result, nil
+			case "PENDING", "RUNNING", "READY", "STALE":
+				if row.CurrentRevisionID != nil && *row.CurrentRevisionID != "" {
+					continue
+				}
+				if *row.ProfileStatus == "PENDING" || *row.ProfileStatus == "RUNNING" {
+					result.DeferredCode = synthesisGoalSourcePending
+					return result, nil
+				}
+				return result, inconsistent("goal catalog profile lost its current revision")
+			default:
+				return result, inconsistent("goal catalog has an unsupported profile status")
+			}
+		}
+		switch row.CaptureProfileStatus {
+		case "FAILED":
+			result.DeferredCode = synthesisGoalProfileFailed
+		case "CAPABILITY_UNAVAILABLE":
+			result.DeferredCode = synthesisGoalProfileCapabilityUnavailable
+		case "PENDING", "RUNNING":
+			result.DeferredCode = synthesisGoalSourcePending
+		case "NOT_APPLICABLE":
+			continue
+		case "READY", "STALE":
+			return result, inconsistent("goal catalog capture lacks its current profile")
+		default:
+			switch row.CaptureIngestionStatus {
+			case "PENDING", "RUNNING":
+				result.DeferredCode = synthesisGoalSourcePending
+			case "FAILED", "CAPABILITY_UNAVAILABLE":
+				result.DeferredCode = synthesisGoalSourceProcessingFailed
+			default:
+				switch row.CaptureStatus {
+				case "RECEIVED", "SOURCE_SAVED", "FETCHING", "PROCESSING":
+					result.DeferredCode = synthesisGoalSourcePending
+				case "PROCESSING_FAILED", "FETCH_FAILED":
+					result.DeferredCode = synthesisGoalSourceProcessingFailed
+				default:
+					return result, inconsistent("goal catalog capture has no profile state")
+				}
+			}
+		}
+		return result, nil
+	}
+	return result, nil
 }
 
 func (reader *GORMSynthesisSourceReader) IsGeneratedSynthesisSourceScoped(ctx context.Context, scope foundation.TransactionScope, source domain.SynthesisSourceVersion) (bool, error) {
@@ -219,11 +335,13 @@ func (reader *GORMSynthesisSourceReader) OpenSynthesisSource(ctx context.Context
 	if err != nil {
 		return view, err
 	}
-	if !found || state.RemovedAt != nil || state.Derived {
+	if !found || state.Derived {
 		return view, nil
 	}
-	if !state.Current {
+	if !state.Current && state.RemovedAt == nil {
 		view.Availability = domain.MaterialStale
+	}
+	if !state.HistoricalReadable {
 		return view, nil
 	}
 	spans, err := reader.spans(ctx, ref.Source, ref.SourceSpanID)
@@ -248,7 +366,11 @@ func (reader *GORMSynthesisSourceReader) OpenSynthesisSource(ctx context.Context
 	if err != nil {
 		return view, nil
 	}
-	view.Availability, view.Text = domain.MaterialAvailable, excerpt.Text
+	if state.Current {
+		view.Availability, view.Text = domain.MaterialAvailable, excerpt.Text
+	} else {
+		view.SnapshotText = excerpt.Text
+	}
 	return view, nil
 }
 

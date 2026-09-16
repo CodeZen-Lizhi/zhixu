@@ -19,7 +19,7 @@ const (
 
 const reservationColumns = `id::text,workspace_id::text,document_id::text,article_revision_id::text,
 		idempotency_key,request_hash,proposal_idempotency_key,target_path,content_hash,target_mode,
-		base_version,absence_token,status,error_code,created_at,updated_at,closed_at,abandoned_at`
+		base_version,absence_token,status,error_code,created_at,updated_at,closed_at,abandoned_at,COALESCE(merge_receipt_id::text,''),COALESCE(merge_capture_id::text,''),COALESCE(merge_published_revision_id::text,''),COALESCE(merge_published_content_hash,''),COALESCE(historical_republish_id::text,'')`
 
 const publicationColumns = `id::text,reservation_id::text,workspace_id::text,document_id::text,
 	article_revision_id::text,proposal_id::text,proposal_revision_id::text,target_path,content_hash,
@@ -53,10 +53,20 @@ func validateStoredReservation(reservation authoringapp.PublicationReservation, 
 		document.CurrentPublishedRevisionID == "" {
 		return inconsistent("stored replace reservation is invalid")
 	}
+	if m := reservation.MergeBaseline; m != nil && document.CurrentPublishedRevisionID != m.PublishedRevisionID {
+		return publicationConflict("published manuscript baseline changed")
+	}
 	return nil
 }
 
 func validateReservationShape(reservation authoringapp.PublicationReservation) error {
+	if m := reservation.MergeBaseline; m != nil {
+		if !((validID(m.ReceiptID) && m.HistoricalRepublishID == "") || (m.ReceiptID == "" && validID(m.HistoricalRepublishID))) || !validID(m.CaptureID) ||
+			(reservation.TargetMode == domain.ProposalTargetReplace && (!validID(m.PublishedRevisionID) || !validHash(m.PublishedContentHash))) ||
+			(reservation.TargetMode == domain.ProposalTargetCreateOnly && (m.PublishedRevisionID != "" || m.PublishedContentHash != "")) {
+			return inconsistent("stored merge publication baseline is invalid")
+		}
+	}
 	if !validID(reservation.ID) || !validID(reservation.WorkspaceID) || !validID(reservation.DocumentID) ||
 		!validID(reservation.ArticleRevisionID) || reservation.IdempotencyKey == "" ||
 		reservation.IdempotencyKey != strings.TrimSpace(reservation.IdempotencyKey) ||

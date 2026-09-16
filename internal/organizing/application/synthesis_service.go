@@ -57,6 +57,10 @@ func (service *SynthesisService) ListCandidates(ctx context.Context, workspaceID
 }
 
 func (service *SynthesisService) ApplyGeneration(ctx context.Context, input SynthesisGenerationInput, generation SynthesisGenerationResult) (SynthesisApplyResult, error) {
+	return service.applyGeneration(ctx, input, generation, nil)
+}
+
+func (service *SynthesisService) applyGeneration(ctx context.Context, input SynthesisGenerationInput, generation SynthesisGenerationResult, manuscripts []SynthesisManuscriptCandidate) (SynthesisApplyResult, error) {
 	if err := service.ready(ctx, input.SourceEvent.Source.WorkspaceID); err != nil {
 		return SynthesisApplyResult{}, err
 	}
@@ -77,7 +81,7 @@ func (service *SynthesisService) ApplyGeneration(ctx context.Context, input Synt
 			*target = id
 		}
 	}
-	result, err := service.dependencies.Store.ApplySynthesisGeneration(ctx, SynthesisApplyRecord{Input: input, Generation: generation, Candidates: allocations, AppliedAt: service.dependencies.Clock.Now().UTC().Truncate(time.Microsecond)})
+	result, err := service.dependencies.Store.ApplySynthesisGeneration(ctx, SynthesisApplyRecord{Input: input, Generation: generation, Manuscripts: manuscripts, Candidates: allocations, AppliedAt: service.dependencies.Clock.Now().UTC().Truncate(time.Microsecond)})
 	if err != nil {
 		return result, err
 	}
@@ -160,6 +164,9 @@ func (service *SynthesisService) OpenSource(ctx context.Context, workspaceID, no
 	if err != nil {
 		return SynthesisSourceView{}, err
 	}
+	if revision.ID != revisionID || revision.NoteID != noteID || revision.WorkspaceID != workspaceID || revision.Validate() != nil {
+		return SynthesisSourceView{}, foundation.NewError(foundation.ErrorConsistencyViolation, ErrorCodeSynthesisConsistency, false, errors.New("source revision binding is invalid"))
+	}
 	if reference.Validate() != nil || reference.Source.WorkspaceID != workspaceID {
 		return SynthesisSourceView{}, invalid(domain.ErrorCodeSynthesisSourceInvalid, "synthesis source binding is invalid")
 	}
@@ -169,6 +176,17 @@ func (service *SynthesisService) OpenSource(ctx context.Context, workspaceID, no
 			if stored == reference {
 				found = true
 				break
+			}
+		}
+	}
+	// 只有不可变修订所属模块可以授权审计引用。
+	// 这些引用不能追加到 Items，也不能作为生成输入暴露。
+	if !found && revision.Manuscript != nil {
+		for _, item := range revision.Manuscript.Machine.MachineItems {
+			for _, stored := range item.SourceReferences() {
+				if stored == reference {
+					found = true
+				}
 			}
 		}
 	}

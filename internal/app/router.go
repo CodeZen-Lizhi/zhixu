@@ -82,6 +82,7 @@ type Dependencies struct {
 	Capture            *capturehttp.Handler
 	Organizing         *organizinghttp.Handler
 	Synthesis          *organizinghttp.SynthesisHandler
+	Anchors            *organizinghttp.AnchorHandler
 	SynthesisInterview *interviewhttp.NotePreparationHandler
 	DocumentHistory    *documenthistoryhttp.Handler
 	GitSync            *gitsynchttp.Handler
@@ -311,6 +312,9 @@ func registerDomainRoutes(api gin.IRouter, deps Dependencies) {
 	}
 	if deps.Organizing != nil {
 		deps.Organizing.Routes(api)
+	}
+	if deps.Anchors != nil {
+		deps.Anchors.Routes(api)
 	}
 	if deps.Synthesis != nil {
 		deps.Synthesis.Routes(api)

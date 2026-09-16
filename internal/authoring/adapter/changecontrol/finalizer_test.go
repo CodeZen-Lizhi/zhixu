@@ -120,3 +120,7 @@ func finalizerPublicationFixture() changecontrolapp.WritebackPublication {
 		GitCommit: strings.Repeat("a", 40), ResultHash: strings.Repeat("b", 64),
 	}
 }
+
+func (fake *publicationRepositoryFake) ValidatePublicationWriteback(context.Context, foundation.ID, foundation.ID, foundation.ID) error {
+	return nil
+}

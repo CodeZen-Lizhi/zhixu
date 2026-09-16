@@ -877,6 +877,12 @@ func queryRoute(writer http.ResponseWriter, request *http.Request, resourceParam
 }
 
 func decodeJSON[T any](request *http.Request, maxDocumentBytes, maxStringBytes, maxArrayItems int) (T, error) {
+	return decodeJSONWithObjectFields[T](request, maxDocumentBytes, maxStringBytes, maxArrayItems, 16)
+}
+
+// decodeJSONWithObjectFields 保留共享严格解码器的行为，
+// 同时允许固定身份字段较多的命令声明自己的字段预算。
+func decodeJSONWithObjectFields[T any](request *http.Request, maxDocumentBytes, maxStringBytes, maxArrayItems, maxObjectFields int) (T, error) {
 	var zero T
 	contentTypes := request.Header.Values("Content-Type")
 	if len(contentTypes) != 1 {
@@ -897,7 +903,7 @@ func decodeJSON[T any](request *http.Request, maxDocumentBytes, maxStringBytes, 
 	limits.MaxDocumentBytes = maxDocumentBytes
 	limits.MaxStringBytes = maxStringBytes
 	limits.MaxDepth = 8
-	limits.MaxObjectFields = 16
+	limits.MaxObjectFields = maxObjectFields
 	limits.MaxArrayItems = maxArrayItems
 	value, err := strictjson.DecodeObject[T](body, limits, nil)
 	if err != nil {

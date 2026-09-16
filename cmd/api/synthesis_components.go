@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/rootgrant"
 	"reflect"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	authoringpostgres "github.com/CodeZen-Lizhi/zhixu/internal/authoring/adapter/postgres"
 	authoringapplication "github.com/CodeZen-Lizhi/zhixu/internal/authoring/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/capability"
+	capturepostgres "github.com/CodeZen-Lizhi/zhixu/internal/capture/adapter/postgres"
 	changecontroldomain "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	organizingowner "github.com/CodeZen-Lizhi/zhixu/internal/organizing/adapter/owner"
@@ -57,8 +59,24 @@ func newAPISynthesisRuntimeComponents(pool *platformpostgres.Pool) (*apiSynthesi
 	if err != nil {
 		return nil, err
 	}
+	profiles, err := capturepostgres.NewGORMProfileRepository(pool, modelRuns)
+	if err != nil {
+		return nil, err
+	}
+	snapshots, err := organizingowner.NewSynthesisGoalCatalogSnapshotReader(profiles)
+	if err != nil {
+		return nil, err
+	}
+	goalResults, err := organizingpostgres.NewGORMGoalSelectionResultReader(pool, snapshots)
+	if err != nil {
+		return nil, err
+	}
+	goalProof, err := organizingapplication.NewSynthesisGoalBindingProof(goalResults)
+	if err != nil {
+		return nil, err
+	}
 	store, err := synthesispostgres.NewStore(pool, synthesispostgres.Dependencies{
-		ModelRuns: modelRuns, WorkflowFence: fence, WorkflowBindings: bindings,
+		Goals: goalProof, ModelRuns: modelRuns, WorkflowFence: fence, WorkflowBindings: bindings,
 	})
 	if err != nil {
 		return nil, err
@@ -92,12 +110,13 @@ func (components *apiSynthesisRuntimeComponents) available() bool {
 }
 
 type apiSynthesisDependencies struct {
-	Workspaces   workspacedomain.SourceMaterialRepository
-	Files        workspacedomain.FileScanner
-	Publications *authoringapplication.Service
-	Retirements  changecontroldomain.GeneratedPublicationRetirementRepository
-	Runtime      *workflowpostgres.GORMRuntimeRepository
-	Timeout      time.Duration
+	ManuscriptRoots *rootgrant.RootGrantResolver
+	Workspaces      workspacedomain.SourceMaterialRepository
+	Files           workspacedomain.FileScanner
+	Publications    *authoringapplication.Service
+	Retirements     changecontroldomain.GeneratedPublicationRetirementRepository
+	Runtime         *workflowpostgres.GORMRuntimeRepository
+	Timeout         time.Duration
 }
 
 type apiSynthesisComponents struct {
@@ -107,6 +126,7 @@ type apiSynthesisComponents struct {
 	processing       *organizingworkflow.SynthesisProcessingService
 	definitions      *workflowapplication.DefinitionRegistry
 	handler          *organizinghttp.SynthesisHandler
+	anchors          *organizinghttp.AnchorHandler
 	interviews       *interviewapplication.NotePreparationService
 	interviewHandler *interviewhttp.NotePreparationHandler
 }
@@ -137,12 +157,17 @@ func newAPISynthesisComponents(runtime *apiSynthesisRuntimeComponents, dependenc
 	if err != nil {
 		return nil, err
 	}
+	anchorStore, err := organizingpostgres.NewGORMAnchorStore(pool, sources)
+	if err != nil {
+		return nil, err
+	}
 	store, err := organizingpostgres.NewGORMSynthesisStore(pool, organizingpostgres.SynthesisStoreDependencies{
-		Authoring: authoring, Retirer: retirer, Sources: sources, Validated: runtime.store,
+		Authoring: authoring, Retirer: retirer, Sources: sources, Validated: runtime.store, Anchors: anchorStore,
 	})
 	if err != nil {
 		return nil, err
 	}
+	anchorHandler := organizinghttp.NewAnchorHandler(anchorStore, dependencies.Timeout)
 	ids, clock := foundation.NewUUIDGenerator(nil), foundation.SystemClock{}
 	service, err := organizingapplication.NewSynthesisService(organizingapplication.SynthesisDependencies{
 		Store: store, Sources: sources, Publications: dependencies.Publications, IDs: ids, Clock: clock,
@@ -165,7 +190,39 @@ func newAPISynthesisComponents(runtime *apiSynthesisRuntimeComponents, dependenc
 	if err != nil {
 		return nil, err
 	}
-	handler := organizinghttp.NewSynthesisHandler(service, processing, dependencies.Timeout)
+	profiles, err := capturepostgres.NewGORMProfileRepository(pool, runtime.modelRuns)
+	if err != nil {
+		return nil, err
+	}
+	directory, err := organizingowner.NewKnowledgeDirectoryReader(profiles)
+	if err != nil {
+		return nil, err
+	}
+	goalViews, err := organizingpostgres.NewGORMGoalViewReader(pool, runtime.store)
+	if err != nil {
+		return nil, err
+	}
+	goalSnapshots, err := organizingowner.NewSynthesisGoalCatalogSnapshotReader(profiles)
+	if err != nil {
+		return nil, err
+	}
+	goalSelections, err := organizingpostgres.NewGORMGoalSelectionStore(pool, store, goalSnapshots, runtime.modelRuns)
+	if err != nil {
+		return nil, err
+	}
+	goalCatalog, err := organizingowner.NewSynthesisGoalCatalogReader(profiles, sources)
+	if err != nil {
+		return nil, err
+	}
+	sourcePromoter, err := organizingapplication.NewSynthesisSourcePromotionService(store, goalCatalog, sources)
+	if err != nil {
+		return nil, err
+	}
+	handler := organizinghttp.NewSynthesisHandlerWithGoals(service, processing, directory, store, goalViews, goalSelections, dependencies.Timeout, sourcePromoter)
+	handler, err = composeSynthesisManuscriptReview(runtime, dependencies, store, sources, handler, definitions)
+	if err != nil {
+		return nil, err
+	}
 	if !handler.Available() {
 		return nil, synthesisAPICompositionUnavailable("synthesis HTTP handler is unavailable")
 	}
@@ -185,7 +242,7 @@ func newAPISynthesisComponents(runtime *apiSynthesisRuntimeComponents, dependenc
 		return nil, err
 	}
 	return &apiSynthesisComponents{
-		store: store, sources: sources, service: service, processing: processing, definitions: definitions, handler: handler,
+		store: store, sources: sources, service: service, anchors: anchorHandler, processing: processing, definitions: definitions, handler: handler,
 		interviews: interviews, interviewHandler: interviewHandler,
 	}, nil
 }
@@ -201,6 +258,13 @@ func registerAPISynthesisWorkflowContracts(executors *workflowapplication.Execut
 			return err
 		}
 	}
+	for _, definition := range organizingworkflow.SourceReviewDefinitions() {
+		for _, node := range definition.Graph.Nodes {
+			if err := executors.RegisterContract(node.Kind, node.InputSchemaVersion); err != nil {
+				return err
+			}
+		}
+	}
 	return executors.RegisterContract(interviewapplication.NotePreparationNodeKind, interviewapplication.NotePreparationSchemaVersion)
 }
 
@@ -208,7 +272,7 @@ func registerAPISynthesisWorkflowDefinitions(definitions *workflowapplication.De
 	if definitions == nil {
 		return synthesisAPICompositionUnavailable("synthesis workflow definitions are unavailable")
 	}
-	for _, definition := range organizingworkflow.SynthesisRegisteredDefinitions() {
+	for _, definition := range append(organizingworkflow.SynthesisRegisteredDefinitions(), organizingworkflow.SourceReviewDefinitions()...) {
 		if err := definitions.Register(definition); err != nil {
 			return err
 		}

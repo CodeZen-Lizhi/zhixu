@@ -208,6 +208,8 @@ func (c *WritebackClient) DiffApproved(ctx context.Context, request changecontro
 		return changecontrol.GitDiff{}, err
 	}
 	targetMode := changecontrol.NormalizeTargetMode(request.TargetMode)
+	authority, hasHistoricalAuthority := changecontrol.HistoricalRepublishGitAuthorityFromContext(ctx)
+	historicalSameBytes := hasHistoricalAuthority && authority.WorkspaceID == request.WorkspaceID && targetMode == changecontrol.TargetModeReplace && historicalSameByteTarget(ctx, request.TargetPath, request.ApprovedGitHead, request.ResultHash)
 	baseMode, baseBlobID := changecontrol.GitFileModeRegular, ""
 	if targetMode == changecontrol.TargetModeCreateOnly {
 		if err := c.ensureTreeTargetAbsent(ctx, root, request.ApprovedGitHead, request.TargetPath); err != nil {
@@ -221,7 +223,11 @@ func (c *WritebackClient) DiffApproved(ctx context.Context, request changecontro
 		if err != nil {
 			return changecontrol.GitDiff{}, err
 		}
-		if err := validateOnlyTargetModification(status, request.TargetPath, baseMode); err != nil {
+		if historicalSameBytes {
+			if len(status) != 0 {
+				return changecontrol.GitDiff{}, classifyDirtyStatus(status)
+			}
+		} else if err := validateOnlyTargetModification(status, request.TargetPath, baseMode); err != nil {
 			return changecontrol.GitDiff{}, err
 		}
 	}
@@ -255,10 +261,13 @@ func (c *WritebackClient) DiffApproved(ctx context.Context, request changecontro
 	if err != nil {
 		return changecontrol.GitDiff{}, err
 	}
-	if len(stableDiff) == 0 {
+	if len(stableDiff) == 0 && !historicalSameBytes {
 		return changecontrol.GitDiff{}, gitWritebackError(foundation.ErrorVersionConflict, "GIT_TARGET_DIFF_MISSING", false, changecontrol.ErrGitVersionConflict)
 	}
-	if err := validateStableDiffForTargetMode(stableDiff, targetMode, baseBlobID, resultBlobID, baseMode); err != nil {
+	if historicalSameBytes && (len(stableDiff) != 0 || baseBlobID != resultBlobID) {
+		return changecontrol.GitDiff{}, gitWritebackError(foundation.ErrorVersionConflict, "GIT_HISTORICAL_CONTENT_CHANGED", false, changecontrol.ErrGitVersionConflict)
+	}
+	if err := validateStableDiffForTargetMode(stableDiff, targetMode, baseBlobID, resultBlobID, baseMode); err != nil && !historicalSameBytes {
 		return changecontrol.GitDiff{}, err
 	}
 	if err := c.ensureFilterUnspecified(ctx, root, request.TargetPath); err != nil {

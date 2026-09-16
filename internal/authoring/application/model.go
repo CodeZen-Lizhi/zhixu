@@ -87,7 +87,18 @@ type PublishBinding struct {
 }
 
 // PublicationReservation is the durable pre-Proposal publication identity.
+// PublicationMergeBaseline 派生自不可变的生成手稿。
+// 它由仓库返回，绝不由发布命令提供。
+type PublicationMergeBaseline struct {
+	HistoricalRepublishID foundation.ID
+	ReceiptID             foundation.ID
+	CaptureID             foundation.ID
+	PublishedRevisionID   foundation.ID
+	PublishedContentHash  string
+}
+
 type PublicationReservation struct {
+	MergeBaseline          *PublicationMergeBaseline
 	ID                     foundation.ID
 	WorkspaceID            foundation.ID
 	DocumentID             foundation.ID

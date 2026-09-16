@@ -2292,7 +2292,7 @@ exactModelSettingsShape("ModelSettingsConflictDetails", ["current_revision"]);
 exactModelSettingsShape("ModelSettingsTestProblem", ["error_code", "message", "retryable"], ["error_code", "message", "retryable", "workflow_run_id", "details"]);
 exactModelSettingsShape("ModelSettingsTestDetails", ["target", "stage"], ["target", "stage", "provider_http_status", "provider_error_code", "provider_error_type", "provider_message", "provider_request_id", "transport_error", "validation_reason"]);
 exactModelSettingsShape("ModelSettingsSummary", ["chat", "embedding"]);
-exactModelSettingsShape("ModelChatSettingsSummary", ["provider", "api_style", "base_url", "model", "model_version", "adapter_version", "api_key_configured"]);
+exactModelSettingsShape("ModelChatSettingsSummary", ["provider", "api_style", "base_url", "model", "model_version", "adapter_version", "api_key_configured", "reasoning_effort", "reasoning_effort_by_function"]);
 exactModelSettingsShape("ModelEmbeddingSettingsSummary", ["provider", "base_url", "model", "dimensions", "normalization", "distance_metric", "api_key_configured"]);
 exactModelSettingsShape("ModelSettingsRuntime", ["api", "worker"]);
 exactModelSettingsShape("ModelSettingsRuntimeRole", ["applied_revision", "phase", "fresh"]);
@@ -2303,7 +2303,7 @@ exactModelSettingsShape("ModelSettingsCapabilities", ["chat", "embedding"]);
 exactModelSettingsShape("ModelLocalRuntime", ["mode", "phase", "fresh", "requirement_hash", "ready_hash", "operation_id", "operation_phase", "completed_bytes", "total_bytes", "progress_known", "operation_error", "operation_retryable"]);
 exactModelSettingsShape("StartModelSettingsActivationRequest", ["expected_revision"]);
 exactModelSettingsShape("UpdateModelSettingsRequest", ["expected_revision", "chat", "embedding"]);
-exactModelSettingsShape("ModelChatSettingsDraft", ["provider", "api_style", "base_url", "model", "model_version", "adapter_version", "api_key"]);
+exactModelSettingsShape("ModelChatSettingsDraft", ["provider", "api_style", "base_url", "model", "model_version", "adapter_version", "api_key"], ["provider", "api_style", "base_url", "model", "model_version", "adapter_version", "api_key", "reasoning_effort", "reasoning_effort_by_function"]);
 exactModelSettingsShape("ModelEmbeddingSettingsDraft", ["provider", "base_url", "model", "dimensions", "normalization", "distance_metric", "api_key"]);
 exactModelSettingsShape("ModelAPIKeyKeep", ["action"]);
 exactModelSettingsShape("ModelAPIKeyReplace", ["action", "value"]);
@@ -2355,6 +2355,28 @@ if (responseSchemas.some((schema) => JSON.stringify(schema).includes('"writeOnly
   throw new Error("Model Settings response schemas must not expose secrets, ciphertext, key metadata, or instance identity");
 }
 
+for (const name of ["ModelChatSettingsSummary", "ModelChatSettingsDraft"]) {
+  const chat = schemas[name];
+  if (chat.properties.reasoning_effort.enum?.join(",") !== ",low,medium,high,xhigh,max" ||
+      chat.properties.reasoning_effort.default !== "" ||
+      chat.oneOf[0].properties.reasoning_effort.const !== "" ||
+      chat.oneOf[2].properties.reasoning_effort.const !== "") {
+    fail(`${name} reasoning effort must preserve provider defaults and provider restrictions`);
+  }
+}
+const reasoningFunctions = ["file_profile", "knowledge_organization", "anchor_scope", "main_note_synthesis", "manuscript_source_review", "knowledge_qna", "workspace_analysis", "note_interview"];
+const reasoningOverrides = schemas.ModelReasoningEffortOverrides;
+if (reasoningOverrides.additionalProperties !== false || reasoningOverrides.maxProperties !== 8 ||
+    Object.keys(reasoningOverrides.properties).join(",") !== reasoningFunctions.join(",") ||
+    reasoningFunctions.some(key => reasoningOverrides.properties[key].enum?.join(",") !== ",low,medium,high,xhigh,max")) {
+  fail("function reasoning overrides must retain their closed keys and levels");
+}
+for (const name of ["ModelChatSettingsSummary", "ModelChatSettingsDraft"]) {
+  const chat = schemas[name];
+  if (chat.properties.reasoning_effort_by_function.$ref !== "#/components/schemas/ModelReasoningEffortOverrides" ||
+      chat.oneOf[0].properties.reasoning_effort_by_function.maxProperties !== 0 ||
+      chat.oneOf[2].properties.reasoning_effort_by_function.maxProperties !== 0) fail("function reasoning provider restriction drifted");
+}
 const chatSummary = schemas.ModelChatSettingsSummary;
 const embeddingSummary = schemas.ModelEmbeddingSettingsSummary;
 if (chatSummary.properties.provider.enum?.join(",") !== "disabled,openai-compatible,ollama" ||

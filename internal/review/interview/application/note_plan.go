@@ -46,6 +46,9 @@ func EncodeNotePlanInput(preparation NotePreparation) ([]byte, error) {
 	if err := preparation.Validate(); err != nil {
 		return nil, err
 	}
+	if len(preparation.Snapshot.Items) == 0 {
+		return nil, domain.InvalidError(domain.ErrorCodeEvidenceInvalid, "published note has no trusted interview material available")
+	}
 	items := make([]noteItemInput, 0, len(preparation.Snapshot.Items))
 	for index, item := range preparation.Snapshot.Items {
 		points, context := noteItemPoints(item)

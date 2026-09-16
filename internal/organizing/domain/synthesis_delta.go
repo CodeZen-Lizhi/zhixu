@@ -2,10 +2,10 @@ package domain
 
 import "github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 
-// ApplySynthesisDelta applies an append-only, source-bound change to a semantic
-// projection. It does not mutate current, delta or available, and creates no
-// revision identity. Persistence must CAS the frozen base and commit only when
-// Changed is true. Semantic support is additionally checked by the application.
+// ApplySynthesisDelta 将有界且绑定来源的变更应用到语义投影。
+// 它不修改 current、delta 或 available，也不创建修订身份。
+// 持久化必须对冻结基线执行 CAS，仅在 Changed 为 true 时提交修订。
+// 语义支持还须由应用层检查。
 func ApplySynthesisDelta(workspaceID foundation.ID, current []SynthesisItem, delta SynthesisDelta, available []SynthesisSourceRef) (SynthesisDeltaResult, error) {
 	if err := ValidateSynthesisItems(workspaceID, current); err != nil {
 		return SynthesisDeltaResult{}, err
@@ -45,11 +45,21 @@ func ApplySynthesisDelta(workspaceID foundation.ID, current []SynthesisItem, del
 		byID[item.ID], bySemantics[key], requestedIDs[item.ID] = index, index, key
 	}
 	changed := false
+	sourcesChanged := false
 	for _, operation := range delta.Operations {
 		if err := requireAvailableSynthesisSources(operation, allowed); err != nil {
 			return SynthesisDeltaResult{}, err
 		}
 		switch operation.Kind {
+		case SynthesisRefreshItem:
+			index, exists := byID[operation.TargetItemID]
+			if !exists || items[index].BodyReference == nil || operation.Item.BodyReference.NoteID != items[index].BodyReference.NoteID || operation.Item.BodyReference.ItemID != items[index].BodyReference.ItemID {
+				return SynthesisDeltaResult{}, invalid(ErrorCodeSynthesisDeltaInvalid, "synthesis refresh target reference changed")
+			}
+			if !synthesisRefreshContentEqual(items[index], *operation.Item) {
+				items[index] = cloneSynthesisItem(*operation.Item)
+				changed = true
+			}
 		case SynthesisAddFact, SynthesisAddConflict, SynthesisAddGap:
 			item := *operation.Item
 			key := synthesisItemKey(item)
@@ -58,7 +68,8 @@ func ApplySynthesisDelta(workspaceID foundation.ID, current []SynthesisItem, del
 			}
 			requestedIDs[item.ID] = key
 			if index, duplicate := bySemantics[key]; duplicate {
-				changed = mergeSynthesisItem(&items[index], item) || changed
+				merged := mergeSynthesisItem(&items[index], item)
+				sourcesChanged = merged || sourcesChanged
 				continue
 			}
 			if len(items) >= MaxSynthesisItems {
@@ -79,12 +90,14 @@ func ApplySynthesisDelta(workspaceID foundation.ID, current []SynthesisItem, del
 				if operation.AlternativeIndex != nil {
 					return SynthesisDeltaResult{}, invalid(ErrorCodeSynthesisDeltaInvalid, "synthesis fact cannot select a conflict alternative")
 				}
-				changed = appendSynthesisSources(&item.Fact.Sources, operation.Sources) || changed
+				added := appendSynthesisSources(&item.Fact.Sources, operation.Sources)
+				sourcesChanged = added || sourcesChanged
 			case SynthesisConflictItem:
 				if operation.AlternativeIndex == nil || *operation.AlternativeIndex >= len(item.Conflict.Alternatives) {
 					return SynthesisDeltaResult{}, invalid(ErrorCodeSynthesisDeltaInvalid, "synthesis conflict alternative is out of range")
 				}
-				changed = appendSynthesisSources(&item.Conflict.Alternatives[*operation.AlternativeIndex].Sources, operation.Sources) || changed
+				added := appendSynthesisSources(&item.Conflict.Alternatives[*operation.AlternativeIndex].Sources, operation.Sources)
+				sourcesChanged = added || sourcesChanged
 			default:
 				return SynthesisDeltaResult{}, invalid(ErrorCodeSynthesisDeltaInvalid, "synthesis support target is not an assertion")
 			}
@@ -102,7 +115,8 @@ func ApplySynthesisDelta(workspaceID foundation.ID, current []SynthesisItem, del
 				if synthesisStatementKey(*gap.Resolution) != synthesisStatementKey(*operation.Resolution) {
 					return SynthesisDeltaResult{}, invalid(ErrorCodeSynthesisDeltaInvalid, "synthesis gap resolution cannot be rewritten")
 				}
-				changed = appendSynthesisSources(&gap.Resolution.Sources, operation.Resolution.Sources) || changed
+				added := appendSynthesisSources(&gap.Resolution.Sources, operation.Resolution.Sources)
+				sourcesChanged = added || sourcesChanged
 			}
 		default:
 			return SynthesisDeltaResult{}, invalid(ErrorCodeSynthesisDeltaInvalid, "synthesis operation kind is unknown")
@@ -111,13 +125,13 @@ func ApplySynthesisDelta(workspaceID foundation.ID, current []SynthesisItem, del
 	if err := ValidateSynthesisItems(workspaceID, items); err != nil {
 		return SynthesisDeltaResult{}, err
 	}
-	return SynthesisDeltaResult{Items: items, Changed: changed}, nil
+	return SynthesisDeltaResult{Items: items, Changed: changed, SourcesChanged: sourcesChanged}, nil
 }
 
 func requireAvailableSynthesisSources(operation SynthesisOperation, allowed map[string]SynthesisSourceRef) error {
 	var references []SynthesisSourceRef
 	switch operation.Kind {
-	case SynthesisAddFact, SynthesisAddConflict, SynthesisAddGap:
+	case SynthesisAddFact, SynthesisAddConflict, SynthesisAddGap, SynthesisRefreshItem:
 		references = operation.Item.SourceReferences()
 	case SynthesisAddSupport:
 		references = operation.Sources
@@ -184,6 +198,10 @@ func cloneSynthesisItems(items []SynthesisItem) []SynthesisItem {
 }
 
 func cloneSynthesisItem(item SynthesisItem) SynthesisItem {
+	if item.BodyReference != nil {
+		reference := *item.BodyReference
+		item.BodyReference = &reference
+	}
 	if item.Fact != nil {
 		statement := cloneSynthesisStatement(*item.Fact)
 		item.Fact = &statement

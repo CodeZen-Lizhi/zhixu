@@ -122,6 +122,20 @@ func (event SynthesisSourceReady) Validate() error {
 		event.ProcessorVersion != SynthesisProcessorVersion || event.CreatedAt.IsZero() || canonicalTime(event.CreatedAt) != event.CreatedAt {
 		return invalid(ErrorCodeSynthesisSourceInvalid, "synthesis source-ready event is invalid")
 	}
+	if trigger := event.Fusion; trigger != nil {
+		if !validID(trigger.RequestID) || !validID(trigger.AnchorID) || !validID(trigger.NoteID) || !validID(trigger.ProposalID) ||
+			trigger.ScopeVersion < 1 || len(trigger.AllowedSources) < 1 || len(trigger.AllowedSources) > MaxSynthesisSources {
+			return invalid(ErrorCodeSynthesisSourceInvalid, "synthesis fusion trigger is invalid")
+		}
+		seen := map[string]bool{}
+		for _, ref := range trigger.AllowedSources {
+			key, err := ref.IdentityKey()
+			if err != nil || ref.Source != event.Source || seen[key] {
+				return invalid(ErrorCodeSynthesisSourceInvalid, "synthesis fusion source is invalid")
+			}
+			seen[key] = true
+		}
+	}
 	return nil
 }
 
@@ -132,16 +146,26 @@ func (event SynthesisSourceReady) ProcessingKey() (string, error) {
 		return "", err
 	}
 	encoded, err := json.Marshal(struct {
-		Source    SynthesisSourceVersion `json:"source"`
-		Processor string                 `json:"processor"`
-	}{event.Source, event.ProcessorVersion})
+		Source    SynthesisSourceVersion  `json:"source"`
+		Processor string                  `json:"processor"`
+		Fusion    *SynthesisFusionTrigger `json:"fusion,omitempty"`
+	}{event.Source, event.ProcessorVersion, event.Fusion})
 	if err != nil {
 		return "", invalid(ErrorCodeSynthesisSourceInvalid, "synthesis source-ready binding cannot be encoded")
 	}
-	return "synthesis:" + synthesisHash(encoded), nil
+	prefix := "synthesis:"
+	if event.Fusion != nil {
+		prefix = "synthesis-fusion:"
+	}
+	return prefix + synthesisHash(encoded), nil
 }
 
 func (item SynthesisItem) Validate(workspaceID foundation.ID) error {
+	if item.BodyReference != nil {
+		if err := item.BodyReference.Validate(workspaceID); err != nil {
+			return err
+		}
+	}
 	if !validID(workspaceID) || !validID(item.ID) {
 		return invalid(ErrorCodeSynthesisDeltaInvalid, "synthesis item identity is invalid")
 	}
@@ -233,6 +257,11 @@ func (operation SynthesisOperation) Validate(workspaceID foundation.ID) error {
 		return invalid(ErrorCodeSynthesisDeltaInvalid, "synthesis operation scope is invalid")
 	}
 	switch operation.Kind {
+	case SynthesisRefreshItem:
+		if operation.Item == nil || !validID(operation.TargetItemID) || operation.Item.ID != operation.TargetItemID || operation.Item.BodyReference == nil || operation.AlternativeIndex != nil || len(operation.Sources) != 0 || operation.Resolution != nil {
+			return invalid(ErrorCodeSynthesisDeltaInvalid, "synthesis refresh operation shape is invalid")
+		}
+		return operation.Item.Validate(workspaceID)
 	case SynthesisAddFact, SynthesisAddConflict, SynthesisAddGap:
 		if operation.Item == nil || operation.TargetItemID != "" || operation.AlternativeIndex != nil ||
 			len(operation.Sources) != 0 || operation.Resolution != nil {
@@ -241,7 +270,7 @@ func (operation SynthesisOperation) Validate(workspaceID foundation.ID) error {
 		expectedKind := map[SynthesisOperationKind]SynthesisItemKind{
 			SynthesisAddFact: SynthesisFactItem, SynthesisAddConflict: SynthesisConflictItem, SynthesisAddGap: SynthesisGapItem,
 		}[operation.Kind]
-		if operation.Item.Kind != expectedKind || (operation.Item.Gap != nil && operation.Item.Gap.Resolution != nil) {
+		if operation.Item.Kind != expectedKind || (operation.Item.Gap != nil && operation.Item.Gap.Resolution != nil && operation.Item.BodyReference == nil) {
 			return invalid(ErrorCodeSynthesisDeltaInvalid, "synthesis add operation kind is invalid")
 		}
 		return operation.Item.Validate(workspaceID)
@@ -367,6 +396,19 @@ func synthesisStatementKey(statement SynthesisStatement) string {
 }
 
 func synthesisItemKey(item SynthesisItem) string {
+	key := synthesisItemContentKey(item)
+	if ref := item.BodyReference; ref != nil {
+		// 显式包含与共享原始证据属于不同契约，
+		// 不能将其作为纯文本重复项丢弃。
+		key += "\x00body_reference\x00" + strings.Join([]string{
+			string(ref.WorkspaceID), string(ref.NoteID), string(ref.RevisionID),
+			string(ref.PublicationID), string(ref.ItemID), ref.ProjectionHash,
+		}, ":")
+	}
+	return key
+}
+
+func synthesisItemContentKey(item SynthesisItem) string {
 	switch item.Kind {
 	case SynthesisFactItem:
 		return string(item.Kind) + "\x00" + synthesisStatementKey(*item.Fact)

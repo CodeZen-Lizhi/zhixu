@@ -14,17 +14,187 @@
 
 import * as runtime from '../runtime';
 import type {
+    AnchorDecisionResult,
+    AnchorFusionRecent,
+    AnchorMutationResult,
+    AnchorPage,
+    AnchorProposalPage,
+    AnchorRecommendation,
+    AnchorRecommendationPage,
+    AnchorView,
+    CreateAnchorRequest,
+    CreateSynthesisGoal,
+    DecideAnchorRequest,
+    GetSynthesisUpdateSummaries200Response,
     Problem,
+    RequestAnchorRecommendation,
+    RetryAnchorRecommendation,
+    SourceKnowledgeDirectory,
+    SynthesisBodyImpacts,
+    SynthesisCandidateRemergeApply,
+    SynthesisCandidateRemergeBegin,
+    SynthesisCandidateRemergeReview,
+    SynthesisCandidateRemergeTarget,
+    SynthesisGoalCreated,
+    SynthesisGoalPage,
+    SynthesisGoalSelection,
+    SynthesisGoalSelectionPage,
+    SynthesisGoalView,
+    SynthesisHistoricalRepublishApply,
+    SynthesisHistoricalRepublishBegin,
+    SynthesisHistoricalRepublishReview,
+    SynthesisHistoricalRepublishTarget,
+    SynthesisKnowledgePointProjection,
+    SynthesisManuscriptDecision,
+    SynthesisManuscriptDetail,
+    SynthesisManuscriptResume,
+    SynthesisManuscriptSummary,
     SynthesisNoteDetail,
     SynthesisNotePage,
     SynthesisProcessingPage,
     SynthesisProcessingResult,
+    SynthesisProcessingSourceReviews,
     SynthesisRetryRequest,
     SynthesisRetryResult,
     SynthesisRevisionPage,
     SynthesisRevisionResult,
+    SynthesisRevisionSourceReviews,
+    SynthesisSourceGraph,
+    SynthesisSourceImpacts,
+    SynthesisSourcePromotion,
+    SynthesisSourceReview,
+    SynthesisSourceReviewCommand,
+    SynthesisSourceReviewEvidenceView,
     SynthesisSourceView,
+    SynthesisSupplementPage,
+    SynthesisSupplementView,
 } from '../models/index';
+
+export interface ApplySynthesisCandidateRemergeRequest {
+    workspaceId: string;
+    noteId: string;
+    attemptId: string;
+    synthesisCandidateRemergeApply: SynthesisCandidateRemergeApply;
+    idempotencyKey?: string;
+}
+
+export interface ApplySynthesisHistoricalRepublishRequest {
+    workspaceId: string;
+    noteId: string;
+    attemptId: string;
+    synthesisHistoricalRepublishApply: SynthesisHistoricalRepublishApply;
+    idempotencyKey?: string;
+}
+
+export interface BeginSynthesisCandidateRemergeRequest {
+    workspaceId: string;
+    noteId: string;
+    synthesisCandidateRemergeBegin: SynthesisCandidateRemergeBegin;
+    idempotencyKey?: string;
+}
+
+export interface BeginSynthesisHistoricalRepublishRequest {
+    workspaceId: string;
+    noteId: string;
+    synthesisHistoricalRepublishBegin: SynthesisHistoricalRepublishBegin;
+    idempotencyKey?: string;
+}
+
+export interface CreateKnowledgeAnchorRequest {
+    idempotencyKey: string;
+    workspaceId: string;
+    createAnchorRequest: CreateAnchorRequest;
+}
+
+export interface CreateSynthesisGoalRequest {
+    idempotencyKey: string;
+    workspaceId: string;
+    createSynthesisGoal: CreateSynthesisGoal;
+}
+
+export interface DecideAnchorAssociationsRequest {
+    idempotencyKey: string;
+    workspaceId: string;
+    anchorId: string;
+    decideAnchorRequest: DecideAnchorRequest;
+}
+
+export interface DecideAnchorScopeProposalsRequest {
+    idempotencyKey: string;
+    workspaceId: string;
+    anchorId: string;
+    decideAnchorRequest: DecideAnchorRequest;
+}
+
+export interface DecideSynthesisManuscriptRequest {
+    workspaceId: string;
+    processingId: string;
+    noteId: string;
+    synthesisManuscriptDecision: SynthesisManuscriptDecision;
+}
+
+export interface GetAnchorRecommendationRequest {
+    workspaceId: string;
+    requestId: string;
+}
+
+export interface GetKnowledgeAnchorRequest {
+    workspaceId: string;
+    anchorId: string;
+}
+
+export interface GetSourceKnowledgeDirectoryRequest {
+    workspaceId: string;
+    sourceVersionId: string;
+}
+
+export interface GetSynthesisBodyImpactsRequest {
+    workspaceId: string;
+    noteId: string;
+    revisionId: string;
+    limit?: number;
+    afterId?: string;
+}
+
+export interface GetSynthesisCandidateRemergeRequest {
+    key: string;
+    workspaceId: string;
+    noteId: string;
+}
+
+export interface GetSynthesisCandidateRemergeTargetRequest {
+    workspaceId: string;
+    noteId: string;
+}
+
+export interface GetSynthesisGoalRequest {
+    workspaceId: string;
+    goalId: string;
+}
+
+export interface GetSynthesisHistoricalRepublishRequest {
+    workspaceId: string;
+    noteId: string;
+    key?: string;
+    attemptId?: string;
+}
+
+export interface GetSynthesisHistoricalRepublishTargetRequest {
+    selectedRevisionId: string;
+    workspaceId: string;
+    noteId: string;
+}
+
+export interface GetSynthesisManuscriptNoteReviewRequest {
+    workspaceId: string;
+    processingId: string;
+    noteId: string;
+}
+
+export interface GetSynthesisManuscriptReviewRequest {
+    workspaceId: string;
+    processingId: string;
+}
 
 export interface GetSynthesisNoteRequest {
     workspaceId: string;
@@ -42,6 +212,83 @@ export interface GetSynthesisRevisionRequest {
     revisionId: string;
 }
 
+export interface GetSynthesisSourceGraphRequest {
+    workspaceId: string;
+    noteId: string;
+    revisionId: string;
+    afterNoteId?: string;
+    limit?: number;
+}
+
+export interface GetSynthesisSourceImpactsRequest {
+    workspaceId: string;
+    noteId: string;
+    revisionId: string;
+}
+
+export interface GetSynthesisSourceKnowledgePointsRequest {
+    workspaceId: string;
+    noteId: string;
+    revisionId: string;
+    sourceSpanId: string;
+}
+
+export interface GetSynthesisSourceReviewRequest {
+    workspaceId: string;
+    reviewId: string;
+}
+
+export interface GetSynthesisUpdateSummariesRequest {
+    noteIds: string;
+    workspaceId: string;
+}
+
+export interface ListAnchorAssociationsRequest {
+    workspaceId: string;
+    anchorId: string;
+    limit?: number;
+    afterId?: string;
+}
+
+export interface ListAnchorRecommendationsRequest {
+    workspaceId: string;
+    limit?: number;
+    afterId?: string;
+    noteId?: string;
+}
+
+export interface ListAnchorScopeProposalsRequest {
+    workspaceId: string;
+    anchorId: string;
+    limit?: number;
+    afterId?: string;
+}
+
+export interface ListKnowledgeAnchorsRequest {
+    workspaceId: string;
+    limit?: number;
+    afterId?: string;
+    noteId?: string;
+}
+
+export interface ListRecentAnchorFusionRequestsRequest {
+    workspaceId: string;
+    anchorId: string;
+}
+
+export interface ListSynthesisGoalSelectionsRequest {
+    workspaceId: string;
+    goalId: string;
+    limit?: number;
+    afterId?: string;
+}
+
+export interface ListSynthesisGoalsRequest {
+    workspaceId: string;
+    limit?: number;
+    cursor?: string;
+}
+
 export interface ListSynthesisNotesRequest {
     workspaceId: string;
     limit?: number;
@@ -54,7 +301,29 @@ export interface ListSynthesisProcessingRequest {
     cursor?: string;
 }
 
+export interface ListSynthesisProcessingSourceReviewsRequest {
+    workspaceId: string;
+    processingId: string;
+    limit?: number;
+    afterId?: string;
+}
+
+export interface ListSynthesisRevisionSourceReviewsRequest {
+    workspaceId: string;
+    noteId: string;
+    revisionId: string;
+    limit?: number;
+    afterId?: string;
+}
+
 export interface ListSynthesisRevisionsRequest {
+    workspaceId: string;
+    noteId: string;
+    limit?: number;
+    cursor?: string;
+}
+
+export interface ListSynthesisSupplementsRequest {
     workspaceId: string;
     noteId: string;
     limit?: number;
@@ -68,6 +337,78 @@ export interface OpenSynthesisSourceRequest {
     sourceSpanId: string;
 }
 
+export interface OpenSynthesisSourceReviewEvidenceRequest {
+    workspaceId: string;
+    reviewId: string;
+    evidenceId: string;
+}
+
+export interface OpenSynthesisSupplementRequest {
+    workspaceId: string;
+    noteId: string;
+    supplementId: string;
+}
+
+export interface PromoteSynthesisSourceRequest {
+    idempotencyKey: string;
+    workspaceId: string;
+    sourceVersionId: string;
+    requestBody: { [key: string]: any | null; };
+}
+
+export interface RecheckSynthesisSourceReviewRequest {
+    workspaceId: string;
+    reviewId: string;
+    synthesisSourceReviewCommand: SynthesisSourceReviewCommand;
+}
+
+export interface RecoverSynthesisSourceReviewRequest {
+    workspaceId: string;
+    reviewId: string;
+    synthesisSourceReviewCommand: SynthesisSourceReviewCommand;
+}
+
+export interface RequestAnchorRecommendationRequest {
+    idempotencyKey: string;
+    workspaceId: string;
+    requestAnchorRecommendation: RequestAnchorRecommendation;
+}
+
+export interface ResumeSynthesisCandidateRemergeRequest {
+    workspaceId: string;
+    noteId: string;
+    attemptId: string;
+    body: object;
+}
+
+export interface ResumeSynthesisHistoricalRepublishRequest {
+    workspaceId: string;
+    noteId: string;
+    attemptId: string;
+    body: object;
+}
+
+export interface ResumeSynthesisManuscriptRequest {
+    workspaceId: string;
+    processingId: string;
+    synthesisManuscriptResume: SynthesisManuscriptResume;
+}
+
+export interface RetryAnchorRecommendationRequest {
+    idempotencyKey: string;
+    workspaceId: string;
+    requestId: string;
+    retryAnchorRecommendation: RetryAnchorRecommendation;
+}
+
+export interface RetrySynthesisGoalSelectionRequest {
+    idempotencyKey: string;
+    workspaceId: string;
+    goalId: string;
+    selectionId: string;
+    synthesisRetryRequest: SynthesisRetryRequest;
+}
+
 export interface RetrySynthesisProcessingRequest {
     idempotencyKey: string;
     workspaceId: string;
@@ -79,6 +420,1438 @@ export interface RetrySynthesisProcessingRequest {
  *
  */
 export class SynthesisApi extends runtime.BaseAPI {
+
+    /**
+     * Creates request options for applySynthesisCandidateRemerge without sending the request
+     */
+    async applySynthesisCandidateRemergeRequestOpts(requestParameters: ApplySynthesisCandidateRemergeRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling applySynthesisCandidateRemerge().'
+            );
+        }
+
+        if (requestParameters['noteId'] == null) {
+            throw new runtime.RequiredError(
+                'noteId',
+                'Required parameter "noteId" was null or undefined when calling applySynthesisCandidateRemerge().'
+            );
+        }
+
+        if (requestParameters['attemptId'] == null) {
+            throw new runtime.RequiredError(
+                'attemptId',
+                'Required parameter "attemptId" was null or undefined when calling applySynthesisCandidateRemerge().'
+            );
+        }
+
+        if (requestParameters['synthesisCandidateRemergeApply'] == null) {
+            throw new runtime.RequiredError(
+                'synthesisCandidateRemergeApply',
+                'Required parameter "synthesisCandidateRemergeApply" was null or undefined when calling applySynthesisCandidateRemerge().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+        if (requestParameters['idempotencyKey'] != null) {
+            headerParameters['Idempotency-Key'] = String(requestParameters['idempotencyKey']);
+        }
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/candidate-remerge/{attempt_id}/apply`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+        urlPath = urlPath.replace('{note_id}', encodeURIComponent(String(requestParameters['noteId'])));
+        urlPath = urlPath.replace('{attempt_id}', encodeURIComponent(String(requestParameters['attemptId'])));
+
+        return {
+            path: urlPath,
+            method: 'POST',
+            headers: headerParameters,
+            query: queryParameters,
+            body: requestParameters['synthesisCandidateRemergeApply'],
+        };
+    }
+
+    /**
+     * Re-merge the complete candidate against the latest file without a model or workflow. Requires authenticated READ_LOCAL and WRITE_PROPOSAL, including development mode. Identities and optional Idempotency-Key header must match the body. Apply creates a new candidate only; normal approval is still required.
+     */
+    async applySynthesisCandidateRemergeRaw(requestParameters: ApplySynthesisCandidateRemergeRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<SynthesisCandidateRemergeReview>> {
+        const requestOptions = await this.applySynthesisCandidateRemergeRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Re-merge the complete candidate against the latest file without a model or workflow. Requires authenticated READ_LOCAL and WRITE_PROPOSAL, including development mode. Identities and optional Idempotency-Key header must match the body. Apply creates a new candidate only; normal approval is still required.
+     */
+    async applySynthesisCandidateRemerge(requestParameters: ApplySynthesisCandidateRemergeRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<SynthesisCandidateRemergeReview> {
+        const response = await this.applySynthesisCandidateRemergeRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for applySynthesisHistoricalRepublish without sending the request
+     */
+    async applySynthesisHistoricalRepublishRequestOpts(requestParameters: ApplySynthesisHistoricalRepublishRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling applySynthesisHistoricalRepublish().'
+            );
+        }
+
+        if (requestParameters['noteId'] == null) {
+            throw new runtime.RequiredError(
+                'noteId',
+                'Required parameter "noteId" was null or undefined when calling applySynthesisHistoricalRepublish().'
+            );
+        }
+
+        if (requestParameters['attemptId'] == null) {
+            throw new runtime.RequiredError(
+                'attemptId',
+                'Required parameter "attemptId" was null or undefined when calling applySynthesisHistoricalRepublish().'
+            );
+        }
+
+        if (requestParameters['synthesisHistoricalRepublishApply'] == null) {
+            throw new runtime.RequiredError(
+                'synthesisHistoricalRepublishApply',
+                'Required parameter "synthesisHistoricalRepublishApply" was null or undefined when calling applySynthesisHistoricalRepublish().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+        if (requestParameters['idempotencyKey'] != null) {
+            headerParameters['Idempotency-Key'] = String(requestParameters['idempotencyKey']);
+        }
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/historical-republish/{attempt_id}/apply`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+        urlPath = urlPath.replace('{note_id}', encodeURIComponent(String(requestParameters['noteId'])));
+        urlPath = urlPath.replace('{attempt_id}', encodeURIComponent(String(requestParameters['attemptId'])));
+
+        return {
+            path: urlPath,
+            method: 'POST',
+            headers: headerParameters,
+            query: queryParameters,
+            body: requestParameters['synthesisHistoricalRepublishApply'],
+        };
+    }
+
+    /**
+     * Re-review the exact selected saved synthesis revision without a model call or editing its content. Requires authenticated READ_LOCAL and WRITE_PROPOSAL and current Root authorization. Begin freezes complete file and published content; Apply requires explicit whole-content restore and candidate retirement decisions. APPLIED is a new candidate awaiting normal approval and Git publication. Retries retain the original command; Resume uses the same attempt and reservation.
+     */
+    async applySynthesisHistoricalRepublishRaw(requestParameters: ApplySynthesisHistoricalRepublishRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<SynthesisHistoricalRepublishReview>> {
+        const requestOptions = await this.applySynthesisHistoricalRepublishRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Re-review the exact selected saved synthesis revision without a model call or editing its content. Requires authenticated READ_LOCAL and WRITE_PROPOSAL and current Root authorization. Begin freezes complete file and published content; Apply requires explicit whole-content restore and candidate retirement decisions. APPLIED is a new candidate awaiting normal approval and Git publication. Retries retain the original command; Resume uses the same attempt and reservation.
+     */
+    async applySynthesisHistoricalRepublish(requestParameters: ApplySynthesisHistoricalRepublishRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<SynthesisHistoricalRepublishReview> {
+        const response = await this.applySynthesisHistoricalRepublishRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for beginSynthesisCandidateRemerge without sending the request
+     */
+    async beginSynthesisCandidateRemergeRequestOpts(requestParameters: BeginSynthesisCandidateRemergeRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling beginSynthesisCandidateRemerge().'
+            );
+        }
+
+        if (requestParameters['noteId'] == null) {
+            throw new runtime.RequiredError(
+                'noteId',
+                'Required parameter "noteId" was null or undefined when calling beginSynthesisCandidateRemerge().'
+            );
+        }
+
+        if (requestParameters['synthesisCandidateRemergeBegin'] == null) {
+            throw new runtime.RequiredError(
+                'synthesisCandidateRemergeBegin',
+                'Required parameter "synthesisCandidateRemergeBegin" was null or undefined when calling beginSynthesisCandidateRemerge().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+        if (requestParameters['idempotencyKey'] != null) {
+            headerParameters['Idempotency-Key'] = String(requestParameters['idempotencyKey']);
+        }
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/candidate-remerge`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+        urlPath = urlPath.replace('{note_id}', encodeURIComponent(String(requestParameters['noteId'])));
+
+        return {
+            path: urlPath,
+            method: 'POST',
+            headers: headerParameters,
+            query: queryParameters,
+            body: requestParameters['synthesisCandidateRemergeBegin'],
+        };
+    }
+
+    /**
+     * Re-merge the complete candidate against the latest file without a model or workflow. Requires authenticated READ_LOCAL and WRITE_PROPOSAL, including development mode. Identities and optional Idempotency-Key header must match the body. Apply creates a new candidate only; normal approval is still required.
+     */
+    async beginSynthesisCandidateRemergeRaw(requestParameters: BeginSynthesisCandidateRemergeRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<SynthesisCandidateRemergeReview>> {
+        const requestOptions = await this.beginSynthesisCandidateRemergeRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Re-merge the complete candidate against the latest file without a model or workflow. Requires authenticated READ_LOCAL and WRITE_PROPOSAL, including development mode. Identities and optional Idempotency-Key header must match the body. Apply creates a new candidate only; normal approval is still required.
+     */
+    async beginSynthesisCandidateRemerge(requestParameters: BeginSynthesisCandidateRemergeRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<SynthesisCandidateRemergeReview> {
+        const response = await this.beginSynthesisCandidateRemergeRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for beginSynthesisHistoricalRepublish without sending the request
+     */
+    async beginSynthesisHistoricalRepublishRequestOpts(requestParameters: BeginSynthesisHistoricalRepublishRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling beginSynthesisHistoricalRepublish().'
+            );
+        }
+
+        if (requestParameters['noteId'] == null) {
+            throw new runtime.RequiredError(
+                'noteId',
+                'Required parameter "noteId" was null or undefined when calling beginSynthesisHistoricalRepublish().'
+            );
+        }
+
+        if (requestParameters['synthesisHistoricalRepublishBegin'] == null) {
+            throw new runtime.RequiredError(
+                'synthesisHistoricalRepublishBegin',
+                'Required parameter "synthesisHistoricalRepublishBegin" was null or undefined when calling beginSynthesisHistoricalRepublish().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+        if (requestParameters['idempotencyKey'] != null) {
+            headerParameters['Idempotency-Key'] = String(requestParameters['idempotencyKey']);
+        }
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/historical-republish`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+        urlPath = urlPath.replace('{note_id}', encodeURIComponent(String(requestParameters['noteId'])));
+
+        return {
+            path: urlPath,
+            method: 'POST',
+            headers: headerParameters,
+            query: queryParameters,
+            body: requestParameters['synthesisHistoricalRepublishBegin'],
+        };
+    }
+
+    /**
+     * Re-review the exact selected saved synthesis revision without a model call or editing its content. Requires authenticated READ_LOCAL and WRITE_PROPOSAL and current Root authorization. Begin freezes complete file and published content; Apply requires explicit whole-content restore and candidate retirement decisions. APPLIED is a new candidate awaiting normal approval and Git publication. Retries retain the original command; Resume uses the same attempt and reservation.
+     */
+    async beginSynthesisHistoricalRepublishRaw(requestParameters: BeginSynthesisHistoricalRepublishRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<SynthesisHistoricalRepublishReview>> {
+        const requestOptions = await this.beginSynthesisHistoricalRepublishRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Re-review the exact selected saved synthesis revision without a model call or editing its content. Requires authenticated READ_LOCAL and WRITE_PROPOSAL and current Root authorization. Begin freezes complete file and published content; Apply requires explicit whole-content restore and candidate retirement decisions. APPLIED is a new candidate awaiting normal approval and Git publication. Retries retain the original command; Resume uses the same attempt and reservation.
+     */
+    async beginSynthesisHistoricalRepublish(requestParameters: BeginSynthesisHistoricalRepublishRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<SynthesisHistoricalRepublishReview> {
+        const response = await this.beginSynthesisHistoricalRepublishRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for createKnowledgeAnchor without sending the request
+     */
+    async createKnowledgeAnchorRequestOpts(requestParameters: CreateKnowledgeAnchorRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['idempotencyKey'] == null) {
+            throw new runtime.RequiredError(
+                'idempotencyKey',
+                'Required parameter "idempotencyKey" was null or undefined when calling createKnowledgeAnchor().'
+            );
+        }
+
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling createKnowledgeAnchor().'
+            );
+        }
+
+        if (requestParameters['createAnchorRequest'] == null) {
+            throw new runtime.RequiredError(
+                'createAnchorRequest',
+                'Required parameter "createAnchorRequest" was null or undefined when calling createKnowledgeAnchor().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+        if (requestParameters['idempotencyKey'] != null) {
+            headerParameters['Idempotency-Key'] = String(requestParameters['idempotencyKey']);
+        }
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/anchors`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+
+        return {
+            path: urlPath,
+            method: 'POST',
+            headers: headerParameters,
+            query: queryParameters,
+            body: requestParameters['createAnchorRequest'],
+        };
+    }
+
+    /**
+     * Manages confirmed anchor scope and source association review without publishing note content.
+     */
+    async createKnowledgeAnchorRaw(requestParameters: CreateKnowledgeAnchorRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<AnchorMutationResult>> {
+        const requestOptions = await this.createKnowledgeAnchorRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Manages confirmed anchor scope and source association review without publishing note content.
+     */
+    async createKnowledgeAnchor(requestParameters: CreateKnowledgeAnchorRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<AnchorMutationResult> {
+        const response = await this.createKnowledgeAnchorRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for createSynthesisGoal without sending the request
+     */
+    async createSynthesisGoalRequestOpts(requestParameters: CreateSynthesisGoalRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['idempotencyKey'] == null) {
+            throw new runtime.RequiredError(
+                'idempotencyKey',
+                'Required parameter "idempotencyKey" was null or undefined when calling createSynthesisGoal().'
+            );
+        }
+
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling createSynthesisGoal().'
+            );
+        }
+
+        if (requestParameters['createSynthesisGoal'] == null) {
+            throw new runtime.RequiredError(
+                'createSynthesisGoal',
+                'Required parameter "createSynthesisGoal" was null or undefined when calling createSynthesisGoal().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+        if (requestParameters['idempotencyKey'] != null) {
+            headerParameters['Idempotency-Key'] = String(requestParameters['idempotencyKey']);
+        }
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/goals`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+
+        return {
+            path: urlPath,
+            method: 'POST',
+            headers: headerParameters,
+            query: queryParameters,
+            body: requestParameters['createSynthesisGoal'],
+        };
+    }
+
+    /**
+     * Persists a main note goal for asynchronous metadata selection, generation and independent review. Creates a candidate without publishing.
+     */
+    async createSynthesisGoalRaw(requestParameters: CreateSynthesisGoalRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<SynthesisGoalCreated>> {
+        const requestOptions = await this.createSynthesisGoalRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Persists a main note goal for asynchronous metadata selection, generation and independent review. Creates a candidate without publishing.
+     */
+    async createSynthesisGoal(requestParameters: CreateSynthesisGoalRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<SynthesisGoalCreated> {
+        const response = await this.createSynthesisGoalRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for decideAnchorAssociations without sending the request
+     */
+    async decideAnchorAssociationsRequestOpts(requestParameters: DecideAnchorAssociationsRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['idempotencyKey'] == null) {
+            throw new runtime.RequiredError(
+                'idempotencyKey',
+                'Required parameter "idempotencyKey" was null or undefined when calling decideAnchorAssociations().'
+            );
+        }
+
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling decideAnchorAssociations().'
+            );
+        }
+
+        if (requestParameters['anchorId'] == null) {
+            throw new runtime.RequiredError(
+                'anchorId',
+                'Required parameter "anchorId" was null or undefined when calling decideAnchorAssociations().'
+            );
+        }
+
+        if (requestParameters['decideAnchorRequest'] == null) {
+            throw new runtime.RequiredError(
+                'decideAnchorRequest',
+                'Required parameter "decideAnchorRequest" was null or undefined when calling decideAnchorAssociations().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+        if (requestParameters['idempotencyKey'] != null) {
+            headerParameters['Idempotency-Key'] = String(requestParameters['idempotencyKey']);
+        }
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/anchors/{anchor_id}/associations/decisions`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+        urlPath = urlPath.replace('{anchor_id}', encodeURIComponent(String(requestParameters['anchorId'])));
+
+        return {
+            path: urlPath,
+            method: 'POST',
+            headers: headerParameters,
+            query: queryParameters,
+            body: requestParameters['decideAnchorRequest'],
+        };
+    }
+
+    /**
+     * Manages confirmed anchor scope and source association review without publishing note content.
+     */
+    async decideAnchorAssociationsRaw(requestParameters: DecideAnchorAssociationsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<AnchorDecisionResult>> {
+        const requestOptions = await this.decideAnchorAssociationsRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Manages confirmed anchor scope and source association review without publishing note content.
+     */
+    async decideAnchorAssociations(requestParameters: DecideAnchorAssociationsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<AnchorDecisionResult> {
+        const response = await this.decideAnchorAssociationsRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for decideAnchorScopeProposals without sending the request
+     */
+    async decideAnchorScopeProposalsRequestOpts(requestParameters: DecideAnchorScopeProposalsRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['idempotencyKey'] == null) {
+            throw new runtime.RequiredError(
+                'idempotencyKey',
+                'Required parameter "idempotencyKey" was null or undefined when calling decideAnchorScopeProposals().'
+            );
+        }
+
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling decideAnchorScopeProposals().'
+            );
+        }
+
+        if (requestParameters['anchorId'] == null) {
+            throw new runtime.RequiredError(
+                'anchorId',
+                'Required parameter "anchorId" was null or undefined when calling decideAnchorScopeProposals().'
+            );
+        }
+
+        if (requestParameters['decideAnchorRequest'] == null) {
+            throw new runtime.RequiredError(
+                'decideAnchorRequest',
+                'Required parameter "decideAnchorRequest" was null or undefined when calling decideAnchorScopeProposals().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+        if (requestParameters['idempotencyKey'] != null) {
+            headerParameters['Idempotency-Key'] = String(requestParameters['idempotencyKey']);
+        }
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/anchors/{anchor_id}/scope-proposals/decisions`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+        urlPath = urlPath.replace('{anchor_id}', encodeURIComponent(String(requestParameters['anchorId'])));
+
+        return {
+            path: urlPath,
+            method: 'POST',
+            headers: headerParameters,
+            query: queryParameters,
+            body: requestParameters['decideAnchorRequest'],
+        };
+    }
+
+    /**
+     * Manages confirmed anchor scope and source association review without publishing note content.
+     */
+    async decideAnchorScopeProposalsRaw(requestParameters: DecideAnchorScopeProposalsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<AnchorDecisionResult>> {
+        const requestOptions = await this.decideAnchorScopeProposalsRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Manages confirmed anchor scope and source association review without publishing note content.
+     */
+    async decideAnchorScopeProposals(requestParameters: DecideAnchorScopeProposalsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<AnchorDecisionResult> {
+        const response = await this.decideAnchorScopeProposalsRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for decideSynthesisManuscript without sending the request
+     */
+    async decideSynthesisManuscriptRequestOpts(requestParameters: DecideSynthesisManuscriptRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling decideSynthesisManuscript().'
+            );
+        }
+
+        if (requestParameters['processingId'] == null) {
+            throw new runtime.RequiredError(
+                'processingId',
+                'Required parameter "processingId" was null or undefined when calling decideSynthesisManuscript().'
+            );
+        }
+
+        if (requestParameters['noteId'] == null) {
+            throw new runtime.RequiredError(
+                'noteId',
+                'Required parameter "noteId" was null or undefined when calling decideSynthesisManuscript().'
+            );
+        }
+
+        if (requestParameters['synthesisManuscriptDecision'] == null) {
+            throw new runtime.RequiredError(
+                'synthesisManuscriptDecision',
+                'Required parameter "synthesisManuscriptDecision" was null or undefined when calling decideSynthesisManuscript().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/processing/{processing_id}/manuscript-review/{note_id}/decisions`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+        urlPath = urlPath.replace('{processing_id}', encodeURIComponent(String(requestParameters['processingId'])));
+        urlPath = urlPath.replace('{note_id}', encodeURIComponent(String(requestParameters['noteId'])));
+
+        return {
+            path: urlPath,
+            method: 'POST',
+            headers: headerParameters,
+            query: queryParameters,
+            body: requestParameters['synthesisManuscriptDecision'],
+        };
+    }
+
+    /**
+     * Controlled human manuscript review. Requires authenticated READ_LOCAL and WRITE_PROPOSAL plus workflow graph capabilities. All path identities must match the body binding; completion only generates a candidate, never publishes.
+     */
+    async decideSynthesisManuscriptRaw(requestParameters: DecideSynthesisManuscriptRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<SynthesisManuscriptSummary>> {
+        const requestOptions = await this.decideSynthesisManuscriptRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Controlled human manuscript review. Requires authenticated READ_LOCAL and WRITE_PROPOSAL plus workflow graph capabilities. All path identities must match the body binding; completion only generates a candidate, never publishes.
+     */
+    async decideSynthesisManuscript(requestParameters: DecideSynthesisManuscriptRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<SynthesisManuscriptSummary> {
+        const response = await this.decideSynthesisManuscriptRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for getAnchorRecommendation without sending the request
+     */
+    async getAnchorRecommendationRequestOpts(requestParameters: GetAnchorRecommendationRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling getAnchorRecommendation().'
+            );
+        }
+
+        if (requestParameters['requestId'] == null) {
+            throw new runtime.RequiredError(
+                'requestId',
+                'Required parameter "requestId" was null or undefined when calling getAnchorRecommendation().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/anchor-recommendations/{request_id}`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+        urlPath = urlPath.replace('{request_id}', encodeURIComponent(String(requestParameters['requestId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * Analyzes the frozen note asynchronously. Recommendations never approve scope, fuse content or publish a note.
+     */
+    async getAnchorRecommendationRaw(requestParameters: GetAnchorRecommendationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<AnchorRecommendation>> {
+        const requestOptions = await this.getAnchorRecommendationRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Analyzes the frozen note asynchronously. Recommendations never approve scope, fuse content or publish a note.
+     */
+    async getAnchorRecommendation(requestParameters: GetAnchorRecommendationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<AnchorRecommendation> {
+        const response = await this.getAnchorRecommendationRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for getKnowledgeAnchor without sending the request
+     */
+    async getKnowledgeAnchorRequestOpts(requestParameters: GetKnowledgeAnchorRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling getKnowledgeAnchor().'
+            );
+        }
+
+        if (requestParameters['anchorId'] == null) {
+            throw new runtime.RequiredError(
+                'anchorId',
+                'Required parameter "anchorId" was null or undefined when calling getKnowledgeAnchor().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/anchors/{anchor_id}`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+        urlPath = urlPath.replace('{anchor_id}', encodeURIComponent(String(requestParameters['anchorId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * Manages confirmed anchor scope and source association review without publishing note content.
+     */
+    async getKnowledgeAnchorRaw(requestParameters: GetKnowledgeAnchorRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<AnchorView>> {
+        const requestOptions = await this.getKnowledgeAnchorRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Manages confirmed anchor scope and source association review without publishing note content.
+     */
+    async getKnowledgeAnchor(requestParameters: GetKnowledgeAnchorRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<AnchorView> {
+        const response = await this.getKnowledgeAnchorRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for getSourceKnowledgeDirectory without sending the request
+     */
+    async getSourceKnowledgeDirectoryRequestOpts(requestParameters: GetSourceKnowledgeDirectoryRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling getSourceKnowledgeDirectory().'
+            );
+        }
+
+        if (requestParameters['sourceVersionId'] == null) {
+            throw new runtime.RequiredError(
+                'sourceVersionId',
+                'Required parameter "sourceVersionId" was null or undefined when calling getSourceKnowledgeDirectory().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/sources/{source_version_id}/knowledge-directory`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+        urlPath = urlPath.replace('{source_version_id}', encodeURIComponent(String(requestParameters['sourceVersionId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * Reads existing source-version profile metadata and exact point locations without generating or approving knowledge.
+     */
+    async getSourceKnowledgeDirectoryRaw(requestParameters: GetSourceKnowledgeDirectoryRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<SourceKnowledgeDirectory>> {
+        const requestOptions = await this.getSourceKnowledgeDirectoryRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Reads existing source-version profile metadata and exact point locations without generating or approving knowledge.
+     */
+    async getSourceKnowledgeDirectory(requestParameters: GetSourceKnowledgeDirectoryRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<SourceKnowledgeDirectory> {
+        const response = await this.getSourceKnowledgeDirectoryRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for getSynthesisBodyImpacts without sending the request
+     */
+    async getSynthesisBodyImpactsRequestOpts(requestParameters: GetSynthesisBodyImpactsRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling getSynthesisBodyImpacts().'
+            );
+        }
+
+        if (requestParameters['noteId'] == null) {
+            throw new runtime.RequiredError(
+                'noteId',
+                'Required parameter "noteId" was null or undefined when calling getSynthesisBodyImpacts().'
+            );
+        }
+
+        if (requestParameters['revisionId'] == null) {
+            throw new runtime.RequiredError(
+                'revisionId',
+                'Required parameter "revisionId" was null or undefined when calling getSynthesisBodyImpacts().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        if (requestParameters['limit'] != null) {
+            queryParameters['limit'] = requestParameters['limit'];
+        }
+
+        if (requestParameters['afterId'] != null) {
+            queryParameters['after_id'] = requestParameters['afterId'];
+        }
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/revisions/{revision_id}/body-impacts`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+        urlPath = urlPath.replace('{note_id}', encodeURIComponent(String(requestParameters['noteId'])));
+        urlPath = urlPath.replace('{revision_id}', encodeURIComponent(String(requestParameters['revisionId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * Reads immutable body-reference review observations for the exact displayed revision. Does not authorize changes or imply a generated candidate.
+     */
+    async getSynthesisBodyImpactsRaw(requestParameters: GetSynthesisBodyImpactsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<SynthesisBodyImpacts>> {
+        const requestOptions = await this.getSynthesisBodyImpactsRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Reads immutable body-reference review observations for the exact displayed revision. Does not authorize changes or imply a generated candidate.
+     */
+    async getSynthesisBodyImpacts(requestParameters: GetSynthesisBodyImpactsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<SynthesisBodyImpacts> {
+        const response = await this.getSynthesisBodyImpactsRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for getSynthesisCandidateRemerge without sending the request
+     */
+    async getSynthesisCandidateRemergeRequestOpts(requestParameters: GetSynthesisCandidateRemergeRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['key'] == null) {
+            throw new runtime.RequiredError(
+                'key',
+                'Required parameter "key" was null or undefined when calling getSynthesisCandidateRemerge().'
+            );
+        }
+
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling getSynthesisCandidateRemerge().'
+            );
+        }
+
+        if (requestParameters['noteId'] == null) {
+            throw new runtime.RequiredError(
+                'noteId',
+                'Required parameter "noteId" was null or undefined when calling getSynthesisCandidateRemerge().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        if (requestParameters['key'] != null) {
+            queryParameters['key'] = requestParameters['key'];
+        }
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/candidate-remerge`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+        urlPath = urlPath.replace('{note_id}', encodeURIComponent(String(requestParameters['noteId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * Re-merge the complete candidate against the latest file without a model or workflow. Requires authenticated READ_LOCAL and WRITE_PROPOSAL, including development mode. Identities and optional Idempotency-Key header must match the body. Apply creates a new candidate only; normal approval is still required.
+     */
+    async getSynthesisCandidateRemergeRaw(requestParameters: GetSynthesisCandidateRemergeRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<SynthesisCandidateRemergeReview>> {
+        const requestOptions = await this.getSynthesisCandidateRemergeRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Re-merge the complete candidate against the latest file without a model or workflow. Requires authenticated READ_LOCAL and WRITE_PROPOSAL, including development mode. Identities and optional Idempotency-Key header must match the body. Apply creates a new candidate only; normal approval is still required.
+     */
+    async getSynthesisCandidateRemerge(requestParameters: GetSynthesisCandidateRemergeRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<SynthesisCandidateRemergeReview> {
+        const response = await this.getSynthesisCandidateRemergeRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for getSynthesisCandidateRemergeTarget without sending the request
+     */
+    async getSynthesisCandidateRemergeTargetRequestOpts(requestParameters: GetSynthesisCandidateRemergeTargetRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling getSynthesisCandidateRemergeTarget().'
+            );
+        }
+
+        if (requestParameters['noteId'] == null) {
+            throw new runtime.RequiredError(
+                'noteId',
+                'Required parameter "noteId" was null or undefined when calling getSynthesisCandidateRemergeTarget().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/candidate-remerge/target`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+        urlPath = urlPath.replace('{note_id}', encodeURIComponent(String(requestParameters['noteId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * Read exact current candidate, document and pending publication identities before Begin. Requires authenticated READ_LOCAL and WRITE_PROPOSAL, including development mode. Does not accept query parameters or body, generate content, or start a workflow.
+     */
+    async getSynthesisCandidateRemergeTargetRaw(requestParameters: GetSynthesisCandidateRemergeTargetRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<SynthesisCandidateRemergeTarget>> {
+        const requestOptions = await this.getSynthesisCandidateRemergeTargetRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Read exact current candidate, document and pending publication identities before Begin. Requires authenticated READ_LOCAL and WRITE_PROPOSAL, including development mode. Does not accept query parameters or body, generate content, or start a workflow.
+     */
+    async getSynthesisCandidateRemergeTarget(requestParameters: GetSynthesisCandidateRemergeTargetRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<SynthesisCandidateRemergeTarget> {
+        const response = await this.getSynthesisCandidateRemergeTargetRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for getSynthesisGoal without sending the request
+     */
+    async getSynthesisGoalRequestOpts(requestParameters: GetSynthesisGoalRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling getSynthesisGoal().'
+            );
+        }
+
+        if (requestParameters['goalId'] == null) {
+            throw new runtime.RequiredError(
+                'goalId',
+                'Required parameter "goalId" was null or undefined when calling getSynthesisGoal().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/goals/{goal_id}`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+        urlPath = urlPath.replace('{goal_id}', encodeURIComponent(String(requestParameters['goalId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * Returns current durable goal progress and an exact candidate revision link when generation succeeded.
+     */
+    async getSynthesisGoalRaw(requestParameters: GetSynthesisGoalRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<SynthesisGoalView>> {
+        const requestOptions = await this.getSynthesisGoalRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Returns current durable goal progress and an exact candidate revision link when generation succeeded.
+     */
+    async getSynthesisGoal(requestParameters: GetSynthesisGoalRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<SynthesisGoalView> {
+        const response = await this.getSynthesisGoalRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for getSynthesisHistoricalRepublish without sending the request
+     */
+    async getSynthesisHistoricalRepublishRequestOpts(requestParameters: GetSynthesisHistoricalRepublishRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling getSynthesisHistoricalRepublish().'
+            );
+        }
+
+        if (requestParameters['noteId'] == null) {
+            throw new runtime.RequiredError(
+                'noteId',
+                'Required parameter "noteId" was null or undefined when calling getSynthesisHistoricalRepublish().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        if (requestParameters['key'] != null) {
+            queryParameters['key'] = requestParameters['key'];
+        }
+
+        if (requestParameters['attemptId'] != null) {
+            queryParameters['attempt_id'] = requestParameters['attemptId'];
+        }
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/historical-republish`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+        urlPath = urlPath.replace('{note_id}', encodeURIComponent(String(requestParameters['noteId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * Re-review the exact selected saved synthesis revision without a model call or editing its content. Requires authenticated READ_LOCAL and WRITE_PROPOSAL and current Root authorization. Begin freezes complete file and published content; Apply requires explicit whole-content restore and candidate retirement decisions. APPLIED is a new candidate awaiting normal approval and Git publication. Retries retain the original command; Resume uses the same attempt and reservation.
+     */
+    async getSynthesisHistoricalRepublishRaw(requestParameters: GetSynthesisHistoricalRepublishRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<SynthesisHistoricalRepublishReview>> {
+        const requestOptions = await this.getSynthesisHistoricalRepublishRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Re-review the exact selected saved synthesis revision without a model call or editing its content. Requires authenticated READ_LOCAL and WRITE_PROPOSAL and current Root authorization. Begin freezes complete file and published content; Apply requires explicit whole-content restore and candidate retirement decisions. APPLIED is a new candidate awaiting normal approval and Git publication. Retries retain the original command; Resume uses the same attempt and reservation.
+     */
+    async getSynthesisHistoricalRepublish(requestParameters: GetSynthesisHistoricalRepublishRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<SynthesisHistoricalRepublishReview> {
+        const response = await this.getSynthesisHistoricalRepublishRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for getSynthesisHistoricalRepublishTarget without sending the request
+     */
+    async getSynthesisHistoricalRepublishTargetRequestOpts(requestParameters: GetSynthesisHistoricalRepublishTargetRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['selectedRevisionId'] == null) {
+            throw new runtime.RequiredError(
+                'selectedRevisionId',
+                'Required parameter "selectedRevisionId" was null or undefined when calling getSynthesisHistoricalRepublishTarget().'
+            );
+        }
+
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling getSynthesisHistoricalRepublishTarget().'
+            );
+        }
+
+        if (requestParameters['noteId'] == null) {
+            throw new runtime.RequiredError(
+                'noteId',
+                'Required parameter "noteId" was null or undefined when calling getSynthesisHistoricalRepublishTarget().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        if (requestParameters['selectedRevisionId'] != null) {
+            queryParameters['selected_revision_id'] = requestParameters['selectedRevisionId'];
+        }
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/historical-republish/target`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+        urlPath = urlPath.replace('{note_id}', encodeURIComponent(String(requestParameters['noteId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * Re-review the exact selected saved synthesis revision without a model call or editing its content. Requires authenticated READ_LOCAL and WRITE_PROPOSAL and current Root authorization. Begin freezes complete file and published content; Apply requires explicit whole-content restore and candidate retirement decisions. APPLIED is a new candidate awaiting normal approval and Git publication. Retries retain the original command; Resume uses the same attempt and reservation.
+     */
+    async getSynthesisHistoricalRepublishTargetRaw(requestParameters: GetSynthesisHistoricalRepublishTargetRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<SynthesisHistoricalRepublishTarget>> {
+        const requestOptions = await this.getSynthesisHistoricalRepublishTargetRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Re-review the exact selected saved synthesis revision without a model call or editing its content. Requires authenticated READ_LOCAL and WRITE_PROPOSAL and current Root authorization. Begin freezes complete file and published content; Apply requires explicit whole-content restore and candidate retirement decisions. APPLIED is a new candidate awaiting normal approval and Git publication. Retries retain the original command; Resume uses the same attempt and reservation.
+     */
+    async getSynthesisHistoricalRepublishTarget(requestParameters: GetSynthesisHistoricalRepublishTargetRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<SynthesisHistoricalRepublishTarget> {
+        const response = await this.getSynthesisHistoricalRepublishTargetRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for getSynthesisManuscriptNoteReview without sending the request
+     */
+    async getSynthesisManuscriptNoteReviewRequestOpts(requestParameters: GetSynthesisManuscriptNoteReviewRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling getSynthesisManuscriptNoteReview().'
+            );
+        }
+
+        if (requestParameters['processingId'] == null) {
+            throw new runtime.RequiredError(
+                'processingId',
+                'Required parameter "processingId" was null or undefined when calling getSynthesisManuscriptNoteReview().'
+            );
+        }
+
+        if (requestParameters['noteId'] == null) {
+            throw new runtime.RequiredError(
+                'noteId',
+                'Required parameter "noteId" was null or undefined when calling getSynthesisManuscriptNoteReview().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/processing/{processing_id}/manuscript-review/{note_id}`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+        urlPath = urlPath.replace('{processing_id}', encodeURIComponent(String(requestParameters['processingId'])));
+        urlPath = urlPath.replace('{note_id}', encodeURIComponent(String(requestParameters['noteId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * Controlled human manuscript review. Requires authenticated READ_LOCAL and WRITE_PROPOSAL plus workflow graph capabilities. All path identities must match the body binding; completion only generates a candidate, never publishes.
+     */
+    async getSynthesisManuscriptNoteReviewRaw(requestParameters: GetSynthesisManuscriptNoteReviewRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<SynthesisManuscriptDetail>> {
+        const requestOptions = await this.getSynthesisManuscriptNoteReviewRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Controlled human manuscript review. Requires authenticated READ_LOCAL and WRITE_PROPOSAL plus workflow graph capabilities. All path identities must match the body binding; completion only generates a candidate, never publishes.
+     */
+    async getSynthesisManuscriptNoteReview(requestParameters: GetSynthesisManuscriptNoteReviewRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<SynthesisManuscriptDetail> {
+        const response = await this.getSynthesisManuscriptNoteReviewRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for getSynthesisManuscriptReview without sending the request
+     */
+    async getSynthesisManuscriptReviewRequestOpts(requestParameters: GetSynthesisManuscriptReviewRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling getSynthesisManuscriptReview().'
+            );
+        }
+
+        if (requestParameters['processingId'] == null) {
+            throw new runtime.RequiredError(
+                'processingId',
+                'Required parameter "processingId" was null or undefined when calling getSynthesisManuscriptReview().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/processing/{processing_id}/manuscript-review`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+        urlPath = urlPath.replace('{processing_id}', encodeURIComponent(String(requestParameters['processingId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * Controlled human manuscript review. Requires authenticated READ_LOCAL and WRITE_PROPOSAL plus workflow graph capabilities. All path identities must match the body binding; completion only generates a candidate, never publishes.
+     */
+    async getSynthesisManuscriptReviewRaw(requestParameters: GetSynthesisManuscriptReviewRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<SynthesisManuscriptSummary>> {
+        const requestOptions = await this.getSynthesisManuscriptReviewRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Controlled human manuscript review. Requires authenticated READ_LOCAL and WRITE_PROPOSAL plus workflow graph capabilities. All path identities must match the body binding; completion only generates a candidate, never publishes.
+     */
+    async getSynthesisManuscriptReview(requestParameters: GetSynthesisManuscriptReviewRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<SynthesisManuscriptSummary> {
+        const response = await this.getSynthesisManuscriptReviewRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
 
     /**
      * Creates request options for getSynthesisNote without sending the request
@@ -272,6 +2045,815 @@ export class SynthesisApi extends runtime.BaseAPI {
     }
 
     /**
+     * Creates request options for getSynthesisSourceGraph without sending the request
+     */
+    async getSynthesisSourceGraphRequestOpts(requestParameters: GetSynthesisSourceGraphRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling getSynthesisSourceGraph().'
+            );
+        }
+
+        if (requestParameters['noteId'] == null) {
+            throw new runtime.RequiredError(
+                'noteId',
+                'Required parameter "noteId" was null or undefined when calling getSynthesisSourceGraph().'
+            );
+        }
+
+        if (requestParameters['revisionId'] == null) {
+            throw new runtime.RequiredError(
+                'revisionId',
+                'Required parameter "revisionId" was null or undefined when calling getSynthesisSourceGraph().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        if (requestParameters['afterNoteId'] != null) {
+            queryParameters['after_note_id'] = requestParameters['afterNoteId'];
+        }
+
+        if (requestParameters['limit'] != null) {
+            queryParameters['limit'] = requestParameters['limit'];
+        }
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/revisions/{revision_id}/source-graph`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+        urlPath = urlPath.replace('{note_id}', encodeURIComponent(String(requestParameters['noteId'])));
+        urlPath = urlPath.replace('{revision_id}', encodeURIComponent(String(requestParameters['revisionId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * Reads exact sources of the selected immutable revision and paginated currently published notes sharing source files. Shared sources do not establish body dependencies.
+     */
+    async getSynthesisSourceGraphRaw(requestParameters: GetSynthesisSourceGraphRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<SynthesisSourceGraph>> {
+        const requestOptions = await this.getSynthesisSourceGraphRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Reads exact sources of the selected immutable revision and paginated currently published notes sharing source files. Shared sources do not establish body dependencies.
+     */
+    async getSynthesisSourceGraph(requestParameters: GetSynthesisSourceGraphRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<SynthesisSourceGraph> {
+        const response = await this.getSynthesisSourceGraphRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for getSynthesisSourceImpacts without sending the request
+     */
+    async getSynthesisSourceImpactsRequestOpts(requestParameters: GetSynthesisSourceImpactsRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling getSynthesisSourceImpacts().'
+            );
+        }
+
+        if (requestParameters['noteId'] == null) {
+            throw new runtime.RequiredError(
+                'noteId',
+                'Required parameter "noteId" was null or undefined when calling getSynthesisSourceImpacts().'
+            );
+        }
+
+        if (requestParameters['revisionId'] == null) {
+            throw new runtime.RequiredError(
+                'revisionId',
+                'Required parameter "revisionId" was null or undefined when calling getSynthesisSourceImpacts().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/revisions/{revision_id}/source-impacts`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+        urlPath = urlPath.replace('{note_id}', encodeURIComponent(String(requestParameters['noteId'])));
+        urlPath = urlPath.replace('{revision_id}', encodeURIComponent(String(requestParameters['revisionId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * Reads persisted source-availability review observations for exact references in the selected immutable revision. These observations do not change note content or determine claim truth.
+     */
+    async getSynthesisSourceImpactsRaw(requestParameters: GetSynthesisSourceImpactsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<SynthesisSourceImpacts>> {
+        const requestOptions = await this.getSynthesisSourceImpactsRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Reads persisted source-availability review observations for exact references in the selected immutable revision. These observations do not change note content or determine claim truth.
+     */
+    async getSynthesisSourceImpacts(requestParameters: GetSynthesisSourceImpactsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<SynthesisSourceImpacts> {
+        const response = await this.getSynthesisSourceImpactsRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for getSynthesisSourceKnowledgePoints without sending the request
+     */
+    async getSynthesisSourceKnowledgePointsRequestOpts(requestParameters: GetSynthesisSourceKnowledgePointsRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling getSynthesisSourceKnowledgePoints().'
+            );
+        }
+
+        if (requestParameters['noteId'] == null) {
+            throw new runtime.RequiredError(
+                'noteId',
+                'Required parameter "noteId" was null or undefined when calling getSynthesisSourceKnowledgePoints().'
+            );
+        }
+
+        if (requestParameters['revisionId'] == null) {
+            throw new runtime.RequiredError(
+                'revisionId',
+                'Required parameter "revisionId" was null or undefined when calling getSynthesisSourceKnowledgePoints().'
+            );
+        }
+
+        if (requestParameters['sourceSpanId'] == null) {
+            throw new runtime.RequiredError(
+                'sourceSpanId',
+                'Required parameter "sourceSpanId" was null or undefined when calling getSynthesisSourceKnowledgePoints().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/revisions/{revision_id}/sources/{source_span_id}/knowledge-points`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+        urlPath = urlPath.replace('{note_id}', encodeURIComponent(String(requestParameters['noteId'])));
+        urlPath = urlPath.replace('{revision_id}', encodeURIComponent(String(requestParameters['revisionId'])));
+        urlPath = urlPath.replace('{source_span_id}', encodeURIComponent(String(requestParameters['sourceSpanId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * Projects profile knowledge points matching a saved revision source span. Profile metadata is separate from the immutable note evidence snapshot.
+     */
+    async getSynthesisSourceKnowledgePointsRaw(requestParameters: GetSynthesisSourceKnowledgePointsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<SynthesisKnowledgePointProjection>> {
+        const requestOptions = await this.getSynthesisSourceKnowledgePointsRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Projects profile knowledge points matching a saved revision source span. Profile metadata is separate from the immutable note evidence snapshot.
+     */
+    async getSynthesisSourceKnowledgePoints(requestParameters: GetSynthesisSourceKnowledgePointsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<SynthesisKnowledgePointProjection> {
+        const response = await this.getSynthesisSourceKnowledgePointsRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for getSynthesisSourceReview without sending the request
+     */
+    async getSynthesisSourceReviewRequestOpts(requestParameters: GetSynthesisSourceReviewRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling getSynthesisSourceReview().'
+            );
+        }
+
+        if (requestParameters['reviewId'] == null) {
+            throw new runtime.RequiredError(
+                'reviewId',
+                'Required parameter "reviewId" was null or undefined when calling getSynthesisSourceReview().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/source-reviews/{review_id}`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+        urlPath = urlPath.replace('{review_id}', encodeURIComponent(String(requestParameters['reviewId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * Reads owner-verified current-manuscript support, retaining exact historical snapshots. Requires actual Workspace Root authority; no model call or body mutation.
+     */
+    async getSynthesisSourceReviewRaw(requestParameters: GetSynthesisSourceReviewRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<SynthesisSourceReview>> {
+        const requestOptions = await this.getSynthesisSourceReviewRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Reads owner-verified current-manuscript support, retaining exact historical snapshots. Requires actual Workspace Root authority; no model call or body mutation.
+     */
+    async getSynthesisSourceReview(requestParameters: GetSynthesisSourceReviewRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<SynthesisSourceReview> {
+        const response = await this.getSynthesisSourceReviewRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for getSynthesisUpdateSummaries without sending the request
+     */
+    async getSynthesisUpdateSummariesRequestOpts(requestParameters: GetSynthesisUpdateSummariesRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['noteIds'] == null) {
+            throw new runtime.RequiredError(
+                'noteIds',
+                'Required parameter "noteIds" was null or undefined when calling getSynthesisUpdateSummaries().'
+            );
+        }
+
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling getSynthesisUpdateSummaries().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        if (requestParameters['noteIds'] != null) {
+            queryParameters['note_ids'] = requestParameters['noteIds'];
+        }
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/update-summaries`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * Read persistent source and body review observations for exact current published and editable candidate revisions. Counts are observations, not generated candidates or knowledge verdicts.
+     * Read bounded current note review summaries
+     */
+    async getSynthesisUpdateSummariesRaw(requestParameters: GetSynthesisUpdateSummariesRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<GetSynthesisUpdateSummaries200Response>> {
+        const requestOptions = await this.getSynthesisUpdateSummariesRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Read persistent source and body review observations for exact current published and editable candidate revisions. Counts are observations, not generated candidates or knowledge verdicts.
+     * Read bounded current note review summaries
+     */
+    async getSynthesisUpdateSummaries(requestParameters: GetSynthesisUpdateSummariesRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<GetSynthesisUpdateSummaries200Response> {
+        const response = await this.getSynthesisUpdateSummariesRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for listAnchorAssociations without sending the request
+     */
+    async listAnchorAssociationsRequestOpts(requestParameters: ListAnchorAssociationsRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling listAnchorAssociations().'
+            );
+        }
+
+        if (requestParameters['anchorId'] == null) {
+            throw new runtime.RequiredError(
+                'anchorId',
+                'Required parameter "anchorId" was null or undefined when calling listAnchorAssociations().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        if (requestParameters['limit'] != null) {
+            queryParameters['limit'] = requestParameters['limit'];
+        }
+
+        if (requestParameters['afterId'] != null) {
+            queryParameters['after_id'] = requestParameters['afterId'];
+        }
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/anchors/{anchor_id}/associations`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+        urlPath = urlPath.replace('{anchor_id}', encodeURIComponent(String(requestParameters['anchorId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * Manages confirmed anchor scope and source association review without publishing note content.
+     */
+    async listAnchorAssociationsRaw(requestParameters: ListAnchorAssociationsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<AnchorProposalPage>> {
+        const requestOptions = await this.listAnchorAssociationsRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Manages confirmed anchor scope and source association review without publishing note content.
+     */
+    async listAnchorAssociations(requestParameters: ListAnchorAssociationsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<AnchorProposalPage> {
+        const response = await this.listAnchorAssociationsRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for listAnchorRecommendations without sending the request
+     */
+    async listAnchorRecommendationsRequestOpts(requestParameters: ListAnchorRecommendationsRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling listAnchorRecommendations().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        if (requestParameters['limit'] != null) {
+            queryParameters['limit'] = requestParameters['limit'];
+        }
+
+        if (requestParameters['afterId'] != null) {
+            queryParameters['after_id'] = requestParameters['afterId'];
+        }
+
+        if (requestParameters['noteId'] != null) {
+            queryParameters['note_id'] = requestParameters['noteId'];
+        }
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/anchor-recommendations`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * Analyzes the frozen note asynchronously. Recommendations never approve scope, fuse content or publish a note.
+     */
+    async listAnchorRecommendationsRaw(requestParameters: ListAnchorRecommendationsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<AnchorRecommendationPage>> {
+        const requestOptions = await this.listAnchorRecommendationsRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Analyzes the frozen note asynchronously. Recommendations never approve scope, fuse content or publish a note.
+     */
+    async listAnchorRecommendations(requestParameters: ListAnchorRecommendationsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<AnchorRecommendationPage> {
+        const response = await this.listAnchorRecommendationsRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for listAnchorScopeProposals without sending the request
+     */
+    async listAnchorScopeProposalsRequestOpts(requestParameters: ListAnchorScopeProposalsRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling listAnchorScopeProposals().'
+            );
+        }
+
+        if (requestParameters['anchorId'] == null) {
+            throw new runtime.RequiredError(
+                'anchorId',
+                'Required parameter "anchorId" was null or undefined when calling listAnchorScopeProposals().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        if (requestParameters['limit'] != null) {
+            queryParameters['limit'] = requestParameters['limit'];
+        }
+
+        if (requestParameters['afterId'] != null) {
+            queryParameters['after_id'] = requestParameters['afterId'];
+        }
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/anchors/{anchor_id}/scope-proposals`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+        urlPath = urlPath.replace('{anchor_id}', encodeURIComponent(String(requestParameters['anchorId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * Manages confirmed anchor scope and source association review without publishing note content.
+     */
+    async listAnchorScopeProposalsRaw(requestParameters: ListAnchorScopeProposalsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<AnchorProposalPage>> {
+        const requestOptions = await this.listAnchorScopeProposalsRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Manages confirmed anchor scope and source association review without publishing note content.
+     */
+    async listAnchorScopeProposals(requestParameters: ListAnchorScopeProposalsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<AnchorProposalPage> {
+        const response = await this.listAnchorScopeProposalsRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for listKnowledgeAnchors without sending the request
+     */
+    async listKnowledgeAnchorsRequestOpts(requestParameters: ListKnowledgeAnchorsRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling listKnowledgeAnchors().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        if (requestParameters['limit'] != null) {
+            queryParameters['limit'] = requestParameters['limit'];
+        }
+
+        if (requestParameters['afterId'] != null) {
+            queryParameters['after_id'] = requestParameters['afterId'];
+        }
+
+        if (requestParameters['noteId'] != null) {
+            queryParameters['note_id'] = requestParameters['noteId'];
+        }
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/anchors`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * Manages confirmed anchor scope and source association review without publishing note content.
+     */
+    async listKnowledgeAnchorsRaw(requestParameters: ListKnowledgeAnchorsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<AnchorPage>> {
+        const requestOptions = await this.listKnowledgeAnchorsRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Manages confirmed anchor scope and source association review without publishing note content.
+     */
+    async listKnowledgeAnchors(requestParameters: ListKnowledgeAnchorsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<AnchorPage> {
+        const response = await this.listKnowledgeAnchorsRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for listRecentAnchorFusionRequests without sending the request
+     */
+    async listRecentAnchorFusionRequestsRequestOpts(requestParameters: ListRecentAnchorFusionRequestsRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling listRecentAnchorFusionRequests().'
+            );
+        }
+
+        if (requestParameters['anchorId'] == null) {
+            throw new runtime.RequiredError(
+                'anchorId',
+                'Required parameter "anchorId" was null or undefined when calling listRecentAnchorFusionRequests().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/anchors/{anchor_id}/fusion-requests`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+        urlPath = urlPath.replace('{anchor_id}', encodeURIComponent(String(requestParameters['anchorId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * Reads the latest twenty approval-driven fusion requests. DISPATCHED means queued, not successful synthesis; consult the linked processing record for the outcome.
+     */
+    async listRecentAnchorFusionRequestsRaw(requestParameters: ListRecentAnchorFusionRequestsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<AnchorFusionRecent>> {
+        const requestOptions = await this.listRecentAnchorFusionRequestsRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Reads the latest twenty approval-driven fusion requests. DISPATCHED means queued, not successful synthesis; consult the linked processing record for the outcome.
+     */
+    async listRecentAnchorFusionRequests(requestParameters: ListRecentAnchorFusionRequestsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<AnchorFusionRecent> {
+        const response = await this.listRecentAnchorFusionRequestsRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for listSynthesisGoalSelections without sending the request
+     */
+    async listSynthesisGoalSelectionsRequestOpts(requestParameters: ListSynthesisGoalSelectionsRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling listSynthesisGoalSelections().'
+            );
+        }
+
+        if (requestParameters['goalId'] == null) {
+            throw new runtime.RequiredError(
+                'goalId',
+                'Required parameter "goalId" was null or undefined when calling listSynthesisGoalSelections().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        if (requestParameters['limit'] != null) {
+            queryParameters['limit'] = requestParameters['limit'];
+        }
+
+        if (requestParameters['afterId'] != null) {
+            queryParameters['after_id'] = requestParameters['afterId'];
+        }
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/goals/{goal_id}/selections`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+        urlPath = urlPath.replace('{goal_id}', encodeURIComponent(String(requestParameters['goalId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * Lists durable knowledge selection slices for one goal without reading source or model payloads.
+     */
+    async listSynthesisGoalSelectionsRaw(requestParameters: ListSynthesisGoalSelectionsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<SynthesisGoalSelectionPage>> {
+        const requestOptions = await this.listSynthesisGoalSelectionsRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Lists durable knowledge selection slices for one goal without reading source or model payloads.
+     */
+    async listSynthesisGoalSelections(requestParameters: ListSynthesisGoalSelectionsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<SynthesisGoalSelectionPage> {
+        const response = await this.listSynthesisGoalSelectionsRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for listSynthesisGoals without sending the request
+     */
+    async listSynthesisGoalsRequestOpts(requestParameters: ListSynthesisGoalsRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling listSynthesisGoals().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        if (requestParameters['limit'] != null) {
+            queryParameters['limit'] = requestParameters['limit'];
+        }
+
+        if (requestParameters['cursor'] != null) {
+            queryParameters['cursor'] = requestParameters['cursor'];
+        }
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/goals`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * Lists durable main note goals and selection/generation progress. Read operations do not trigger model work.
+     */
+    async listSynthesisGoalsRaw(requestParameters: ListSynthesisGoalsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<SynthesisGoalPage>> {
+        const requestOptions = await this.listSynthesisGoalsRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Lists durable main note goals and selection/generation progress. Read operations do not trigger model work.
+     */
+    async listSynthesisGoals(requestParameters: ListSynthesisGoalsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<SynthesisGoalPage> {
+        const response = await this.listSynthesisGoalsRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
      * Creates request options for listSynthesisNotes without sending the request
      */
     async listSynthesisNotesRequestOpts(requestParameters: ListSynthesisNotesRequest): Promise<runtime.RequestOpts> {
@@ -394,6 +2976,152 @@ export class SynthesisApi extends runtime.BaseAPI {
     }
 
     /**
+     * Creates request options for listSynthesisProcessingSourceReviews without sending the request
+     */
+    async listSynthesisProcessingSourceReviewsRequestOpts(requestParameters: ListSynthesisProcessingSourceReviewsRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling listSynthesisProcessingSourceReviews().'
+            );
+        }
+
+        if (requestParameters['processingId'] == null) {
+            throw new runtime.RequiredError(
+                'processingId',
+                'Required parameter "processingId" was null or undefined when calling listSynthesisProcessingSourceReviews().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        if (requestParameters['limit'] != null) {
+            queryParameters['limit'] = requestParameters['limit'];
+        }
+
+        if (requestParameters['afterId'] != null) {
+            queryParameters['after_id'] = requestParameters['afterId'];
+        }
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/processing/{processing_id}/source-reviews`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+        urlPath = urlPath.replace('{processing_id}', encodeURIComponent(String(requestParameters['processingId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * Reads owner-verified current-manuscript support, retaining exact historical snapshots. Requires actual Workspace Root authority; no model call or body mutation.
+     */
+    async listSynthesisProcessingSourceReviewsRaw(requestParameters: ListSynthesisProcessingSourceReviewsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<SynthesisProcessingSourceReviews>> {
+        const requestOptions = await this.listSynthesisProcessingSourceReviewsRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Reads owner-verified current-manuscript support, retaining exact historical snapshots. Requires actual Workspace Root authority; no model call or body mutation.
+     */
+    async listSynthesisProcessingSourceReviews(requestParameters: ListSynthesisProcessingSourceReviewsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<SynthesisProcessingSourceReviews> {
+        const response = await this.listSynthesisProcessingSourceReviewsRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for listSynthesisRevisionSourceReviews without sending the request
+     */
+    async listSynthesisRevisionSourceReviewsRequestOpts(requestParameters: ListSynthesisRevisionSourceReviewsRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling listSynthesisRevisionSourceReviews().'
+            );
+        }
+
+        if (requestParameters['noteId'] == null) {
+            throw new runtime.RequiredError(
+                'noteId',
+                'Required parameter "noteId" was null or undefined when calling listSynthesisRevisionSourceReviews().'
+            );
+        }
+
+        if (requestParameters['revisionId'] == null) {
+            throw new runtime.RequiredError(
+                'revisionId',
+                'Required parameter "revisionId" was null or undefined when calling listSynthesisRevisionSourceReviews().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        if (requestParameters['limit'] != null) {
+            queryParameters['limit'] = requestParameters['limit'];
+        }
+
+        if (requestParameters['afterId'] != null) {
+            queryParameters['after_id'] = requestParameters['afterId'];
+        }
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/revisions/{revision_id}/source-reviews`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+        urlPath = urlPath.replace('{note_id}', encodeURIComponent(String(requestParameters['noteId'])));
+        urlPath = urlPath.replace('{revision_id}', encodeURIComponent(String(requestParameters['revisionId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * Reads owner-verified current-manuscript support, retaining exact historical snapshots. Requires actual Workspace Root authority; no model call or body mutation.
+     */
+    async listSynthesisRevisionSourceReviewsRaw(requestParameters: ListSynthesisRevisionSourceReviewsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<SynthesisRevisionSourceReviews>> {
+        const requestOptions = await this.listSynthesisRevisionSourceReviewsRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Reads owner-verified current-manuscript support, retaining exact historical snapshots. Requires actual Workspace Root authority; no model call or body mutation.
+     */
+    async listSynthesisRevisionSourceReviews(requestParameters: ListSynthesisRevisionSourceReviewsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<SynthesisRevisionSourceReviews> {
+        const response = await this.listSynthesisRevisionSourceReviewsRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
      * Creates request options for listSynthesisRevisions without sending the request
      */
     async listSynthesisRevisionsRequestOpts(requestParameters: ListSynthesisRevisionsRequest): Promise<runtime.RequestOpts> {
@@ -459,6 +3187,75 @@ export class SynthesisApi extends runtime.BaseAPI {
      */
     async listSynthesisRevisions(requestParameters: ListSynthesisRevisionsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<SynthesisRevisionPage> {
         const response = await this.listSynthesisRevisionsRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for listSynthesisSupplements without sending the request
+     */
+    async listSynthesisSupplementsRequestOpts(requestParameters: ListSynthesisSupplementsRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling listSynthesisSupplements().'
+            );
+        }
+
+        if (requestParameters['noteId'] == null) {
+            throw new runtime.RequiredError(
+                'noteId',
+                'Required parameter "noteId" was null or undefined when calling listSynthesisSupplements().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        if (requestParameters['limit'] != null) {
+            queryParameters['limit'] = requestParameters['limit'];
+        }
+
+        if (requestParameters['cursor'] != null) {
+            queryParameters['cursor'] = requestParameters['cursor'];
+        }
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/supplements`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+        urlPath = urlPath.replace('{note_id}', encodeURIComponent(String(requestParameters['noteId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * Lists later supplementary evidence separately from immutable revision references.
+     */
+    async listSynthesisSupplementsRaw(requestParameters: ListSynthesisSupplementsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<SynthesisSupplementPage>> {
+        const requestOptions = await this.listSynthesisSupplementsRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Lists later supplementary evidence separately from immutable revision references.
+     */
+    async listSynthesisSupplements(requestParameters: ListSynthesisSupplementsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<SynthesisSupplementPage> {
+        const response = await this.listSynthesisSupplementsRaw(requestParameters, initOverrides);
         return await response.value();
     }
 
@@ -536,6 +3333,851 @@ export class SynthesisApi extends runtime.BaseAPI {
      */
     async openSynthesisSource(requestParameters: OpenSynthesisSourceRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<SynthesisSourceView> {
         const response = await this.openSynthesisSourceRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for openSynthesisSourceReviewEvidence without sending the request
+     */
+    async openSynthesisSourceReviewEvidenceRequestOpts(requestParameters: OpenSynthesisSourceReviewEvidenceRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling openSynthesisSourceReviewEvidence().'
+            );
+        }
+
+        if (requestParameters['reviewId'] == null) {
+            throw new runtime.RequiredError(
+                'reviewId',
+                'Required parameter "reviewId" was null or undefined when calling openSynthesisSourceReviewEvidence().'
+            );
+        }
+
+        if (requestParameters['evidenceId'] == null) {
+            throw new runtime.RequiredError(
+                'evidenceId',
+                'Required parameter "evidenceId" was null or undefined when calling openSynthesisSourceReviewEvidence().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/source-reviews/{review_id}/evidence/{evidence_id}`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+        urlPath = urlPath.replace('{review_id}', encodeURIComponent(String(requestParameters['reviewId'])));
+        urlPath = urlPath.replace('{evidence_id}', encodeURIComponent(String(requestParameters['evidenceId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * Reads owner-verified current-manuscript support, retaining exact historical snapshots. Requires actual Workspace Root authority; no model call or body mutation.
+     */
+    async openSynthesisSourceReviewEvidenceRaw(requestParameters: OpenSynthesisSourceReviewEvidenceRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<SynthesisSourceReviewEvidenceView>> {
+        const requestOptions = await this.openSynthesisSourceReviewEvidenceRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Reads owner-verified current-manuscript support, retaining exact historical snapshots. Requires actual Workspace Root authority; no model call or body mutation.
+     */
+    async openSynthesisSourceReviewEvidence(requestParameters: OpenSynthesisSourceReviewEvidenceRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<SynthesisSourceReviewEvidenceView> {
+        const response = await this.openSynthesisSourceReviewEvidenceRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for openSynthesisSupplement without sending the request
+     */
+    async openSynthesisSupplementRequestOpts(requestParameters: OpenSynthesisSupplementRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling openSynthesisSupplement().'
+            );
+        }
+
+        if (requestParameters['noteId'] == null) {
+            throw new runtime.RequiredError(
+                'noteId',
+                'Required parameter "noteId" was null or undefined when calling openSynthesisSupplement().'
+            );
+        }
+
+        if (requestParameters['supplementId'] == null) {
+            throw new runtime.RequiredError(
+                'supplementId',
+                'Required parameter "supplementId" was null or undefined when calling openSynthesisSupplement().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/supplements/{supplement_id}/source`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+        urlPath = urlPath.replace('{note_id}', encodeURIComponent(String(requestParameters['noteId'])));
+        urlPath = urlPath.replace('{supplement_id}', encodeURIComponent(String(requestParameters['supplementId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * Opens the exact source saved in a supplementary evidence record, without changing historical references.
+     */
+    async openSynthesisSupplementRaw(requestParameters: OpenSynthesisSupplementRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<SynthesisSupplementView>> {
+        const requestOptions = await this.openSynthesisSupplementRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Opens the exact source saved in a supplementary evidence record, without changing historical references.
+     */
+    async openSynthesisSupplement(requestParameters: OpenSynthesisSupplementRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<SynthesisSupplementView> {
+        const response = await this.openSynthesisSupplementRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for promoteSynthesisSource without sending the request
+     */
+    async promoteSynthesisSourceRequestOpts(requestParameters: PromoteSynthesisSourceRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['idempotencyKey'] == null) {
+            throw new runtime.RequiredError(
+                'idempotencyKey',
+                'Required parameter "idempotencyKey" was null or undefined when calling promoteSynthesisSource().'
+            );
+        }
+
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling promoteSynthesisSource().'
+            );
+        }
+
+        if (requestParameters['sourceVersionId'] == null) {
+            throw new runtime.RequiredError(
+                'sourceVersionId',
+                'Required parameter "sourceVersionId" was null or undefined when calling promoteSynthesisSource().'
+            );
+        }
+
+        if (requestParameters['requestBody'] == null) {
+            throw new runtime.RequiredError(
+                'requestBody',
+                'Required parameter "requestBody" was null or undefined when calling promoteSynthesisSource().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+        if (requestParameters['idempotencyKey'] != null) {
+            headerParameters['Idempotency-Key'] = String(requestParameters['idempotencyKey']);
+        }
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/sources/{source_version_id}/promote`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+        urlPath = urlPath.replace('{source_version_id}', encodeURIComponent(String(requestParameters['sourceVersionId'])));
+
+        return {
+            path: urlPath,
+            method: 'POST',
+            headers: headerParameters,
+            query: queryParameters,
+            body: requestParameters['requestBody'],
+        };
+    }
+
+    /**
+     * Starts a reviewed main note from one current analyzed source. Pins this source catalog atomically; the original file is preserved and nothing is published.
+     */
+    async promoteSynthesisSourceRaw(requestParameters: PromoteSynthesisSourceRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<SynthesisSourcePromotion>> {
+        const requestOptions = await this.promoteSynthesisSourceRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Starts a reviewed main note from one current analyzed source. Pins this source catalog atomically; the original file is preserved and nothing is published.
+     */
+    async promoteSynthesisSource(requestParameters: PromoteSynthesisSourceRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<SynthesisSourcePromotion> {
+        const response = await this.promoteSynthesisSourceRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for recheckSynthesisSourceReview without sending the request
+     */
+    async recheckSynthesisSourceReviewRequestOpts(requestParameters: RecheckSynthesisSourceReviewRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling recheckSynthesisSourceReview().'
+            );
+        }
+
+        if (requestParameters['reviewId'] == null) {
+            throw new runtime.RequiredError(
+                'reviewId',
+                'Required parameter "reviewId" was null or undefined when calling recheckSynthesisSourceReview().'
+            );
+        }
+
+        if (requestParameters['synthesisSourceReviewCommand'] == null) {
+            throw new runtime.RequiredError(
+                'synthesisSourceReviewCommand',
+                'Required parameter "synthesisSourceReviewCommand" was null or undefined when calling recheckSynthesisSourceReview().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/source-reviews/{review_id}/recheck`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+        urlPath = urlPath.replace('{review_id}', encodeURIComponent(String(requestParameters['reviewId'])));
+
+        return {
+            path: urlPath,
+            method: 'POST',
+            headers: headerParameters,
+            query: queryParameters,
+            body: requestParameters['synthesisSourceReviewCommand'],
+        };
+    }
+
+    /**
+     * 显式重新分析当前全文与当前批准范围；旧核验与证据保持历史身份。同键同参数重放返回原命令结果，不产生额外模型调用。
+     * 重新核验当前全文来源
+     */
+    async recheckSynthesisSourceReviewRaw(requestParameters: RecheckSynthesisSourceReviewRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<SynthesisSourceReview>> {
+        const requestOptions = await this.recheckSynthesisSourceReviewRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * 显式重新分析当前全文与当前批准范围；旧核验与证据保持历史身份。同键同参数重放返回原命令结果，不产生额外模型调用。
+     * 重新核验当前全文来源
+     */
+    async recheckSynthesisSourceReview(requestParameters: RecheckSynthesisSourceReviewRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<SynthesisSourceReview> {
+        const response = await this.recheckSynthesisSourceReviewRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for recoverSynthesisSourceReview without sending the request
+     */
+    async recoverSynthesisSourceReviewRequestOpts(requestParameters: RecoverSynthesisSourceReviewRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling recoverSynthesisSourceReview().'
+            );
+        }
+
+        if (requestParameters['reviewId'] == null) {
+            throw new runtime.RequiredError(
+                'reviewId',
+                'Required parameter "reviewId" was null or undefined when calling recoverSynthesisSourceReview().'
+            );
+        }
+
+        if (requestParameters['synthesisSourceReviewCommand'] == null) {
+            throw new runtime.RequiredError(
+                'synthesisSourceReviewCommand',
+                'Required parameter "synthesisSourceReviewCommand" was null or undefined when calling recoverSynthesisSourceReview().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/source-reviews/{review_id}/recover`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+        urlPath = urlPath.replace('{review_id}', encodeURIComponent(String(requestParameters['reviewId'])));
+
+        return {
+            path: urlPath,
+            method: 'POST',
+            headers: headerParameters,
+            query: queryParameters,
+            body: requestParameters['synthesisSourceReviewCommand'],
+        };
+    }
+
+    /**
+     * 只恢复应用已持久接受的核验原结果；独立恢复执行不调用模型，不改变历史模型身份。
+     * 恢复已保存的全文核验结果
+     */
+    async recoverSynthesisSourceReviewRaw(requestParameters: RecoverSynthesisSourceReviewRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<SynthesisSourceReview>> {
+        const requestOptions = await this.recoverSynthesisSourceReviewRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * 只恢复应用已持久接受的核验原结果；独立恢复执行不调用模型，不改变历史模型身份。
+     * 恢复已保存的全文核验结果
+     */
+    async recoverSynthesisSourceReview(requestParameters: RecoverSynthesisSourceReviewRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<SynthesisSourceReview> {
+        const response = await this.recoverSynthesisSourceReviewRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for requestAnchorRecommendation without sending the request
+     */
+    async requestAnchorRecommendationRequestOpts(requestParameters: RequestAnchorRecommendationRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['idempotencyKey'] == null) {
+            throw new runtime.RequiredError(
+                'idempotencyKey',
+                'Required parameter "idempotencyKey" was null or undefined when calling requestAnchorRecommendation().'
+            );
+        }
+
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling requestAnchorRecommendation().'
+            );
+        }
+
+        if (requestParameters['requestAnchorRecommendation'] == null) {
+            throw new runtime.RequiredError(
+                'requestAnchorRecommendation',
+                'Required parameter "requestAnchorRecommendation" was null or undefined when calling requestAnchorRecommendation().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+        if (requestParameters['idempotencyKey'] != null) {
+            headerParameters['Idempotency-Key'] = String(requestParameters['idempotencyKey']);
+        }
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/anchor-recommendations`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+
+        return {
+            path: urlPath,
+            method: 'POST',
+            headers: headerParameters,
+            query: queryParameters,
+            body: requestParameters['requestAnchorRecommendation'],
+        };
+    }
+
+    /**
+     * Analyzes the frozen note asynchronously. Recommendations never approve scope, fuse content or publish a note.
+     */
+    async requestAnchorRecommendationRaw(requestParameters: RequestAnchorRecommendationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<AnchorRecommendation>> {
+        const requestOptions = await this.requestAnchorRecommendationRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Analyzes the frozen note asynchronously. Recommendations never approve scope, fuse content or publish a note.
+     */
+    async requestAnchorRecommendation(requestParameters: RequestAnchorRecommendationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<AnchorRecommendation> {
+        const response = await this.requestAnchorRecommendationRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for resumeSynthesisCandidateRemerge without sending the request
+     */
+    async resumeSynthesisCandidateRemergeRequestOpts(requestParameters: ResumeSynthesisCandidateRemergeRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling resumeSynthesisCandidateRemerge().'
+            );
+        }
+
+        if (requestParameters['noteId'] == null) {
+            throw new runtime.RequiredError(
+                'noteId',
+                'Required parameter "noteId" was null or undefined when calling resumeSynthesisCandidateRemerge().'
+            );
+        }
+
+        if (requestParameters['attemptId'] == null) {
+            throw new runtime.RequiredError(
+                'attemptId',
+                'Required parameter "attemptId" was null or undefined when calling resumeSynthesisCandidateRemerge().'
+            );
+        }
+
+        if (requestParameters['body'] == null) {
+            throw new runtime.RequiredError(
+                'body',
+                'Required parameter "body" was null or undefined when calling resumeSynthesisCandidateRemerge().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/candidate-remerge/{attempt_id}/resume`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+        urlPath = urlPath.replace('{note_id}', encodeURIComponent(String(requestParameters['noteId'])));
+        urlPath = urlPath.replace('{attempt_id}', encodeURIComponent(String(requestParameters['attemptId'])));
+
+        return {
+            path: urlPath,
+            method: 'POST',
+            headers: headerParameters,
+            query: queryParameters,
+            body: requestParameters['body'] as any,
+        };
+    }
+
+    /**
+     * 按已保存的 attempt 恢复更新提案创建，复用持久命令与预约；不重新合并或创建正文版本。
+     * 继续创建重新合并候选的更新提案
+     */
+    async resumeSynthesisCandidateRemergeRaw(requestParameters: ResumeSynthesisCandidateRemergeRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<SynthesisCandidateRemergeReview>> {
+        const requestOptions = await this.resumeSynthesisCandidateRemergeRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * 按已保存的 attempt 恢复更新提案创建，复用持久命令与预约；不重新合并或创建正文版本。
+     * 继续创建重新合并候选的更新提案
+     */
+    async resumeSynthesisCandidateRemerge(requestParameters: ResumeSynthesisCandidateRemergeRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<SynthesisCandidateRemergeReview> {
+        const response = await this.resumeSynthesisCandidateRemergeRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for resumeSynthesisHistoricalRepublish without sending the request
+     */
+    async resumeSynthesisHistoricalRepublishRequestOpts(requestParameters: ResumeSynthesisHistoricalRepublishRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling resumeSynthesisHistoricalRepublish().'
+            );
+        }
+
+        if (requestParameters['noteId'] == null) {
+            throw new runtime.RequiredError(
+                'noteId',
+                'Required parameter "noteId" was null or undefined when calling resumeSynthesisHistoricalRepublish().'
+            );
+        }
+
+        if (requestParameters['attemptId'] == null) {
+            throw new runtime.RequiredError(
+                'attemptId',
+                'Required parameter "attemptId" was null or undefined when calling resumeSynthesisHistoricalRepublish().'
+            );
+        }
+
+        if (requestParameters['body'] == null) {
+            throw new runtime.RequiredError(
+                'body',
+                'Required parameter "body" was null or undefined when calling resumeSynthesisHistoricalRepublish().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/historical-republish/{attempt_id}/resume`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+        urlPath = urlPath.replace('{note_id}', encodeURIComponent(String(requestParameters['noteId'])));
+        urlPath = urlPath.replace('{attempt_id}', encodeURIComponent(String(requestParameters['attemptId'])));
+
+        return {
+            path: urlPath,
+            method: 'POST',
+            headers: headerParameters,
+            query: queryParameters,
+            body: requestParameters['body'] as any,
+        };
+    }
+
+    /**
+     * Re-review the exact selected saved synthesis revision without a model call or editing its content. Requires authenticated READ_LOCAL and WRITE_PROPOSAL and current Root authorization. Begin freezes complete file and published content; Apply requires explicit whole-content restore and candidate retirement decisions. APPLIED is a new candidate awaiting normal approval and Git publication. Retries retain the original command; Resume uses the same attempt and reservation.
+     * 继续创建重新合并候选的更新提案
+     */
+    async resumeSynthesisHistoricalRepublishRaw(requestParameters: ResumeSynthesisHistoricalRepublishRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<SynthesisHistoricalRepublishReview>> {
+        const requestOptions = await this.resumeSynthesisHistoricalRepublishRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Re-review the exact selected saved synthesis revision without a model call or editing its content. Requires authenticated READ_LOCAL and WRITE_PROPOSAL and current Root authorization. Begin freezes complete file and published content; Apply requires explicit whole-content restore and candidate retirement decisions. APPLIED is a new candidate awaiting normal approval and Git publication. Retries retain the original command; Resume uses the same attempt and reservation.
+     * 继续创建重新合并候选的更新提案
+     */
+    async resumeSynthesisHistoricalRepublish(requestParameters: ResumeSynthesisHistoricalRepublishRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<SynthesisHistoricalRepublishReview> {
+        const response = await this.resumeSynthesisHistoricalRepublishRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for resumeSynthesisManuscript without sending the request
+     */
+    async resumeSynthesisManuscriptRequestOpts(requestParameters: ResumeSynthesisManuscriptRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling resumeSynthesisManuscript().'
+            );
+        }
+
+        if (requestParameters['processingId'] == null) {
+            throw new runtime.RequiredError(
+                'processingId',
+                'Required parameter "processingId" was null or undefined when calling resumeSynthesisManuscript().'
+            );
+        }
+
+        if (requestParameters['synthesisManuscriptResume'] == null) {
+            throw new runtime.RequiredError(
+                'synthesisManuscriptResume',
+                'Required parameter "synthesisManuscriptResume" was null or undefined when calling resumeSynthesisManuscript().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/processing/{processing_id}/manuscript-review/resume`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+        urlPath = urlPath.replace('{processing_id}', encodeURIComponent(String(requestParameters['processingId'])));
+
+        return {
+            path: urlPath,
+            method: 'POST',
+            headers: headerParameters,
+            query: queryParameters,
+            body: requestParameters['synthesisManuscriptResume'],
+        };
+    }
+
+    /**
+     * Recovers saved all-ready receipts after interrupted task submission, using only the exact original binding. No new model call or receipt; normal final Decide still continues automatically. Requires authenticated READ_LOCAL and WRITE_PROPOSAL plus graph capabilities.
+     */
+    async resumeSynthesisManuscriptRaw(requestParameters: ResumeSynthesisManuscriptRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<SynthesisManuscriptSummary>> {
+        const requestOptions = await this.resumeSynthesisManuscriptRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Recovers saved all-ready receipts after interrupted task submission, using only the exact original binding. No new model call or receipt; normal final Decide still continues automatically. Requires authenticated READ_LOCAL and WRITE_PROPOSAL plus graph capabilities.
+     */
+    async resumeSynthesisManuscript(requestParameters: ResumeSynthesisManuscriptRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<SynthesisManuscriptSummary> {
+        const response = await this.resumeSynthesisManuscriptRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for retryAnchorRecommendation without sending the request
+     */
+    async retryAnchorRecommendationRequestOpts(requestParameters: RetryAnchorRecommendationRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['idempotencyKey'] == null) {
+            throw new runtime.RequiredError(
+                'idempotencyKey',
+                'Required parameter "idempotencyKey" was null or undefined when calling retryAnchorRecommendation().'
+            );
+        }
+
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling retryAnchorRecommendation().'
+            );
+        }
+
+        if (requestParameters['requestId'] == null) {
+            throw new runtime.RequiredError(
+                'requestId',
+                'Required parameter "requestId" was null or undefined when calling retryAnchorRecommendation().'
+            );
+        }
+
+        if (requestParameters['retryAnchorRecommendation'] == null) {
+            throw new runtime.RequiredError(
+                'retryAnchorRecommendation',
+                'Required parameter "retryAnchorRecommendation" was null or undefined when calling retryAnchorRecommendation().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+        if (requestParameters['idempotencyKey'] != null) {
+            headerParameters['Idempotency-Key'] = String(requestParameters['idempotencyKey']);
+        }
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/anchor-recommendations/{request_id}/retry`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+        urlPath = urlPath.replace('{request_id}', encodeURIComponent(String(requestParameters['requestId'])));
+
+        return {
+            path: urlPath,
+            method: 'POST',
+            headers: headerParameters,
+            query: queryParameters,
+            body: requestParameters['retryAnchorRecommendation'],
+        };
+    }
+
+    /**
+     * Analyzes the frozen note asynchronously. Recommendations never approve scope, fuse content or publish a note.
+     */
+    async retryAnchorRecommendationRaw(requestParameters: RetryAnchorRecommendationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<AnchorRecommendation>> {
+        const requestOptions = await this.retryAnchorRecommendationRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Analyzes the frozen note asynchronously. Recommendations never approve scope, fuse content or publish a note.
+     */
+    async retryAnchorRecommendation(requestParameters: RetryAnchorRecommendationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<AnchorRecommendation> {
+        const response = await this.retryAnchorRecommendationRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for retrySynthesisGoalSelection without sending the request
+     */
+    async retrySynthesisGoalSelectionRequestOpts(requestParameters: RetrySynthesisGoalSelectionRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['idempotencyKey'] == null) {
+            throw new runtime.RequiredError(
+                'idempotencyKey',
+                'Required parameter "idempotencyKey" was null or undefined when calling retrySynthesisGoalSelection().'
+            );
+        }
+
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling retrySynthesisGoalSelection().'
+            );
+        }
+
+        if (requestParameters['goalId'] == null) {
+            throw new runtime.RequiredError(
+                'goalId',
+                'Required parameter "goalId" was null or undefined when calling retrySynthesisGoalSelection().'
+            );
+        }
+
+        if (requestParameters['selectionId'] == null) {
+            throw new runtime.RequiredError(
+                'selectionId',
+                'Required parameter "selectionId" was null or undefined when calling retrySynthesisGoalSelection().'
+            );
+        }
+
+        if (requestParameters['synthesisRetryRequest'] == null) {
+            throw new runtime.RequiredError(
+                'synthesisRetryRequest',
+                'Required parameter "synthesisRetryRequest" was null or undefined when calling retrySynthesisGoalSelection().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+        if (requestParameters['idempotencyKey'] != null) {
+            headerParameters['Idempotency-Key'] = String(requestParameters['idempotencyKey']);
+        }
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/synthesis/goals/{goal_id}/selections/{selection_id}/retry`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+        urlPath = urlPath.replace('{goal_id}', encodeURIComponent(String(requestParameters['goalId'])));
+        urlPath = urlPath.replace('{selection_id}', encodeURIComponent(String(requestParameters['selectionId'])));
+
+        return {
+            path: urlPath,
+            method: 'POST',
+            headers: headerParameters,
+            query: queryParameters,
+            body: requestParameters['synthesisRetryRequest'],
+        };
+    }
+
+    /**
+     * Explicitly retries a failed retryable knowledge selection with the same goal identity. Recovery-required selections cannot be retried.
+     */
+    async retrySynthesisGoalSelectionRaw(requestParameters: RetrySynthesisGoalSelectionRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<SynthesisGoalSelection>> {
+        const requestOptions = await this.retrySynthesisGoalSelectionRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * Explicitly retries a failed retryable knowledge selection with the same goal identity. Recovery-required selections cannot be retried.
+     */
+    async retrySynthesisGoalSelection(requestParameters: RetrySynthesisGoalSelectionRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<SynthesisGoalSelection> {
+        const response = await this.retrySynthesisGoalSelectionRaw(requestParameters, initOverrides);
         return await response.value();
     }
 

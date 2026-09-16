@@ -41,6 +41,8 @@ type synthesisWireOperation struct {
 	Question     string
 	Context      string
 	Sources      []string
+	IncludeNote  string
+	IncludeItem  string
 }
 
 func decodeSynthesisDelta(raw []byte) (json.RawMessage, error) {
@@ -50,7 +52,23 @@ func decodeSynthesisDelta(raw []byte) (json.RawMessage, error) {
 	return append(json.RawMessage(nil), raw...), nil
 }
 
+// decodeSynthesisBodyDelta 实现 GENERATE 输出契约 v2；v1 解码器继续拒绝 INCLUDE_ITEM，以保持历史运行的行为。
+func decodeSynthesisBodyDelta(raw []byte) (json.RawMessage, error) {
+	if _, err := decodeSynthesisBodyWire(raw); err != nil {
+		return nil, err
+	}
+	return append(json.RawMessage(nil), raw...), nil
+}
+
 func decodeSynthesisWire(raw []byte) (synthesisWireOutput, error) {
+	return decodeSynthesisWireVersion(raw, false)
+}
+
+func decodeSynthesisBodyWire(raw []byte) (synthesisWireOutput, error) {
+	return decodeSynthesisWireVersion(raw, true)
+}
+
+func decodeSynthesisWireVersion(raw []byte, allowInclude bool) (synthesisWireOutput, error) {
 	object, err := synthesisObject(raw, "notes")
 	if err != nil {
 		return synthesisWireOutput{}, err
@@ -62,7 +80,7 @@ func decodeSynthesisWire(raw []byte) (synthesisWireOutput, error) {
 	result := synthesisWireOutput{Notes: make([]synthesisWireNote, 0, len(notes))}
 	seen := make(map[string]bool)
 	for _, rawNote := range notes {
-		note, err := decodeSynthesisWireNote(rawNote)
+		note, err := decodeSynthesisWireNote(rawNote, allowInclude)
 		if err != nil {
 			return synthesisWireOutput{}, err
 		}
@@ -79,7 +97,7 @@ func decodeSynthesisWire(raw []byte) (synthesisWireOutput, error) {
 	return result, nil
 }
 
-func decodeSynthesisWireNote(raw []byte) (synthesisWireNote, error) {
+func decodeSynthesisWireNote(raw []byte, allowInclude bool) (synthesisWireNote, error) {
 	object, err := synthesisObject(raw)
 	if err != nil {
 		return synthesisWireNote{}, err
@@ -121,7 +139,7 @@ func decodeSynthesisWireNote(raw []byte) (synthesisWireNote, error) {
 	}
 	value.Operations = make([]synthesisWireOperation, 0, len(operations))
 	for _, rawOperation := range operations {
-		operation, err := decodeSynthesisWireOperation(rawOperation)
+		operation, err := decodeSynthesisWireOperation(rawOperation, allowInclude)
 		if err != nil {
 			return value, err
 		}
@@ -130,7 +148,7 @@ func decodeSynthesisWireNote(raw []byte) (synthesisWireNote, error) {
 	return value, nil
 }
 
-func decodeSynthesisWireOperation(raw []byte) (synthesisWireOperation, error) {
+func decodeSynthesisWireOperation(raw []byte, allowInclude bool) (synthesisWireOperation, error) {
 	object, err := synthesisObject(raw)
 	if err != nil {
 		return synthesisWireOperation{}, err
@@ -141,6 +159,18 @@ func decodeSynthesisWireOperation(raw []byte) (synthesisWireOperation, error) {
 	}
 	value := synthesisWireOperation{Kind: domain.SynthesisOperationKind(kind)}
 	switch value.Kind {
+	case "INCLUDE_ITEM":
+		if !allowInclude || !synthesisKeys(object, "op", "note", "item") {
+			return value, synthesisOutputError()
+		}
+		value.IncludeNote, err = synthesisString(object["note"], 4, false)
+		if err != nil || !synthesisLabel(value.IncludeNote, 'N', organizingapp.MaxSynthesisCandidateNotes) {
+			return value, synthesisOutputError()
+		}
+		value.IncludeItem, err = synthesisString(object["item"], 4, false)
+		if err != nil || !synthesisLabel(value.IncludeItem, 'I', domain.MaxSynthesisItems) {
+			return value, synthesisOutputError()
+		}
 	case domain.SynthesisAddFact:
 		if !synthesisKeys(object, "op", "statement") {
 			return value, synthesisOutputError()

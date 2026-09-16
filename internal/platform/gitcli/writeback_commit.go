@@ -425,7 +425,7 @@ func (c *WritebackClient) createCommitObject(ctx context.Context, root string, l
 	if lookup.Operation == changecontrol.GitOperationRevert {
 		parent = lookup.RevertsCommit
 	}
-	result, err := c.git.runCommand(ctx, root, commandOptions{Stdin: strings.NewReader(fixedCommitMessage(lookup))},
+	result, err := c.git.runCommand(ctx, root, commandOptions{Stdin: strings.NewReader(fixedAuthorizedCommitMessage(ctx, lookup))},
 		"-c", "commit.gpgsign=false", "commit-tree", treeID, "-p", parent, "-F", "-")
 	if err != nil {
 		return "", "", err
@@ -463,7 +463,7 @@ func (c *WritebackClient) verifyImmutableTree(ctx context.Context, root, treeID 
 	if err != nil {
 		return err
 	}
-	if len(paths) != 1 || paths[0] != lookup.TargetPath {
+	if !(len(paths) == 0 && sameHistoricalBlob(ctx, lookup)) && (len(paths) != 1 || paths[0] != lookup.TargetPath) {
 		return gitWritebackError(foundation.ErrorVersionConflict, "GIT_COMMIT_TREE_PATH_CONFLICT", false, changecontrol.ErrGitVersionConflict)
 	}
 	if changecontrol.NormalizeTargetMode(lookup.TargetMode) == changecontrol.TargetModeCreateOnly {
@@ -583,14 +583,20 @@ func (c *WritebackClient) verifyStagedTarget(ctx context.Context, root, base, ta
 			expectedChange = "D"
 		}
 	}
-	if err := validateOnlyStagedTarget(status, target, expectedChange); err != nil {
+	authority, hasAuthority := changecontrol.HistoricalRepublishGitAuthorityFromContext(ctx)
+	historicalSameBytes := hasAuthority && expectedRevert == "" && changecontrol.NormalizeTargetMode(targetMode) == changecontrol.TargetModeReplace && authority.TargetPath == target && authority.ApprovedGitHead == base && diffHash == sha256Hex(nil)
+	if historicalSameBytes {
+		if len(status) != 0 {
+			return classifyDirtyStatus(status)
+		}
+	} else if err := validateOnlyStagedTarget(status, target, expectedChange); err != nil {
 		return err
 	}
 	paths, err := c.readStagedPaths(ctx, root, base, expectedChange)
 	if err != nil {
 		return err
 	}
-	if len(paths) != 1 || paths[0] != target {
+	if !(historicalSameBytes && len(paths) == 0) && (len(paths) != 1 || paths[0] != target) {
 		return gitWritebackError(foundation.ErrorVersionConflict, "GIT_STAGED_PATH_CONFLICT", false, changecontrol.ErrGitVersionConflict)
 	}
 	stagedMode, stagedBlob, found, err := c.readIndexEntryOptional(ctx, root, target)
@@ -805,14 +811,14 @@ func (c *WritebackClient) verifyLookupCommit(ctx context.Context, root, commitID
 	if lookup.Operation == changecontrol.GitOperationRevert {
 		expectedParent = lookup.RevertsCommit
 	}
-	if len(object.parents) != 1 || !strings.EqualFold(object.parents[0], expectedParent) || object.message != fixedCommitMessage(lookup) {
+	if len(object.parents) != 1 || !strings.EqualFold(object.parents[0], expectedParent) || object.message != fixedAuthorizedCommitMessage(ctx, lookup) {
 		return changecontrol.GitCommit{}, gitWritebackError(foundation.ErrorConsistencyViolation, "GIT_COMMIT_OBJECT_CONFLICT", false, changecontrol.ErrGitConsistencyViolation)
 	}
 	paths, err := c.readChangedPaths(ctx, root, expectedParent, commitID)
 	if err != nil {
 		return changecontrol.GitCommit{}, err
 	}
-	if len(paths) != 1 || paths[0] != lookup.TargetPath {
+	if !(len(paths) == 0 && sameHistoricalBlob(ctx, lookup)) && (len(paths) != 1 || paths[0] != lookup.TargetPath) {
 		return changecontrol.GitCommit{}, gitWritebackError(foundation.ErrorConsistencyViolation, "GIT_COMMIT_PATH_CONFLICT", false, changecontrol.ErrGitConsistencyViolation)
 	}
 	if changecontrol.NormalizeTargetMode(lookup.TargetMode) == changecontrol.TargetModeCreateOnly {

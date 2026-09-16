@@ -12,6 +12,7 @@ import (
 )
 
 type SynthesisDispatcherDependencies struct {
+	Manuscripts bool
 	UnitOfWork  foundation.UnitOfWork
 	Outbox      SynthesisSourceReadyOutbox
 	Sources     SynthesisProvenanceGate
@@ -48,7 +49,7 @@ func NewSynthesisDispatcher(dependencies SynthesisDispatcherDependencies) (*Synt
 		nilScopedDependency(dependencies.IDs) || nilScopedDependency(dependencies.Clock) {
 		return nil, workflowError(foundation.ErrorDependencyUnavailable, ErrorCodeSynthesisExecutionUnavailable, false, "synthesis source dispatcher dependencies are incomplete")
 	}
-	if _, err := dependencies.Definitions.Resolve(SynthesisDefinitionKey, SynthesisDefinitionVersion); err != nil {
+	if _, err := dependencies.Definitions.Resolve(SynthesisDefinitionKey, synthesisDispatchVersion(dependencies.Manuscripts)); err != nil {
 		return nil, err
 	}
 	return &SynthesisDispatcher{dependencies: dependencies}, nil
@@ -143,7 +144,7 @@ func (dispatcher *SynthesisDispatcher) dispatchOne(ctx context.Context, excluded
 			result.Waiting = 1
 			return nil
 		}
-		definition, err := d.Definitions.Resolve(SynthesisDefinitionKey, SynthesisDefinitionVersion)
+		definition, err := d.Definitions.Resolve(SynthesisDefinitionKey, synthesisDispatchVersion(d.Manuscripts))
 		if err != nil {
 			return err
 		}

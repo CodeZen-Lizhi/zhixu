@@ -19,12 +19,16 @@ func gormScanReservation(ctx context.Context, database *gorm.DB, query string, a
 		return authoringapp.PublicationReservation{}, false, classifyGORM(ctx, e, "AUTHORING_PUBLICATION_RESERVATION_QUERY_FAILED")
 	}
 	var r authoringapp.PublicationReservation
-	e = row.Scan(&r.ID, &r.WorkspaceID, &r.DocumentID, &r.ArticleRevisionID, &r.IdempotencyKey, &r.RequestHash, &r.ProposalIdempotencyKey, &r.TargetPath, &r.ContentHash, &r.TargetMode, &r.BaseVersion, &r.AbsenceToken, &r.Status, &r.ErrorCode, &r.CreatedAt, &r.UpdatedAt, &r.ClosedAt, &r.AbandonedAt)
+	var merge authoringapp.PublicationMergeBaseline
+	e = row.Scan(&r.ID, &r.WorkspaceID, &r.DocumentID, &r.ArticleRevisionID, &r.IdempotencyKey, &r.RequestHash, &r.ProposalIdempotencyKey, &r.TargetPath, &r.ContentHash, &r.TargetMode, &r.BaseVersion, &r.AbsenceToken, &r.Status, &r.ErrorCode, &r.CreatedAt, &r.UpdatedAt, &r.ClosedAt, &r.AbandonedAt, &merge.ReceiptID, &merge.CaptureID, &merge.PublishedRevisionID, &merge.PublishedContentHash, &merge.HistoricalRepublishID)
 	if gormNoRows(e) {
 		return authoringapp.PublicationReservation{}, false, nil
 	}
 	if e != nil {
 		return authoringapp.PublicationReservation{}, false, classifyGORM(ctx, e, "AUTHORING_PUBLICATION_RESERVATION_QUERY_FAILED")
+	}
+	if merge.HistoricalRepublishID != "" || merge.ReceiptID != "" || merge.CaptureID != "" || merge.PublishedRevisionID != "" || merge.PublishedContentHash != "" {
+		r.MergeBaseline = &merge
 	}
 	r.CreatedAt = r.CreatedAt.UTC()
 	r.UpdatedAt = r.UpdatedAt.UTC()
@@ -171,6 +175,9 @@ func gormReservePublication(ctx context.Context, tx *gorm.DB, record authoringap
 			if e := validateStoredReservation(reservation, document, revision); e != nil {
 				return e
 			}
+			if e := gormValidateStoredMergeBaseline(ctx, tx, reservation, document, revision); e != nil {
+				return e
+			}
 			result.Reservation = reservation
 			result.Document = document
 			result.Revision = revision
@@ -212,13 +219,30 @@ func gormReservePublication(ctx context.Context, tx *gorm.DB, record authoringap
 		} else {
 			return foundation.NewError(foundation.ErrorVersionConflict, domain.ErrorCodePublicationInvalid, false, errors.New("document lifecycle cannot start a publication"))
 		}
+		merge, e := gormPublicationMergeBaseline(ctx, tx, document, revision)
+		if e != nil {
+			return e
+		}
+		if merge != nil {
+			baseVersion = merge.FileBase
+		}
 		proposalKey, e := domain.ComputeProposalIdempotencyKey(document.WorkspaceID, document.ID, revision.ID, document.CanonicalPath, revision.ContentHash, mode, absenceToken)
 		if e != nil {
 			return e
 		}
 		at := record.ReservedAt.UTC().Truncate(time.Microsecond)
 		reservation = authoringapp.PublicationReservation{ID: record.ReservationID, WorkspaceID: document.WorkspaceID, DocumentID: document.ID, ArticleRevisionID: revision.ID, IdempotencyKey: record.Binding.IdempotencyKey, RequestHash: record.Binding.RequestHash, ProposalIdempotencyKey: proposalKey, TargetPath: document.CanonicalPath, ContentHash: revision.ContentHash, TargetMode: mode, BaseVersion: baseVersion, AbsenceToken: absenceToken, Status: authoringapp.PublicationReservationPending, CreatedAt: at, UpdatedAt: at}
-		if e := tx.Exec(`INSERT INTO authoring.document_publication_reservation(id,workspace_id,document_id,article_revision_id,idempotency_key,request_hash,proposal_idempotency_key,target_path,content_hash,target_mode,base_version,absence_token,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'PENDING',?,?)`, string(reservation.ID), string(reservation.WorkspaceID), string(reservation.DocumentID), string(reservation.ArticleRevisionID), reservation.IdempotencyKey, reservation.RequestHash, reservation.ProposalIdempotencyKey, reservation.TargetPath, reservation.ContentHash, string(reservation.TargetMode), reservation.BaseVersion, reservation.AbsenceToken, at, at).Error; e != nil {
+		var mergeReceipt, mergeCapture, mergePublished, mergePublishedHash, historicalRepublish any
+		if merge != nil {
+			reservation.MergeBaseline = &merge.PublicationMergeBaseline
+			mergeReceipt, mergeCapture = nullableID(merge.ReceiptID), string(merge.CaptureID)
+			historicalRepublish = nullableID(merge.HistoricalRepublishID)
+			mergePublished = nullableID(merge.PublishedRevisionID)
+			if merge.PublishedContentHash != "" {
+				mergePublishedHash = merge.PublishedContentHash
+			}
+		}
+		if e := tx.Exec(`INSERT INTO authoring.document_publication_reservation(id,workspace_id,document_id,article_revision_id,idempotency_key,request_hash,proposal_idempotency_key,target_path,content_hash,target_mode,base_version,absence_token,status,created_at,updated_at,merge_receipt_id,merge_capture_id,merge_published_revision_id,merge_published_content_hash,historical_republish_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'PENDING',?,?,?,?,?,?,?)`, string(reservation.ID), string(reservation.WorkspaceID), string(reservation.DocumentID), string(reservation.ArticleRevisionID), reservation.IdempotencyKey, reservation.RequestHash, reservation.ProposalIdempotencyKey, reservation.TargetPath, reservation.ContentHash, string(reservation.TargetMode), reservation.BaseVersion, reservation.AbsenceToken, at, at, mergeReceipt, mergeCapture, mergePublished, mergePublishedHash, historicalRepublish).Error; e != nil {
 			return classifyGORM(ctx, e, "AUTHORING_PUBLICATION_RESERVATION_FAILED")
 		}
 		result = authoringapp.PublicationPreparation{Reservation: reservation, Document: document, Revision: revision}
@@ -344,6 +368,9 @@ func (repository *GORMRepository) CompletePublication(ctx context.Context, recor
 			return inconsistent("publication reservation cannot be completed")
 		}
 		if e := validateStoredReservation(reservation, document, revision); e != nil {
+			return e
+		}
+		if e := gormValidateStoredMergeBaseline(ctx, tx, reservation, document, revision); e != nil {
 			return e
 		}
 		if e := gormValidateProposalSnapshot(ctx, tx, reservation, record.ProposalID, record.ProposalRevisionID, revision.Content); e != nil {
@@ -587,7 +614,7 @@ func gormReconcileOne(repository *GORMRepository, ctx context.Context, w, id fou
 				if e != nil {
 					return e
 				}
-				if previous.Status != domain.RevisionPublished || previous.GitCommit == "" || (binding.TargetMode == domain.ProposalTargetReplace && previous.ContentHash != reservation.BaseVersion) {
+				if previous.Status != domain.RevisionPublished || previous.GitCommit == "" || (binding.TargetMode == domain.ProposalTargetReplace && !reservationReplacesRevision(reservation, previous)) {
 					return gormMarkPublication(ctx, tx, binding, domain.PublicationRecoveryRequired, publicationStateMismatch, "", nil, now, &changed)
 				}
 				res := tx.Exec(`UPDATE core.article_revision SET status='SUPERSEDED' WHERE id=? AND workspace_id=? AND document_id=? AND status='PUBLISHED'`, string(previous.ID), string(w), string(document.ID))

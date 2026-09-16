@@ -94,11 +94,20 @@ func (service *SynthesisProcessingService) RetryProcessing(ctx context.Context, 
 		if err != nil {
 			return err
 		}
-		definition, err := d.Definitions.Resolve(SynthesisDefinitionKey, SynthesisDefinitionVersion)
+		version := SynthesisDefinitionVersion
+		if versions, ok := d.Retries.(interface {
+			SynthesisRetryDefinitionVersionScoped(context.Context, foundation.TransactionScope, foundation.ID, foundation.ID) (int64, error)
+		}); ok {
+			version, err = versions.SynthesisRetryDefinitionVersionScoped(ctx, scope, command.WorkspaceID, processing.WorkflowRunID)
+			if err != nil {
+				return err
+			}
+		}
+		definition, err := d.Definitions.Resolve(SynthesisDefinitionKey, version)
 		if err != nil {
 			return err
 		}
-		input, err := json.Marshal(SynthesisStartInput{ProcessingID: processing.ID, ExecutionNo: executionNo, ApplyRecovery: recoverApply})
+		input, err := json.Marshal(SynthesisStartInput{BodyRefreshRequestID: processing.BodyRefreshRequestID, GoalRequestID: processing.GoalRequestID, ProcessingID: processing.ID, ExecutionNo: executionNo, ApplyRecovery: recoverApply})
 		if err != nil {
 			return err
 		}

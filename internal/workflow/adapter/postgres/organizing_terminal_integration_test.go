@@ -1,6 +1,6 @@
 //go:build integration
 
-package workflowpostgres
+package workflowpostgres_test
 
 import (
 	"context"
@@ -14,6 +14,8 @@ import (
 	organizingapp "github.com/CodeZen-Lizhi/zhixu/internal/organizing/application"
 	organizingdomain "github.com/CodeZen-Lizhi/zhixu/internal/organizing/domain"
 	organizingworkflow "github.com/CodeZen-Lizhi/zhixu/internal/organizing/workflow"
+	"github.com/CodeZen-Lizhi/zhixu/internal/platform/testdb"
+	workflowpostgres "github.com/CodeZen-Lizhi/zhixu/internal/workflow/adapter/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/workflow/domain"
 	"github.com/jackc/pgx/v5"
@@ -23,9 +25,9 @@ import (
 
 func TestOrganizingTerminalHookBindsResultAfterSucceededStateInSameTransaction(t *testing.T) {
 	ctx := context.Background()
-	platformPool, cleanup := newGORMRuntimeTestDatabase(t, ctx)
+	fixture := testdb.Require(t, testdb.Config{Availability: testdb.FailWhenUnavailable, MaxConns: 8})
+	platformPool := fixture.Pool()
 	pool := platformPool.DB()
-	defer cleanup()
 
 	workspaceID := foundation.ID("a8000000-0000-4000-8000-000000000001")
 	snapshotID := foundation.ID("a8000000-0000-4000-8000-000000000002")
@@ -59,7 +61,7 @@ func TestOrganizingTerminalHookBindsResultAfterSucceededStateInSameTransaction(t
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtime := newGORMRuntimeTestRepository(t, platformPool, GORMRuntimeRepositoryHooks{Terminal: terminal})
+	runtime := workflowpostgres.NewOrganizingTerminalTestRuntime(t, platformPool, workflowpostgres.GORMRuntimeRepositoryHooks{Terminal: terminal})
 	request := organizingTerminalStartRequest(t, workspaceID, snapshotID)
 	started, err := runtime.Start(ctx, request)
 	if err != nil {
@@ -146,7 +148,7 @@ func TestOrganizingTerminalHookBindsResultAfterSucceededStateInSameTransaction(t
 func organizingTerminalStartRequest(t *testing.T, workspaceID, snapshotID foundation.ID) application.RuntimeStartRequest {
 	t.Helper()
 	retry := domain.RetryPolicy{MaxRetries: 0, BaseDelay: time.Nanosecond, MaxDelay: time.Second}
-	request := runtimeStateStartFixture(workspaceID, organizingworkflow.InterviewReviewDefinitionKey, retry)
+	request := workflowpostgres.OrganizingTerminalTestStartFixture(workspaceID, organizingworkflow.InterviewReviewDefinitionKey, retry)
 	graph := domain.CanonicalGraph{Nodes: []domain.NodeDefinition{{
 		Key: organizingworkflow.InterviewReviewNodeKind, Kind: organizingworkflow.InterviewReviewNodeKind,
 		InputSchemaVersion: organizingworkflow.InputSchemaVersion, OutputSchemaVersion: organizingworkflow.OutputSchemaVersion,

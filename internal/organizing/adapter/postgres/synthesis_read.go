@@ -41,6 +41,31 @@ func (store *GORMSynthesisStore) ListSynthesisCandidates(ctx context.Context, wo
 			}
 			byID[row.ID] = revision
 		}
+		noteIDs := make([]string, len(rows))
+		for i, row := range rows {
+			noteIDs[i] = row.ID
+		}
+		// 只追加账本没有总量上限，因此提供稳定的最近记录窗口；准备阶段先为必需摘录预留预算，再选择可选补源。
+		var supplements []synthesisSupplementModel
+		if err := tx.Where("workspace_id=? AND note_id IN ?", string(workspaceID), noteIDs).Order("created_at DESC,id DESC").Limit(domain.MaxSynthesisSources).Find(&supplements).Error; err != nil {
+			return err
+		}
+		byNote := map[string][]organizingapp.SynthesisSourceSupplement{}
+		for _, row := range supplements {
+			value, err := row.value()
+			if err != nil {
+				return err
+			}
+			byNote[row.NoteID] = append(byNote[row.NoteID], value)
+		}
+		documentIDs := make([]string, len(rows))
+		for i, row := range rows {
+			documentIDs[i] = row.DocumentID
+		}
+		documents, publications, err := readSynthesisOwnerProjections(tx, workspaceID, documentIDs)
+		if err != nil {
+			return err
+		}
 		for _, row := range rows {
 			note, err := row.domain()
 			if err != nil {
@@ -50,7 +75,24 @@ func (store *GORMSynthesisStore) ListSynthesisCandidates(ctx context.Context, wo
 			if !found || revision.NoteID != note.ID || revision.DocumentID != note.DocumentID {
 				return synthesisConsistency("synthesis current revision is missing")
 			}
-			result = append(result, organizingapp.SynthesisGenerationNote{Note: note, Revision: revision})
+			candidate := organizingapp.SynthesisGenerationNote{Note: note, Revision: revision, Supplements: byNote[string(note.ID)]}
+			if revision.Manuscript != nil {
+				candidate.Supplements = nil
+				for _, supplement := range byNote[string(note.ID)] {
+					if supplement.MatchesItem(revision.Items) {
+						candidate.Supplements = append(candidate.Supplements, supplement)
+					}
+				}
+			}
+			document := documents[row.DocumentID]
+			publication := publications[string(revision.ArticleRevisionID)]
+			if document.PublishedVerified && document.PublishedArticleID == string(revision.ArticleRevisionID) && publication.Status == "PUBLISHED" {
+				candidate.PublicationID = foundation.ID(publication.PublicationID)
+				if !validID(candidate.PublicationID) {
+					return synthesisConsistency("published candidate has no publication identity")
+				}
+			}
+			result = append(result, candidate)
 		}
 		return nil
 	})
@@ -110,6 +152,7 @@ type synthesisDocumentProjection struct {
 }
 
 type synthesisPublicationProjection struct {
+	PublicationID             string `gorm:"column:publication_id"`
 	ArticleRevisionID         string `gorm:"column:article_revision_id"`
 	ProposalID                string `gorm:"column:proposal_id"`
 	ProposalRevisionID        string `gorm:"column:proposal_revision_id"`
@@ -146,7 +189,7 @@ func readSynthesisOwnerProjections(tx *gorm.DB, workspaceID foundation.ID, docum
 		documents[doc.ID] = doc
 	}
 	var bindings []synthesisPublicationProjection
-	err = tx.Raw(`SELECT b.article_revision_id,b.proposal_id,b.proposal_revision_id,b.content_hash,b.status,b.error_code,COALESCE(p.current_revision_id::text,'') AS proposal_current_revision_id
+	err = tx.Raw(`SELECT b.id AS publication_id,b.article_revision_id,b.proposal_id,b.proposal_revision_id,b.content_hash,b.status,b.error_code,COALESCE(p.current_revision_id::text,'') AS proposal_current_revision_id
 	 FROM authoring.document_publication_binding b JOIN change_control.proposal p ON p.id=b.proposal_id AND p.workspace_id=b.workspace_id
 	 JOIN organizing.synthesis_note n ON n.workspace_id=b.workspace_id AND n.document_id=b.document_id
 	 JOIN organizing.synthesis_revision r ON r.id=n.current_revision_id AND r.workspace_id=n.workspace_id AND r.article_revision_id=b.article_revision_id
@@ -353,5 +396,9 @@ func (store *GORMSynthesisStore) ListSynthesisNotes(ctx context.Context, query o
 }
 
 func synthesisRevisionSummary(row synthesisRevisionModel) *organizingapp.SynthesisRevisionSummary {
-	return &organizingapp.SynthesisRevisionSummary{ID: foundation.ID(row.ID), RevisionNo: row.RevisionNo, ArticleRevisionID: foundation.ID(row.ArticleRevisionID), ArticleRevisionNo: row.ArticleRevisionNo, ContentHash: row.ContentHash, CreatedAt: row.CreatedAt.UTC()}
+	var remergeSource foundation.ID
+	if row.CandidateRemergeID != nil && row.ParentRevisionID != nil {
+		remergeSource = foundation.ID(*row.ParentRevisionID)
+	}
+	return &organizingapp.SynthesisRevisionSummary{RemergeSourceRevisionID: remergeSource, ID: foundation.ID(row.ID), RevisionNo: row.RevisionNo, ArticleRevisionID: foundation.ID(row.ArticleRevisionID), ArticleRevisionNo: row.ArticleRevisionNo, ContentHash: row.ContentHash, CreatedAt: row.CreatedAt.UTC()}
 }

@@ -41,7 +41,12 @@ const (
 	// WorkspaceAnalysisCandidateSchemaVersion 是候选持久表使用的数字 Schema 版本。
 	WorkspaceAnalysisCandidateSchemaVersion int64 = 1
 	// SynthesisDeltaSchemaID binds original parse excerpts to restricted note deltas.
-	SynthesisDeltaSchemaID = "agent.synthesis-delta"
+	SynthesisDeltaSchemaID       = "agent.synthesis-delta"
+	AnchorRecommendationSchemaID = "organizing.anchor-recommendation"
+	// GoalSelectionSchemaID 为用户请求的合成目标选择
+	// 有界的画像知识点。它不是生成笔记的契约。
+	GoalSelectionSchemaID                   = "organizing.goal-point-selection"
+	SynthesisManuscriptSourceReviewSchemaID = "agent.synthesis-manuscript-source-review"
 	// SynthesisSemanticReviewSchemaID independently reviews every delta assertion.
 	SynthesisSemanticReviewSchemaID = "agent.synthesis-semantic-review"
 	// SynthesisNoteInterviewPlanSchemaID plans an interview from a frozen published note.
@@ -78,6 +83,13 @@ const (
 	ResultTypeSynthesisSemanticReview = "synthesis_semantic_review"
 	// ResultTypeSynthesisNoteInterviewPlan is a frozen note interview question plan.
 	ResultTypeSynthesisNoteInterviewPlan = "synthesis_note_interview_plan"
+	// ResultTypeAnchorRecommendation 表示有界且标注证据的锚点
+	// 范围或关联建议。它不能发布笔记内容。
+	ResultTypeAnchorRecommendation = "anchor_recommendation"
+	// ResultTypeGoalSelection 表示持久化且绑定来源的知识点选择。
+	// 它仅授权后续打开来源和核验证据。
+	ResultTypeGoalSelection                   = "goal_point_selection"
+	ResultTypeSynthesisManuscriptSourceReview = "synthesis_manuscript_source_review"
 
 	maxOutputTextBytes = 16 * 1024
 	maxSummaryBytes    = 4 * 1024

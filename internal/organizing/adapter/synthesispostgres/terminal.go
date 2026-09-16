@@ -32,12 +32,15 @@ func (store *Store) OnWorkflowNodeTerminalScoped(ctx context.Context, scope foun
 		return err
 	}
 	input, err := organizingworkflow.DecodeSynthesisStartInput(binding.RunInput)
-	if err != nil || binding.DefinitionKey != organizingworkflow.SynthesisDefinitionKey || binding.DefinitionVersion != organizingworkflow.SynthesisDefinitionVersion || binding.NodeKey != event.NodeKind || binding.NodeType != event.NodeKind || (event.NodeAttemptID != "" && !binding.AttemptFound) {
+	if err != nil || binding.DefinitionKey != organizingworkflow.SynthesisDefinitionKey || (binding.DefinitionVersion != organizingworkflow.SynthesisDefinitionVersion && binding.DefinitionVersion != organizingworkflow.SynthesisManuscriptDefinitionVersion) || binding.NodeKey != event.NodeKind || binding.NodeType != event.NodeKind || (event.NodeAttemptID != "" && !binding.AttemptFound) {
 		return invalid("synthesis terminal event does not match its Workflow")
 	}
 	processing, err := loadProcessing(tx, event.WorkspaceID, input.ProcessingID, true)
 	if err != nil {
 		return err
+	}
+	if idValue(processing.GoalRequestID) != input.GoalRequestID || idValue(processing.BodyRefreshRequestID) != input.BodyRefreshRequestID {
+		return invalid("synthesis terminal goal differs from its processing")
 	}
 	if idValue(processing.WorkflowRunID) != event.WorkflowRunID {
 		return nil

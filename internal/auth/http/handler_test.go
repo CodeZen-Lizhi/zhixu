@@ -309,6 +309,7 @@ func TestRequiredCapabilityDoesNotTreatGraphCommandsAsReadQueries(t *testing.T) 
 		method string
 		want   []capability.Capability
 	}{
+		{path: "/api/v1/workspaces/10000000-0000-4000-8000-000000000001/discovery-failures", method: http.MethodGet, want: []capability.Capability{capability.ReadLocal}},
 		{path: "/api/v1/graph/global", method: http.MethodPost, want: []capability.Capability{capability.ReadLocal}},
 		{path: "/api/v1/settings/models", method: http.MethodGet, want: []capability.Capability{capability.ManageSystemSettings}},
 		{path: "/api/v1/settings/models", method: http.MethodPut, want: []capability.Capability{capability.ManageSystemSettings}},
@@ -570,5 +571,25 @@ func TestRevokeMissingAPITokenReturnsNotFoundWithoutInvalidatingSession(t *testi
 	}
 	if response.Header().Get("WWW-Authenticate") != "" || response.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("missing api token headers=%v", response.Header())
+	}
+}
+
+func TestCandidateRemergeRequiresBothCapabilities(t *testing.T) {
+	base := "/api/v1/workspaces/00000000-0000-4000-8000-000000000001/synthesis/notes/00000000-0000-4000-8000-000000000002/candidate-remerge"
+	for _, tc := range []struct{ method, path string }{{"GET", base + "/target"}, {"GET", base + "?key=original"}, {"POST", base}, {"POST", base + "/00000000-0000-4000-8000-000000000003/apply"}, {"POST", base + "/00000000-0000-4000-8000-000000000003/resume"}} {
+		got := RequiredCapabilities(httptest.NewRequest(tc.method, tc.path, nil))
+		if !slices.Equal(got, []capability.Capability{capability.ReadLocal, capability.WriteProposal}) {
+			t.Fatalf("%s %s capabilities %v", tc.method, tc.path, got)
+		}
+	}
+}
+
+func TestHistoricalRepublishRequiresBothCapabilities(t *testing.T) {
+	base := "/api/v1/workspaces/00000000-0000-4000-8000-000000000001/synthesis/notes/00000000-0000-4000-8000-000000000002/historical-republish"
+	for _, tc := range []struct{ method, path string }{{"GET", base + "/target"}, {"GET", base + "?key=original"}, {"POST", base}, {"POST", base + "/00000000-0000-4000-8000-000000000003/apply"}, {"POST", base + "/00000000-0000-4000-8000-000000000003/resume"}} {
+		got := RequiredCapabilities(httptest.NewRequest(tc.method, tc.path, nil))
+		if !slices.Equal(got, []capability.Capability{capability.ReadLocal, capability.WriteProposal}) {
+			t.Fatalf("%s %s capabilities %v", tc.method, tc.path, got)
+		}
 	}
 }

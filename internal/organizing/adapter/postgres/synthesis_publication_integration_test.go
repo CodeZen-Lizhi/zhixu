@@ -40,7 +40,7 @@ import (
 // Workflow lease are fixture data; no approval, commit or published pointer is
 // fabricated. Every filesystem write and git commit stays under t.TempDir().
 func TestSynthesisPostgreSQLRealGitPublication(t *testing.T) {
-	f := newSynthesisGitFixture(t)
+	f := newSynthesisGitFixtureAtVersion(t, 116)
 	ctx := t.Context()
 	first := f.generation(t, 54000, nil, "The scheduler manages runnable work. Fairness depends on workload. A version-specific limit remains unknown.")
 	first.Generation.Notes = []organizingapp.SynthesisGeneratedNote{f.newTopic(first, "scheduling publication")}
@@ -76,6 +76,9 @@ func TestSynthesisPostgreSQLRealGitPublication(t *testing.T) {
 		t.Fatalf("unapproved candidate became interview material: %v", err)
 	}
 
+	if n, err := f.store.ReconcileSynthesisPublicationEvents(ctx, 1); err != nil || n != 0 {
+		t.Fatalf("pending candidate emitted a publication: %d %v", n, err)
+	}
 	firstExecution := f.preparePublication(t, pending)
 	firstWritten, err := f.node.Execute(ctx, firstExecution.input, firstExecution.identity)
 	if err != nil {
@@ -96,8 +99,13 @@ func TestSynthesisPostgreSQLRealGitPublication(t *testing.T) {
 	if err != nil || ready.Note.Status != domain.SynthesisReady || ready.PublishedRevision == nil {
 		t.Fatalf("first ready note: %+v %v", ready, err)
 	}
+	listed, err := f.store.ListSynthesisCandidates(ctx, f.workspace)
+	if err != nil || len(listed) != 1 || listed[0].PublicationID == "" || listed[0].Revision.ID != ready.CurrentRevision.ID {
+		t.Fatalf("published candidate body availability: %+v %v", listed, err)
+	}
+	publishedSource := listed[0]
 	second := f.generation(t, 55000, []organizingapp.SynthesisGenerationNote{{Note: ready.Note, Revision: *ready.CurrentRevision}}, "Additional evidence for the existing scheduling fact.")
-	second.Generation.Notes = []organizingapp.SynthesisGeneratedNote{supportedSynthesisNote(ready, second.Input.Sources[0].Reference)}
+	second.Generation.Notes = []organizingapp.SynthesisGeneratedNote{extendedSynthesisNote(ready, second.Input.Sources[0].Reference)}
 	if _, err := f.service.ApplyGeneration(ctx, second.Input, second.Generation); err != nil {
 		t.Fatalf("prepare governed replacement: %v", err)
 	}
@@ -117,6 +125,71 @@ func TestSynthesisPostgreSQLRealGitPublication(t *testing.T) {
 		t.Fatalf("second real writeback: %v", err)
 	}
 	f.assertPublished(t, replacement, target, secondWritten)
+	// 切换离开工作区不能抹去已提交的发布事实。
+	if err := f.store.database.WithContext(ctx).Exec(`UPDATE core.workspace SET status='inactive',version=version+1,updated_at=GREATEST(updated_at,clock_timestamp()) WHERE id=?`, string(f.workspace)).Error; err != nil {
+		t.Fatal(err)
+	}
+	// 等两次发布都完成后再观察：被替代的首个版本仍须在有界批次中恰好发出一次。
+	type scanResult struct {
+		count int
+		err   error
+	}
+	scans := make(chan scanResult, 2)
+	for range 2 {
+		go func() {
+			n, err := f.store.ReconcileSynthesisPublicationEvents(ctx, 1)
+			scans <- scanResult{n, err}
+		}()
+	}
+	total := 0
+	for range 2 {
+		r := <-scans
+		if r.err != nil || r.count < 0 || r.count > 1 {
+			t.Fatalf("concurrent publication scan: %+v", r)
+		}
+		total += r.count
+	}
+	if total < 1 || total > 2 {
+		t.Fatalf("concurrent publication count=%d", total)
+	}
+	for i := total; i < 2; i++ {
+		if n, err := f.store.ReconcileSynthesisPublicationEvents(ctx, 1); err != nil || n != 1 {
+			t.Fatalf("publication history batch %d: %d %v", i, n, err)
+		}
+	}
+	if n, err := f.store.ReconcileSynthesisPublicationEvents(ctx, 100); err != nil || n != 0 {
+		t.Fatalf("replayed publication scan: %d %v", n, err)
+	}
+	var events []struct {
+		ID      string
+		Payload json.RawMessage
+	}
+	if err := f.store.database.WithContext(ctx).Raw(`SELECT id,payload FROM workflow.outbox_event
+	 WHERE workspace_id=? AND event_type='organizing.synthesis.published'
+	 ORDER BY occurred_at,payload->>'revision_id'`, string(f.workspace)).Scan(&events).Error; err != nil || len(events) != 2 {
+		t.Fatalf("publication event read: %+v %v", events, err)
+	}
+	for i, revision := range []domain.SynthesisRevision{*pending.CurrentRevision, *replacement.CurrentRevision} {
+		var payload map[string]string
+		if err := json.Unmarshal(events[i].Payload, &payload); err != nil || len(payload) != 10 ||
+			payload["revision_id"] != string(revision.ID) || payload["note_id"] != string(noteID) ||
+			payload["article_revision_id"] != string(revision.ArticleRevisionID) || payload["projection_hash"] != revision.Hash ||
+			payload["content_hash"] != revision.ContentHash || payload["workspace_id"] != string(f.workspace) {
+			t.Fatalf("publication event lost exact historical binding: %s %v", events[i].Payload, err)
+		}
+	}
+	if err := f.store.database.WithContext(ctx).Exec(`UPDATE workflow.outbox_event SET published_at=clock_timestamp() WHERE id=?`, events[0].ID).Error; err != nil {
+		t.Fatalf("publication event consumption acknowledgement: %v", err)
+	}
+	for _, mutation := range []string{
+		`UPDATE workflow.outbox_event SET payload=jsonb_set(payload,'{note_id}',to_jsonb('forged'::text)) WHERE id=?`,
+		`DELETE FROM workflow.outbox_event WHERE id=?`,
+		`UPDATE workflow.outbox_event SET published_at=NULL WHERE id=?`,
+	} {
+		if err := f.store.database.WithContext(ctx).Exec(mutation, events[0].ID).Error; err == nil {
+			t.Fatal("publication event mutation accepted")
+		}
+	}
 	if secondWritten.GitCommit == firstWritten.GitCommit || synthesisGit(t, ctx, f.root, "rev-list", "--count", "HEAD") != "3" {
 		t.Fatal("replacement did not make exactly one new commit")
 	}
@@ -125,13 +198,16 @@ func TestSynthesisPostgreSQLRealGitPublication(t *testing.T) {
 		t.Fatalf("published history or stable item changed: %v", err)
 	}
 
+	if err := f.store.database.WithContext(ctx).Exec(`UPDATE core.workspace SET status='active',version=version+1,updated_at=GREATEST(updated_at,clock_timestamp()) WHERE id=?`, string(f.workspace)).Error; err != nil {
+		t.Fatal(err)
+	}
 	// A human edit after approval and authorization must survive a resumed Saga.
 	latest, err := f.service.GetNote(ctx, f.workspace, noteID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	third := f.generation(t, 56000, []organizingapp.SynthesisGenerationNote{{Note: latest.Note, Revision: *latest.CurrentRevision}}, "Further evidence pending user review.")
-	third.Generation.Notes = []organizingapp.SynthesisGeneratedNote{supportedSynthesisNote(latest, third.Input.Sources[0].Reference)}
+	third.Generation.Notes = []organizingapp.SynthesisGeneratedNote{extendedSynthesisNote(latest, third.Input.Sources[0].Reference)}
 	if _, err := f.service.ApplyGeneration(ctx, third.Input, third.Generation); err != nil {
 		t.Fatal(err)
 	}
@@ -160,9 +236,260 @@ func TestSynthesisPostgreSQLRealGitPublication(t *testing.T) {
 		t.Fatal("failed writeback created a git commit")
 	}
 	f.count(t, "change_control.proposal_commit", "proposal_id", string(drifted.Publication.ProposalID), 0)
+	if n, err := f.store.ReconcileSynthesisPublicationEvents(ctx, 100); err != nil || n != 0 {
+		t.Fatalf("failed writeback emitted a publication: %d %v", n, err)
+	}
+	if err := f.store.database.WithContext(ctx).Exec(`INSERT INTO workflow.outbox_event
+	 (id,workspace_id,event_type,idempotency_key,event_key,schema_version,event_version,payload,occurred_at)
+	 SELECT gen_random_uuid(),workspace_id,event_type,'forged-event','forged-event',schema_version,event_version,
+	 jsonb_set(payload,'{revision_id}',to_jsonb(?::text)),occurred_at FROM workflow.outbox_event WHERE id=?`,
+		string(drifted.CurrentRevision.ID), events[0].ID).Error; err == nil {
+		t.Fatal("unpublished revision forged a publication event")
+	}
 	if snapshot, err := f.service.ReadPublishedSynthesisNote(ctx, f.workspace, noteID); err != nil || snapshot.RevisionID != replacement.CurrentRevision.ID {
 		t.Fatalf("failed candidate replaced the published snapshot: %+v %v", snapshot, err)
 	}
+
+	// 即使上游版本已被替代，且新候选写回失败，纳入关系仍保留精确的已发布快照。
+	listed, err = f.store.ListSynthesisCandidates(ctx, f.workspace)
+	if err != nil || len(listed) != 1 || listed[0].PublicationID != "" {
+		t.Fatalf("unpublished current candidate offered as body evidence: %+v %v", listed, err)
+	}
+	// 普通本地条目中相同的措辞，不得静默消除随后明确请求的已发布正文纳入操作。
+	plain := f.generation(t, 56500, []organizingapp.SynthesisGenerationNote{publishedSource}, "Local scheduling context.")
+	plain.Input.Sources = append(plain.Input.Sources, first.Input.Sources...)
+	plainNote := f.newTopic(plain, "application scheduling")
+	plainItem := publishedSource.Revision.Items[0]
+	plainItem.ID = organizingIntegrationID(56530)
+	plainNote.Delta.Operations = []domain.SynthesisOperation{{Kind: domain.SynthesisAddFact, Item: &plainItem}}
+	plain.Generation.Notes = []organizingapp.SynthesisGeneratedNote{plainNote}
+	plainResult, err := f.service.ApplyGeneration(ctx, plain.Input, plain.Generation)
+	if err != nil || len(plainResult.Publications) != 1 {
+		t.Fatalf("ordinary local item: %+v %v", plainResult, err)
+	}
+	plainDetail, err := f.service.GetNote(ctx, f.workspace, plainResult.Publications[0].NoteID)
+	if err != nil || plainDetail.CurrentRevision == nil {
+		t.Fatalf("ordinary candidate: %+v %v", plainDetail, err)
+	}
+	inclusion := f.generation(t, 57000, []organizingapp.SynthesisGenerationNote{publishedSource, {Note: plainDetail.Note, Revision: *plainDetail.CurrentRevision}}, "An application note needs scheduling context.")
+	inclusion.Input.Sources = append(inclusion.Input.Sources, first.Input.Sources...)
+	included := supportedSynthesisNote(plainDetail, inclusion.Input.Sources[0].Reference)
+	included.Delta.Operations = nil
+	for i, item := range publishedSource.Revision.Items {
+		op, err := domain.IncludeSynthesisPublishedItem(publishedSource.Revision, publishedSource.PublicationID, item.ID, organizingIntegrationID(57030+i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		included.Delta.Operations = append(included.Delta.Operations, op)
+	}
+	inclusion.Generation.Notes = []organizingapp.SynthesisGeneratedNote{included}
+	bound, err := f.service.ApplyGeneration(ctx, inclusion.Input, inclusion.Generation)
+	if err != nil || len(bound.Publications) != 1 {
+		t.Fatalf("include published body: %+v %v", bound, err)
+	}
+	downstream, err := f.service.GetNote(ctx, f.workspace, bound.Publications[0].NoteID)
+	if err != nil || downstream.PublishedRevision != nil || downstream.CurrentRevision == nil {
+		t.Fatalf("included candidate: %+v %v", downstream, err)
+	}
+	f.count(t, "organizing.synthesis_revision_body_reference", "revision_id", string(downstream.CurrentRevision.ID), 3)
+	if downstream.CurrentRevision.RevisionNo != 2 || downstream.CurrentRevision.Items[0].ID != plainItem.ID || downstream.CurrentRevision.Items[0].BodyReference != nil {
+		t.Fatal("explicit inclusion did not preserve the ordinary local item in a new version")
+	}
+	for _, item := range downstream.CurrentRevision.Items[1:] {
+		if !domain.MatchesSynthesisBodyItem(item, publishedSource.Revision, publishedSource.PublicationID) {
+			t.Fatal("included body changed original content/conditions/evidence")
+		}
+	}
+	if replay, err := f.service.ApplyGeneration(ctx, inclusion.Input, inclusion.Generation); err != nil || !replay.Replayed || !reflect.DeepEqual(replay.RevisionIDs, bound.RevisionIDs) {
+		t.Fatalf("body inclusion replay changed candidate: %+v %v", replay, err)
+	}
+	for _, mutation := range []string{
+		`UPDATE organizing.synthesis_revision_body_reference SET upstream_item_id=item_id WHERE revision_id=?`,
+		`DELETE FROM organizing.synthesis_revision_body_reference WHERE revision_id=?`,
+	} {
+		if err := f.store.database.WithContext(ctx).Exec(mutation, string(downstream.CurrentRevision.ID)).Error; err == nil {
+			t.Fatal("immutable body reference mutation accepted")
+		}
+	}
+	// 保留合法结构和原始证据，但伪造发布身份；数据库所属模块校验仍须拒绝整个候选。
+	forged := f.generation(t, 58000, []organizingapp.SynthesisGenerationNote{publishedSource}, "Another context for scheduling.")
+	forged.Input.Notes[0].PublicationID = organizingIntegrationID(58090)
+	forged.Input.Sources = append(forged.Input.Sources, first.Input.Sources...)
+	forgedNote := f.newTopic(forged, "forged inclusion")
+	op, err := domain.IncludeSynthesisPublishedItem(publishedSource.Revision, forged.Input.Notes[0].PublicationID, publishedSource.Revision.Items[0].ID, organizingIntegrationID(58030))
+	if err != nil {
+		t.Fatal(err)
+	}
+	forgedNote.Delta.Operations = []domain.SynthesisOperation{op}
+	forged.Generation.Notes = []organizingapp.SynthesisGeneratedNote{forgedNote}
+	if _, err := f.service.ApplyGeneration(ctx, forged.Input, forged.Generation); err == nil {
+		t.Fatal("forged published body accepted")
+	}
+	f.count(t, "organizing.synthesis_apply_receipt", "processing_id", string(forged.Input.ProcessingID), 0)
+}
+
+// 所有测试发布都经过 Approval 和真实 Git 写回；只有已发布且涉及明确纳入条目的变更，才形成持久化影响。
+func TestSynthesisBodyImpactsFromRealPublications(t *testing.T) {
+	f := newSynthesisGitFixtureAtVersion(t, 117)
+	ctx := t.Context()
+	apply := func(record organizingapp.SynthesisApplyRecord) organizingapp.SynthesisNoteDetail {
+		t.Helper()
+		result, err := f.service.ApplyGeneration(ctx, record.Input, record.Generation)
+		if err != nil || len(result.Publications) != 1 {
+			t.Fatalf("apply candidate: %+v %v", result, err)
+		}
+		detail, err := f.service.GetNote(ctx, f.workspace, result.Publications[0].NoteID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return detail
+	}
+	publish := func(detail organizingapp.SynthesisNoteDetail) {
+		t.Helper()
+		prepared := f.preparePublication(t, detail)
+		written, err := f.node.Execute(ctx, prepared.input, prepared.identity)
+		if err != nil {
+			t.Fatal(err)
+		}
+		target, err := authoringdomain.DefaultGeneratedTargetPath(detail.Note.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.assertPublished(t, detail, target, written)
+	}
+	reconcile := func(want int) {
+		t.Helper()
+		if _, err := f.store.ReconcileSynthesisPublicationEvents(ctx, 100); err != nil {
+			t.Fatal(err)
+		}
+		if count, err := f.store.ReconcileSynthesisBodyImpacts(ctx, 100); err != nil || count != want {
+			t.Fatalf("impact count=%d want=%d err=%v", count, want, err)
+		}
+	}
+	initial := f.generation(t, 61000, nil, "Scheduling is workload dependent. The version-specific limit is unknown.")
+	upstream := f.newTopic(initial, "upstream scheduler")
+	gapID := organizingIntegrationID(61030)
+	upstream.Delta.Operations = append(upstream.Delta.Operations, domain.SynthesisOperation{Kind: domain.SynthesisAddGap, Item: &domain.SynthesisItem{ID: gapID, Kind: domain.SynthesisGapItem, Gap: &domain.SynthesisGapContent{Question: "Which version changes the limit?", Context: "The version is unspecified.", Sources: []domain.SynthesisSourceRef{initial.Input.Sources[0].Reference}}}})
+	initial.Generation.Notes = []organizingapp.SynthesisGeneratedNote{upstream}
+	first := apply(initial)
+	publish(first)
+	listed, err := f.store.ListSynthesisCandidates(ctx, f.workspace)
+	if err != nil || len(listed) != 1 || listed[0].PublicationID == "" {
+		t.Fatalf("published source unavailable: %+v %v", listed, err)
+	}
+	published := listed[0]
+	inclusion := f.generation(t, 62000, []organizingapp.SynthesisGenerationNote{published}, "Application scheduling context.")
+	inclusion.Input.Sources = append(inclusion.Input.Sources, initial.Input.Sources...)
+	downstreamNote := f.newTopic(inclusion, "downstream application")
+	includedID := organizingIntegrationID(62030)
+	op, err := domain.IncludeSynthesisPublishedItem(published.Revision, published.PublicationID, gapID, includedID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 普通事实共享上游来源，但没有正文引用。
+	downstreamNote.Delta.Operations[0].Item.Fact.Sources = initial.Generation.Notes[0].Delta.Operations[0].Item.Fact.Sources
+	downstreamNote.Delta.Operations = append(downstreamNote.Delta.Operations, op)
+	inclusion.Generation.Notes = []organizingapp.SynthesisGeneratedNote{downstreamNote}
+	downstream := apply(inclusion)
+	publish(downstream)
+	downstreamPath, _ := authoringdomain.DefaultGeneratedTargetPath(downstream.Note.ID)
+	before, err := os.ReadFile(filepath.Join(f.root, downstreamPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 较新的下游候选 C 待处理时，默认读取仍返回 P。上游发布后续版本后，已发布的 P 仍须作为影响基线；C 也作为可编辑基线保留，并接收相同观察。
+	downstreamCandidate := f.generation(t, 62500, []organizingapp.SynthesisGenerationNote{{Note: downstream.Note, Revision: *downstream.CurrentRevision}}, "Pending downstream review.")
+	downstreamCandidate.Generation.Notes = []organizingapp.SynthesisGeneratedNote{extendedSynthesisNote(downstream, downstreamCandidate.Input.Sources[0].Reference)}
+	downstreamDraft := apply(downstreamCandidate)
+	if downstreamDraft.PublishedRevision == nil || downstreamDraft.PublishedRevision.ID != downstream.CurrentRevision.ID || downstreamDraft.CurrentRevision.ID == downstream.CurrentRevision.ID {
+		t.Fatalf("published base was not retained under a pending draft: %+v", downstreamDraft)
+	}
+	reconcile(0)
+	// 对未引用事实的补源及新增无关条目不计入影响。
+	unrelated := f.generation(t, 63000, []organizingapp.SynthesisGenerationNote{{Note: first.Note, Revision: *first.CurrentRevision}}, "New unrelated scheduling information.")
+	unrelated.Generation.Notes = []organizingapp.SynthesisGeneratedNote{extendedSynthesisNote(first, unrelated.Input.Sources[0].Reference)}
+	second := apply(unrelated)
+	publish(second)
+	reconcile(0)
+	resolve := f.generation(t, 64000, []organizingapp.SynthesisGenerationNote{{Note: second.Note, Revision: *second.CurrentRevision}}, "Version 2 raises the workload limit.")
+	changed := supportedSynthesisNote(second, resolve.Input.Sources[0].Reference)
+	changed.Delta.Operations = []domain.SynthesisOperation{{Kind: domain.SynthesisResolveGap, TargetItemID: gapID, Resolution: &domain.SynthesisStatement{Text: "Version 2 raises the limit.", Applicability: "Version 2", Sources: []domain.SynthesisSourceRef{resolve.Input.Sources[0].Reference}}}}
+	resolve.Generation.Notes = []organizingapp.SynthesisGeneratedNote{changed}
+	third := apply(resolve)
+	reconcile(0) // 草稿中的解决结论不是发布证据。
+	publish(third)
+	if _, err := f.store.ReconcileSynthesisPublicationEvents(ctx, 100); err != nil {
+		t.Fatal(err)
+	}
+	// 其他消费者的确认不能隐藏此事件。
+	if err := f.store.database.WithContext(ctx).Exec(`UPDATE workflow.outbox_event SET published_at=clock_timestamp() WHERE workspace_id=? AND event_type='organizing.synthesis.published' AND published_at IS NULL`, string(f.workspace)).Error; err != nil {
+		t.Fatal(err)
+	}
+	type outcome struct {
+		count int
+		err   error
+	}
+	results := make(chan outcome, 2)
+	for range 2 {
+		go func() { n, err := f.store.ReconcileSynthesisBodyImpacts(ctx, 1); results <- outcome{n, err} }()
+	}
+	total := 0
+	for range 2 {
+		result := <-results
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		total += result.count
+	}
+	if total < 1 || total > 2 {
+		t.Fatalf("concurrent impacts=%d", total)
+	}
+	// 并发有界扫描可能选中同一待处理行。先完成剩余可见基线，再检查精确数量和重放结果。
+	reconcile(2 - total)
+	f.count(t, "organizing.synthesis_body_impact", "workspace_id", string(f.workspace), 2)
+	reconcile(0)
+	query := organizingapp.SynthesisBodyImpactQuery{WorkspaceID: f.workspace, NoteID: downstream.Note.ID, BaseRevisionID: downstream.CurrentRevision.ID, Limit: 1}
+	impacts, err := f.service.ReadSynthesisBodyImpacts(ctx, query)
+	if err != nil || len(impacts.Items) != 1 || impacts.NextAfterID != "" {
+		t.Fatalf("read exact impacts: %+v %v", impacts, err)
+	}
+	impact := impacts.Items[0]
+	if impact.DetectedAt.Location() != time.UTC {
+		t.Fatal("body impact timestamp is not canonical UTC")
+	}
+	if impact.ItemID != includedID || impact.UpstreamItemID != gapID || impact.UpstreamRevisionID != first.CurrentRevision.ID || impact.UpstreamPublicationID != published.PublicationID || impact.PublishedRevisionID != third.CurrentRevision.ID || impact.Reason != "CONTENT_CHANGED" {
+		t.Fatalf("impact bindings: %+v", impact)
+	}
+	draftImpacts, err := f.service.ReadSynthesisBodyImpacts(ctx, organizingapp.SynthesisBodyImpactQuery{WorkspaceID: f.workspace, NoteID: downstream.Note.ID, BaseRevisionID: downstreamDraft.CurrentRevision.ID, Limit: 1})
+	if err != nil || len(draftImpacts.Items) != 1 || draftImpacts.Items[0].UpstreamPublicationID != impact.UpstreamPublicationID || draftImpacts.Items[0].PublishedRevisionID != impact.PublishedRevisionID {
+		t.Fatalf("impact bindings for pending draft base: %+v %v", draftImpacts, err)
+	}
+	query.AfterID = impact.ID
+	if page, err := f.service.ReadSynthesisBodyImpacts(ctx, query); err != nil || len(page.Items) != 0 {
+		t.Fatalf("cursor replay: %+v %v", page, err)
+	}
+	query.WorkspaceID = organizingIntegrationID(64999)
+	if _, err := f.service.ReadSynthesisBodyImpacts(ctx, query); !organizingIntegrationError(err, foundation.ErrorNotFound, organizingapp.ErrorCodeSynthesisNotFound) {
+		t.Fatalf("cross-workspace impact read: %v", err)
+	}
+	for _, statement := range []string{
+		`UPDATE organizing.synthesis_body_impact SET reason='ITEM_MISSING' WHERE id=?`,
+		`DELETE FROM organizing.synthesis_body_impact WHERE id=?`,
+		`INSERT INTO organizing.synthesis_body_impact(workspace_id,note_id,base_revision_id,item_id,upstream_note_id,upstream_revision_id,upstream_item_id,upstream_publication_id,publication_id,published_revision_id,event_id,reason) SELECT workspace_id,note_id,base_revision_id,item_id,upstream_note_id,upstream_revision_id,upstream_item_id,upstream_publication_id,upstream_publication_id,upstream_revision_id,event_id,reason FROM organizing.synthesis_body_impact WHERE id=?`,
+	} {
+		if err := f.store.database.WithContext(ctx).Exec(statement, string(impact.ID)).Error; err == nil {
+			t.Fatalf("impact mutation accepted: %s", statement)
+		}
+	}
+	current, err := f.service.ReadPublishedSynthesisNote(ctx, f.workspace, downstream.Note.ID)
+	if err != nil || current.RevisionID != downstream.CurrentRevision.ID {
+		t.Fatalf("impact moved publication: %+v %v", current, err)
+	}
+	after, err := os.ReadFile(filepath.Join(f.root, downstreamPath))
+	if err != nil || !reflect.DeepEqual(before, after) {
+		t.Fatalf("impact rewrote downstream file: %v", err)
+	}
+	f.count(t, "organizing.synthesis_body_impact", "workspace_id", string(f.workspace), 2)
 }
 
 type synthesisGitFixture struct {
@@ -180,11 +507,22 @@ func newSynthesisGitFixture(t *testing.T) *synthesisGitFixture {
 }
 
 func newSynthesisGitFixtureAtVersion(t *testing.T, version int64) *synthesisGitFixture {
+	return newSynthesisGitFixtureWithRootBinding(t, version, false)
+}
+
+func newSynthesisGitFixtureWithRootBinding(t *testing.T, version int64, rootBound bool) *synthesisGitFixture {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Fatal("real publication validation requires git")
 	}
 	f := &synthesisGitFixture{synthesisDBFixture: newSynthesisDBFixtureAtVersion(t, version), root: t.TempDir(), definitionID: organizingIntegrationID(53001)}
+	if rootBound {
+		canonical, err := filepath.EvalSymlinks(f.root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.root = canonical
+	}
 	ctx := t.Context()
 	if err := os.WriteFile(filepath.Join(f.root, ".gitignore"), []byte(".knowledge/\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -203,8 +541,15 @@ func newSynthesisGitFixtureAtVersion(t *testing.T, version int64) *synthesisGitF
 	}
 	f.workspace = organizingIntegrationID(53000)
 	now := time.Now().UTC().Truncate(time.Microsecond)
-	if _, err := workspaces.CreateWorkspace(ctx, workspacedomain.Workspace{ID: f.workspace, Name: "Synthesis publication integration", RootPath: f.root,
-		Git: workspacedomain.GitBaseline{RepositoryPath: f.root, Branch: "main", Head: f.initialHead, CheckedAt: now}, Status: workspacedomain.WorkspaceStatusActive, Version: 1, CreatedAt: now, UpdatedAt: now}); err != nil {
+	workspaceRecord := workspacedomain.Workspace{ID: f.workspace, Name: "Synthesis publication integration", RootPath: f.root,
+		Git: workspacedomain.GitBaseline{RepositoryPath: f.root, Branch: "main", Head: f.initialHead, CheckedAt: now}, Status: workspacedomain.WorkspaceStatusActive, Version: 1, CreatedAt: now, UpdatedAt: now}
+	if rootBound {
+		workspaceRecord.RootFingerprint = organizingIntegrationHash(f.root)
+		workspaceRecord.BindingVersion = 1
+		workspaceRecord.Availability = workspacedomain.WorkspaceAvailabilityAvailable
+		workspaceRecord.AvailabilityCheckedAt = now
+	}
+	if _, err := workspaces.CreateWorkspace(ctx, workspaceRecord); err != nil {
 		t.Fatal(err)
 	}
 	targets, err := changecontrollocalfs.NewReader(workspaces)
@@ -411,4 +756,12 @@ func synthesisGitOutput(t *testing.T, ctx context.Context, root string, argument
 		t.Fatalf("isolated git %v failed: %v: %s", arguments, err, output)
 	}
 	return string(output)
+}
+
+// 发布和退役场景需要真实正文变化；仅增加证据不再创建新候选，也不替代提案。
+func extendedSynthesisNote(detail organizingapp.SynthesisNoteDetail, source domain.SynthesisSourceRef) organizingapp.SynthesisGeneratedNote {
+	generated := supportedSynthesisNote(detail, source)
+	item := domain.SynthesisItem{ID: source.SourceSpanID, Kind: domain.SynthesisFactItem, Fact: &domain.SynthesisStatement{Text: "Additional finding from " + source.Title, Sources: []domain.SynthesisSourceRef{source}}}
+	generated.Delta.Operations = append(generated.Delta.Operations, domain.SynthesisOperation{Kind: domain.SynthesisAddFact, Item: &item})
+	return generated
 }

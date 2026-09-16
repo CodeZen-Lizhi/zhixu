@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -33,9 +34,12 @@ const (
 type synthesisCompositionCalls struct{ Profile, Generate, Validate, NoChange int }
 
 type synthesisCompositionProvider struct {
-	mu      sync.Mutex
-	calls   synthesisCompositionCalls
-	failure string
+	mu                      sync.Mutex
+	calls                   synthesisCompositionCalls
+	failure                 string
+	beforeProfile           func(context.Context, int) error
+	expectedProfileEffort   string
+	expectedSynthesisEffort string
 }
 
 func newSynthesisCompositionProvider(t *testing.T) (*synthesisCompositionProvider, config.Config) {
@@ -91,8 +95,9 @@ func (provider *synthesisCompositionProvider) serveHTTP(w http.ResponseWriter, r
 		return
 	}
 	var request struct {
-		Model    string `json:"model"`
-		Messages []struct {
+		Model           string `json:"model"`
+		ReasoningEffort string `json:"reasoning_effort"`
+		Messages        []struct {
 			Content string `json:"content"`
 		} `json:"messages"`
 		ResponseFormat struct {
@@ -121,6 +126,16 @@ func (provider *synthesisCompositionProvider) serveHTTP(w http.ResponseWriter, r
 	var output any
 	var err error
 	properties := request.ResponseFormat.JSONSchema.Schema.Properties
+	if expected := provider.expectedProfileEffort; properties["schema_id"] != nil && expected != "" && request.ReasoningEffort != expected {
+		provider.fail("file profile used unexpected reasoning effort")
+		http.Error(w, "fixture reasoning effort mismatch", http.StatusBadRequest)
+		return
+	}
+	if expected := provider.expectedSynthesisEffort; (properties["notes"] != nil || properties["checks"] != nil) && expected != "" && request.ReasoningEffort != expected {
+		provider.fail("main note synthesis used unexpected reasoning effort")
+		http.Error(w, "fixture reasoning effort mismatch", http.StatusBadRequest)
+		return
+	}
 	switch {
 	case properties["notes"] != nil:
 		provider.mu.Lock()
@@ -145,8 +160,14 @@ func (provider *synthesisCompositionProvider) serveHTTP(w http.ResponseWriter, r
 		} else {
 			provider.mu.Lock()
 			provider.calls.Profile++
+			number, before := provider.calls.Profile, provider.beforeProfile
 			provider.mu.Unlock()
-			output, err = synthesisCompositionProfile(input)
+			if before != nil {
+				err = before(r.Context(), number)
+			}
+			if err == nil {
+				output, err = synthesisCompositionProfile(input)
+			}
 		}
 	default:
 		err = errors.New("unexpected output schema")

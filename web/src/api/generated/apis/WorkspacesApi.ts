@@ -18,6 +18,7 @@ import type {
     CreateWorkspaceRequest,
     Problem,
     Workspace,
+    WorkspaceDiscoveryFailurePage,
     WorkspaceScan,
 } from '../models/index';
 
@@ -27,6 +28,12 @@ export interface CreateWorkspaceOperationRequest {
 
 export interface GetWorkspaceRequest {
     workspaceId: string;
+}
+
+export interface ListWorkspaceDiscoveryFailuresRequest {
+    workspaceId: string;
+    cursor?: string;
+    limit?: number;
 }
 
 export interface ScanWorkspaceRequest {
@@ -184,6 +191,67 @@ export class WorkspacesApi extends runtime.BaseAPI {
      */
     async getWorkspace(requestParameters: GetWorkspaceRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<Workspace> {
         const response = await this.getWorkspaceRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for listWorkspaceDiscoveryFailures without sending the request
+     */
+    async listWorkspaceDiscoveryFailuresRequestOpts(requestParameters: ListWorkspaceDiscoveryFailuresRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['workspaceId'] == null) {
+            throw new runtime.RequiredError(
+                'workspaceId',
+                'Required parameter "workspaceId" was null or undefined when calling listWorkspaceDiscoveryFailures().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        if (requestParameters['cursor'] != null) {
+            queryParameters['cursor'] = requestParameters['cursor'];
+        }
+
+        if (requestParameters['limit'] != null) {
+            queryParameters['limit'] = requestParameters['limit'];
+        }
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        if (this.configuration && this.configuration.accessToken) {
+            const token = this.configuration.accessToken;
+            const tokenString = await token("apiBearer", []);
+
+            if (tokenString) {
+                headerParameters["Authorization"] = `Bearer ${tokenString}`;
+            }
+        }
+
+        let urlPath = `/api/v1/workspaces/{workspace_id}/discovery-failures`;
+        urlPath = urlPath.replace('{workspace_id}', encodeURIComponent(String(requestParameters['workspaceId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * List observed file discovery failures for the current root binding
+     */
+    async listWorkspaceDiscoveryFailuresRaw(requestParameters: ListWorkspaceDiscoveryFailuresRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<WorkspaceDiscoveryFailurePage>> {
+        const requestOptions = await this.listWorkspaceDiscoveryFailuresRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response);
+    }
+
+    /**
+     * List observed file discovery failures for the current root binding
+     */
+    async listWorkspaceDiscoveryFailures(requestParameters: ListWorkspaceDiscoveryFailuresRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<WorkspaceDiscoveryFailurePage> {
+        const response = await this.listWorkspaceDiscoveryFailuresRaw(requestParameters, initOverrides);
         return await response.value();
     }
 

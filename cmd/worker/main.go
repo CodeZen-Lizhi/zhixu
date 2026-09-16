@@ -81,6 +81,7 @@ import (
 	organizingowner "github.com/CodeZen-Lizhi/zhixu/internal/organizing/adapter/owner"
 	organizingpostgres "github.com/CodeZen-Lizhi/zhixu/internal/organizing/adapter/postgres"
 	synthesispostgres "github.com/CodeZen-Lizhi/zhixu/internal/organizing/adapter/synthesispostgres"
+	organizingapplication "github.com/CodeZen-Lizhi/zhixu/internal/organizing/application"
 	organizingworkflow "github.com/CodeZen-Lizhi/zhixu/internal/organizing/workflow"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/filesystem"
@@ -214,37 +215,55 @@ type workerComponents struct {
 	tools           toolRuntimeComponents
 	agentCapability agentCapabilityStatus
 	// workspaceAnalysisCapability 表示可选工作区分析子组合的启动状态；它绝不影响固定 RAG 就绪。
-	workspaceAnalysisCapability agentCapabilityStatus
-	artifact                    artifactWorkflowComponents
-	captureExecutor             *captureworkflow.Executor
-	captureOutbox               captureOutboxDispatchService
-	captureProfile              agentCapabilityStatus
-	organizingExecutor          *organizingworkflow.Executor
-	organizingOutbox            organizingOutboxDispatchService
-	synthesisExecutor           *organizingworkflow.SynthesisExecutor
-	synthesisSources            *organizingworkflow.SynthesisDispatcher
-	synthesisInterview          workerSynthesisInterviewComponents
-	gitSyncWorker               *gitsyncapplication.Worker
-	gitSyncScheduler            *gitsyncapplication.AutoSyncScheduler
-	gitSyncCapability           agentCapabilityStatus
-	reindexWorker               *reindexriver.Worker
-	dispatcher                  *retrievalruntime.Runner
-	runtimeClient               *riveradapter.Client
-	definitions                 *workflowapplication.DefinitionRegistry
-	executors                   *workflowapplication.ExecutorRegistry
-	runtimeGeneration           workerRuntimeGenerationBuilder
-	sourceProcessing            sourceProcessingComponents
-	reindexRuntime              *workerReindexProcessorAcquirer
-	semanticScan                *graphworkflow.SemanticLinkScanExecutor
-	healthScan                  *healthworkflowadapter.HealthScanExecutor
-	healthScanStart             *healthapplication.ScanService
-	healthSchedule              *healthapplication.ScheduleService
-	healthAffected              *healthapplication.AffectedChangeDispatcher
-	timelineProject             *knowledgeapplication.TimelineProjectionDispatcher
-	citationBackfill            *artifactapplication.CitationBackfillDispatcher
-	exportWorker                *exportriver.Worker
-	exportService               *exportapplication.Service
-	memoryExpiry                memoryExpiryService
+	workspaceAnalysisCapability  agentCapabilityStatus
+	artifact                     artifactWorkflowComponents
+	captureExecutor              *captureworkflow.Executor
+	captureOutbox                captureOutboxDispatchService
+	captureBackfill              captureapplication.SourceBackfillScheduler
+	localSourcePresence          *localSourcePresenceReconciler
+	localSourceDiscovery         *localSourceDiscovery
+	synthesisSourceImpacts       organizingapplication.SynthesisSourceImpactReconciler
+	synthesisPublicationEvents   organizingapplication.SynthesisPublicationEventReconciler
+	synthesisBodyImpacts         organizingapplication.SynthesisBodyImpactReconciler
+	synthesisBodyRefreshRequests organizingapplication.SynthesisBodyRefreshReconciler
+	synthesisGoalCatalog         *organizingworkflow.SynthesisGoalCatalogDispatcher
+	goalSelectionExecutor        *organizingworkflow.GoalSelectionExecutor
+	goalSelections               *organizingworkflow.GoalSelectionDispatcher
+	sourceReviews                *organizingworkflow.SourceReviewDispatcher
+	sourceReviewExecutor         *organizingworkflow.SourceReviewExecutor
+	goalGenerations              *organizingworkflow.GoalGenerationDispatcher
+	bodyRefreshGenerations       *organizingworkflow.BodyRefreshGenerationDispatcher
+	captureProfile               agentCapabilityStatus
+	organizingExecutor           *organizingworkflow.Executor
+	organizingOutbox             organizingOutboxDispatchService
+	synthesisExecutor            *organizingworkflow.SynthesisExecutor
+	anchorRecommendationExecutor *organizingworkflow.AnchorRecommendationExecutor
+	synthesisSources             *organizingworkflow.SynthesisDispatcher
+	anchorFusions                *organizingworkflow.AnchorFusionDispatcher
+	anchorRecommendations        *organizingworkflow.AnchorRecommendationDispatcher
+	anchorDiscoveries            *organizingworkflow.AnchorDiscoveryDispatcher
+	synthesisInterview           workerSynthesisInterviewComponents
+	gitSyncWorker                *gitsyncapplication.Worker
+	gitSyncScheduler             *gitsyncapplication.AutoSyncScheduler
+	gitSyncCapability            agentCapabilityStatus
+	reindexWorker                *reindexriver.Worker
+	dispatcher                   *retrievalruntime.Runner
+	runtimeClient                *riveradapter.Client
+	definitions                  *workflowapplication.DefinitionRegistry
+	executors                    *workflowapplication.ExecutorRegistry
+	runtimeGeneration            workerRuntimeGenerationBuilder
+	sourceProcessing             sourceProcessingComponents
+	reindexRuntime               *workerReindexProcessorAcquirer
+	semanticScan                 *graphworkflow.SemanticLinkScanExecutor
+	healthScan                   *healthworkflowadapter.HealthScanExecutor
+	healthScanStart              *healthapplication.ScanService
+	healthSchedule               *healthapplication.ScheduleService
+	healthAffected               *healthapplication.AffectedChangeDispatcher
+	timelineProject              *knowledgeapplication.TimelineProjectionDispatcher
+	citationBackfill             *artifactapplication.CitationBackfillDispatcher
+	exportWorker                 *exportriver.Worker
+	exportService                *exportapplication.Service
+	memoryExpiry                 memoryExpiryService
 	// interviewCompletion 是 reservation/hidden hold 维护依赖。
 	interviewCompletion interviewCompletionMaintenanceService
 	// learningPathMaintenance 是 Review Path reservation/hidden hold 维护依赖。
@@ -462,7 +481,7 @@ func run(configPath string, logger *slog.Logger) (runErr error) {
 		modelBinding.sourceRefreshAcquirer = sourceRefreshAcquirer
 	}
 	cfg = modelsettingsruntime.WithoutModelCredentials(cfg)
-	components, err := newWorkerComponentsWithModels(database, cfg, configuredModels, modelBinding, workspaceRuntime.Repository, logger, telemetry.Metrics(), telemetry.Tracer(), modelEnqueueFences...)
+	components, err := newWorkerComponentsWithModels(database, cfg, configuredModels, modelBinding, synthesisWorkspaceRuntime{GORMRepositoryPort: workspaceRuntime.Repository, resolver: workspaceRuntime.Resolver}, logger, telemetry.Metrics(), telemetry.Tracer(), modelEnqueueFences...)
 	if err != nil {
 		logger.Error("worker components are unavailable", "error_code", "WORKER_COMPONENTS_UNAVAILABLE")
 		return err
@@ -682,16 +701,33 @@ func run(configPath string, logger *slog.Logger) (runErr error) {
 		gitSyncDispatchInterval, gitSyncDispatchTimeout, modelDrain.ProducersEnabled,
 	)
 	defer cancelGitSyncProcess()
+	discoverLocalSources(processContext, logger, components.localSourceDiscovery, cfg.DatabasePingTimeout)
+	reconcileLocalSourcePresence(processContext, logger, components.localSourcePresence, cfg.DatabasePingTimeout)
+	reconcileSynthesisSourceImpacts(processContext, logger, components.synthesisSourceImpacts, cfg.DatabasePingTimeout)
+	reconcileSynthesisPublicationEvents(processContext, logger, components.synthesisPublicationEvents, cfg.DatabasePingTimeout)
+	reconcileSynthesisBodyImpacts(processContext, logger, components.synthesisBodyImpacts, cfg.DatabasePingTimeout)
+	reconcileSynthesisBodyRefreshRequests(processContext, logger, components.synthesisBodyRefreshRequests, cfg.DatabasePingTimeout)
+	discoverSynthesisGoals(processContext, logger, components.synthesisGoalCatalog, cfg.DatabasePingTimeout)
 	captureContext, cancelCapture := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
+	_, _ = backfillCaptureSources(captureContext, logger, components.captureBackfill)
+	cancelCapture()
+	captureContext, cancelCapture = context.WithTimeout(processContext, cfg.DatabasePingTimeout)
 	_, _ = dispatchCaptureOutbox(captureContext, logger, components.captureOutbox, captureDispatchStartupPhase)
 	cancelCapture()
 	organizingContext, cancelOrganizing := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
 	_, _ = dispatchOrganizingOutbox(organizingContext, logger, components.organizingOutbox, organizingDispatchStartupPhase)
 	cancelOrganizing()
 	if modelDrain.ProducersEnabled() {
+		dispatchGoalGenerations(processContext, logger, components.goalGenerations, cfg.DatabasePingTimeout)
+		dispatchBodyRefreshGenerations(processContext, logger, components.bodyRefreshGenerations, cfg.DatabasePingTimeout)
 		synthesisContext, cancelSynthesis := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
 		_, _ = dispatchSynthesisSources(synthesisContext, logger, components.synthesisSources, organizingDispatchStartupPhase)
+		_, _ = dispatchAnchorFusions(synthesisContext, logger, components.anchorFusions, organizingDispatchStartupPhase)
+		dispatchAnchorDiscoveries(synthesisContext, logger, components.anchorDiscoveries, organizingDispatchStartupPhase)
+		_, _ = dispatchAnchorRecommendations(synthesisContext, logger, components.anchorRecommendations, organizingDispatchStartupPhase)
 		cancelSynthesis()
+		dispatchGoalSelections(processContext, logger, components.goalSelections, cfg.DatabasePingTimeout)
+		dispatchSourceReviews(processContext, logger, components.sourceReviews, cfg.DatabasePingTimeout)
 	}
 	timelineContext, cancelTimeline := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
 	_, _ = dispatchTimelineProjection(timelineContext, logger, components.timelineProject, timelineProjectionStartupPhase)
@@ -796,18 +832,35 @@ func run(configPath string, logger *slog.Logger) (runErr error) {
 				logger.Warn("workspace analysis worker capability heartbeat failed", "error_code", agentapplication.ErrorCodeWorkspaceAnalysisCapabilityUnavailable)
 			}
 		case <-captureTicker.C:
+			discoverLocalSources(processContext, logger, components.localSourceDiscovery, cfg.DatabasePingTimeout)
+			reconcileLocalSourcePresence(processContext, logger, components.localSourcePresence, cfg.DatabasePingTimeout)
+			reconcileSynthesisSourceImpacts(processContext, logger, components.synthesisSourceImpacts, cfg.DatabasePingTimeout)
+			reconcileSynthesisPublicationEvents(processContext, logger, components.synthesisPublicationEvents, cfg.DatabasePingTimeout)
+			reconcileSynthesisBodyImpacts(processContext, logger, components.synthesisBodyImpacts, cfg.DatabasePingTimeout)
+			reconcileSynthesisBodyRefreshRequests(processContext, logger, components.synthesisBodyRefreshRequests, cfg.DatabasePingTimeout)
+			discoverSynthesisGoals(processContext, logger, components.synthesisGoalCatalog, cfg.DatabasePingTimeout)
 			if !modelDrain.ProducersEnabled() {
 				continue
 			}
 			dispatchContext, cancelDispatch := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
+			_, _ = backfillCaptureSources(dispatchContext, logger, components.captureBackfill)
+			cancelDispatch()
+			dispatchContext, cancelDispatch = context.WithTimeout(processContext, cfg.DatabasePingTimeout)
 			_, _ = dispatchCaptureOutbox(dispatchContext, logger, components.captureOutbox, captureDispatchPeriodicPhase)
 			cancelDispatch()
 			organizingContext, cancelOrganizing := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
 			_, _ = dispatchOrganizingOutbox(organizingContext, logger, components.organizingOutbox, organizingDispatchPeriodicPhase)
 			cancelOrganizing()
+			dispatchGoalGenerations(processContext, logger, components.goalGenerations, cfg.DatabasePingTimeout)
+			dispatchBodyRefreshGenerations(processContext, logger, components.bodyRefreshGenerations, cfg.DatabasePingTimeout)
 			synthesisContext, cancelSynthesis := context.WithTimeout(processContext, cfg.DatabasePingTimeout)
 			_, _ = dispatchSynthesisSources(synthesisContext, logger, components.synthesisSources, organizingDispatchPeriodicPhase)
+			_, _ = dispatchAnchorFusions(synthesisContext, logger, components.anchorFusions, organizingDispatchPeriodicPhase)
+			dispatchAnchorDiscoveries(synthesisContext, logger, components.anchorDiscoveries, organizingDispatchPeriodicPhase)
+			_, _ = dispatchAnchorRecommendations(synthesisContext, logger, components.anchorRecommendations, organizingDispatchPeriodicPhase)
 			cancelSynthesis()
+			dispatchGoalSelections(processContext, logger, components.goalSelections, cfg.DatabasePingTimeout)
+			dispatchSourceReviews(processContext, logger, components.sourceReviews, cfg.DatabasePingTimeout)
 		case <-ticker.C:
 			if err := ping(database, cfg.DatabasePingTimeout); err != nil {
 				readiness.SetDatabaseOK(false)
@@ -1616,7 +1669,7 @@ func newWorkerComponentsWithModels(db *postgres.Pool, cfg config.Config, models 
 	if err != nil {
 		return workerComponents{}, err
 	}
-	synthesisOwners, err := newSynthesisWorkerOwners(db, workspaceRepository, authoringRepository, writebackRepository, changeControlService, targetReader, synthesisStore)
+	synthesisOwners, err := newSynthesisWorkerOwners(db, workspaceRepository, authoringRepository, writebackRepository, changeControlService, targetReader, synthesisStore, artifactAgentRepository)
 	if err != nil {
 		return workerComponents{}, err
 	}
@@ -1644,6 +1697,9 @@ func newWorkerComponentsWithModels(db *postgres.Pool, cfg config.Config, models 
 		organizingTerminal,
 		synthesisStore,
 		synthesisInterviewTerminal,
+	}
+	if synthesisOwners.sourceReviews != nil {
+		terminalHookComponents = append(terminalHookComponents, synthesisOwners.sourceReviews)
 	}
 	if workspaceAnalysisWorkerEnabled {
 		workspaceAnalysisCancellationAudit, workspaceAnalysisControlErr := conversationpostgres.NewGORMWorkspaceAnalysisCancellationAuditHook(
@@ -1747,13 +1803,35 @@ func newWorkerComponentsWithModels(db *postgres.Pool, cfg config.Config, models 
 	if err != nil {
 		return workerComponents{}, err
 	}
-	synthesisExecutor, err := newSynthesisWorkerExecutor(synthesisOwners, synthesisStore, workflowRepository, artifactAgentRepository, agentComponents.model, agentComponents.contract, agentComponents.organizingScheduler)
+	synthesisExecutor, err := newSynthesisWorkerExecutor(synthesisOwners, synthesisStore, workflowRepository, artifactAgentRepository, agentComponents.forFunction(modelsettingsdomain.ReasoningMainNoteSynthesis).model, agentComponents.forFunction(modelsettingsdomain.ReasoningMainNoteSynthesis).contract, agentComponents.organizingScheduler)
 	if err != nil {
 		return workerComponents{}, err
 	}
 	if err := registerSynthesisWorkerExecutors(executors, synthesisExecutor); err != nil {
 		return workerComponents{}, err
 	}
+	anchorRecommendationExecutor, err := newAnchorRecommendationWorkerExecutor(synthesisOwners, workflowRepository, artifactAgentRepository, agentComponents.forFunction(modelsettingsdomain.ReasoningAnchorScope).model, agentComponents.forFunction(modelsettingsdomain.ReasoningAnchorScope).contract, agentComponents.organizingScheduler)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	if err := registerAnchorRecommendationWorkerExecutor(executors, anchorRecommendationExecutor); err != nil {
+		return workerComponents{}, err
+	}
+	goalSelectionExecutor, err := newGoalSelectionWorkerExecutor(synthesisOwners, workflowRepository, artifactAgentRepository, agentComponents.forFunction(modelsettingsdomain.ReasoningMainNoteSynthesis).model, agentComponents.forFunction(modelsettingsdomain.ReasoningMainNoteSynthesis).contract, agentComponents.organizingScheduler)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	if err := registerGoalSelectionWorkerExecutor(executors, goalSelectionExecutor); err != nil {
+		return workerComponents{}, err
+	}
+	sourceReviewExecutor, err := newSourceReviewWorkerExecutor(synthesisOwners, workflowRepository, artifactAgentRepository, agentComponents.forFunction(modelsettingsdomain.ReasoningManuscriptSourceReview).model, agentComponents.forFunction(modelsettingsdomain.ReasoningManuscriptSourceReview).contract, agentComponents.organizingScheduler)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	if err = registerSourceReviewWorkerExecutor(executors, sourceReviewExecutor); err != nil {
+		return workerComponents{}, err
+	}
+
 	synthesisInterview, err := newWorkerSynthesisInterviewComponents(synthesisInterviewPersistence, workflowRepository, agentComponents)
 	if err != nil {
 		return workerComponents{}, err
@@ -1762,7 +1840,7 @@ func newWorkerComponentsWithModels(db *postgres.Pool, cfg config.Config, models 
 		return workerComponents{}, err
 	}
 	captureProfileGenerator, captureProfileCapability, err := newCaptureProfileGenerator(
-		db, agentComponents.model, agentComponents.contract, artifactAgentRepository,
+		db, agentComponents.forFunction(modelsettingsdomain.ReasoningFileProfile).model, agentComponents.forFunction(modelsettingsdomain.ReasoningFileProfile).contract, artifactAgentRepository,
 		agentComponents.captureScheduler,
 		foundation.NewUUIDGenerator(nil), foundation.SystemClock{},
 	)
@@ -2000,6 +2078,30 @@ func newWorkerComponentsWithModels(db *postgres.Pool, cfg config.Config, models 
 	if err != nil {
 		return workerComponents{}, err
 	}
+	anchorFusions, err := newAnchorFusionDispatcher(db, synthesisOwners, synthesisStore, runtimeRepository, definitions)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	anchorRecommendations, err := newAnchorRecommendationDispatcher(db, synthesisOwners, runtimeRepository, definitions)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	goalSelections, err := newGoalSelectionDispatcher(db, synthesisOwners, workspaceRepository, runtimeRepository, definitions)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	sourceReviews, err := newSourceReviewDispatcher(db, synthesisOwners, workspaceRepository, runtimeRepository, definitions)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	goalGenerations, err := newGoalGenerationDispatcher(db, synthesisStore, workspaceRepository, runtimeRepository, definitions)
+	if err != nil {
+		return workerComponents{}, err
+	}
+	bodyRefreshGenerations, err := newBodyRefreshGenerationDispatcher(db, synthesisStore, workspaceRepository, runtimeRepository, definitions)
+	if err != nil {
+		return workerComponents{}, err
+	}
 	workflowService, err := workflowapplication.NewRuntimeService(
 		workflowRepository, foundation.NewUUIDGenerator(nil), foundation.SystemClock{},
 		workflowapplication.RuntimeDependencies{
@@ -2152,9 +2254,9 @@ func newWorkerComponentsWithModels(db *postgres.Pool, cfg config.Config, models 
 	return workerComponents{
 		workerID: workerID, safeWriteback: node, tools: toolComponents, agentCapability: agentComponents.capability,
 		workspaceAnalysisCapability: workspaceAnalysisCapability, artifact: artifactComponents,
-		captureExecutor: captureExecutor, captureOutbox: captureOutbox, captureProfile: captureProfileCapability,
+		captureExecutor: captureExecutor, captureOutbox: captureOutbox, captureProfile: captureProfileCapability, captureBackfill: captureRepository, localSourcePresence: &localSourcePresenceReconciler{repository: workspaceRepository}, localSourceDiscovery: &localSourceDiscovery{repository: workspaceRepository, service: sourceProcessing.workspace}, synthesisSourceImpacts: synthesisOwners.store, synthesisPublicationEvents: synthesisOwners.store, synthesisBodyImpacts: synthesisOwners.store, synthesisBodyRefreshRequests: synthesisOwners.store, synthesisGoalCatalog: &organizingworkflow.SynthesisGoalCatalogDispatcher{Workspaces: workspaceRepository, Store: synthesisOwners.store, Catalog: synthesisOwners.goalCatalog},
 		organizingExecutor: organizingExecutor, organizingOutbox: organizingOutbox,
-		synthesisExecutor: synthesisExecutor, synthesisSources: synthesisSources, synthesisInterview: synthesisInterview,
+		bodyRefreshGenerations: bodyRefreshGenerations, goalGenerations: goalGenerations, goalSelections: goalSelections, goalSelectionExecutor: goalSelectionExecutor, sourceReviews: sourceReviews, sourceReviewExecutor: sourceReviewExecutor, synthesisExecutor: synthesisExecutor, anchorRecommendationExecutor: anchorRecommendationExecutor, synthesisSources: synthesisSources, anchorFusions: anchorFusions, anchorRecommendations: anchorRecommendations, anchorDiscoveries: newAnchorDiscoveryDispatcher(synthesisOwners), synthesisInterview: synthesisInterview,
 		gitSyncWorker: gitSyncWorker, gitSyncScheduler: gitSyncScheduler, gitSyncCapability: gitSyncCapability,
 		reindexWorker: reindex.worker, reindexRuntime: reindex.runtime, dispatcher: reindex.dispatcher,
 		runtimeClient: runtimeClient, definitions: definitions, executors: executors, runtimeGeneration: runtimeGeneration, sourceProcessing: sourceProcessing, semanticScan: semanticScan, healthScan: healthScan, healthScanStart: healthScanStartService, healthSchedule: healthSchedule, healthAffected: healthAffected, timelineProject: timelineProject, citationBackfill: citationBackfill,
@@ -2236,13 +2338,35 @@ func newWorkerRuntimeGenerationBuilder(
 		if err != nil {
 			return nil, err
 		}
-		synthesisExecutor, err := newSynthesisWorkerExecutor(synthesisOwners, synthesisStore, workflowRepository, artifactAgentRepository, agentComponents.model, agentComponents.contract, agentComponents.organizingScheduler)
+		synthesisExecutor, err := newSynthesisWorkerExecutor(synthesisOwners, synthesisStore, workflowRepository, artifactAgentRepository, agentComponents.forFunction(modelsettingsdomain.ReasoningMainNoteSynthesis).model, agentComponents.forFunction(modelsettingsdomain.ReasoningMainNoteSynthesis).contract, agentComponents.organizingScheduler)
 		if err != nil {
 			return nil, err
 		}
 		if err := registerSynthesisWorkerExecutors(executors, synthesisExecutor); err != nil {
 			return nil, err
 		}
+		anchorRecommendationExecutor, err := newAnchorRecommendationWorkerExecutor(synthesisOwners, workflowRepository, artifactAgentRepository, agentComponents.forFunction(modelsettingsdomain.ReasoningAnchorScope).model, agentComponents.forFunction(modelsettingsdomain.ReasoningAnchorScope).contract, agentComponents.organizingScheduler)
+		if err != nil {
+			return nil, err
+		}
+		if err := registerAnchorRecommendationWorkerExecutor(executors, anchorRecommendationExecutor); err != nil {
+			return nil, err
+		}
+		goalSelectionExecutor, err := newGoalSelectionWorkerExecutor(synthesisOwners, workflowRepository, artifactAgentRepository, agentComponents.forFunction(modelsettingsdomain.ReasoningMainNoteSynthesis).model, agentComponents.forFunction(modelsettingsdomain.ReasoningMainNoteSynthesis).contract, agentComponents.organizingScheduler)
+		if err != nil {
+			return nil, err
+		}
+		if err := registerGoalSelectionWorkerExecutor(executors, goalSelectionExecutor); err != nil {
+			return nil, err
+		}
+		sourceReviewExecutor, err := newSourceReviewWorkerExecutor(synthesisOwners, workflowRepository, artifactAgentRepository, agentComponents.forFunction(modelsettingsdomain.ReasoningManuscriptSourceReview).model, agentComponents.forFunction(modelsettingsdomain.ReasoningManuscriptSourceReview).contract, agentComponents.organizingScheduler)
+		if err != nil {
+			return nil, err
+		}
+		if err = registerSourceReviewWorkerExecutor(executors, sourceReviewExecutor); err != nil {
+			return nil, err
+		}
+
 		synthesisInterview, err := newWorkerSynthesisInterviewComponents(synthesisInterviewPersistence, workflowRepository, agentComponents)
 		if err != nil {
 			return nil, err
@@ -2251,7 +2375,7 @@ func newWorkerRuntimeGenerationBuilder(
 			return nil, err
 		}
 		captureProfileGenerator, _, err := newCaptureProfileGenerator(
-			db, agentComponents.model, agentComponents.contract, artifactAgentRepository, agentComponents.captureScheduler,
+			db, agentComponents.forFunction(modelsettingsdomain.ReasoningFileProfile).model, agentComponents.forFunction(modelsettingsdomain.ReasoningFileProfile).contract, artifactAgentRepository, agentComponents.captureScheduler,
 			foundation.NewUUIDGenerator(nil), foundation.SystemClock{},
 		)
 		if err != nil {
@@ -2892,6 +3016,7 @@ func artifactWorkflowReadiness(components workerComponents) bool {
 }
 
 type agentWorkflowComponents struct {
+	models                      *modelsettingsruntime.Models
 	relation                    *agentworkflow.Executor
 	rag                         *agentworkflow.RAGWorkflowExecutor
 	workspaceInspect            *agentworkflow.WorkspaceAnalysisInspectExecutor
@@ -2970,7 +3095,7 @@ func newAgentWorkflowComponentsWithDependencies(
 	if err != nil {
 		return agentWorkflowComponents{}, err
 	}
-	chat := models.Chat()
+	chat := models.ChatFor(modelsettingsdomain.ReasoningKnowledgeOrganization)
 	if chat.State() != platformmodels.CapabilityConfigured {
 		return agentWorkflowComponents{capability: agentCapabilityStatus{code: agentworkflow.ErrorCodeCapabilityUnavailable}}, nil
 	}
@@ -2986,7 +3111,7 @@ func newAgentWorkflowComponentsWithDependencies(
 		if err := validateRAGWorkerJobTimeout(cfg.WorkerJobTimeout, contract.Timeout); err != nil {
 			return agentWorkflowComponents{}, err
 		}
-		runtimeChat := models.RuntimeChat()
+		runtimeChat := models.RuntimeChatFor(modelsettingsdomain.ReasoningKnowledgeQNA)
 		if runtimeChat.State() != platformmodels.CapabilityConfigured || runtimeChat.Model() == nil {
 			return agentWorkflowComponents{}, foundation.NewError(foundation.ErrorDependencyUnavailable, "WORKER_RAG_EINO_RUNTIME_UNAVAILABLE", false, errors.New("configured Eino Agent/Stream runtime is unavailable"))
 		}
@@ -3138,7 +3263,7 @@ func newAgentWorkflowComponentsWithDependencies(
 		return agentWorkflowComponents{}, err
 	}
 	rag, err := agentworkflow.NewRAGWorkflowExecutor(agentworkflow.RAGWorkflowExecutorDependencies{
-		Model: model, Scheduler: ragScheduler, RAGScheduler: ragRuntimeScheduler, Catalog: catalog, Repository: repository, Snapshots: repository,
+		Model: models.ChatFor(modelsettingsdomain.ReasoningKnowledgeQNA).Model(), Scheduler: ragScheduler, RAGScheduler: ragRuntimeScheduler, Catalog: catalog, Repository: repository, Snapshots: repository,
 		Memory: memoryLoader, MemoryOwner: agentapplication.MemoryOwnerRef{Kind: string(memoryOwner.Kind), ID: memoryOwner.ID},
 		Context: conversationRepository,
 		Search:  retrievalAdapter, Retrieval: retrievalAdapter, Eligibility: knowledgePort, Topics: topicAdapter,
@@ -3162,6 +3287,7 @@ func newAgentWorkflowComponentsWithDependencies(
 		workspaceAnalysisCapability.code = agentapplication.ErrorCodeWorkspaceAnalysisCapabilityUnavailable
 	}
 	buildWorkspaceAnalysis := func() error {
+		model := models.ChatFor(modelsettingsdomain.ReasoningWorkspaceAnalysis).Model()
 		if err := validateWorkspaceAnalysisWorkerRuntime(cfg, contract.Timeout, tools.contracts); err != nil {
 			return err
 		}
@@ -3173,7 +3299,7 @@ func newAgentWorkflowComponentsWithDependencies(
 		if err != nil {
 			return err
 		}
-		runtimeChat := models.RuntimeChat()
+		runtimeChat := models.RuntimeChatFor(modelsettingsdomain.ReasoningWorkspaceAnalysis)
 		workspaceCandidateStream, err = agenteino.NewWorkspaceAnalysisCandidateStreamRuntime(runtimeChat.Model())
 		if err != nil {
 			return err
@@ -3316,7 +3442,7 @@ func newAgentWorkflowComponentsWithDependencies(
 		workspaceRetrieve: workspaceRetrieve, workspaceRead: workspaceRead, workspaceSynthesize: workspaceSynthesize,
 		workspaceDynamic:  workspaceDynamic,
 		workspaceValidate: workspaceValidate, workspaceReview: workspaceReview,
-		model: model, contract: contract,
+		model: model, contract: contract, models: models,
 		relationScheduler: relationScheduler, ragScheduler: ragScheduler, ragRuntimeScheduler: ragRuntimeScheduler,
 		artifactScheduler: artifactScheduler, captureScheduler: captureScheduler, organizingScheduler: organizingScheduler,
 		capability: agentCapabilityStatus{available: true}, workspaceAnalysisCapability: workspaceAnalysisCapability,
@@ -3644,7 +3770,7 @@ func newSourceProcessingComponents(db *postgres.Pool, cfg config.Config, workspa
 	clock := foundation.SystemClock{}
 	files := filesystem.Scanner{Options: filesystem.ScanOptions{MaxBytes: filesystem.DefaultMaxBytes}}
 	workspaceService := workspaceapplication.NewService(workspaceapplication.Dependencies{
-		Repository: workspaceRepository, ManagedFiles: files, CommittedFiles: files, CommittedGit: committedGit,
+		Repository: workspaceRepository, Files: files, ManagedFiles: files, CommittedFiles: files, CommittedGit: committedGit,
 		IDs: ids, Clock: clock,
 	})
 	sourceReadyOutbox, err := workflowpostgres.NewGORMSourceReadyOutbox(db)
@@ -3956,4 +4082,17 @@ func ping(database *postgres.Pool, timeout time.Duration) error {
 		return err
 	}
 	return nil
+}
+
+// forFunction 在组装根中一次性绑定可信的产品功能。
+// 共享 Models 实例属于精确冻结的运行代次；它不会
+// 读取期望设置或可变的逐请求覆盖配置。
+func (components agentWorkflowComponents) forFunction(function modelsettingsdomain.ReasoningFunction) agentWorkflowComponents {
+	if components.models == nil {
+		return components
+	}
+	chat := components.models.ChatFor(function)
+	components.model = chat.Model()
+	components.contract, _ = chat.Contract()
+	return components
 }

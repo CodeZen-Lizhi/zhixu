@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	manuscriptadapter "github.com/CodeZen-Lizhi/zhixu/internal/organizing/adapter/manuscript"
 	app "github.com/CodeZen-Lizhi/zhixu/internal/organizing/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/organizing/domain"
 	"github.com/gin-gonic/gin"
@@ -113,6 +114,7 @@ func TestSynthesisHTTPListsInitialFailureWithoutNoteOrModelPayload(t *testing.T)
 func TestSynthesisHTTPSourceUsesOnlyFrozenRevisionReferences(t *testing.T) {
 	revision, reference := synthesisHTTPRevision(t)
 	availability := domain.MaterialAvailable
+	snapshot := ""
 	openCalls := 0
 	stub := synthesisNotesStub{revision: func(_ context.Context, workspaceID, noteID, revisionID foundation.ID) (domain.SynthesisRevision, error) {
 		if noteID != revision.NoteID || revisionID != revision.ID {
@@ -129,7 +131,7 @@ func TestSynthesisHTTPSourceUsesOnlyFrozenRevisionReferences(t *testing.T) {
 		if availability == domain.MaterialAvailable {
 			text = "immutable source excerpt"
 		}
-		return app.SynthesisSourceView{Reference: source, Availability: availability, Text: text}, nil
+		return app.SynthesisSourceView{Reference: source, Availability: availability, Text: text, SnapshotText: snapshot}, nil
 	}}
 	router := synthesisRouter(NewSynthesisHandler(stub, synthesisProcessingStub{}, time.Second))
 	base := "/api/v1/workspaces/" + string(revision.WorkspaceID) + "/synthesis/notes/" + string(revision.NoteID) + "/revisions/" + string(revision.ID) + "/sources/"
@@ -149,9 +151,15 @@ func TestSynthesisHTTPSourceUsesOnlyFrozenRevisionReferences(t *testing.T) {
 			t.Fatalf("invalid source projection = %s", response.Body.String())
 		}
 	}
+	snapshot = "immutable source excerpt"
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, base+string(reference.SourceSpanID), nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"text":null`) || !strings.Contains(response.Body.String(), `"snapshot_text":"immutable source excerpt"`) {
+		t.Fatalf("snapshot projection = %d %s", response.Code, response.Body.String())
+	}
 	response = httptest.NewRecorder()
 	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, strings.Replace(base, string(revision.WorkspaceID), string(testID(1000)), 1)+string(reference.SourceSpanID), nil))
-	if response.Code != http.StatusConflict || openCalls != 3 {
+	if response.Code != http.StatusConflict || openCalls != 4 {
 		t.Fatalf("foreign workspace response = %d calls=%d", response.Code, openCalls)
 	}
 }
@@ -244,4 +252,107 @@ func synthesisHTTPRevision(t *testing.T) (domain.SynthesisRevision, domain.Synth
 		t.Fatal(err)
 	}
 	return revision, reference
+}
+
+func TestSynthesisHTTPManuscriptReading(t *testing.T) {
+	original, reference := synthesisHTTPRevision(t)
+	revision := original
+	stub := synthesisNotesStub{revision: func(context.Context, foundation.ID, foundation.ID, foundation.ID) (domain.SynthesisRevision, error) {
+		return revision, nil
+	}, source: func(_ context.Context, _, _, _ foundation.ID, ref domain.SynthesisSourceRef) (app.SynthesisSourceView, error) {
+		if ref != reference {
+			t.Fatal("unbound source")
+		}
+		return app.SynthesisSourceView{Reference: ref, Availability: domain.MaterialAvailable, Text: "immutable source excerpt"}, nil
+	}}
+	router := synthesisRouter(NewSynthesisHandler(stub, synthesisProcessingStub{}, time.Second))
+	path := "/api/v1/workspaces/" + string(original.WorkspaceID) + "/synthesis/notes/" + string(original.NoteID) + "/revisions/" + string(original.ID)
+	read := func(path string) *httptest.ResponseRecorder {
+		t.Helper()
+		out := httptest.NewRecorder()
+		router.ServeHTTP(out, httptest.NewRequest(http.MethodGet, path, nil))
+		return out
+	}
+	if out := read(path); out.Code != 200 || strings.Contains(out.Body.String(), `"display"`) {
+		t.Fatalf("v1 shape changed: %s", out.Body.String())
+	}
+	machine := domain.SynthesisManuscriptMachine{WorkspaceID: original.WorkspaceID, NoteID: original.NoteID, MachineTitle: original.Title, MachineItems: original.Items}
+	full, err := original.Content()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, manual := range []bool{false, true} {
+		body := full
+		if manual {
+			body += "\n人工批注：  保留逐字内容。\n<script>alert(1)</script>\n"
+		}
+		manuscript, err := domain.NewSynthesisManuscript(machine, body, manuscriptadapter.Mapper{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		trusted, err := manuscript.TrustedItems(machine, manuscriptadapter.Mapper{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		revision = original
+		revision.Manuscript = &manuscript
+		revision.RendererVersion = domain.SynthesisRendererVersionV2
+		revision.Items = trusted
+		revision.ContentHash = manuscript.ContentHash
+		revision.Hash, err = domain.ComputeSynthesisRevisionHash(revision)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := read(path)
+		if out.Code != 200 {
+			t.Fatalf("v2: %d %s", out.Code, out.Body.String())
+		}
+		var response struct {
+			Revision synthesisRevisionResponse `json:"revision"`
+		}
+		if err := json.Unmarshal(out.Body.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		if response.Revision.Display == nil || response.Revision.Display.FullContent != body || response.Revision.Display.ManualChanges != manual || response.Revision.Display.ReviewRequired != manual || len(response.Revision.Items) != len(trusted) {
+			t.Fatal("lost manuscript projection")
+		}
+		digest := sha256.Sum256([]byte(response.Revision.Display.FullContent))
+		if hex.EncodeToString(digest[:]) != response.Revision.ContentHash {
+			t.Fatal("content hash mismatch")
+		}
+		source := read(path + "/sources/" + string(reference.SourceSpanID))
+		if source.Code != 200 || strings.Contains(source.Body.String(), `"role":"HISTORICAL_REVIEW"`) != manual {
+			t.Fatalf("source role: %s", source.Body.String())
+		}
+		// 独立来源响应直接标识仅供审计的证据，
+		// 不要求使用方事先获取修订展示信息。
+		if manual && (strings.Contains(source.Body.String(), `"display"`) || !strings.Contains(source.Body.String(), `"role":"HISTORICAL_REVIEW"`)) {
+			t.Fatal("standalone source response lost its historical role")
+		}
+		if manual && (len(response.Revision.Items) != 0 || len(response.Revision.Display.HistoricalSources) != 1) {
+			t.Fatal("audit became trusted")
+		}
+		for _, forbidden := range []string{`"machine_items"`, `"assessment"`, `"prepared"`, `"model_run_id"`} {
+			if strings.Contains(out.Body.String(), forbidden) {
+				t.Fatal("private envelope exposed")
+			}
+		}
+	}
+	valid := revision
+	for _, corrupt := range []func(){func() { revision.ContentHash = testHash }, func() { revision.Manuscript.Version = "unknown" }, func() { revision.Manuscript.FullContent += "\x00" }, func() { revision.Manuscript.FullContent = string([]byte{0xff}) }, func() { revision.Manuscript.FullContent = strings.Repeat("x", (1<<20)+1) }} {
+		revision = valid
+		copy := *valid.Manuscript
+		revision.Manuscript = &copy
+		corrupt()
+		if out := read(path); out.Code == 200 {
+			t.Fatal("invalid envelope accepted")
+		}
+	}
+	revision = valid
+	if out := read(strings.Replace(path, string(original.WorkspaceID), string(testID(999)), 1)); out.Code == 200 {
+		t.Fatal("cross workspace accepted")
+	}
+	if out := read(path + "/sources/" + string(testID(999))); out.Code != 404 {
+		t.Fatal("arbitrary reference accepted")
+	}
 }

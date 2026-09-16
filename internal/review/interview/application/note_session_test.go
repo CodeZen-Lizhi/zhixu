@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	manuscriptmapper "github.com/CodeZen-Lizhi/zhixu/internal/organizing/adapter/manuscript"
 	organizingdomain "github.com/CodeZen-Lizhi/zhixu/internal/organizing/domain"
 	"github.com/CodeZen-Lizhi/zhixu/internal/review/interview/domain"
 )
@@ -204,5 +206,116 @@ func TestNotePreparationReplayAndExplicitRetryKeepOriginalPublishedSnapshot(t *t
 	}
 	if strings.Contains(string(raw), "Entries expire") || strings.Contains(string(raw), `"snapshot"`) {
 		t.Fatal("preparation exposed frozen answers")
+	}
+}
+
+func TestNoteManuscriptUsesOnlyTrustedItemsBeforePreparationOrModel(t *testing.T) {
+	original := applicationNoteFixture(t)
+	v1Input, err := EncodeNotePlanInput(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := original.Snapshot.Content()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, manual := range []bool{false, true} {
+		p := original
+		full := content
+		if manual {
+			full = "人工备注改变整篇语境。\n\n" + content
+		}
+		machine := organizingdomain.SynthesisManuscriptMachine{WorkspaceID: p.WorkspaceID, NoteID: p.Snapshot.NoteID, MachineTitle: p.Snapshot.Title, MachineItems: p.Snapshot.Items, IneligibleItemIDs: []foundation.ID{}}
+		manuscript, err := organizingdomain.NewSynthesisManuscript(machine, full, manuscriptmapper.Mapper{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		p.Snapshot.Manuscript = &manuscript
+		p.Snapshot.RendererVersion = organizingdomain.SynthesisRendererVersionV2
+		p.Snapshot.ContentHash = manuscript.ContentHash
+		p.Snapshot.Items, err = manuscript.TrustedItems(machine, manuscriptmapper.Mapper{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		p.NoteRevision, err = domain.NoteRevisionFromSnapshot(p.Snapshot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reader := &noteSnapshotReader{snapshot: p.Snapshot}
+		store := &notePreparationMemory{values: map[foundation.ID]NotePreparation{}}
+		service, err := NewNotePreparationService(NotePreparationDependencies{Store: store, Snapshots: reader, IDs: &fakeIDs{}, Clock: foundation.FixedClock{Value: p.CreatedAt}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, prepareErr := service.Prepare(t.Context(), PrepareNoteInterviewCommand{WorkspaceID: p.WorkspaceID, NoteID: p.Snapshot.NoteID, Options: p.Options, IdempotencyKey: "manuscript-trust"})
+		input, modelErr := EncodeNotePlanInput(p)
+		if manual {
+			if len(p.Snapshot.Items) != 0 || len(manuscript.Machine.MachineItems) == 0 {
+				t.Fatal("fixture must retain audit items but no trusted material")
+			}
+			for _, err := range []error{prepareErr, modelErr} {
+				var failure *foundation.Error
+				if !errors.As(err, &failure) || failure.Code != domain.ErrorCodeEvidenceInvalid || failure.Retryable {
+					t.Fatalf("empty material error=%v", err)
+				}
+			}
+			if store.count != 0 || input != nil {
+				t.Fatal("untrusted manuscript entered preparation or model payload")
+			}
+		} else {
+			if prepareErr != nil || modelErr != nil || store.count != 1 {
+				t.Fatalf("valid v2 rejected: %v %v", prepareErr, modelErr)
+			}
+			if string(input) != string(v1Input) {
+				t.Fatal("v2 added manuscript/audit data or changed existing model protocol")
+			}
+		}
+	}
+}
+
+func TestNoteManuscriptExcludesHistoricalAuditItemFromModelAndPlan(t *testing.T) {
+	p := applicationNoteFixture(t)
+	p.Options.QuestionCount, p.Options.MaxFollowUps = 1, 0
+	audit := applicationNoteFixture(t).Snapshot.Items[0]
+	audit.ID = applicationID(999)
+	audit.Fact.Text = "Historical excluded assertion must never become an answer."
+	machine := organizingdomain.SynthesisManuscriptMachine{WorkspaceID: p.WorkspaceID, NoteID: p.Snapshot.NoteID, MachineTitle: p.Snapshot.Title, MachineItems: append(p.Snapshot.Items, audit), IneligibleItemIDs: []foundation.ID{audit.ID}}
+	content, err := organizingdomain.RenderSynthesisMarkdown(machine.WorkspaceID, machine.NoteID, machine.MachineTitle, machine.MachineItems)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manuscript, err := organizingdomain.NewSynthesisManuscript(machine, content, manuscriptmapper.Mapper{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Snapshot.Manuscript, p.Snapshot.RendererVersion, p.Snapshot.ContentHash = &manuscript, organizingdomain.SynthesisRendererVersionV2, manuscript.ContentHash
+	p.Snapshot.Items, err = manuscript.TrustedItems(machine, manuscriptmapper.Mapper{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.NoteRevision, err = domain.NoteRevisionFromSnapshot(p.Snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, err := EncodeNotePlanInput(p)
+	if err != nil || len(p.Snapshot.Items) != 1 || strings.Contains(string(input), audit.Fact.Text) {
+		t.Fatalf("audit item reached model: %s %v", input, err)
+	}
+	for _, label := range []string{"I001", "I002"} {
+		raw := []byte(fmt.Sprintf(`{"questions":[{"item_label":%q,"prompt":"Explain expiry.","answer_point_labels":["P001","P002"],"follow_ups":[]}]}`, label))
+		plan, err := DecodeNotePlan(raw, p)
+		if label == "I002" {
+			if err == nil {
+				t.Fatal("model selected excluded audit item")
+			}
+			continue
+		}
+		if err != nil || len(plan) != 1 || plan[0].Source.ItemID != p.Snapshot.Items[0].ID {
+			t.Fatalf("trusted item plan failed: %v", err)
+		}
+		start, err := BuildNoteInterviewStart(p, plan, p.CreatedAt)
+		if err != nil || len(start.Questions) != 1 || start.Questions[0].NoteSource.ItemID == audit.ID {
+			t.Fatalf("session trust binding failed: %v", err)
+		}
 	}
 }

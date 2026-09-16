@@ -247,11 +247,16 @@ type generatedAuthoringFixture struct {
 
 func newGeneratedAuthoringFixture(t *testing.T) generatedAuthoringFixture {
 	t.Helper()
-	// This owner contract was introduced by 00094. Cross-owner semantic projection
-	// FKs introduced later are covered by the Synthesis composition fixture.
+	// 此夹具隔离 00094 引入的 Authoring 所有者，其真实
+	// 约束保持启用。后续 Synthesis 依赖通过空证明视图表示，
+	// 不伪造语义投影，也不禁用外键。
+	// 完整的 00121 迁移和证明覆盖由 Synthesis 组装负责。
 	databaseFixture := testdb.Require(t, testdb.Config{MaxConns: 12, Availability: testdb.FailWhenUnavailable,
 		Migrate: func(ctx context.Context, pool *pgxpool.Pool) error {
-			return platformmigration.MigrateAtlasToVersion(ctx, pool, 94)
+			if err := platformmigration.MigrateAtlasToVersion(ctx, pool, 94); err != nil {
+				return err
+			}
+			return installGeneratedAuthoringDependencyFixture(ctx, pool)
 		}})
 	platform := databaseFixture.Pool()
 	repository, err := NewGORMRepository(platform)
@@ -271,6 +276,31 @@ func newGeneratedAuthoringFixture(t *testing.T) generatedAuthoringFixture {
 	seedAuthoringWorkspace(t, t.Context(), platform.DB(), fixture.workspaceID, "generated-authoring")
 	seedAuthoringWorkspace(t, t.Context(), platform.DB(), fixture.otherWorkspaceID, "generated-authoring-other")
 	return fixture
+}
+
+// 当前仓库即使读取普通生成发布，也会读取
+// 00121 中可空的预留字段。此依赖夹具仅允许 NULL，
+// 不能授权手稿发布。它不是生产迁移。
+func installGeneratedAuthoringDependencyFixture(ctx context.Context, pool *pgxpool.Pool) error {
+	_, err := pool.Exec(ctx, `
+ALTER TABLE authoring.document_publication_reservation
+ ADD COLUMN historical_republish_id uuid,
+ ADD COLUMN merge_receipt_id uuid,
+ ADD COLUMN merge_capture_id uuid,
+ ADD COLUMN merge_published_revision_id uuid,
+ ADD COLUMN merge_published_content_hash text,
+ ADD CONSTRAINT generated_owner_fixture_no_manuscript CHECK (
+  historical_republish_id IS NULL AND merge_receipt_id IS NULL AND merge_capture_id IS NULL
+  AND merge_published_revision_id IS NULL AND merge_published_content_hash IS NULL);
+CREATE VIEW organizing.synthesis_publication_merge_baseline AS
+ SELECT NULL::uuid AS workspace_id, NULL::uuid AS document_id,
+        NULL::uuid AS article_revision_id, NULL::uuid AS receipt_id,
+        NULL::uuid AS capture_id, NULL::uuid AS published_revision_id,
+        NULL::text AS published_content_hash, NULL::text AS file_base,
+        NULL::text AS target_path, NULL::text AS content_hash,
+        NULL::bigint AS document_version, false AS valid, NULL::uuid AS historical_republish_id
+ WHERE false;`)
+	return err
 }
 
 func generatedIntegrationRecord(t *testing.T, workspaceID foundation.ID, base int, at time.Time) authoringapp.GeneratedRevisionRecord {

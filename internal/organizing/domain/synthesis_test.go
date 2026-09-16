@@ -55,7 +55,7 @@ func TestSynthesisIncrementalNotesPreserveUnrelatedContentAndHistory(t *testing.
 	}
 	thirdDelta := SynthesisDelta{Operations: []SynthesisOperation{{Kind: SynthesisAddSupport, TargetItemID: fact.ID, Sources: []SynthesisSourceRef{third}}}}
 	strengthened, err := ApplySynthesisDelta(workspaceID, merged.Items, thirdDelta, []SynthesisSourceRef{third})
-	if err != nil || !strengthened.Changed || len(strengthened.Items) != len(merged.Items) {
+	if err != nil || strengthened.Changed || !strengthened.SourcesChanged || len(strengthened.Items) != len(merged.Items) {
 		t.Fatalf("third source should only add support: %v", err)
 	}
 	if !reflect.DeepEqual(strengthened.Items[0].Fact.Sources, []SynthesisSourceRef{first, second, third}) {
@@ -71,7 +71,7 @@ func TestSynthesisIncrementalNotesPreserveUnrelatedContentAndHistory(t *testing.
 		}
 	}
 	replayed, err := ApplySynthesisDelta(workspaceID, strengthened.Items, thirdDelta, []SynthesisSourceRef{third})
-	if err != nil || replayed.Changed || !reflect.DeepEqual(replayed.Items, strengthened.Items) {
+	if err != nil || replayed.Changed || replayed.SourcesChanged || !reflect.DeepEqual(replayed.Items, strengthened.Items) {
 		t.Fatalf("replayed evidence should not request a new revision: %v", err)
 	}
 	empty, err := ApplySynthesisDelta(workspaceID, strengthened.Items, SynthesisDelta{}, nil)
@@ -98,7 +98,7 @@ func TestSynthesisConflictDedupPreservesBothSidesAndTheirOrder(t *testing.T) {
 	}
 	reversed.Conflict.Alternatives[0].Sources = []SynthesisSourceRef{c}
 	result, err = ApplySynthesisDelta(testID(1), result.Items, SynthesisDelta{Operations: []SynthesisOperation{{Kind: SynthesisAddConflict, Item: &reversed}}}, []SynthesisSourceRef{a, c})
-	if err != nil || !result.Changed || result.Items[0].ID != conflict.ID ||
+	if err != nil || result.Changed || !result.SourcesChanged || result.Items[0].ID != conflict.ID ||
 		result.Items[0].Conflict.Alternatives[0].Text != conflict.Conflict.Alternatives[0].Text ||
 		!reflect.DeepEqual(result.Items[0].Conflict.Alternatives[1].Sources, []SynthesisSourceRef{b, c}) {
 		t.Fatalf("conflict support failed to preserve the original side order and identity: %v", err)
@@ -220,6 +220,21 @@ func TestSynthesisSourceLabelsAndProcessingKeyBindExactOriginalInput(t *testing.
 	}
 }
 
+func TestSynthesisFusionSourceReadyUsesDistinctProcessingKey(t *testing.T) {
+	t.Parallel()
+	ref := synthesisTestSource(300)
+	event := SynthesisSourceReady{ID: testID(301), Source: ref.Source, IngestionAttemptID: testID(302), ProcessorVersion: SynthesisProcessorVersion, CreatedAt: time.Date(2026, 9, 14, 8, 0, 0, 0, time.UTC)}
+	base, err := event.ProcessingKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	event.Fusion = &SynthesisFusionTrigger{RequestID: testID(303), AnchorID: testID(304), NoteID: testID(305), ProposalID: testID(306), ScopeVersion: 1, AllowedSources: []SynthesisSourceRef{ref}}
+	fusion, err := event.ProcessingKey()
+	if err != nil || fusion == base || !strings.HasPrefix(fusion, "synthesis-fusion:") {
+		t.Fatalf("base=%s fusion=%s err=%v", base, fusion, err)
+	}
+}
+
 func TestSynthesisRevisionHashSnapshotAndSafeMarkdown(t *testing.T) {
 	t.Parallel()
 	source := synthesisTestSource(100)
@@ -252,6 +267,12 @@ func TestSynthesisRevisionHashSnapshotAndSafeMarkdown(t *testing.T) {
 	if err != nil || revision.Validate() != nil {
 		t.Fatalf("valid immutable revision rejected: %v", err)
 	}
+	// 持久化 v1 回执和历史链接绑定这些精确字节。
+	// 新的全文渲染器必须使用独立版本，不能修改此格式。
+	if revision.Hash != "72d75c499b47f076afc0e6397bab8ae7d8d613b15a67289fb7b223169463a4de" ||
+		revision.ContentHash != "b021b6dcf2676f8d9e3df08190f3e26e805074621c761097015f44311d932412" {
+		t.Fatal("historical synthesis v1 projection or Markdown byte contract changed")
+	}
 	snapshot, err := SynthesisSnapshotFromRevision(revision)
 	if err != nil || snapshot.Validate() != nil || snapshot.ProjectionHash != revision.Hash || snapshot.ArticleRevisionID != revision.ArticleRevisionID {
 		t.Fatalf("snapshot lost its exact article/semantic binding: %v", err)
@@ -278,7 +299,7 @@ func TestSynthesisBoundsAndReparsePreserveOriginalSpans(t *testing.T) {
 	secondProjection.SourceSpanID = testID(502)
 	delta := SynthesisDelta{Operations: []SynthesisOperation{{Kind: SynthesisAddSupport, TargetItemID: fact.ID, Sources: []SynthesisSourceRef{secondProjection}}}}
 	result, err := ApplySynthesisDelta(testID(1), []SynthesisItem{fact}, delta, []SynthesisSourceRef{secondProjection})
-	if err != nil || !result.Changed || !reflect.DeepEqual(result.Items[0].Fact.Sources, []SynthesisSourceRef{first, secondProjection}) {
+	if err != nil || result.Changed || !result.SourcesChanged || !reflect.DeepEqual(result.Items[0].Fact.Sources, []SynthesisSourceRef{first, secondProjection}) {
 		t.Fatalf("a new parser projection should retain old original-source references: %v", err)
 	}
 	tooMany := SynthesisDelta{Operations: make([]SynthesisOperation, MaxSynthesisOperations+1)}

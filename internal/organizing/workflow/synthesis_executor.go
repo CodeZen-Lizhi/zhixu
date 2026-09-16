@@ -14,12 +14,16 @@ import (
 )
 
 type SynthesisExecutorDependencies struct {
-	Runs       WorkflowRunReader
-	Store      SynthesisProcessingStore
-	Candidates SynthesisCandidateOwner
-	Sources    organizingapp.SynthesisSourceReader
-	Model      SynthesisExecutionModel
-	Clock      foundation.Clock
+	Manuscripts SynthesisManuscriptRuntime
+	Runs        WorkflowRunReader
+	Store       SynthesisProcessingStore
+	Candidates  SynthesisCandidateOwner
+	Sources     organizingapp.SynthesisSourceReader
+	Anchors     organizingapp.SynthesisAnchorAdmissionReader
+	Goals       SynthesisGoalPreparation
+	BodyRefresh organizingapp.SynthesisBodyRefreshPreparer
+	Model       SynthesisExecutionModel
+	Clock       foundation.Clock
 }
 
 type SynthesisExecutor struct{ dependencies SynthesisExecutorDependencies }
@@ -98,6 +102,22 @@ func (executor *SynthesisExecutor) Execute(ctx context.Context, execution workfl
 			return workflowapp.ExecutionResult{}, synthesisInvalid("synthesis semantic receipt does not prove the generated delta")
 		}
 		return synthesisReceipt(execution, loaded.Processing.ID, input.RequestHash, nil)
+	case SynthesisMergeReviewNodeKind:
+		if execution.DefinitionVersion != SynthesisManuscriptDefinitionVersion || nilScopedDependency(executor.dependencies.Manuscripts) {
+			return workflowapp.ExecutionResult{}, synthesisInvalid("manuscript runtime is unavailable")
+		}
+		input, generation, err := executor.openGeneration(ctx, loaded)
+		if err != nil {
+			return workflowapp.ExecutionResult{}, err
+		}
+		wait, err := executor.dependencies.Manuscripts.PrepareManuscripts(ctx, execution, input, generation)
+		if err != nil {
+			return workflowapp.ExecutionResult{}, err
+		}
+		if wait != nil {
+			return workflowapp.ExecutionResult{HumanWait: wait}, nil
+		}
+		return synthesisReceipt(execution, loaded.Processing.ID, input.RequestHash, nil)
 	case SynthesisApplyNodeKind:
 		if loaded.Input == nil {
 			return workflowapp.ExecutionResult{}, synthesisInvalid("synthesis application has no frozen input")
@@ -125,7 +145,14 @@ func (executor *SynthesisExecutor) Execute(ctx context.Context, execution workfl
 		if err != nil {
 			return workflowapp.ExecutionResult{}, err
 		}
-		result, err = executor.dependencies.Candidates.ApplyGeneration(ctx, input, generation)
+		if execution.DefinitionVersion == SynthesisManuscriptDefinitionVersion {
+			if nilScopedDependency(executor.dependencies.Manuscripts) {
+				return workflowapp.ExecutionResult{}, synthesisInvalid("manuscript runtime is unavailable")
+			}
+			result, err = executor.dependencies.Manuscripts.ApplyManuscripts(ctx, execution, input, generation)
+		} else {
+			result, err = executor.dependencies.Candidates.ApplyGeneration(ctx, input, generation)
+		}
 		if err != nil {
 			return workflowapp.ExecutionResult{}, err
 		}
@@ -148,7 +175,7 @@ func (executor *SynthesisExecutor) finishApplication(ctx context.Context, execut
 func (executor *SynthesisExecutor) loadExecution(ctx context.Context, execution workflowapp.ExecutionContext) (SynthesisExecution, error) {
 	if !validID(execution.WorkspaceID) || !validID(execution.RunID) || !validID(execution.DefinitionID) ||
 		!validID(execution.NodeRunID) || !validID(execution.NodeAttemptID) || !validHash(execution.DefinitionHash) ||
-		execution.DefinitionVersion != SynthesisDefinitionVersion || execution.InputSchemaVersion != SynthesisInputSchemaVersion ||
+		(execution.DefinitionVersion != SynthesisDefinitionVersion && execution.DefinitionVersion != SynthesisManuscriptDefinitionVersion) || execution.InputSchemaVersion != SynthesisInputSchemaVersion ||
 		execution.NodeKey != execution.NodeKind || !synthesisNodeKind(execution.NodeKind) {
 		return SynthesisExecution{}, synthesisInvalid("synthesis Workflow execution binding is invalid")
 	}
@@ -167,10 +194,10 @@ func (executor *SynthesisExecutor) loadExecution(ctx context.Context, execution 
 		return SynthesisExecution{}, err
 	}
 	if loaded.WorkflowRunID != execution.RunID || loaded.Processing.ID != input.ProcessingID || loaded.Processing.SourceEvent.Source.WorkspaceID != execution.WorkspaceID ||
-		loaded.ExecutionNo != input.ExecutionNo || loaded.ApplyRecovery != input.ApplyRecovery || loaded.CreatedAt.IsZero() {
+		loaded.BodyRefreshRequestID != input.BodyRefreshRequestID || loaded.GoalRequestID != input.GoalRequestID || loaded.Input != nil && ((loaded.Input.Goal == nil) != (input.GoalRequestID == "") || loaded.Input.Goal != nil && loaded.Input.Goal.RequestID != input.GoalRequestID) || loaded.ExecutionNo != input.ExecutionNo || loaded.ApplyRecovery != input.ApplyRecovery || loaded.CreatedAt.IsZero() {
 		return SynthesisExecution{}, synthesisInvalid("synthesis execution ledger changed its binding")
 	}
-	if executor.dependencies.Clock.Now().After(loaded.CreatedAt.Add(SynthesisMaxExecutionAge)) {
+	if executor.dependencies.Clock.Now().After(loaded.CreatedAt.Add(SynthesisMaxExecutionAge + loaded.HumanWaitDuration)) {
 		return SynthesisExecution{}, workflowError(foundation.ErrorNonRetryableFailure, ErrorCodeSynthesisExecutionBudget, false, "synthesis execution exceeded its persisted time budget")
 	}
 	return loaded, nil
@@ -180,12 +207,30 @@ func (executor *SynthesisExecutor) prepareInput(ctx context.Context, execution w
 	if loaded.Input != nil {
 		return synthesisReceipt(execution, loaded.Processing.ID, loaded.Input.RequestHash, nil)
 	}
+	if loaded.GoalRequestID != "" {
+		return executor.prepareGoalInput(ctx, execution, loaded)
+	}
+	if loaded.BodyRefreshRequestID != "" {
+		return executor.prepareBodyRefreshInput(ctx, execution, loaded)
+	}
 	candidates, err := executor.dependencies.Candidates.ListCandidates(ctx, execution.WorkspaceID)
 	if err != nil {
 		return workflowapp.ExecutionResult{}, err
 	}
 	if len(candidates) > organizingapp.MaxSynthesisCandidateNotes {
 		return workflowapp.ExecutionResult{}, synthesisInvalid("synthesis candidate owner exceeded the input bound")
+	}
+	if trigger := loaded.Processing.SourceEvent.Fusion; trigger != nil {
+		filtered := candidates[:0]
+		for _, candidate := range candidates {
+			if candidate.Note.ID == trigger.NoteID {
+				filtered = append(filtered, candidate)
+			}
+		}
+		if len(filtered) != 1 {
+			return workflowapp.ExecutionResult{}, workflowError(foundation.ErrorVersionConflict, ErrorCodeSynthesisInputStale, false, "fusion anchor target is no longer a candidate")
+		}
+		candidates = filtered
 	}
 	sources, err := executor.dependencies.Sources.ReadSynthesisSource(ctx, loaded.Processing.SourceEvent.Source)
 	if err != nil {
@@ -194,6 +239,52 @@ func (executor *SynthesisExecutor) prepareInput(ctx context.Context, execution w
 	if len(sources) == 0 {
 		return workflowapp.ExecutionResult{}, synthesisInvalid("synthesis source owner returned no incoming excerpts")
 	}
+	if trigger := loaded.Processing.SourceEvent.Fusion; trigger != nil {
+		wanted := map[string]bool{}
+		for _, ref := range trigger.AllowedSources {
+			key, _ := ref.IdentityKey()
+			wanted[key] = true
+		}
+		filtered := sources[:0]
+		for _, source := range sources {
+			key, _ := source.Reference.IdentityKey()
+			if wanted[key] {
+				filtered = append(filtered, source)
+				delete(wanted, key)
+			}
+		}
+		if len(filtered) == 0 || len(wanted) != 0 {
+			return workflowapp.ExecutionResult{}, workflowError(foundation.ErrorVersionConflict, ErrorCodeSynthesisInputStale, false, "fusion accepted source spans are unavailable")
+		}
+		sources = filtered
+		// 审批是快照，不是永久写入授权。构造模型输入前，
+		// 须重新检查锚点当前范围和每个已接受片段。
+		if executor.dependencies.Anchors == nil || nilScopedDependency(executor.dependencies.Anchors) {
+			return workflowapp.ExecutionResult{}, workflowError(foundation.ErrorDependencyUnavailable, ErrorCodeSynthesisInputStale, false, "fusion anchor admission reader is unavailable")
+		}
+		admission, admissionErr := executor.dependencies.Anchors.ReadSynthesisAnchorAdmission(ctx, execution.WorkspaceID, trigger.NoteID, loaded.Processing.SourceEvent.Source)
+		if admissionErr != nil {
+			return workflowapp.ExecutionResult{}, admissionErr
+		}
+		if admission.AnchorID != trigger.AnchorID || admission.ScopeVersion != trigger.ScopeVersion {
+			return workflowapp.ExecutionResult{}, workflowError(foundation.ErrorVersionConflict, ErrorCodeSynthesisInputStale, false, "fusion anchor scope is no longer current")
+		}
+		admitted := make(map[string]bool, len(admission.AllowedSources))
+		for _, ref := range admission.AllowedSources {
+			key, keyErr := ref.IdentityKey()
+			if keyErr != nil {
+				return workflowapp.ExecutionResult{}, keyErr
+			}
+			admitted[key] = true
+		}
+		for _, ref := range trigger.AllowedSources {
+			key, keyErr := ref.IdentityKey()
+			if keyErr != nil || !admitted[key] {
+				return workflowapp.ExecutionResult{}, workflowError(foundation.ErrorVersionConflict, ErrorCodeSynthesisInputStale, false, "fusion accepted source spans are no longer current")
+			}
+		}
+	}
+	incomingRefs := make(map[string]bool, len(sources))
 	snapshot := SynthesisFrozenInput{ProcessingID: loaded.Processing.ID, WorkflowRunID: execution.RunID,
 		SourceEvent: loaded.Processing.SourceEvent, Notes: make([]SynthesisFrozenNote, 0, len(candidates)), Sources: []organizingdomain.SynthesisSourceRef{}}
 	seen := make(map[string]bool)
@@ -220,6 +311,11 @@ func (executor *SynthesisExecutor) prepareInput(ctx context.Context, execution w
 		if err := appendSource(source); err != nil {
 			return workflowapp.ExecutionResult{}, err
 		}
+		key, keyErr := source.Reference.IdentityKey()
+		if keyErr != nil {
+			return workflowapp.ExecutionResult{}, keyErr
+		}
+		incomingRefs[key] = true
 	}
 	// Read each historical artifact once, even when many candidate items cite it.
 	grouped := make(map[organizingdomain.SynthesisSourceVersion]map[string]organizingdomain.SynthesisSourceRef)
@@ -229,21 +325,53 @@ func (executor *SynthesisExecutor) prepareInput(ctx context.Context, execution w
 			candidate.Revision.NoteID != candidate.Note.ID || candidate.Note.CurrentRevisionID != candidate.Revision.ID {
 			return workflowapp.ExecutionResult{}, synthesisInvalid("candidate owner returned a mismatched revision")
 		}
-		snapshot.Notes = append(snapshot.Notes, SynthesisFrozenNote{Note: candidate.Note, RevisionID: candidate.Revision.ID, RevisionHash: candidate.Revision.Hash})
-		for _, item := range candidate.Revision.Items {
-			for _, ref := range item.SourceReferences() {
-				key, _ := ref.IdentityKey()
-				if seen[key] {
+		var anchor *organizingapp.SynthesisAnchorBinding
+		if reader, ok := executor.dependencies.Anchors.(organizingapp.SynthesisAnchorAdmissionReader); ok && !nilScopedDependency(reader) {
+			admission, admissionErr := reader.ReadSynthesisAnchorAdmission(ctx, execution.WorkspaceID, candidate.Note.ID, snapshot.SourceEvent.Source)
+			if admissionErr != nil {
+				return workflowapp.ExecutionResult{}, admissionErr
+			}
+			if admission.AnchorID != "" {
+				allowed := make([]organizingdomain.SynthesisSourceRef, 0, len(admission.AllowedSources))
+				for _, ref := range admission.AllowedSources {
+					key, keyErr := ref.IdentityKey()
+					if keyErr != nil {
+						return workflowapp.ExecutionResult{}, keyErr
+					}
+					if incomingRefs[key] {
+						allowed = append(allowed, ref)
+					}
+				}
+				if len(allowed) == 0 {
 					continue
 				}
-				if grouped[ref.Source] == nil {
-					grouped[ref.Source] = make(map[string]organizingdomain.SynthesisSourceRef)
-					order = append(order, ref.Source)
+				binding := organizingapp.SynthesisAnchorBinding{AnchorID: admission.AnchorID, ScopeVersion: admission.ScopeVersion, Scope: admission.Scope, AllowedSources: allowed}
+				if err := binding.Validate(execution.WorkspaceID); err != nil {
+					return workflowapp.ExecutionResult{}, err
 				}
-				grouped[ref.Source][key] = ref
+				// 只有传入来源版本至少有一个被明确接受的精确片段时，
+				// 锚点笔记才具备准入资格。
+				anchor = &binding
 			}
 		}
+		snapshot.Notes = append(snapshot.Notes, SynthesisFrozenNote{PublicationID: candidate.PublicationID, Note: candidate.Note, RevisionID: candidate.Revision.ID, RevisionHash: candidate.Revision.Hash, Anchor: anchor})
+		references := []organizingdomain.SynthesisSourceRef{}
+		for _, item := range candidate.Revision.Items {
+			references = append(references, item.SourceReferences()...)
+		}
+		for _, ref := range references {
+			key, _ := ref.IdentityKey()
+			if seen[key] {
+				continue
+			}
+			if grouped[ref.Source] == nil {
+				grouped[ref.Source] = make(map[string]organizingdomain.SynthesisSourceRef)
+				order = append(order, ref.Source)
+			}
+			grouped[ref.Source][key] = ref
+		}
 	}
+	openedByVersion := map[organizingdomain.SynthesisSourceVersion][]organizingapp.SynthesisSourceExcerpt{snapshot.SourceEvent.Source: sources}
 	for _, version := range order {
 		opened, err := executor.dependencies.Sources.ReadSynthesisSource(ctx, version)
 		if err != nil {
@@ -253,6 +381,7 @@ func (executor *SynthesisExecutor) prepareInput(ctx context.Context, execution w
 			}
 			return workflowapp.ExecutionResult{}, err
 		}
+		openedByVersion[version] = opened
 		for _, source := range opened {
 			key, err := source.Reference.IdentityKey()
 			if err != nil {
@@ -268,6 +397,67 @@ func (executor *SynthesisExecutor) prepareInput(ctx context.Context, execution w
 			}
 		}
 	}
+	// 补充证据用于丰富已有断言，不能在有界生成请求中
+	// 挤掉必需的传入证据或正文证据。
+	for frozenIndex := range snapshot.Notes {
+		frozenNote := snapshot.Notes[frozenIndex]
+		candidateIndex := -1
+		for index, candidate := range candidates {
+			if candidate.Note.ID == frozenNote.Note.ID {
+				candidateIndex = index
+				break
+			}
+		}
+		if candidateIndex < 0 {
+			return workflowapp.ExecutionResult{}, synthesisInvalid("frozen synthesis candidate was not found")
+		}
+		candidate := candidates[candidateIndex]
+		for _, supplement := range candidate.Supplements {
+			if supplement.Validate() != nil || supplement.NoteID != candidate.Note.ID || supplement.WorkspaceID != execution.WorkspaceID || !supplement.MatchesItem(candidate.Revision.Items) {
+				return workflowapp.ExecutionResult{}, synthesisInvalid("candidate owner returned an invalid supplement")
+			}
+			key, _ := supplement.Reference.IdentityKey()
+			if seen[key] {
+				snapshot.Notes[frozenIndex].Supplements = append(snapshot.Notes[frozenIndex].Supplements, supplement)
+				continue
+			}
+			if len(snapshot.Sources) >= organizingdomain.MaxSynthesisSources {
+				continue
+			}
+			version := supplement.Reference.Source
+			opened, cached := openedByVersion[version]
+			if !cached {
+				opened, err = executor.dependencies.Sources.ReadSynthesisSource(ctx, version)
+				if err != nil {
+					var classified *foundation.Error
+					if !errors.As(err, &classified) || classified.Code != "SYNTHESIS_SOURCE_STALE" && classified.Kind != foundation.ErrorNotFound {
+						return workflowapp.ExecutionResult{}, err
+					}
+					opened = nil
+				}
+				openedByVersion[version] = opened
+			}
+			for _, source := range opened {
+				sourceKey, sourceErr := source.Reference.IdentityKey()
+				if sourceErr != nil {
+					return workflowapp.ExecutionResult{}, sourceErr
+				}
+				if sourceKey != key {
+					continue
+				}
+				if total+len(source.Text) > organizingapp.MaxSynthesisSourceInputBytes {
+					break
+				}
+				source.Reference = supplement.Reference
+				if err := appendSource(source); err != nil {
+					return workflowapp.ExecutionResult{}, err
+				}
+				snapshot.Notes[frozenIndex].Supplements = append(snapshot.Notes[frozenIndex].Supplements, supplement)
+				break
+			}
+		}
+	}
+	snapshot.freezeSourceIdentityPromptVersions()
 	snapshot.RequestHash, err = snapshot.ComputeHash()
 	if err != nil {
 		return workflowapp.ExecutionResult{}, err
@@ -290,7 +480,7 @@ func (executor *SynthesisExecutor) openInput(ctx context.Context, loaded Synthes
 		return organizingapp.SynthesisGenerationInput{}, synthesisInvalid("synthesis frozen input is missing")
 	}
 	frozen := *loaded.Input
-	input := organizingapp.SynthesisGenerationInput{ProcessingID: frozen.ProcessingID, SourceEvent: frozen.SourceEvent,
+	input := organizingapp.SynthesisGenerationInput{GenerationPromptVersion: frozen.GenerationPromptVersion, SemanticPromptVersion: frozen.SemanticPromptVersion, BodyRefresh: frozen.BodyRefresh, Goal: frozen.Goal, ProcessingID: frozen.ProcessingID, SourceEvent: frozen.SourceEvent,
 		WorkflowRunID: frozen.WorkflowRunID, NodeRunID: nodeID, NodeAttemptID: attemptID, RequestHash: frozen.RequestHash,
 		Notes: make([]organizingapp.SynthesisGenerationNote, 0, len(frozen.Notes)), Sources: make([]organizingapp.SynthesisSourceExcerpt, 0, len(frozen.Sources))}
 	for _, note := range frozen.Notes {
@@ -301,7 +491,32 @@ func (executor *SynthesisExecutor) openInput(ctx context.Context, loaded Synthes
 		if revision.Validate() != nil || revision.ID != note.RevisionID || revision.Hash != note.RevisionHash || revision.NoteID != note.Note.ID {
 			return organizingapp.SynthesisGenerationInput{}, synthesisInvalid("synthesis frozen note revision changed")
 		}
-		input.Notes = append(input.Notes, organizingapp.SynthesisGenerationNote{Note: note.Note, Revision: revision})
+		input.Notes = append(input.Notes, organizingapp.SynthesisGenerationNote{PublicationID: note.PublicationID, Note: note.Note, Revision: revision, Supplements: note.Supplements, Anchor: note.Anchor})
+	}
+	if frozen.BodyRefresh != nil {
+		for _, binding := range organizingapp.SynthesisBodyRefreshPublications(frozen.BodyRefresh) {
+			revision, err := executor.dependencies.Candidates.GetSynthesisRevision(ctx, binding.WorkspaceID, binding.NoteID, binding.RevisionID)
+			if err != nil {
+				return organizingapp.SynthesisGenerationInput{}, err
+			}
+			if revision.Hash != binding.ProjectionHash {
+				return organizingapp.SynthesisGenerationInput{}, synthesisInvalid("refresh historical revision changed")
+			}
+			input.BodyRefreshRevisions = append(input.BodyRefreshRevisions, revision)
+		}
+	}
+	if frozen.Goal != nil || frozen.BodyRefresh != nil {
+		for _, ref := range frozen.Sources {
+			view, err := executor.dependencies.Sources.OpenSynthesisSource(ctx, ref)
+			if err != nil {
+				return organizingapp.SynthesisGenerationInput{}, err
+			}
+			if view.Reference != ref || view.Validate(ref.Source.WorkspaceID) != nil || view.Availability != organizingdomain.MaterialAvailable {
+				return organizingapp.SynthesisGenerationInput{}, workflowError(foundation.ErrorVersionConflict, ErrorCodeSynthesisInputStale, false, "selected original evidence is no longer available")
+			}
+			input.Sources = append(input.Sources, organizingapp.SynthesisSourceExcerpt{Reference: ref, Text: view.Text})
+		}
+		return input, input.Validate()
 	}
 	opened := make(map[organizingdomain.SynthesisSourceVersion]map[string]organizingapp.SynthesisSourceExcerpt)
 	for _, ref := range frozen.Sources {
@@ -371,27 +586,43 @@ func synthesisNodeKind(kind string) bool {
 // DecodeSynthesisStartInput is shared by the executor and its persistence fence.
 func DecodeSynthesisStartInput(raw []byte) (SynthesisStartInput, error) {
 	type wire struct {
-		ProcessingID  *foundation.ID `json:"processing_id"`
-		ExecutionNo   *int           `json:"execution_no"`
-		ApplyRecovery *bool          `json:"apply_recovery"`
+		ProcessingID         *foundation.ID  `json:"processing_id"`
+		ExecutionNo          *int            `json:"execution_no"`
+		ApplyRecovery        *bool           `json:"apply_recovery"`
+		GoalRequestID        json.RawMessage `json:"goal_request_id"`
+		BodyRefreshRequestID json.RawMessage `json:"body_refresh_request_id"`
 	}
-	value, err := strictjson.DecodeObject[wire](raw, strictjson.Limits{MaxDocumentBytes: 1024, MaxDepth: 2, MaxStringBytes: 128, MaxArrayItems: 1, MaxObjectFields: 3}, nil)
+	value, err := strictjson.DecodeObject[wire](raw, strictjson.Limits{MaxDocumentBytes: 1024, MaxDepth: 2, MaxStringBytes: 128, MaxArrayItems: 1, MaxObjectFields: 5}, nil)
 	if err != nil || value.ProcessingID == nil || !validID(*value.ProcessingID) || value.ExecutionNo == nil || *value.ExecutionNo < 1 ||
 		*value.ExecutionNo > SynthesisMaxAttempts || value.ApplyRecovery == nil {
 		return SynthesisStartInput{}, synthesisInvalid("synthesis Workflow input is not a complete strict document")
 	}
-	return SynthesisStartInput{ProcessingID: *value.ProcessingID, ExecutionNo: *value.ExecutionNo, ApplyRecovery: *value.ApplyRecovery}, nil
+	result := SynthesisStartInput{ProcessingID: *value.ProcessingID, ExecutionNo: *value.ExecutionNo, ApplyRecovery: *value.ApplyRecovery}
+	if len(value.GoalRequestID) != 0 {
+		if json.Unmarshal(value.GoalRequestID, &result.GoalRequestID) != nil || !validID(result.GoalRequestID) {
+			return SynthesisStartInput{}, synthesisInvalid("synthesis goal request identity is invalid")
+		}
+	}
+	if len(value.BodyRefreshRequestID) != 0 {
+		if json.Unmarshal(value.BodyRefreshRequestID, &result.BodyRefreshRequestID) != nil || !validID(result.BodyRefreshRequestID) || result.GoalRequestID != "" {
+			return SynthesisStartInput{}, synthesisInvalid("synthesis body refresh request identity is invalid")
+		}
+	}
+	return result, nil
 }
 
 // EqualSynthesisFrozenGeneration compares only persistable input, never source
 // text. The reopened excerpts are independently checked by Input.Validate.
 func EqualSynthesisFrozenGeneration(frozen SynthesisFrozenInput, input organizingapp.SynthesisGenerationInput) bool {
-	if frozen.ProcessingID != input.ProcessingID || frozen.WorkflowRunID != input.WorkflowRunID || frozen.SourceEvent != input.SourceEvent || frozen.RequestHash != input.RequestHash ||
+	if frozen.GenerationPromptVersion != input.GenerationPromptVersion || frozen.SemanticPromptVersion != input.SemanticPromptVersion || !reflect.DeepEqual(frozen.BodyRefresh, input.BodyRefresh) || !reflect.DeepEqual(frozen.Goal, input.Goal) || frozen.ProcessingID != input.ProcessingID || frozen.WorkflowRunID != input.WorkflowRunID || !reflect.DeepEqual(frozen.SourceEvent, input.SourceEvent) || frozen.RequestHash != input.RequestHash ||
 		len(frozen.Notes) != len(input.Notes) || len(frozen.Sources) != len(input.Sources) {
 		return false
 	}
 	for index, note := range frozen.Notes {
-		if !reflect.DeepEqual(note.Note, input.Notes[index].Note) || note.RevisionID != input.Notes[index].Revision.ID || note.RevisionHash != input.Notes[index].Revision.Hash {
+		if note.PublicationID != input.Notes[index].PublicationID {
+			return false
+		}
+		if !reflect.DeepEqual(note.Note, input.Notes[index].Note) || note.RevisionID != input.Notes[index].Revision.ID || note.RevisionHash != input.Notes[index].Revision.Hash || !reflect.DeepEqual(note.Supplements, input.Notes[index].Supplements) || !reflect.DeepEqual(note.Anchor, input.Notes[index].Anchor) {
 			return false
 		}
 	}

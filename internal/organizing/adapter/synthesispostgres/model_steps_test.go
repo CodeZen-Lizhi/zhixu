@@ -12,7 +12,7 @@ import (
 
 func TestSynthesisModelProofRequiresTheFinalExactStructuredResponse(t *testing.T) {
 	model, step := synthesisModelProofFixture()
-	if err := validateModelProof(model, step, step.OutputHash, int64(len(step.Output))); err != nil {
+	if err := validateModelProof(model, step, step.OutputHash, int64(len(step.Output)), organizingapp.SynthesisLegacyPromptVersion); err != nil {
 		t.Fatalf("valid recorded output rejected: %v", err)
 	}
 	tests := []struct {
@@ -42,10 +42,69 @@ func TestSynthesisModelProofRequiresTheFinalExactStructuredResponse(t *testing.T
 		t.Run(test.name, func(t *testing.T) {
 			record, step := synthesisModelProofFixture()
 			test.mutate(&record)
-			if err := validateModelProof(record, step, step.OutputHash, int64(len(step.Output))); err == nil {
+			if err := validateModelProof(record, step, step.OutputHash, int64(len(step.Output)), organizingapp.SynthesisLegacyPromptVersion); err == nil {
 				t.Fatal("mismatched recorded invocation was accepted as output proof")
 			}
 		})
+	}
+}
+
+func TestSynthesisModelProofRequiresTheFrozenPromptVersion(t *testing.T) {
+	model, step := synthesisModelProofFixture()
+	model.Run.Prompt.Version = organizingapp.SynthesisAnchoredPromptVersion
+	model.Calls[0].Prompt = model.Run.Prompt
+	if err := validateModelProof(model, step, step.OutputHash, int64(len(step.Output)), organizingapp.SynthesisAnchoredPromptVersion); err != nil {
+		t.Fatalf("anchored v2 proof rejected: %v", err)
+	}
+	if err := validateModelProof(model, step, step.OutputHash, int64(len(step.Output)), organizingapp.SynthesisLegacyPromptVersion); err == nil {
+		t.Fatal("anchored v2 proof was accepted under the unanchored v1 contract")
+	}
+}
+
+func TestSynthesisGoalProofRequiresV3RatherThanLegacyPrompts(t *testing.T) {
+	model, step := synthesisModelProofFixture()
+	if err := validateModelProof(model, step, step.OutputHash, int64(len(step.Output)), organizingapp.SynthesisGoalPromptVersion); err == nil {
+		t.Fatal("v1 proof accepted for goal generation")
+	}
+	model.Run.Prompt.Version = organizingapp.SynthesisGoalPromptVersion
+	model.Calls[0].Prompt = model.Run.Prompt
+	if err := validateModelProof(model, step, step.OutputHash, int64(len(step.Output)), organizingapp.SynthesisGoalPromptVersion); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateModelProof(model, step, step.OutputHash, int64(len(step.Output)), organizingapp.SynthesisAnchoredPromptVersion); err == nil {
+		t.Fatal("goal proof accepted for anchor generation")
+	}
+}
+
+func TestSynthesisBodyProofRequiresGenerateV2AndReviewV1Schemas(t *testing.T) {
+	for _, stage := range []organizingapp.SynthesisModelStage{organizingapp.SynthesisModelGenerate, organizingapp.SynthesisModelValidate} {
+		model, step := synthesisModelProofFixture()
+		step.Stage = stage
+		model.Run.Prompt.Version = organizingapp.SynthesisBodyPromptVersion
+		if stage == organizingapp.SynthesisModelGenerate {
+			model.Run.Schema.Version = organizingapp.SynthesisBodySchemaVersion
+		} else {
+			model.Run.Prompt.ID = organizingapp.SynthesisSemanticPromptID
+			model.Run.Schema.ID = "agent.synthesis-semantic-review"
+		}
+		model.Run.ReducedSchema = model.Run.Schema
+		model.Calls[0].Prompt, model.Calls[0].Schema = model.Run.Prompt, model.Run.Schema
+		if err := validateModelProof(model, step, step.OutputHash, int64(len(step.Output)), organizingapp.SynthesisBodyPromptVersion); err != nil {
+			t.Fatalf("%s proof rejected: %v", stage, err)
+		}
+		if err := validateModelProof(model, step, step.OutputHash, int64(len(step.Output)), organizingapp.SynthesisAnchoredPromptVersion); err == nil {
+			t.Fatalf("%s body proof accepted under old contract", stage)
+		}
+		if stage == organizingapp.SynthesisModelGenerate {
+			model.Run.Schema.Version = organizingapp.SynthesisRuntimeVersion
+		} else {
+			model.Run.Schema.Version = organizingapp.SynthesisBodySchemaVersion
+		}
+		model.Run.ReducedSchema = model.Run.Schema
+		model.Calls[0].Schema = model.Run.Schema
+		if err := validateModelProof(model, step, step.OutputHash, int64(len(step.Output)), organizingapp.SynthesisBodyPromptVersion); err == nil {
+			t.Fatalf("%s accepted the other stage's schema version", stage)
+		}
 	}
 }
 
@@ -69,4 +128,33 @@ func synthesisModelProofFixture() (agentapp.ModelRunRecord, organizingapp.Synthe
 		MaxOutputTokens: 256, Status: agentdomain.ModelCallSucceeded, RequestHash: strings.Repeat("c", 64), RequestBytes: 64,
 		ResponseHash: step.OutputHash, ResponseBytes: int64(len(step.Output)), Version: 2, StartedAt: at, CompletedAt: &at}
 	return agentapp.ModelRunRecord{Run: run, Calls: []agentdomain.ModelCall{call}}, step
+}
+
+func TestSynthesisSemanticFormatProofRejectsMixedVersions(t *testing.T) {
+	model, step := synthesisModelProofFixture()
+	step.Stage = organizingapp.SynthesisModelValidate
+	model.Run.Prompt.ID = organizingapp.SynthesisSemanticPromptID
+	model.Run.Prompt.Version = organizingapp.SynthesisSemanticFormatPromptVersion
+	model.Run.Schema.ID = "agent.synthesis-semantic-review"
+	model.Run.ReducedSchema = model.Run.Schema
+	model.Calls[0].Prompt, model.Calls[0].Schema = model.Run.Prompt, model.Run.Schema
+	if err := validateModelProof(model, step, step.OutputHash, int64(len(step.Output)), organizingapp.SynthesisSemanticFormatPromptVersion); err != nil {
+		t.Fatal(err)
+	}
+	for _, version := range []string{"v1", "v2", "v3", "v4", "v5", "v7"} {
+		if err := validateModelProof(model, step, step.OutputHash, int64(len(step.Output)), version); err == nil {
+			t.Fatalf("v6 proof accepted as %s", version)
+		}
+	}
+	model.Run.Prompt.Version = organizingapp.SynthesisLegacyPromptVersion
+	model.Calls[0].Prompt = model.Run.Prompt
+	if err := validateModelProof(model, step, step.OutputHash, int64(len(step.Output)), organizingapp.SynthesisSemanticFormatPromptVersion); err == nil {
+		t.Fatal("legacy proof accepted as v6")
+	}
+	model.Run.Prompt = agentdomain.PromptRef{ID: organizingapp.SynthesisDeltaPromptID, Version: organizingapp.SynthesisSemanticFormatPromptVersion}
+	model.Run.Schema.ID = "agent.synthesis-delta"
+	model.Run.ReducedSchema = model.Run.Schema
+	if validModelRuntime(model.Run, organizingapp.SynthesisModelGenerate, organizingapp.SynthesisSemanticFormatPromptVersion) {
+		t.Fatal("v6 generation admitted")
+	}
 }

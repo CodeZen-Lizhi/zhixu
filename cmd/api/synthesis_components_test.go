@@ -10,6 +10,7 @@ import (
 	changecontrolapplication "github.com/CodeZen-Lizhi/zhixu/internal/changecontrol/application"
 	eventspostgres "github.com/CodeZen-Lizhi/zhixu/internal/events/adapter/postgres"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	organizingapplication "github.com/CodeZen-Lizhi/zhixu/internal/organizing/application"
 	organizingworkflow "github.com/CodeZen-Lizhi/zhixu/internal/organizing/workflow"
 	"github.com/CodeZen-Lizhi/zhixu/internal/platform/config"
 	interviewapplication "github.com/CodeZen-Lizhi/zhixu/internal/review/interview/application"
@@ -148,7 +149,7 @@ func TestAPISynthesisWorkflowRegistrationDoesNotDependOnChat(t *testing.T) {
 		if err := definitions.Freeze(); err != nil {
 			t.Fatal(err)
 		}
-		for _, key := range []string{organizingworkflow.SynthesisDefinitionKey, interviewapplication.NotePreparationDefinitionKey} {
+		for _, key := range []string{organizingworkflow.SynthesisDefinitionKey, interviewapplication.NotePreparationDefinitionKey, organizingapplication.SynthesisSourceReviewDefinition, organizingapplication.SynthesisSourceReviewRecoveryDefinition} {
 			definition, err := definitions.Resolve(key, 1)
 			if err != nil {
 				t.Fatalf("chat=%t definition=%s: %v", chatEnabled, key, err)

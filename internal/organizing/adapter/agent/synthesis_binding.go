@@ -46,30 +46,57 @@ type synthesisInputItem struct {
 }
 
 type synthesisInputNote struct {
-	Label    string               `json:"label"`
-	TopicKey string               `json:"topic_key"`
-	Title    string               `json:"title"`
-	Aliases  []string             `json:"aliases"`
-	Items    []synthesisInputItem `json:"items"`
+	Label     string                `json:"label"`
+	TopicKey  string                `json:"topic_key"`
+	Title     string                `json:"title"`
+	Aliases   []string              `json:"aliases"`
+	Published bool                  `json:"published,omitempty"`
+	Anchor    *synthesisInputAnchor `json:"anchor,omitempty"`
+	Items     []synthesisInputItem  `json:"items"`
+}
+
+type synthesisInputAnchor struct {
+	ScopeVersion   int64    `json:"scope_version"`
+	Topics         []string `json:"topics"`
+	Audiences      []string `json:"audiences"`
+	Description    string   `json:"description"`
+	AllowedSources []string `json:"allowed_sources"`
 }
 
 type synthesisProviderInput struct {
-	Notes   []synthesisInputNote   `json:"notes"`
-	Sources []synthesisInputSource `json:"sources"`
+	FusionTarget   string                 `json:"fusion_target,omitempty"`
+	RefreshUpdates []synthesisInputItem   `json:"refresh_updates,omitempty"`
+	Goal           string                 `json:"user_goal,omitempty"`
+	Notes          []synthesisInputNote   `json:"notes"`
+	Sources        []synthesisInputSource `json:"sources"`
 }
 
 func synthesisInput(input organizingapp.SynthesisGenerationInput) synthesisProviderInput {
 	value := synthesisProviderInput{Notes: make([]synthesisInputNote, 0, len(input.Notes)), Sources: make([]synthesisInputSource, len(input.Sources))}
+	if input.Goal != nil {
+		value.Goal = input.Goal.Text
+	}
 	labels := make(map[domain.SynthesisSourceRef]string, len(input.Sources))
 	for index, source := range input.Sources {
 		label := fmt.Sprintf("S%03d", index+1)
 		labels[source.Reference] = label
-		value.Sources[index] = synthesisInputSource{Label: label, Incoming: source.Reference.Source == input.SourceEvent.Source, Excerpt: source.Text}
+		value.Sources[index] = synthesisInputSource{Label: label, Incoming: input.Goal != nil || source.Reference.Source == input.SourceEvent.Source, Excerpt: source.Text}
 	}
 	for index, candidate := range input.Notes {
 		note := synthesisInputNote{
 			Label: fmt.Sprintf("N%03d", index+1), TopicKey: candidate.Note.TopicKey, Title: candidate.Note.Title,
-			Aliases: append([]string{}, candidate.Note.Aliases...), Items: make([]synthesisInputItem, 0, len(candidate.Revision.Items)),
+			Aliases: append([]string{}, candidate.Note.Aliases...), Published: candidate.PublicationID != "", Items: make([]synthesisInputItem, 0, len(candidate.Revision.Items)),
+		}
+		if candidate.Anchor != nil {
+			allowed := make([]string, 0, len(candidate.Anchor.AllowedSources))
+			for _, ref := range candidate.Anchor.AllowedSources {
+				if label, ok := labels[ref]; ok {
+					allowed = append(allowed, label)
+				}
+			}
+			note.Anchor = &synthesisInputAnchor{ScopeVersion: candidate.Anchor.ScopeVersion,
+				Topics: append([]string{}, candidate.Anchor.Scope.Topics...), Audiences: append([]string{}, candidate.Anchor.Scope.Audiences...),
+				Description: candidate.Anchor.Scope.Description, AllowedSources: allowed}
 		}
 		for itemIndex, item := range candidate.Revision.Items {
 			projected := synthesisInputItem{Label: fmt.Sprintf("I%03d", itemIndex+1), Kind: item.Kind}
@@ -92,9 +119,75 @@ func synthesisInput(input organizingapp.SynthesisGenerationInput) synthesisProvi
 				}
 				projected.Gap = &gap
 			}
+			for _, supplement := range candidate.Supplements {
+				if supplement.ItemID != item.ID {
+					continue
+				}
+				var sources *[]string
+				var unopened *int
+				switch supplement.Slot {
+				case "FACT":
+					if projected.Fact != nil {
+						sources = &projected.Fact.Sources
+						unopened = &projected.Fact.UnopenedSources
+					}
+				case "CONFLICT":
+					if projected.Conflict != nil && supplement.AlternativeIndex >= 0 && supplement.AlternativeIndex < len(projected.Conflict.Alternatives) {
+						alt := &projected.Conflict.Alternatives[supplement.AlternativeIndex]
+						sources = &alt.Sources
+						unopened = &alt.UnopenedSources
+					}
+				case "GAP_CONTEXT":
+					if projected.Gap != nil {
+						sources = &projected.Gap.Sources
+						unopened = &projected.Gap.UnopenedSources
+					}
+				case "GAP_RESOLUTION":
+					if projected.Gap != nil && projected.Gap.Resolution != nil {
+						sources = &projected.Gap.Resolution.Sources
+						unopened = &projected.Gap.Resolution.UnopenedSources
+					}
+				}
+				if sources == nil {
+					continue
+				}
+				if label, ok := labels[supplement.Reference]; ok {
+					present := false
+					for _, existing := range *sources {
+						if existing == label {
+							present = true
+							break
+						}
+					}
+					if !present {
+						*sources = append(*sources, label)
+					}
+				} else {
+					*unopened++
+				}
+			}
 			note.Items = append(note.Items, projected)
 		}
+		if organizingapp.IsSynthesisFusionSemanticVersion(input.SemanticPromptVersion) && input.SourceEvent.Fusion != nil && candidate.Note.ID == input.SourceEvent.Fusion.NoteID {
+			value.FusionTarget = note.Label
+		}
 		value.Notes = append(value.Notes, note)
+	}
+	if input.BodyRefresh != nil {
+		value.RefreshUpdates = synthesisRefreshProjection(input, labels)
+		wanted := map[string]bool{}
+		for _, item := range value.RefreshUpdates {
+			wanted[item.Label] = true
+		}
+		for index := range value.Notes {
+			var items []synthesisInputItem
+			for _, item := range value.Notes[index].Items {
+				if wanted[item.Label] {
+					items = append(items, item)
+				}
+			}
+			value.Notes[index].Items = items
+		}
 	}
 	return value
 }
@@ -126,7 +219,14 @@ func encodeSynthesisInput(input any) ([]byte, error) {
 }
 
 func bindSynthesisOutput(raw []byte, input organizingapp.SynthesisGenerationInput, modelRunID foundation.ID, nextID func() (foundation.ID, error)) (organizingapp.SynthesisGenerationResult, error) {
-	wire, err := decodeSynthesisWire(raw)
+	decode := decodeSynthesisWire
+	if input.BodyRefresh != nil {
+		decode = decodeSynthesisRefreshWire
+	}
+	if synthesisPromptVersion(input) == organizingapp.SynthesisBodyPromptVersion {
+		decode = decodeSynthesisBodyWire
+	}
+	wire, err := decode(raw)
 	if err != nil {
 		return organizingapp.SynthesisGenerationResult{}, err
 	}
@@ -158,11 +258,20 @@ func bindSynthesisOutput(raw []byte, input organizingapp.SynthesisGenerationInpu
 			}
 		}
 		for _, wireOperation := range value.Operations {
-			operation, err := bindSynthesisOperation(wireOperation, input.SourceEvent.Source.WorkspaceID, catalog, targets, nextID)
+			var operation domain.SynthesisOperation
+			var err error
+			if input.BodyRefresh != nil {
+				operation, err = organizingapp.BodyRefreshOperation(input, targets[wireOperation.Target])
+			} else {
+				operation, err = bindSynthesisWireOperation(wireOperation, input.SourceEvent.Source.WorkspaceID, catalog, targets, notes, value.Label, nextID)
+			}
 			if err != nil {
 				return result, err
 			}
-			if operation.Item != nil {
+			if candidate, ok := notes[value.Label]; ok && candidate.Anchor != nil && !synthesisOperationAllowedForAnchor(operation, candidate) {
+				return result, synthesisOutputError()
+			}
+			if operation.Item != nil && operation.Kind != domain.SynthesisRefreshItem {
 				if identities[operation.Item.ID] {
 					return result, synthesisOutputError()
 				}
@@ -176,6 +285,75 @@ func bindSynthesisOutput(raw []byte, input organizingapp.SynthesisGenerationInpu
 		return organizingapp.SynthesisGenerationResult{}, synthesisOutputError()
 	}
 	return result, nil
+}
+
+func bindSynthesisWireOperation(wire synthesisWireOperation, workspaceID foundation.ID, catalog []domain.SynthesisLabelledSource, targets map[string]foundation.ID, notes map[string]organizingapp.SynthesisGenerationNote, targetNote string, nextID func() (foundation.ID, error)) (domain.SynthesisOperation, error) {
+	if wire.Kind != "INCLUDE_ITEM" {
+		return bindSynthesisOperation(wire, workspaceID, catalog, targets, nextID)
+	}
+	if wire.IncludeNote == targetNote {
+		return domain.SynthesisOperation{}, synthesisOutputError()
+	}
+	candidate, found := notes[wire.IncludeNote]
+	if !found || candidate.PublicationID == "" {
+		return domain.SynthesisOperation{}, synthesisOutputError()
+	}
+	index := 0
+	for ; index < len(candidate.Revision.Items); index++ {
+		if wire.IncludeItem == fmt.Sprintf("I%03d", index+1) {
+			break
+		}
+	}
+	if index == len(candidate.Revision.Items) {
+		return domain.SynthesisOperation{}, synthesisOutputError()
+	}
+	itemID, err := nextID()
+	if err != nil {
+		return domain.SynthesisOperation{}, err
+	}
+	operation, err := domain.IncludeSynthesisPublishedItem(candidate.Revision, candidate.PublicationID, candidate.Revision.Items[index].ID, itemID)
+	if err != nil {
+		return domain.SynthesisOperation{}, synthesisOutputError()
+	}
+	return operation, nil
+}
+
+func synthesisOperationAllowedForAnchor(operation domain.SynthesisOperation, candidate organizingapp.SynthesisGenerationNote) bool {
+	allowed := make(map[string]bool)
+	for _, item := range candidate.Revision.Items {
+		for _, ref := range item.SourceReferences() {
+			key, err := ref.IdentityKey()
+			if err == nil {
+				allowed[key] = true
+			}
+		}
+	}
+	for _, ref := range candidate.Anchor.AllowedSources {
+		key, err := ref.IdentityKey()
+		if err == nil {
+			allowed[key] = true
+		}
+	}
+	for _, supplement := range candidate.Supplements {
+		key, err := supplement.Reference.IdentityKey()
+		if err == nil {
+			allowed[key] = true
+		}
+	}
+	refs := operation.Sources
+	if operation.Item != nil {
+		refs = append(refs, operation.Item.SourceReferences()...)
+	}
+	if operation.Resolution != nil {
+		refs = append(refs, operation.Resolution.Sources...)
+	}
+	for _, ref := range refs {
+		key, err := ref.IdentityKey()
+		if err != nil || !allowed[key] {
+			return false
+		}
+	}
+	return true
 }
 
 func bindSynthesisOperation(wire synthesisWireOperation, workspaceID foundation.ID, catalog []domain.SynthesisLabelledSource, targets map[string]foundation.ID, nextID func() (foundation.ID, error)) (domain.SynthesisOperation, error) {
@@ -240,7 +418,7 @@ func validateSynthesisBoundOutput(raw []byte, input organizingapp.SynthesisGener
 	ids := make([]foundation.ID, 0)
 	for _, note := range stored.Notes {
 		for _, operation := range note.Delta.Operations {
-			if operation.Item != nil {
+			if operation.Item != nil && operation.Kind != domain.SynthesisRefreshItem {
 				ids = append(ids, operation.Item.ID)
 			}
 		}

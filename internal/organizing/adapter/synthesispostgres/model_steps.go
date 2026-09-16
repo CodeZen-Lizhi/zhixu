@@ -127,7 +127,11 @@ func (store *Store) BindModelRun(ctx context.Context, command organizingapp.Bind
 		if err != nil {
 			return err
 		}
-		if !sameModelRunBinding(run, step) || run.Status != agentdomain.ModelRunRunning || run.Version != 1 || !validModelRuntime(run, step.Stage) {
+		promptVersion, err := store.synthesisPromptVersionForStep(tx, step)
+		if err != nil {
+			return err
+		}
+		if !sameModelRunBinding(run, step) || run.Status != agentdomain.ModelRunRunning || run.Version != 1 || !validModelRuntime(run, step.Stage, promptVersion) {
 			return invalid("synthesis model run differs from its prepared step")
 		}
 		if replayed {
@@ -207,7 +211,11 @@ func (store *Store) Complete(ctx context.Context, command organizingapp.Complete
 		if model.Run.Status != agentdomain.ModelRunRunning || model.Run.Version != command.ExpectedModelRunVersion {
 			return invalid("synthesis model run is not running at the expected version")
 		}
-		if err := validateModelProof(model, step, command.OutputHash, int64(len(command.Output))); err != nil {
+		promptVersion, err := store.synthesisPromptVersionForStep(tx, step)
+		if err != nil {
+			return err
+		}
+		if err := validateModelProof(model, step, command.OutputHash, int64(len(command.Output)), promptVersion); err != nil {
 			return err
 		}
 		terminal := model.Run
@@ -290,7 +298,11 @@ func (store *Store) Fail(ctx context.Context, command organizingapp.FailSynthesi
 		if err != nil {
 			return err
 		}
-		if !sameModelRunBinding(model.Run, step) || !validModelRuntime(model.Run, step.Stage) || model.Run.Status != agentdomain.ModelRunRunning || model.Run.Version != command.ExpectedModelRunVersion {
+		promptVersion, err := store.synthesisPromptVersionForStep(tx, step)
+		if err != nil {
+			return err
+		}
+		if !sameModelRunBinding(model.Run, step) || !validModelRuntime(model.Run, step.Stage, promptVersion) || model.Run.Status != agentdomain.ModelRunRunning || model.Run.Version != command.ExpectedModelRunVersion {
 			return invalid("synthesis model failure binding is invalid")
 		}
 		terminal := model.Run
@@ -377,7 +389,28 @@ func sameStepCompletion(step organizingapp.SynthesisModelStepRecord, command org
 func sameModelRunBinding(run agentdomain.ModelRun, step organizingapp.SynthesisModelStepRecord) bool {
 	return run.WorkspaceID == step.WorkspaceID && run.WorkflowRunID == step.WorkflowRunID && run.NodeRunID == step.NodeRunID && run.NodeAttemptID == step.NodeAttemptID && reflect.DeepEqual(run.ModelSettingsRevision, step.ModelSettingsRevision)
 }
-func validModelRuntime(run agentdomain.ModelRun, stage organizingapp.SynthesisModelStage) bool {
+func (store *Store) synthesisPromptVersionForStep(tx *gorm.DB, step organizingapp.SynthesisModelStepRecord) (string, error) {
+	execution, err := loadExecution(tx, step.WorkspaceID, step.ProcessingID, step.WorkflowRunID, false)
+	if err != nil {
+		return "", err
+	}
+	frozen, err := execution.frozen()
+	if err != nil {
+		return "", err
+	}
+	if frozen == nil || frozen.ProcessingID != step.ProcessingID || frozen.WorkflowRunID != step.WorkflowRunID || frozen.RequestHash != step.InputRequestHash || frozen.SourceEvent.Source.WorkspaceID != step.WorkspaceID {
+		return "", invalid("synthesis model step has no matching frozen input")
+	}
+	if step.Stage == organizingapp.SynthesisModelGenerate && frozen.GenerationPromptVersion != "" {
+		return frozen.GenerationPromptVersion, nil
+	}
+	if step.Stage == organizingapp.SynthesisModelValidate && frozen.SemanticPromptVersion != "" {
+		return frozen.SemanticPromptVersion, nil
+	}
+	return frozen.OriginalPromptVersion(), nil
+}
+
+func validModelRuntime(run agentdomain.ModelRun, stage organizingapp.SynthesisModelStage, promptVersion string) bool {
 	prompt, schema := "", ""
 	switch stage {
 	case organizingapp.SynthesisModelGenerate:
@@ -387,11 +420,20 @@ func validModelRuntime(run agentdomain.ModelRun, stage organizingapp.SynthesisMo
 	default:
 		return false
 	}
-	return run.Prompt == (agentdomain.PromptRef{ID: prompt, Version: organizingapp.SynthesisRuntimeVersion}) && run.Schema == (agentdomain.SchemaRef{ID: schema, Version: organizingapp.SynthesisRuntimeVersion}) && run.ReducedSchema == run.Schema && !run.Retrieval.IsBound() && !run.MemoryContext.IsBound()
+	schemaVersion := organizingapp.SynthesisRuntimeVersion
+	if promptVersion == organizingapp.SynthesisBodyRefreshPromptVersion && stage == organizingapp.SynthesisModelGenerate {
+		schemaVersion = organizingapp.SynthesisBodyRefreshSchemaVersion
+	}
+	if (promptVersion == organizingapp.SynthesisBodyPromptVersion || promptVersion == organizingapp.SynthesisSourceIdentityBodyPromptVersion || promptVersion == organizingapp.SynthesisFusionBodyPromptVersion || promptVersion == organizingapp.SynthesisGenerationFormatBodyPromptVersion || promptVersion == organizingapp.SynthesisGenerationFormatFusionBodyPromptVersion) && stage == organizingapp.SynthesisModelGenerate {
+		schemaVersion = organizingapp.SynthesisBodySchemaVersion
+	}
+	return (stage == organizingapp.SynthesisModelValidate && (promptVersion == organizingapp.SynthesisSemanticFormatPromptVersion || promptVersion == organizingapp.SynthesisSourceIdentitySemanticPromptVersion || organizingapp.IsSynthesisFusionSemanticVersion(promptVersion)) ||
+		stage == organizingapp.SynthesisModelGenerate && (promptVersion == organizingapp.SynthesisSourceIdentityLegacyPromptVersion || promptVersion == organizingapp.SynthesisSourceIdentityAnchoredPromptVersion || promptVersion == organizingapp.SynthesisSourceIdentityGoalPromptVersion || promptVersion == organizingapp.SynthesisSourceIdentityBodyPromptVersion || promptVersion == organizingapp.SynthesisGenerationFormatLegacyPromptVersion || promptVersion == organizingapp.SynthesisGenerationFormatAnchoredPromptVersion || promptVersion == organizingapp.SynthesisGenerationFormatGoalPromptVersion || promptVersion == organizingapp.SynthesisGenerationFormatBodyPromptVersion || promptVersion == organizingapp.SynthesisGenerationFormatFusionAnchoredPromptVersion || promptVersion == organizingapp.SynthesisGenerationFormatFusionBodyPromptVersion || promptVersion == organizingapp.SynthesisFusionAnchoredPromptVersion || promptVersion == organizingapp.SynthesisFusionBodyPromptVersion) || promptVersion == organizingapp.SynthesisLegacyPromptVersion || promptVersion == organizingapp.SynthesisAnchoredPromptVersion || promptVersion == organizingapp.SynthesisGoalPromptVersion || promptVersion == organizingapp.SynthesisBodyPromptVersion || promptVersion == organizingapp.SynthesisBodyRefreshPromptVersion) &&
+		run.Prompt == (agentdomain.PromptRef{ID: prompt, Version: promptVersion}) && run.Schema == (agentdomain.SchemaRef{ID: schema, Version: schemaVersion}) && run.ReducedSchema == run.Schema && !run.Retrieval.IsBound() && !run.MemoryContext.IsBound()
 }
 
-func validateModelProof(model agentapp.ModelRunRecord, step organizingapp.SynthesisModelStepRecord, outputHash string, outputBytes int64) error {
-	if agentdomain.ValidateModelRun(model.Run) != nil || model.Run.ID != step.ModelRunID || !sameModelRunBinding(model.Run, step) || !validModelRuntime(model.Run, step.Stage) || len(model.Calls) < 1 || len(model.Calls) > agentapp.StructuredCallLimit {
+func validateModelProof(model agentapp.ModelRunRecord, step organizingapp.SynthesisModelStepRecord, outputHash string, outputBytes int64, promptVersion string) error {
+	if agentdomain.ValidateModelRun(model.Run) != nil || model.Run.ID != step.ModelRunID || !sameModelRunBinding(model.Run, step) || !validModelRuntime(model.Run, step.Stage, promptVersion) || len(model.Calls) < 1 || len(model.Calls) > agentapp.StructuredCallLimit {
 		return invalid("synthesis model result has no complete recorded invocation")
 	}
 	phases := []agentdomain.ModelCallPhase{agentdomain.ModelCallInitial, agentdomain.ModelCallRepair, agentdomain.ModelCallReduced}
@@ -430,6 +472,11 @@ func (store *Store) VerifyValidatedSynthesisGenerationScoped(ctx context.Context
 	if err != nil {
 		return err
 	}
+	return store.verifyImmutableGenerationScoped(ctx, scope, tx, row, input, generation)
+}
+
+// verifyImmutableGenerationScoped 证明冻结输入和两份独立模型日志；调用方另行建立当前执行权限。
+func (store *Store) verifyImmutableGenerationScoped(ctx context.Context, scope foundation.TransactionScope, tx *gorm.DB, row executionModel, input organizingapp.SynthesisGenerationInput, generation organizingapp.SynthesisGenerationResult) error {
 	frozen, err := row.frozen()
 	if err != nil {
 		return err
@@ -437,8 +484,18 @@ func (store *Store) VerifyValidatedSynthesisGenerationScoped(ctx context.Context
 	if frozen == nil || !organizingworkflow.EqualSynthesisFrozenGeneration(*frozen, input) {
 		return invalid("synthesis application changed the frozen input")
 	}
+	processing, err := loadProcessing(tx, input.SourceEvent.Source.WorkspaceID, input.ProcessingID, false)
+	if err != nil {
+		return err
+	}
+	if !matchesGoal(idValue(processing.GoalRequestID), input.Goal) || !matchesBodyRefresh(idValue(processing.BodyRefreshRequestID), input.BodyRefresh) {
+		return invalid("synthesis application goal differs from its processing")
+	}
+	if err := store.verifyGoal(ctx, input.SourceEvent.Source.WorkspaceID, input.Goal); err != nil {
+		return err
+	}
 	var rows []modelStepModel
-	if err := tx.Where("workspace_id=? AND workflow_run_id=? AND status=?", string(execution.WorkspaceID), string(execution.RunID), string(organizingapp.SynthesisModelStepReady)).Order("stage").Clauses(clause.Locking{Strength: "UPDATE"}).Find(&rows).Error; err != nil {
+	if err := tx.Where("workspace_id=? AND workflow_run_id=? AND status=?", string(input.SourceEvent.Source.WorkspaceID), string(input.WorkflowRunID), string(organizingapp.SynthesisModelStepReady)).Order("stage").Clauses(clause.Locking{Strength: "UPDATE"}).Find(&rows).Error; err != nil {
 		return classify(ctx, err)
 	}
 	if len(rows) != 2 {
@@ -469,7 +526,8 @@ func (store *Store) VerifyValidatedSynthesisGenerationScoped(ctx context.Context
 		if model.Run.Status != agentdomain.ModelRunSucceeded || model.Run.FinalResultType != synthesisResultType(step.Stage) {
 			return invalid("synthesis model result is not successfully terminal")
 		}
-		if err := validateModelProof(model, step, step.OutputHash, int64(len(step.Output))); err != nil {
+		promptVersion := organizingapp.SynthesisPromptVersion(step.Stage, input)
+		if err := validateModelProof(model, step, step.OutputHash, int64(len(step.Output)), promptVersion); err != nil {
 			return err
 		}
 	}

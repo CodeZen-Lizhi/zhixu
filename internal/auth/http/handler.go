@@ -170,13 +170,13 @@ func RequiredCapabilities(request *http.Request) []capability.Capability {
 	if path == "/api/v1/settings/models" || path == "/api/v1/settings/models/test" || path == "/api/v1/settings/models/activations" {
 		return []capability.Capability{capability.ManageSystemSettings}
 	}
-	if request.Method == http.MethodGet || request.Method == http.MethodHead || request.Method == http.MethodOptions {
-		return []capability.Capability{capability.ReadLocal}
-	}
 	for _, route := range capabilityRoutes {
 		if route.method == request.Method && routePatternMatches(route.pattern, path) {
 			return append([]capability.Capability(nil), route.capabilities...)
 		}
+	}
+	if request.Method == http.MethodGet || request.Method == http.MethodHead || request.Method == http.MethodOptions {
+		return []capability.Capability{capability.ReadLocal}
 	}
 	// Unknown mutation: fail closed. A route accidentally omitted from the
 	// policy cannot be reached by a low-scope API Token.
@@ -199,6 +199,12 @@ func multipleCapabilities(method, pattern string, values ...capability.Capabilit
 
 // capabilityRoutes 是 API 公共状态修改端点的唯一 Capability 映射表。
 var capabilityRoutes = []capabilityRoute{
+	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/synthesis/processing/{processing_id}/source-reviews", capability.ReadLocal),
+	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/revisions/{revision_id}/source-reviews", capability.ReadLocal),
+	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/synthesis/source-reviews/{review_id}", capability.ReadLocal),
+	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/synthesis/source-reviews/{review_id}/evidence/{evidence_id}", capability.ReadLocal),
+	multipleCapabilities(http.MethodPost, "/api/v1/workspaces/{workspace_id}/synthesis/source-reviews/{review_id}/recheck", capability.ReadLocal, capability.WriteProposal),
+	multipleCapabilities(http.MethodPost, "/api/v1/workspaces/{workspace_id}/synthesis/source-reviews/{review_id}/recover", capability.ReadLocal, capability.WriteProposal),
 	oneCapability(http.MethodPost, "/api/v2/conversations/{conversation_id}/questions", capability.ReadLocal),
 	oneCapability(http.MethodPost, "/api/v2/review/interviews", capability.WriteProposal),
 	oneCapability(http.MethodPost, "/api/v2/review/interviews/{session_id}/turns", capability.WriteProposal),
@@ -269,13 +275,52 @@ var capabilityRoutes = []capabilityRoute{
 	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspace_id}/organizing/templates/{template_id}/clone", capability.WriteProposal),
 	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspace_id}/organizing/templates/{template_id}/revisions", capability.WriteProposal),
 	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/organizing/runs/{snapshot_id}", capability.ReadLocal),
+	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/synthesis/anchor-recommendations", capability.ReadLocal),
+	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspace_id}/synthesis/anchor-recommendations", capability.WriteProposal),
+	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/synthesis/anchor-recommendations/{request_id}", capability.ReadLocal),
+	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspace_id}/synthesis/anchor-recommendations/{request_id}/retry", capability.WriteProposal),
+	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/synthesis/anchors", capability.ReadLocal),
+	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspace_id}/synthesis/anchors", capability.WriteProposal),
+	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/synthesis/anchors/{anchor_id}", capability.ReadLocal),
+	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/synthesis/anchors/{anchor_id}/fusion-requests", capability.ReadLocal),
+	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/synthesis/anchors/{anchor_id}/scope-proposals", capability.ReadLocal),
+	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/synthesis/anchors/{anchor_id}/associations", capability.ReadLocal),
+	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspace_id}/synthesis/anchors/{anchor_id}/scope-proposals/decisions", capability.WriteProposal),
+	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspace_id}/synthesis/anchors/{anchor_id}/associations/decisions", capability.WriteProposal),
+	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/synthesis/goals/{goal_id}/selections", capability.ReadLocal),
+	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspace_id}/synthesis/goals/{goal_id}/selections/{selection_id}/retry", capability.WriteProposal),
+	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspace_id}/synthesis/sources/{source_version_id}/promote", capability.WriteProposal),
+	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/synthesis/goals", capability.ReadLocal),
+	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspace_id}/synthesis/goals", capability.WriteProposal),
+	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/synthesis/goals/{goal_id}", capability.ReadLocal),
+	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/synthesis/update-summaries", capability.ReadLocal),
 	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/synthesis/notes", capability.ReadLocal),
+	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/supplements", capability.ReadLocal),
+	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/supplements/{supplement_id}/source", capability.ReadLocal),
 	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}", capability.ReadLocal),
 	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/revisions", capability.ReadLocal),
 	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/revisions/{revision_id}", capability.ReadLocal),
 	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/revisions/{revision_id}/sources/{source_span_id}", capability.ReadLocal),
+	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/revisions/{revision_id}/source-graph", capability.ReadLocal),
+	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/revisions/{revision_id}/source-impacts", capability.ReadLocal),
+	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/revisions/{revision_id}/sources/{source_span_id}/knowledge-points", capability.ReadLocal),
+	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/synthesis/sources/{source_version_id}/knowledge-directory", capability.ReadLocal),
 	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/synthesis/processing", capability.ReadLocal),
 	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/synthesis/processing/{processing_id}", capability.ReadLocal),
+	multipleCapabilities(http.MethodGet, "/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/historical-republish/target", capability.ReadLocal, capability.WriteProposal),
+	multipleCapabilities(http.MethodGet, "/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/historical-republish", capability.ReadLocal, capability.WriteProposal),
+	multipleCapabilities(http.MethodPost, "/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/historical-republish", capability.ReadLocal, capability.WriteProposal),
+	multipleCapabilities(http.MethodPost, "/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/historical-republish/{attempt_id}/apply", capability.ReadLocal, capability.WriteProposal),
+	multipleCapabilities(http.MethodPost, "/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/historical-republish/{attempt_id}/resume", capability.ReadLocal, capability.WriteProposal),
+	multipleCapabilities(http.MethodGet, "/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/candidate-remerge/target", capability.ReadLocal, capability.WriteProposal),
+	multipleCapabilities(http.MethodGet, "/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/candidate-remerge", capability.ReadLocal, capability.WriteProposal),
+	multipleCapabilities(http.MethodPost, "/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/candidate-remerge", capability.ReadLocal, capability.WriteProposal),
+	multipleCapabilities(http.MethodPost, "/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/candidate-remerge/{attempt_id}/apply", capability.ReadLocal, capability.WriteProposal),
+	multipleCapabilities(http.MethodPost, "/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/candidate-remerge/{attempt_id}/resume", capability.ReadLocal, capability.WriteProposal),
+	multipleCapabilities(http.MethodGet, "/api/v1/workspaces/{workspace_id}/synthesis/processing/{processing_id}/manuscript-review", capability.ReadLocal, capability.WriteProposal),
+	multipleCapabilities(http.MethodGet, "/api/v1/workspaces/{workspace_id}/synthesis/processing/{processing_id}/manuscript-review/{note_id}", capability.ReadLocal, capability.WriteProposal),
+	multipleCapabilities(http.MethodPost, "/api/v1/workspaces/{workspace_id}/synthesis/processing/{processing_id}/manuscript-review/resume", capability.ReadLocal, capability.WriteProposal),
+	multipleCapabilities(http.MethodPost, "/api/v1/workspaces/{workspace_id}/synthesis/processing/{processing_id}/manuscript-review/{note_id}/decisions", capability.ReadLocal, capability.WriteProposal),
 	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspace_id}/synthesis/processing/{processing_id}/retry", capability.WriteProposal),
 	oneCapability(http.MethodPost, "/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/interviews", capability.WriteProposal),
 	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/synthesis/notes/{note_id}/interviews", capability.ReadLocal),
@@ -329,6 +374,7 @@ var capabilityRoutes = []capabilityRoute{
 	oneCapability(http.MethodPost, "/api/v1/proposals/{proposal_id}/approvals", capability.WriteKnowledge),
 	oneCapability(http.MethodPost, "/api/v1/proposals/{proposal_id}/apply-preflight", capability.WriteKnowledge),
 
+	oneCapability(http.MethodGet, "/api/v1/workspaces/{workspace_id}/discovery-failures", capability.ReadLocal),
 	multipleCapabilities(http.MethodPost, "/api/v1/workspaces/{workspace_id}/scan", capability.ReadLocal, capability.IndexMaintenance),
 	multipleCapabilities(http.MethodPost, "/api/v1/source-versions/{source_version_id}/ingestion-attempts", capability.ReadLocal, capability.IndexMaintenance),
 	multipleCapabilities(http.MethodPost, "/api/v1/health/scans", capability.ReadLocal, capability.WriteProposal),

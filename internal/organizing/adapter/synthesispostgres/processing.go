@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
+	"time"
 
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
 	organizingapp "github.com/CodeZen-Lizhi/zhixu/internal/organizing/application"
@@ -60,7 +62,7 @@ func (store *Store) CreateSynthesisProcessingScoped(ctx context.Context, scope f
 		return invalid("synthesis processing creation is invalid")
 	}
 	input, err := organizingworkflow.DecodeSynthesisStartInput(command.Start.Run.Input)
-	if err != nil || input.ProcessingID != p.ID || input.ExecutionNo != 1 || input.ApplyRecovery {
+	if err != nil || input.ProcessingID != p.ID || input.ExecutionNo != 1 || input.GoalRequestID != p.GoalRequestID || input.BodyRefreshRequestID != p.BodyRefreshRequestID || input.ApplyRecovery {
 		return invalid("synthesis processing start input changed")
 	}
 	tx, err := store.transaction(ctx, scope)
@@ -71,7 +73,7 @@ func (store *Store) CreateSynthesisProcessingScoped(ctx context.Context, scope f
 	if err != nil {
 		return err
 	}
-	if err := tx.Create(&row).Error; err != nil {
+	if err := createProcessing(tx, &row); err != nil {
 		return classify(ctx, err)
 	}
 	execution := executionModel{WorkflowRunID: string(p.WorkflowRunID), WorkspaceID: string(p.SourceEvent.Source.WorkspaceID), ProcessingID: string(p.ID), ExecutionNo: 1,
@@ -80,7 +82,7 @@ func (store *Store) CreateSynthesisProcessingScoped(ctx context.Context, scope f
 }
 
 func (store *Store) RecordSkippedSynthesisSourceScoped(ctx context.Context, scope foundation.TransactionScope, processing organizingapp.SynthesisProcessing) error {
-	if processing.Status != organizingapp.SynthesisProcessingSkipped || !validID(processing.ID) || processing.Version != 1 || processing.WorkflowRunID != "" || processing.ModelRunID != "" || processing.CompletedAt == nil || processing.Failure != nil || len(processing.RevisionIDs) != 0 {
+	if processing.GoalRequestID != "" || processing.BodyRefreshRequestID != "" || processing.Status != organizingapp.SynthesisProcessingSkipped || !validID(processing.ID) || processing.Version != 1 || processing.WorkflowRunID != "" || processing.ModelRunID != "" || processing.CompletedAt == nil || processing.Failure != nil || len(processing.RevisionIDs) != 0 {
 		return invalid("synthesis skipped source receipt is invalid")
 	}
 	tx, err := store.transaction(ctx, scope)
@@ -91,7 +93,7 @@ func (store *Store) RecordSkippedSynthesisSourceScoped(ctx context.Context, scop
 	if err != nil {
 		return err
 	}
-	return classify(ctx, tx.Create(&row).Error)
+	return classify(ctx, createProcessing(tx, &row))
 }
 
 func (store *Store) GetSynthesisProcessing(ctx context.Context, workspaceID, processingID foundation.ID) (organizingapp.SynthesisProcessing, error) {
@@ -163,7 +165,18 @@ func (store *Store) LoadSynthesisExecution(ctx context.Context, workspaceID, pro
 	if err != nil {
 		return organizingworkflow.SynthesisExecution{}, err
 	}
-	result := organizingworkflow.SynthesisExecution{Processing: projection, WorkflowRunID: runID, ExecutionNo: row.ExecutionNo, ApplyRecovery: row.ApplyRecovery, Input: input, CreatedAt: canonical(row.CreatedAt)}
+	if input != nil && (!matchesGoal(projection.GoalRequestID, input.Goal) || !matchesBodyRefresh(projection.BodyRefreshRequestID, input.BodyRefresh)) {
+		return organizingworkflow.SynthesisExecution{}, invalid("synthesis frozen goal differs from its processing")
+	}
+	result := organizingworkflow.SynthesisExecution{BodyRefreshRequestID: projection.BodyRefreshRequestID, GoalRequestID: projection.GoalRequestID, Processing: projection, WorkflowRunID: runID, ExecutionNo: row.ExecutionNo, ApplyRecovery: row.ApplyRecovery, Input: input, CreatedAt: canonical(row.CreatedAt)}
+	var waitedMicros int64
+	if err := tx.Raw(`SELECT COALESCE(SUM(EXTRACT(EPOCH FROM (h.submitted_at-h.created_at))*1000000),0)::bigint
+ FROM workflow.human_task h JOIN workflow.node_run n ON n.id=h.node_run_id AND n.run_id=h.run_id
+ JOIN workflow.run r ON r.id=h.run_id JOIN workflow.definition d ON d.id=r.definition_id AND d.workspace_id=r.workspace_id
+ WHERE h.run_id=? AND r.workspace_id=? AND n.node_key=? AND n.node_type=n.node_key AND n.status='succeeded' AND h.status='submitted' AND d.key=? AND d.version=? AND h.submitted_at>=h.created_at AND h.submitted_at<=h.expires_at`, string(runID), string(workspaceID), organizingworkflow.SynthesisMergeReviewNodeKind, organizingworkflow.SynthesisDefinitionKey, organizingworkflow.SynthesisManuscriptDefinitionVersion).Scan(&waitedMicros).Error; err != nil {
+		return organizingworkflow.SynthesisExecution{}, classify(ctx, err)
+	}
+	result.HumanWaitDuration = time.Duration(waitedMicros) * time.Microsecond
 	var steps []modelStepModel
 	if err := tx.Where("workspace_id=? AND workflow_run_id=?", string(workspaceID), string(runID)).Order("created_at,id").Find(&steps).Error; err != nil {
 		return organizingworkflow.SynthesisExecution{}, classify(ctx, err)
@@ -190,8 +203,14 @@ func (store *Store) LoadSynthesisExecution(ctx context.Context, workspaceID, pro
 }
 
 func (store *Store) FreezeSynthesisInput(ctx context.Context, execution workflowapp.ExecutionContext, input organizingworkflow.SynthesisFrozenInput) (organizingworkflow.SynthesisFrozenInput, error) {
-	if input.Validate() != nil || input.WorkflowRunID != execution.RunID || input.SourceEvent.Source.WorkspaceID != execution.WorkspaceID || execution.NodeKind != organizingworkflow.SynthesisPrepareNodeKind {
+	if err := input.Validate(); err != nil {
+		return organizingworkflow.SynthesisFrozenInput{}, err
+	}
+	if input.WorkflowRunID != execution.RunID || input.SourceEvent.Source.WorkspaceID != execution.WorkspaceID || execution.NodeKind != organizingworkflow.SynthesisPrepareNodeKind {
 		return organizingworkflow.SynthesisFrozenInput{}, invalid("synthesis input freeze is invalid")
+	}
+	if err := store.verifyGoal(ctx, execution.WorkspaceID, input.Goal); err != nil {
+		return organizingworkflow.SynthesisFrozenInput{}, err
 	}
 	var result organizingworkflow.SynthesisFrozenInput
 	err := store.within(ctx, func(ctx context.Context, scope foundation.TransactionScope, _ *gorm.DB) error {
@@ -216,8 +235,25 @@ func (store *Store) FreezeSynthesisInput(ctx context.Context, execution workflow
 		if err != nil {
 			return err
 		}
-		if projection.SourceEvent != input.SourceEvent {
+		// Fusion 触发条件从持久化 JSON 重建，因此即使不可变值相同，指针身份也会不同。
+		if !reflect.DeepEqual(projection.SourceEvent, input.SourceEvent) || !matchesGoal(projection.GoalRequestID, input.Goal) || !matchesBodyRefresh(projection.BodyRefreshRequestID, input.BodyRefresh) {
 			return invalid("synthesis input changed the durable source event")
+		}
+		bindings := organizingapp.SynthesisBodyRefreshPublications(input.BodyRefresh)
+		for _, note := range input.Notes {
+			if note.PublicationID != "" {
+				bindings = append(bindings, organizingapp.SynthesisPublicationBinding{WorkspaceID: note.Note.WorkspaceID,
+					NoteID: note.Note.ID, RevisionID: note.RevisionID, PublicationID: note.PublicationID, ProjectionHash: note.RevisionHash})
+			}
+		}
+		if len(bindings) > 0 {
+			encoded, err := marshal(bindings)
+			if err != nil {
+				return err
+			}
+			if err := tx.Exec(`SELECT organizing.verify_synthesis_published_bindings(?::jsonb)`, encoded).Error; err != nil {
+				return classify(ctx, err)
+			}
 		}
 		encoded, err := marshal(input)
 		if err != nil {
@@ -394,7 +430,7 @@ func (store *Store) RecordSynthesisRetryScoped(ctx context.Context, scope founda
 		return organizingapp.RetrySynthesisResult{}, err
 	}
 	input, err := organizingworkflow.DecodeSynthesisStartInput(record.Start.Run.Input)
-	if err != nil || input.ProcessingID != command.ProcessingID || input.ApplyRecovery != record.ApplyRecovery || record.Start.Run.WorkspaceID != command.WorkspaceID || record.Start.Job.JobID < 1 || row.Version != command.ExpectedVersion || row.Status != string(organizingapp.SynthesisProcessingFailed) || !row.Retryable {
+	if err != nil || input.ProcessingID != command.ProcessingID || input.GoalRequestID != idValue(row.GoalRequestID) || input.BodyRefreshRequestID != idValue(row.BodyRefreshRequestID) || input.ApplyRecovery != record.ApplyRecovery || record.Start.Run.WorkspaceID != command.WorkspaceID || record.Start.Job.JobID < 1 || row.Version != command.ExpectedVersion || row.Status != string(organizingapp.SynthesisProcessingFailed) || !row.Retryable {
 		return organizingapp.RetrySynthesisResult{}, conflict("synthesis retry binding changed")
 	}
 	updated := tx.Model(&processingModel{}).Where("id=? AND workspace_id=? AND version=?", row.ID, row.WorkspaceID, row.Version).

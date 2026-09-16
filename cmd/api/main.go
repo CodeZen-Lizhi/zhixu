@@ -409,6 +409,7 @@ func runAPI() (exitCode int) {
 	captureHandler := capturehttp.NewHandler(nil, 0)
 	organizingHandler := organizinghttp.NewHandler(nil, nil, nil, cfg.GraphQueryTimeout)
 	synthesisHandler := organizinghttp.NewSynthesisHandler(nil, nil, cfg.GraphQueryTimeout)
+	anchorHandler := organizinghttp.NewAnchorHandler(nil, cfg.GraphQueryTimeout)
 	synthesisInterviewHandler := interviewhttp.NewNotePreparationHandler(nil)
 	documentHistoryHandler := documenthistoryhttp.NewHandler(nil, cfg.GraphQueryTimeout)
 	gitSyncHandler := gitsynchttp.NewHandler(nil, cfg.GraphQueryTimeout)
@@ -677,13 +678,15 @@ func runAPI() (exitCode int) {
 				logger.Error("authoring service is unavailable", "error_code", "AUTHORING_DEPENDENCY_UNAVAILABLE")
 			} else {
 				configuredSynthesis, synthesisErr := newAPISynthesisComponents(synthesisRuntime, apiSynthesisDependencies{
-					Workspaces: workspaceRepository, Files: fileScanner, Publications: configuredAuthoringService,
+					ManuscriptRoots: workspaceRuntime.Resolver,
+					Workspaces:      workspaceRepository, Files: fileScanner, Publications: configuredAuthoringService,
 					Retirements: changeControlRepository, Runtime: workflowRuntime, Timeout: cfg.GraphQueryTimeout,
 				})
 				if synthesisErr != nil {
 					logger.Error("synthesis note services are unavailable", "error_code", "SYNTHESIS_COMPOSITION_UNAVAILABLE")
 				} else {
 					synthesisHandler = configuredSynthesis.handler
+					anchorHandler = configuredSynthesis.anchors
 					synthesisInterviewHandler = configuredSynthesis.interviewHandler
 				}
 				configuredOrganizingHandler, organizingHandlerErr := newOrganizingHandler(
@@ -782,6 +785,7 @@ func runAPI() (exitCode int) {
 		Capture:            captureHandler,
 		Organizing:         organizingHandler,
 		Synthesis:          synthesisHandler,
+		Anchors:            anchorHandler,
 		SynthesisInterview: synthesisInterviewHandler,
 		DocumentHistory:    documentHistoryHandler,
 		GitSync:            gitSyncHandler,

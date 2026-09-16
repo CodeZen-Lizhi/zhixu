@@ -218,3 +218,68 @@ type synthesisUnexpectedModel struct{ SynthesisExecutionModel }
 func synthesisWorkflowTestID(value int) foundation.ID {
 	return foundation.ID(fmt.Sprintf("7d000000-0000-4000-8000-%012d", value))
 }
+
+func TestSynthesisLegacyFrozenBytesAndSemanticVersionBinding(t *testing.T) {
+	_, _, store, _, _ := synthesisExecutorFixture(t)
+	legacy := *store.value.Input
+	raw, err := json.Marshal(legacy)
+	if err != nil || strings.Contains(string(raw), "semantic_prompt_version") || strings.Contains(string(raw), "generation_prompt_version") {
+		t.Fatal("legacy frozen bytes gained a field")
+	}
+	var replay SynthesisFrozenInput
+	if err := json.Unmarshal(raw, &replay); err != nil || replay.Validate() != nil || replay.RequestHash != legacy.RequestHash {
+		t.Fatal("legacy frozen input cannot replay")
+	}
+	current := legacy
+	current.SemanticPromptVersion = organizingapp.SynthesisSemanticFormatPromptVersion
+	if current.Validate() == nil {
+		t.Fatal("version change did not invalidate frozen hash")
+	}
+	current.RequestHash, err = current.ComputeHash()
+	if err != nil || current.Validate() != nil || current.RequestHash == legacy.RequestHash {
+		t.Fatal("new frozen identity invalid")
+	}
+}
+
+func TestSynthesisFrozenSourceIdentityPairsRequireExactInputKind(t *testing.T) {
+	_, _, store, _, _ := synthesisExecutorFixture(t)
+	legacy := *store.value.Input
+	for _, original := range []string{"v1", "v2", "v3", "v4", "v5"} {
+		frozen := legacy
+		switch original {
+		case "v2":
+			frozen.Notes = []SynthesisFrozenNote{{Anchor: &organizingapp.SynthesisAnchorBinding{}}}
+		case "v3":
+			frozen.Goal = &organizingapp.SynthesisGoalBinding{}
+		case "v4":
+			frozen.Notes = []SynthesisFrozenNote{{PublicationID: synthesisWorkflowTestID(98)}}
+		case "v5":
+			frozen.BodyRefresh = &organizingapp.SynthesisBodyRefreshBinding{}
+		}
+		frozen.freezeSourceIdentityPromptVersions()
+		if frozen.OriginalPromptVersion() != original || !organizingapp.ValidSynthesisPromptVersions(original, frozen.GenerationPromptVersion, frozen.SemanticPromptVersion) {
+			t.Fatalf("wrong frozen pair for %s", original)
+		}
+		for _, generated := range []string{"", "v6", "v7", "v8", "v9", "v10", "v11", "v12", "v13", "v14", "v15", "v16", "v17", "v18"} {
+			want := generated == organizingapp.SynthesisSourceIdentityGenerationVersion(original) || generated == organizingapp.SynthesisGenerationFormatVersion(original)
+			if organizingapp.ValidSynthesisPromptVersions(original, generated, "v7") != want {
+				t.Fatalf("mixed input type accepted: %s %s", original, generated)
+			}
+		}
+	}
+	current := legacy
+	current.freezeSourceIdentityPromptVersions()
+	if current.Validate() == nil {
+		t.Fatal("new pair accepted legacy input hash")
+	}
+	current.RequestHash, _ = current.ComputeHash()
+	if err := current.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	changed := current
+	changed.GenerationPromptVersion = organizingapp.SynthesisSourceIdentityAnchoredPromptVersion
+	changed.RequestHash, _ = changed.ComputeHash()
+	if changed.Validate() == nil {
+		t.Fatal("forged generation type accepted")
+	}
+}

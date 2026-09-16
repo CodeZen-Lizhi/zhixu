@@ -39,29 +39,33 @@ func (value *jsonValue) Scan(raw any) error {
 }
 
 type processingModel struct {
-	ID                 string     `gorm:"column:id;primaryKey"`
-	WorkspaceID        string     `gorm:"column:workspace_id"`
-	SourceEventID      string     `gorm:"column:source_event_id"`
-	SourceID           string     `gorm:"column:source_id"`
-	SourceVersionID    string     `gorm:"column:source_version_id"`
-	ContentArtifactID  string     `gorm:"column:content_artifact_id"`
-	ParseProjectionID  string     `gorm:"column:parse_projection_id"`
-	SourceContentHash  string     `gorm:"column:source_content_hash"`
-	IngestionAttemptID string     `gorm:"column:ingestion_attempt_id"`
-	ProcessorVersion   string     `gorm:"column:processor_version"`
-	SourceOccurredAt   time.Time  `gorm:"column:source_occurred_at"`
-	ProcessingKey      string     `gorm:"column:processing_key"`
-	WorkflowRunID      *string    `gorm:"column:workflow_run_id"`
-	ModelRunID         *string    `gorm:"column:model_run_id"`
-	RequestHash        string     `gorm:"column:request_hash"`
-	Status             string     `gorm:"column:status"`
-	RevisionIDs        jsonValue  `gorm:"column:revision_ids;type:jsonb"`
-	ErrorCode          *string    `gorm:"column:error_code"`
-	Retryable          bool       `gorm:"column:retryable"`
-	Version            int64      `gorm:"column:version"`
-	CreatedAt          time.Time  `gorm:"column:created_at;autoCreateTime:false"`
-	UpdatedAt          time.Time  `gorm:"column:updated_at;autoUpdateTime:false"`
-	CompletedAt        *time.Time `gorm:"column:completed_at"`
+	BodyRefreshRequestID *string    `gorm:"column:body_refresh_request_id"`
+	GoalRequestID        *string    `gorm:"column:goal_request_id"`
+	ID                   string     `gorm:"column:id;primaryKey"`
+	WorkspaceID          string     `gorm:"column:workspace_id"`
+	SourceEventID        string     `gorm:"column:source_event_id"`
+	SourceID             string     `gorm:"column:source_id"`
+	SourceVersionID      string     `gorm:"column:source_version_id"`
+	ContentArtifactID    string     `gorm:"column:content_artifact_id"`
+	ParseProjectionID    string     `gorm:"column:parse_projection_id"`
+	SourceContentHash    string     `gorm:"column:source_content_hash"`
+	IngestionAttemptID   string     `gorm:"column:ingestion_attempt_id"`
+	ProcessorVersion     string     `gorm:"column:processor_version"`
+	SourceOccurredAt     time.Time  `gorm:"column:source_occurred_at"`
+	FusionRequestID      *string    `gorm:"column:fusion_request_id"`
+	FusionTrigger        jsonValue  `gorm:"column:fusion_trigger;type:jsonb"`
+	ProcessingKey        string     `gorm:"column:processing_key"`
+	WorkflowRunID        *string    `gorm:"column:workflow_run_id"`
+	ModelRunID           *string    `gorm:"column:model_run_id"`
+	RequestHash          string     `gorm:"column:request_hash"`
+	Status               string     `gorm:"column:status"`
+	RevisionIDs          jsonValue  `gorm:"column:revision_ids;type:jsonb"`
+	ErrorCode            *string    `gorm:"column:error_code"`
+	Retryable            bool       `gorm:"column:retryable"`
+	Version              int64      `gorm:"column:version"`
+	CreatedAt            time.Time  `gorm:"column:created_at;autoCreateTime:false"`
+	UpdatedAt            time.Time  `gorm:"column:updated_at;autoUpdateTime:false"`
+	CompletedAt          *time.Time `gorm:"column:completed_at"`
 }
 
 func (processingModel) TableName() string { return "organizing.synthesis_processing" }
@@ -125,7 +129,7 @@ type retryModel struct {
 func (retryModel) TableName() string { return "organizing.synthesis_retry_receipt" }
 
 func modelProcessing(value organizingapp.SynthesisProcessing) (processingModel, error) {
-	key, err := value.SourceEvent.ProcessingKey()
+	key, err := organizingapp.SynthesisExecutionKey(value.SourceEvent, value.GoalRequestID, value.BodyRefreshRequestID)
 	if err != nil {
 		return processingModel{}, err
 	}
@@ -134,12 +138,19 @@ func modelProcessing(value organizingapp.SynthesisProcessing) (processingModel, 
 		return processingModel{}, err
 	}
 	source := value.SourceEvent.Source
-	row := processingModel{ID: string(value.ID), WorkspaceID: string(source.WorkspaceID), SourceEventID: string(value.SourceEvent.ID),
+	row := processingModel{BodyRefreshRequestID: optionalID(value.BodyRefreshRequestID), GoalRequestID: optionalID(value.GoalRequestID), ID: string(value.ID), WorkspaceID: string(source.WorkspaceID), SourceEventID: string(value.SourceEvent.ID),
 		SourceID: string(source.SourceID), SourceVersionID: string(source.SourceVersionID), ContentArtifactID: string(source.ContentArtifactID),
 		ParseProjectionID: string(source.ParseProjectionID), SourceContentHash: source.ContentHash, IngestionAttemptID: string(value.SourceEvent.IngestionAttemptID),
 		ProcessorVersion: value.SourceEvent.ProcessorVersion, SourceOccurredAt: canonical(value.SourceEvent.CreatedAt), ProcessingKey: key,
 		WorkflowRunID: optionalID(value.WorkflowRunID), ModelRunID: optionalID(value.ModelRunID), RequestHash: value.RequestHash,
 		Status: string(value.Status), RevisionIDs: revisions, Version: value.Version, CreatedAt: canonical(value.CreatedAt), UpdatedAt: canonical(value.UpdatedAt), CompletedAt: value.CompletedAt}
+	if value.SourceEvent.Fusion != nil {
+		trigger, triggerErr := marshal(value.SourceEvent.Fusion)
+		if triggerErr != nil {
+			return processingModel{}, triggerErr
+		}
+		row.FusionRequestID, row.FusionTrigger = optionalID(value.SourceEvent.Fusion.RequestID), trigger
+	}
 	if value.Failure != nil {
 		row.ErrorCode, row.Retryable = optionalString(value.Failure.Code), value.Failure.Retryable
 	}
@@ -147,10 +158,17 @@ func modelProcessing(value organizingapp.SynthesisProcessing) (processingModel, 
 }
 
 func (row processingModel) projection() (organizingapp.SynthesisProcessing, error) {
-	result := organizingapp.SynthesisProcessing{ID: foundation.ID(row.ID), SourceEvent: organizingdomain.SynthesisSourceReady{ID: foundation.ID(row.SourceEventID),
+	event := organizingdomain.SynthesisSourceReady{ID: foundation.ID(row.SourceEventID),
 		Source: organizingdomain.SynthesisSourceVersion{WorkspaceID: foundation.ID(row.WorkspaceID), SourceID: foundation.ID(row.SourceID), SourceVersionID: foundation.ID(row.SourceVersionID),
 			ContentArtifactID: foundation.ID(row.ContentArtifactID), ParseProjectionID: foundation.ID(row.ParseProjectionID), ContentHash: row.SourceContentHash},
-		IngestionAttemptID: foundation.ID(row.IngestionAttemptID), ProcessorVersion: row.ProcessorVersion, CreatedAt: canonical(row.SourceOccurredAt)},
+		IngestionAttemptID: foundation.ID(row.IngestionAttemptID), ProcessorVersion: row.ProcessorVersion, CreatedAt: canonical(row.SourceOccurredAt)}
+	if row.FusionRequestID != nil {
+		event.Fusion = new(organizingdomain.SynthesisFusionTrigger)
+		if json.Unmarshal(row.FusionTrigger, event.Fusion) != nil || event.Fusion.RequestID != foundation.ID(*row.FusionRequestID) {
+			return organizingapp.SynthesisProcessing{}, invalid("synthesis fusion trigger is invalid")
+		}
+	}
+	result := organizingapp.SynthesisProcessing{BodyRefreshRequestID: idValue(row.BodyRefreshRequestID), GoalRequestID: idValue(row.GoalRequestID), ID: foundation.ID(row.ID), SourceEvent: event,
 		WorkflowRunID: idValue(row.WorkflowRunID), ModelRunID: idValue(row.ModelRunID), RequestHash: row.RequestHash,
 		Status: organizingapp.SynthesisProcessingStatus(row.Status), Version: row.Version, CreatedAt: canonical(row.CreatedAt), UpdatedAt: canonical(row.UpdatedAt), CompletedAt: row.CompletedAt}
 	if err := json.Unmarshal(row.RevisionIDs, &result.RevisionIDs); err != nil {
@@ -159,7 +177,7 @@ func (row processingModel) projection() (organizingapp.SynthesisProcessing, erro
 	if row.ErrorCode != nil {
 		result.Failure = &organizingdomain.SynthesisFailure{Code: *row.ErrorCode, Retryable: row.Retryable}
 	}
-	key, err := result.SourceEvent.ProcessingKey()
+	key, err := organizingapp.SynthesisExecutionKey(result.SourceEvent, result.GoalRequestID, result.BodyRefreshRequestID)
 	if err != nil || key != row.ProcessingKey || result.RequestHash != processingSourceHash(key) || !validID(result.ID) || !result.Status.Valid() || result.Version < 1 || result.CreatedAt.IsZero() || result.UpdatedAt.Before(result.CreatedAt) {
 		return organizingapp.SynthesisProcessing{}, invalid("synthesis processing has an invalid durable binding")
 	}

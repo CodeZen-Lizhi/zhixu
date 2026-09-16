@@ -64,6 +64,123 @@ func TestSynthesisProviderWireRejectsMissingUnknownDuplicateAndUnionDrift(t *tes
 	}
 }
 
+func TestSynthesisPublishedBodyIncludeBindsExactItemAndReviewsEveryCopiedPart(t *testing.T) {
+	input, _, _ := synthesisFixtureWithNote(t)
+	input.Notes[0].PublicationID = synthesisTestID(80)
+	gap := input.Notes[0].Revision.Items[2].Gap
+	gap.Resolution = &domain.SynthesisStatement{Text: "Keep at most 100 entries.", Sources: []domain.SynthesisSourceRef{input.Sources[0].Reference}}
+	unresolvedGap := domain.SynthesisItem{ID: input.Notes[0].Revision.Items[2].ID, Kind: domain.SynthesisGapItem,
+		Gap: &domain.SynthesisGapContent{Question: gap.Question, Context: gap.Context, Sources: append([]domain.SynthesisSourceRef{}, gap.Sources...)}}
+	input.Notes[0].Revision.Delta = domain.SynthesisDelta{Operations: []domain.SynthesisOperation{
+		{Kind: domain.SynthesisAddFact, Item: &input.Notes[0].Revision.Items[0]},
+		{Kind: domain.SynthesisAddConflict, Item: &input.Notes[0].Revision.Items[1]},
+		{Kind: domain.SynthesisAddGap, Item: &unresolvedGap},
+		{Kind: domain.SynthesisResolveGap, TargetItemID: unresolvedGap.ID, Resolution: gap.Resolution},
+	}}
+	body, err := domain.RenderSynthesisMarkdown(input.Notes[0].Note.WorkspaceID, input.Notes[0].Note.ID, input.Notes[0].Revision.Title, input.Notes[0].Revision.Items)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.Notes[0].Revision.ContentHash = synthesisHash([]byte(body))
+	input.Notes[0].Revision.Hash, err = domain.ComputeSynthesisRevisionHash(input.Notes[0].Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := input.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	raw := `{"notes":[{"note":"","topic_key":"included cache","title":"Included cache","aliases":[],"operations":[
+{"op":"INCLUDE_ITEM","note":"N001","item":"I001"},
+{"op":"INCLUDE_ITEM","note":"N001","item":"I002"},
+{"op":"INCLUDE_ITEM","note":"N001","item":"I003"}
+]}]}`
+	result, err := bindSynthesisOutput([]byte(raw), input, synthesisTestID(81), (&synthesisTestIDs{}).New)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operations := result.Notes[0].Delta.Operations
+	if len(operations) != 3 || operations[0].Item.BodyReference == nil || operations[0].Item.BodyReference.PublicationID != input.Notes[0].PublicationID ||
+		operations[0].Item.Fact.Applicability != input.Notes[0].Revision.Items[0].Fact.Applicability ||
+		!reflect.DeepEqual(operations[1].Item.Conflict.Alternatives, input.Notes[0].Revision.Items[1].Conflict.Alternatives) ||
+		operations[2].Item.Gap.Resolution == nil || !reflect.DeepEqual(operations[2].Item.Gap.Resolution, input.Notes[0].Revision.Items[2].Gap.Resolution) {
+		t.Fatalf("included items lost exact published content: %+v", operations)
+	}
+	plan, err := synthesisSemanticPlan(input, result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([]string, len(plan.Checks))
+	for index, check := range plan.Checks {
+		got[index] = check.Kind
+		if len(check.Sources) > 0 && !reflect.DeepEqual(check.Sources, []string{"S001"}) {
+			t.Fatalf("check %s did not review exact copied evidence: %+v", check.Kind, check)
+		}
+	}
+	want := []string{"ASSERTION", "CONFLICT_ALTERNATIVE", "CONFLICT_ALTERNATIVE", "CONFLICT_RELATION", "GAP_CONTEXT", "GAP_RESOLUTION"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("semantic checks=%v want=%v", got, want)
+	}
+	if _, err := decodeSynthesisDelta([]byte(raw)); synthesisTestCode(err) != organizingapp.ErrorCodeSynthesisModelOutputInvalid {
+		t.Fatalf("v1 decoder accepted INCLUDE_ITEM: %v", err)
+	}
+}
+
+func TestSynthesisPublishedBodyIncludeRejectsDraftSelfUnknownAndUnopenedReferences(t *testing.T) {
+	input, _, _ := synthesisFixtureWithNote(t)
+	input.Notes[0].PublicationID = synthesisTestID(82)
+	if err := input.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for name, raw := range map[string]string{
+		"self":    `{"notes":[{"note":"N001","operations":[{"op":"INCLUDE_ITEM","note":"N001","item":"I001"}]}]}`,
+		"unknown": `{"notes":[{"note":"","topic_key":"included cache","title":"Included cache","aliases":[],"operations":[{"op":"INCLUDE_ITEM","note":"N002","item":"I001"}]}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := bindSynthesisOutput([]byte(raw), input, synthesisTestID(83), (&synthesisTestIDs{}).New); synthesisTestCode(err) != organizingapp.ErrorCodeSynthesisModelOutputInvalid {
+				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+	draft := input
+	draft.Notes = append(draft.Notes, synthesisDuplicateGenerationNote(t, input.Notes[0], 85))
+	if err := draft.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	draftRaw := `{"notes":[{"note":"","topic_key":"included cache","title":"Included cache","aliases":[],"operations":[{"op":"INCLUDE_ITEM","note":"N002","item":"I001"}]}]}`
+	if _, err := bindSynthesisOutput([]byte(draftRaw), draft, synthesisTestID(85), (&synthesisTestIDs{}).New); synthesisTestCode(err) != organizingapp.ErrorCodeSynthesisModelOutputInvalid {
+		t.Fatalf("draft include err=%v", err)
+	}
+	unopened := input
+	unopened.Sources = unopened.Sources[1:]
+	if err := unopened.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	raw := `{"notes":[{"note":"","topic_key":"included cache","title":"Included cache","aliases":[],"operations":[{"op":"INCLUDE_ITEM","note":"N001","item":"I001"}]}]}`
+	if _, err := bindSynthesisOutput([]byte(raw), unopened, synthesisTestID(84), (&synthesisTestIDs{}).New); synthesisTestCode(err) != organizingapp.ErrorCodeSynthesisModelOutputInvalid {
+		t.Fatalf("unopened include err=%v", err)
+	}
+}
+
+func synthesisDuplicateGenerationNote(t *testing.T, source organizingapp.SynthesisGenerationNote, base int) organizingapp.SynthesisGenerationNote {
+	t.Helper()
+	result := source
+	result.PublicationID = ""
+	result.Note.ID, result.Note.DocumentID, result.Note.CurrentRevisionID = synthesisTestID(base), synthesisTestID(base+1), synthesisTestID(base+2)
+	result.Revision.ID, result.Revision.NoteID, result.Revision.DocumentID = result.Note.CurrentRevisionID, result.Note.ID, result.Note.DocumentID
+	result.Revision.ArticleRevisionID = synthesisTestID(base + 3)
+	body, err := domain.RenderSynthesisMarkdown(result.Revision.WorkspaceID, result.Revision.NoteID, result.Revision.Title, result.Revision.Items)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result.Revision.ContentHash = synthesisHash([]byte(body))
+	hash, err := domain.ComputeSynthesisRevisionHash(result.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result.Revision.Hash = hash
+	return result
+}
+
 func TestSynthesisSemanticPlanChecksEveryAssertionAndExactSupport(t *testing.T) {
 	input, _, _ := synthesisFixtureWithNote(t)
 	raw := `{"notes":[{"note":"N001","operations":[
@@ -155,12 +272,34 @@ func TestSynthesisIncrementalModelKeepsExistingTextAndAddsOnlySource(t *testing.
 		t.Fatal(err)
 	}
 	before := input.Notes[0].Revision.Items
-	if !applied.Changed || applied.Items[0].ID != before[0].ID || applied.Items[0].Fact.Text != before[0].Fact.Text || len(applied.Items[0].Fact.Sources) != 2 ||
+	if applied.Changed || !applied.SourcesChanged || applied.Items[0].ID != before[0].ID || applied.Items[0].Fact.Text != before[0].Fact.Text || len(applied.Items[0].Fact.Sources) != 2 ||
 		!reflect.DeepEqual(applied.Items[1:], before[1:]) {
 		t.Fatal("incremental model result rewrote existing text or unrelated items")
 	}
 	if result.Notes[0].NoteID != input.Notes[0].Note.ID || result.Notes[0].BaseRevisionID != input.Notes[0].Revision.ID {
 		t.Fatal("existing note was not bound to its frozen base")
+	}
+}
+
+func TestSynthesisAnchoredNoteRejectsUnacceptedIncomingSpan(t *testing.T) {
+	input, _, _ := synthesisFixtureWithNote(t)
+	accepted := input.Sources[1].Reference
+	other := input.Sources[1]
+	other.Reference.SourceSpanID = synthesisTestID(70)
+	other.Text = "RAW-OTHER-SPAN: unrelated cache evidence"
+	other.Reference.ExcerptHash = synthesisHash([]byte(other.Text))
+	input.Sources = append(input.Sources, other)
+	input.Notes[0].Anchor = &organizingapp.SynthesisAnchorBinding{
+		AnchorID: synthesisTestID(60), ScopeVersion: 1,
+		Scope:          domain.AnchorScope{Topics: []string{"Redis"}, Audiences: []string{"Interview"}, Description: "Redis revision"},
+		AllowedSources: []domain.SynthesisSourceRef{accepted},
+	}
+	if err := input.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	raw := `{"notes":[{"note":"N001","operations":[{"op":"ADD_SUPPORT","target":"I001","alternative":null,"sources":["S003"]}]}]}`
+	if _, err := bindSynthesisOutput([]byte(raw), input, synthesisTestID(61), (&synthesisTestIDs{}).New); synthesisTestCode(err) != organizingapp.ErrorCodeSynthesisModelOutputInvalid {
+		t.Fatalf("anchored output cited unaccepted source: %v", err)
 	}
 }
 

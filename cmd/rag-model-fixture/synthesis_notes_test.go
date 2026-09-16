@@ -40,8 +40,11 @@ func TestFixtureSynthesisNotesUsesProductionHTTPAndPreservesInputLabels(t *testi
 	// Labels deliberately differ from the first generation. The fixture must
 	// follow the current request's frozen note, item and original-source labels.
 	note := synthesisTestNote([]string{"S002"}, false)
+	// 初始笔记发布后，生产流程会选择 v4 提示词和
+	// v2 输出 Schema，即使此夹具仅添加普通来源事实。
+	note["published"] = true
 	secondSources := []any{synthesisTestSource("S001", true, synthesisFixtureSecondSource), synthesisTestSource("S002", false, synthesisFixtureFirstSource)}
-	second := call(synthesisFixtureGenerateStage, map[string]any{"notes": []any{note}, "sources": secondSources})
+	second := call(synthesisFixtureBodyGenerateStage, map[string]any{"notes": []any{note}, "sources": secondSources})
 	secondNote := second["notes"].([]any)[0].(map[string]any)
 	operations = secondNote["operations"].([]any)
 	support := operations[0].(map[string]any)

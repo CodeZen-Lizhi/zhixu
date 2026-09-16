@@ -49,6 +49,7 @@ const runtimeFactOutput = `{"notes":[{"note":"","topic_key":"cache lifetime","ti
 const runtimeFactReview = `{"checks":[{"index":1,"verdict":"SUPPORTED","sources":[{"source":"S001","verdict":"SUPPORTED"}]}]}`
 const runtimeSupportOutput = `{"notes":[{"note":"N001","operations":[{"op":"ADD_SUPPORT","target":"I001","alternative":null,"sources":["S001"]}]}]}`
 const runtimeNoChangeReview = `{"checks":[{"index":1,"verdict":"SUPPORTED","sources":[]}]}`
+const runtimeFusionExpansionOutput = `{"notes":[{"note":"N001","operations":[{"op":"ADD_FACT","statement":{"text":"Cache expiry should be verified during Redis maintenance.","applicability":"","sources":["S001"]}}]}]}`
 
 func TestSynthesisExecutionSchema(t *testing.T) {
 	fixture := newSynthesisRuntimeDatabase(t)
@@ -78,6 +79,16 @@ func TestSynthesisSourceReadyRunsThroughRiver(t *testing.T) {
 	if err != nil || execution.Generation == nil || execution.Semantic == nil || !execution.Semantic.Semantic.Accepted || !bytes.Equal(execution.Generation.Output, []byte(raw)) {
 		t.Fatalf("accepted original bytes or independent review lost: err=%v", err)
 	}
+	if execution.Input.SemanticPromptVersion != organizingapp.SynthesisSourceIdentitySemanticPromptVersion || execution.Input.GenerationPromptVersion != organizingapp.SynthesisGenerationFormatLegacyPromptVersion {
+		t.Fatal("new prepare did not freeze semantic format version")
+	}
+	for _, version := range []string{"v1", "v5", "v6", "v7"} {
+		var matches bool
+		err := f.database.Raw(`SELECT organizing.synthesis_model_contract_matches(?,?,'VALIDATE','synthesis-semantic-review',?,'agent.synthesis-semantic-review','v1')`, string(f.workspace), string(processing.WorkflowRunID), version).Scan(&matches).Error
+		if err != nil || matches != (version == "v7") {
+			t.Fatalf("SQL version %s match=%t err=%v", version, matches, err)
+		}
+	}
 	if execution.Generation.ModelRunID == execution.Semantic.ModelRunID || execution.Generation.NodeAttemptID == execution.Semantic.NodeAttemptID {
 		t.Fatal("generation and semantic validation shared a recorded attempt")
 	}
@@ -104,31 +115,37 @@ func TestSynthesisSourceReadyRunsThroughRiver(t *testing.T) {
 		t.Fatalf("candidate publication=%+v err=%v", detail, err)
 	}
 	oldProposal := detail.Publication.ProposalID
-	second := f.source(t, "Second source: Entries expire after five minutes under the same conditions.")
+	second := f.source(t, "First source: Entries expire after five minutes. RAW-SOURCE-SENTINEL\nDifferent document context.", "First source: Entries expire after five minutes. RAW-SOURCE-SENTINEL")
 	third := f.source(t, "Third source repeats information already covered.")
 	batch, err := f.dispatcher.DispatchBatch(t.Context(), 10)
 	if err != nil || batch.Started < 1 || batch.Started > 2 || batch.Started+batch.Waiting != 2 {
 		t.Fatalf("two queued sources did not serialize: %+v %v", batch, err)
 	}
-	f.wait(t, second, organizingapp.SynthesisProcessingSucceeded)
+	f.wait(t, second, organizingapp.SynthesisProcessingNoChange)
 	if batch.Started == 1 {
 		f.dispatch(t, 1)
 	}
 	f.wait(t, third, organizingapp.SynthesisProcessingNoChange)
 	updated, err := f.notes.GetNote(t.Context(), f.workspace, old.Note.ID)
-	if err != nil || updated.CurrentRevision.RevisionNo != 2 || updated.CurrentRevision.Items[0].ID != old.Revision.Items[0].ID || updated.CurrentRevision.Items[0].Fact.Text != old.Revision.Items[0].Fact.Text || len(updated.CurrentRevision.Items[0].Fact.Sources) != 2 {
+	if err != nil || updated.CurrentRevision.RevisionNo != 1 || updated.CurrentRevision.Items[0].ID != old.Revision.Items[0].ID || updated.CurrentRevision.Items[0].Fact.Text != old.Revision.Items[0].Fact.Text || len(updated.CurrentRevision.Items[0].Fact.Sources) != 1 {
 		t.Fatalf("continuous update did not preserve the old item: %+v %v", updated, err)
 	}
 	var proposalStatus string
-	if err := f.database.Raw(`SELECT status FROM change_control.proposal WHERE id=?`, string(oldProposal)).Scan(&proposalStatus).Error; err != nil || proposalStatus != string(changecontroldomain.StatusNeedsRevision) {
-		t.Fatalf("superseded proposal status=%s err=%v", proposalStatus, err)
+	if err := f.database.Raw(`SELECT status FROM change_control.proposal WHERE id=?`, string(oldProposal)).Scan(&proposalStatus).Error; err != nil || proposalStatus != string(changecontroldomain.StatusReady) {
+		t.Fatalf("unchanged proposal status=%s err=%v", proposalStatus, err)
 	}
-	f.count(t, "organizing.synthesis_revision", 2)
+	f.count(t, "organizing.synthesis_revision", 1)
+	f.count(t, "organizing.synthesis_source_supplement", 1)
+	supplements, err := f.notes.ListSupplements(t.Context(), organizingapp.SynthesisSupplementListQuery{WorkspaceID: f.workspace, NoteID: old.Note.ID, Limit: 20})
+	if err != nil || len(supplements.Items) != 1 || supplements.Items[0].Reference.Source.SourceID != second.SourceID || supplements.Items[0].Reference.Source.SourceVersionID != second.SourceVersionID || supplements.Items[0].ItemID != old.Revision.Items[0].ID || updated.PublishedRevision != nil || updated.CurrentRevision.ContentHash != old.Revision.ContentHash {
+		t.Fatalf("identical text did not persist only the distinct source: %+v %v", supplements, err)
+	}
 	f.count(t, "organizing.synthesis_apply_receipt", 3)
-	f.count(t, "change_control.proposal", 2)
+	f.count(t, "change_control.proposal", 1)
 	f.count(t, "change_control.proposal_commit", 0)
 	f.count(t, "core.source_version", 3)
 	f.append(t, first)
+	f.append(t, second)
 	batch, err = f.dispatcher.DispatchBatch(t.Context(), 10)
 	if err != nil || batch.Started != 0 || batch.Claimed != 0 || f.provider.CallCount() != 6 {
 		t.Fatalf("source replay repeated work: %+v calls=%d err=%v", batch, f.provider.CallCount(), err)
@@ -145,6 +162,91 @@ func TestSynthesisSourceReadyRunsThroughRiver(t *testing.T) {
 	skipped := f.wait(t, derived, organizingapp.SynthesisProcessingSkipped)
 	if skipped.WorkflowRunID != "" || skipped.ModelRunID != "" {
 		t.Fatal("excluded source created execution or model work")
+	}
+}
+
+// 已评审关联创建第二个受约束的处理身份。此时原 source-ready 回执已经完成，因此该测试验证 PostgreSQL 队列、River 及终态迁移，不只是调度器模拟。
+func TestAcceptedAnchorFusionRunsThroughRiverWithoutReplayingSourceReady(t *testing.T) {
+	f := newSynthesisRuntimeFixture(t, runtimeFactOutput, runtimeFactReview, runtimeFusionExpansionOutput, runtimeFactReview)
+	source := f.source(t, "Redis source: Entries expire after five minutes.")
+	f.dispatch(t, 1)
+	original := f.wait(t, source, organizingapp.SynthesisProcessingSucceeded)
+	originalExecution, err := f.store.LoadSynthesisExecution(t.Context(), f.workspace, original.ID, original.WorkflowRunID)
+	if err != nil || originalExecution.Generation == nil || len(originalExecution.Input.Sources) != 1 {
+		t.Fatalf("original execution=%+v err=%v", originalExecution, err)
+	}
+	before, err := f.notes.ListCandidates(t.Context(), f.workspace)
+	if err != nil || len(before) != 1 {
+		t.Fatalf("initial candidate notes=%+v err=%v", before, err)
+	}
+	anchorStore, err := organizingpostgres.NewGORMAnchorStore(f.pool, f.sources, runtimeAnchorModelProof{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.anchors.reader = anchorStore
+	anchor, err := anchorStore.CreateAnchor(t.Context(), organizingapp.CreateAnchorCommand{
+		WorkspaceID: f.workspace, IdempotencyKey: "anchor-fusion-create", NoteID: before[0].Note.ID,
+		ExpectedNoteVersion: before[0].Note.Version, BasisRevisionID: before[0].Revision.ID,
+		Title: "Redis", Scope: organizingdomain.AnchorScope{Topics: []string{"Redis"}, Audiences: []string{"interview"}, Description: "Redis interview knowledge"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recommendation, err := anchorStore.RecordAnchorRecommendation(t.Context(), organizingapp.RecordAnchorRecommendation{
+		WorkspaceID: f.workspace, AnchorID: anchor.Anchor.ID, IdempotencyKey: "anchor-fusion-association", ExpectedScopeVersion: anchor.Anchor.ScopeVersion,
+		Kind: organizingdomain.AnchorSourceAssociation, Reason: "accepted Redis source span", Evidence: []organizingdomain.SynthesisSourceRef{originalExecution.Input.Sources[0]}, ModelRunID: originalExecution.Generation.ModelRunID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted, err := anchorStore.DecideAnchor(t.Context(), organizingapp.DecideAnchorCommand{
+		WorkspaceID: f.workspace, AnchorID: anchor.Anchor.ID, IdempotencyKey: "anchor-fusion-accept", Kind: organizingdomain.AnchorSourceAssociation,
+		ExpectedAnchorVersion: anchor.Anchor.Version, Decision: organizingdomain.AnchorAccepted,
+		Items: []organizingapp.AnchorDecisionItem{{ProposalID: recommendation.Proposal.ID, ExpectedVersion: recommendation.Proposal.Version}},
+	})
+	if err != nil || accepted.Replayed || len(accepted.Items) != 1 || accepted.Items[0].Status != organizingdomain.AnchorAccepted {
+		t.Fatalf("association acceptance=%+v err=%v", accepted, err)
+	}
+	requests, err := anchorStore.ListAnchorFusionRequests(t.Context(), f.workspace, anchor.Anchor.ID, 10)
+	if err != nil || len(requests) != 1 || requests[0].Status != "PENDING" || requests[0].SourceEvent.ID != original.SourceEvent.ID {
+		t.Fatalf("accepted request=%+v err=%v", requests, err)
+	}
+	fusion := &organizingworkflow.AnchorFusionDispatcher{UnitOfWork: f.uow, Requests: anchorStore, Processing: f.store, Sources: f.sources, Starter: f.runtime, Definitions: f.definitions, IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{}}
+	batch, err := fusion.DispatchBatch(t.Context(), 10)
+	if err != nil || batch.Started != 1 || batch.Claimed != 1 {
+		t.Fatalf("fusion dispatch=%+v err=%v", batch, err)
+	}
+	// 第二个消费者找不到 PENDING 请求，不得创建另一次运行。
+	replayedDispatch, err := fusion.DispatchBatch(t.Context(), 10)
+	if err != nil || replayedDispatch.Started != 0 || replayedDispatch.Claimed != 0 {
+		t.Fatalf("fusion duplicate dispatch=%+v err=%v", replayedDispatch, err)
+	}
+	dispatched, err := anchorStore.GetAnchorFusionRequest(t.Context(), f.workspace, requests[0].ID)
+	if err != nil || dispatched.Status != "DISPATCHED" || dispatched.ProcessingID == "" || dispatched.ProcessingID == original.ID {
+		t.Fatalf("dispatched request=%+v err=%v", dispatched, err)
+	}
+	fused := f.waitProcessing(t, dispatched.ProcessingID, organizingapp.SynthesisProcessingSucceeded)
+	frozenFusion, err := f.store.LoadSynthesisExecution(t.Context(), f.workspace, fused.ID, fused.WorkflowRunID)
+	if err != nil || frozenFusion.Input == nil || frozenFusion.Input.GenerationPromptVersion != organizingapp.SynthesisGenerationFormatFusionAnchoredPromptVersion || frozenFusion.Input.SemanticPromptVersion != organizingapp.SynthesisFusionExistingSemanticPromptVersion {
+		t.Fatalf("fusion contract not frozen: %v", err)
+	}
+	for _, version := range []string{"v2", "v7", "v8", "v11", "v12", "v13", "v14", "v15", "v16", "v17", "v18"} {
+		var matches bool
+		if err := f.database.Raw(`SELECT organizing.synthesis_model_contract_matches(?,?,'GENERATE','synthesis-delta',?,'agent.synthesis-delta','v1')`, string(f.workspace), string(fused.WorkflowRunID), version).Scan(&matches).Error; err != nil || matches != (version == "v17") {
+			t.Fatalf("fusion proof %s=%t: %v", version, matches, err)
+		}
+	}
+	fusedKey, fusedKeyErr := fused.SourceEvent.ProcessingKey()
+	originalKey, originalKeyErr := original.SourceEvent.ProcessingKey()
+	if fused.SourceEvent.Fusion == nil || fused.SourceEvent.Fusion.RequestID != dispatched.ID || fused.SourceEvent.Fusion.NoteID != before[0].Note.ID || fusedKeyErr != nil || originalKeyErr != nil || fusedKey == originalKey {
+		t.Fatalf("fusion processing did not retain an independent constrained identity: %+v", fused)
+	}
+	if f.provider.CallCount() != 4 || original.Status != organizingapp.SynthesisProcessingSucceeded {
+		t.Fatalf("old completed receipt was replayed or fusion did not run: calls=%d original=%+v", f.provider.CallCount(), original)
+	}
+	after, err := f.notes.ListCandidates(t.Context(), f.workspace)
+	if err != nil || len(after) != 1 || after[0].Note.ID != before[0].Note.ID || after[0].Revision.RevisionNo != 2 {
+		t.Fatalf("fusion updated an unintended candidate: before=%+v after=%+v err=%v", before, after, err)
 	}
 }
 
@@ -237,8 +339,13 @@ func TestSynthesisUnknownModelCommitBlocksPaidReplay(t *testing.T) {
 
 func newSynthesisRuntimeDatabase(t *testing.T) *testdb.Fixture {
 	t.Helper()
+	return newSynthesisRuntimeDatabaseAtVersion(t, 135)
+}
+
+func newSynthesisRuntimeDatabaseAtVersion(t *testing.T, version int64) *testdb.Fixture {
+	t.Helper()
 	return testdb.Require(t, testdb.Config{Availability: testdb.FailWhenUnavailable, MaxConns: 12, Migrate: func(ctx context.Context, pool *pgxpool.Pool) error {
-		if err := platformmigration.MigrateAtlasToVersion(ctx, pool, 96); err != nil {
+		if err := platformmigration.MigrateAtlasToVersion(ctx, pool, version); err != nil {
 			return err
 		}
 		migrator, err := riveradapter.NewMigrator(pool)
@@ -264,9 +371,13 @@ type synthesisRuntimeFixture struct {
 	model       *runtimeSwitchModel
 	publisher   *runtimePublisher
 	artifacts   *runtimeArtifacts
+	sources     *organizingowner.GORMSynthesisSourceReader
+	anchors     *runtimeAnchorAdmissions
 	notes       *organizingapp.SynthesisService
 	dispatcher  *organizingworkflow.SynthesisDispatcher
 	processing  *organizingworkflow.SynthesisProcessingService
+	runtime     *workflowpostgres.GORMRuntimeRepository
+	definitions *workflowapp.DefinitionRegistry
 	outbox      *workflowpostgres.GORMSourceReadyOutbox
 	coordinator *workflowapp.RuntimeCoordinator
 	executor    *organizingworkflow.SynthesisExecutor
@@ -279,7 +390,12 @@ func newSynthesisRuntimeFixture(t *testing.T, outputs ...string) *synthesisRunti
 
 func newSynthesisRuntimeFixtureWithWorker(t *testing.T, startWorker bool, outputs ...string) *synthesisRuntimeFixture {
 	t.Helper()
-	f := &synthesisRuntimeFixture{pool: newSynthesisRuntimeDatabase(t).Pool(), workspace: runtimeID(), artifacts: &runtimeArtifacts{values: make(map[foundation.ID]retrievalapp.EvidenceArtifact)}}
+	return newSynthesisRuntimeFixtureAtVersion(t, startWorker, 135, outputs...)
+}
+
+func newSynthesisRuntimeFixtureAtVersion(t *testing.T, startWorker bool, version int64, outputs ...string) *synthesisRuntimeFixture {
+	t.Helper()
+	f := &synthesisRuntimeFixture{pool: newSynthesisRuntimeDatabaseAtVersion(t, version).Pool(), workspace: runtimeID(), artifacts: &runtimeArtifacts{values: make(map[foundation.ID]retrievalapp.EvidenceArtifact)}}
 	var err error
 	f.database, err = f.pool.GORM()
 	if err != nil {
@@ -318,6 +434,7 @@ func newSynthesisRuntimeFixtureWithWorker(t *testing.T, startWorker bool, output
 	if err != nil {
 		t.Fatal(err)
 	}
+	f.sources = sources
 	authoring, err := authoringpostgres.NewGORMRepository(f.pool)
 	if err != nil {
 		t.Fatal(err)
@@ -330,7 +447,7 @@ func newSynthesisRuntimeFixtureWithWorker(t *testing.T, startWorker bool, output
 	if err != nil {
 		t.Fatal(err)
 	}
-	noteStore, err := organizingpostgres.NewGORMSynthesisStore(f.pool, organizingpostgres.SynthesisStoreDependencies{Authoring: authoring, Retirer: retirer, Sources: sources, Validated: f.store})
+	noteStore, err := organizingpostgres.NewGORMSynthesisStore(f.pool, organizingpostgres.SynthesisStoreDependencies{Authoring: authoring, Retirer: retirer, Sources: sources, Validated: f.store, Anchors: runtimeNoAnchorFence{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -379,7 +496,8 @@ func newSynthesisRuntimeFixtureWithWorker(t *testing.T, startWorker bool, output
 		t.Fatal(err)
 	}
 	f.model = &runtimeSwitchModel{ready: model, unavailable: organizingagent.NewUnavailableSynthesisModel()}
-	executor, err := organizingworkflow.NewSynthesisExecutor(organizingworkflow.SynthesisExecutorDependencies{Runs: runs, Store: f.store, Candidates: f.notes, Sources: sources, Model: f.model, Clock: foundation.SystemClock{}})
+	f.anchors = &runtimeAnchorAdmissions{}
+	executor, err := organizingworkflow.NewSynthesisExecutor(organizingworkflow.SynthesisExecutorDependencies{Runs: runs, Store: f.store, Candidates: f.notes, Sources: sources, Anchors: f.anchors, Model: f.model, Clock: foundation.SystemClock{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -412,6 +530,8 @@ func newSynthesisRuntimeFixtureWithWorker(t *testing.T, startWorker bool, output
 	if err := definitions.Freeze(); err != nil {
 		t.Fatal(err)
 	}
+	f.definitions = definitions
+	f.runtime = runtime
 	resolved, err := definitions.Resolve(organizingworkflow.SynthesisDefinitionKey, 1)
 	if err != nil || resolved.GraphHash != f.store.definitionHash {
 		t.Fatalf("store fence differs from canonical registry: %v", err)
@@ -469,11 +589,18 @@ func seedSynthesisRuntimeWorkspace(t *testing.T, database *gorm.DB, workspaceID 
 	}
 }
 
-func (f *synthesisRuntimeFixture) source(t *testing.T, content string) ingestiondomain.SourceReady {
+func (f *synthesisRuntimeFixture) source(t *testing.T, content string, excerpts ...string) ingestiondomain.SourceReady {
 	t.Helper()
 	ids := []foundation.ID{runtimeID(), runtimeID(), runtimeID(), runtimeID(), runtimeID(), runtimeID()}
 	at := time.Now().UTC().Add(-time.Second).Truncate(time.Microsecond)
 	hash := runtimeHash(content)
+	excerpt := content
+	if len(excerpts) == 1 {
+		excerpt = excerpts[0]
+		if !strings.HasPrefix(content, excerpt) {
+			t.Fatal("fixture excerpt must be original prefix bytes")
+		}
+	}
 	parserHash := runtimeHash("synthesis fixture parser")
 	rows := []struct {
 		query string
@@ -484,7 +611,7 @@ func (f *synthesisRuntimeFixture) source(t *testing.T, content string) ingestion
 		{`INSERT INTO core.source_version(id,source_id,workspace_id,content_artifact_id,content_hash,byte_size,mime_type,original_content_location,security_status,captured_at) VALUES(?,?,?,?,?,?,'text/markdown',?,'passed',?)`, []any{string(ids[1]), string(ids[0]), string(f.workspace), string(ids[2]), hash, len(content), string(ids[0]) + ".md", at}},
 		{`INSERT INTO ingestion.parse_projection(id,workspace_id,content_artifact_id,parser_id,parser_version,parser_config_hash,schema_version,normalized_content_hash,created_at) VALUES(?,?,?,'test-parser','v1',?,'v1',?,?)`, []any{string(ids[3]), string(f.workspace), string(ids[2]), parserHash, hash, at}},
 		{`INSERT INTO ingestion.source_version_projection(source_version_id,parse_projection_id,workspace_id,created_at) VALUES(?,?,?,?)`, []any{string(ids[1]), string(ids[3]), string(f.workspace), at}},
-		{`INSERT INTO ingestion.source_span(id,workspace_id,content_artifact_id,parse_projection_id,span_type,start_line,end_line,start_byte,end_byte,excerpt_hash,evidence_kind,derived_excerpt,parser_version,schema_version,created_at) VALUES(?,?,?,?,'paragraph',1,1,0,?,?,'raw_bytes','','v1','v1',?)`, []any{string(ids[4]), string(f.workspace), string(ids[2]), string(ids[3]), len(content), hash, at}},
+		{`INSERT INTO ingestion.source_span(id,workspace_id,content_artifact_id,parse_projection_id,span_type,start_line,end_line,start_byte,end_byte,excerpt_hash,evidence_kind,derived_excerpt,parser_version,schema_version,created_at) VALUES(?,?,?,?,'paragraph',1,1,0,?,?,'raw_bytes','','v1','v1',?)`, []any{string(ids[4]), string(f.workspace), string(ids[2]), string(ids[3]), len(excerpt), runtimeHash(excerpt), at}},
 		{`INSERT INTO ingestion.attempt(id,workspace_id,source_version_id,parse_projection_id,status,security_status,parser_id,parser_version,parser_config_hash,chunk_strategy_version,schema_version,idempotency_key,attempt_number,started_at,completed_at) VALUES(?,?,?,?,'chunked','passed','test-parser','v1',?,'v1','v1',?,1,?,?)`, []any{string(ids[5]), string(f.workspace), string(ids[1]), string(ids[3]), parserHash, string(ids[5]), at, at}},
 	}
 	for _, row := range rows {
@@ -554,6 +681,31 @@ func (f *synthesisRuntimeFixture) wait(t *testing.T, source ingestiondomain.Sour
 	}
 }
 
+func (f *synthesisRuntimeFixture) waitProcessing(t *testing.T, id foundation.ID, want organizingapp.SynthesisProcessingStatus) organizingapp.SynthesisProcessing {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 12*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		processing, err := f.store.GetSynthesisProcessing(ctx, f.workspace, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if processing.Status == want {
+			return processing
+		}
+		if processing.Status != organizingapp.SynthesisProcessingPending && processing.Status != organizingapp.SynthesisProcessingRunning {
+			t.Fatalf("fusion processing terminal=%s expected=%s failure=%+v", processing.Status, want, processing.Failure)
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("fusion processing did not finish: %+v", processing)
+		case <-ticker.C:
+		}
+	}
+}
+
 func (f *synthesisRuntimeFixture) count(t *testing.T, table string, expected int64) {
 	t.Helper()
 	var count int64
@@ -565,6 +717,23 @@ func (f *synthesisRuntimeFixture) count(t *testing.T, table string, expected int
 type runtimeArtifacts struct {
 	mu     sync.Mutex
 	values map[foundation.ID]retrievalapp.EvidenceArtifact
+}
+
+type runtimeAnchorModelProof struct{}
+
+func (runtimeAnchorModelProof) VerifyAnchorRecommendationScoped(context.Context, foundation.TransactionScope, organizingdomain.Anchor, organizingapp.RecordAnchorRecommendation) error {
+	return nil
+}
+
+type runtimeAnchorAdmissions struct {
+	reader organizingapp.SynthesisAnchorAdmissionReader
+}
+
+func (r *runtimeAnchorAdmissions) ReadSynthesisAnchorAdmission(ctx context.Context, workspaceID, noteID foundation.ID, source organizingdomain.SynthesisSourceVersion) (organizingapp.SynthesisAnchorAdmission, error) {
+	if r.reader == nil {
+		return organizingapp.SynthesisAnchorAdmission{}, nil
+	}
+	return r.reader.ReadSynthesisAnchorAdmission(ctx, workspaceID, noteID, source)
 }
 
 func (a *runtimeArtifacts) ReadEvidenceArtifact(_ context.Context, workspaceID, versionID foundation.ID) (retrievalapp.EvidenceArtifact, error) {
@@ -588,6 +757,12 @@ func (runtimeTargets) EnsureTargetAbsent(context.Context, foundation.ID, string,
 }
 func (runtimeTargets) CaptureApprovalSnapshot(context.Context, foundation.ID) (changecontroldomain.GitSnapshot, error) {
 	return changecontroldomain.GitSnapshot{}, errors.New("fixture does not approve candidates")
+}
+
+type runtimeNoAnchorFence struct{}
+
+func (runtimeNoAnchorFence) VerifySynthesisAnchorAdmissionScoped(context.Context, foundation.TransactionScope, foundation.ID, foundation.ID, organizingdomain.SynthesisSourceVersion, *organizingapp.SynthesisAnchorBinding) error {
+	return nil
 }
 
 type runtimeModelStore struct {
@@ -650,4 +825,337 @@ func runtimeID() foundation.ID {
 func runtimeHash(text string) string {
 	sum := sha256.Sum256([]byte(text))
 	return hex.EncodeToString(sum[:])
+}
+
+// 升级前冻结历史结构；前向迁移后直接应用其真实 READY ModelRun/Call 证明，不再调用模型。
+func TestSynthesisSemanticFormatForwardMigrationKeepsLegacyProof(t *testing.T) {
+	f := newSynthesisRuntimeFixtureAtVersion(t, false, 132, runtimeFactOutput, runtimeFactReview)
+	f.source(t, "Entries expire after five minutes.")
+	f.dispatch(t, 1)
+	prepare, binding := f.claimNode(t, organizingworkflow.SynthesisPrepareNodeKind, 1)
+	start, err := organizingworkflow.DecodeSynthesisStartInput(prepare.Run.Input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	execution, err := f.store.LoadSynthesisExecution(t.Context(), f.workspace, start.ProcessingID, prepare.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sources, err := f.sources.ReadSynthesisSource(t.Context(), execution.Processing.SourceEvent.Source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frozen := organizingworkflow.SynthesisFrozenInput{GenerationPromptVersion: organizingapp.SynthesisSourceIdentityLegacyPromptVersion, SemanticPromptVersion: organizingapp.SynthesisSourceIdentitySemanticPromptVersion, ProcessingID: start.ProcessingID, WorkflowRunID: prepare.Run.ID, SourceEvent: execution.Processing.SourceEvent, Notes: []organizingworkflow.SynthesisFrozenNote{}, Sources: []organizingdomain.SynthesisSourceRef{sources[0].Reference}}
+	frozen.RequestHash, err = frozen.ComputeHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.FreezeSynthesisInput(t.Context(), synthesisRuntimeExecution(prepare), frozen); err != nil {
+		t.Fatal(err)
+	}
+	result, err := f.executor.Execute(t.Context(), synthesisRuntimeExecution(prepare))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.coordinator.Complete(t.Context(), workflowapp.CompleteDeliveryCommand{Binding: binding, Output: result.Output, OutputSchemaVersion: organizingworkflow.SynthesisOutputSchemaVersion}); err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []string{organizingworkflow.SynthesisGenerateNodeKind, organizingworkflow.SynthesisValidateNodeKind} {
+		claim, binding := f.claimNode(t, kind, 1)
+		result, err := f.executor.Execute(t.Context(), synthesisRuntimeExecution(claim))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// 在原始有效尝试中重放 READY 时，不得调用提供方。
+		if _, err := f.executor.Execute(t.Context(), synthesisRuntimeExecution(claim)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.coordinator.Complete(t.Context(), workflowapp.CompleteDeliveryCommand{Binding: binding, Output: result.Output, OutputSchemaVersion: organizingworkflow.SynthesisOutputSchemaVersion}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var before string
+	if err := f.database.Raw(`SELECT input_document::text FROM organizing.synthesis_execution WHERE workflow_run_id=?`, string(prepare.Run.ID)).Scan(&before).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := platformmigration.MigrateAtlasToVersion(t.Context(), f.pool.DB(), 134); err != nil {
+		t.Fatal(err)
+	}
+	var after string
+	if err := f.database.Raw(`SELECT input_document::text FROM organizing.synthesis_execution WHERE workflow_run_id=?`, string(prepare.Run.ID)).Scan(&after).Error; err != nil {
+		t.Fatal(err)
+	}
+	if before != after {
+		t.Fatal("migration rewrote legacy frozen input")
+	}
+	for _, version := range []string{"v1", "v6", "v7"} {
+		var matches bool
+		if err := f.database.Raw(`SELECT organizing.synthesis_model_contract_matches(?,?,'VALIDATE','synthesis-semantic-review',?,'agent.synthesis-semantic-review','v1')`, string(f.workspace), string(prepare.Run.ID), version).Scan(&matches).Error; err != nil || matches != (version == "v7") {
+			t.Fatalf("legacy SQL proof %s=%t: %v", version, matches, err)
+		}
+	}
+	claim, binding := f.claimNode(t, organizingworkflow.SynthesisApplyNodeKind, 1)
+	result, err = f.executor.Execute(t.Context(), synthesisRuntimeExecution(claim))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.coordinator.Complete(t.Context(), workflowapp.CompleteDeliveryCommand{Binding: binding, Output: result.Output, OutputSchemaVersion: organizingworkflow.SynthesisOutputSchemaVersion}); err != nil {
+		t.Fatal(err)
+	}
+	if f.provider.CallCount() != 2 {
+		t.Fatal("upgrade caused another paid invocation")
+	}
+	f.count(t, "organizing.synthesis_apply_receipt", 1)
+	f.count(t, "agent.model_run", 2)
+}
+
+func TestSynthesisSemanticFormatSQLRejectsForgedFrozenVersions(t *testing.T) {
+	f := newSynthesisRuntimeFixtureWithWorker(t, false)
+	f.source(t, "Entries expire after five minutes.")
+	f.dispatch(t, 1)
+	prepare, _ := f.claimNode(t, organizingworkflow.SynthesisPrepareNodeKind, 1)
+	start, err := organizingworkflow.DecodeSynthesisStartInput(prepare.Run.Input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	execution, err := f.store.LoadSynthesisExecution(t.Context(), f.workspace, start.ProcessingID, prepare.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sources, err := f.sources.ReadSynthesisSource(t.Context(), execution.Processing.SourceEvent.Source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frozen := organizingworkflow.SynthesisFrozenInput{ProcessingID: start.ProcessingID, WorkflowRunID: prepare.Run.ID, SourceEvent: execution.Processing.SourceEvent, Notes: []organizingworkflow.SynthesisFrozenNote{}, Sources: []organizingdomain.SynthesisSourceRef{sources[0].Reference}}
+	frozen.RequestHash, _ = frozen.ComputeHash()
+	raw, _ := json.Marshal(frozen)
+	var document map[string]any
+	if err := json.Unmarshal(raw, &document); err != nil {
+		t.Fatal(err)
+	}
+	type trial struct {
+		generation, semantic       any
+		original, generate, review string
+	}
+	trials := []trial{
+		{"", "", "v1", "v1", "v1"}, {"", "v6", "v1", "v1", "v6"},
+		{"v7", "v7", "v1", "v7", "v7"}, {"v8", "v7", "v2", "v8", "v7"}, {"v10", "v7", "v4", "v10", "v7"},
+		{"v13", "v7", "v1", "v13", "v7"}, {"v14", "v7", "v2", "v14", "v7"}, {"v16", "v7", "v4", "v16", "v7"},
+	}
+	for _, field := range []string{"generation", "semantic"} {
+		for _, value := range []any{"", "v5", "v6", "v8", "v9", "v10", "v11", "v12", "v14", "v15", "v16", "v17", "v18", nil, 7, map[string]any{"version": "v7"}} {
+			if field == "generation" {
+				trials = append(trials, trial{value, "v7", "v1", "", ""})
+			} else {
+				trials = append(trials, trial{"v7", value, "v1", "", ""})
+			}
+		}
+	}
+	for _, trial := range trials {
+		document["generation_prompt_version"], document["semantic_prompt_version"] = trial.generation, trial.semantic
+		document["notes"] = []any{}
+		delete(document, "goal")
+		switch trial.original {
+		case "v2":
+			document["notes"] = []any{map[string]any{"anchor": map[string]any{}}}
+		case "v3":
+			document["goal"] = map[string]any{}
+		case "v4":
+			document["notes"] = []any{map[string]any{"publication_id": string(runtimeID())}}
+		}
+		encoded, err := json.Marshal(document)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// 从未冻结行开始并回滚；绝不改写不可变输入。
+		tx := f.database.Begin()
+		if tx.Error != nil {
+			t.Fatal(tx.Error)
+		}
+		if err := tx.Exec(`UPDATE organizing.synthesis_execution SET input_document=?::jsonb,input_hash=?,version=version+1,updated_at=clock_timestamp() WHERE workflow_run_id=?`, string(encoded), frozen.RequestHash, string(prepare.Run.ID)).Error; err != nil {
+			tx.Rollback()
+			t.Fatal(err)
+		}
+		for _, stage := range []string{"GENERATE", "VALIDATE"} {
+			prompt, schema, expected := "synthesis-delta", "agent.synthesis-delta", trial.generate
+			if stage == "VALIDATE" {
+				prompt, schema, expected = "synthesis-semantic-review", "agent.synthesis-semantic-review", trial.review
+			}
+			for _, version := range []string{"v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10", "v11", "v12", "v13", "v14", "v15", "v16", "v17", "v18"} {
+				for _, schemaVersion := range []string{"v1", "v2", "v3"} {
+					wantedSchema := "v1"
+					if stage == "GENERATE" && trial.original == "v4" {
+						wantedSchema = "v2"
+					}
+					want := version == expected && schemaVersion == wantedSchema
+					var matches bool
+					err := tx.Raw(`SELECT organizing.synthesis_model_contract_matches(?,?,?,?,?,?,?)`, string(f.workspace), string(prepare.Run.ID), stage, prompt, version, schema, schemaVersion).Scan(&matches).Error
+					if err != nil || matches != want {
+						tx.Rollback()
+						t.Fatalf("trial=%+v stage=%s prompt=%s schema=%s match=%t want=%t: %v", trial, stage, version, schemaVersion, matches, want, err)
+					}
+				}
+			}
+		}
+		if err := tx.Rollback().Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if f.provider.CallCount() != 0 {
+		t.Fatal("SQL contract test called provider")
+	}
+}
+
+func TestSynthesisFusionExistingForwardMigrationKeepsSemantic8Proof(t *testing.T) {
+	f := newSynthesisRuntimeFixtureAtVersion(t, false, 134, runtimeFactOutput, runtimeFactReview, runtimeFusionExpansionOutput, runtimeFactReview)
+
+	advance := func(kinds ...string) {
+		for _, kind := range kinds {
+			claim, binding := f.claimNode(t, kind, 1)
+			result, err := f.executor.Execute(t.Context(), synthesisRuntimeExecution(claim))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.executor.Execute(t.Context(), synthesisRuntimeExecution(claim)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.coordinator.Complete(t.Context(), workflowapp.CompleteDeliveryCommand{Binding: binding, Output: result.Output, OutputSchemaVersion: organizingworkflow.SynthesisOutputSchemaVersion}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	source := f.source(t, "Redis source: Entries expire after five minutes.")
+	f.dispatch(t, 1)
+	advance(organizingworkflow.SynthesisPrepareNodeKind, organizingworkflow.SynthesisGenerateNodeKind, organizingworkflow.SynthesisValidateNodeKind, organizingworkflow.SynthesisApplyNodeKind)
+	original := f.wait(t, source, organizingapp.SynthesisProcessingSucceeded)
+	originalExecution, err := f.store.LoadSynthesisExecution(t.Context(), f.workspace, original.ID, original.WorkflowRunID)
+	if err != nil || originalExecution.Generation == nil || len(originalExecution.Input.Sources) != 1 {
+		t.Fatalf("original execution=%+v err=%v", originalExecution, err)
+	}
+	before, err := f.notes.ListCandidates(t.Context(), f.workspace)
+	if err != nil || len(before) != 1 {
+		t.Fatalf("initial candidate notes=%+v err=%v", before, err)
+	}
+	anchorStore, err := organizingpostgres.NewGORMAnchorStore(f.pool, f.sources, runtimeAnchorModelProof{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.anchors.reader = anchorStore
+	anchor, err := anchorStore.CreateAnchor(t.Context(), organizingapp.CreateAnchorCommand{
+		WorkspaceID: f.workspace, IdempotencyKey: "anchor-fusion-create", NoteID: before[0].Note.ID,
+		ExpectedNoteVersion: before[0].Note.Version, BasisRevisionID: before[0].Revision.ID,
+		Title: "Redis", Scope: organizingdomain.AnchorScope{Topics: []string{"Redis"}, Audiences: []string{"interview"}, Description: "Redis interview knowledge"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recommendation, err := anchorStore.RecordAnchorRecommendation(t.Context(), organizingapp.RecordAnchorRecommendation{
+		WorkspaceID: f.workspace, AnchorID: anchor.Anchor.ID, IdempotencyKey: "anchor-fusion-association", ExpectedScopeVersion: anchor.Anchor.ScopeVersion,
+		Kind: organizingdomain.AnchorSourceAssociation, Reason: "accepted Redis source span", Evidence: []organizingdomain.SynthesisSourceRef{originalExecution.Input.Sources[0]}, ModelRunID: originalExecution.Generation.ModelRunID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted, err := anchorStore.DecideAnchor(t.Context(), organizingapp.DecideAnchorCommand{
+		WorkspaceID: f.workspace, AnchorID: anchor.Anchor.ID, IdempotencyKey: "anchor-fusion-accept", Kind: organizingdomain.AnchorSourceAssociation,
+		ExpectedAnchorVersion: anchor.Anchor.Version, Decision: organizingdomain.AnchorAccepted,
+		Items: []organizingapp.AnchorDecisionItem{{ProposalID: recommendation.Proposal.ID, ExpectedVersion: recommendation.Proposal.Version}},
+	})
+	if err != nil || accepted.Replayed || len(accepted.Items) != 1 || accepted.Items[0].Status != organizingdomain.AnchorAccepted {
+		t.Fatalf("association acceptance=%+v err=%v", accepted, err)
+	}
+	requests, err := anchorStore.ListAnchorFusionRequests(t.Context(), f.workspace, anchor.Anchor.ID, 10)
+	if err != nil || len(requests) != 1 || requests[0].Status != "PENDING" || requests[0].SourceEvent.ID != original.SourceEvent.ID {
+		t.Fatalf("accepted request=%+v err=%v", requests, err)
+	}
+	fusion := &organizingworkflow.AnchorFusionDispatcher{UnitOfWork: f.uow, Requests: anchorStore, Processing: f.store, Sources: f.sources, Starter: f.runtime, Definitions: f.definitions, IDs: foundation.NewUUIDGenerator(nil), Clock: foundation.SystemClock{}}
+	batch, err := fusion.DispatchBatch(t.Context(), 10)
+	if err != nil || batch.Started != 1 || batch.Claimed != 1 {
+		t.Fatalf("fusion dispatch=%+v err=%v", batch, err)
+	}
+	// 第二个消费者找不到 PENDING 请求，不得创建另一次运行。
+	replayedDispatch, err := fusion.DispatchBatch(t.Context(), 10)
+	if err != nil || replayedDispatch.Started != 0 || replayedDispatch.Claimed != 0 {
+		t.Fatalf("fusion duplicate dispatch=%+v err=%v", replayedDispatch, err)
+	}
+	dispatched, err := anchorStore.GetAnchorFusionRequest(t.Context(), f.workspace, requests[0].ID)
+	if err != nil || dispatched.Status != "DISPATCHED" || dispatched.ProcessingID == "" || dispatched.ProcessingID == original.ID {
+		t.Fatalf("dispatched request=%+v err=%v", dispatched, err)
+	}
+
+	prepare, binding := f.claimNode(t, organizingworkflow.SynthesisPrepareNodeKind, 1)
+	start, err := organizingworkflow.DecodeSynthesisStartInput(prepare.Run.Input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	execution, err := f.store.LoadSynthesisExecution(t.Context(), f.workspace, start.ProcessingID, prepare.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frozen := organizingworkflow.SynthesisFrozenInput{
+		GenerationPromptVersion: organizingapp.SynthesisGenerationFormatFusionAnchoredPromptVersion,
+		SemanticPromptVersion:   organizingapp.SynthesisFusionSemanticPromptVersion,
+		ProcessingID:            start.ProcessingID, WorkflowRunID: prepare.Run.ID, SourceEvent: execution.Processing.SourceEvent,
+		Notes: []organizingworkflow.SynthesisFrozenNote{{Note: before[0].Note, RevisionID: before[0].Revision.ID, RevisionHash: before[0].Revision.Hash,
+			Anchor: &organizingapp.SynthesisAnchorBinding{AnchorID: anchor.Anchor.ID, ScopeVersion: anchor.Anchor.ScopeVersion, Scope: anchor.Anchor.Scope, AllowedSources: execution.Processing.SourceEvent.Fusion.AllowedSources}}},
+		Sources: originalExecution.Input.Sources,
+	}
+	frozen.RequestHash, err = frozen.ComputeHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.FreezeSynthesisInput(t.Context(), synthesisRuntimeExecution(prepare), frozen); err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := f.executor.Execute(t.Context(), synthesisRuntimeExecution(prepare))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.coordinator.Complete(t.Context(), workflowapp.CompleteDeliveryCommand{Binding: binding, Output: prepared.Output, OutputSchemaVersion: organizingworkflow.SynthesisOutputSchemaVersion}); err != nil {
+		t.Fatal(err)
+	}
+	advance(organizingworkflow.SynthesisGenerateNodeKind, organizingworkflow.SynthesisValidateNodeKind)
+	var beforeDocument string
+	if err := f.database.Raw(`SELECT input_document::text FROM organizing.synthesis_execution WHERE workflow_run_id=?`, string(prepare.Run.ID)).Scan(&beforeDocument).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := platformmigration.MigrateAtlasToVersion(t.Context(), f.pool.DB(), 135); err != nil {
+		t.Fatal(err)
+	}
+	var afterDocument string
+	if err := f.database.Raw(`SELECT input_document::text FROM organizing.synthesis_execution WHERE workflow_run_id=?`, string(prepare.Run.ID)).Scan(&afterDocument).Error; err != nil || beforeDocument != afterDocument {
+		t.Fatalf("migration changed frozen input: %v", err)
+	}
+	for _, version := range []string{"v7", "v8", "v9"} {
+		var matches bool
+		err := f.database.Raw(`SELECT organizing.synthesis_model_contract_matches(?,?,'VALIDATE','synthesis-semantic-review',?,'agent.synthesis-semantic-review','v1')`, string(f.workspace), string(prepare.Run.ID), version).Scan(&matches).Error
+		if err != nil || matches != (version == "v8") {
+			t.Fatalf("legacy semantic proof %s=%t: %v", version, matches, err)
+		}
+	}
+	advance(organizingworkflow.SynthesisApplyNodeKind)
+	fused := f.waitProcessing(t, dispatched.ProcessingID, organizingapp.SynthesisProcessingSucceeded)
+	frozenFusion, err := f.store.LoadSynthesisExecution(t.Context(), f.workspace, fused.ID, fused.WorkflowRunID)
+	if err != nil || frozenFusion.Input == nil || frozenFusion.Input.GenerationPromptVersion != organizingapp.SynthesisGenerationFormatFusionAnchoredPromptVersion || frozenFusion.Input.SemanticPromptVersion != organizingapp.SynthesisFusionSemanticPromptVersion {
+		t.Fatalf("fusion contract not frozen: %v", err)
+	}
+	for _, version := range []string{"v2", "v7", "v8", "v11", "v12", "v13", "v14", "v15", "v16", "v17", "v18"} {
+		var matches bool
+		if err := f.database.Raw(`SELECT organizing.synthesis_model_contract_matches(?,?,'GENERATE','synthesis-delta',?,'agent.synthesis-delta','v1')`, string(f.workspace), string(fused.WorkflowRunID), version).Scan(&matches).Error; err != nil || matches != (version == "v17") {
+			t.Fatalf("fusion proof %s=%t: %v", version, matches, err)
+		}
+	}
+	fusedKey, fusedKeyErr := fused.SourceEvent.ProcessingKey()
+	originalKey, originalKeyErr := original.SourceEvent.ProcessingKey()
+	if fused.SourceEvent.Fusion == nil || fused.SourceEvent.Fusion.RequestID != dispatched.ID || fused.SourceEvent.Fusion.NoteID != before[0].Note.ID || fusedKeyErr != nil || originalKeyErr != nil || fusedKey == originalKey {
+		t.Fatalf("fusion processing did not retain an independent constrained identity: %+v", fused)
+	}
+	if f.provider.CallCount() != 4 || original.Status != organizingapp.SynthesisProcessingSucceeded {
+		t.Fatalf("old completed receipt was replayed or fusion did not run: calls=%d original=%+v", f.provider.CallCount(), original)
+	}
+	after, err := f.notes.ListCandidates(t.Context(), f.workspace)
+	if err != nil || len(after) != 1 || after[0].Note.ID != before[0].Note.ID || after[0].Revision.RevisionNo != 2 {
+		t.Fatalf("fusion updated an unintended candidate: before=%+v after=%+v err=%v", before, after, err)
+	}
 }

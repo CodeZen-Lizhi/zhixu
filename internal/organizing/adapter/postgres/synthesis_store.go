@@ -27,10 +27,12 @@ type SynthesisGeneratedAuthoring interface {
 }
 
 type SynthesisStoreDependencies struct {
-	Authoring SynthesisGeneratedAuthoring
-	Retirer   authoringapp.GeneratedProposalRetirer
-	Sources   organizingapp.SynthesisSourceFence
-	Validated organizingapp.SynthesisValidatedGenerationFence
+	Manuscripts *GORMSynthesisManuscriptStore
+	Authoring   SynthesisGeneratedAuthoring
+	Retirer     authoringapp.GeneratedProposalRetirer
+	Sources     organizingapp.SynthesisSourceFence
+	Validated   organizingapp.SynthesisValidatedGenerationFence
+	Anchors     organizingapp.SynthesisAnchorAdmissionFence
 }
 
 type GORMSynthesisStore struct {
@@ -101,6 +103,9 @@ func (store *GORMSynthesisStore) ApplySynthesisGeneration(ctx context.Context, r
 	if err := generation.Validate(input); err != nil {
 		return organizingapp.SynthesisApplyResult{}, err
 	}
+	if err := organizingapp.ValidateSynthesisAnchorGeneration(input, generation); err != nil {
+		return organizingapp.SynthesisApplyResult{}, err
+	}
 	if len(record.Candidates) != len(generation.Notes) || record.AppliedAt.IsZero() {
 		return organizingapp.SynthesisApplyResult{}, invalid(errors.New("synthesis candidate allocations are incomplete"))
 	}
@@ -113,14 +118,19 @@ func (store *GORMSynthesisStore) ApplySynthesisGeneration(ctx context.Context, r
 			seenIDs[id] = true
 		}
 	}
-	processingKey, err := input.SourceEvent.ProcessingKey()
+	var goalID foundation.ID
+	if input.Goal != nil {
+		goalID = input.Goal.RequestID
+	}
+	var bodyRefreshID foundation.ID
+	if input.BodyRefresh != nil {
+		bodyRefreshID = input.BodyRefresh.Request.ID
+	}
+	processingKey, err := organizingapp.SynthesisExecutionKey(input.SourceEvent, goalID, bodyRefreshID)
 	if err != nil {
 		return organizingapp.SynthesisApplyResult{}, err
 	}
-	encoded, err := json.Marshal(struct {
-		Input      organizingapp.SynthesisGenerationInput
-		Generation organizingapp.SynthesisGenerationResult
-	}{input, generation})
+	encoded, err := synthesisApplyBinding(input, generation, record.Manuscripts)
 	if err != nil {
 		return organizingapp.SynthesisApplyResult{}, err
 	}
@@ -175,6 +185,22 @@ func (store *GORMSynthesisStore) ApplySynthesisGeneration(ctx context.Context, r
 		if err := store.dependencies.Validated.VerifyValidatedSynthesisGenerationScoped(ctx, scope, input, generation); err != nil {
 			return err
 		}
+		bindings := organizingapp.SynthesisBodyRefreshPublications(input.BodyRefresh)
+		for _, note := range input.Notes {
+			if note.PublicationID != "" {
+				bindings = append(bindings, organizingapp.SynthesisPublicationBinding{WorkspaceID: note.Note.WorkspaceID,
+					NoteID: note.Note.ID, RevisionID: note.Revision.ID, PublicationID: note.PublicationID, ProjectionHash: note.Revision.Hash})
+			}
+		}
+		if len(bindings) > 0 {
+			encoded, err := json.Marshal(bindings)
+			if err != nil {
+				return err
+			}
+			if err := tx.Exec(`SELECT organizing.verify_synthesis_published_bindings(?::jsonb)`, organizingJSONB(encoded)).Error; err != nil {
+				return err
+			}
+		}
 		refs := make([]domain.SynthesisSourceRef, len(input.Sources))
 		for i, source := range input.Sources {
 			refs[i] = source.Reference
@@ -182,8 +208,90 @@ func (store *GORMSynthesisStore) ApplySynthesisGeneration(ctx context.Context, r
 		if err := store.dependencies.Sources.VerifySynthesisSourcesScoped(ctx, scope, workspaceID, refs); err != nil {
 			return err
 		}
-		current := make(map[foundation.ID]organizingapp.SynthesisGenerationNote, len(input.Notes))
+		generatedExistingNotes := make(map[foundation.ID]bool)
+		if input.BodyRefresh != nil {
+			generatedExistingNotes[input.BodyRefresh.Request.NoteID] = true
+		}
+		for _, generated := range generation.Notes {
+			if generated.NoteID != "" {
+				generatedExistingNotes[generated.NoteID] = true
+			}
+		}
 		for _, candidate := range input.Notes {
+			if !generatedExistingNotes[candidate.Note.ID] {
+				continue
+			}
+			if isNilInterface(store.dependencies.Anchors) {
+				return synthesisUnavailable(errors.New("anchored synthesis admission fence is unavailable"))
+			}
+			if input.BodyRefresh != nil {
+				if candidate.Anchor == nil || candidate.Anchor.Validate(workspaceID) != nil || len(candidate.Anchor.AllowedSources) != len(refs) {
+					return organizingapp.AnchorConflict()
+				}
+				groups := make(map[domain.SynthesisSourceVersion][]domain.SynthesisSourceRef)
+				for _, ref := range refs {
+					groups[ref.Source] = append(groups[ref.Source], ref)
+				}
+				for source, evidence := range groups {
+					binding := *candidate.Anchor
+					binding.AllowedSources = evidence
+					if err := store.dependencies.Anchors.VerifySynthesisAnchorAdmissionScoped(ctx, scope, workspaceID, candidate.Note.ID, source, &binding); err != nil {
+						return err
+					}
+				}
+				continue
+			}
+			if err := store.dependencies.Anchors.VerifySynthesisAnchorAdmissionScoped(ctx, scope, workspaceID, candidate.Note.ID, input.SourceEvent.Source, candidate.Anchor); err != nil {
+				return err
+			}
+		}
+		if input.BodyRefresh != nil {
+			frozen := input.Notes[0]
+			stored, err := loadSynthesisNote(tx, workspaceID, frozen.Note.ID, true)
+			if err != nil {
+				return err
+			}
+			if stored.Version != frozen.Note.Version || stored.CurrentRevisionID != frozen.Revision.ID {
+				return synthesisConflict("body refresh target changed while model was running")
+			}
+			for _, item := range input.BodyRefresh.Items {
+				var supplements int64
+				if err := tx.Table("organizing.synthesis_source_supplement").Where("workspace_id=? AND note_id=? AND item_id=?", string(workspaceID), string(stored.ID), string(item.ItemID)).Count(&supplements).Error; err != nil {
+					return err
+				}
+				if supplements != 0 {
+					return synthesisConflict("body refresh target acquired local supplementary evidence")
+				}
+			}
+		}
+		current := make(map[foundation.ID]organizingapp.SynthesisGenerationNote, len(input.Notes))
+		var supplementIDs []string
+		for _, candidate := range input.Notes {
+			for _, supplement := range candidate.Supplements {
+				supplementIDs = append(supplementIDs, string(supplement.ID))
+			}
+		}
+		persisted := map[foundation.ID]organizingapp.SynthesisSourceSupplement{}
+		if len(supplementIDs) > 0 {
+			var rows []synthesisSupplementModel
+			if err := tx.Where("workspace_id=? AND id IN ?", string(workspaceID), supplementIDs).Find(&rows).Error; err != nil {
+				return err
+			}
+			for _, row := range rows {
+				value, err := row.value()
+				if err != nil {
+					return err
+				}
+				persisted[value.ID] = value
+			}
+		}
+		for _, candidate := range input.Notes {
+			for _, supplement := range candidate.Supplements {
+				stored, found := persisted[supplement.ID]
+				if !found || stored != supplement {
+					return synthesisConsistency("frozen supplement changed")
+				}
+			}
 			current[candidate.Note.ID] = candidate
 		}
 		for index, generated := range generation.Notes {
@@ -211,8 +319,19 @@ func (store *GORMSynthesisStore) ApplySynthesisGeneration(ctx context.Context, r
 				items = base.Revision.Items
 			}
 			delta, err := domain.ApplySynthesisDelta(workspaceID, items, generated.Delta, refs)
+			if store.dependencies.Manuscripts != nil && base != nil && base.Revision.Manuscript != nil {
+				// 准备阶段与应用内部使用完全相同的增量及审计来源校验，不受是否需要回执影响。
+				delta, err = organizingapp.SynthesisMachineDelta(input, generated, &base.Revision)
+			}
 			if err != nil {
 				return err
+			}
+			if base != nil && delta.SourcesChanged {
+				added, err := insertSynthesisSupplements(tx, base.Revision, delta.Items, input.ProcessingID, record.AppliedAt)
+				if err != nil {
+					return err
+				}
+				result.SourcesChanged = result.SourcesChanged || added
 			}
 			if !delta.Changed {
 				continue
@@ -233,7 +352,15 @@ func (store *GORMSynthesisStore) ApplySynthesisGeneration(ctx context.Context, r
 			return err
 		}
 		receipt = synthesisApplyModel{WorkspaceID: string(workspaceID), ProcessingID: string(input.ProcessingID), ProcessingKey: processingKey, SourceEventID: string(input.SourceEvent.ID), WorkflowRunID: string(input.WorkflowRunID), ModelRunID: string(generation.ModelRunID), RequestHash: input.RequestHash, OutputHash: generation.OutputHash, BindingHash: bindingHash, Changed: result.Changed, Result: organizingJSONB(encodedResult), CreatedAt: canonicalTime(record.AppliedAt)}
-		return tx.Create(&receipt).Error
+		if err := tx.Create(&receipt).Error; err != nil {
+			return err
+		}
+		for _, manuscript := range record.Manuscripts {
+			if err := tx.Exec(`INSERT INTO organizing.synthesis_manuscript_application(workspace_id,processing_id,note_id,receipt_id,receipt_hash,binding_hash) VALUES(?,?,?,?,?,?)`, string(workspaceID), string(input.ProcessingID), string(manuscript.NoteID), string(manuscript.ReceiptID), manuscript.ReceiptHash, bindingHash).Error; err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		return organizingapp.SynthesisApplyResult{}, err
@@ -251,6 +378,10 @@ func synthesisReplayConflict() error {
 
 func (store *GORMSynthesisStore) appendCandidate(ctx context.Context, scope foundation.TransactionScope, tx *gorm.DB, record organizingapp.SynthesisApplyRecord, index int, base *organizingapp.SynthesisGenerationNote, items []domain.SynthesisItem) (organizingapp.SynthesisPublicationCommand, error) {
 	input, generated, ids := record.Input, record.Generation.Notes[index], record.Candidates[index]
+	manuscript, err := store.manuscriptCandidate(ctx, scope, tx, record, index, base, items)
+	if err != nil {
+		return organizingapp.SynthesisPublicationCommand{}, err
+	}
 	workspaceID := input.SourceEvent.Source.WorkspaceID
 	at := canonicalTime(record.AppliedAt)
 	note := domain.SynthesisNote{ID: ids.NoteID, WorkspaceID: workspaceID, DocumentID: ids.DocumentID, TopicKey: generated.TopicKey, Title: generated.Title, Aliases: append([]string{}, generated.Aliases...), CurrentRevisionID: ids.RevisionID, Version: 1, Status: domain.SynthesisPendingApproval, WorkflowRunID: input.WorkflowRunID, CreatedAt: at, UpdatedAt: at}
@@ -313,7 +444,18 @@ func (store *GORMSynthesisStore) appendCandidate(ctx context.Context, scope foun
 		revision.RevisionNo = base.Revision.RevisionNo + 1
 		revision.ArticleRevisionNo = base.Revision.ArticleRevisionNo + 1
 	}
-	content, err := domain.RenderSynthesisMarkdown(workspaceID, note.ID, note.Title, items)
+	var content string
+	if manuscript != nil {
+		revision.RendererVersion = domain.SynthesisRendererVersionV2
+		revision.Manuscript = &manuscript.Manuscript
+		revision.Items, err = manuscript.Manuscript.TrustedItems(manuscript.Manuscript.Machine, store.dependencies.Manuscripts.dependencies.Mapper)
+		if err != nil {
+			return organizingapp.SynthesisPublicationCommand{}, err
+		}
+		content = manuscript.Manuscript.FullContent
+	} else {
+		content, err = domain.RenderSynthesisMarkdown(workspaceID, note.ID, note.Title, items)
+	}
 	if err != nil {
 		return organizingapp.SynthesisPublicationCommand{}, err
 	}
@@ -345,6 +487,9 @@ func (store *GORMSynthesisStore) appendCandidate(ctx context.Context, scope foun
 	row, err := synthesisRevisionRecord(revision)
 	if err != nil {
 		return organizingapp.SynthesisPublicationCommand{}, err
+	}
+	if manuscript != nil {
+		row.ManuscriptReceiptID = synthesisIDPointer(manuscript.ID)
 	}
 	if err := tx.Create(&row).Error; err != nil {
 		return organizingapp.SynthesisPublicationCommand{}, err

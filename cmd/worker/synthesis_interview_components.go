@@ -7,6 +7,7 @@ import (
 	agentworkflow "github.com/CodeZen-Lizhi/zhixu/internal/agent/adapter/workflow"
 	agentapplication "github.com/CodeZen-Lizhi/zhixu/internal/agent/application"
 	"github.com/CodeZen-Lizhi/zhixu/internal/foundation"
+	modelsettingsdomain "github.com/CodeZen-Lizhi/zhixu/internal/modelsettings/domain"
 	platformmodels "github.com/CodeZen-Lizhi/zhixu/internal/platform/models"
 	platformpostgres "github.com/CodeZen-Lizhi/zhixu/internal/platform/postgres"
 	interviewagent "github.com/CodeZen-Lizhi/zhixu/internal/review/interview/adapter/agent"
@@ -80,6 +81,7 @@ func newWorkerSynthesisInterviewComponents(
 	runs *workflowpostgres.GORMRepository,
 	agent agentWorkflowComponents,
 ) (workerSynthesisInterviewComponents, error) {
+	agent = agent.forFunction(modelsettingsdomain.ReasoningNoteInterview)
 	if !persistence.available() || runs == nil {
 		return workerSynthesisInterviewComponents{}, synthesisInterviewCompositionUnavailable("note interview executor dependencies are unavailable")
 	}

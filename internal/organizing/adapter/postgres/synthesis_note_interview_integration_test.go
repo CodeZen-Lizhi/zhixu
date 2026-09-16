@@ -231,7 +231,7 @@ func TestSynthesisNoteInterviewPostgreSQLPublishedLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	second := f.generation(t, 59000, []organizingapp.SynthesisGenerationNote{{Note: latest.Note, Revision: *latest.CurrentRevision}}, "Further support for the scheduler's responsibility.")
-	second.Generation.Notes = []organizingapp.SynthesisGeneratedNote{supportedSynthesisNote(latest, second.Input.Sources[0].Reference)}
+	second.Generation.Notes = []organizingapp.SynthesisGeneratedNote{extendedSynthesisNote(latest, second.Input.Sources[0].Reference)}
 	if _, err := f.service.ApplyGeneration(ctx, second.Input, second.Generation); err != nil {
 		t.Fatal(err)
 	}

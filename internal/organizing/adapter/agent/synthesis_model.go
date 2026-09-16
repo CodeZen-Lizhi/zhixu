@@ -35,8 +35,23 @@ func NewSynthesisModel(dependencies SynthesisModelDependencies) (*SynthesisModel
 	if _, err := agentapp.NewStructuredRunnerWithScheduler(dependencies.Model, dependencies.Catalog, dependencies.Budget, dependencies.Scheduler); err != nil {
 		return nil, err
 	}
-	for _, stage := range []organizingapp.SynthesisModelStage{organizingapp.SynthesisModelGenerate, organizingapp.SynthesisModelValidate} {
-		if _, err := dependencies.Catalog.Snapshot(synthesisPrompt(stage), synthesisSchema(stage), synthesisSchema(stage), dependencies.ProfileRef); err != nil {
+	for _, version := range []string{organizingapp.SynthesisLegacyPromptVersion, organizingapp.SynthesisAnchoredPromptVersion, organizingapp.SynthesisGoalPromptVersion, organizingapp.SynthesisBodyPromptVersion, organizingapp.SynthesisBodyRefreshPromptVersion} {
+		for _, stage := range []organizingapp.SynthesisModelStage{organizingapp.SynthesisModelGenerate, organizingapp.SynthesisModelValidate} {
+			schema := synthesisSchemaForPromptVersion(stage, version)
+			if _, err := dependencies.Catalog.Snapshot(synthesisPromptForVersion(stage, version), schema, schema, dependencies.ProfileRef); err != nil {
+				return nil, err
+			}
+		}
+	}
+	for _, version := range []string{organizingapp.SynthesisSourceIdentityLegacyPromptVersion, organizingapp.SynthesisSourceIdentityAnchoredPromptVersion, organizingapp.SynthesisSourceIdentityGoalPromptVersion, organizingapp.SynthesisSourceIdentityBodyPromptVersion, organizingapp.SynthesisFusionAnchoredPromptVersion, organizingapp.SynthesisFusionBodyPromptVersion, organizingapp.SynthesisGenerationFormatLegacyPromptVersion, organizingapp.SynthesisGenerationFormatAnchoredPromptVersion, organizingapp.SynthesisGenerationFormatGoalPromptVersion, organizingapp.SynthesisGenerationFormatBodyPromptVersion, organizingapp.SynthesisGenerationFormatFusionAnchoredPromptVersion, organizingapp.SynthesisGenerationFormatFusionBodyPromptVersion} {
+		schema := synthesisSchemaForPromptVersion(organizingapp.SynthesisModelGenerate, version)
+		if _, err := dependencies.Catalog.Snapshot(synthesisPromptForVersion(organizingapp.SynthesisModelGenerate, version), schema, schema, dependencies.ProfileRef); err != nil {
+			return nil, err
+		}
+	}
+	for _, version := range []string{organizingapp.SynthesisSemanticFormatPromptVersion, organizingapp.SynthesisSourceIdentitySemanticPromptVersion, organizingapp.SynthesisFusionSemanticPromptVersion, organizingapp.SynthesisFusionExistingSemanticPromptVersion} {
+		schema := synthesisSchema(organizingapp.SynthesisModelValidate)
+		if _, err := dependencies.Catalog.Snapshot(synthesisPromptForVersion(organizingapp.SynthesisModelValidate, version), schema, schema, dependencies.ProfileRef); err != nil {
 			return nil, err
 		}
 	}
@@ -144,6 +159,9 @@ func (model *SynthesisModel) execution(ctx context.Context, input organizingapp.
 	if err := input.Validate(); err != nil {
 		return workflowapp.ExecutionContext{}, err
 	}
+	if err := organizingapp.ValidateSynthesisSourceSupportCapacity(input); err != nil {
+		return workflowapp.ExecutionContext{}, err
+	}
 	execution, ok := ctx.Value(synthesisExecutionKey{}).(workflowapp.ExecutionContext)
 	if !ok || execution.WorkspaceID != input.SourceEvent.Source.WorkspaceID || execution.RunID != input.WorkflowRunID ||
 		!synthesisValidID(execution.NodeRunID) || !synthesisValidID(execution.NodeAttemptID) || execution.NodeRunID == execution.NodeAttemptID ||
@@ -168,7 +186,8 @@ func (model *SynthesisModel) invoke(ctx context.Context, execution workflowapp.E
 	} else if found {
 		return ready, model.verifyReady(ctx, ready, input, stage, execution.NodeRunID, requestHash, generationHash)
 	}
-	runtime, err := model.dependencies.Catalog.Snapshot(synthesisPrompt(stage), synthesisSchema(stage), synthesisSchema(stage), model.dependencies.ProfileRef)
+	schema := synthesisSchemaForInput(stage, input)
+	runtime, err := model.dependencies.Catalog.Snapshot(synthesisPrompt(stage, input), schema, schema, model.dependencies.ProfileRef)
 	if err != nil {
 		return organizingapp.SynthesisModelStepRecord{}, err
 	}
@@ -314,8 +333,8 @@ func (model *SynthesisModel) verifyReady(ctx context.Context, record organizinga
 	run := stored.Run
 	if agentdomain.ValidateModelRun(run) != nil || run.ID != record.ModelRunID || run.WorkspaceID != record.WorkspaceID || run.WorkflowRunID != record.WorkflowRunID ||
 		run.NodeRunID != record.NodeRunID || run.NodeAttemptID != record.NodeAttemptID || !sameSynthesisRevisionNumber(run.ModelSettingsRevision, record.ModelSettingsRevision) ||
-		run.Status != agentdomain.ModelRunSucceeded || run.FinalResultType != synthesisResultType(stage) || run.Prompt != synthesisPrompt(stage) ||
-		run.Schema != synthesisSchema(stage) || run.ReducedSchema != synthesisSchema(stage) || run.Retrieval.IsBound() || run.MemoryContext.IsBound() ||
+		run.Status != agentdomain.ModelRunSucceeded || run.FinalResultType != synthesisResultType(stage) || run.Prompt != synthesisPrompt(stage, input) ||
+		run.Schema != synthesisSchemaForInput(stage, input) || run.ReducedSchema != synthesisSchemaForInput(stage, input) || run.Retrieval.IsBound() || run.MemoryContext.IsBound() ||
 		len(stored.Calls) < 1 || len(stored.Calls) > agentapp.StructuredCallLimit {
 		return synthesisReplayUnsafe()
 	}
@@ -386,6 +405,105 @@ func (model *SynthesisModel) fail(ctx context.Context, record organizingapp.Synt
 // Provider input digest. Attempt IDs and live model settings are excluded so a
 // READY node can replay its original, audited result after transport recovery.
 func synthesisModelRequestHash(stage organizingapp.SynthesisModelStage, nodeID foundation.ID, input organizingapp.SynthesisGenerationInput, generated *organizingapp.SynthesisGenerationResult, payload []byte) (string, error) {
+	if !organizingapp.ValidSynthesisGenerationPromptContract(input) {
+		return "", synthesisContextInvalid()
+	}
+	legacyHash, err := synthesisLegacyModelRequestHash(stage, nodeID, input, generated, payload)
+	if err != nil {
+		return "", err
+	}
+	if stage == organizingapp.SynthesisModelGenerate {
+		if input.GenerationPromptVersion == "" {
+			return legacyHash, nil
+		}
+		encoded, err := json.Marshal(struct {
+			GenerationPromptVersion string `json:"generation_prompt_version"`
+			RequestHash             string `json:"request_hash"`
+		}{input.GenerationPromptVersion, legacyHash})
+		if err != nil {
+			return "", synthesisContextInvalid()
+		}
+		return synthesisHash(encoded), nil
+	}
+	if stage != organizingapp.SynthesisModelValidate || input.SemanticPromptVersion == "" {
+		return legacyHash, nil
+	}
+	encoded, err := json.Marshal(struct {
+		SemanticPromptVersion string `json:"semantic_prompt_version"`
+		RequestHash           string `json:"request_hash"`
+	}{input.SemanticPromptVersion, legacyHash})
+	if err != nil {
+		return "", synthesisContextInvalid()
+	}
+	return synthesisHash(encoded), nil
+}
+
+// 保持历史哈希封装的字节兼容，使已冻结的 v1–v5 运行仍可恢复。
+func synthesisLegacyModelRequestHash(stage organizingapp.SynthesisModelStage, nodeID foundation.ID, input organizingapp.SynthesisGenerationInput, generated *organizingapp.SynthesisGenerationResult, payload []byte) (string, error) {
+	if input.BodyRefresh != nil {
+		encoded, err := json.Marshal(struct {
+			Version      string
+			Stage        organizingapp.SynthesisModelStage
+			NodeID       foundation.ID
+			ProcessingID foundation.ID
+			RunID        foundation.ID
+			InputHash    string
+			Binding      *organizingapp.SynthesisBodyRefreshBinding
+			PayloadHash  string
+			Generated    *organizingapp.SynthesisGenerationResult
+		}{organizingapp.SynthesisBodyRefreshPromptVersion, stage, nodeID, input.ProcessingID, input.WorkflowRunID, input.RequestHash, input.BodyRefresh, synthesisHash(payload), generated})
+		if err != nil {
+			return "", synthesisContextInvalid()
+		}
+		return synthesisHash(encoded), nil
+	}
+
+	if synthesisPromptVersion(input) == organizingapp.SynthesisLegacyPromptVersion {
+		return synthesisModelRequestHashV1(stage, nodeID, input, generated, payload)
+	}
+	type candidateBinding struct {
+		PublicationID foundation.ID                             `json:"publication_id,omitempty"`
+		Note          domain.SynthesisNote                      `json:"note"`
+		RevisionID    foundation.ID                             `json:"revision_id"`
+		RevisionHash  string                                    `json:"revision_hash"`
+		Supplements   []organizingapp.SynthesisSourceSupplement `json:"supplements,omitempty"`
+		Anchor        *organizingapp.SynthesisAnchorBinding     `json:"anchor"`
+	}
+	candidates := make([]candidateBinding, len(input.Notes))
+	for index, note := range input.Notes {
+		candidates[index] = candidateBinding{PublicationID: note.PublicationID, Note: note.Note, RevisionID: note.Revision.ID, RevisionHash: note.Revision.Hash, Supplements: note.Supplements, Anchor: note.Anchor}
+	}
+	sources := make([]domain.SynthesisSourceRef, len(input.Sources))
+	for index, source := range input.Sources {
+		sources[index] = source.Reference
+	}
+	// v2/v3 使用相同的历史哈希封装版本。保留精确的 READY 身份；仅新引入的正文运行时使用 v4。
+	version := organizingapp.SynthesisAnchoredPromptVersion
+	if synthesisPromptVersion(input) == organizingapp.SynthesisBodyPromptVersion {
+		version = organizingapp.SynthesisBodyPromptVersion
+	}
+	value := struct {
+		Stage             organizingapp.SynthesisModelStage        `json:"stage"`
+		Version           string                                   `json:"version"`
+		ProcessingID      foundation.ID                            `json:"processing_id"`
+		SourceEvent       domain.SynthesisSourceReady              `json:"source_event"`
+		RunID             foundation.ID                            `json:"run_id"`
+		NodeID            foundation.ID                            `json:"node_id"`
+		InputRequestHash  string                                   `json:"input_request_hash"`
+		Candidates        []candidateBinding                       `json:"candidates"`
+		Sources           []domain.SynthesisSourceRef              `json:"sources"`
+		ProviderInputHash string                                   `json:"provider_input_hash"`
+		Generated         *organizingapp.SynthesisGenerationResult `json:"generated"`
+	}{stage, version, input.ProcessingID, input.SourceEvent, input.WorkflowRunID, nodeID, input.RequestHash, candidates, sources, synthesisHash(payload), generated}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return "", synthesisContextInvalid()
+	}
+	return synthesisHash(encoded), nil
+}
+
+// synthesisModelRequestHashV1 保持与原请求身份的字节兼容；即使 v2 在提供方契约中增加锚点范围，READY 的 v1 运行仍可重放。
+func synthesisModelRequestHashV1(stage organizingapp.SynthesisModelStage, nodeID foundation.ID, input organizingapp.SynthesisGenerationInput, generated *organizingapp.SynthesisGenerationResult, payload []byte) (string, error) {
 	type candidateBinding struct {
 		Note         domain.SynthesisNote `json:"note"`
 		RevisionID   foundation.ID        `json:"revision_id"`
