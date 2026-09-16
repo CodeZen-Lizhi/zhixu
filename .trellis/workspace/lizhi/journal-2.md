@@ -984,3 +984,393 @@ Eino/eino-ext 已成为生产唯一 AI Runtime，旧 direct 实现已删除并�
 ### Next Steps
 
 - M11 按原决定暂缓；后续如需实际 AI 生成，再处理有效额度与模型激活。
+
+
+## Session 84: 当前全文补源与恢复链路收口
+
+**Date**: 2026-09-15
+**Task**: 当前全文补源与恢复链路收口
+**Branch**: `dev`
+
+### Summary
+
+落实人工改写后由 AI 核对当前全文的补源要求；完成127恢复、共享证据、身份约束及HTTP/UI，真实浏览器丢响应后同键恢复通过。真实外部模型语义质量仍待可用配置，任务保持进行中。
+
+### Main Changes
+
+- 当前全文核验、独立重核/恢复与稳定的段落来源追溯；四项P2已修复。
+- 同步127正式schema、跨层spec、任务当前验收清单及上下文索引；未提交或发布。
+
+### Git Commits
+
+(No commits - planning session)
+
+### Testing
+
+- [OK] 真实PG/River/auth HTTP三场景、generated React两场景、实际Chromium请求丢响应与刷新重放全部通过。
+- [OK] 正式127空库迁移和另空库恢复、253条OpenAPI/generated一致、受影响Go vet/Web typecheck/ESLint及定向回归通过。
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- 先读research/remaining-acceptance.md；取得可用模型配置后核验真实语义质量，包含当前全文已否定旧结论的反例。
+
+
+## Session 85: 历史主笔记恢复与同正文发布收口
+
+**Date**: 2026-09-15
+**Task**: 历史主笔记恢复与同正文发布收口
+**Branch**: `dev`
+
+### Summary
+
+补齐原PRD历史版本重新发布；实际主笔记页面恢复中断后继续同候选提案、审批Git、刷新与来源读取通过。128正式迁移/Schema恢复通过；同正文历史发布已实现并实库通过，最终独立授权恢复窄审完成，未发现P1/P2。真实模型质量仍缺可用配置。
+
+### Main Changes
+
+- 128 HistoricalRepublish精确selected正文和来源/profile/body继承、parent当前L、整篇确认、可退役候选与无首次P/F支持
+- HTTP/generated/Web及原Begin/Apply跨刷新恢复，修复完整17字段Begin被16字段上限拒绝
+- 仅历史回执授权的同正文独立Git提交，精确receipt trailer及原执行重放
+
+### Git Commits
+
+(未提交；本轮为实施与验收)
+
+### Testing
+
+- [OK] 真实SynthesisNotePage/auth HTTP/PG/Git恢复与来源浏览器 PASS311.78s；390窄屏无溢出，临时入口和服务已清理
+- [OK] 最终128 SHA4501e97 正式空库迁移、schema导出/另库恢复及Atlas lint/validate通过
+- [OK] 独立无首次发布12.30s、普通Authoring7.37s与samebytes12.65s通过；core旧125及历史/同正文PG合跑50.531s，五包单测及vet通过
+
+### Status
+
+本轮实施与关键验证完成；整体任务仍 in_progress，真实模型质量验收待配置。
+
+### Next Steps
+
+- 同正文Git最终独立窄审已完成，无待修P1/P2；remaining-acceptance及历史恢复勾选已同步
+- 真实外部模型语义质量需可用连接配置，当前不得标整项需求完成或归档
+
+
+## Session 86: 模型思考强度设置与请求参数接通
+
+**Date**: 2026-09-16
+**Task**: 模型思考强度设置与请求参数接通
+**Branch**: `dev`
+
+### Summary
+
+加入统一Chat思考强度、不可变配置保存/应用传递、GPT-6请求兼容及00129迁移。实际PG/HTTP/React页面保存刷新与请求参数、旧数据升级和独立检查通过；无按任务自动覆盖。真实模型质量仍待可用配置，任务保持in_progress。
+
+### Main Changes
+
+- 模型默认及五档强度，前后端/数据库/运行时/OpenAPI同步
+
+### Git Commits
+
+(No commits - planning session)
+
+### Testing
+
+- [OK] 前端53项、typecheck/lint；后端定向测试/vet及API/Worker编译
+- [OK] 真实PG配置版本到生产连接探测8.545s；实际页面保存刷新383.428s；独立检查无P1/P2
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- 获取可用外部模型配置后继续真实模型语义质量验收
+
+
+## Session 87: 按功能思考强度与BGE向量模型接入
+
+**Date**: 2026-09-16
+**Task**: 按功能思考强度与BGE向量模型接入
+**Branch**: `dev`
+
+### Summary
+
+完成八功能强度覆盖与版本冻结、130迁移及真实页面保存验证；BGE-M3请求兼容修复和真实1024维调用通过，实际desired7已保存，尚未启用。聊天网关503阻塞真实语义验收。
+
+### Main Changes
+
+- 八个固定功能覆盖优先于全局；缺键继承、显式空字符串模型默认；结构化/工具/流式能力按revision冻结和复用。
+- BGE-M3省略不支持的dimensions请求参数，保留预期宽度校验；通过既有Session/CSRF API保存desired7并确认Chat草稿保留。
+
+### Git Commits
+
+(No commits - planning session)
+
+### Testing
+
+- [OK] 前端56测试/typecheck/lint；真实PG+HTTP+页面保存完整刷新240.54s；移动390无横向溢出。
+- [OK] 真实PG两代配置→Eino请求9.994s；真实Worker导入简介low/融合high16.862s；资源race、API/Worker编译、vet、130迁移/恢复、Atlas/OpenAPI通过。
+- [OK] BGE真实生产两条向量请求PASS，返回1024维；本地聊天网关最小请求503，语义验收未通过。
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- 本地运行服务仍旧版，active2全部关闭、desired7待应用；更新程序并启用BGE需确定部署范围，Chat草稿仍是此前Qwen，未改成Luna。
+- 本地聊天网关恢复后使用新artifact路径重跑有界真实全文复核与融合质量检查；主任务保持in_progress，不提交或归档。
+
+
+## Session 88: 模型配置增量独立复核与剩余验收校准
+
+**Date**: 2026-09-16
+**Task**: 模型配置增量独立复核与剩余验收校准
+**Branch**: `dev`
+
+### Summary
+
+独立审查分功能强度与BGE适配，无待修P1/P2；纠正设计和剩余验收文档的过期状态。聊天网关再次503，实际运行服务更新仍待确认。
+
+### Main Changes
+
+- 复核固定八功能三态、持久版本、构造/释放、初始与热重建接线、协议和UI一致性；未发现需修改的代码。
+- 更新任务design/remaining-acceptance，移除当前状态中缺配置及旧125待实现等过期结论，保留真实未验证范围。
+
+### Git Commits
+
+(No commits - planning session)
+
+### Testing
+
+- [OK] 独立review复用最终Go/Web/PG/Worker/race/schema/browser证据；本轮只复查相关文档diff和一次Chat最小请求，仍503。
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- 等待此前运行服务更新确认；聊天网关恢复后执行有界真实全文来源复核及融合质量检查。整体目标保持active/in_progress。
+
+
+## Session 89: 部署最新本地服务并启用 BGE，调研 Agent 协议兼容性
+
+**Date**: 2026-09-16
+**Task**: 部署最新本地服务并启用 BGE，调研 Agent 协议兼容性
+**Branch**: `dev`
+
+### Summary
+
+完成停写备份、正式 launcher 更新与 Schema 99→130；修复 BGE 精确域名容器出口，真实 Probe 418ms 和 API/Worker revision8 激活通过。调研 Chat/Responses、官方模型能力及开源 Agent 实践；仅记录建议，未扩展协议实现。Responses 网关最小调用仍返回502，主笔记语义质量待验收。
+
+### Main Changes
+
+- BGE-M3 1024维已在本地 API 与 Worker 同时生效，Chat保持disabled，旧revision7草稿保留历史
+- OrbStack只添加api.siliconflow.cn代理例外，保留auto，原值已私有备份
+- 记录框架、Provider、Luna/Astra协议差异及通用模型设置建议，不默认新增两种接口或自动探测
+
+### Git Commits
+
+(No commits - planning session)
+
+### Testing
+
+- [OK] 备份create/verify通过；当前Root19文件逐字节一致；8运行容器healthy、readyz200、Schema130
+- [OK] 生产Embedding Probe成功418ms；activation完成；新Session重新读取active/API/Worker均8且fresh、apply_required=false
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- 根据调研确定可用Chat接入或单独批准Responses适配；网关恢复后继续有界真实融合与全文补源质量验收
+
+
+## Session 90: 确认先用 Chat 并重测用户调整后的网关
+
+**Date**: 2026-09-16
+**Task**: 确认先用 Chat 并重测用户调整后的网关
+**Branch**: `dev`
+
+### Summary
+
+用户确认当前使用Chat Completions、Responses后续再接。网关模型列表200且列出gpt-5.6-luna；严格结构化、最小同步、最小流式Chat均503执行计划失败，未得到模型输出，未启动语义质量套件。BGE revision8保持已启用。
+
+### Git Commits
+
+(No commits - planning session)
+
+### Testing
+
+- [OK] 指定模型列表200；三种Chat生成请求均503，错误分别为同步/流式无法构建本地执行计划
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- 网关恢复指定模型Chat执行后，继续有界真实融合与全文补源质量验收
+
+
+## Session 91: DeepSeek 配置保存、探测修复与目录身份恢复边界
+
+**Date**: 2026-09-16
+**Task**: DeepSeek 配置保存、探测修复与目录身份恢复边界
+**Branch**: `dev`
+
+### Summary
+
+保存 desired 10：Shenwen deepseek-v4.1-flash，保留 BGE。修复默认推理模型 64 token 连接探测截断及安全错误诊断。真实全文补源两例通过；融合独立复核仍截断。正式服务升级构建完成，但工作区物理身份变化阻止启动；备份 19 文件字节一致，已询问用户是否重新绑定，未越过授权。
+
+### Git Commits
+
+(No commits - planning session)
+
+### Testing
+
+- [OK] 7 个 Adapter 定向测试、包级 vet 通过；更新后的离线 TestSynthesisLive 通过；真实全文补源 2 次调用通过并检查产物。
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- 用户确认同一路径仍是原工作区后执行 ./zhixu workspace rebind --confirm REBIND，验证 ready，再激活 exact desired 10；继续调查融合复核结构修复截断，保留预算和语义验收。
+
+
+## Session 92: DeepSeek 复核格式版本化与真实质量缺口
+
+**Date**: 2026-09-16
+**Task**: DeepSeek 复核格式版本化与真实质量缺口
+**Branch**: `dev`
+
+### Summary
+
+实现冻结 semantic v6 和迁移131，定向Go/隔离PG/Atlas及独立审查通过；30秒全文补源两例通过，融合超时。90秒诊断范围/混合内容通过，但同文不同来源漏补且NO_CHANGE误判；未启用模型，目录重新绑定仍待确认。
+
+### Main Changes
+
+- 新prepare显式冻结semantic v6；旧v1-v5提示/hash/READY/失败恢复保持，Go与SQL证明同步。
+- 更新spec、验收报告和私有合成产物；保持desired10、active8及正式Schema130。
+
+### Git Commits
+
+(No commits - planning session)
+
+### Testing
+
+- [OK] 四包定向单元、真实PG普通/锚点/目标/正文刷新及130→131升级、伪造版本负例、vet/Atlas通过；独立review无待修缺陷。
+- [OK] 真实30秒全文两例3次调用通过；融合首次超时。90秒融合7次调用：前两例通过、duplicate漏补来源失败、后两例未运行。
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- 等待用户确认原目录身份后受控rebind，验证ready再精确激活模型；不能绕过授权或假称DeepSeek已启用。
+- 修复同文不同来源的生成与NO_CHANGE复核义务，保留不可变提示/预算边界；真实融合质量仍未验收。
+
+
+## Session 93: DeepSeek 五类真实融合通过与版本化兼容修复
+
+**Date**: 2026-09-16
+**Task**: DeepSeek 五类真实融合通过与版本化兼容修复
+**Branch**: `dev`
+
+### Summary
+
+修复同文补源遗漏与付费前容量、唯一Fusion目标、完整生成格式和原有证据资格；五类真实融合及既有全文两例通过，正式服务恢复仍待原目录确认。
+
+### Main Changes
+
+- 来源身份生成v7–v10、Fusion v11/v12、完整生成格式v13–v18与Fusion semantic v9，冻结/Go/SQL proof及前向132–135同步，历史版本保持。
+- 补源容量P2在付费前显式拒绝；live fixture使用真实Fusion形状并记录脱敏耗时/用量/断言失败。
+
+### Git Commits
+
+(No commits - planning session)
+
+### Testing
+
+- [OK] 定向Go/vet/隔离PG/River/132→135阶段升级与旧READY/unknown回放、Atlas通过；最终独立复审开放问题0。
+- [OK] DeepSeek按保存30秒/8192预算五类融合全部通过，10次调用36.71秒，无repair；逐项人工核对原文、输出、正文及引用；全文两例既有真实通过证据有效。
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- 等待用户确认 /Users/zhenglizhi/Documents/files/zhixu 仍为原工作区并授权受控rebind，再恢复最新服务/迁移与精确激活desired10；active仍8，正式schema130，API/Worker停机。
+
+
+## Session 94: 原笔记目录受控重绑与DeepSeek正式启用
+
+**Date**: 2026-09-16
+**Task**: 原笔记目录受控重绑与DeepSeek正式启用
+**Branch**: `dev`
+
+### Summary
+
+用户确认原目录并授权后，受控rebind退出0，binding3→4；正式Schema131–135完成，8个容器healthy。设置API精确激活desired10，独立Session复读确认active/API/Worker均10、fresh且idle；DeepSeek Chat和1024维BGE正式生效。恢复后19个文件含Git与备份逐字节一致。批准交付范围完成，保留既有验证限制；未提交、推送或归档。
+
+### Main Changes
+
+- 更新恢复与最终验收证据，任务标记completed，保留任务目录供审阅。
+
+### Git Commits
+
+(No commits - planning session)
+
+### Testing
+
+- [OK] 正式rebind、Schema读取、Registry审计、双角色心跳、readyz、模型设置激活及独立读取、19文件字节校验均通过。
+
+### Status
+
+[OK] **Completed**
+
+
+## Session 95: 分功能提交主笔记需求并推送中文注释版本
+
+**Date**: 2026-09-16
+**Task**: 分功能提交主笔记需求并推送中文注释版本
+**Branch**: `dev`
+
+### Summary
+
+用户授权按功能提交并推送，要求提交说明与新增手写代码注释使用中文。已形成资料发现、模型配置、主笔记后端、工作台和需求证据五批提交，并以1b71dde7归档当前任务；首次push成功将origin/dev从e2d0b8e9推进至1b71dde7，本日志随后单独提交推送。
+
+### Main Changes
+
+- 232个Go文件及7个前端文件、1个环境示例的新增说明性注释中文化；历史迁移、生成物、机器指令及未修改旧注释保留。
+- 71个全项目规范改动与3份研究临时文件按用户要求留在本地，不纳入提交；凭据和私有诊断目录未提交。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `b0dab884` | (see git log) |
+| `f888ad60` | (see git log) |
+| `4adf6343` | (see git log) |
+| `0cf2ad3d` | (see git log) |
+| `f3980246` | (see git log) |
+
+### Testing
+
+- [OK] 375个Go文件的非注释token/字面量/机器指令与翻译前完全一致；72个前端及配置文件检查中8个变化文件语义一致，定向ESLint通过；OpenAPI契约和258标签通过。
+- [OK] 受影响Go文件gofmt通过；仅5个已执行迁移原有末尾空行作为校验和保留例外，其余暂存差异检查通过。118个Atlas/生成契约/排除规范文件与翻译前逐字节一致。
+- [OK] 独立模型质量、实库业务链路及本地恢复证据沿用最终验收记录，本次无业务逻辑变更、没有重复付费模型调用。
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- 可使用本地服务；整套真实个人笔记从完整登录入口的体验验收仍保留为未专项验证范围。
